@@ -11,7 +11,7 @@ from assent import AssentError
 from assent.gitops import (
     branches_with_prefix, changes_outside_scope, commit_all, commit_if_dirty,
     ensure_branch,
-    ensure_clean, ensure_worktree, head_ref, restore, tracked_paths,
+    ensure_clean, ensure_worktree, head_ref, resolve_folder_source, restore, tracked_paths,
     worktree_path)
 
 
@@ -164,6 +164,69 @@ class TestEnsureWorktree(GitTestCase):
         self.assertEqual(current_main, main_branch)
         self.assertEqual((self.root / "README.md").read_text(encoding="utf-8"),
                          "init\n")
+
+
+class TestResolveFolderSource(GitTestCase):
+    def tearDown(self) -> None:
+        container = self.root.parent / f"{self.root.name}.worktrees"
+        if container.exists():
+            for path in container.iterdir():
+                if (path / ".git").is_file():
+                    _run(self.root, "worktree", "remove", "--force", str(path))
+                else:
+                    shutil.rmtree(path)
+            container.rmdir()
+        _run(self.root, "worktree", "prune")
+        super().tearDown()
+
+    def make_source(self, folder: str = "upstream") -> Path:
+        path = worktree_path(self.root, folder)
+        _run(self.root, "worktree", "add", "-b", f"{folder}/run", str(path), "HEAD")
+        (path / f"{folder}.txt").write_text("source\n", encoding="utf-8")
+        _run(path, "add", "-A")
+        _run(path, "commit", "-m", f"finish {folder}")
+        return path
+
+    def test_returns_exact_clean_attached_source_identity(self):
+        path = self.make_source()
+
+        source = resolve_folder_source(self.root, "upstream")
+
+        self.assertEqual(source.folder, "upstream")
+        self.assertEqual(source.branch, "upstream/run")
+        self.assertEqual(source.worktree, path.resolve())
+        self.assertEqual(source.tip, subprocess.run(
+            ["git", "rev-parse", "upstream/run"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout.strip())
+
+    def test_missing_fixed_worktree_is_refused(self):
+        _run(self.root, "branch", "upstream/run", "HEAD")
+        with self.assertRaisesRegex(AssentError, "no valid fixed source worktree"):
+            resolve_folder_source(self.root, "upstream")
+
+    def test_ambiguous_branches_are_refused(self):
+        self.make_source()
+        _run(self.root, "branch", "upstream/other", "HEAD")
+        with self.assertRaisesRegex(AssentError, "ambiguous source branches"):
+            resolve_folder_source(self.root, "upstream")
+
+    def test_dirty_source_is_refused(self):
+        path = self.make_source()
+        (path / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "source worktree .* is dirty"):
+            resolve_folder_source(self.root, "upstream")
+
+    def test_detached_source_is_refused(self):
+        path = self.make_source()
+        _run(path, "checkout", "--detach")
+        with self.assertRaisesRegex(AssentError, "source worktree .* is detached"):
+            resolve_folder_source(self.root, "upstream")
+
+    def test_foreign_source_branch_is_refused(self):
+        path = self.make_source()
+        _run(path, "checkout", "-b", "foreign")
+        with self.assertRaisesRegex(AssentError, "foreign branch foreign"):
+            resolve_folder_source(self.root, "upstream")
 
 
 class TestTrackedPaths(GitTestCase):

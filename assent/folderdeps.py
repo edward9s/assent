@@ -13,8 +13,9 @@ import tomllib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
-from assent import AssentError
+from assent import AssentError, gitops
 from assent.config import _validate_tasks_name, list_task_folders
 from assent.plan import Plan
 
@@ -56,6 +57,15 @@ class UnfinishedPrerequisite:
         detail = ", ".join(f"{status} {count}" for status, count in self.counts)
         return (f"Prerequisite folder {self.name} still has {self.total} unfinished task(s)"
                 f" ({detail})")
+
+
+@dataclass(frozen=True)
+class FolderBaseResolution:
+    """Reproducible Git identity selected for one downstream folder."""
+
+    target_snapshot: str
+    speculative_upstream: gitops.FolderSourceSnapshot | None
+    resolved_base: str
 
 
 def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
@@ -164,6 +174,75 @@ def parse_folder_dependency_graph(
     }
     _ensure_acyclic(dependencies)
     return dependencies
+
+
+def resolve_folder_base(
+        root: str | Path, tasks_dir: str | Path, *,
+        excludes: Sequence[str] = (),
+        downstream_tip: str | None = None) -> FolderBaseResolution:
+    """Resolve the immutable base for a downstream folder, failing closed.
+
+    Every direct prerequisite is reconstructed from its current task files and
+    sole clean, attached source.  A source tip already reachable from the current
+    target ``HEAD`` is accepted.  At most one other tip may become the speculative
+    base; choosing among multiple unaccepted sources would be an implicit
+    integration policy, so it is refused.
+
+    When ``downstream_tip`` is supplied, it must descend from the newly resolved
+    base.  This turns an upstream that advanced after downstream creation into an
+    actionable stale-stack error without rewriting either branch.
+    """
+    root = Path(root).resolve()
+    tasks_dir = Path(tasks_dir).resolve()
+    graph = parse_folder_dependency_graph(tasks_dir.parent)
+    dependencies = graph.get(tasks_dir.name)
+    if dependencies is None or dependencies.path.parent != tasks_dir:
+        raise AssentError(
+            f"downstream task folder is not part of the parsed dependency graph: "
+            f"{tasks_dir}")
+
+    target = gitops.main_worktree(root)
+    target_snapshot = gitops.commit_of(target, "HEAD")
+    candidates: list[gitops.FolderSourceSnapshot] = []
+    for folder in dependencies.after:
+        completion = infer_folder_completion(tasks_dir.parent / folder)
+        if not completion.complete:
+            raise AssentError(
+                f"upstream folder {folder} is incomplete: {completion.reason}")
+        source = gitops.resolve_folder_source(root, folder, excludes)
+        if not gitops.is_ancestor(target, source.tip, target_snapshot):
+            candidates.append(source)
+
+    if len(candidates) > 1:
+        detail = "\n".join(
+            f"  - folder {source.folder}, tip {source.tip}: accept this upstream "
+            "into the target, or replan the downstream dependency"
+            for source in candidates)
+        raise AssentError(
+            "multiple unaccepted upstream folders cannot form one speculative "
+            f"base:\n{detail}\nResolve all but at most one before starting the "
+            "downstream task")
+
+    upstream = candidates[0] if candidates else None
+    resolved_base = upstream.tip if upstream is not None else target_snapshot
+    if downstream_tip is not None:
+        downstream_snapshot = gitops.commit_of(target, downstream_tip)
+        if not gitops.is_ancestor(target, resolved_base, downstream_snapshot):
+            old_tip = gitops.merge_base(target, resolved_base, downstream_snapshot)
+            if upstream is not None:
+                raise AssentError(
+                    f"stale speculative stack for {tasks_dir.name}: downstream tip "
+                    f"{downstream_snapshot} descends from old upstream tip {old_tip}, "
+                    f"not current upstream {upstream.folder} tip {upstream.tip}; "
+                    f"run `assent rework {tasks_dir.name}` to rebuild on the new tip, "
+                    "or replan the dependency")
+            raise AssentError(
+                f"stale downstream {tasks_dir.name}: downstream tip "
+                f"{downstream_snapshot} descends from old target tip {old_tip}, not "
+                f"current target tip {target_snapshot}; run `assent rework "
+                f"{tasks_dir.name}` or replan before continuing")
+
+    return FolderBaseResolution(target_snapshot, upstream, resolved_base)
 
 
 def _ensure_acyclic(dependencies: dict[str, FolderDependencies]) -> None:

@@ -179,6 +179,19 @@ def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
         f"{result.stderr.strip() or result.stdout.strip()}")
 
 
+def merge_base(root: Path, first: str, second: str) -> str:
+    """Return the unique best common ancestor of two commits."""
+    bases = [line.strip() for line in _git(
+        root, "merge-base", "--all", first, second).splitlines()
+             if line.strip()]
+    if len(bases) != 1:
+        detail = ", ".join(bases) if bases else "none"
+        raise AssentError(
+            f"git merge-base found {len(bases)} best common ancestors for "
+            f"{first} and {second}: {detail}")
+    return bases[0]
+
+
 def remove_worktree(root: Path, path: Path) -> None:
     """Remove a worktree using Git's ordinary safeguards; deliberately no force option."""
     _git(root, "worktree", "remove", str(path))
@@ -472,6 +485,62 @@ def unique_folder_branch(root: Path, folder: str) -> str | None:
 def branch_tip(root: Path, branch: str) -> str:
     """Return the full commit hash at a branch tip."""
     return commit_of(root, branch)
+
+
+@dataclass(frozen=True)
+class FolderSourceSnapshot:
+    """Immutable identity of a folder's sole clean, attached source."""
+
+    folder: str
+    branch: str
+    worktree: Path
+    tip: str
+
+
+def resolve_folder_source(
+        root: Path, folder: str,
+        excludes: Sequence[str] = ()) -> FolderSourceSnapshot:
+    """Resolve a folder's current source without guessing from historical metadata.
+
+    Speculative stacking needs stronger evidence than ordinary cleanup discovery:
+    the fixed worktree must exist, be clean and attached to the folder's one and
+    only local branch.  Reading the tip twice detects a branch that moves during
+    resolution instead of returning a mixed snapshot.
+    """
+    primary = main_worktree(Path(root).resolve())
+    branches = folder_branches(primary, folder)
+    if not branches:
+        raise AssentError(
+            f"upstream folder {folder} has no {folder}/* source branch")
+    if len(branches) != 1:
+        raise AssentError(
+            f"upstream folder {folder} has ambiguous source branches: "
+            f"{', '.join(branches)}")
+    branch = branches[0]
+
+    worktree = folder_worktree(primary, folder)
+    if worktree is None:
+        raise AssentError(
+            f"upstream folder {folder} has no valid fixed source worktree")
+    attached = current_branch(worktree)
+    if not attached:
+        raise AssentError(
+            f"upstream folder {folder} source worktree {worktree} is detached")
+    if attached != branch:
+        raise AssentError(
+            f"upstream folder {folder} source worktree {worktree} is on foreign "
+            f"branch {attached}; expected {branch}")
+    if not working_tree_status(worktree, excludes).is_clean:
+        raise AssentError(
+            f"upstream folder {folder} source worktree {worktree} is dirty")
+
+    tip = branch_tip(primary, branch)
+    worktree_tip = commit_of(worktree, "HEAD")
+    confirmed_tip = branch_tip(primary, branch)
+    if worktree_tip != tip or confirmed_tip != tip:
+        raise AssentError(
+            f"upstream folder {folder} source changed while its tip was being resolved")
+    return FolderSourceSnapshot(folder, branch, worktree, tip)
 
 
 # Machine-readable evidence recorded on an accept merge.
