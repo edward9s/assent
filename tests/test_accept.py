@@ -553,6 +553,59 @@ class TestDependencyGate(AcceptRepositoryCase):
         self.assertIn("current source is ambiguous", output)
         self.assertEqual(self._head(), before)
 
+    def test_only_declared_base_must_be_in_downstream_source(self) -> None:
+        first = "first"
+        second = "second"
+        self._write_task(folder=first)
+        _first_worktree, first_branch, first_tip = self._make_source(first)
+        self._write_task(folder=second)
+        _second_worktree, second_branch, second_tip = self._make_source(second)
+        _git(self.root, "merge", "--no-ff", "-m", "accept first manually", first_branch)
+
+        self._write_task()
+        (self.assent_dir / self.folder / "_folder.toml").write_text(
+            'after = ["first", "second"]\n'
+            'base = "first"\n', encoding="utf-8")
+        _downstream_worktree, _downstream_branch, downstream_tip = self._make_source()
+        _git(self.root, "merge", "--no-ff", "-m", "accept second manually", second_branch)
+
+        self.assertTrue(gitops.is_ancestor(self.root, first_tip, downstream_tip))
+        self.assertFalse(gitops.is_ancestor(self.root, second_tip, downstream_tip))
+        self.assertTrue(gitops.is_ancestor(self.root, first_tip, self._head()))
+        self.assertTrue(gitops.is_ancestor(self.root, second_tip, self._head()))
+        receipt = self._write_receipt()
+
+        code, output = self._accept()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(gitops.tree_of(self.root, "HEAD"), receipt.integration_tree)
+
+    def test_no_declared_base_skips_downstream_lineage_requirement(self) -> None:
+        first = "first"
+        second = "second"
+        self._write_task(folder=first)
+        _first_worktree, first_branch, first_tip = self._make_source(first)
+        self._write_task(folder=second)
+        _second_worktree, second_branch, second_tip = self._make_source(second)
+
+        self._write_task()
+        (self.assent_dir / self.folder / "_folder.toml").write_text(
+            'after = ["first", "second"]\n', encoding="utf-8")
+        _downstream_worktree, _downstream_branch, downstream_tip = self._make_source()
+        _git(self.root, "merge", "--no-ff", "-m", "accept first manually", first_branch)
+        _git(self.root, "merge", "--no-ff", "-m", "accept second manually", second_branch)
+
+        self.assertFalse(gitops.is_ancestor(self.root, first_tip, downstream_tip))
+        self.assertFalse(gitops.is_ancestor(self.root, second_tip, downstream_tip))
+        self.assertTrue(gitops.is_ancestor(self.root, first_tip, self._head()))
+        self.assertTrue(gitops.is_ancestor(self.root, second_tip, self._head()))
+        receipt = self._write_receipt()
+
+        code, output = self._accept()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(gitops.tree_of(self.root, "HEAD"), receipt.integration_tree)
+
 
 class TestAcceptTransactionalFailures(AcceptRepositoryCase):
     def setUp(self) -> None:

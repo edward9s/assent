@@ -208,7 +208,8 @@ def _accept_locked(cfg: Config) -> int:
     stale_dependencies = [
         f"{dependency} ({tip[:12]})"
         for dependency, tip in dependency_tips
-        if not gitops.is_ancestor(main, tip, source_tip)
+        if dependencies.base == dependency
+        and not gitops.is_ancestor(main, tip, source_tip)
     ]
     if stale_dependencies:
         print(f"accept {folder}: refused, the downstream source does not contain "
