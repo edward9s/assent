@@ -708,6 +708,9 @@ human.
 - Quota exhausted -> not counted as a failure: the r file records `quota`,
   progress is gathered into a `wip(<work folder>/tNNN)` checkpoint, a countdown
   waits for the reset, and the same task reruns carrying a "resume" prompt.
+  When `[adapter].name` is a list, quota exhaustion rotates to the next adapter
+  in order; the scheduler waits for the rotation poll only after every adapter
+  in the rotation is exhausted.
 - Unclean exit (power loss, a forced kill) never reaches the Ctrl+C/quota
   interrupt handlers, so a dirty worktree can survive to the next `run`
   startup. The startup gate checks whether every uncommitted change is

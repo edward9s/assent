@@ -1363,6 +1363,11 @@ class TestBillingAbort(EngineTestCase):
 
 
 class TestQuotaAndResume(EngineTestCase):
+    def rotation_config(self):
+        cfg = self.build()
+        cfg.adapter_names = ("claude", "codex")
+        return cfg
+
     def test_quota_waits_then_resumes_same_task(self):
         path = self.write_task(1)
         cfg = self.build()
@@ -1396,6 +1401,88 @@ class TestQuotaAndResume(EngineTestCase):
         self.assertEqual(quota["requested_model"], "lite")
         self.assertEqual(quota["requested_effort"], "medium")
         self.assertNotIn("session", [e["event"] for e in entries])
+
+    def test_quota_rotates_to_next_adapter_and_records_each_identity(self):
+        path = self.write_task(1)
+        cfg = self.rotation_config()
+        self.commit_all()
+
+        def quota_step(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text("kept", encoding="utf-8")
+            return TaskResult(
+                exit_code=1, output="", quota_exhausted=True, reset_at=None)
+
+        claude = ScriptedAdapter([quota_step], resolved_model="claude-lite")
+        codex = ScriptedAdapter(
+            [self.ai_done(
+                path, by="codex", requested_model="codex-lite")],
+            resolved_model="codex-lite")
+        sleeps: list[float] = []
+
+        with mock.patch("assent.engine.get_adapter", return_value=codex):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=claude, sleep=sleeps.append), 0)
+
+        self.assertEqual(sleeps, [])
+        self.assertIn("resume", codex.calls[0][0])
+        self.assertTrue(any(
+            subject.startswith("wip(plan01/t001): ")
+            for subject in self.subjects()))
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        quota = next(entry for entry in entries if entry["event"] == "quota")
+        self.assertEqual(quota["agent"], "claude")
+        self.assertEqual(quota["requested_model"], "claude-lite")
+        done = next(entry for entry in entries if entry["by"] == "codex")
+        self.assertEqual(done["requested_model"], "codex-lite")
+
+    def test_complete_quota_rotation_waits_then_continues_from_next_adapter(self):
+        path = self.write_task(1)
+        cfg = self.rotation_config()
+        cfg.rotation_poll_minutes = 2
+        self.commit_all()
+        quota = TaskResult(
+            exit_code=1, output="", quota_exhausted=True, reset_at=None)
+        claude = ScriptedAdapter(
+            [quota, self.ai_done(path)], resolved_model="claude-lite")
+        codex = ScriptedAdapter([quota], resolved_model="codex-lite")
+        sleeps: list[float] = []
+        out = io.StringIO()
+
+        with mock.patch("assent.engine.get_adapter", return_value=codex):
+            with contextlib.redirect_stdout(out):
+                result = engine.run(
+                    cfg, once=True, adapter=claude, sleep=sleeps.append)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(sum(sleeps), 2 * 60)
+        self.assertEqual(len(claude.calls), 2)
+        self.assertEqual(len(codex.calls), 1)
+        self.assertIn("Every adapter in the rotation is quota-exhausted",
+                      out.getvalue())
+        self.assertIn("continuing with claude", out.getvalue())
+
+    def test_all_rotation_adapters_are_preflighted_before_worktree_creation(self):
+        self.write_task(1)
+        cfg = self.rotation_config()
+        self.commit_all()
+        claude = ScriptedAdapter([ok_result()])
+        codex = ScriptedAdapter([])
+        codex.preflight = mock.Mock(return_value=["unsupported invocation"])
+        out = io.StringIO()
+
+        with mock.patch("assent.engine.get_adapter", return_value=codex):
+            with contextlib.redirect_stdout(out):
+                result = engine.run(cfg, once=True, adapter=claude)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(claude.calls, [])
+        self.assertEqual(codex.calls, [])
+        self.assertFalse(gitops.worktree_path(self.root, "plan01").exists())
+        codex.preflight.assert_called_once()
+        self.assertIn("codex capability preflight: FAIL", out.getvalue())
 
     def test_wip_task_resumed_on_startup(self):
         path = self.write_task(1, status="WIP")
