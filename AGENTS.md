@@ -19,4 +19,8 @@ Windows 優先、跨平台。CLI 子命令:run / status / check / report / init�
 - 不得引入手工維護的「目前資料夾」指標;工作資料夾由參數明示,或由任務檔
   事實推導,歧義一律拒絕。
 - `build/lib/` 是舊建置產物,永遠不要改它。
+- `model` 與 `effort` 是正交的抽象檔位:`model` 使用 prime/core/lite;
+  選填的 `effort` 使用 low/medium/high,只在任務需偏離模型預設時明寫。
+  `high` 表示可攜的高推理投入,不等於廠牌原生最高檔;adapter 不得靜默忽略
+  或升降任務明寫的 effort。
 - 使用 agents 時,請先讀專案主工作樹的 `.agents/instructions.md`;worktree session 以調度器提示的絕對路徑為準。 <!-- agents-instructions -->
