@@ -314,8 +314,7 @@ def resolve_folder_base(
     Every direct prerequisite is reconstructed from its current task files and
     sole clean, attached source.  A source tip already reachable from the current
     target ``HEAD`` is accepted.  At most one other tip may become the speculative
-    base; choosing among multiple unaccepted sources would be an implicit
-    integration policy, so it is refused.
+    base unless the downstream explicitly declares which ``base`` to use.
 
     When ``downstream_tip`` is supplied, it must descend from the newly resolved
     base.  This turns an upstream that advanced after downstream creation into an
@@ -344,17 +343,23 @@ def resolve_folder_base(
         if not gitops.is_ancestor(target, source.tip, target_snapshot):
             candidates.append(source)
 
-    if len(candidates) > 1:
-        detail = "\n".join(
-            f"  - folder {source.folder}, tip {source.tip}: accept this upstream "
-            "into the target, or replan the downstream dependency"
-            for source in candidates)
-        raise AssentError(
-            "multiple unaccepted upstream folders cannot form one speculative "
-            f"base:\n{detail}\nResolve all but at most one before starting the "
-            "downstream task")
+    if dependencies.base is None:
+        if len(candidates) > 1:
+            detail = "\n".join(
+                f"  - folder {source.folder}, tip {source.tip}: accept this upstream "
+                "into the target"
+                for source in candidates)
+            raise AssentError(
+                "multiple unaccepted upstream folders cannot form one speculative "
+                f"base:\n{detail}\nDeclare `base = \"<folder>\"` to inherit from "
+                "one candidate, or accept the extra upstreams before starting the "
+                "downstream task")
+        upstream = candidates[0] if candidates else None
+    else:
+        upstream = next(
+            (source for source in candidates if source.folder == dependencies.base),
+            None)
 
-    upstream = candidates[0] if candidates else None
     resolved_base = upstream.tip if upstream is not None else target_snapshot
     if downstream_tip is not None:
         downstream_snapshot = gitops.commit_of(target, downstream_tip)
