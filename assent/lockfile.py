@@ -173,10 +173,18 @@ def _integration_busy_message(diag: dict) -> str:
 
 @contextlib.contextmanager
 def hold_integration_lock(assent_dir: Path) -> Iterator[None]:
-    """Hold the main worktree's ``.assent/integration.lock`` OS lock."""
+    """Hold the repository-wide integration lock in Git's common directory.
+
+    ``assent_dir`` remains the management-directory argument used by callers,
+    but it does not identify the lock.  Resolving through the parent repository
+    means alternate configuration/management directories and linked worktrees
+    all contend on the same inode.
+    """
+    from assent.gitops import git_common_dir
+
     assent_dir = Path(assent_dir)
-    assent_dir.mkdir(parents=True, exist_ok=True)
-    path = assent_dir / INTEGRATION_LOCK_NAME
+    repository = assent_dir.resolve().parent
+    path = git_common_dir(repository) / INTEGRATION_LOCK_NAME
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
     handle = os.fdopen(os.open(str(path), flags, 0o644), "r+b")
     try:

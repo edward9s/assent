@@ -112,9 +112,14 @@ class Config:
         return self.git_rel(self.tasks_dir / LOCK_NAME)
 
     @property
+    def verification_receipt_rel(self) -> str:
+        return self.git_rel(self.tasks_dir / "_verification.toml")
+
+    @property
     def git_excludes(self) -> tuple[str, ...]:
         """Runtime artifacts: excluded from the clean check, scope check, and checkpoint commit."""
-        return (self.runtime_log_rel, self.report_rel, self.lockfile_rel)
+        return (self.runtime_log_rel, self.report_rel, self.lockfile_rel,
+                self.verification_receipt_rel)
 
 
 def _section(data: dict, name: str) -> dict:

@@ -392,6 +392,12 @@ def main_worktree(root: Path) -> Path:
         "unable to determine the main worktree from `git worktree list` output")
 
 
+def git_common_dir(root: Path) -> Path:
+    """Return the repository-wide Git directory shared by all linked worktrees."""
+    return _resolved_git_path(
+        Path(root).resolve(), _git(Path(root), "rev-parse", "--git-common-dir"))
+
+
 def require_current_branch(root: Path) -> str:
     """Return the current branch, refusing a detached integration target."""
     branch = current_branch(root)
@@ -608,16 +614,38 @@ def _temporary_container(root: Path) -> Path:
 
 def _cleanup_temporary_worktree(root: Path, path: Path,
                                 branch: str | None = None) -> None:
-    """Best-effort cleanup that preserves an exception raised inside the context."""
+    """Remove this call's temporary resources and report any incomplete cleanup."""
+    problems: list[str] = []
     if path.exists():
         removed = _run_git(root, "worktree", "remove", "--force", str(path))
         if removed.returncode != 0:
-            shutil.rmtree(path, ignore_errors=True)
-    _run_git(root, "worktree", "prune")
+            try:
+                shutil.rmtree(path)
+            except OSError as e:
+                problems.append(f"unable to remove temporary path {path}: {e}")
+    pruned = _run_git(root, "worktree", "prune")
+    if pruned.returncode != 0:
+        problems.append(
+            "git worktree prune failed: "
+            f"{pruned.stderr.strip() or pruned.stdout.strip() or 'unknown error'}")
     if branch is not None:
-        _run_git(root, "branch", "-D", branch)
+        exists = _run_git(root, "show-ref", "--verify", "--quiet",
+                          f"refs/heads/{branch}")
+        if exists.returncode == 0:
+            deleted = _run_git(root, "branch", "-D", branch)
+            if deleted.returncode != 0:
+                problems.append(
+                    f"unable to delete temporary branch {branch}: "
+                    f"{deleted.stderr.strip() or deleted.stdout.strip() or 'unknown error'}")
+        elif exists.returncode not in (1,):
+            problems.append(f"unable to inspect temporary branch {branch}")
+    if path.exists():
+        problems.append(f"temporary worktree path remains: {path}")
     with contextlib.suppress(OSError):
         _temporary_container(root).rmdir()
+    if problems:
+        raise AssentError("Temporary integration cleanup was incomplete: "
+                          + "; ".join(problems))
 
 
 def _commit_snapshot(root: Path, committish: str) -> str:
@@ -633,11 +661,20 @@ def temporary_source_worktree(root: Path, commit: str) -> Iterator[Path]:
     suffix = uuid.uuid4().hex
     path = _temporary_container(primary) / f"source-{suffix}"
     path.parent.mkdir(parents=True, exist_ok=True)
+    primary_error: BaseException | None = None
     try:
         _git(primary, "worktree", "add", "--detach", str(path), snapshot)
         yield path
+    except BaseException as e:
+        primary_error = e
+        raise
     finally:
-        _cleanup_temporary_worktree(primary, path)
+        try:
+            _cleanup_temporary_worktree(primary, path)
+        except AssentError as cleanup_error:
+            if primary_error is None:
+                raise
+            primary_error.add_note(str(cleanup_error))
 
 
 @dataclass(frozen=True)
@@ -646,6 +683,7 @@ class MergeOutcome:
 
     ok: bool
     conflicts: tuple[str, ...] = ()
+    exit_code: int = 0
 
 
 def conflict_paths(worktree: Path) -> list[str]:
@@ -666,7 +704,19 @@ def merge_no_ff(worktree: Path, commit: str, message: str) -> MergeOutcome:
             f"git merge --no-ff {snapshot} failed (exit code {result.returncode}): "
             f"{result.stderr.strip() or result.stdout.strip()}")
     _run_git(worktree, "merge", "--abort")
-    return MergeOutcome(False, tuple(conflicts))
+    return MergeOutcome(False, tuple(conflicts), result.returncode)
+
+
+def tree_of(root: Path, committish: str) -> str:
+    """Return the full tree object id for a commit or tree-ish."""
+    _validate_evidence_value("tree-ish", committish)
+    return _git(root, "rev-parse", f"{committish}^{{tree}}").strip()
+
+
+def object_type(root: Path, object_id: str) -> str:
+    """Return an object's Git type, failing if the object does not exist."""
+    _validate_evidence_value("object id", object_id)
+    return _git(root, "cat-file", "-t", object_id).strip()
 
 
 def fast_forward(root: Path, commit: str) -> None:
@@ -687,8 +737,17 @@ def temporary_integration_worktree(
     branch = f"assent-integration/{folder}/{suffix}"
     path = _temporary_container(primary) / f"target-{suffix}"
     path.parent.mkdir(parents=True, exist_ok=True)
+    primary_error: BaseException | None = None
     try:
         _git(primary, "worktree", "add", "-b", branch, str(path), snapshot)
         yield path, branch
+    except BaseException as e:
+        primary_error = e
+        raise
     finally:
-        _cleanup_temporary_worktree(primary, path, branch)
+        try:
+            _cleanup_temporary_worktree(primary, path, branch)
+        except AssentError as cleanup_error:
+            if primary_error is None:
+                raise
+            primary_error.add_note(str(cleanup_error))

@@ -4,8 +4,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from assent import AssentError
+from assent import gitops
 from assent.gitops import (
     AcceptStatus,
     accept_commit_message,
@@ -296,6 +298,25 @@ class TestTemporaryWorktrees(GitRepositoryCase):
             self.root, "for-each-ref", "--format=%(refname:short)",
             "refs/heads/").splitlines())
         self.assertEqual(self._metadata_paths(), [self.root.resolve()])
+
+    def test_cleanup_diagnostic_does_not_replace_primary_exception(self) -> None:
+        original_cleanup = gitops._cleanup_temporary_worktree
+
+        def cleanup_then_report(*args, **kwargs):
+            original_cleanup(*args, **kwargs)
+            raise AssentError("simulated cleanup diagnostic")
+
+        with mock.patch.object(
+                gitops, "_cleanup_temporary_worktree",
+                side_effect=cleanup_then_report):
+            with self.assertRaisesRegex(RuntimeError, "primary failure") as caught:
+                with temporary_integration_worktree(
+                        self.root, "plan01", self.initial):
+                    raise RuntimeError("primary failure")
+        self.assertTrue(any(
+            "simulated cleanup diagnostic" in note
+            for note in getattr(caught.exception, "__notes__", ())))
+        self.assertEqual(self._temporary_entries(), [])
 
 
 if __name__ == "__main__":

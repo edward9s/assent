@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 
 from assent.config import load_config
+from assent.gitops import git_common_dir
 from assent.lockfile import (
     INTEGRATION_LOCK_NAME, LOCK_NAME, LockBusy, hold_integration_lock,
     hold_lock)
@@ -126,6 +127,9 @@ class TestIntegrationLock(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        subprocess.run(
+            ["git", "init"], cwd=self.root, check=True,
+            capture_output=True, encoding="utf-8")
         self.assent_dir = self.root / ".assent"
         self.assent_dir.mkdir()
 
@@ -164,11 +168,22 @@ class TestIntegrationLock(unittest.TestCase):
             pass
 
     def test_stale_file_does_not_block(self):
-        path = self.assent_dir / INTEGRATION_LOCK_NAME
+        path = git_common_dir(self.root) / INTEGRATION_LOCK_NAME
         path.write_text("pid = 999999\n", encoding="utf-8")
         with hold_integration_lock(self.assent_dir):
             pass
         self.assertTrue(path.is_file())
+
+    def test_different_management_directories_share_repository_lock(self):
+        proc = self._start_holder()
+        alternate = self.root / ".alternate-assent"
+        alternate.mkdir()
+        with self.assertRaises(LockBusy):
+            with hold_integration_lock(alternate):
+                pass
+        self.assertTrue(
+            (git_common_dir(self.root) / INTEGRATION_LOCK_NAME).is_file())
+        self.assertFalse((alternate / INTEGRATION_LOCK_NAME).exists())
 
 
 if __name__ == "__main__":
