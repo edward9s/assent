@@ -289,6 +289,7 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
                     cfg.root, f"wip({task.id}): 額度中斷,保留進度",
                     cfg.git_excludes):
                 print("  已建立 wip 檢查點。")
+            _try_write_report(cfg)
             _wait_for_quota(cfg, result.reset_at, sleep, now)
             resumed = True
             continue  # 接續同一任務,不計入重試次數
@@ -300,6 +301,7 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
                     cfg.root, f"auto({task.id}): {_short(task.title) or '完成'}",
                     cfg.git_excludes):
                 print("  (工作區無新變更,進度已在先前的 wip 檢查點內)")
+            _try_write_report(cfg)
             return
         if outcome == "self_blocked":
             print("  執行 AI 自標 BLOCKED(合法產出,交人類裁決)-> 建立檢查點")
@@ -307,6 +309,7 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
                 gitops.commit_if_dirty(cfg.root,
                                        f"auto({task.id}): BLOCKED(執行 AI 自標)",
                                        cfg.git_excludes)
+            _try_write_report(cfg)
             return
 
         # outcome == "fail":不還原(產出保留),帶原因重試;次數用盡由調度器標 BLOCKED,
@@ -319,6 +322,7 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
             continue
         print("  重試次數用盡 -> 調度器標記 BLOCKED(未通過的工作一併保留)")
         _mark_blocked(cfg, task, reason or "驗收未通過", now, attempts=attempts_used)
+        _try_write_report(cfg)
         return
 
 

@@ -135,11 +135,34 @@ class TestRunSuccess(EngineTestCase):
         p2 = self.write_task(2, deps=("t001",))
         cfg = self.build()
         self.commit_all()
-        adapter = ScriptedAdapter([self.ai_done(p1), self.ai_done(p2)])
+
+        def second_task(prompt):
+            report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
+            self.assertIn("t001  DONE", report)
+            self.assertIn("t002  TODO", report)
+            return self.ai_done(p2)(prompt)
+
+        adapter = ScriptedAdapter([self.ai_done(p1), second_task])
         self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
         self.assertEqual(parse_task_file(p2).status, "DONE")
         autos = [s for s in self.subjects() if s.startswith("auto(")]
         self.assertEqual(len(autos), 2)
+
+    def test_report_updates_after_scheduler_blocked_before_next_task(self):
+        p1 = self.write_task(1)
+        p2 = self.write_task(2)
+        cfg = self.build(retry=0)
+        self.commit_all()
+
+        def second_task(prompt):
+            report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
+            self.assertIn("t001  BLOCKED", report)
+            return self.ai_done(p2)(prompt)
+
+        adapter = ScriptedAdapter([lambda prompt: ok_result(), second_task])
+        self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
+        self.assertEqual(parse_task_file(p1).status, "BLOCKED")
+        self.assertEqual(parse_task_file(p2).status, "DONE")
 
     def test_effort_from_task_overrides_default(self):
         p1 = self.write_task(1, effort="low")
