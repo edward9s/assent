@@ -15,7 +15,7 @@ from assent.archive import (archive_all, archive_folder, read_roster,
                             restore_folder, _archive_dir, _write_roster,
                             _zip_path)
 from assent.config import load_config
-from assent.lockfile import hold_lock
+from assent.lockfile import LockBusy, hold_lock
 from assent.__main__ import _dispatch
 
 
@@ -128,6 +128,55 @@ class TestArchive(unittest.TestCase):
         self.assertIn("a run is in progress", output)
         self.assertFalse(_zip_path(self.assent_dir, self.folder).exists())
         self.assertTrue(self.tasks_dir.exists())
+
+    def test_folder_without_lock_file_archives(self) -> None:
+        # A folder that predates the lock mechanism has no assent.lock; its absence
+        # is proof nobody holds it, so archive acquires (creates) the lock and files
+        # the folder rather than skipping it (the archive --all=0 incident).
+        (self.tasks_dir / "assent.lock").unlink()
+
+        code, output = self._archive()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("archived", output)
+        self._assert_fully_archived()
+
+    def test_zip_excludes_the_lock_file(self) -> None:
+        # assent.lock is a runtime artifact and must never enter the archive zip,
+        # whether it was already present or created by archive taking the lock.
+        code, output = self._archive()
+
+        self.assertEqual(code, 0, output)
+        with zipfile.ZipFile(_zip_path(self.assent_dir, self.folder)) as zf:
+            names = zf.namelist()
+        self.assertNotIn("assent.lock", names)
+        self.assertIn("t001_task.e.toml", names)
+
+    def test_lock_is_held_across_archive_work(self) -> None:
+        # While archive works, it holds the folder lock, so a concurrent
+        # run/reject/rework acquisition is refused — closing the probe-then-act
+        # TOCTOU window.  The probe happens mid-archive, during compression.
+        import assent.archive as archive_mod
+        original = archive_mod._compress_plan
+        observed: dict[str, bool] = {}
+
+        def spy(src_dir, tmp_zip):
+            try:
+                with hold_lock(self.tasks_dir, self.folder):
+                    observed["acquired"] = True
+            except LockBusy:
+                observed["blocked"] = True
+            return original(src_dir, tmp_zip)
+
+        archive_mod._compress_plan = spy
+        self.addCleanup(setattr, archive_mod, "_compress_plan", original)
+
+        code, output = self._archive()
+
+        self.assertEqual(code, 0, output)
+        self.assertTrue(observed.get("blocked"))
+        self.assertNotIn("acquired", observed)
+        self._assert_fully_archived()
 
     def test_unintegrated_source_refuses_archive(self) -> None:
         worktree, branch = self._unmerged_source()
