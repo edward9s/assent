@@ -22,7 +22,6 @@ from assent.gitops import (
     object_type,
     require_current_branch,
     temporary_integration_worktree,
-    temporary_source_worktree,
     tree_of,
     unique_folder_branch,
     working_tree_status,
@@ -192,26 +191,6 @@ class TestTemporaryWorktrees(GitRepositoryCase):
     def _temporary_entries(self) -> list[Path]:
         container = self.parent / f"{self.root.name}.integration"
         return list(container.iterdir()) if container.exists() else []
-
-    def test_source_uses_explicit_snapshot_and_cleans_success(self) -> None:
-        (self.root / "later.txt").write_text("later", encoding="utf-8")
-        _git(self.root, "add", "-A")
-        _git(self.root, "commit", "-m", "later")
-        with temporary_source_worktree(self.root, self.initial) as path:
-            self.assertEqual(commit_of(path, "HEAD"), self.initial)
-            self.assertFalse((path / "later.txt").exists())
-            self.assertIn(path.resolve(), self._metadata_paths())
-        self.assertFalse(path.exists())
-        self.assertEqual(self._temporary_entries(), [])
-        self.assertEqual(self._metadata_paths(), [self.root.resolve()])
-
-    def test_source_cleans_after_python_exception(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "verify failure"):
-            with temporary_source_worktree(self.root, self.initial) as path:
-                (path / "generated.txt").write_text("dirty", encoding="utf-8")
-                raise RuntimeError("verify failure")
-        self.assertFalse(path.exists())
-        self.assertEqual(self._temporary_entries(), [])
 
     def test_integration_uses_snapshot_and_cleans_success(self) -> None:
         (self.root / "later.txt").write_text("later", encoding="utf-8")

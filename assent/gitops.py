@@ -824,30 +824,6 @@ def _commit_snapshot(root: Path, committish: str) -> str:
     return commit_of(root, f"{committish}^{{commit}}")
 
 
-@contextlib.contextmanager
-def temporary_source_worktree(root: Path, commit: str) -> Iterator[Path]:
-    """Create a detached temporary source worktree at an explicit commit."""
-    primary = main_worktree(root)
-    snapshot = _commit_snapshot(primary, commit)
-    suffix = uuid.uuid4().hex
-    path = _temporary_container(primary) / f"source-{suffix}"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    primary_error: BaseException | None = None
-    try:
-        _git(primary, "worktree", "add", "--detach", str(path), snapshot)
-        yield path
-    except BaseException as e:
-        primary_error = e
-        raise
-    finally:
-        try:
-            _cleanup_temporary_worktree(primary, path)
-        except AssentError as cleanup_error:
-            if primary_error is None:
-                raise
-            primary_error.add_note(str(cleanup_error))
-
-
 @dataclass(frozen=True)
 class MergeOutcome:
     """Result of a no-fast-forward merge attempt."""
