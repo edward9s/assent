@@ -148,6 +148,8 @@ class TestRunSuccess(EngineTestCase):
         adapter = ScriptedAdapter([self.ai_done(path, {"src/a.py": "x"})])
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
         self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertTrue(path.with_name("t001_task.r.toml").is_file())
+        self.assertFalse(path.with_name("r001_task.toml").exists())
         self.assertTrue(any(s.startswith("auto(t001)") for s in self.subjects()))
         # 工作樹除 _report.md、agents.lock(執行期產物)外乾淨
         porcelain = [ln for ln in self._git("status", "--porcelain").splitlines()
@@ -235,7 +237,7 @@ class TestRunSuccess(EngineTestCase):
         prompt = adapter.calls[0][0]
         self.assertIn(str(cfg.agents_dir / "instructions.md"), prompt)
         self.assertIn(str(p1), prompt)
-        self.assertIn(str(p1.with_name("r001_task.toml")), prompt)
+        self.assertIn(str(p1.with_name("t001_task.r.toml")), prompt)
         self.assertIn(_OK, prompt)
         self.assertIn('by = "claude"', prompt)
         self.assertIn('requested_model = "lite"', prompt)

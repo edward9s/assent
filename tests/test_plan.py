@@ -65,7 +65,7 @@ class TestParseTaskFile(PlanTestCase):
         self.assertEqual(task.effort, "high")
         self.assertEqual(task.status, "TODO")
         self.assertEqual(task.scope, ["src/", "tests/"])
-        self.assertEqual(task.journal_path.name, "r001_demo.toml")
+        self.assertEqual(task.journal_path.name, "t001_demo.r.toml")
         self.assertIn("做一件事", task.goal)
         self.assertIn("附註", task.notes)
 
@@ -78,6 +78,11 @@ class TestParseTaskFile(PlanTestCase):
             path = self.write(name, task_text())
             with self.assertRaises(AgentsError):
                 parse_task_file(path)
+
+    def test_journal_file_rejected_before_parsing_fields(self):
+        path = self.write("t001_demo.r.toml", "[[entry]]\n")
+        with self.assertRaisesRegex(AgentsError, "日誌檔.*不可當作任務檔"):
+            parse_task_file(path)
 
     def test_missing_required_fields_rejected(self):
         for key in ("title", "deps", "model", "status", "scope", "verify",
@@ -137,11 +142,32 @@ class TestPlanParse(PlanTestCase):
 
     def test_non_task_files_ignored(self):
         self.write("t001_a.toml", task_text())
-        self.write("r001_a.toml", "[[entry]]\ntime = \"x\"\nby = \"ai\"\n"
-                                  "event = \"note\"\nsummary = \"s\"\n")
+        self.write("t001_a.r.toml", "[[entry]]\ntime = \"x\"\nby = \"ai\"\n"
+                                    "event = \"note\"\nsummary = \"s\"\n")
         self.write("_report.md", "報告")
         plan = Plan.parse(self.dir)
         self.assertEqual(len(plan.tasks), 1)
+
+    def test_multiple_task_journal_pairs_do_not_affect_plan(self):
+        self.write("t001_a.toml", task_text(status="DONE"))
+        self.write("t001_a.r.toml", task_text(deps=("t999",)))
+        self.write("t002_b.toml", task_text(deps=("t001",)))
+        self.write("t002_b.r.toml", task_text(deps=("t002",)))
+
+        plan = Plan.parse(self.dir)
+
+        self.assertEqual([task.id for task in plan.tasks], ["t001", "t002"])
+        task, resumed = plan.next_task()
+        self.assertEqual(task.id, "t002")
+        self.assertFalse(resumed)
+
+    def test_journals_do_not_hide_real_dependency_cycle(self):
+        self.write("t001_a.toml", task_text(deps=("t002",)))
+        self.write("t001_a.r.toml", task_text())
+        self.write("t002_b.toml", task_text(deps=("t001",)))
+        self.write("t002_b.r.toml", task_text())
+        with self.assertRaisesRegex(AgentsError, "循環"):
+            Plan.parse(self.dir)
 
     def test_empty_folder_rejected(self):
         with self.assertRaisesRegex(AgentsError, "沒有任務檔"):
@@ -270,7 +296,7 @@ class TestStructuralCompare(PlanTestCase):
 
 class TestJournal(PlanTestCase):
     def test_append_creates_valid_toml_and_accumulates(self):
-        journal = self.dir / "r001_x.toml"
+        journal = self.dir / "t001_x.r.toml"
         append_entry(journal, by="codex", requested_model="gpt-test",
                      event="done", summary="第一筆",
                      detail="細節\n多行", time_str="2026-07-17T00:00:00+00:00")
@@ -293,14 +319,14 @@ class TestJournal(PlanTestCase):
         self.assertEqual(lines[second + 2], 'requested_model = "gpt-test"')
 
     def test_summary_with_quotes_and_backslashes(self):
-        journal = self.dir / "r001_x.toml"
+        journal = self.dir / "t001_x.r.toml"
         tricky = 'He said "C:\\Users\\L" fails'
         append_entry(journal, by="claude", requested_model="sonnet",
                      event="note", summary=tricky)
         self.assertEqual(read_entries(journal)[0]["summary"], tricky)
 
     def test_detail_with_triple_quotes_sanitized(self):
-        journal = self.dir / "r001_x.toml"
+        journal = self.dir / "t001_x.r.toml"
         append_entry(journal, by="claude", requested_model="sonnet",
                      event="note", summary="s",
                      detail="含 ''' 的內容")
@@ -309,11 +335,11 @@ class TestJournal(PlanTestCase):
 
     def test_new_entry_rejects_legacy_ai_identity(self):
         with self.assertRaises(AgentsError):
-            append_entry(self.dir / "r001_x.toml", by="ai", event="done",
+            append_entry(self.dir / "t001_x.r.toml", by="ai", event="done",
                          summary="s")
 
     def test_read_legacy_ai_entry_without_new_fields(self):
-        journal = self.dir / "r001_x.toml"
+        journal = self.dir / "t001_x.r.toml"
         journal.write_text(
             '[[entry]]\ntime = "2026-07-17T00:00:00+00:00"\n'
             'by = "ai"\nevent = "done"\nsummary = "舊資料"\n',
@@ -324,15 +350,33 @@ class TestJournal(PlanTestCase):
 
     def test_bad_by_rejected(self):
         with self.assertRaises(AgentsError):
-            append_entry(self.dir / "r001_x.toml", by="human", event="e",
+            append_entry(self.dir / "t001_x.r.toml", by="human", event="e",
                          summary="s")
 
     def test_read_entries_missing_file_empty(self):
-        self.assertEqual(read_entries(self.dir / "r009_x.toml"), [])
+        self.assertEqual(read_entries(self.dir / "t009_x.r.toml"), [])
 
     def test_journal_path_for(self):
         self.assertEqual(journal_path_for(Path("a/t001_x.toml")).name,
-                         "r001_x.toml")
+                         "t001_x.r.toml")
+
+    def test_task_and_journal_pairs_are_adjacent_when_sorted(self):
+        names = [
+            journal_path_for(Path("t002_b.toml")).name,
+            "t001_a.toml",
+            journal_path_for(Path("t001_a.toml")).name,
+            "t002_b.toml",
+        ]
+        self.assertEqual(sorted(names), [
+            "t001_a.r.toml", "t001_a.toml",
+            "t002_b.r.toml", "t002_b.toml",
+        ])
+
+    def test_old_journal_name_is_not_adopted(self):
+        task = self.write("t001_x.toml", task_text())
+        old_journal = self.write("r001_x.toml", "[[entry]]\n")
+        self.assertNotEqual(journal_path_for(task), old_journal)
+        self.assertEqual(journal_path_for(task).name, "t001_x.r.toml")
 
 
 if __name__ == "__main__":

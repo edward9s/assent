@@ -1,7 +1,7 @@
 """工作資料夾解析與寫回(格式契約見 templates/format.md)。
 
 - 任務檔:tNNN_名稱.toml,表頭欄位嚴格驗證,未知鍵報錯。
-- 日誌檔:rNNN_名稱.toml,append-only 的 [[entry]] 區塊。
+- 日誌檔:tNNN_名稱.r.toml,append-only 的 [[entry]] 區塊。
 - 對任務檔的機器寫入僅一種:set_status 精準替換 status 那一行,其餘位元組不動;
   寫完以 tomllib 重新解析驗證,防止多行字串裡的假 status 行被誤中。
 """
@@ -45,7 +45,7 @@ class Task:
     acceptance: str
     notes: str
     path: Path                     # 任務檔絕對路徑
-    journal_path: Path             # 對應 r 檔絕對路徑(t 換 r)
+    journal_path: Path             # 對應 .r.toml 日誌檔絕對路徑
 
 
 def _require_str(data: dict, path: Path, key: str, *, allow_empty: bool = False) -> str:
@@ -79,12 +79,16 @@ def _str_list(data: dict, path: Path, key: str) -> list[str]:
 
 
 def journal_path_for(task_path: Path) -> Path:
-    """t 檔路徑 -> 對應 r 檔路徑(檔名首字母 t 換 r,其餘不動)。"""
-    return task_path.with_name("r" + task_path.name[1:])
+    """t 檔路徑 -> 對應日誌路徑(任務檔完整主幹加上 .r.toml)。"""
+    return task_path.with_suffix(".r.toml")
 
 
 def parse_task_file(path: Path) -> Task:
     """解析單一任務檔;任何格式問題都以清楚訊息報錯(fail-closed)。"""
+    if path.name.endswith(".r.toml"):
+        raise AgentsError(
+            f"日誌檔 {path.name} 不可當作任務檔解析"
+            "(日誌檔格式為 tNNN_名稱.r.toml)")
     m = _FILENAME_RE.match(path.name)
     if m is None:
         raise AgentsError(
@@ -169,8 +173,10 @@ class Plan:
             raise AgentsError(
                 f"找不到工作資料夾:{tasks_dir}"
                 "(命令列參數或 agents.toml 的 [plan] tasks 指錯了?)")
-        files = sorted(p for p in tasks_dir.iterdir()
-                       if p.is_file() and _FILENAME_RE.match(p.name))
+        files = sorted(
+            p for p in tasks_dir.iterdir()
+            if (p.is_file() and not p.name.endswith(".r.toml")
+                and _FILENAME_RE.match(p.name)))
         if not files:
             raise AgentsError(
                 f"工作資料夾 {tasks_dir} 沒有任務檔(tNNN_名稱.toml);"
@@ -295,7 +301,7 @@ def append_entry(journal: Path, *, by: str, event: str, summary: str,
                  detail: str = "", time_str: str | None = None,
                  agent: str | None = None,
                  requested_model: str | None = None) -> None:
-    """在 r 檔尾 append 一筆 [[entry]];檔案不存在就建立。寫後解析驗證。
+    """在 .r.toml 日誌檔尾 append 一筆 [[entry]];不存在就建立。寫後解析驗證。
 
     ``agent`` 與 ``requested_model`` 是新版選填欄位;舊日誌仍由 ``read_entries``
     原樣讀取,但新寫入不再接受無法辨認 adapter 的籠統 ``by = "ai"``。
@@ -345,7 +351,7 @@ def append_entry(journal: Path, *, by: str, event: str, summary: str,
 
 
 def read_entries(journal: Path) -> list[dict]:
-    """讀取 r 檔全部 [[entry]];檔案不存在回空清單,壞檔回錯誤。report 用。"""
+    """讀取 .r.toml 全部 [[entry]];檔案不存在回空清單,壞檔回錯誤。report 用。"""
     if not journal.is_file():
         return []
     with open(journal, "rb") as f:
