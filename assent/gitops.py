@@ -8,10 +8,16 @@ or commits.
 """
 from __future__ import annotations
 
+import contextlib
+import enum
+import re
+import shutil
 import subprocess
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from assent import AssentError
 
@@ -371,3 +377,283 @@ def restore(root: Path) -> None:
     """
     _git(root, "checkout", "--", ".")
     _git(root, "clean", "-fd")
+
+
+# --- Local accept integration foundation ---
+
+
+def main_worktree(root: Path) -> Path:
+    """Return the main worktree from either it or one of its linked worktrees."""
+    out = _git(root, "worktree", "list", "--porcelain")
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            return Path(line.removeprefix("worktree ")).resolve()
+    raise AssentError(
+        "unable to determine the main worktree from `git worktree list` output")
+
+
+def require_current_branch(root: Path) -> str:
+    """Return the current branch, refusing a detached integration target."""
+    branch = current_branch(root)
+    if not branch:
+        raise AssentError(
+            f"{root} is in detached HEAD state; check out a normal branch before "
+            "integrating accepted work")
+    return branch
+
+
+@dataclass(frozen=True)
+class WorkingTreeStatus:
+    """Categorized porcelain status for an integration target."""
+
+    staged: list[str]
+    unstaged: list[str]
+    untracked: list[str]
+
+    @property
+    def is_clean(self) -> bool:
+        return not (self.staged or self.unstaged or self.untracked)
+
+
+def working_tree_status(root: Path,
+                        excludes: Sequence[str] = ()) -> WorkingTreeStatus:
+    """Return staged, unstaged, and untracked paths separately."""
+    excluded = {_normalize(value) for value in excludes}
+    staged: list[str] = []
+    unstaged: list[str] = []
+    untracked: list[str] = []
+    for line in _git(root, "status", "--porcelain").splitlines():
+        if not line.strip():
+            continue
+        path = _status_path(line)
+        if path in excluded:
+            continue
+        code = line[:2]
+        if code == "??":
+            untracked.append(path)
+            continue
+        if code[0] not in (" ", "?"):
+            staged.append(path)
+        if code[1] not in (" ", "?"):
+            unstaged.append(path)
+    return WorkingTreeStatus(staged, unstaged, untracked)
+
+
+def folder_worktree(root: Path, folder: str) -> Path | None:
+    """Return a folder's valid fixed worktree, if it exists."""
+    primary = main_worktree(root)
+    path = worktree_path(primary, folder)
+    if is_repo_worktree(primary, path):
+        return path.resolve()
+    return None
+
+
+def folder_branches(root: Path, folder: str) -> list[str]:
+    """Return local branches belonging to ``<folder>/*``."""
+    return branches_with_prefix(root, f"{folder}/")
+
+
+def unique_folder_branch(root: Path, folder: str) -> str | None:
+    """Return the folder's sole local branch, or refuse an ambiguous set."""
+    branches = folder_branches(root, folder)
+    if not branches:
+        return None
+    if len(branches) != 1:
+        raise AssentError(
+            f"task folder {folder} has multiple local branches: {', '.join(branches)}")
+    return branches[0]
+
+
+def branch_tip(root: Path, branch: str) -> str:
+    """Return the full commit hash at a branch tip."""
+    return commit_of(root, branch)
+
+
+# Machine-readable evidence recorded on an accept merge.
+ACCEPT_TRAILER_FOLDER = "Assent-Folder"
+ACCEPT_TRAILER_SOURCE_BRANCH = "Assent-Source-Branch"
+ACCEPT_TRAILER_SOURCE_TIP = "Assent-Source-Tip"
+
+_FULL_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
+_EVIDENCE_FIELD = "\x1f"
+
+
+@dataclass(frozen=True)
+class AcceptEvidence:
+    folder: str
+    source_branch: str
+    source_tip: str
+
+
+def _validate_evidence_value(name: str, value: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise AssentError(f"accept evidence {name} must be a non-empty string")
+    if value != value.strip():
+        raise AssentError(
+            f"accept evidence {name} must not have leading or trailing whitespace")
+    if any(ord(character) < 0x20 or ord(character) == 0x7f
+           for character in value):
+        raise AssentError(
+            f"accept evidence {name} must not contain control characters")
+
+
+def build_accept_trailers(folder: str, source_branch: str,
+                          source_tip: str) -> str:
+    """Build the fixed three-line accept evidence block."""
+    _validate_evidence_value("folder", folder)
+    _validate_evidence_value("source branch", source_branch)
+    _validate_evidence_value("source tip", source_tip)
+    if not source_branch.startswith(f"{folder}/") or source_branch == f"{folder}/":
+        raise AssentError(
+            f"accept evidence source branch must belong to task folder {folder}")
+    if not _FULL_HASH_RE.fullmatch(source_tip):
+        raise AssentError(
+            "accept evidence source tip must be a 40-character lowercase hex hash")
+    return (f"{ACCEPT_TRAILER_FOLDER}: {folder}\n"
+            f"{ACCEPT_TRAILER_SOURCE_BRANCH}: {source_branch}\n"
+            f"{ACCEPT_TRAILER_SOURCE_TIP}: {source_tip}")
+
+
+def accept_commit_message(subject: str, folder: str, source_branch: str,
+                          source_tip: str) -> str:
+    """Compose a one-line subject and a canonical accept trailer block."""
+    _validate_evidence_value("subject", subject)
+    return f"{subject}\n\n{build_accept_trailers(folder, source_branch, source_tip)}\n"
+
+
+def _accept_trailers(message: str) -> dict[str, str] | None:
+    """Parse unique, exactly formatted accept trailer lines."""
+    keys = (ACCEPT_TRAILER_FOLDER, ACCEPT_TRAILER_SOURCE_BRANCH,
+            ACCEPT_TRAILER_SOURCE_TIP)
+    found: dict[str, str] = {}
+    for line in message.splitlines():
+        for key in keys:
+            prefix = f"{key}: "
+            if line.startswith(f"{key}:"):
+                if key in found or not line.startswith(prefix):
+                    return None
+                found[key] = line[len(prefix):]
+    return found
+
+
+def parse_accept_evidence(message: str) -> AcceptEvidence | None:
+    """Parse complete internally consistent evidence from a commit message."""
+    trailers = _accept_trailers(message)
+    if trailers is None:
+        return None
+    folder = trailers.get(ACCEPT_TRAILER_FOLDER, "")
+    source_branch = trailers.get(ACCEPT_TRAILER_SOURCE_BRANCH, "")
+    source_tip = trailers.get(ACCEPT_TRAILER_SOURCE_TIP, "")
+    try:
+        build_accept_trailers(folder, source_branch, source_tip)
+    except AssentError:
+        return None
+    return AcceptEvidence(folder, source_branch, source_tip)
+
+
+class AcceptStatus(enum.Enum):
+    ACCEPTED = "accepted"
+    ABSENT = "absent"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True)
+class AcceptResult:
+    status: AcceptStatus
+    evidence: AcceptEvidence | None = None
+
+
+def _validated_accept_evidence(folder: str, message: str,
+                               parents: Sequence[str]) -> AcceptEvidence | None:
+    evidence = parse_accept_evidence(message)
+    if evidence is None or evidence.folder != folder:
+        return None
+    if len(parents) != 2 or parents[1] != evidence.source_tip:
+        return None
+    return evidence
+
+
+def find_accept_evidence(root: Path, folder: str,
+                         ref: str = "HEAD") -> AcceptResult:
+    """Search a target's first-parent history for structurally valid evidence."""
+    _validate_evidence_value("folder", folder)
+    out = _git(root, "log", "--first-parent", "-z",
+               f"--format=%P{_EVIDENCE_FIELD}%B", ref)
+    for record in out.split("\0"):
+        if not record.strip():
+            continue
+        parent_text, separator, message = record.partition(_EVIDENCE_FIELD)
+        if not separator:
+            raise AssentError("unable to parse Git accept evidence history")
+        trailers = _accept_trailers(message)
+        if trailers is None:
+            # A malformed accept-looking trailer block is relevant only when it still
+            # contains the requested folder line.
+            if f"{ACCEPT_TRAILER_FOLDER}: {folder}" in message.splitlines():
+                return AcceptResult(AcceptStatus.UNCERTAIN)
+            continue
+        if trailers.get(ACCEPT_TRAILER_FOLDER) != folder:
+            continue
+        evidence = _validated_accept_evidence(
+            folder, message, parent_text.split())
+        if evidence is None:
+            return AcceptResult(AcceptStatus.UNCERTAIN)
+        return AcceptResult(AcceptStatus.ACCEPTED, evidence)
+    return AcceptResult(AcceptStatus.ABSENT)
+
+
+def _temporary_container(root: Path) -> Path:
+    return root.parent / f"{root.name}.integration"
+
+
+def _cleanup_temporary_worktree(root: Path, path: Path,
+                                branch: str | None = None) -> None:
+    """Best-effort cleanup that preserves an exception raised inside the context."""
+    if path.exists():
+        removed = _run_git(root, "worktree", "remove", "--force", str(path))
+        if removed.returncode != 0:
+            shutil.rmtree(path, ignore_errors=True)
+    _run_git(root, "worktree", "prune")
+    if branch is not None:
+        _run_git(root, "branch", "-D", branch)
+    with contextlib.suppress(OSError):
+        _temporary_container(root).rmdir()
+
+
+def _commit_snapshot(root: Path, committish: str) -> str:
+    _validate_evidence_value("commit", committish)
+    return commit_of(root, f"{committish}^{{commit}}")
+
+
+@contextlib.contextmanager
+def temporary_source_worktree(root: Path, commit: str) -> Iterator[Path]:
+    """Create a detached temporary source worktree at an explicit commit."""
+    primary = main_worktree(root)
+    snapshot = _commit_snapshot(primary, commit)
+    suffix = uuid.uuid4().hex
+    path = _temporary_container(primary) / f"source-{suffix}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _git(primary, "worktree", "add", "--detach", str(path), snapshot)
+        yield path
+    finally:
+        _cleanup_temporary_worktree(primary, path)
+
+
+@contextlib.contextmanager
+def temporary_integration_worktree(
+        root: Path, folder: str,
+        target_snapshot: str) -> Iterator[tuple[Path, str]]:
+    """Create a temporary branch/worktree from an explicit target snapshot."""
+    _validate_evidence_value("folder", folder)
+    primary = main_worktree(root)
+    snapshot = _commit_snapshot(primary, target_snapshot)
+    suffix = uuid.uuid4().hex
+    branch = f"assent-integration/{folder}/{suffix}"
+    path = _temporary_container(primary) / f"target-{suffix}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _git(primary, "worktree", "add", "-b", branch, str(path), snapshot)
+        yield path, branch
+    finally:
+        _cleanup_temporary_worktree(primary, path, branch)

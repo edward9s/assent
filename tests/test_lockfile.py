@@ -14,7 +14,9 @@ import unittest
 from pathlib import Path
 
 from assent.config import load_config
-from assent.lockfile import LOCK_NAME, LockBusy, hold_lock
+from assent.lockfile import (
+    INTEGRATION_LOCK_NAME, LOCK_NAME, LockBusy, hold_integration_lock,
+    hold_lock)
 
 # Importing assent requires the repo root on the path; the subprocess uses it as cwd.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +30,18 @@ _HOLDER = textwrap.dedent(
     from pathlib import Path
     from assent.lockfile import hold_lock
     with hold_lock(Path(sys.argv[1]), sys.argv[2]):
+        sys.stdout.write("LOCKED\\n")
+        sys.stdout.flush()
+        sys.stdin.readline()
+    """
+)
+
+_INTEGRATION_HOLDER = textwrap.dedent(
+    """
+    import sys
+    from pathlib import Path
+    from assent.lockfile import hold_integration_lock
+    with hold_integration_lock(Path(sys.argv[1])):
         sys.stdout.write("LOCKED\\n")
         sys.stdout.flush()
         sys.stdin.readline()
@@ -106,6 +120,55 @@ class TestHoldLock(unittest.TestCase):
             self.root / ".assent" / "assent.toml", "parallel01")
         self.assertEqual(cfg.lockfile_rel, ".assent/parallel01/assent.lock")
         self.assertIn(".assent/parallel01/assent.lock", cfg.git_excludes)
+
+
+class TestIntegrationLock(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.assent_dir = self.root / ".assent"
+        self.assent_dir.mkdir()
+
+    def _start_holder(self) -> subprocess.Popen:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _INTEGRATION_HOLDER, str(self.assent_dir)],
+            cwd=str(_REPO_ROOT), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            encoding="utf-8")
+        self.addCleanup(self._cleanup_holder, proc)
+        self.assertEqual(proc.stdout.readline().strip(), "LOCKED")
+        return proc
+
+    def _cleanup_holder(self, proc: subprocess.Popen) -> None:
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=10)
+        finally:
+            if proc.stdin is not None and not proc.stdin.closed:
+                proc.stdin.close()
+            if proc.stdout is not None and not proc.stdout.closed:
+                proc.stdout.close()
+
+    def test_second_integration_is_rejected(self):
+        proc = self._start_holder()
+        with self.assertRaises(LockBusy) as caught:
+            with hold_integration_lock(self.assent_dir):
+                pass
+        self.assertIn(str(proc.pid), str(caught.exception))
+
+    def test_release_allows_reacquire(self):
+        proc = self._start_holder()
+        proc.stdin.close()
+        self.assertEqual(proc.wait(timeout=10), 0)
+        with hold_integration_lock(self.assent_dir):
+            pass
+
+    def test_stale_file_does_not_block(self):
+        path = self.assent_dir / INTEGRATION_LOCK_NAME
+        path.write_text("pid = 999999\n", encoding="utf-8")
+        with hold_integration_lock(self.assent_dir):
+            pass
+        self.assertTrue(path.is_file())
 
 
 if __name__ == "__main__":
