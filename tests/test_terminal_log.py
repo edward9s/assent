@@ -121,7 +121,7 @@ class TestTerminalLogging(unittest.TestCase):
                 print(f"{command} 輸出")
             self.assertFalse(log_path.exists())
 
-        log_path.parent.mkdir(parents=True)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("既有 run 現場", encoding="utf-8")
         for command in ("status", "check", "report"):
             with terminal_logging([command, "--config", str(config)]):
