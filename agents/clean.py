@@ -21,8 +21,10 @@ def _unmerged_branches(root: Path, branches: list[str], head: str) -> list[str]:
 
 
 def _remove_empty_container(path: Path) -> None:
-    """worktree 移除後,容器目錄(<repo>.worktrees)已空就順手刪掉。
+    """容器目錄(<repo>.worktrees)已空就順手刪掉。
 
+    worktree 剛移除後與每次清理入口都會各嘗試一次;入口那次負責補刪
+    前回殘留的空容器(當時 rmdir 失敗或 worktree 由其他途徑移除)。
     rmdir 只在空目錄成功,天然避免誤刪其他工作資料夾的 worktree;
     非空或移除失敗(如其他行程佔用)都靜默保留,不影響清理結果。
     """
@@ -44,6 +46,7 @@ def clean_folder(cfg: Config) -> int:
     """清理一個工作資料夾；只有 Git 查詢或實際刪除失敗時回傳 1。"""
     name = cfg.tasks_name
     path = gitops.worktree_path(cfg.root, name)
+    _remove_empty_container(path)
     try:
         if not _has_cleanup_target(cfg):
             print(f"{name}:跳過(沒有可清理的 worktree 或分支)")

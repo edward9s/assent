@@ -104,6 +104,16 @@ class TestClean(unittest.TestCase):
         self.assertTrue(self.container.exists())
         self.assertIn("已清(worktree", output)
 
+    def test_leftover_empty_container_is_removed(self) -> None:
+        """worktree 已由其他途徑移除、僅剩空容器時,入口補刪不受跳過影響。"""
+        self.container.mkdir()
+
+        code, output = self._run_clean()
+
+        self.assertEqual(code, 0)
+        self.assertFalse(self.container.exists())
+        self.assertIn("沒有可清理的 worktree 或分支", output)
+
     def test_dirty_worktree_is_retained(self) -> None:
         worktree, branch = self._worktree_branch()
         (worktree / "未追蹤.txt").write_text("不可丟\n", encoding="utf-8")
