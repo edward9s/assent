@@ -46,6 +46,11 @@ project/
   與分支成果已完全併入主樹目前 HEAD，才可移除。證明不了就跳過並說明原因；
   不碰 `.agents/`（其中的 t/r 檔是歸檔本體），沒有 `--force`，也與 `git clean`
   無關，不刪未追蹤或未合併的內容。
+- **駁回**:`agents reject <FOLDER>` 是人工裁決的明示駁回,與常規清理分流:
+  封存未提交變更後強制刪除該資料夾的 worktree 與同前綴分支(刪除前以
+  完整 tip hash 存證),並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔留下含
+  完整 Git 存證的 `rejected` 記錄(SKIP 不推翻)。`FOLDER` 必填;run 進行中
+  拒絕。
 
 ### 專案規則與 agents 管理面
 
@@ -245,6 +250,13 @@ summary = "額度耗盡,保留進度等待重置後接續"
 `agents.lock`、worktree 完全乾淨,且所有同前綴分支與 detached HEAD 都已併入
 主樹目前 HEAD,才會先以一般保護移除 worktree,再以 `git branch -d` 刪除分支。
 任何證明不足都保留並明講原因;不提供強制刪除選項,也絕不改動 `.agents/`。
+
+`agents reject <FOLDER>` 供驗收會議駁回整個資料夾的實作:取得同一把
+`agents.lock` 後,先完整解析任務檔,再把未提交變更封存為 wip commit,以各
+分支完整 tip hash 存證,再強制移除 worktree、以 `git branch -D` 刪除同前綴
+分支,最後把 DONE/WIP/BLOCKED 任務改回 TODO 並在 r 檔 append 含完整 Git
+存證的 `rejected` 記錄。狀態重置是駁回的本分,不是常規清理的例外;任何
+Git 步驟失敗都不進入任務檔重置,重跑同一命令即可續完。
 
 任一資料夾內:有 `WIP` 任務 -> 優先選它,帶「接續」提示續作;否則取第一個
 `TODO` 且所有 `deps` 皆為 `DONE` / `SKIP` 的任務。`BLOCKED` 只擋以它為前置

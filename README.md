@@ -93,6 +93,9 @@ agents run --all --jobs 2
 agents status
 agents report
 agents clean [FOLDER]
+
+# 驗收會議裁決駁回整個資料夾的實作時(封存、強刪、任務改回 TODO)
+agents reject <FOLDER>
 ```
 
 跑完後人類驗收:
@@ -101,6 +104,7 @@ agents clean [FOLDER]
 git log --oneline <資料夾名>/<run-id>   # 一任務一 commit,逐一查看
 git diff main...<資料夾名>/<run-id>     # 或看整體差異
 # 接受 → merge;不接受 → 對著 _report.md 逐項裁決,叫 AI 改任務檔後續跑
+# 整個資料夾的實作都不要 → agents reject <資料夾>
 ```
 
 ## 平行執行
@@ -174,6 +178,12 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 `agents clean [FOLDER]` 只刪除已完全併入且乾淨的 worktree 與分支；證明不了就跳過，
 不碰 `.agents/`，也沒有強制選項，且與 `git clean` 無關。
 
+`agents reject <FOLDER>` 是人工裁決的明示駁回動作,與常規 clean 分流:先把
+未提交變更封存為 wip commit,印出各分支完整 tip hash 存證後強制刪除該
+資料夾的 worktree 與同前綴分支(僅 gc 期限內可用 hash 救回),再把 DONE/
+WIP/BLOCKED 任務改回 TODO 並在 r 檔留下含完整 Git 存證的 `rejected`
+記錄(SKIP 不推翻)。`FOLDER` 必填,不可作用於全部資料夾;run 進行中拒絕執行。
+
 兩項舊設定已廢除:工作資料夾不再由設定檔中的手工指標維護,Git 也沒有停用
 開關或無 Git 降級模式;工作資料夾由命令列明示或依任務事實推導,Git 永遠啟用。
 
@@ -185,6 +195,7 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 | `agents check [FOLDER]`<br>`agents check --config .agents/agents.toml parallel01` | 驗證任務檔格式、依賴無循環、設定與環境，是規劃會議的散會條件。接受 `--config PATH`。 | **零** |
 | `agents report [FOLDER]`<br>`agents report parallel01` | 生成並顯示工作資料夾內的人讀報告 `_report.md`。接受 `--config PATH`。 | **零** |
 | `agents clean [FOLDER]`<br>`agents clean parallel01` | 只清理已完全併入且乾淨的 worktree 與同資料夾前綴分支；任何證明不足就跳過，不碰 `.agents/`，且沒有強制選項。省略 `FOLDER` 時作用於全部工作資料夾。 | **零** |
+| `agents reject <FOLDER>`<br>`agents reject parallel01` | 人工裁決駁回:封存未提交變更後強制刪除該資料夾的 worktree 與同前綴分支(刪除前以完整 tip hash 存證)，並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔保存 Git 存證。`FOLDER` 必填；run 進行中拒絕。 | **零** |
 | `agents init`<br>`agents init --path C:\\work\\my-project` | 在目標專案生成 `.agents` 骨架與 `AGENTS.md`；`--path DIR` 預設為目前目錄。它不接受 `FOLDER` 或 `--config`。 | **零** |
 
 各子命令的 `-h`／`--help` 會顯示該層實際語法；頂層沒有可套用到所有子命令的

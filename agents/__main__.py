@@ -1,4 +1,4 @@
-"""CLI 進入點:argparse 子命令 run / status / check / report / clean / init。"""
+"""CLI 進入點:argparse 子命令 run / status / check / report / clean / reject / init。"""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +14,7 @@ from agents.folderdeps import (find_unfinished_prerequisites,
 from agents.folder_scheduler import run_all
 from agents.init import init as run_init
 from agents.plan import Plan
+from agents.reject import reject_folder
 from agents.terminal_log import terminal_logging
 
 _DEFAULT_CONFIG = ".agents/agents.toml"
@@ -37,7 +38,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     "逐任務開 AI session、客觀驗收、自動 git 檢查點。",
     )
     sub = parser.add_subparsers(dest="command", required=True,
-                                metavar="{run,status,check,report,clean,init}")
+                                metavar="{run,status,check,report,clean,reject,init}")
 
     run_p = sub.add_parser("run", help="執行指定[工作資料夾]的任務直到全部 DONE/BLOCKED/SKIP")
     run_p.add_argument("--once", action="store_true", help="只執行下一個任務後停止")
@@ -52,6 +53,13 @@ def _build_parser() -> argparse.ArgumentParser:
                                            "會議的散會條件)")
     report_p = sub.add_parser("report", help="生成人讀的執行報告 _report.md(零 token)")
     clean_p = sub.add_parser("clean", help="清除可證明冗餘的 worktree 與已併入分支")
+
+    reject_p = sub.add_parser("reject", help="人工裁決駁回:封存後強制清除該資料夾的 "
+                                             "worktree 與分支,任務改回 TODO")
+    reject_p.add_argument("folder", metavar="FOLDER",
+                          help="要駁回的工作資料夾(必填,不可作用於全部資料夾)")
+    reject_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
+                          help=f"設定檔位置(預設:{_DEFAULT_CONFIG})")
 
     init_p = sub.add_parser("init", help="在專案生成 .agents 骨架與 AGENTS.md")
     init_p.add_argument("--path", default=".", metavar="DIR",
@@ -167,6 +175,13 @@ def _dispatch(argv: list[str]) -> int:
 
     if args.command == "run" and args.all_folders:
         return run_all(args.config, agents_dir, args.jobs or 1)
+    if args.command == "reject":
+        try:
+            cfg = load_config(args.config, args.folder)
+        except AgentsError as e:
+            print(f"設定檔錯誤:{e}")
+            return 1
+        return reject_folder(cfg)
     folders = list_task_folders(agents_dir)
     if args.command == "clean":
         selected = folders if args.folder is None else [args.folder]

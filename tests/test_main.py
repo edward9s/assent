@@ -126,6 +126,19 @@ class TestDispatch(MainTestCase):
             main(["clean", "--force"])
         self.assertEqual(ctx.exception.code, 2)
 
+    def test_reject_requires_folder(self):
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
+                io.StringIO()):
+            main(["reject"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_reject_dispatches_to_reject_folder(self):
+        config = self.write_config()
+        with patch("agents.__main__.reject_folder", return_value=0) as mocked:
+            code, _ = self.run_main(["reject", "B", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(mocked.call_args.args[0].tasks_name, "B")
+
     def test_invalid_folder_override_reports_error(self):
         config = self.write_config()
         code, out = self.run_main(["status", "bad/name", "--config", str(config)])

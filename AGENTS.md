@@ -3,7 +3,8 @@
 ## Project
 
 agents — AI 計畫格式 + 自動調度器。純 Python 3.11+(僅標準庫,tomllib),
-Windows 優先、跨平台。CLI 子命令:run / status / check / report / init。
+Windows 優先、跨平台。CLI 子命令:run / status / check / report / clean /
+reject / init。
 原始碼在 `agents/`,測試在 `tests/`(unittest,不用 pytest)。
 
 ## Permanent constraints

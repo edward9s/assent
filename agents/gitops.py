@@ -179,6 +179,20 @@ def delete_branch(root: Path, branch: str) -> None:
     _git(root, "branch", "-d", branch)
 
 
+def delete_branch_force(root: Path, branch: str) -> None:
+    """以 ``git branch -D`` 強制刪除分支;僅供人工裁決駁回路徑使用。
+
+    呼叫端必須先以 :func:`commit_of` 取得完整 tip hash 並持久存證,刪除後
+    在 gc 期限內仍可用 hash 救回。常規清理一律走 :func:`delete_branch`。
+    """
+    _git(root, "branch", "-D", branch)
+
+
+def commit_of(root: Path, ref: str) -> str:
+    """回傳 ``ref`` 指向的完整 commit hash，供刪除前持久存證。"""
+    return _git(root, "rev-parse", ref).strip()
+
+
 def tracked_paths(root: Path, path: str, ref: str | None = None) -> list[str]:
     """列出指定路徑下的索引檔案;有 ref 時改查該 commit/ref。"""
     normalized = _normalize(path)

@@ -106,7 +106,8 @@ effort 分成選擇與翻譯兩步:任務明寫值優先於 `default_effort[mode
   驗收失敗不還原、帶原因重試;重試用盡連同成果 commit 進 BLOCKED
   檢查點交人類裁決。
 - 合併後的 worktree 與分支清理由 `agents clean` 機械執行；安全條件必須由機器
-  證明，人不手動執行 Git 清理。
+  證明，人不手動執行 Git 清理。駁回整個資料夾的實作亦由 `agents reject`
+  機械執行(封存、強刪、任務改回 TODO、r 檔留痕),同樣不手動操作 Git。
 
 ## 升級路徑(先有痛點,再加結構)
 
