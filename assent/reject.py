@@ -5,7 +5,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Callable
 
-from assent import AssentError, gitops
+from assent import AssentError, gitops, verification
 from assent.accept import _source_snapshot
 from assent.clean import _direct_dependents
 from assent.config import Config
@@ -181,6 +181,14 @@ def _reject_locked(cfg: Config, path: Path, dependent_locks: ExitStack,
     if not _confirm_destructive(name, path, branches, reset_candidates, stranded, confirm):
         print(f"{name}: reject cancelled, no changes made")
         return 1
+
+    # Invalidated before the first destructive step, so no window exists in which
+    # a batch receipt still authorizes releasing a source this reject has already
+    # deleted. A receipt is derived evidence; the only cost is one more
+    # `assent verify --batch`.
+    if verification.invalidate_batch_receipt(cfg.assent_dir):
+        print(f"{name}: batch verification receipt invalidated; run "
+              "`assent verify --batch` again before the next batch release")
 
     evidence: list[str] = []
     try:

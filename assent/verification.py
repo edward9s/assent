@@ -1,11 +1,21 @@
-"""Reproducible, unattended full verification of one integration candidate.
+"""Reproducible, unattended full verification of an integration candidate.
 
-The receipt written here is a derived runtime cache.  It records facts about an
-explicit source snapshot, the resulting integration tree, and the main-tree
-verification script; it is not human approval and never advances a Git ref.
+The receipts written here are a derived runtime cache.  They record facts about
+explicit source snapshots, the resulting integration trees, and the main-tree
+verification script; they are not human approval and never advance a Git ref.
+
+Two independent receipt models live side by side and never read each other's
+files:
+
+* the per-folder receipt (``<folder>/_verification.toml``), covering one folder
+  merged into the target;
+* the batch receipt (``.assent/_batch_verification.toml``), covering one full
+  verification of several folders merged in a recorded order, so that a batch
+  release can publish them one by one against a single test run.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -15,14 +25,17 @@ import sys
 import time
 import tomllib
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from assent import AssentError, gitops
-from assent.config import Config
+from assent.config import Config, _validate_tasks_name, load_config
 from assent.folderdeps import (infer_folder_completion, live_upstreams,
-                               parse_folder_dependencies)
+                               order_folders_by_dependency,
+                               parse_folder_dependencies,
+                               parse_folder_dependency_graph)
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 
@@ -173,16 +186,13 @@ def _validate_receipt(receipt: VerificationReceipt, repository: Path) -> None:
                 f"Verification receipt {name} names a Git {actual}, not a {expected}")
 
 
-def write_receipt(path: Path, receipt: VerificationReceipt,
-                  repository: Path) -> None:
-    """Atomically replace a receipt after validating its schema and Git objects."""
-    path = Path(path)
-    _validate_receipt(receipt, repository)
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace one receipt file in place, flushed and without a partial state."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(_receipt_text(receipt))
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
@@ -193,6 +203,14 @@ def write_receipt(path: Path, receipt: VerificationReceipt,
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def write_receipt(path: Path, receipt: VerificationReceipt,
+                  repository: Path) -> None:
+    """Atomically replace a receipt after validating its schema and Git objects."""
+    path = Path(path)
+    _validate_receipt(receipt, repository)
+    _atomic_write_text(path, _receipt_text(receipt))
 
 
 def read_receipt(path: Path, repository: Path) -> VerificationReceipt:
@@ -603,3 +621,819 @@ def receipt_report_lines(cfg: Config) -> list[str]:
     if receipt.failure_summary:
         lines.append("  Failure: " + receipt.failure_summary.splitlines()[0])
     return lines
+
+
+# --- Batch receipt: one full verification covering several folders ------------
+#
+# One candidate tree merges every queued folder in a recorded order, is verified
+# once, and is then released folder by folder.  Each intermediate merge commit
+# must be comparable against the receipt, so the receipt stores the tree after
+# every step, not only the final tree.
+
+BATCH_RECEIPT_NAME = "_batch_verification.toml"
+BATCH_RECEIPT_VERSION = 1
+_BATCH_RECEIPT_KEYS = {
+    "version", "status", "target_tip", "sources", "final_tree",
+    "verify_script_sha256", "verify_command", "exit_code", "completed_at",
+    "failure_summary",
+}
+_BATCH_SOURCE_KEYS = {"folder", "source_tip", "step_tree"}
+
+
+@dataclass(frozen=True)
+class BatchSource:
+    """One folder's place in the recorded merge order.
+
+    ``step_tree`` is the candidate tree right after this folder was merged, so a
+    release can compare every intermediate merge commit it creates, not just the
+    end of the chain.
+    """
+
+    folder: str
+    source_tip: str
+    step_tree: str
+
+
+@dataclass(frozen=True)
+class BatchVerificationReceipt:
+    """Evidence of one full verification covering an ordered list of folders."""
+
+    version: int
+    status: str
+    target_tip: str
+    sources: tuple[BatchSource, ...]
+    final_tree: str
+    verify_script_sha256: str
+    verify_command: str
+    exit_code: int
+    completed_at: str
+    failure_summary: str
+
+    def __post_init__(self) -> None:
+        # A TOML array reads back as a list; normalizing keeps a receipt equal to
+        # its own round trip without coercing the element type, which stays a
+        # validated schema error.
+        if isinstance(self.sources, list):
+            object.__setattr__(self, "sources", tuple(self.sources))
+
+    @property
+    def folders(self) -> tuple[str, ...]:
+        """Folder names in the recorded merge order."""
+        return tuple(source.folder for source in self.sources)
+
+
+@dataclass(frozen=True)
+class BatchCandidate:
+    """The rebuilt merge chain: either every step tree, or the first conflict."""
+
+    step_trees: tuple[str, ...] = ()
+    conflict_folder: str = ""
+    conflicts: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not self.conflict_folder
+
+
+def batch_receipt_path(assent_dir: str | Path) -> Path:
+    """Return the repository-level batch receipt path.
+
+    The batch receipt spans folders, so it belongs to ``.assent/`` itself and
+    never to one folder's directory.
+    """
+    return Path(assent_dir) / BATCH_RECEIPT_NAME
+
+
+def invalidate_batch_receipt(assent_dir: str | Path) -> bool:
+    """Delete the batch receipt so no release can consume it; True if one existed.
+
+    This is the single invalidation entry point for every command that changes
+    what a batch was verified against: ``reject`` and ``rework`` reopen work the
+    candidate was built from, and a batch release consumes the receipt once it
+    has published.  The receipt is derived and disposable, so deleting it only
+    ever costs one ``assent verify --batch``; it never destroys a source of
+    truth.
+    """
+    path = batch_receipt_path(assent_dir)
+    existed = path.exists()
+    _invalidate_receipt(path)
+    return existed
+
+
+def _batch_receipt_text(receipt: BatchVerificationReceipt) -> str:
+    text = (
+        f"version = {receipt.version}\n"
+        f"status = {_toml_string(receipt.status)}\n"
+        f"target_tip = {_toml_string(receipt.target_tip)}\n"
+        f"final_tree = {_toml_string(receipt.final_tree)}\n"
+        f"verify_script_sha256 = {_toml_string(receipt.verify_script_sha256)}\n"
+        f"verify_command = {_toml_string(receipt.verify_command)}\n"
+        f"exit_code = {receipt.exit_code}\n"
+        f"completed_at = {_toml_string(receipt.completed_at)}\n"
+        f"failure_summary = {_toml_string(receipt.failure_summary)}\n"
+    )
+    for source in receipt.sources:
+        text += (
+            "\n[[sources]]\n"
+            f"folder = {_toml_string(source.folder)}\n"
+            f"source_tip = {_toml_string(source.source_tip)}\n"
+            f"step_tree = {_toml_string(source.step_tree)}\n"
+        )
+    return text
+
+
+def _require_oid(value: object, name: str) -> None:
+    if not isinstance(value, str) or not _OID_RE.fullmatch(value):
+        raise AssentError(
+            f"Batch verification receipt {name} must be a 40- or 64-character "
+            "lowercase hexadecimal object id")
+
+
+def _validate_batch_receipt(receipt: BatchVerificationReceipt,
+                            repository: Path) -> None:
+    """Fail closed on any incomplete, inconsistent, or non-existent identity."""
+    if type(receipt.version) is not int or receipt.version != BATCH_RECEIPT_VERSION:
+        raise AssentError(
+            f"Batch verification receipt version must be {BATCH_RECEIPT_VERSION}")
+    if receipt.status not in _RECEIPT_STATUSES:
+        raise AssentError(
+            "Batch verification receipt status must be PASSED or FAILED")
+    _require_oid(receipt.target_tip, "target_tip")
+    _require_oid(receipt.final_tree, "final_tree")
+    if not isinstance(receipt.sources, tuple) or not receipt.sources:
+        raise AssentError(
+            "Batch verification receipt sources must be a non-empty ordered list")
+    seen: set[str] = set()
+    for index, source in enumerate(receipt.sources):
+        if not isinstance(source, BatchSource):
+            raise AssentError(
+                f"Batch verification receipt sources[{index}] is not a source entry")
+        if not isinstance(source.folder, str):
+            raise AssentError(
+                f"Batch verification receipt sources[{index}] folder must be a string")
+        _validate_tasks_name(source.folder, "Batch verification receipt folder")
+        if source.folder in seen:
+            raise AssentError(
+                "Batch verification receipt lists folder "
+                f"{source.folder} more than once")
+        seen.add(source.folder)
+        _require_oid(source.source_tip, f"sources[{index}] source_tip")
+        _require_oid(source.step_tree, f"sources[{index}] step_tree")
+    if receipt.final_tree != receipt.sources[-1].step_tree:
+        raise AssentError(
+            "Batch verification receipt final_tree must equal the last step_tree")
+    if not isinstance(receipt.verify_script_sha256, str) or not _DIGEST_RE.fullmatch(
+            receipt.verify_script_sha256):
+        raise AssentError(
+            "Batch verification receipt verify_script_sha256 must be a "
+            "64-character lowercase hexadecimal digest")
+    if receipt.verify_command != VERIFY_COMMAND:
+        raise AssentError(
+            "Batch verification receipt verify_command must be "
+            f"{VERIFY_COMMAND!r}")
+    if type(receipt.exit_code) is not int:
+        raise AssentError(
+            "Batch verification receipt exit_code must be an integer")
+    if not isinstance(receipt.completed_at, str):
+        raise AssentError(
+            "Batch verification receipt completed_at must be a string")
+    try:
+        completed = datetime.fromisoformat(receipt.completed_at)
+    except ValueError as e:
+        raise AssentError(
+            "Batch verification receipt completed_at must be ISO 8601") from e
+    if completed.tzinfo is None:
+        raise AssentError(
+            "Batch verification receipt completed_at must include a timezone")
+    if not isinstance(receipt.failure_summary, str):
+        raise AssentError(
+            "Batch verification receipt failure_summary must be a string")
+    if len(receipt.failure_summary) > _SUMMARY_LIMIT:
+        raise AssentError(
+            "Batch verification receipt failure_summary exceeds the size limit")
+    if receipt.status == "PASSED" and receipt.exit_code != 0:
+        raise AssentError(
+            "A PASSED batch verification receipt must have exit_code = 0")
+    if receipt.status == "FAILED" and receipt.exit_code == 0:
+        raise AssentError(
+            "A FAILED batch verification receipt must have a nonzero exit_code")
+    expected = [(receipt.target_tip, "commit"), (receipt.final_tree, "tree")]
+    for source in receipt.sources:
+        expected.append((source.source_tip, "commit"))
+        expected.append((source.step_tree, "tree"))
+    for object_id, wanted in expected:
+        actual = gitops.object_type(repository, object_id)
+        if actual != wanted:
+            raise AssentError(
+                f"Batch verification receipt {object_id} names a Git {actual}, "
+                f"not a {wanted}")
+
+
+def write_batch_receipt(path: Path, receipt: BatchVerificationReceipt,
+                        repository: Path) -> None:
+    """Atomically replace the batch receipt after validating schema and objects."""
+    path = Path(path)
+    _validate_batch_receipt(receipt, repository)
+    _atomic_write_text(path, _batch_receipt_text(receipt))
+
+
+def read_batch_receipt(path: Path,
+                       repository: Path) -> BatchVerificationReceipt:
+    """Read the batch receipt fail-closed, including Git existence and types."""
+    path = Path(path)
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except FileNotFoundError as e:
+        raise AssentError(f"Batch verification receipt not found: {path}") from e
+    except OSError as e:
+        raise AssentError(
+            f"Unable to read batch verification receipt {path}: {e}") from e
+    except tomllib.TOMLDecodeError as e:
+        raise AssentError(
+            f"Batch verification receipt is not valid TOML ({path}): {e}") from e
+    if not isinstance(data, dict):
+        raise AssentError("Batch verification receipt must be a TOML table")
+    unknown = sorted(set(data) - _BATCH_RECEIPT_KEYS)
+    missing = sorted(_BATCH_RECEIPT_KEYS - set(data))
+    if unknown:
+        raise AssentError(
+            f"Batch verification receipt has unknown keys: {', '.join(unknown)}")
+    if missing:
+        raise AssentError(
+            f"Batch verification receipt is missing keys: {', '.join(missing)}")
+    raw_sources = data.pop("sources")
+    if not isinstance(raw_sources, list):
+        raise AssentError(
+            "Batch verification receipt sources must be an array of tables")
+    sources: list[BatchSource] = []
+    for index, item in enumerate(raw_sources):
+        if not isinstance(item, dict):
+            raise AssentError(
+                f"Batch verification receipt sources[{index}] is not a table")
+        unknown = sorted(set(item) - _BATCH_SOURCE_KEYS)
+        missing = sorted(_BATCH_SOURCE_KEYS - set(item))
+        if unknown:
+            raise AssentError(
+                f"Batch verification receipt sources[{index}] has unknown keys: "
+                f"{', '.join(unknown)}")
+        if missing:
+            raise AssentError(
+                f"Batch verification receipt sources[{index}] is missing keys: "
+                f"{', '.join(missing)}")
+        sources.append(BatchSource(**item))
+    try:
+        receipt = BatchVerificationReceipt(sources=tuple(sources), **data)
+    except TypeError as e:
+        raise AssentError(
+            f"Batch verification receipt has an invalid structure: {e}") from e
+    _validate_batch_receipt(receipt, repository)
+    return receipt
+
+
+def _merge_chain(candidate: Path,
+                 sources: Sequence[tuple[str, str]]) -> BatchCandidate:
+    """Merge every ``(folder, source_tip)`` into an open candidate worktree.
+
+    Each step is asserted before the next one starts: a no-fast-forward merge
+    must produce exactly the two expected parents, the previous step and this
+    folder's source.  Anything else (a source already contained in the chain, so
+    that Git reports "already up to date" and creates no commit) is an
+    unexpected shape rather than a conflict, and fails closed instead of
+    recording a step tree that no release could reproduce.
+    """
+    step_trees: list[str] = []
+    for folder, source_tip in sources:
+        previous = gitops.commit_of(candidate, "HEAD")
+        message = f"verify(batch/{folder}): temporary integration candidate"
+        outcome = gitops.merge_no_ff(candidate, source_tip, message)
+        if not outcome.ok:
+            return BatchCandidate(
+                tuple(step_trees), folder, tuple(outcome.conflicts))
+        if gitops.commit_parents(candidate, "HEAD") != (previous, source_tip):
+            raise AssentError(
+                f"merging {folder} did not produce the expected two-parent "
+                "batch candidate")
+        step_trees.append(gitops.tree_of(candidate, "HEAD"))
+    return BatchCandidate(tuple(step_trees))
+
+
+def build_batch_candidate(main: Path, target_tip: str,
+                          sources: Sequence[tuple[str, str]]) -> BatchCandidate:
+    """Merge every ``(folder, source_tip)`` in order and return each step tree.
+
+    The chain is built in one temporary worktree that is always removed, and the
+    first conflicting folder stops it.  Every step is a no-fast-forward merge, so
+    the trees recorded here are exactly the trees a release reproduces.
+    """
+    if not sources:
+        raise AssentError("a batch candidate needs at least one source folder")
+    with gitops.temporary_integration_worktree(
+            main, "batch", target_tip) as (candidate, _branch):
+        return _merge_chain(candidate, sources)
+
+
+def batch_receipt_staleness(cfg: Config,
+                            receipt: BatchVerificationReceipt) -> tuple[str, ...]:
+    """Return every reason the whole batch has expired; empty means still current.
+
+    A batch receipt is all-or-nothing: any one drifted source expires the batch,
+    because the recorded merge order and its step trees only describe that exact
+    set of sources.  Cheap identity checks run first; the merge chain is rebuilt
+    only when every recorded identity is still current, and the target tip itself
+    is deliberately not compared -- a target that moved without changing the
+    rebuilt trees keeps the receipt usable.
+    """
+    main = gitops.main_worktree(cfg.root)
+    reasons: list[str] = []
+    try:
+        if verifier_digest(cfg) != receipt.verify_script_sha256:
+            reasons.append("verification script changed")
+    except AssentError as e:
+        reasons.append(f"verification script is unavailable: {e}")
+
+    target_tip = gitops.commit_of(main, gitops.require_current_branch(main))
+    for source in receipt.sources:
+        try:
+            branch = gitops.unique_folder_branch(main, source.folder)
+        except AssentError as e:
+            reasons.append(f"source branch for {source.folder} is ambiguous: {e}")
+            continue
+        if branch is None:
+            reasons.append(f"source branch for {source.folder} no longer exists")
+            continue
+        tip = gitops.branch_tip(main, branch)
+        if tip != source.source_tip:
+            reasons.append(
+                f"source tip for {source.folder} changed from {source.source_tip} "
+                f"to {tip}")
+            continue
+        if gitops.is_ancestor(main, tip, target_tip):
+            reasons.append(
+                f"{source.folder} has already been accepted into the target "
+                "on its own")
+    if reasons:
+        return tuple(reasons)
+
+    candidate = build_batch_candidate(
+        main, target_tip,
+        [(source.folder, source.source_tip) for source in receipt.sources])
+    if not candidate.ok:
+        return (f"rebuilt integration of {candidate.conflict_folder} conflicts: "
+                + ", ".join(candidate.conflicts),)
+    for source, tree in zip(receipt.sources, candidate.step_trees):
+        if tree != source.step_tree:
+            reasons.append(
+                f"rebuilt step tree for {source.folder} is {tree}, not the "
+                f"recorded {source.step_tree}")
+            break
+    if not reasons and candidate.step_trees[-1] != receipt.final_tree:
+        reasons.append(
+            f"rebuilt final tree is {candidate.step_trees[-1]}, not the recorded "
+            f"{receipt.final_tree}")
+    return tuple(reasons)
+
+
+def batch_receipt_is_current(cfg: Config,
+                             receipt: BatchVerificationReceipt) -> bool:
+    """True only for a PASSED batch receipt with no staleness reason left."""
+    if receipt.status != "PASSED":
+        return False
+    return not batch_receipt_staleness(cfg, receipt)
+
+
+# --- assent verify --batch: one full verification for every queued folder ------
+
+
+@dataclass(frozen=True)
+class BatchSelection:
+    """Which folders enter one batch candidate, and why the others do not."""
+
+    sources: tuple[tuple[str, str], ...] = ()
+    skipped: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def folders(self) -> tuple[str, ...]:
+        return tuple(folder for folder, _tip in self.sources)
+
+
+def _new_batch_receipt(*, status: str, target_tip: str,
+                       sources: Sequence[tuple[str, str]],
+                       step_trees: Sequence[str], digest: str, exit_code: int,
+                       failure_summary: str = "") -> BatchVerificationReceipt:
+    entries = tuple(
+        BatchSource(folder, source_tip, step_tree)
+        for (folder, source_tip), step_tree in zip(sources, step_trees))
+    return BatchVerificationReceipt(
+        version=BATCH_RECEIPT_VERSION,
+        status=status,
+        target_tip=target_tip,
+        sources=entries,
+        final_tree=step_trees[-1],
+        verify_script_sha256=digest,
+        verify_command=VERIFY_COMMAND,
+        exit_code=exit_code,
+        completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        failure_summary=_summary(failure_summary),
+    )
+
+
+def select_batch_folders(config_path: str, assent_dir: Path, main: Path,
+                         target_tip: str) -> tuple[BatchSelection,
+                                                   dict[str, Config]]:
+    """Pick every finished folder that still has work to publish, in merge order.
+
+    Selection reuses the folder dependency graph and the same on-the-spot
+    completion inference the scheduler uses, so a batch merges folders in
+    exactly the order ``accept --all`` would publish them.  Two situations are a
+    skip rather than a failure, matching ``accept --all``:
+
+    * a folder that is not finished has nothing to verify yet;
+    * a finished folder whose source branch and worktree are both gone was
+      already integrated and cleaned, so there is nothing left to merge.
+
+    A source tip already reachable from the target is likewise skipped: merging
+    it would be a Git no-op, not a step a release could reproduce.  Any other
+    unresolved source identity (detached, ambiguous, dirty) fails the whole
+    batch instead of being silently dropped from the candidate.
+    """
+    graph = parse_folder_dependency_graph(assent_dir)
+    finished: set[str] = set()
+    skipped: list[tuple[str, str]] = []
+    for folder in graph:
+        completion = infer_folder_completion(assent_dir / folder)
+        if completion.complete:
+            finished.add(folder)
+        else:
+            skipped.append((folder, f"not finished: {completion.reason}"))
+
+    configs: dict[str, Config] = {}
+    sources: list[tuple[str, str]] = []
+    for folder in order_folders_by_dependency(graph, finished):
+        cfg = load_config(config_path, folder)
+        if (gitops.folder_worktree(main, folder) is None
+                and not gitops.folder_branches(main, folder)):
+            skipped.append((folder, "no source branch remains; already "
+                                    "integrated and cleaned"))
+            continue
+        _branch, source_tip, _worktree = _source_snapshot(cfg, main)
+        if gitops.is_ancestor(main, source_tip, target_tip):
+            skipped.append(
+                (folder, f"current source {source_tip[:12]} is already "
+                         "contained in the target"))
+            continue
+        configs[folder] = cfg
+        sources.append((folder, source_tip))
+    return BatchSelection(tuple(sources), tuple(skipped)), configs
+
+
+def _batch_drift(configs: dict[str, Config], main: Path, excludes: Sequence[str],
+                 target_branch: str, target_tip: str,
+                 sources: Sequence[tuple[str, str]], script: Path,
+                 digest: str) -> list[str]:
+    """Re-observe every identity the batch receipt is about to certify."""
+    changed: list[str] = []
+    if gitops.current_branch(main) != target_branch:
+        changed.append("target branch changed")
+    elif gitops.commit_of(main, target_branch) != target_tip:
+        changed.append("target tip changed")
+    if not gitops.working_tree_status(main, excludes).is_clean:
+        changed.append("target worktree became dirty")
+    for folder, source_tip in sources:
+        try:
+            _branch, current, _worktree = _source_snapshot(configs[folder], main)
+        except AssentError as e:
+            changed.append(f"source for {folder} changed: {e}")
+        else:
+            if current != source_tip:
+                changed.append(f"source tip for {folder} changed")
+    if _sha256(script) != digest:
+        changed.append("verification script changed")
+    return changed
+
+
+@dataclass(frozen=True)
+class _PrefixRun:
+    """One full verification of a prefix of the recorded merge chain."""
+
+    passed: bool
+    step_trees: tuple[str, ...]
+    exit_code: int
+    failure_summary: str
+
+
+@dataclass(frozen=True)
+class BatchBisectResult:
+    """Which folder broke the batch, and what is still provably good.
+
+    ``kept`` is the longest prefix that was verified and passed during the
+    search, so ``kept_step_trees`` comes from a real full verification and never
+    from a re-run: the last passing step of a prefix bisection is always the
+    prefix immediately before the guilty folder.
+    """
+
+    guilty: str
+    guilty_summary: str
+    kept: tuple[tuple[str, str], ...] = ()
+    kept_step_trees: tuple[str, ...] = ()
+
+
+def _bisect_steps(count: int) -> int:
+    """Worst-case full verifications needed to localize among ``count`` folders."""
+    steps = 0
+    span = count
+    while span > 1:
+        span = (span + 1) // 2
+        steps += 1
+    return steps
+
+
+def _verify_prefix(main: Path, target_tip: str,
+                   sources: Sequence[tuple[str, str]],
+                   script: Path) -> _PrefixRun:
+    """Build and fully verify one prefix of an already-mergeable batch chain.
+
+    The whole chain merged cleanly before localization started, so truncating it
+    repeats a subset of the same merges and cannot conflict.  A conflict here
+    would mean the repository changed underneath the search, which fails closed
+    rather than being recorded as a test failure.
+    """
+    with gitops.temporary_integration_worktree(
+            main, "batch", target_tip) as (candidate, _branch):
+        chain = _merge_chain(candidate, sources)
+        if not chain.ok:
+            raise AssentError(
+                f"merging {chain.conflict_folder} conflicts while localizing a "
+                "batch failure, although the full chain merged cleanly; the "
+                "repository changed during verification")
+        try:
+            result = _run_full_verifier(script, candidate)
+        except OSError as e:
+            return _PrefixRun(False, chain.step_trees, 1,
+                              f"Unable to start verification: {e}")
+    if result.returncode == 0:
+        return _PrefixRun(True, chain.step_trees, 0, "")
+    return _PrefixRun(
+        False, chain.step_trees, result.returncode,
+        _summary(result.stdout, result.stderr,
+                 f"Verification command failed: {VERIFY_COMMAND} "
+                 f"(exit code {result.returncode})"))
+
+
+def bisect_batch_failure(main: Path, target_tip: str,
+                         sources: Sequence[tuple[str, str]], script: Path,
+                         failure_summary: str) -> BatchBisectResult:
+    """Localize a failed batch to the first folder whose merge turns it red.
+
+    The caller has already proven that the full chain merges cleanly and that
+    verifying all of it fails, so the search looks for the smallest failing
+    prefix by bisection: at most ``ceil(log2(N))`` full verifications instead of
+    the ``N`` a folder-by-folder walk would cost.  Batching exists to spend fewer
+    full runs, so localizing it must be cheap too.
+    """
+    total = len(sources)
+    steps = _bisect_steps(total)
+    if steps:
+        print(f"verify --batch: localizing the failure over {total} folders; "
+              f"at most {steps} more full verification(s)")
+    low, high = 1, total
+    last_pass: _PrefixRun | None = None
+    guilty_summary = failure_summary
+    step = 0
+    while low < high:
+        middle = (low + high) // 2
+        step += 1
+        prefix = tuple(sources[:middle])
+        print(f"verify --batch: localizing step {step}/{steps}: verifying "
+              f"{middle} of {total} folders ("
+              + ", ".join(folder for folder, _tip in prefix) + ")")
+        run = _verify_prefix(main, target_tip, prefix, script)
+        if run.passed:
+            last_pass = run
+            low = middle + 1
+        else:
+            high = middle
+            guilty_summary = run.failure_summary
+
+    guilty = sources[high - 1][0]
+    if high == 1:
+        return BatchBisectResult(guilty, guilty_summary)
+    if last_pass is None or len(last_pass.step_trees) != high - 1:
+        raise AssentError(
+            f"batch localization ended at {guilty} without a verified result "
+            f"for the {high - 1} folder(s) ahead of it")
+    return BatchBisectResult(
+        guilty, guilty_summary, tuple(sources[:high - 1]), last_pass.step_trees)
+
+
+def _dependent_folders(graph: dict, folder: str,
+                       candidates: Sequence[str]) -> tuple[str, ...]:
+    """Every candidate that transitively declares ``after`` on ``folder``."""
+    tainted = {folder}
+    growing = True
+    while growing:
+        growing = False
+        for name in candidates:
+            if name in tainted or name not in graph:
+                continue
+            if tainted.intersection(graph[name].after):
+                tainted.add(name)
+                growing = True
+    return tuple(name for name in candidates if name in tainted and name != folder)
+
+
+def _report_localization(assent_dir: Path, folders: Sequence[str],
+                         result: BatchBisectResult) -> str:
+    """Print the localization verdict and return the note stored in the receipt.
+
+    The guilty folder keeps its status and its task files: it is still finished
+    work awaiting a human decision, and this command only says which folder it
+    is.  ``rework`` and ``reject`` remain the only ways to reopen it.
+    """
+    try:
+        graph = parse_folder_dependency_graph(assent_dir)
+    except AssentError:
+        # Localization is a diagnostic; an unparsable graph must not hide the
+        # folder that was just proven guilty.
+        graph = {}
+    downstream = _dependent_folders(graph, result.guilty, folders)
+    print(f"verify --batch: localized the failure to {result.guilty}")
+    for line in result.guilty_summary.splitlines():
+        print(f"  {line}")
+    ejected = f"{result.guilty} is out of this batch"
+    if downstream:
+        ejected = (f"{result.guilty} and its downstream ("
+                   + ", ".join(downstream) + ") are out of this batch")
+    print(f"verify --batch: {ejected}. Its status and task files were not "
+          f"touched; decide with `assent rework {result.guilty}` or "
+          f"`assent reject {result.guilty}`")
+    note = (f"Batch localization: {result.guilty} is the first folder whose "
+            f"merge fails the full verification; {ejected}.")
+    if result.kept:
+        print("verify --batch: reissuing a PASSED batch receipt for the "
+              f"{len(result.kept)} folder(s) verified ahead of it: "
+              + ", ".join(folder for folder, _tip in result.kept))
+    else:
+        print("verify --batch: no folder ahead of it remains, so the batch "
+              "keeps a FAILED receipt and publishes nothing")
+    return _summary(note, result.guilty_summary)
+
+
+def _verify_batch_locked(config_path: str, assent_dir: Path,
+                         bisect: bool = True) -> int:
+    """Build, verify, and record one batch candidate with every lock held."""
+    root = assent_dir.parent
+    main = gitops.main_worktree(root)
+    path = batch_receipt_path(assent_dir)
+    # A malformed batch receipt is evidence of an unsafe state, not permission
+    # to erase it; this mirrors the single-folder path.
+    if path.exists():
+        read_batch_receipt(path, main)
+
+    target_branch = gitops.require_current_branch(main)
+    target_tip = gitops.commit_of(main, target_branch)
+    selection, configs = select_batch_folders(
+        config_path, assent_dir, main, target_tip)
+    for folder, reason in selection.skipped:
+        print(f"verify --batch: skip {folder} ({reason})")
+    if not selection.sources:
+        print("verify --batch: no folder has anything left to verify; "
+              "no receipt was written.")
+        return 0
+
+    with contextlib.ExitStack() as locks:
+        # The repository integration lock is already held; taking every queued
+        # folder's own lock next keeps the fixed integration-then-folder order
+        # and refuses to verify a folder that is currently running.
+        for folder in selection.folders:
+            locks.enter_context(hold_lock(configs[folder].tasks_dir, folder))
+
+        excludes = configs[selection.folders[0]].git_excludes
+        if not gitops.working_tree_status(main, excludes).is_clean:
+            raise AssentError(f"target worktree {main} is not clean")
+        for folder, source_tip in selection.sources:
+            _branch, current, _worktree = _source_snapshot(configs[folder], main)
+            if current != source_tip:
+                raise AssentError(
+                    f"source tip for {folder} changed while the batch locks "
+                    "were being acquired")
+        script = (assent_dir / "verify.py").resolve()
+        if not script.is_file():
+            raise AssentError(f"Verification script not found: {script}")
+        digest = _sha256(script)
+
+        print("verify --batch: merging "
+              f"{len(selection.sources)} folder(s) in dependency order: "
+              + ", ".join(selection.folders))
+        _invalidate_receipt(path)
+
+        candidate_result = BatchCandidate()
+        result: subprocess.CompletedProcess[str] | None = None
+        start_failure = ""
+        localized = False
+        with gitops.temporary_integration_worktree(
+                main, "batch", target_tip) as (candidate, _branch):
+            candidate_result = _merge_chain(candidate, selection.sources)
+            if candidate_result.ok:
+                try:
+                    result = _run_full_verifier(script, candidate)
+                except OSError as e:
+                    start_failure = f"Unable to start verification: {e}"
+
+        if not candidate_result.ok:
+            print(f"verify --batch: refused, merging {candidate_result.conflict_folder} "
+                  "into the batch candidate conflicts. The target was not "
+                  "changed and no receipt was written. Conflicting file(s):")
+            for conflicting in candidate_result.conflicts:
+                print(f"  - {conflicting}")
+            print("Resolve the conflict in "
+                  f"{candidate_result.conflict_folder} (or accept the folders "
+                  "ahead of it) before verifying the batch again")
+            return 1
+
+        # A localization may shrink what the receipt certifies to the prefix
+        # ahead of the guilty folder, so the recorded sources and step trees are
+        # decided here rather than assumed to be the whole chain.
+        sources = selection.sources
+        step_trees = candidate_result.step_trees
+        if start_failure:
+            status, exit_code, summary = "FAILED", 1, start_failure
+        else:
+            assert result is not None
+            status = "PASSED" if result.returncode == 0 else "FAILED"
+            exit_code = result.returncode
+            summary = "" if result.returncode == 0 else _summary(
+                result.stdout, result.stderr,
+                f"Verification command failed: {VERIFY_COMMAND} "
+                f"(exit code {result.returncode})")
+            if status == "FAILED" and bisect:
+                bisected = bisect_batch_failure(
+                    main, target_tip, selection.sources, script, summary)
+                summary = _report_localization(
+                    assent_dir, selection.folders, bisected)
+                localized = True
+                if bisected.kept:
+                    sources = bisected.kept
+                    step_trees = bisected.kept_step_trees
+                    status, exit_code = "PASSED", 0
+
+        receipt = _new_batch_receipt(
+            status=status, target_tip=target_tip, sources=sources,
+            step_trees=step_trees, digest=digest, exit_code=exit_code,
+            failure_summary=summary)
+
+        changed = _batch_drift(
+            configs, main, excludes, target_branch, target_tip,
+            selection.sources, script, digest)
+        if changed:
+            if localized:
+                print("verify --batch: the repository changed while the batch "
+                      "was being verified, so the localization above certifies "
+                      "nothing and the receipt records the drift instead")
+            receipt = _new_batch_receipt(
+                status="FAILED", target_tip=target_tip,
+                sources=selection.sources,
+                step_trees=candidate_result.step_trees, digest=digest,
+                exit_code=1, failure_summary="; ".join(changed))
+
+        write_batch_receipt(path, receipt, main)
+
+    for source in receipt.sources:
+        print(f"  {source.folder}: source {source.source_tip[:12]} "
+              f"-> tree {source.step_tree}")
+    if receipt.status == "PASSED":
+        if not localized:
+            print(f"verify --batch: passed ({receipt.final_tree})")
+            return 0
+        # The batch as requested did not pass, so the exit code stays nonzero
+        # even though a smaller batch is now certified: a caller must not read
+        # success for folders that were just proven, or suspected, broken.
+        print(f"verify --batch: failed, but {len(receipt.sources)} folder(s) "
+              f"kept a PASSED batch receipt ({receipt.final_tree}); "
+              "`assent accept --all` publishes exactly those")
+        return 1
+    print(f"verify --batch: failed ({receipt.failure_summary.splitlines()[0]})")
+    return 1
+
+
+def verify_batch(config_path: str, assent_dir: str | Path,
+                 bisect: bool = True) -> int:
+    """Verify every queued folder as one candidate; zero only for PASSED.
+
+    An empty batch is success with no receipt: there is nothing to certify, so
+    inventing a receipt would be inventing evidence.
+
+    A failed batch is localized to the folder that breaks it, and the folders
+    ahead of that one keep the PASSED receipt they were already proven to earn.
+    ``bisect=False`` turns that off and simply records the failure.
+    """
+    assent_dir = Path(assent_dir)
+    try:
+        with hold_integration_lock(assent_dir):
+            return _verify_batch_locked(config_path, assent_dir, bisect)
+    except LockBusy as e:
+        print(f"verify --batch: refused ({e})")
+        return 1
+    except AssentError as e:
+        print(f"verify --batch: failed ({e})")
+        return 1

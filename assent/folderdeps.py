@@ -252,6 +252,42 @@ def parse_folder_dependency_graph(
     return dependencies
 
 
+def order_folders_by_dependency(
+        graph: dict[str, FolderDependencies],
+        selected: set[str]) -> list[str]:
+    """Topologically sort a subset of folders, breaking ties lexicographically.
+
+    ``graph`` keys are already lexicographically sorted (parsed from
+    ``list_task_folders``), so repeatedly picking the smallest ready name
+    reproduces ``run --all``'s dependency-then-lexicographic ordering, just
+    serialized instead of concurrency-scheduled.  Edges to folders outside
+    ``selected`` are dropped: a prerequisite that is not part of this subset is
+    either already integrated or deliberately excluded, and either way it
+    imposes no order among the folders that remain.
+
+    This is the single ordering used by every command that walks several
+    folders in one pass (``accept --all``, ``verify --batch``), so their orders
+    cannot drift apart.
+    """
+    edges = {name: {dep for dep in graph[name].after if dep in selected}
+             for name in selected}
+    ordered: list[str] = []
+    resolved: set[str] = set()
+    remaining = set(selected)
+    while remaining:
+        ready = sorted(name for name in remaining if edges[name] <= resolved)
+        if not ready:
+            raise AssentError(
+                "Folder dependencies among the selected folders form a cycle; "
+                "this should be unreachable because the full graph is "
+                "already checked acyclic")
+        picked = ready[0]
+        ordered.append(picked)
+        resolved.add(picked)
+        remaining.discard(picked)
+    return ordered
+
+
 def resolve_folder_base(
         root: str | Path, tasks_dir: str | Path, *,
         excludes: Sequence[str] = (),

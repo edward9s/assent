@@ -527,16 +527,27 @@ evidence, and make the acceptance decision explicitly with:
 assent accept <FOLDER>
 ```
 
-`FOLDER` and `--all` are mutually exclusive alternatives: `--all` walks every
+`FOLDER` and `--all` are mutually exclusive alternatives. `--all` first looks
+for a fresh, PASSED batch verification receipt (written by `assent verify
+--batch`, see "Lifecycle and review" below): when one covers several
+finished folders, `--all` takes the batch release path instead of walking
+folders one by one. It replays the receipt's recorded merge chain in one
+temporary worktree, comparing the tree after every step against the receipt,
+and publishes the whole chain with a single ref update -- the same audit
+`--no-ff` merge per folder an ordinary accept would write, but all of them
+or none of them in one atomic step. A stale batch receipt (any source, the
+target, or the verification script drifted since it was written) is deleted
+instead of trusted, and `--all` falls back to the folder-by-folder path
+below, exactly as when no batch receipt exists at all: it walks every
 finished work folder in dependency order and accepts each in turn. Each
-`accept` still integrates exactly one completed folder into the target
-branch currently checked out in the main worktree. It verifies the source and
-the integrated result, records an auditable `--no-ff` merge, and keeps the
-source worktree and branch for later inspection or cleanup. A successful
-rerun is idempotent and does not create a duplicate merge: once the source
-tip is an ancestor of the target, acceptance is judged by ancestry alone and
-requires no receipt, unaffected by a stale receipt or a changed verification
-script.
+`accept`, and each step of that folder-by-folder path, still integrates
+exactly one completed folder into the target branch currently checked out in
+the main worktree. It verifies the source and the integrated result, records
+an auditable `--no-ff` merge, and keeps the source worktree and branch for
+later inspection or cleanup. A successful rerun is idempotent and does not
+create a duplicate merge: once the source tip is an ancestor of the target,
+acceptance is judged by ancestry alone and requires no receipt, unaffected by
+a stale receipt or a changed verification script.
 
 Acceptance refuses incomplete, locked, dirty, detached, ambiguous, or
 dependency-unsafe state. A source or post-merge verification failure and a
@@ -546,6 +557,18 @@ subcommand; `--all` stops the chain fail-closed at the first verification or
 merge failure while already-accepted folders remain published. Remote
 synchronization is an independent Git operation chosen by the human after
 local acceptance; it is not an Assent feature.
+
+A batch release is all-or-nothing at the ref level: source drift, a batched
+folder no longer finished, a folder's own dependency not itself covered
+earlier in the same batch or already accepted, a conflict while replaying
+the chain, or any of the ordinary gate checks above failing, refuses the
+whole release before the ref moves, and every source is kept untouched, same
+as a single-folder refusal. The batch receipt is deleted only once its chain
+has actually published, so a successful release cannot be replayed by
+accident; running `--all` again afterward finds nothing left to publish for
+those folders and instead reports any folder that finished too late to be
+part of the batch, so a zero exit code is never misread as "everything is
+published".
 
 The integration lock serializes Assent `accept` operations. It is not an
 atomic barrier against external programs, so users must not run Git commands
@@ -570,6 +593,35 @@ receipt is stale or missing. A receipt is derived and disposable: it never
 outranks Git and can be deleted and rebuilt. A changed target commit does not
 by itself make acceptance impossible when the rebuilt candidate tree is
 identical; a changed candidate tree makes the receipt stale.
+
+`assent verify --batch` is the same unattended, zero-token refresh, but for
+several folders at once. It selects every finished, not-yet-integrated
+folder in the same folder-dependency order `accept --all` would publish
+them, merges their sources into one candidate with a `--no-ff` step per
+folder, and runs the full verifier once over the result. The evidence is a
+separate batch receipt (`.assent/_batch_verification.toml`), independent of
+the per-folder `<folder>/_verification.toml` receipt -- the two never read
+each other's files, and building one neither consumes nor requires the
+other. The batch receipt records the tree after every merge step, not only
+the final one, so a later release can compare each intermediate merge
+against exactly what was verified. A batch with nothing left to verify
+(every folder unfinished, already integrated, or already an ancestor of the
+target) succeeds with no receipt written, since there would be nothing to
+certify.
+
+On failure, `verify --batch` bisects the chain by default to the first
+folder whose merge turns the full verification red, at most
+`ceil(log2(N))` extra full verifications for `N` folders. The folders ahead
+of the guilty one keep a PASSED batch receipt for that shorter prefix, since
+it was already proven good during the search; `verify --batch`'s own exit
+code still stays nonzero, so a caller cannot read success for a batch that
+did not pass as requested. The guilty folder's status and task files are
+left untouched -- localization only says which folder broke the batch, and
+`assent rework` or `assent reject` remain the only ways to reopen it.
+`--no-bisect` turns this off and records the failure as-is against the whole
+chain instead. Both `reject` and `rework` invalidate any existing batch
+receipt, since reopening the work it certified makes it stale evidence; the
+next `assent verify --batch` simply rebuilds it.
 
 There is no `review` task-file field. `DONE` is the executing AI's completion
 claim, the receipt is the scheduler's complete-verification evidence, and

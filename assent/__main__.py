@@ -21,7 +21,7 @@ from assent.plan import Plan
 from assent.reject import reject_folder
 from assent.rework import rework_task
 from assent.terminal_log import terminal_logging
-from assent.verification import verify_folder
+from assent.verification import verify_batch, verify_folder
 
 _DEFAULT_CONFIG = ".assent/assent.toml"
 
@@ -69,10 +69,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "report", help="Generate the human-readable run report _report.md "
                        "(zero tokens)")
     verify_p = sub.add_parser(
-        "verify", help="Refresh full integration verification for exactly one folder")
+        "verify", help="Refresh full integration verification for exactly one "
+                       "folder, or for every queued folder as one candidate "
+                       "with --batch")
     verify_p.add_argument(
-        "folder", metavar="FOLDER",
-        help="The completed work folder to verify (required; exactly one folder)")
+        "folder", nargs="?", metavar="FOLDER",
+        help="The completed work folder to verify (omit only with --batch)")
+    verify_p.add_argument(
+        "--batch", action="store_true",
+        help="Merge every finished, not-yet-integrated folder in folder-"
+             "dependency order into one candidate and verify it once")
+    verify_p.add_argument(
+        "--no-bisect", action="store_false", dest="bisect",
+        help="With --batch, record a failure as-is instead of localizing it to "
+             "the first folder that breaks the batch")
     verify_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
         help=f"Config file location (default: {_DEFAULT_CONFIG})")
@@ -272,6 +282,14 @@ def _dispatch(argv: list[str]) -> int:
         if not args.all_folders and args.folder is None:
             parser.error("accept requires FOLDER or --all")
 
+    if args.command == "verify":
+        if args.batch and args.folder is not None:
+            parser.error("verify's --batch and FOLDER cannot be used together")
+        if not args.batch and args.folder is None:
+            parser.error("verify requires FOLDER or --batch")
+        if not args.batch and not args.bisect:
+            parser.error("verify's --no-bisect only applies to --batch")
+
     if args.command == "archive":
         if args.restore:
             if args.all_folders:
@@ -316,12 +334,15 @@ def _dispatch(argv: list[str]) -> int:
             return 1
         return restore_folder(cfg) if args.restore else archive_folder(cfg)
     if args.command == "verify":
+        if not args.batch:
+            try:
+                cfg = load_config(args.config, args.folder)
+            except AssentError as e:
+                print(f"Config error: {e}")
+                return 1
         try:
-            cfg = load_config(args.config, args.folder)
-        except AssentError as e:
-            print(f"Config error: {e}")
-            return 1
-        try:
+            if args.batch:
+                return verify_batch(args.config, assent_dir, args.bisect)
             return verify_folder(cfg)
         except KeyboardInterrupt:
             print("\nverify interrupted; temporary resources were cleaned up.")
