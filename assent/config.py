@@ -32,9 +32,25 @@ _EFFORT_BASELINE = {"heavy": "high", "normal": "medium", "slight": "low"}
 # refreshing a stale receipt itself.
 _RECEIPT_REFRESH_MODES = {"manual", "auto"}
 
-# Task folder name: no whitespace or path separators, must not start with
-# - or . (it becomes the git branch prefix)
-_FOLDER_RE = re.compile(r"^[^\s/\\]+$")
+# A task folder name becomes the first component of every Assent branch name.
+# Keep this contract local and explicit instead of relying on a later Git command:
+# the name must also remain usable as a Windows directory name.
+_GIT_REF_FORBIDDEN_CHARS = frozenset("~^:?*[")
+_WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|')
+_FOLDER_FORBIDDEN_CHARS = (
+    _GIT_REF_FORBIDDEN_CHARS | _WINDOWS_FORBIDDEN_CHARS | {"/", "\\"})
+_WINDOWS_RESERVED_DEVICE_NAMES = frozenset({
+    "con", "prn", "aux", "nul",
+    "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+    "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    # The superscript forms are also reserved device names on Windows.
+    "com¹", "com²", "com³", "lpt¹", "lpt²", "lpt³",
+})
+_FOLDER_NAME_RULE = (
+    "must be non-empty, contain no whitespace, path separators, control characters, "
+    "or Git-ref/Windows-forbidden characters, must not start with - or ., contain .. "
+    "or @{, end with . or .lock, or use a reserved Windows device name; "
+    "it also becomes the Git branch prefix")
 _TASK_FILE_RE = re.compile(r"^t\d{3}_.+\.e\.toml$")
 
 _DEFAULT_EXTRA_ARGS = ["--permission-mode", "acceptEdits"]
@@ -419,11 +435,24 @@ def _effort_maps(section: dict, owner: str,
 
 def _validate_tasks_name(tasks_name: str, owner: str) -> None:
     """Validate a task folder name so it is safe to use as a git branch prefix."""
-    if not _FOLDER_RE.match(tasks_name) or tasks_name[0] in "-.":
+    valid = isinstance(tasks_name, str) and bool(tasks_name)
+    if valid:
+        valid = (
+            not any(char.isspace() for char in tasks_name)
+            and not any(ord(char) < 0x20 or ord(char) == 0x7F
+                        for char in tasks_name)
+            and not any(char in _FOLDER_FORBIDDEN_CHARS for char in tasks_name)
+            and tasks_name[0] not in "-."
+            and ".." not in tasks_name
+            and "@{" not in tasks_name
+            and not tasks_name.endswith(".")
+            and not tasks_name.casefold().endswith(".lock")
+            and tasks_name.split(".", 1)[0].casefold()
+            not in _WINDOWS_RESERVED_DEVICE_NAMES)
+    if not valid:
         raise AssentError(
             f"{owner} = {tasks_name!r} is not a valid task folder name"
-            " (no whitespace or path separators, must not start with - or .;"
-            " it also becomes the git branch prefix)")
+            f" ({_FOLDER_NAME_RULE})")
 
 
 def _load_data(path: str | Path) -> tuple[Path, dict]:
@@ -466,6 +495,7 @@ def list_task_folders(assent_dir: str | Path) -> list[str]:
             continue
         if any(child.is_file() and _TASK_FILE_RE.match(child.name)
                for child in entry.iterdir()):
+            _validate_tasks_name(entry.name, "Live task folder")
             folders.append(entry.name)
     return sorted(folders)
 
