@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from agents import AgentsError, gitops
@@ -10,19 +11,25 @@ from agents.lockfile import LockBusy, LockMissing, probe_lock
 from agents.plan import Plan, Task, append_entry, read_entries, set_status
 
 _CASCADE_STATUSES = {"DONE", "WIP", "BLOCKED"}
+_CHECKPOINT_RE = re.compile(
+    r"^(?:wip|auto)\((?P<folder>[^/()]+)/(?P<task>t[0-9]{3})\): .+$")
+_REWORK_RE = re.compile(
+    r"^rework\((?P<folder>[^/()]+)/t[0-9]{3}\): .+$")
 
 
 def rework_task(cfg: Config, task_id: str, cascade: bool = False,
-                reason: str = "") -> int:
+                reason: str = "", revert_code: bool = False) -> int:
     """把指定任務安全改回 TODO；明示 ``cascade`` 時一併重開下游。
 
-    本入口只保存 Git 現場並調整管理狀態，不刪除、還原或覆寫程式碼。鎖定、
-    任務與 Git 預檢任一步驟失敗時，均以退出碼 1 拒絕操作。
+    預設只保存 Git 現場並調整管理狀態；明示 ``revert_code`` 時，只反向目前
+    分支尾端可確定歸屬的檢查點。鎖定、任務與 Git 預檢任一步驟失敗時，均以
+    退出碼 1 拒絕操作。
     """
     name = cfg.tasks_name
     try:
         with probe_lock(cfg.tasks_dir, name):
-            return _rework_locked(cfg, task_id, cascade, reason)
+            return _rework_locked(
+                cfg, task_id, cascade, reason, revert_code)
     except LockBusy as e:
         print(f"{name}:任務重開中止(run 進行中):{e}")
     except (LockMissing, AgentsError, OSError, ValueError) as e:
@@ -49,7 +56,7 @@ def _downstream_tasks(plan: Plan, task_id: str) -> list[Task]:
 
 
 def _validate_request(task_id: object, cascade: object,
-                      reason: object) -> str | None:
+                      reason: object, revert_code: object) -> str | None:
     """驗證領域入口參數；回傳錯誤訊息，合法時回傳 ``None``。"""
     if not isinstance(task_id, str) or not task_id:
         return "task_id 必須是非空字串"
@@ -57,6 +64,8 @@ def _validate_request(task_id: object, cascade: object,
         return "cascade 必須是布林值"
     if not isinstance(reason, str):
         return "reason 必須是字串"
+    if not isinstance(revert_code, bool):
+        return "revert_code 必須是布林值"
     return None
 
 
@@ -73,7 +82,9 @@ def _ensure_management_writable(tasks: list[Task]) -> None:
 
 def _entry_values(task: Task, target: Task, head: str,
                   downstream: list[Task], cascade: bool,
-                  reason: str) -> tuple[str, str]:
+                  reason: str, reverted: list[str] | None = None,
+                  revert_checkpoint: str | None = None,
+                  revert_scope: list[str] | None = None) -> tuple[str, str]:
     """建立可驗證且重跑時內容穩定的摘要與明細。"""
     scope = ", ".join(item.id for item in downstream) if cascade else "未啟用"
     if cascade and not scope:
@@ -86,7 +97,68 @@ def _entry_values(task: Task, target: Task, head: str,
         f"cascade 範圍: {scope}\n"
         f"reason: {reason}"
     )
+    if reverted is not None and revert_checkpoint is not None:
+        reversed_scope = (", ".join(revert_scope or [])
+                          if cascade else "未啟用")
+        detail += (
+            f"\n操作前 HEAD: {head}"
+            f"\n反向 checkpoint: {revert_checkpoint}"
+            f"\n被撤銷 hashes: {', '.join(reverted)}"
+            f"\n反向 cascade 集合: {reversed_scope}"
+        )
     return summary, detail
+
+
+def _revert_candidates(path: Path, name: str,
+                       task_ids: set[str]) -> list[str]:
+    """找出目前 rework 邊界後、由允許任務組成的連續 checkpoint 尾段。"""
+    history = gitops.commit_history(path)
+    current: list[tuple[str, tuple[str, ...], str]] = []
+    for record in history:
+        subject = record[2]
+        boundary = _REWORK_RE.fullmatch(subject)
+        if boundary and boundary.group("folder") == name:
+            break
+        current.append(record)
+
+    relevant_positions = [
+        index for index, (_, _, subject) in enumerate(current)
+        if (match := _CHECKPOINT_RE.fullmatch(subject))
+        and match.group("folder") == name
+        and match.group("task") in task_ids
+    ]
+    if not relevant_positions:
+        raise AgentsError("沒有可自動撤銷的程式碼檢查點")
+
+    oldest = relevant_positions[-1]
+    commits: list[str] = []
+    for commit, parents, subject in current[:oldest + 1]:
+        if len(parents) != 1:
+            raise AgentsError(f"checkpoint 尾段含 merge commit:{commit}")
+        match = _CHECKPOINT_RE.fullmatch(subject)
+        if (match is None or match.group("folder") != name
+                or match.group("task") not in task_ids):
+            raise AgentsError(
+                f"checkpoint 未形成可安全撤銷的連續尾段:{commit} {subject}")
+        commits.append(commit)
+    return commits
+
+
+def _abort_failed_revert(path: Path, name: str, original_head: str,
+                         error: AgentsError) -> int:
+    """中止失敗的反向操作並驗證現場；中止失敗時明確要求人工處理。"""
+    try:
+        gitops.abort_revert(path)
+        if gitops.commit_of(path, "HEAD") != original_head:
+            raise AgentsError("abort 後 HEAD 未回到操作前位置")
+        gitops.ensure_clean(path)
+    except AgentsError as abort_error:
+        print(
+            f"{name}:程式碼反向提交失敗({error})；git revert --abort 亦失敗"
+            f"({abort_error})，必須人工處理:{path}")
+        return 1
+    print(f"{name}:程式碼反向提交失敗({error})；已中止並還原操作前 Git 現場")
+    return 1
 
 
 def _has_entry(entries: list[dict], summary: str, detail: str) -> bool:
@@ -102,10 +174,10 @@ def _has_entry(entries: list[dict], summary: str, detail: str) -> bool:
 
 
 def _rework_locked(cfg: Config, task_id: object, cascade: object,
-                   reason: object) -> int:
+                   reason: object, revert_code: object) -> int:
     """持鎖後完成所有預檢、保存 Git 現場，再寫入日誌與狀態。"""
     name = cfg.tasks_name
-    request_error = _validate_request(task_id, cascade, reason)
+    request_error = _validate_request(task_id, cascade, reason, revert_code)
     if request_error:
         print(f"{name}:任務重開中止({request_error})")
         return 1
@@ -113,6 +185,7 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
     assert isinstance(task_id, str)
     assert isinstance(cascade, bool)
     assert isinstance(reason, str)
+    assert isinstance(revert_code, bool)
     effective_reason = reason.strip() or "人工要求重做"
 
     try:
@@ -153,8 +226,27 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
         return 1
 
     path = gitops.worktree_path(cfg.root, name)
+    reverted: list[str] | None = None
+    revert_checkpoint: str | None = None
     try:
-        if path.exists():
+        if revert_code:
+            if not path.exists():
+                raise AgentsError(f"worktree 不存在:{path}")
+            if not gitops.is_repo_worktree(cfg.root, path):
+                raise AgentsError(
+                    f"固定路徑不是本 repo 的有效 worktree:{path}")
+            branch = gitops.current_branch(path)
+            if not branch.startswith(cfg.branch_prefix):
+                shown = branch or "detached HEAD"
+                raise AgentsError(f"worktree 位於非本資料夾分支:{shown}")
+            gitops.ensure_clean(path)
+            head_value = gitops.head_ref(path)
+            if head_value is None:
+                raise AgentsError("worktree 沒有 HEAD")
+            head = head_value
+            reverted = _revert_candidates(
+                path, name, {task.id for task in changed})
+        elif path.exists():
             if not gitops.is_repo_worktree(cfg.root, path):
                 raise AgentsError(
                     f"固定路徑不是本 repo 的有效 worktree:{path}")
@@ -175,9 +267,23 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
         print(f"{name}:任務重開中止(Git 預檢或封存失敗:{e})，狀態未變更")
         return 1
 
+    if revert_code:
+        assert reverted is not None
+        message = f"rework({name}/{target.id}): 撤銷 task 成果"
+        print(f"{name}:{target.id} 將反向下列程式碼檢查點:")
+        for commit in reverted:
+            print(f"  - {commit}")
+        try:
+            gitops.revert_no_commit(path, reverted)
+            gitops.commit_all(path, message)
+            revert_checkpoint = gitops.commit_of(path, "HEAD")
+        except AgentsError as e:
+            return _abort_failed_revert(path, name, head, e)
+
     log_values = {
         task.id: _entry_values(
-            task, target, head, downstream, cascade, effective_reason)
+            task, target, head, downstream, cascade, effective_reason,
+            reverted, revert_checkpoint, [item.id for item in changed])
         for task in changed
     }
     try:

@@ -340,6 +340,271 @@ class TestRework(unittest.TestCase):
         for mocked in mocks:
             mocked.assert_not_called()
 
+    def test_revert_code_reverses_leaf_checkpoint_and_records_hashes(self) -> None:
+        task = self._write_task(1, "DONE")
+        worktree, _ = self._worktree()
+        result = worktree / "成果.txt"
+        result.write_text("完成\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 完成成果")
+        original = _git(worktree, "rev-parse", "HEAD")
+
+        code, output = self._run(revert_code=True, reason="重新設計")
+
+        checkpoint = _git(worktree, "rev-parse", "HEAD")
+        self.assertEqual(code, 0)
+        self.assertEqual(self._status(task), "TODO")
+        self.assertFalse(result.exists())
+        self.assertNotEqual(checkpoint, original)
+        self.assertIn(original, _git(worktree, "rev-list", "HEAD"))
+        self.assertEqual(
+            _git(worktree, "log", "-1", "--pretty=%s"),
+            "rework(plan01/t001): 撤銷 task 成果")
+        entry = read_entries(task.with_name("t001_task.r.toml"))[-1]
+        self.assertIn(f"操作前 HEAD: {original}", entry["detail"])
+        self.assertIn(f"反向 checkpoint: {checkpoint}", entry["detail"])
+        self.assertIn(f"被撤銷 hashes: {original}", entry["detail"])
+        self.assertIn("反向 cascade 集合: 未啟用", entry["detail"])
+        self.assertIn(f"  - {original}", output)
+
+    def test_revert_code_reverses_multiple_tasks_newest_first(self) -> None:
+        target = self._write_task(1, "DONE")
+        downstream = self._write_task(2, "BLOCKED", (1,))
+        worktree, _ = self._worktree()
+        first = worktree / "一.txt"
+        second = worktree / "二.txt"
+        first.write_text("第一版\n", encoding="utf-8")
+        gitops.commit_all(worktree, "wip(plan01/t001): 第一段")
+        oldest = _git(worktree, "rev-parse", "HEAD")
+        second.write_text("下游\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t002): 下游成果")
+        middle = _git(worktree, "rev-parse", "HEAD")
+        first.write_text("第二版\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 最終成果")
+        newest = _git(worktree, "rev-parse", "HEAD")
+
+        code, _ = self._run(cascade=True, revert_code=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self._status(target), "TODO")
+        self.assertEqual(self._status(downstream), "TODO")
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        entry = read_entries(target.with_name("t001_task.r.toml"))[-1]
+        self.assertIn(
+            f"被撤銷 hashes: {newest}, {middle}, {oldest}",
+            entry["detail"])
+        self.assertIn("反向 cascade 集合: t001, t002", entry["detail"])
+
+    def test_revert_code_rejects_dirty_missing_and_bad_branches(self) -> None:
+        task = self._write_task(1, "DONE")
+
+        missing_code, missing_output = self._run(revert_code=True)
+        worktree = gitops.ensure_worktree(self.root, self.folder)
+        detached_code, detached_output = self._run(revert_code=True)
+        gitops.ensure_branch(worktree, "other/")
+        wrong_code, wrong_output = self._run(revert_code=True)
+
+        self.assertEqual((missing_code, detached_code, wrong_code), (1, 1, 1))
+        self.assertEqual(self._status(task), "DONE")
+        self.assertIn("worktree 不存在", missing_output)
+        self.assertIn("detached HEAD", detached_output)
+        self.assertIn("非本資料夾分支", wrong_output)
+        self.assertFalse(task.with_name("t001_task.r.toml").exists())
+
+    def test_revert_code_dirty_is_rejected_without_checkpoint(self) -> None:
+        task = self._write_task(1, "DONE")
+        worktree, _ = self._worktree()
+        result = worktree / "成果.txt"
+        result.write_text("完成\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 完成成果")
+        before = _git(worktree, "rev-parse", "HEAD")
+        dirty = worktree / "未知變更.txt"
+        dirty.write_text("不得封存\n", encoding="utf-8")
+
+        code, output = self._run(revert_code=True)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
+        self.assertEqual(self._status(task), "DONE")
+        self.assertTrue(dirty.exists())
+        self.assertIn("工作樹不乾淨", output)
+        self.assertFalse(task.with_name("t001_task.r.toml").exists())
+
+    def test_revert_code_requires_checkpoint_continuous_at_head(self) -> None:
+        task = self._write_task(1, "DONE")
+        worktree, _ = self._worktree()
+
+        none_code, none_output = self._run(revert_code=True)
+        result = worktree / "成果.txt"
+        result.write_text("完成\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 完成成果")
+        manual = worktree / "人工.txt"
+        manual.write_text("人工調整\n", encoding="utf-8")
+        gitops.commit_all(worktree, "人工提交")
+        before = _git(worktree, "rev-parse", "HEAD")
+
+        gap_code, gap_output = self._run(revert_code=True)
+
+        self.assertEqual((none_code, gap_code), (1, 1))
+        self.assertIn("沒有可自動撤銷的程式碼檢查點", none_output)
+        self.assertIn("未形成可安全撤銷的連續尾段", gap_output)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
+        self.assertEqual(self._status(task), "DONE")
+        self.assertFalse(task.with_name("t001_task.r.toml").exists())
+
+    def test_revert_code_rejects_other_task_and_legacy_checkpoint(self) -> None:
+        task = self._write_task(1, "DONE")
+        self._write_task(2, "TODO")
+        worktree, _ = self._worktree()
+        (worktree / "目標.txt").write_text("目標\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 目標成果")
+        (worktree / "其他.txt").write_text("其他\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t002): 其他成果")
+        other_head = _git(worktree, "rev-parse", "HEAD")
+
+        other_code, other_output = self._run(revert_code=True)
+        _git(worktree, "commit", "--amend", "-m", "auto(t002): 舊格式")
+        legacy_head = _git(worktree, "rev-parse", "HEAD")
+        legacy_code, legacy_output = self._run(revert_code=True)
+
+        self.assertEqual((other_code, legacy_code), (1, 1))
+        self.assertIn("未形成可安全撤銷的連續尾段", other_output)
+        self.assertIn("未形成可安全撤銷的連續尾段", legacy_output)
+        self.assertNotEqual(other_head, legacy_head)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), legacy_head)
+        self.assertEqual(self._status(task), "DONE")
+        self.assertFalse(task.with_name("t001_task.r.toml").exists())
+
+    def test_revert_code_requires_cascade_before_git_mutation(self) -> None:
+        target = self._write_task(1, "DONE")
+        downstream = self._write_task(2, "DONE", (1,))
+        worktree, _ = self._worktree()
+        (worktree / "目標.txt").write_text("目標\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 目標成果")
+        (worktree / "下游.txt").write_text("下游\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t002): 下游成果")
+        before = _git(worktree, "rev-parse", "HEAD")
+
+        code, output = self._run(revert_code=True)
+
+        self.assertEqual(code, 1)
+        self.assertIn("請明示 cascade:t002", output)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
+        self.assertEqual(self._status(target), "DONE")
+        self.assertEqual(self._status(downstream), "DONE")
+        self.assertEqual(list(self.tasks_dir.glob("*.r.toml")), [])
+
+    def test_revert_checkpoint_is_a_boundary_for_later_requests(self) -> None:
+        task = self._write_task(1, "DONE")
+        worktree, _ = self._worktree()
+        (worktree / "成果.txt").write_text("完成\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 完成成果")
+        first_code, _ = self._run(revert_code=True)
+        set_status(task, "DONE")
+        before = _git(worktree, "rev-parse", "HEAD")
+
+        second_code, output = self._run(revert_code=True)
+
+        self.assertEqual((first_code, second_code), (0, 1))
+        self.assertIn("沒有可自動撤銷的程式碼檢查點", output)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
+        self.assertEqual(self._status(task), "DONE")
+
+    def test_revert_code_rejects_merge_in_checkpoint_tail(self) -> None:
+        task = self._write_task(1, "DONE")
+        worktree, branch = self._worktree()
+        result = worktree / "成果.txt"
+        result.write_text("完成\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 完成成果")
+        _git(worktree, "checkout", "-b", "side")
+        (worktree / "旁支.txt").write_text("旁支\n", encoding="utf-8")
+        gitops.commit_all(worktree, "旁支提交")
+        _git(worktree, "checkout", branch)
+        _git(worktree, "merge", "--no-ff", "side", "-m",
+             "auto(plan01/t001): 不合法的 merge checkpoint")
+        before = _git(worktree, "rev-parse", "HEAD")
+
+        code, output = self._run(revert_code=True)
+
+        self.assertEqual(code, 1)
+        self.assertIn("merge commit", output)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
+        self.assertEqual(self._status(task), "DONE")
+
+    def _prepare_real_revert_conflict(self) -> tuple[Path, Path, str, str]:
+        task = self._write_task(1, "DONE")
+        worktree, _ = self._worktree()
+        (self.root / "README.md").write_text("旁支版本\n", encoding="utf-8")
+        gitops.commit_all(self.root, "旁支衝突來源")
+        conflicting = _git(self.root, "rev-parse", "HEAD")
+        (worktree / "README.md").write_text("任務版本\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 任務成果")
+        original = _git(worktree, "rev-parse", "HEAD")
+        return task, worktree, conflicting, original
+
+    def test_revert_conflict_aborts_to_original_clean_state(self) -> None:
+        task, worktree, conflicting, original = \
+            self._prepare_real_revert_conflict()
+        real_revert = gitops.revert_no_commit
+
+        def conflict(path, commits):
+            return real_revert(path, [conflicting])
+
+        with patch("agents.rework.gitops.revert_no_commit",
+                   side_effect=conflict):
+            code, output = self._run(revert_code=True)
+
+        self.assertEqual(code, 1)
+        self.assertIn("已中止並還原", output)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), original)
+        self.assertEqual(_git(worktree, "status", "--porcelain"), "")
+        self.assertEqual(
+            (worktree / "README.md").read_text(encoding="utf-8"),
+            "任務版本\n")
+        self.assertEqual(self._status(task), "DONE")
+        self.assertFalse(task.with_name("t001_task.r.toml").exists())
+
+    def test_revert_abort_failure_is_loud_and_keeps_management_state(self) -> None:
+        task, worktree, conflicting, _ = self._prepare_real_revert_conflict()
+        real_revert = gitops.revert_no_commit
+
+        def conflict(path, commits):
+            return real_revert(path, [conflicting])
+
+        with patch("agents.rework.gitops.revert_no_commit",
+                   side_effect=conflict), patch(
+                       "agents.rework.gitops.abort_revert",
+                       side_effect=AgentsError("模擬 abort 失敗")):
+            code, output = self._run(revert_code=True)
+
+        self.assertEqual(code, 1)
+        self.assertIn("git revert --abort 亦失敗", output)
+        self.assertIn(f"必須人工處理:{worktree}", output)
+        self.assertEqual(self._status(task), "DONE")
+        self.assertFalse(task.with_name("t001_task.r.toml").exists())
+
+    def test_revert_code_never_runs_forbidden_git_commands(self) -> None:
+        self._write_task(1, "DONE")
+        worktree, _ = self._worktree()
+        (worktree / "成果.txt").write_text("完成\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 完成成果")
+        real_run = gitops._run_git
+        calls: list[tuple[str, ...]] = []
+
+        def recording(root, *args):
+            calls.append(args)
+            return real_run(root, *args)
+
+        with patch("agents.gitops._run_git", side_effect=recording):
+            code, _ = self._run(revert_code=True)
+
+        self.assertEqual(code, 0)
+        joined = [" ".join(args) for args in calls]
+        for forbidden in ("reset --hard", "restore", "clean", "branch -D",
+                          "tag -d", "tag --delete"):
+            self.assertFalse(any(forbidden in command for command in joined),
+                             (forbidden, joined))
+
 
 if __name__ == "__main__":
     unittest.main()
