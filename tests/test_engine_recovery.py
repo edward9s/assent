@@ -3,7 +3,8 @@
 Two situations, both of which must keep every produced byte: a worktree left dirty by an
 unclean process exit (hard power loss / kill) that never reached an interrupt handler, and a
 session that wrote into the main tree instead of its isolated worktree. Shared fixtures come
-from tests.engine_support.
+from tests.engine_support, plus GlobalContractsMixin for the temporary user home that `run`
+now requires.
 
 Chinese literals that remain are deliberate user/upstream passthrough data."""
 import contextlib
@@ -14,9 +15,10 @@ import unittest
 from assent import engine, gitops
 from assent.plan import journal_path_for, parse_task_file
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
+from tests.test_contracts import GlobalContractsMixin
 
 
-class TestCrashDirtyWorktreeRecovery(EngineTestCase):
+class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
     """Startup recovery of a worktree left dirty by an unclean process exit (hard power loss /
     kill) that never reached the Ctrl+C / quota / infrastructure interrupt handlers."""
 
@@ -188,7 +190,7 @@ class TestCrashDirtyWorktreeRecovery(EngineTestCase):
                              for s in self.subjects()))
 
 
-class TestMainTreeEscapeDetection(EngineTestCase):
+class TestMainTreeEscapeDetection(GlobalContractsMixin, EngineTestCase):
     """A session is expected to write only into its isolated worktree (self.execution_root());
     these tests reproduce a session instead writing into the main tree (self.root) and check
     the scheduler's mechanical detect + port-back-or-fail-closed handling."""
