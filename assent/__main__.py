@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import _thread
 import argparse
+import dataclasses
+import functools
 import importlib.metadata
 import os
 import signal
@@ -59,6 +61,33 @@ _REMAINDER_HELP = ("; the literal token `...` as the last argument adds every "
                    "remaining discovered work folder")
 
 
+class _HelpFormatter(argparse.HelpFormatter):
+    """The standard help formatter with a readable heading color.
+
+    Python 3.14 colorizes argparse help by default and paints the ``usage:``
+    prefix and the section headings dark blue (``1;34``), which is barely
+    legible on a dark terminal.  Only those two theme fields are swapped for
+    bright cyan (``1;96``); every option, label and action color stays exactly
+    as the standard theme defines it.  The swap happens inside argparse's own
+    ``_set_color``, so all of its terminal and environment checks (``NO_COLOR``,
+    ``FORCE_COLOR``, ``PYTHON_COLORS``, a redirected or unsupported stream) still
+    decide whether any escape is emitted at all: when color is off the theme is
+    the all-empty-string one, whose empty ``reset`` is what this checks before
+    substituting anything.  Python 3.11-3.13 argparse has neither ``_set_color``
+    nor a ``color`` argument, so there the subclass is an ordinary formatter and
+    help stays plain.
+    """
+
+    _HEADING_COLOR = "\x1b[1;96m"
+
+    def _set_color(self, color: bool) -> None:
+        super()._set_color(color)
+        if self._theme.reset:
+            self._theme = dataclasses.replace(
+                self._theme, usage=self._HEADING_COLOR,
+                heading=self._HEADING_COLOR)
+
+
 def _positive_int(value: str) -> int:
     """Parse a command-line integer that must be greater than zero."""
     try:
@@ -76,14 +105,21 @@ def _build_parser() -> argparse.ArgumentParser:
         description="An AI plan format plus an automatic scheduler: reads "
                     ".assent work folders, opens an AI session per task, "
                     "checks acceptance objectively, and auto-checkpoints git.",
+        formatter_class=_HelpFormatter,
     )
     parser.add_argument(
         "--version", action="version",
         version=f"%(prog)s {importlib.metadata.version('assent')}",
         help="Show the installed assent distribution version and exit",
     )
-    sub = parser.add_subparsers(dest="command", required=True,
-                                metavar="{run,status,check,report,verify,clean,accept,reconcile,reject,rework,archive,init,doctor}")
+    # add_parser passes prog and the color decision down to a subparser but not
+    # the formatter class, so the shared palette is installed once by fixing the
+    # class every subparser is constructed from.
+    sub = parser.add_subparsers(
+        dest="command", required=True,
+        parser_class=functools.partial(argparse.ArgumentParser,
+                                       formatter_class=_HelpFormatter),
+        metavar="{run,status,check,report,verify,clean,accept,reconcile,reject,rework,archive,init,doctor}")
 
     run_p = sub.add_parser(
         "run", help="Run one or more folders in order until all are "
@@ -100,6 +136,14 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Run all unfinished work folders in folder-dependency order")
     run_p.add_argument("--jobs", type=_positive_int, metavar="N",
                        help="Max folders to run concurrently with --all (default: 1)")
+    run_p.add_argument(
+        "--verify", action="store_true",
+        help="After the whole run exits zero, run the complete verification "
+             "that matches the selection: one folder as a folder receipt, an "
+             "exact multi-folder selection as that selected batch, and --all or "
+             "a bare `...` as the whole-project batch. A failing run is "
+             "returned as-is and verifies nothing; cannot be used with --once "
+             "or --task")
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
@@ -177,8 +221,11 @@ def _build_parser() -> argparse.ArgumentParser:
              + " that is finished")
     accept_p.add_argument(
         "--all", action="store_true", dest="all_folders",
-        help="Accept every finished work folder in folder-dependency order, "
-             "refreshing any stale verification receipt first (sequential only)")
+        help="Accept every finished work folder in folder-dependency order: a "
+             "fresh PASSED batch receipt is replayed and released atomically "
+             "without new verification, while absent or expired batch evidence "
+             "verifies each not-yet-integrated folder in turn, stops at the "
+             "first failure, and keeps the folders already published")
     accept_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
         help=_CONFIG_HELP)
@@ -448,6 +495,33 @@ def _dispatch_run_folders(
     return 0
 
 
+def _close_run(result: int, *, verify: bool, config_path: str,
+               assent_dir: Path, selection: list[str] | None) -> int:
+    """Chain `run --verify`'s complete verification onto a successful run.
+
+    A nonzero run is returned untouched and starts no verification: there is no
+    finished plan to certify.  ``--verify`` is an invocation-level request, so it
+    always performs the verification, unlike the closeout stage that consults the
+    configured receipt-refresh policy.
+
+    ``selection`` is the exact folder set the run covered, and ``None`` is a
+    whole-project request (``--all`` or a bare ``...``), which keeps the dynamic
+    batch's own discovery rather than freezing a set the scheduler may extend.
+    """
+    if result != 0 or not verify:
+        return result
+    if selection is None:
+        return verify_batch(config_path, assent_dir)
+    if len(selection) > 1:
+        return verify_selected_batch(config_path, assent_dir, selection)
+    try:
+        cfg = load_config(config_path, selection[0])
+    except AssentError as e:
+        print(f"Config error: {e}")
+        return 1
+    return verify_folder(cfg)
+
+
 def _dispatch(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -474,6 +548,11 @@ def _dispatch(argv: list[str]) -> int:
             parser.error("run's --once and --task each require at most one FOLDER")
         if not args.all_folders and args.jobs is not None:
             parser.error("run's --jobs can only be used with --all")
+        # --once and --task stop before folder closeout on purpose, so pairing
+        # them with --verify would offer complete acceptance evidence for a plan
+        # that is knowingly incomplete.
+        if args.verify and (args.once or args.task is not None):
+            parser.error("run's --verify cannot be used with --once or --task")
 
     if args.command == "accept":
         if remainder and args.all_folders:
@@ -554,13 +633,23 @@ def _dispatch(argv: list[str]) -> int:
             return 1
         # The remainder is snapshotted before the explicit prefix starts, so a
         # folder that appears while the prefix runs cannot join this invocation.
+        # The same snapshot is what `--verify` verifies afterwards, so an
+        # explicit prefix plus `...` certifies exactly the set it ran, while a
+        # bare `...` stays a whole-project request like --all.
         scheduled: list[str] | None = None
+        selection: list[str] | None = None
         if remainder:
             expanded = _expand_remainder("run", args.folders, assent_dir,
                                          order_remainder=True)
             if expanded is None:
                 return 1
             scheduled = expanded[len(args.folders):]
+            selection = expanded if args.folders else None
+        elif not args.all_folders:
+            selection = list(args.folders)
+        closeout = functools.partial(
+            _close_run, verify=args.verify, config_path=args.config,
+            assent_dir=assent_dir, selection=selection)
         if args.folders:
             result = _dispatch_run_folders(
                 args.config, args.folders, once=args.once, task_id=args.task)
@@ -569,16 +658,16 @@ def _dispatch(argv: list[str]) -> int:
         if scheduled is not None:
             if not scheduled:
                 print("No remaining work folder to run.")
-                return 0
+                return closeout(0)
             # The remainder is run through the same explicit-folder path, in
             # dependency order: `...` selects folders, it does not switch the
             # command over to the whole-project scheduler.
-            return _dispatch_run_folders(
-                args.config, scheduled, once=False, task_id=None)
+            return closeout(_dispatch_run_folders(
+                args.config, scheduled, once=False, task_id=None))
         if args.all_folders:
-            return run_all(args.config, assent_dir, args.jobs or 1)
+            return closeout(run_all(args.config, assent_dir, args.jobs or 1))
         if args.folders:
-            return 0
+            return closeout(0)
     if args.command == "accept":
         if args.all_folders:
             return accept_all(args.config, assent_dir)
@@ -706,7 +795,12 @@ def _dispatch(argv: list[str]) -> int:
         return 1
 
     if args.command == "run":
-        return engine.run(cfg, once=args.once, task_id=args.task)
+        # The automatically selected folder is one folder, so `--verify` gives it
+        # the same folder receipt an explicitly named one would get.
+        return _close_run(
+            engine.run(cfg, once=args.once, task_id=args.task),
+            verify=args.verify, config_path=args.config, assent_dir=assent_dir,
+            selection=[folder])
     if args.command == "status":
         return inspection.status(cfg)
     if args.command == "check":

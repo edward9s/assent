@@ -620,6 +620,204 @@ class TestDispatch(MainTestCase):
                 self.assertIn("Folder dependency graph: FAIL", out)
 
 
+class TestRunVerifyChaining(MainTestCase):
+    """`run --verify` chains the complete verification that matches the run.
+
+    Each case patches the verification entry point the CLI is expected to
+    choose and makes the other two fail loudly, so the tests prove the
+    selection-to-verification mapping rather than re-testing verification.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.config = self.write_config()
+        self.assent_dir = self.config.parent.resolve()
+
+    @contextlib.contextmanager
+    def only(self, name, result=0):
+        """Allow exactly one of the three verification entry points."""
+        entries = {"verify_folder", "verify_selected_batch", "verify_batch"}
+        with contextlib.ExitStack() as stack:
+            for other in entries - {name}:
+                stack.enter_context(patch(
+                    f"assent.__main__.{other}",
+                    side_effect=AssertionError(f"used {other}")))
+            yield stack.enter_context(patch(
+                f"assent.__main__.{name}", return_value=result))
+
+    def test_automatically_selected_folder_verifies_that_one_folder(self):
+        self.write_task("active", "TODO")
+        with patch("assent.__main__.engine.run", return_value=0), \
+                self.only("verify_folder") as folder:
+            code, out = self.run_main(
+                ["run", "--verify", "--config", str(self.config)])
+        self.assertEqual(code, 0)
+        self.assertIn("selected automatically", out)
+        self.assertEqual(folder.call_args.args[0].tasks_name, "active")
+
+    def test_one_explicit_folder_verifies_that_folder(self):
+        with patch("assent.__main__.engine.run", return_value=0), \
+                self.only("verify_folder") as folder:
+            code, _ = self.run_main(
+                ["run", "alpha", "--verify", "--config", str(self.config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(folder.call_args.args[0].tasks_name, "alpha")
+
+    def test_exact_multiple_folders_verify_as_that_selected_batch(self):
+        with patch("assent.__main__.engine.run", return_value=0), \
+                self.only("verify_selected_batch") as batch:
+            code, _ = self.run_main(
+                ["run", "alpha", "beta", "--verify", "--config",
+                 str(self.config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(batch.call_args.args,
+                         (str(self.config), self.assent_dir, ["alpha", "beta"]))
+
+    def test_remainder_verifies_the_pre_expanded_set_once(self):
+        for folder in ("alpha", "beta", "gamma"):
+            self.write_task(folder)
+        with patch("assent.__main__.engine.run", return_value=0), \
+                self.only("verify_selected_batch") as batch:
+            code, _ = self.run_main(
+                ["run", "gamma", "...", "--verify", "--config",
+                 str(self.config)])
+        self.assertEqual(code, 0)
+        batch.assert_called_once()
+        self.assertEqual(batch.call_args.args[2], ["gamma", "alpha", "beta"])
+
+    def test_bare_remainder_is_a_whole_project_batch(self):
+        self.write_task("alpha")
+        with patch("assent.__main__.engine.run", return_value=0), \
+                self.only("verify_batch") as batch:
+            code, _ = self.run_main(
+                ["run", "...", "--verify", "--config", str(self.config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(batch.call_args.args[:2],
+                         (str(self.config), self.assent_dir))
+
+    def test_all_and_an_explicit_prefix_with_all_use_the_whole_project_batch(self):
+        for argv in (["run", "--all", "--verify"],
+                     ["run", "alpha", "--all", "--verify"]):
+            with self.subTest(argv=argv):
+                with patch("assent.__main__.run_all", return_value=0), \
+                        patch("assent.__main__.engine.run", return_value=0), \
+                        self.only("verify_batch") as batch:
+                    code, _ = self.run_main(
+                        [*argv, "--config", str(self.config)])
+                self.assertEqual(code, 0)
+                self.assertEqual(batch.call_args.args[:2],
+                                 (str(self.config), self.assent_dir))
+
+    def test_a_failing_run_is_preserved_and_verifies_nothing(self):
+        self.write_task("alpha")
+        cases = (["run", "alpha", "--verify"], ["run", "alpha", "beta", "--verify"],
+                 ["run", "...", "--verify"], ["run", "--verify"])
+        for argv in cases:
+            with self.subTest(argv=argv):
+                with patch("assent.__main__.engine.run", return_value=3), \
+                        patch("assent.__main__.verify_folder",
+                              side_effect=AssertionError("verified a failed run")), \
+                        patch("assent.__main__.verify_batch",
+                              side_effect=AssertionError("verified a failed run")), \
+                        patch("assent.__main__.verify_selected_batch",
+                              side_effect=AssertionError("verified a failed run")):
+                    code, _ = self.run_main(
+                        [*argv, "--config", str(self.config)])
+                self.assertEqual(code, 3)
+
+        with patch("assent.__main__.run_all", return_value=1), \
+                patch("assent.__main__.verify_batch",
+                      side_effect=AssertionError("verified a failed run")):
+            code, _ = self.run_main(
+                ["run", "--all", "--verify", "--config", str(self.config)])
+        self.assertEqual(code, 1)
+
+    def test_verification_failure_becomes_the_exit_code_of_a_successful_run(self):
+        with patch("assent.__main__.engine.run", return_value=0), \
+                self.only("verify_folder", result=1):
+            code, _ = self.run_main(
+                ["run", "alpha", "--verify", "--config", str(self.config)])
+        self.assertEqual(code, 1)
+
+    def test_a_run_without_verify_never_verifies(self):
+        with patch("assent.__main__.engine.run", return_value=0), \
+                patch("assent.__main__.verify_folder",
+                      side_effect=AssertionError("verified without --verify")):
+            code, _ = self.run_main(
+                ["run", "alpha", "--config", str(self.config)])
+        self.assertEqual(code, 0)
+
+    def test_verify_is_rejected_with_once_and_task(self):
+        for argv in (["run", "--verify", "--once"],
+                     ["run", "alpha", "--verify", "--once"],
+                     ["run", "--verify", "--task", "t001"],
+                     ["run", "alpha", "--verify", "--task", "t001"]):
+            with self.subTest(argv=argv):
+                errors = io.StringIO()
+                with self.assertRaises(SystemExit) as ctx, \
+                        contextlib.redirect_stderr(errors):
+                    main(argv)
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertIn("--verify cannot be used with --once or --task",
+                              " ".join(errors.getvalue().split()))
+
+
+class TestHelpPalette(MainTestCase):
+    """Help stays colored on Python 3.14+ but never dark blue, and stays
+    plain whenever the standard controls disable color."""
+
+    def help_output(self, argv, environment) -> str:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(_PROJECT_ROOT)
+        for name in ("FORCE_COLOR", "NO_COLOR", "PYTHON_COLORS", "TERM"):
+            env.pop(name, None)
+        env.update(environment)
+        result = subprocess.run(
+            [sys.executable, "-m", "assent", *argv, "--help"],
+            cwd=self.root, capture_output=True, text=True,
+            encoding="utf-8", env=env)
+        self.assertEqual(result.returncode, 0)
+        return result.stdout
+
+    def test_forced_color_uses_bright_cyan_headings_and_no_dark_blue(self):
+        for argv in ([], ["run"], ["accept"], ["verify"]):
+            with self.subTest(argv=argv):
+                text = self.help_output(argv, {"FORCE_COLOR": "1"})
+                self.assertNotIn("\x1b[1;34m", text)
+                if sys.version_info >= (3, 14):
+                    # Only 3.14+ argparse colorizes help at all; older versions
+                    # legitimately emit no escapes even when color is forced.
+                    self.assertIn("\x1b[1;96musage: ", text)
+                    self.assertIn("\x1b[1;96moptions:", text)
+                    # Unrelated colors keep the standard theme.
+                    self.assertIn("\x1b[1;35m", text)
+                else:
+                    self.assertNotIn("\x1b[", text)
+
+    def test_disabled_color_emits_no_escape_sequences(self):
+        for environment in ({"NO_COLOR": "1"}, {"PYTHON_COLORS": "0"},
+                            {"TERM": "dumb"}, {}):
+            for argv in ([], ["run"], ["accept"]):
+                with self.subTest(environment=environment, argv=argv):
+                    self.assertNotIn(
+                        "\x1b[", self.help_output(argv, environment))
+
+    def test_help_states_the_remainder_syntax_and_the_two_receipt_paths(self):
+        run_help = " ".join(self.help_output(["run"], {}).split())
+        self.assertIn("the literal token `...` as the last argument adds every "
+                      "remaining discovered work folder", run_help)
+        self.assertIn("After the whole run exits zero, run the complete "
+                      "verification that matches the selection", run_help)
+        self.assertIn("cannot be used with --once or --task", run_help)
+
+        accept_help = " ".join(self.help_output(["accept"], {}).split())
+        self.assertIn("a fresh PASSED batch receipt is replayed and released "
+                      "atomically without new verification", accept_help)
+        self.assertIn("absent or expired batch evidence verifies each "
+                      "not-yet-integrated folder in turn", accept_help)
+        self.assertNotIn("(sequential only)", accept_help)
+
+
 class TestRemainderSelection(MainTestCase):
     """The literal `...` token as a remainder selector across the workflow.
 
