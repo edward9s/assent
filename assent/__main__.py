@@ -43,6 +43,16 @@ _CONFIG_HELP = (
 # that child into the stdin stop channel; a hand-typed `assent run` never sees
 # it, so an interactive stdin (possibly a tty) is left completely alone.
 _STDIN_STOP_ENV = "ASSENT_STDIN_STOP"
+# The literal ASCII token `...` is remainder syntax, never a folder name:
+# `A B ...` means "A, then B, then every other discovered work folder".  Folder
+# validation already rejects any name containing `..`, so the token cannot
+# collide with a real folder, and it is stripped here so it never reaches
+# configuration loading.  It is a remainder operator, not an alias for `--all`:
+# the expanded folder set is snapshotted once, before anything is mutated,
+# while `--all` keeps its own dynamic whole-project scheduling.
+_REMAINDER = "..."
+_REMAINDER_HELP = ("; the literal token `...` as the last argument adds every "
+                   "remaining discovered work folder")
 
 
 def _positive_int(value: str) -> int:
