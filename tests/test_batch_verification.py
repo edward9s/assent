@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import gitops
-from assent.accept import accept_all
+from assent.batch_accept import accept_all
 from assent.batch_receipt import (BatchVerificationReceipt, batch_receipt_path,
                                   read_batch_receipt)
 from assent.batch_verification import (confirm_on_terminal, verify_batch,

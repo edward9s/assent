@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import subprocess
 import unittest
 from collections.abc import Callable
 from dataclasses import replace
@@ -21,19 +20,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assent import gitops, verification
+from assent.batch_accept import accept_selected_batch
 from assent.lockfile import hold_lock
 from assent.reject import reject_folder
 from assent.rework import rework_task
 # A batch release publishes the same folders the ``--all`` chain publishes one
-# at a time, so both exercise the same disposable repository fixture.
-from tests.test_accept_all import AcceptAllRepositoryCase
-
-
-def _git(root: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, encoding="utf-8",
-        errors="replace", check=True)
-    return result.stdout.strip()
+# at a time, so both exercise the same disposable repository fixture and its
+# git helper.
+from tests.test_accept_all import AcceptAllRepositoryCase, _git
 
 
 class BatchReleaseCase(AcceptAllRepositoryCase):
@@ -75,6 +69,13 @@ class BatchReleaseCase(AcceptAllRepositoryCase):
 
 class SelectedBatchReleaseCase(BatchReleaseCase):
     """Helpers for the explicit ``accept FOLDER_A FOLDER_B`` path."""
+
+    def _accept_selected(self, *folders: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = accept_selected_batch(
+                str(self.config_path), self.assent_dir, folders)
+        return code, output.getvalue()
 
     def _verify_selected(self, *folders: str) -> tuple[int, str]:
         output = io.StringIO()
