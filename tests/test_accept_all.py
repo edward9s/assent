@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -367,10 +368,18 @@ class TestSkipCleanedFolder(AcceptAllRepositoryCase):
 class BatchReleaseCase(AcceptAllRepositoryCase):
     """An ``accept --all`` repository plus helpers for one verified batch."""
 
-    def _verify_batch(self) -> tuple[int, str]:
+    def _verify_batch(self, confirm: Callable[[str], bool] | None = None
+                      ) -> tuple[int, str]:
+        """Verify the queued batch; ``confirm`` answers a conflict-skip question.
+
+        Left unset, ``verify_batch`` keeps its terminal default, which a batch
+        that merges cleanly never reaches.
+        """
+        options = {} if confirm is None else {"confirm": confirm}
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = verification.verify_batch(str(self.config_path), self.assent_dir)
+            code = verification.verify_batch(
+                str(self.config_path), self.assent_dir, **options)
         return code, output.getvalue()
 
     def _batch_path(self) -> Path:
@@ -660,6 +669,134 @@ class TestBatchReceiptInvalidation(BatchReleaseCase):
         self.assertIn("per-folder verify+accept", output)
         self.assertEqual(self._accept_subjects(),
                          ["accept(alpha): integrate into trunk"])
+
+
+class TestPartialBatchRelease(BatchReleaseCase):
+    """Release a batch that conflict filtering shrank to part of the queue.
+
+    ``verify --batch`` leaves out a folder whose source conflicts together with
+    everything queued after it, so the receipt it writes can skip a folder in
+    the middle of the publishing order.  The release must reproduce that exact
+    chain, leave the omitted work untouched and recoverable, and say what it did
+    not publish.
+    """
+
+    def _prepare_partial_batch(self) -> verification.BatchVerificationReceipt:
+        """Verify a batch that keeps alpha and delta but omits beta and gamma.
+
+        ``beta`` collides with the ``shared.txt`` ``alpha`` already merged, and
+        ``gamma`` is queued after ``beta``, so the receipt covers a subset that
+        is not a prefix of the queue: it ends with ``delta``, which the omitted
+        ``beta`` precedes.
+        """
+        for folder in ("alpha", "beta", "delta", "gamma"):
+            self._write_task(folder)
+        self._write_after("gamma", ("beta",))
+        self._make_source("alpha", filename="shared.txt", content="alpha\n")
+        self._make_source("beta", filename="shared.txt", content="beta\n")
+        self._make_source("delta")
+        self._make_source("gamma")
+
+        code, output = self._verify_batch(confirm=lambda question: True)
+
+        self.assertEqual(code, 0, output)
+        receipt = self._batch_receipt()
+        self.assertEqual(receipt.folders, ("alpha", "delta"))
+        return receipt
+
+    def _assert_recoverable(self, folder: str) -> None:
+        """The omitted folder still has exactly the source a rework would need."""
+        branches = gitops.folder_branches(self.root, folder)
+        self.assertEqual(len(branches), 1, folder)
+        self.assertIsNotNone(gitops.folder_worktree(self.root, folder))
+        self.assertFalse(gitops.is_ancestor(
+            self.root, gitops.branch_tip(self.root, branches[0]), self._head()))
+
+    def test_a_partial_batch_publishes_its_subset_and_nothing_else(self) -> None:
+        receipt = self._prepare_partial_batch()
+        target_before = self._head()
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("batch receipt covers: alpha, delta", output)
+        self.assertEqual(self._accept_subjects(), [
+            "accept(alpha): integrate into trunk",
+            "accept(delta): integrate into trunk",
+        ])
+        # Exactly the recorded step trees, chained onto the untouched target.
+        self.assertEqual(self._head("HEAD^1^1"), target_before)
+        self.assertEqual(self._head("HEAD^1^2"), receipt.sources[0].source_tip)
+        self.assertEqual(self._head("HEAD^2"), receipt.sources[1].source_tip)
+        self.assertEqual(gitops.tree_of(self.root, "HEAD^1"),
+                         receipt.sources[0].step_tree)
+        self.assertEqual(gitops.tree_of(self.root, "HEAD"), receipt.final_tree)
+        # The conflicting folder's content never reached the target, and both
+        # it and its downstream can still be reworked or rejected.
+        self.assertEqual((self.root / "shared.txt").read_text(encoding="utf-8"),
+                         "alpha\n")
+        self.assertFalse((self.root / "gamma.txt").exists())
+        self._assert_recoverable("beta")
+        self._assert_recoverable("gamma")
+
+    def test_the_release_names_the_omitted_folders_neutrally(self) -> None:
+        self._prepare_partial_batch()
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("2 finished folder(s) still not accepted: beta, gamma",
+                      output)
+        # beta and gamma were finished before the batch was verified, so the
+        # wording must not present being outside the batch as finishing late.
+        self.assertNotIn("finished after it was verified", output)
+
+    def test_a_partial_release_neither_verifies_nor_asks_anything(self) -> None:
+        counter = self.parent / "verify_runs.log"
+        counter.write_text("", encoding="utf-8")
+        self._write_verify(
+            "import pathlib\n"
+            f"pathlib.Path({str(counter)!r}).open('a', encoding='utf-8').write('run\\n')\n"
+            "raise SystemExit(0)\n")
+        self._prepare_partial_batch()
+        during_verify = counter.read_text(encoding="utf-8").count("run\n")
+
+        with patch("builtins.input",
+                   side_effect=AssertionError("the release asked a question")):
+            code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(counter.read_text(encoding="utf-8").count("run\n"),
+                         during_verify)
+        self.assertNotIn("per-folder verify+accept", output)
+
+    def test_the_receipt_records_no_skip_metadata(self) -> None:
+        self._prepare_partial_batch()
+
+        text = self._batch_path().read_text(encoding="utf-8")
+
+        self.assertIn("alpha", text)
+        for omitted in ("beta", "gamma", "skip"):
+            self.assertNotIn(omitted, text)
+
+    def test_replay_refuses_a_source_whose_prerequisite_was_omitted(self) -> None:
+        """A receipt is evidence, not authorization.
+
+        Declaring ``delta`` after the omitted, still-unaccepted ``beta`` makes
+        the recorded chain one that would carry no upstream while claiming the
+        order held, so the prerequisite gate must refuse the whole release.
+        """
+        self._prepare_partial_batch()
+        self._write_after("delta", ("beta",))
+        target_before = self._head()
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._head(), target_before)
+        self.assertIn("prerequisite beta of delta", output)
+        self.assertEqual(self._accept_subjects(), [])
+        self.assertTrue(self._batch_path().exists())
 
 
 if __name__ == "__main__":

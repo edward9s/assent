@@ -165,6 +165,34 @@ dependents retain source evidence until accepted and mechanically proven
 integrated and clean, after which clean may remove redundant artifacts without
 a separate state database.
 
+## Batch conflict-skip consensus (2026-07-26)
+
+`verify --batch` never resolves a source conflict itself; it only decides,
+once, whether to certify a smaller batch instead of none. Building the batch
+candidate merges every queued folder in turn regardless of an earlier
+conflict, so one conflicting folder does not stop a later, independent one
+from being attempted. A conflict-free batch stays fully unattended. When one
+or more folders conflict, every conflicting folder and its transitively
+queued-`after` downstream are collected and reported together, then exactly
+one `[Y/n]` question offers to skip that whole set and verify the remaining,
+still-mergeable folders. A clear yes runs one full verification over that
+smaller subset and records only it in the receipt; no, an unrecognized
+answer, or EOF is fail-closed and certifies nothing. A batch with nothing
+independent left to offer refuses outright without asking.
+
+Skipping is deliberately not a form of resolution: it changes nothing about
+the target or any source, conflicting or merged, and the conflicting
+folder's own source still requires an explicit human `rework` or `reject`
+before it can rejoin a future batch. `accept --all`'s batch-release path
+mirrors this discipline on the publishing side: it publishes only the exact
+folders a fresh receipt covers in one atomic ref update and, in that same
+run, only reports every other finished folder the receipt leaves out — never
+a second prompt, and never a same-run fallback that would verify or accept
+that leftover set on its own initiative. `archive --all` extends the same
+upstream-first rule `clean` already enforces: it archives only a folder that
+is independently eligible and continues to retain the source evidence an
+unaccepted dependent still needs.
+
 ## Model and reasoning-investment consensus
 
 `model` and `effort` are orthogonal abstract tiers. A task's model is fixed

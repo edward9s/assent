@@ -85,7 +85,9 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_p.add_argument(
         "--batch", action="store_true",
         help="Merge every finished, not-yet-integrated folder in folder-"
-             "dependency order into one candidate and verify it once")
+             "dependency order into one candidate and verify it once; a "
+             "conflicting source is reported and, after one confirmation, "
+             "skipped together with the folders queued after it")
     verify_p.add_argument(
         "--no-bisect", action="store_false", dest="bisect",
         help="With --batch, record a failure as-is instead of localizing it to "

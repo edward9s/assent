@@ -593,10 +593,15 @@ the chain, or any of the ordinary gate checks above failing, refuses the
 whole release before the ref moves, and every source is kept untouched, same
 as a single-folder refusal. The batch receipt is deleted only once its chain
 has actually published, so a successful release cannot be replayed by
-accident; running `--all` again afterward finds nothing left to publish for
-those folders and instead reports any folder that finished too late to be
-part of the batch, so a zero exit code is never misread as "everything is
-published".
+accident. A published release publishes exactly the receipt's own folders and
+then, in that same run, only reports every other finished folder the receipt
+does not cover -- one that finished too late to be built into the batch, or
+that the batch was built without -- neither verifying nor accepting them: there
+is no second `[Y/n]` prompt and no same-run fallback to the folder-by-folder
+path for that leftover set. Running `assent verify --batch` builds the next
+batch over what remains; running `--all` again afterward finds nothing left to
+publish for the already-released folders, so a zero exit code is never
+misread as "everything is published".
 
 The integration lock serializes Assent `accept` operations. It is not an
 atomic barrier against external programs, so users must not run Git commands
@@ -656,6 +661,29 @@ against exactly what was verified. A batch with nothing left to verify
 (every folder unfinished, already integrated, or already an ancestor of the
 target) succeeds with no receipt written, since there would be nothing to
 certify.
+
+Building the batch candidate is where a source conflict surfaces, and it is
+never treated as a verification failure: `verify --batch` tries every queued
+folder's merge in turn, so one conflicting folder does not stop a later,
+independent folder from being attempted too. A conflict-free batch stays
+fully unattended and asks nothing. When one or more folders conflict,
+`verify --batch` first states every conflicting folder together with its
+conflicting path(s), then every folder queued `after` a conflicting one --
+excluded with it, transitively, rather than verified without the upstream it
+was written against -- and finally asks one `[Y/n]` question offering to skip
+that whole excluded set and verify only the remaining, still-mergeable
+folders. An empty answer or `y`/`yes` is the only yes: it runs one full
+verification over just that smaller subset and the batch receipt records only
+those verified folders, leaving every skipped folder out entirely rather than
+attempting it. `n`/`no`, any other unrecognized answer, or EOF (a
+non-interactive caller with no one to ask) is a no: `verify --batch` stops
+before running the full verifier and writes no receipt, the same as any other
+refusal. When every queued folder conflicts there is nothing independent left
+to offer, so the batch refuses outright without asking. Skipping is not
+resolving, rebasing, accepting, or deleting anything -- the target and every
+source folder, skipped or merged, are left exactly as they were, and the
+conflicting folder's own source still needs a human decision through `assent
+rework` or `assent reject` before it can rejoin a batch.
 
 On failure, `verify --batch` bisects the chain by default to the first
 folder whose merge turns the full verification red, at most

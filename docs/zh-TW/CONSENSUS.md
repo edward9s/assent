@@ -125,6 +125,29 @@ exact-tree verification 覆蓋,conflict 則 target 不變交由人工作裁決�
 有機械證據證明整合並乾淨前都保留 source evidence;之後才可清除多餘成果,
 不另設狀態資料庫。
 
+## 批次衝突略過共識(2026-07-26)
+
+`verify --batch` 從不自行解決 source conflict;它只做一次決定:是否改為
+證明一個較小的批次,而非完全不證明。建置批次候選時,無論較早出現的
+conflict 為何,都仍會依序嘗試合併每個排入佇列的資料夾,因此一個資料夾
+conflict 不會阻止之後、彼此獨立的資料夾也被嘗試。沒有 conflict 的批次
+維持完全無人值守。一旦有一個以上資料夾發生 conflict,系統會把每個
+conflict 的資料夾與其遞移排在其 `after` 之後的下游一併蒐集、回報,然後
+只問一次 `[Y/n]`:是否略過整組被排除者,改為驗證其餘仍可合併的資料夾。
+明確的「是」會對這個較小子集執行一次完整驗證,receipt 只記錄這個子集;
+「否」、無法辨識的回答、或 EOF 一律 fail-closed,不證明任何東西。若整批
+都沒有獨立可提供的資料夾,批次會直接拒絕,不會提問。
+
+略過刻意不是任何形式的解決:它不改變 target 或任何 source(不論被略過
+或已合併),conflict 資料夾自身的 source 仍須經過明確的人工 `rework` 或
+`reject` 才能重新加入未來的批次。`accept --all` 的批次發佈路徑在發佈端
+呼應同一紀律:它只在一次原子 ref 更新中發佈 receipt 涵蓋的確切資料夾,
+並在同一次執行內,只回報 receipt 未涵蓋的其餘已完成資料夾——不會有第二次
+提問,也不會有同一次執行內自行驗證或接受那批剩餘項目的 fallback。
+`archive --all` 延伸 `clean` 已在強制的 upstream-first 規則:只封存
+獨立符合資格的資料夾,並持續保留尚未被接受的 dependent 仍需要的
+source evidence。
+
 ## 模型與推理投入共識
 
 `model` 與 `effort` 是正交的抽象檔位。任務的 model 固定使用

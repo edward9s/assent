@@ -25,7 +25,7 @@ import sys
 import time
 import tomllib
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1233,6 +1233,116 @@ def _dependent_folders(graph: dict, folder: str,
     return tuple(name for name in candidates if name in tainted and name != folder)
 
 
+@dataclass(frozen=True)
+class BatchConflict:
+    """One queued folder whose own merge into the batch candidate conflicted."""
+
+    folder: str
+    conflicts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FilteredBatchChain:
+    """The merge chain that survived, plus every folder it had to leave out.
+
+    ``skipped_after`` pairs an excluded folder with the conflicting folder it is
+    queued ``after``: it was never attempted, because verifying it without the
+    upstream it was written against would certify a candidate nobody asked for.
+    """
+
+    sources: tuple[tuple[str, str], ...] = ()
+    step_trees: tuple[str, ...] = ()
+    conflicts: tuple[BatchConflict, ...] = ()
+    skipped_after: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def folders(self) -> tuple[str, ...]:
+        """Merged folder names in dependency order."""
+        return tuple(folder for folder, _tip in self.sources)
+
+    @property
+    def skipped(self) -> tuple[str, ...]:
+        """Every excluded folder: the conflicting ones, then their downstream."""
+        return (tuple(conflict.folder for conflict in self.conflicts)
+                + tuple(folder for folder, _cause in self.skipped_after))
+
+
+def _merge_chain_skipping_conflicts(
+        candidate: Path, sources: Sequence[tuple[str, str]],
+        graph: dict) -> FilteredBatchChain:
+    """Merge every source that still fits, recording the ones that do not.
+
+    This is the only merge path that may leave a queued folder out, and it only
+    ever proposes that to a human.  ``gitops.merge_no_ff`` aborts a conflicting
+    merge itself, so the candidate stays at the last clean step and every later
+    independent folder is still attempted: one scan collects all the conflicts a
+    human then decides about once, instead of stopping at the first one.
+    """
+    queued = [folder for folder, _tip in sources]
+    excluded: dict[str, str] = {}
+    merged: list[tuple[str, str]] = []
+    step_trees: list[str] = []
+    conflicts: list[BatchConflict] = []
+    for folder, source_tip in sources:
+        if folder in excluded:
+            continue
+        previous = gitops.commit_of(candidate, "HEAD")
+        message = f"verify(batch/{folder}): temporary integration candidate"
+        outcome = gitops.merge_no_ff(candidate, source_tip, message)
+        if not outcome.ok:
+            conflicts.append(BatchConflict(folder, tuple(outcome.conflicts)))
+            for downstream in _dependent_folders(graph, folder, queued):
+                excluded.setdefault(downstream, folder)
+            continue
+        if gitops.commit_parents(candidate, "HEAD") != (previous, source_tip):
+            raise AssentError(
+                f"merging {folder} did not produce the expected two-parent "
+                "batch candidate")
+        merged.append((folder, source_tip))
+        step_trees.append(gitops.tree_of(candidate, "HEAD"))
+    return FilteredBatchChain(
+        tuple(merged), tuple(step_trees), tuple(conflicts),
+        tuple((folder, excluded[folder])
+              for folder in queued if folder in excluded))
+
+
+def confirm_on_terminal(question: str) -> bool:
+    """Ask one yes/no question on the terminal; only a clear yes is a yes.
+
+    There is deliberately no retry loop.  The question is always "may I verify
+    less than you asked for", so an unclear answer, a closed stdin, or an
+    unattended caller must land on no rather than stall the run.
+    """
+    try:
+        answer = input(question)
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("", "y", "yes")
+
+
+def _report_batch_conflicts(chain: FilteredBatchChain) -> None:
+    """State every conflicting folder, its paths, and its excluded downstream."""
+    for conflict in chain.conflicts:
+        print(f"verify --batch: merging {conflict.folder} into the batch "
+              "candidate conflicts. Conflicting file(s):")
+        for conflicting in conflict.conflicts:
+            print(f"  - {conflicting}")
+    for folder, cause in chain.skipped_after:
+        print(f"verify --batch: {folder} is queued after {cause}, so it is "
+              "skipped with it rather than verified without it")
+    print("verify --batch: a source conflict is a human decision. Accepting "
+          "the folders ahead of it does not resolve it; the conflicting "
+          "folder's own source has to be reworked against the target "
+          "(`assent rework`) or dropped (`assent reject`).")
+
+
+def _skip_question(chain: FilteredBatchChain) -> str:
+    """The single question that decides between a smaller batch and no batch."""
+    return ("Skip " + ", ".join(chain.skipped) + " and verify the remaining "
+            f"{len(chain.sources)} folder(s) (" + ", ".join(chain.folders)
+            + ")? [Y/n]: ")
+
+
 def _report_localization(assent_dir: Path, folders: Sequence[str],
                          result: BatchBisectResult) -> str:
     """Print the localization verdict and return the note stored in the receipt.
@@ -1270,8 +1380,8 @@ def _report_localization(assent_dir: Path, folders: Sequence[str],
     return _summary(note, result.guilty_summary)
 
 
-def _verify_batch_locked(config_path: str, assent_dir: Path,
-                         bisect: bool = True) -> int:
+def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
+                         confirm: Callable[[str], bool]) -> int:
     """Build, verify, and record one batch candidate with every lock held."""
     root = assent_dir.parent
     main = gitops.main_worktree(root)
@@ -1318,35 +1428,39 @@ def _verify_batch_locked(config_path: str, assent_dir: Path,
               + ", ".join(selection.folders))
         _invalidate_receipt(path)
 
-        candidate_result = BatchCandidate()
+        graph = parse_folder_dependency_graph(assent_dir)
         result: subprocess.CompletedProcess[str] | None = None
         start_failure = ""
         localized = False
+        refusal = ""
         with gitops.temporary_integration_worktree(
                 main, "batch", target_tip) as (candidate, _branch):
-            candidate_result = _merge_chain(candidate, selection.sources)
-            if candidate_result.ok:
+            chain = _merge_chain_skipping_conflicts(
+                candidate, selection.sources, graph)
+            if chain.conflicts:
+                _report_batch_conflicts(chain)
+            if chain.conflicts and not chain.sources:
+                # Nothing is left to offer, so there is no decision to ask for.
+                refusal = ("every queued folder conflicts, so no independent "
+                           "subset remains to verify")
+            elif chain.conflicts and not confirm(_skip_question(chain)):
+                refusal = "the skip was declined, so nothing was verified"
+            else:
                 try:
                     result = _run_full_verifier(script, candidate)
                 except OSError as e:
                     start_failure = f"Unable to start verification: {e}"
 
-        if not candidate_result.ok:
-            print(f"verify --batch: refused, merging {candidate_result.conflict_folder} "
-                  "into the batch candidate conflicts. The target was not "
-                  "changed and no receipt was written. Conflicting file(s):")
-            for conflicting in candidate_result.conflicts:
-                print(f"  - {conflicting}")
-            print("Resolve the conflict in "
-                  f"{candidate_result.conflict_folder} (or accept the folders "
-                  "ahead of it) before verifying the batch again")
+        if refusal:
+            print(f"verify --batch: refused, {refusal}. The target and every "
+                  "source were left unchanged and no receipt was written")
             return 1
 
-        # A localization may shrink what the receipt certifies to the prefix
-        # ahead of the guilty folder, so the recorded sources and step trees are
-        # decided here rather than assumed to be the whole chain.
-        sources = selection.sources
-        step_trees = candidate_result.step_trees
+        # Both a human skip and a localization shrink what the receipt
+        # certifies, so the recorded sources and step trees are decided here
+        # rather than assumed to be every queued folder.
+        sources = chain.sources
+        step_trees = chain.step_trees
         if start_failure:
             status, exit_code, summary = "FAILED", 1, start_failure
         else:
@@ -1359,9 +1473,9 @@ def _verify_batch_locked(config_path: str, assent_dir: Path,
                 f"(exit code {result.returncode})")
             if status == "FAILED" and bisect:
                 bisected = bisect_batch_failure(
-                    main, target_tip, selection.sources, script, summary)
+                    main, target_tip, chain.sources, script, summary)
                 summary = _report_localization(
-                    assent_dir, selection.folders, bisected)
+                    assent_dir, chain.folders, bisected)
                 localized = True
                 if bisected.kept:
                     sources = bisected.kept
@@ -1375,16 +1489,15 @@ def _verify_batch_locked(config_path: str, assent_dir: Path,
 
         changed = _batch_drift(
             configs, main, excludes, target_branch, target_tip,
-            selection.sources, script, digest)
+            chain.sources, script, digest)
         if changed:
             if localized:
                 print("verify --batch: the repository changed while the batch "
                       "was being verified, so the localization above certifies "
                       "nothing and the receipt records the drift instead")
             receipt = _new_batch_receipt(
-                status="FAILED", target_tip=target_tip,
-                sources=selection.sources,
-                step_trees=candidate_result.step_trees, digest=digest,
+                status="FAILED", target_tip=target_tip, sources=chain.sources,
+                step_trees=chain.step_trees, digest=digest,
                 exit_code=1, failure_summary="; ".join(changed))
 
         write_batch_receipt(path, receipt, main)
@@ -1395,6 +1508,9 @@ def _verify_batch_locked(config_path: str, assent_dir: Path,
     if receipt.status == "PASSED":
         if not localized:
             print(f"verify --batch: passed ({receipt.final_tree})")
+            if chain.skipped:
+                print("verify --batch: verified " + ", ".join(chain.folders)
+                      + "; skipped " + ", ".join(chain.skipped))
             return 0
         # The batch as requested did not pass, so the exit code stays nonzero
         # even though a smaller batch is now certified: a caller must not read
@@ -1407,12 +1523,17 @@ def _verify_batch_locked(config_path: str, assent_dir: Path,
     return 1
 
 
-def verify_batch(config_path: str, assent_dir: str | Path,
-                 bisect: bool = True) -> int:
+def verify_batch(config_path: str, assent_dir: str | Path, bisect: bool = True,
+                 confirm: Callable[[str], bool] = confirm_on_terminal) -> int:
     """Verify every queued folder as one candidate; zero only for PASSED.
 
     An empty batch is success with no receipt: there is nothing to certify, so
     inventing a receipt would be inventing evidence.
+
+    Sources that conflict with the candidate are the one place a human is asked
+    a question: ``confirm`` decides once whether to verify the independent
+    subset that remains, or nothing at all.  It is a parameter so a test can
+    answer without a terminal; the CLI leaves it at the ``input``-based default.
 
     A failed batch is localized to the folder that breaks it, and the folders
     ahead of that one keep the PASSED receipt they were already proven to earn.
@@ -1421,7 +1542,8 @@ def verify_batch(config_path: str, assent_dir: str | Path,
     assent_dir = Path(assent_dir)
     try:
         with hold_integration_lock(assent_dir):
-            return _verify_batch_locked(config_path, assent_dir, bisect)
+            return _verify_batch_locked(
+                config_path, assent_dir, bisect, confirm)
     except LockBusy as e:
         print(f"verify --batch: refused ({e})")
         return 1

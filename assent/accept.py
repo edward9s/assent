@@ -12,6 +12,13 @@ stale receipt first, then publishes through the same ``accept_folder``.
 receipt covers several folders, their whole merge chain is replayed in one
 temporary worktree, compared tree by tree against that receipt, and published
 by a single ref update -- all of them or none of them.
+
+That receipt may cover only part of what is finished: ``verify --batch`` leaves
+out a folder whose source conflicts, together with everything queued after it,
+so the recorded chain can have gaps in the publishing order.  The release
+publishes exactly the sources the receipt records and then names every finished
+folder it did not cover, which is what keeps its zero exit code from reading as
+"everything is published".
 """
 from __future__ import annotations
 
@@ -571,9 +578,10 @@ def _unbatched_finished_folders(config_path: str, assent_dir: Path, main: Path,
                                 target_tip: str) -> list[str]:
     """Finished folders this batch did not cover, in the usual publishing order.
 
-    A batch receipt describes the folders that were finished when it was
-    written.  Anything finished afterwards is simply not part of it, and saying
-    so is what keeps a zero exit code from reading as "everything is published".
+    A batch receipt describes only the folders it was built from.  A finished
+    folder can be outside it for two reasons that look identical here -- it
+    finished after the batch was verified, or building the batch had to leave it
+    out -- so this reports membership and never guesses which reason applies.
     """
     try:
         graph = parse_folder_dependency_graph(assent_dir)
@@ -777,6 +785,20 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
             print(f"    {folder}: source {source.tip} -> merge {commit} "
                   f"(tree {source.step_tree})")
         print(f"  accepted:  {', '.join(receipt.folders)}")
+        # Stated at the left margin, not inside the detail block: a partial
+        # release exits zero, so the folders it did not publish are the one
+        # thing a reader must not miss.
+        outstanding = _unbatched_finished_folders(
+            config_path, assent_dir, main, receipt.folders, target_after)
+        if outstanding:
+            print(f"accept --all: {len(outstanding)} finished folder(s) still "
+                  f"not accepted: {', '.join(outstanding)}.")
+            print("  A batch publishes only what it was built from; a folder "
+                  "is outside it either because it finished later or because "
+                  "the batch was built without it. This run published the "
+                  "batch alone and neither verified nor examined them; run "
+                  "`assent verify --batch` to build the next batch over what "
+                  "remains.")
         if consume_error:
             print(f"warning: the batch was published but its receipt could not "
                   f"be deleted ({consume_error}); delete {path} by hand. It "
@@ -785,12 +807,6 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
         else:
             print("  batch receipt consumed; rerunning `assent accept --all` is "
                   "a no-op for the folders it published.")
-        outstanding = _unbatched_finished_folders(
-            config_path, assent_dir, main, receipt.folders, target_after)
-        if outstanding:
-            print(f"  not covered by this batch: {', '.join(outstanding)} "
-                  "(finished after it was verified). Run `assent accept --all` "
-                  "again to publish them.")
         print("  source branch/worktree kept for every published folder; retain "
               "each while a dependent may still need its source evidence. "
               "`assent clean FOLDER` makes the final safety decision.")

@@ -106,6 +106,19 @@ class TestArchive(unittest.TestCase):
         gitops.commit_all(worktree, "finish result")
         return worktree, branch
 
+    def _finished_source(self, name: str) -> str:
+        """Create a finished folder with a committed, not-yet-integrated source."""
+        self._folder(name)
+        worktree = gitops.ensure_worktree(self.root, name)
+        branch = gitops.ensure_branch(worktree, f"{name}/")
+        (worktree / f"{name}.txt").write_text("work\n", encoding="utf-8")
+        gitops.commit_all(worktree, f"finish {name}")
+        return branch
+
+    def _integrate(self, branch: str) -> None:
+        """Merge a source into the target the way an accepted folder leaves it."""
+        _git(self.root, "merge", "--no-ff", branch, "-m", f"accept: {branch}")
+
     # ---- preconditions ---------------------------------------------------
 
     def test_unfinished_folder_is_refused(self) -> None:
@@ -343,6 +356,54 @@ class TestArchive(unittest.TestCase):
         self.assertFalse(_zip_path(self.assent_dir, "plan02").exists())
         self.assertEqual(
             [e["folder"] for e in read_roster(self.assent_dir)], [self.folder])
+
+    def test_archive_all_files_only_the_work_cleanup_proves_safe(self) -> None:
+        """A partly accepted batch leaves a mixed ``.assent/``, and each folder is
+        still judged on its own evidence.
+
+        Nothing here tells archive why a source was left unaccepted -- a conflict
+        skipped during batch filtering and a folder nobody has accepted yet look
+        identical to it, which is the point: eligibility is per folder, and every
+        safety-driven retention stays a visible skip rather than an error.
+        """
+        self._integrate(self._finished_source("independent"))
+        self._finished_source("conflicting")
+        self._integrate(self._finished_source("upstream"))
+        self._finished_source("zdependent")
+        (self.assent_dir / "zdependent" / "_folder.toml").write_text(
+            'after = ["upstream"]\n', encoding="utf-8")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = archive_all(str(self.config_path), self.assent_dir)
+        text = output.getvalue()
+
+        self.assertEqual(code, 0, text)
+        self.assertIn("independent: archived", text)
+        self.assertIn("conflicting: skipped", text)
+        self.assertIn("zdependent: skipped", text)
+        # upstream is itself integrated, yet its source is the evidence its
+        # unaccepted dependent still needs, so cleanup retains it.
+        self.assertIn("upstream: skipped", text)
+        self.assertIn("dependent source evidence is still required", text)
+        self.assertIn("dependent zdependent:", text)
+        self.assertIn("2 archived, 3 skipped, 0 error(s)", text)
+
+        self.assertTrue(_zip_path(self.assent_dir, "independent").exists())
+        self.assertEqual(
+            gitops.branches_with_prefix(self.root, "independent/"), [])
+        for retained in ("conflicting", "upstream", "zdependent"):
+            self.assertFalse(_zip_path(self.assent_dir, retained).exists())
+            self.assertTrue((self.assent_dir / retained).is_dir())
+            self.assertNotEqual(
+                gitops.branches_with_prefix(self.root, f"{retained}/"), [])
+        # The roster records archived folders and nothing about the skips.
+        roster = read_roster(self.assent_dir)
+        self.assertEqual(sorted(entry["folder"] for entry in roster),
+                         ["independent", self.folder])
+        for entry in roster:
+            self.assertEqual(sorted(entry),
+                             ["archived_at", "folder", "main_tip"])
 
     # ---- CLI argument guards --------------------------------------------
 
