@@ -409,19 +409,36 @@ class TestRunSuccess(EngineTestCase):
         self.assertEqual(adapter.calls[0],
                          (adapter.calls[0][0], "lite", "balanced"))
 
-    def test_effort_omitted_without_default_is_not_sent(self):
+    def test_empty_default_effort_still_sends_the_builtin_tier_effort(self):
+        # An empty table no longer suppresses the built-in mapping: the lite tier keeps
+        # its built-in "normal" and is translated to a concrete value, so the vendor CLI
+        # default is never what decides the reasoning investment.
         p1 = self.write_task(1, model="lite")
         cfg = self.build(extra_config=
             '[adapter.claude.default_effort]\n'
-            '[adapter.claude.efforts]\nslight = "minimal"\n')
+            '[adapter.claude.efforts]\nnormal = "balanced"\n')
         self.commit_all()
-        adapter = ScriptedAdapter([self.ai_done(p1)])
+        adapter = ScriptedAdapter([self.ai_done(p1)], resolved_model="sonnet")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             engine.run(cfg, once=True, adapter=adapter)
-        self.assertIsNone(adapter.calls[0][2])
-        self.assertIn("effort(abstract)=unspecified", out.getvalue())
-        self.assertIn("requested_effort(actual)=CLI default", out.getvalue())
+        self.assertEqual(adapter.calls[0][2], "balanced")
+        self.assertIn("Session: claude | lite->sonnet | normal->balanced",
+                      out.getvalue())
+        self.assertNotIn("unspecified", out.getvalue())
+        self.assertNotIn("CLI default", out.getvalue())
+
+    def test_every_builtin_adapter_and_tier_resolves_a_concrete_effort(self):
+        # No supported invocation may plan a None effort for a known tier.
+        cfg = self.build()
+        for tier in ("prime", "core", "lite"):
+            for name in ("claude", "codex", "antigravity"):
+                with self.subTest(adapter=name, tier=tier):
+                    settings = cfg.adapter_settings(name)
+                    effort = settings.resolve_effort(None, tier)
+                    self.assertIsNotNone(effort)
+                    self.assertIsNotNone(
+                        settings.resolve_requested_effort(tier, effort))
 
     def test_effort_translation_uses_tier_then_flat_then_baseline(self):
         cfg = self.build(extra_config=
@@ -508,7 +525,7 @@ class TestRunSuccess(EngineTestCase):
         self.assertEqual(adapter.calls[0][0],
                          "claude|cli-model|normal|medium|t001")
 
-    def test_session_output_distinguishes_abstract_and_requested_effort(self):
+    def test_session_line_states_the_four_facts_compactly(self):
         p1 = self.write_task(1, model="lite", effort="heavy")
         cfg = self.build(extra_config=
             '[adapter.claude.efforts.lite]\nheavy = "max"\n')
@@ -516,9 +533,11 @@ class TestRunSuccess(EngineTestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             engine.run(cfg, once=True,
-                       adapter=ScriptedAdapter([self.ai_done(p1)]))
-        self.assertIn("effort(abstract)=heavy", out.getvalue())
-        self.assertIn("requested_effort(actual)=max", out.getvalue())
+                       adapter=ScriptedAdapter([self.ai_done(p1)],
+                                               resolved_model="sonnet"))
+        lines = [line for line in out.getvalue().splitlines()
+                 if "Session:" in line]
+        self.assertEqual(lines, ["  Session: claude | lite->sonnet | heavy->max"])
 
     def test_worktree_default_verify_uses_main_script_and_worktree_cwd(self):
         cfg = self.build()
@@ -554,8 +573,9 @@ class TestInvocationResolution(EngineTestCase):
         self.assertEqual(requested_effort, "max")            # concrete CLI value
         self.assertIn('abstract effort = "heavy"', prompt)    # abstract kept distinct
         self.assertIn('requested_effort = "max"', prompt)
-        self.assertIn("effort(abstract)=heavy", out.getvalue())
-        self.assertIn("requested_effort(actual)=max", out.getvalue())
+        # the prompt no longer offers "no value = the CLI default" as a session contract
+        self.assertNotIn("CLI default", prompt)
+        self.assertIn("| heavy->max", out.getvalue())
 
         from assent.plan import read_entries
         done = next(e for e in read_entries(journal_path_for(p1))
@@ -1438,6 +1458,36 @@ class TestQuotaAndResume(EngineTestCase):
         done = next(entry for entry in entries if entry["by"] == "codex")
         self.assertEqual(done["requested_model"], "codex-lite")
 
+    def test_rotation_resolves_each_adapter_effort_and_names_it_in_the_line(self):
+        # Each adapter resolves its own built-in lite default independently
+        # (claude normal -> medium, codex slight -> low), and the opening line says
+        # which one is running.
+        path = self.write_task(1)
+        cfg = self.rotation_config()
+        self.commit_all()
+
+        def quota_step(prompt):
+            return TaskResult(
+                exit_code=1, output="", quota_exhausted=True, reset_at=None)
+
+        claude = ScriptedAdapter([quota_step], resolved_model="claude-lite")
+        codex = ScriptedAdapter(
+            [self.ai_done(path, by="codex", requested_model="codex-lite")],
+            resolved_model="codex-lite")
+        out = io.StringIO()
+
+        with mock.patch("assent.engine.get_adapter", return_value=codex):
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(engine.run(
+                    cfg, once=True, adapter=claude, sleep=lambda _: None), 0)
+
+        self.assertEqual(claude.calls[0][2], "medium")
+        self.assertEqual(codex.calls[0][2], "low")
+        self.assertEqual(
+            [line for line in out.getvalue().splitlines() if "Session:" in line],
+            ["  Session: claude | lite->claude-lite | normal->medium",
+             "  Session: codex | lite->codex-lite | slight->low"])
+
     def test_complete_quota_rotation_waits_then_continues_from_next_adapter(self):
         path = self.write_task(1)
         cfg = self.rotation_config()
@@ -1914,7 +1964,9 @@ class TestQueries(EngineTestCase):
         self.assertIn("gpt-lite/max", text)
         self.assertIn("(* effort filled from default_effort)", text)
 
-    def test_check_omits_actual_effort_when_no_effort_flag_is_resolved(self):
+    def test_check_shows_the_builtin_effort_when_the_table_is_empty(self):
+        # An empty default_effort table leaves the built-in codex core default (normal)
+        # in place, so the assignment still names both the abstract and the actual value.
         self.write_task(1, model="core")
         cfg = self.build(adapter_name="codex", extra_config=(
             '[adapter.codex]\ncommand = "python"\n'
@@ -1927,9 +1979,8 @@ class TestQueries(EngineTestCase):
             self.assertEqual(engine.check(cfg), 0)
         line = next(line for line in out.getvalue().splitlines()
                     if "t001_task" in line)
-        self.assertRegex(line, r"core\s+-> gpt-core$")
-        self.assertNotIn("gpt-core/", line)
-        self.assertNotIn("effort filled from default_effort", out.getvalue())
+        self.assertRegex(line, r"core/normal\*\s+-> gpt-core/medium$")
+        self.assertIn("(* effort filled from default_effort)", out.getvalue())
 
     def test_check_truncates_cjk_task_names_without_exceeding_line_width(self):
         self.write_task(1, slug="這是一個非常非常長的任務名稱甲乙丙丁戊己庚辛壬癸",
