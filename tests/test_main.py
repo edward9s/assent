@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 from assent.__main__ import _start_stdin_stop_watcher, main
 from assent.adapters.process import clear_stop_wake
+from assent.config import load_config
 from assent.init import init as run_init
 from tests.test_contracts import install_global_contracts
 
@@ -617,6 +618,245 @@ class TestDispatch(MainTestCase):
                         ["check", "--config", str(config)])
                 self.assertEqual(code, 1)
                 self.assertIn("Folder dependency graph: FAIL", out)
+
+
+class TestRemainderSelection(MainTestCase):
+    """The literal `...` token as a remainder selector across the workflow.
+
+    `A B ...` is A and B plus the folders that command would otherwise discover
+    for the whole project.  These tests patch the operation each branch calls,
+    so they prove what the CLI selects rather than re-testing the operations.
+    """
+
+    def usage_error(self, argv) -> str:
+        errors = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
+                errors), contextlib.redirect_stdout(io.StringIO()):
+            main(argv)
+        self.assertEqual(ctx.exception.code, 2)
+        return errors.getvalue()
+
+    def test_marker_is_rejected_when_repeated_misplaced_or_incompatible(self):
+        cases = (
+            ["run", "...", "..."],
+            ["run", "...", "first"],
+            ["run", "first", "...", "--all"],
+            ["run", "first", "...", "--once"],
+            ["run", "first", "...", "--task", "t001"],
+            ["accept", "first", "...", "--all"],
+            ["accept", "...", "first"],
+            ["verify", "first", "...", "--batch"],
+            ["verify", "first", "...", "--focus"],
+            ["verify", "...", "..."],
+            ["clean", "...", "first"],
+            ["clean", "first", "first"],
+            ["archive", "first", "...", "--all"],
+            ["archive", "first", "...", "--restore"],
+            ["archive", "...", "--restore"],
+            ["archive", "first", "second", "--restore"],
+            ["archive", "first", "first"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.usage_error(argv)
+
+    def test_marker_never_reaches_configuration_loading_as_a_folder_name(self):
+        config = self.write_config()
+        self.write_task("alpha", "DONE")
+        real_load = load_config
+        seen: list[str] = []
+
+        def record(path, folder):
+            seen.append(folder)
+            return real_load(path, folder)
+
+        commands = (["run", "..."], ["clean", "..."], ["archive", "..."],
+                    ["verify", "..."], ["accept", "..."])
+        for argv in commands:
+            with self.subTest(argv=argv), \
+                    patch("assent.__main__.load_config", side_effect=record), \
+                    patch("assent.__main__.engine.run", return_value=0), \
+                    patch("assent.__main__.clean_folders", return_value=0), \
+                    patch("assent.__main__.archive_folder", return_value=0), \
+                    patch("assent.__main__.verify_folder", return_value=0), \
+                    patch("assent.__main__.accept_folder", return_value=0):
+                code, _ = self.run_main([*argv, "--config", str(config)])
+                self.assertEqual(code, 0)
+        self.assertEqual(set(seen), {"alpha"})
+
+    def test_run_completes_the_explicit_prefix_before_the_remainder(self):
+        config = self.write_config()
+        for folder in ("alpha", "beta", "delta", "gamma"):
+            self.write_task(folder)
+        # delta must wait for beta, so the remainder is dependency-ordered
+        # rather than merely lexicographic.
+        (self.root / ".assent" / "delta" / "_folder.toml").write_text(
+            'after = ["beta"]\n', encoding="utf-8")
+        order: list[str] = []
+        with patch("assent.__main__.engine.run",
+                   side_effect=lambda cfg, **_: order.append(cfg.tasks_name)
+                   or 0), \
+                patch("assent.__main__.run_all",
+                      side_effect=AssertionError("used the --all scheduler")):
+            code, out = self.run_main(
+                ["run", "gamma", "alpha", "...", "--config", str(config)])
+
+        self.assertEqual(code, 0)
+        self.assertIn("run: `...` selects gamma, alpha, beta, delta", out)
+        self.assertEqual(order, ["gamma", "alpha", "beta", "delta"])
+
+    def test_run_explicit_prefix_failure_prevents_remainder_scheduling(self):
+        config = self.write_config()
+        for folder in ("alpha", "beta"):
+            self.write_task(folder)
+        with patch("assent.__main__.engine.run", return_value=1) as engine_run, \
+                patch("assent.__main__.run_all",
+                      side_effect=AssertionError("remainder was scheduled")):
+            code, _ = self.run_main(
+                ["run", "alpha", "...", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertEqual([call.args[0].tasks_name
+                          for call in engine_run.call_args_list], ["alpha"])
+
+    def test_run_remainder_is_a_snapshot_taken_before_the_prefix_runs(self):
+        config = self.write_config()
+        self.write_task("alpha")
+        started: list[str] = []
+
+        def create_a_folder_mid_run(cfg, **_):
+            started.append(cfg.tasks_name)
+            self.write_task("appeared")
+            return 0
+
+        with patch("assent.__main__.engine.run",
+                   side_effect=create_a_folder_mid_run):
+            code, out = self.run_main(
+                ["run", "alpha", "...", "--config", str(config)])
+
+        self.assertEqual(code, 0)
+        self.assertIn("No remaining work folder to run.", out)
+        self.assertEqual(started, ["alpha"])
+
+    def test_verify_remainder_expands_to_finished_folders_only(self):
+        config = self.write_config()
+        self.write_task("alpha", "DONE")
+        self.write_task("beta", "DONE")
+        self.write_task("ongoing", "TODO")
+        with patch("assent.__main__.verify_selected_batch",
+                   return_value=0) as batch:
+            code, out = self.run_main(
+                ["verify", "beta", "...", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(batch.call_args.args[2], ["beta", "alpha"])
+        self.assertNotIn("ongoing", out)
+
+    def test_verify_remainder_of_one_folder_uses_the_folder_path(self):
+        config = self.write_config()
+        self.write_task("alpha", "DONE")
+        self.write_task("ongoing", "TODO")
+        with patch("assent.__main__.verify_folder", return_value=0) as folder, \
+                patch("assent.__main__.verify_selected_batch",
+                      side_effect=AssertionError("used the batch path")):
+            code, _ = self.run_main(["verify", "...", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(folder.call_args.args[0].tasks_name, "alpha")
+
+        # A one-folder expansion is not a batch, so --no-bisect is a usage error
+        # exactly as it is for a single named folder.
+        self.usage_error(["verify", "...", "--no-bisect", "--config",
+                          str(config)])
+
+    def test_accept_remainder_never_falls_back_to_accept_all(self):
+        config = self.write_config()
+        self.write_task("alpha", "DONE")
+        self.write_task("beta", "DONE")
+        self.write_task("ongoing", "TODO")
+        with patch("assent.__main__.accept_selected_batch",
+                   return_value=0) as batch, \
+                patch("assent.__main__.accept_all",
+                      side_effect=AssertionError("fell back to accept --all")), \
+                patch("assent.__main__.verify_folder",
+                      side_effect=AssertionError("accept verified")):
+            code, _ = self.run_main(
+                ["accept", "beta", "...", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(batch.call_args.args[2], ["beta", "alpha"])
+
+    def test_accept_remainder_of_one_folder_uses_the_direct_gate(self):
+        config = self.write_config()
+        self.write_task("alpha", "DONE")
+        self.write_task("ongoing", "TODO")
+        with patch("assent.__main__.accept_folder", return_value=0) as direct, \
+                patch("assent.__main__.accept_selected_batch",
+                      side_effect=AssertionError("used the batch path")):
+            code, _ = self.run_main(["accept", "...", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(direct.call_args.args[0].tasks_name, "alpha")
+
+    def test_clean_accepts_an_exact_set_and_a_remainder(self):
+        config = self.write_config()
+        for folder in ("alpha", "beta", "gamma"):
+            self.write_task(folder)
+        with patch("assent.__main__.clean_folders", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["clean", "gamma", "alpha", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]],
+                         ["gamma", "alpha"])
+
+        with patch("assent.__main__.clean_folders", return_value=1) as mocked:
+            code, _ = self.run_main(
+                ["clean", "gamma", "...", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]],
+                         ["gamma", "alpha", "beta"])
+
+    def test_archive_selection_and_remainder_use_the_explicit_policy(self):
+        config = self.write_config()
+        for folder in ("alpha", "beta", "gamma"):
+            self.write_task(folder, "DONE")
+        with patch("assent.__main__.archive_selected", return_value=1) as mocked, \
+                patch("assent.__main__.archive_all",
+                      side_effect=AssertionError("used the --all policy")):
+            code, _ = self.run_main(
+                ["archive", "gamma", "...", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertEqual(mocked.call_args.args[1], ["gamma", "alpha", "beta"])
+
+        with patch("assent.__main__.archive_folder", return_value=0) as one:
+            code, _ = self.run_main(
+                ["archive", "beta", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(one.call_args.args[0].tasks_name, "beta")
+
+    def test_archive_restore_stays_a_single_folder_operation(self):
+        config = self.write_config()
+        self.write_task("alpha", "DONE")
+        with patch("assent.__main__.restore_folder", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["archive", "alpha", "--restore", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(mocked.call_args.args[0].tasks_name, "alpha")
+
+    def test_remainder_without_any_selectable_folder_refuses(self):
+        config = self.write_config()
+        commands = ("run", "clean", "verify", "accept", "archive")
+        for command in commands:
+            with self.subTest(command=command, project="empty"):
+                code, out = self.run_main([command, "...", "--config",
+                                           str(config)])
+                self.assertEqual(code, 1)
+                self.assertIn(f"{command}: `...` selected no work folder.", out)
+
+        # verify and accept only ever select finished folders, so an entirely
+        # unfinished project leaves their remainder empty too.
+        self.write_task("ongoing", "TODO")
+        for command in ("verify", "accept"):
+            with self.subTest(command=command, project="unfinished"):
+                code, out = self.run_main([command, "...", "--config",
+                                           str(config)])
+                self.assertEqual(code, 1)
+                self.assertIn(f"{command}: `...` selected no work folder.", out)
 
 
 class TestStdinStopWatcher(unittest.TestCase):

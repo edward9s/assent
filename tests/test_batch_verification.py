@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import gitops
+from assent.__main__ import _dispatch
 from assent.batch_accept import accept_all
 from assent.batch_receipt import (BatchVerificationReceipt, batch_receipt_path,
                                   read_batch_receipt)
@@ -390,6 +391,61 @@ class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
         self.assertIn("smaller PASSED prefix receipt does not authorize acceptance "
                       "of the originally requested full set", output)
         self.assertEqual(self.read_batch_receipt().folders, ("aa", "bb"))
+
+
+class TestRemainderSelection(BatchVerifyRepositoryCase):
+    """``verify A ...`` resolves to exactly one verification of one exact set."""
+
+    def run_cli(self, *folders: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = _dispatch(
+                ["verify", *folders, "--config", str(self.config_path)])
+        return code, output.getvalue()
+
+    def test_remainder_writes_one_receipt_for_the_expanded_set(self) -> None:
+        tips = {name: self.make_source(name) for name in ("aa", "bb", "cc")}
+        self.write_task("ongoing", status="TODO")  # unfinished: not discovered
+
+        with mock.patch("assent.__main__.verify_folder",
+                        side_effect=AssertionError("ran the folder path too")):
+            code, output = self.run_cli("cc", "...")
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("verify: `...` selects cc, aa, bb", output)
+        self.assertNotIn("ongoing", output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.folders, ("aa", "bb", "cc"))
+        self.assertEqual(
+            [(source.folder, source.source_tip) for source in receipt.sources],
+            [(name, tips[name]) for name in ("aa", "bb", "cc")])
+
+    def test_remainder_conflict_is_refused_rather_than_skipped(self) -> None:
+        self.make_source("aa", filename="shared.txt", content="from aa\n")
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+
+        with mock.patch("assent.batch_verification.confirm_on_terminal") as ask, \
+                mock.patch("assent.batch_verification.run_full_verifier") as verifier:
+            code, output = self.run_cli("aa", "...")
+
+        self.assertEqual(code, 1)
+        self.assertIn("exact selected set conflicts", output)
+        ask.assert_not_called()
+        verifier.assert_not_called()
+        self.assertFalse(self.receipt_path().exists())
+
+    def test_a_one_folder_expansion_uses_the_ordinary_folder_path(self) -> None:
+        self.make_source("aa")
+        self.write_task("ongoing", status="TODO")
+
+        with mock.patch("assent.__main__.verify_selected_batch",
+                        side_effect=AssertionError("used the batch path")):
+            code, output = self.run_cli("...")
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(self.receipt_path().exists())
+        self.assertTrue(receipt_path(
+            load_config(str(self.config_path), "aa")).exists())
 
 
 class TestSkipConfirmation(unittest.TestCase):

@@ -10,16 +10,20 @@ import signal
 import sys
 import threading
 from collections import Counter
+from pathlib import Path
 
 from assent import AssentError, contracts, engine, inspection
 from assent.accept import accept_folder
 from assent.adapters.process import wake_stop_waiters
-from assent.archive import archive_all, archive_folder, restore_folder
+from assent.archive import (archive_all, archive_folder, archive_selected,
+                            restore_folder)
 from assent.batch_accept import accept_all, accept_selected_batch
 from assent.clean import clean_folders
 from assent.config import list_task_folders, load_config, validate_config
 from assent.doctor import doctor as run_doctor
 from assent.folderdeps import (find_unfinished_prerequisites,
+                               infer_folder_completion,
+                               order_folders_by_dependency,
                                parse_folder_dependency_graph)
 from assent.folder_scheduler import run_all
 from assent.init import init as run_init
@@ -87,7 +91,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "folders", nargs="*", metavar="FOLDER",
         help="Work folders to run in the stated order; omit to select one "
-             "automatically")
+             "automatically" + _REMAINDER_HELP)
     run_p.add_argument("--once", action="store_true",
                        help="Run only the next task, then stop")
     run_p.add_argument("--task", metavar="ID",
@@ -113,7 +117,8 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_p.add_argument(
         "folder", nargs="*", metavar="FOLDER",
         help="One completed folder, or two or more exact folders to verify "
-             "as one dependency-ordered candidate (omit with --batch)")
+             "as one dependency-ordered candidate (omit with --batch)"
+             + _REMAINDER_HELP + " that is finished")
     verify_p.add_argument(
         "--batch", action="store_true",
         help="Merge every finished, not-yet-integrated folder in folder-"
@@ -134,14 +139,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help=_CONFIG_HELP)
     clean_p = sub.add_parser(
         "clean", help="Remove worktrees and merged branches that are provably redundant")
+    clean_p.add_argument(
+        "folder", nargs="*", metavar="FOLDER",
+        help="The work folders to clean upstream-first; omit to act on all "
+             "folders" + _REMAINDER_HELP)
+    clean_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
+                         help=_CONFIG_HELP)
 
     archive_p = sub.add_parser(
         "archive", help="Retire a finished folder: clean it, then compress its plan "
                         "into _archive/ and register it in the roster; --restore "
                         "reverses one archive")
     archive_p.add_argument(
-        "folder", nargs="?", metavar="FOLDER",
-        help="The finished work folder to archive or restore (omit only with --all)")
+        "folder", nargs="*", metavar="FOLDER",
+        help="The finished work folders to archive, or the one folder to "
+             "restore (omit only with --all)" + _REMAINDER_HELP)
     archive_p.add_argument(
         "--all", action="store_true", dest="all_folders",
         help="Archive every eligible finished folder in lexicographic order; "
@@ -161,7 +173,8 @@ def _build_parser() -> argparse.ArgumentParser:
     accept_p.add_argument(
         "folder", nargs="*", metavar="FOLDER",
         help="One reviewed work folder, or two or more exact folders to accept "
-             "as a verified batch (omit only with --all)")
+             "as a verified batch (omit only with --all)" + _REMAINDER_HELP
+             + " that is finished")
     accept_p.add_argument(
         "--all", action="store_true", dest="all_folders",
         help="Accept every finished work folder in folder-dependency order, "
@@ -251,7 +264,7 @@ def _build_parser() -> argparse.ArgumentParser:
                        "adapter CLIs, temp directory); needs no existing "
                        ".assent/ project")
 
-    for p in (status_p, check_p, report_p, clean_p):
+    for p in (status_p, check_p, report_p):
         p.add_argument(
             "folder", nargs="?", metavar="FOLDER",
             help="The work folder; omit to act on all folders")
@@ -262,6 +275,76 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                        help=_CONFIG_HELP)
     return parser
+
+
+def _split_remainder(parser: argparse.ArgumentParser, command: str,
+                     names: list[str]) -> tuple[list[str], bool]:
+    """Strip the literal `...` remainder marker from one positional list.
+
+    Every command that accepts folder names parses the marker here, so the five
+    dispatch branches share one syntax rather than five near-identical ones.  A
+    misplaced or repeated marker is a usage error, and the marker never survives
+    into the returned names, so it can never be loaded as a folder.
+    """
+    occurrences = names.count(_REMAINDER)
+    if occurrences == 0:
+        return list(names), False
+    if occurrences > 1:
+        parser.error(f"{command}'s `...` may be given at most once")
+    if names[-1] != _REMAINDER:
+        parser.error(f"{command}'s `...` must be the last argument")
+    return list(names[:-1]), True
+
+
+def _remainder_pool(command: str, assent_dir: Path) -> list[str]:
+    """List the folders `...` may add, by the command's own discovery rule.
+
+    ``verify`` and ``accept`` only ever work on finished folders -- that is what
+    their whole-project ``--batch`` / ``--all`` paths discover -- so an
+    unfinished folder is not part of their remainder.  ``run``, ``clean`` and
+    ``archive`` consider every work folder and make their own per-folder
+    decision afterwards.
+    """
+    folders = list_task_folders(assent_dir)
+    if command in ("verify", "accept"):
+        return [folder for folder in folders
+                if infer_folder_completion(assent_dir / folder).complete]
+    return folders
+
+
+def _expand_remainder(command: str, explicit: list[str], assent_dir: Path, *,
+                      order_remainder: bool = False) -> list[str] | None:
+    """Snapshot the explicit prefix plus every remaining discovered folder.
+
+    The whole selection is resolved once, before anything is mutated, so a
+    folder appearing during the operation cannot silently broaden it.  ``None``
+    means the expansion is unusable and the caller returns 1.
+
+    ``order_remainder`` sorts the added folders with the shared dependency
+    ordering, for ``run``, which walks the selection itself instead of handing
+    it to a command that normalizes the order later.  The explicit prefix keeps
+    the order the human stated in either case.
+    """
+    try:
+        pool = _remainder_pool(command, assent_dir)
+    except AssentError as e:
+        print(f"Config error: {e}")
+        return None
+    chosen = set(explicit)
+    remainder = [f for f in pool if f not in chosen]
+    if order_remainder and remainder:
+        try:
+            graph = parse_folder_dependency_graph(assent_dir)
+            remainder = order_folders_by_dependency(graph, set(remainder))
+        except AssentError as e:
+            print(f"Folder dependency graph: FAIL ({e})")
+            return None
+    expanded = list(explicit) + remainder
+    if not expanded:
+        print(f"{command}: `...` selected no work folder.")
+        return None
+    print(f"{command}: `...` selects {', '.join(expanded)}")
+    return expanded
 
 
 def _status_summary(plan: Plan) -> str:
@@ -369,25 +452,44 @@ def _dispatch(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    # One parse of the remainder marker for every folder-taking command; the
+    # attribute is left holding only real folder names afterwards.
+    remainder = False
+    if args.command in ("run", "verify", "accept", "clean", "archive"):
+        field = "folders" if args.command == "run" else "folder"
+        names, remainder = _split_remainder(
+            parser, args.command, getattr(args, field))
+        setattr(args, field, names)
+
     if args.command == "run":
         if len(args.folders) != len(set(args.folders)):
             parser.error("run does not allow duplicate FOLDER names")
         if args.all_folders and (args.once or args.task is not None):
             parser.error("run's --all cannot be used with --once or --task")
+        if remainder and args.all_folders:
+            parser.error("run's `...` and --all cannot be used together")
+        if remainder and (args.once or args.task is not None):
+            parser.error("run's --once and --task cannot be used with `...`")
         if len(args.folders) > 1 and (args.once or args.task is not None):
             parser.error("run's --once and --task each require at most one FOLDER")
         if not args.all_folders and args.jobs is not None:
             parser.error("run's --jobs can only be used with --all")
 
     if args.command == "accept":
+        if remainder and args.all_folders:
+            parser.error("accept's `...` and --all cannot be used together")
         if args.all_folders and args.folder:
             parser.error("accept's --all and FOLDER cannot be used together")
-        if not args.all_folders and not args.folder:
+        if not args.all_folders and not args.folder and not remainder:
             parser.error("accept requires FOLDER or --all")
         if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
             parser.error("accept does not allow duplicate FOLDER names")
 
     if args.command == "verify":
+        if remainder and args.batch:
+            parser.error("verify's `...` and --batch cannot be used together")
+        if remainder and args.focus:
+            parser.error("verify's `...` and --focus cannot be used together")
         if args.batch and args.folder:
             parser.error("verify's --batch and FOLDER cannot be used together")
         if args.focus:
@@ -398,22 +500,35 @@ def _dispatch(argv: list[str]) -> int:
             if not args.bisect:
                 parser.error("verify's --no-bisect cannot be used with --focus")
         elif not args.batch:
-            if not args.folder:
+            if not args.folder and not remainder:
                 parser.error("verify requires FOLDER, a selected batch, or --batch")
-            if len(args.folder) == 1 and not args.bisect:
+            # With `...` the size of the batch is only known after expansion, so
+            # the same --no-bisect rule is applied again there.
+            if len(args.folder) == 1 and not args.bisect and not remainder:
                 parser.error("verify's --no-bisect only applies to a batch")
             if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
                 parser.error("verify does not allow duplicate FOLDER names")
 
+    if args.command == "clean":
+        if len(args.folder) != len(set(args.folder)):
+            parser.error("clean does not allow duplicate FOLDER names")
+
     if args.command == "archive":
+        if len(args.folder) != len(set(args.folder)):
+            parser.error("archive does not allow duplicate FOLDER names")
         if args.restore:
             if args.all_folders:
                 parser.error("archive's --restore and --all cannot be used together")
-            if args.folder is None:
+            if remainder:
+                parser.error("archive's --restore and `...` cannot be used "
+                             "together; restore takes exactly one FOLDER")
+            if not args.folder:
                 parser.error("archive --restore requires FOLDER")
-        elif args.all_folders and args.folder is not None:
+            if len(args.folder) > 1:
+                parser.error("archive --restore takes exactly one FOLDER")
+        elif args.all_folders and (args.folder or remainder):
             parser.error("archive's --all and FOLDER cannot be used together")
-        elif not args.all_folders and args.folder is None:
+        elif not args.all_folders and not args.folder and not remainder:
             parser.error("archive requires FOLDER or --all")
 
     if args.command == "init":
@@ -437,11 +552,29 @@ def _dispatch(argv: list[str]) -> int:
         except AssentError as e:
             print(f"Global contracts: FAIL ({e})")
             return 1
+        # The remainder is snapshotted before the explicit prefix starts, so a
+        # folder that appears while the prefix runs cannot join this invocation.
+        scheduled: list[str] | None = None
+        if remainder:
+            expanded = _expand_remainder("run", args.folders, assent_dir,
+                                         order_remainder=True)
+            if expanded is None:
+                return 1
+            scheduled = expanded[len(args.folders):]
         if args.folders:
             result = _dispatch_run_folders(
                 args.config, args.folders, once=args.once, task_id=args.task)
             if result != 0:
                 return result
+        if scheduled is not None:
+            if not scheduled:
+                print("No remaining work folder to run.")
+                return 0
+            # The remainder is run through the same explicit-folder path, in
+            # dependency order: `...` selects folders, it does not switch the
+            # command over to the whole-project scheduler.
+            return _dispatch_run_folders(
+                args.config, scheduled, once=False, task_id=None)
         if args.all_folders:
             return run_all(args.config, assent_dir, args.jobs or 1)
         if args.folders:
@@ -449,11 +582,16 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "accept":
         if args.all_folders:
             return accept_all(args.config, assent_dir)
-        if len(args.folder) >= 2:
-            return accept_selected_batch(
-                args.config, assent_dir, args.folder)
+        selected = args.folder
+        if remainder:
+            expanded = _expand_remainder("accept", selected, assent_dir)
+            if expanded is None:
+                return 1
+            selected = expanded
+        if len(selected) >= 2:
+            return accept_selected_batch(args.config, assent_dir, selected)
         try:
-            cfg = load_config(args.config, args.folder[0])
+            cfg = load_config(args.config, selected[0])
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
@@ -461,16 +599,32 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "archive":
         if args.all_folders:
             return archive_all(args.config, assent_dir)
+        selected = args.folder
+        if remainder:
+            expanded = _expand_remainder("archive", selected, assent_dir)
+            if expanded is None:
+                return 1
+            selected = expanded
+        if len(selected) > 1:
+            return archive_selected(args.config, selected)
         try:
-            cfg = load_config(args.config, args.folder)
+            cfg = load_config(args.config, selected[0])
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
         return restore_folder(cfg) if args.restore else archive_folder(cfg)
     if args.command == "verify":
+        selected = args.folder
+        if remainder:
+            expanded = _expand_remainder("verify", selected, assent_dir)
+            if expanded is None:
+                return 1
+            selected = expanded
+            if len(selected) == 1 and not args.bisect:
+                parser.error("verify's --no-bisect only applies to a batch")
         if not args.batch:
             try:
-                cfg = load_config(args.config, args.folder[0])
+                cfg = load_config(args.config, selected[0])
             except AssentError as e:
                 print(f"Config error: {e}")
                 return 1
@@ -479,10 +633,10 @@ def _dispatch(argv: list[str]) -> int:
                 return verify_batch(args.config, assent_dir, args.bisect)
             if args.focus:
                 return engine.verify_focused(cfg)
-            if len(args.folder) == 1:
+            if len(selected) == 1:
                 return verify_folder(cfg)
             return verify_selected_batch(
-                args.config, assent_dir, args.folder, args.bisect)
+                args.config, assent_dir, selected, args.bisect)
         except KeyboardInterrupt:
             print("\nverify interrupted; temporary resources were cleaned up.")
             return 130
@@ -515,7 +669,13 @@ def _dispatch(argv: list[str]) -> int:
             reason=args.reason, revert_code=args.revert_code)
     folders = list_task_folders(assent_dir)
     if args.command == "clean":
-        selected = folders if args.folder is None else [args.folder]
+        if remainder:
+            expanded = _expand_remainder("clean", args.folder, assent_dir)
+            if expanded is None:
+                return 1
+            selected = expanded
+        else:
+            selected = args.folder or folders
         if not selected:
             print("No work folder with a task file found.")
             return 1
