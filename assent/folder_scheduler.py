@@ -46,6 +46,19 @@ _TERMINATE_GRACE_SECONDS = 10
 _FORCED_CLEANUP_ATTEMPTS = 5
 
 
+def _package_search_root() -> Path:
+    """The directory that owns the running ``assent`` package.
+
+    ``python -m assent`` puts the child's working directory at the front of its
+    module search path, so a managed project that happens to contain its own
+    ``assent/`` directory would otherwise decide which Assent the child runs.
+    Pointing the child at the parent of this file's package makes it import the
+    very code the parent process is executing, whether that is the flat
+    repository checkout or an installed site-packages copy.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
 def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
     """Start an isolated child process equivalent to ``assent run <folder>``.
 
@@ -53,6 +66,9 @@ def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
     stop channel: closing it (or dying) gives the child EOF, which
     ``assent.__main__`` turns into KeyboardInterrupt. Console signals do not
     survive a non-console pty such as tmux's, a pipe always does.
+
+    The child runs from the package's own root rather than the project's, so
+    the absolute ``--config`` path is what still locates the project.
     """
     command = [
         sys.executable, "-m", "assent", "run", folder,
@@ -62,6 +78,7 @@ def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
     child_env["ASSENT_STDIN_STOP"] = "1"
     kwargs = {
         "env": child_env,
+        "cwd": str(_package_search_root()),
         "stdin": subprocess.PIPE,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
