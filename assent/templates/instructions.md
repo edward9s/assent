@@ -37,6 +37,12 @@ the `_assent.log` inside a work folder.
 
 ## Working rules
 
+- Write boundary (task session): all file edits must land under the session
+  cwd (the isolated worktree); before editing, confirm the target's absolute
+  path is prefixed by cwd. The scheduler-provided main-worktree absolute path
+  has exactly two writable exceptions: your own task file's status line and
+  your own r file; everything else, including the main tree's source and
+  tests, is read-only. Writing into the main worktree fails that task run.
 - Do not modify files unrelated to the current task.
 - Reference shared specifications; do not copy them into each task file.
 - Keep conjecture, changed, verified, and unverified separately recorded.
