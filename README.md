@@ -693,14 +693,16 @@ fresh-batch release mode or, when batch evidence is absent/expired, its
 intentional sequential verify-then-accept mode.
 
 The packaged `.assent/verify.py` checks both the candidate working tree and the
-committed delta from `HEAD` to its first parent. This catches committed
-trailing whitespace that plain `git diff --check` cannot see. Fresh `assent init`
-asks which real project test to enable: parallel unittest, pytest, npm test,
-Flutter test, or a custom command rendered as argv. The packaged template keeps
-all of those project-test examples commented, while the new project copy
-activates exactly the selected command. A fresh verifier therefore fails when
-the selected test is absent instead of reporting `verify: OK` from an empty
-skeleton.
+committed delta from `HEAD` to its first parent for leftover conflict markers.
+Whitespace-only differences, including line endings, trailing spaces or tabs,
+and blank lines at EOF, do not block verification; projects that require a
+formatting policy can select or add an explicit formatter check. Fresh
+`assent init` asks which real project test to enable: parallel unittest, pytest,
+npm test, Flutter test, or a custom command rendered as argv. The packaged
+template keeps all of those project-test examples commented, while the new
+project copy activates exactly the selected command. A fresh verifier therefore
+fails when the selected test is absent instead of reporting `verify: OK` from
+an empty skeleton.
 
 On repeat initialization, `assent init` never overwrites an existing verifier
 and refuses `--test` when one is already present. It does replace

@@ -22,6 +22,12 @@ if hasattr(sys.stdout, "reconfigure"):
 # The verification target is always the cwd the scheduler sets; under isolated execution the script body still lives in the main tree.
 ROOT = Path.cwd().resolve()
 
+# Keep diff --check's conflict-marker detection without enforcing formatting.
+DIFF_CHECK_CONFIG = (
+    "core.whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,"
+    "-indent-with-non-tab,-tab-in-indent"
+)
+
 
 def fail(message: str) -> None:
     print(f"verify: FAIL - {message}")
@@ -54,7 +60,7 @@ def check_committed_delta() -> None:
         first_parent = parent.stdout.strip()
         if not first_parent:
             fail("git returned an empty first parent")
-        run("git", "-c", "core.whitespace=cr-at-eol", "diff", "--check",
+        run("git", "-c", DIFF_CHECK_CONFIG, "diff", "--check",
             first_parent, "HEAD")
     elif parent.returncode != 128:
         fail("unable to determine the candidate's first parent")
@@ -124,9 +130,8 @@ def run_unittest_parallel(start_dir: str = "tests", jobs: int | None = None) -> 
 
 
 # --- Worktree integrity check (keep) ---
-# core.whitespace=cr-at-eol is set per invocation so a CR stored before LF is not
-# reported as trailing whitespace; real trailing spaces and tabs still fail.
-run("git", "-c", "core.whitespace=cr-at-eol", "diff", "--check")
+# Whitespace is formatting, not an integration failure. Conflict markers fail.
+run("git", "-c", DIFF_CHECK_CONFIG, "diff", "--check")
 check_committed_delta()
 
 # --- Project test choice (assent init activates exactly one line) ---

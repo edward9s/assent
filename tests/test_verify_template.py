@@ -1,4 +1,4 @@
-"""Fixture tests for the packaged verify.py template: its git whitespace gates,
+"""Fixture tests for the packaged verify.py template: its git diff gates,
 its run() command resolution, and its run_unittest_parallel() helper."""
 from __future__ import annotations
 
@@ -196,8 +196,8 @@ class ResolvedCommandCase(VerifyTemplateFixture):
         self.assertIn("verify: OK", result.stdout)
 
 
-class LineEndingWhitespaceCase(VerifyTemplateFixture):
-    """The template's two git diff --check gates must accept LF and CRLF alike."""
+class DiffIntegrityCase(VerifyTemplateFixture):
+    """Whitespace passes, while both diff gates reject conflict markers."""
 
     def _prepare(self, baseline: bytes) -> None:
         self._write_module("test_a", _PASS_MODULE)
@@ -232,26 +232,61 @@ class LineEndingWhitespaceCase(VerifyTemplateFixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("verify: OK", result.stdout)
 
-    def test_trailing_space_before_lf_still_fails(self) -> None:
+    def test_trailing_space_before_lf_passes(self) -> None:
         self._prepare(b"alpha\n")
         self._write_bytes("data.txt", b"alpha\nbeta \n")
 
         result = self._run()
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("trailing whitespace", result.stdout + result.stderr)
-        self.assertIn("verify: FAIL", result.stdout)
-        self.assertNotIn("verify: OK", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("verify: OK", result.stdout)
 
-    def test_trailing_tab_before_crlf_in_committed_delta_still_fails(self) -> None:
+    def test_trailing_tab_before_crlf_in_committed_delta_passes(self) -> None:
         self._prepare(b"alpha\r\n")
         self._write_bytes("data.txt", b"alpha\r\nbeta\t\r\n")
         self._commit("crlf whitespace candidate")
 
         result = self._run()
 
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("verify: OK", result.stdout)
+
+    def test_blank_line_at_eof_in_committed_delta_passes(self) -> None:
+        self._prepare(b"alpha\n")
+        self._write_bytes("data.txt", b"alpha\nbeta\n\n")
+        self._commit("blank eof candidate")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("verify: OK", result.stdout)
+
+    def test_worktree_conflict_marker_still_fails(self) -> None:
+        self._prepare(b"alpha\n")
+        self._write_bytes(
+            "data.txt",
+            b"alpha\n<<<<<<< ours\nbeta\n=======\ngamma\n>>>>>>> theirs\n",
+        )
+
+        result = self._run()
+
         self.assertEqual(result.returncode, 1)
-        self.assertIn("trailing whitespace", result.stdout + result.stderr)
+        self.assertIn("leftover conflict marker", result.stdout + result.stderr)
+        self.assertIn("verify: FAIL", result.stdout)
+        self.assertNotIn("verify: OK", result.stdout)
+
+    def test_committed_conflict_marker_still_fails(self) -> None:
+        self._prepare(b"alpha\n")
+        self._write_bytes(
+            "data.txt",
+            b"alpha\n<<<<<<< ours\nbeta\n=======\ngamma\n>>>>>>> theirs\n",
+        )
+        self._commit("conflict marker candidate")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("leftover conflict marker", result.stdout + result.stderr)
         self.assertIn("verify: FAIL", result.stdout)
         self.assertNotIn("verify: OK", result.stdout)
 

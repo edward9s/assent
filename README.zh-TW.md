@@ -560,11 +560,12 @@ verifier;`assent accept --all` 則依 fresh batch release,或 batch evidence 缺
 過期時的刻意逐資料夾 verify-then-accept 模式執行。
 
 打包的 `.assent/verify.py` 同時檢查 candidate working tree 與 candidate `HEAD` 相對
-第一父提交的 committed delta,因此能抓到單純 `git diff --check` 看不到的已提交尾端
-空白。新的 `assent init` 會選擇真正的專案測試:平行 unittest、pytest、npm test、
-Flutter test 或 custom 命令,並把它安全地渲染成 argv。打包 template 內的所有專案
-測試範例都維持註解,只有新專案副本啟用選中的一個;測試尚不存在時,新的 verifier
-會失敗而不會從空骨架回報 `verify: OK`。
+第一父提交的 committed delta 是否殘留合併衝突標記。只有空白差異時不阻擋驗證,
+包括換行格式、行尾空格或 tab,以及檔尾空白行;需要格式政策的專案可選用或加入明確
+的 formatter 檢查。新的 `assent init` 會選擇真正的專案測試:平行 unittest、
+pytest、npm test、Flutter test 或 custom 命令,並把它安全地渲染成 argv。打包
+template 內的所有專案測試範例都維持註解,只有新專案副本啟用選中的一個;測試尚不
+存在時,新的 verifier 會失敗而不會從空骨架回報 `verify: OK`。
 
 重跑初始化時,`assent init` 永不覆寫既有 verifier,已有 verifier 時提供 `--test`
 會拒絕。它會用打包版本取代 `~/.assent/format.md` 與 `~/.assent/instructions.md`,
