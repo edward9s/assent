@@ -54,6 +54,13 @@ class PlanTestCase(unittest.TestCase):
 
 
 class TestParseTaskFile(PlanTestCase):
+    def test_formal_task_path_parsed_and_preserved(self):
+        path = self.write("t001_demo.e.toml", task_text())
+        task = parse_task_file(path)
+        self.assertEqual(task.id, "t001")
+        self.assertEqual(task.path, path.resolve())
+        self.assertEqual(task.journal_path.name, "t001_demo.r.toml")
+
     def test_valid_task_parsed(self):
         path = self.write("t001_demo.toml", task_text(
             title="骨架", deps=(), model="prime", effort="high",
@@ -134,6 +141,16 @@ class TestParseTaskFile(PlanTestCase):
 
 
 class TestPlanParse(PlanTestCase):
+    def test_mixed_formats_share_dependency_graph_and_selection(self):
+        formal = self.write("t002_b.e.toml", task_text(deps=("t001",)))
+        legacy = self.write("t001_a.toml", task_text(status="DONE"))
+        plan = Plan.parse(self.dir)
+        self.assertEqual([task.path for task in plan.tasks],
+                         [legacy.resolve(), formal.resolve()])
+        task, resumed = plan.next_task()
+        self.assertEqual(task.path, formal.resolve())
+        self.assertFalse(resumed)
+
     def test_tasks_sorted_by_filename(self):
         self.write("t002_b.toml", task_text(deps=("t001",)))
         self.write("t001_a.toml", task_text())
@@ -183,6 +200,12 @@ class TestPlanParse(PlanTestCase):
         with self.assertRaisesRegex(AgentsError, "重複"):
             Plan.parse(self.dir)
 
+    def test_same_id_in_formal_and_legacy_formats_rejected(self):
+        self.write("t001_a.e.toml", task_text())
+        self.write("t001_a.toml", task_text())
+        with self.assertRaisesRegex(AgentsError, "任務 id 重複:t001"):
+            Plan.parse(self.dir)
+
     def test_unknown_dep_rejected(self):
         self.write("t001_a.toml", task_text(deps=("t009",)))
         with self.assertRaisesRegex(AgentsError, "不存在的任務"):
@@ -230,6 +253,11 @@ class TestNextTask(PlanTestCase):
 
 
 class TestSetStatus(PlanTestCase):
+    def test_formal_task_status_writeback(self):
+        path = self.write("t001_x.e.toml", task_text())
+        set_status(path, "DONE")
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
     def test_only_status_line_changes(self):
         path = self.write("t001_x.toml", task_text(notes="內文提到 status 一詞"))
         before = path.read_text(encoding="utf-8")
@@ -360,16 +388,21 @@ class TestJournal(PlanTestCase):
         self.assertEqual(journal_path_for(Path("a/t001_x.toml")).name,
                          "t001_x.r.toml")
 
+    def test_formal_journal_path_for_removes_execution_marker(self):
+        journal = journal_path_for(Path("a/t001_x.e.toml"))
+        self.assertEqual(journal.name, "t001_x.r.toml")
+        self.assertNotEqual(journal.name, "t001_x.e.r.toml")
+
     def test_task_and_journal_pairs_are_adjacent_when_sorted(self):
         names = [
-            journal_path_for(Path("t002_b.toml")).name,
-            "t001_a.toml",
-            journal_path_for(Path("t001_a.toml")).name,
-            "t002_b.toml",
+            journal_path_for(Path("t002_b.e.toml")).name,
+            "t001_a.e.toml",
+            journal_path_for(Path("t001_a.e.toml")).name,
+            "t002_b.e.toml",
         ]
         self.assertEqual(sorted(names), [
-            "t001_a.r.toml", "t001_a.toml",
-            "t002_b.r.toml", "t002_b.toml",
+            "t001_a.e.toml", "t001_a.r.toml",
+            "t002_b.e.toml", "t002_b.r.toml",
         ])
 
     def test_old_journal_name_is_not_adopted(self):

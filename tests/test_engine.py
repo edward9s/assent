@@ -108,8 +108,9 @@ class EngineTestCase(unittest.TestCase):
             encoding="utf-8")
         return load_config(self.root / ".agents" / "agents.toml")
 
-    def write_task(self, num, slug="task", **kw) -> Path:
-        path = self.plan_dir / f"t{num:03d}_{slug}.toml"
+    def write_task(self, num, slug="task", *, formal=False, **kw) -> Path:
+        suffix = ".e.toml" if formal else ".toml"
+        path = self.plan_dir / f"t{num:03d}_{slug}{suffix}"
         path.write_text(task_text(**kw), encoding="utf-8", newline="\n")
         return path
 
@@ -141,6 +142,25 @@ class EngineTestCase(unittest.TestCase):
 
 
 class TestRunSuccess(EngineTestCase):
+    def test_formal_task_runs_with_prompt_scope_and_journal_paths(self):
+        path = self.write_task(1, formal=True)
+        cfg = self.build()
+        self.commit_all()
+        adapter = ScriptedAdapter([
+            self.ai_done(path, {"src/formal.py": "ok"})])
+
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        prompt = adapter.calls[0][0]
+        journal = path.with_name("t001_task.r.toml")
+        self.assertIn(str(path), prompt)
+        self.assertIn(str(journal), prompt)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertTrue(journal.is_file())
+        self.assertFalse(path.with_name("t001_task.e.r.toml").exists())
+        self.assertTrue(any(s.startswith("auto(t001)")
+                            for s in self.subjects()))
+
     def test_once_success_creates_checkpoint(self):
         path = self.write_task(1)
         cfg = self.build()

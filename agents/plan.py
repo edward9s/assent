@@ -1,6 +1,7 @@
 """工作資料夾解析與寫回(格式契約見 templates/format.md)。
 
-- 任務檔:tNNN_名稱.toml,表頭欄位嚴格驗證,未知鍵報錯。
+- 任務檔:tNNN_名稱.e.toml(過渡期仍可讀舊 tNNN_名稱.toml),表頭欄位嚴格
+  驗證,未知鍵報錯。
 - 日誌檔:tNNN_名稱.r.toml,append-only 的 [[entry]] 區塊。
 - 對任務檔的機器寫入僅一種:set_status 精準替換 status 那一行,其餘位元組不動;
   寫完以 tomllib 重新解析驗證,防止多行字串裡的假 status 行被誤中。
@@ -16,7 +17,8 @@ from pathlib import Path
 
 from agents import AgentsError
 
-_FILENAME_RE = re.compile(r"^t(\d{3})_(.+)\.toml$")
+_FORMAL_FILENAME_RE = re.compile(r"^t(\d{3})_(.+)\.e\.toml$")
+_LEGACY_FILENAME_RE = re.compile(r"^t(\d{3})_(.+)\.toml$")
 _ID_RE = re.compile(r"^t\d{3}$")
 _STATUS_VALUES = {"TODO", "WIP", "DONE", "BLOCKED", "SKIP"}
 _MODEL_TIERS = {"prime", "core", "lite"}
@@ -79,8 +81,23 @@ def _str_list(data: dict, path: Path, key: str) -> list[str]:
 
 
 def journal_path_for(task_path: Path) -> Path:
-    """t 檔路徑 -> 對應日誌路徑(任務檔完整主幹加上 .r.toml)。"""
-    return task_path.with_suffix(".r.toml")
+    """正式或舊任務檔路徑 -> 同主幹的 .r.toml 日誌路徑。"""
+    name = task_path.name
+    if name.endswith(".e.toml"):
+        journal_name = name[:-len(".e.toml")] + ".r.toml"
+    elif name.endswith(".toml") and not name.endswith(".r.toml"):
+        journal_name = name[:-len(".toml")] + ".r.toml"
+    else:
+        raise AgentsError(
+            f"無法從非任務檔路徑產生日誌路徑:{name}"
+            "(需為 tNNN_名稱.e.toml 或過渡期舊 tNNN_名稱.toml)")
+    return task_path.with_name(journal_name)
+
+
+def _task_filename_match(name: str) -> re.Match[str] | None:
+    """辨識正式與過渡期舊任務檔名;呼叫端須先排除日誌檔。"""
+    return (_FORMAL_FILENAME_RE.match(name)
+            or _LEGACY_FILENAME_RE.match(name))
 
 
 def parse_task_file(path: Path) -> Task:
@@ -89,10 +106,12 @@ def parse_task_file(path: Path) -> Task:
         raise AgentsError(
             f"日誌檔 {path.name} 不可當作任務檔解析"
             "(日誌檔格式為 tNNN_名稱.r.toml)")
-    m = _FILENAME_RE.match(path.name)
+    m = _task_filename_match(path.name)
     if m is None:
         raise AgentsError(
-            f"任務檔名不合規則:{path.name}(需為 tNNN_名稱.toml,NNN 為三位數字)")
+            f"任務檔名不合規則:{path.name}"
+            "(需為 tNNN_名稱.e.toml,過渡期亦接受舊 tNNN_名稱.toml;"
+            "NNN 為三位數字)")
     task_id = f"t{m.group(1)}"
 
     try:
@@ -176,10 +195,11 @@ class Plan:
         files = sorted(
             p for p in tasks_dir.iterdir()
             if (p.is_file() and not p.name.endswith(".r.toml")
-                and _FILENAME_RE.match(p.name)))
+                and _task_filename_match(p.name)))
         if not files:
             raise AgentsError(
-                f"工作資料夾 {tasks_dir} 沒有任務檔(tNNN_名稱.toml);"
+                f"工作資料夾 {tasks_dir} 沒有任務檔(tNNN_名稱.e.toml;"
+                "過渡期亦接受舊 tNNN_名稱.toml);"
                 "請先開 AI 會議產出計畫")
 
         tasks: list[Task] = []

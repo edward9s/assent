@@ -90,8 +90,9 @@ class E2ETestCase(unittest.TestCase):
     def cfg(self):
         return load_config(self.root / ".agents" / "agents.toml")
 
-    def add_task(self, num, **kw) -> Path:
-        path = self.plan_dir / f"t{num:03d}_task.toml"
+    def add_task(self, num, *, formal=False, **kw) -> Path:
+        suffix = ".e.toml" if formal else ".toml"
+        path = self.plan_dir / f"t{num:03d}_task{suffix}"
         path.write_text(task_text(**kw), encoding="utf-8", newline="\n")
         return path
 
@@ -128,6 +129,24 @@ class E2ETestCase(unittest.TestCase):
 
 
 class TestScenarios(E2ETestCase):
+    def test_formal_task_runs_end_to_end_with_matching_journal(self):
+        task = self.add_task(1, formal=True)
+        self.start()
+        adapter = ScriptedAdapter([
+            self.done_step(task, {"src/formal.py": "ok"})])
+
+        self.assertEqual(self.run_engine(adapter, once=True), 0)
+
+        journal = task.with_name("t001_task.r.toml")
+        self.assertEqual(parse_task_file(task).status, "DONE")
+        self.assertTrue(journal.is_file())
+        self.assertFalse(task.with_name("t001_task.e.r.toml").exists())
+        self.assertIn(str(task), adapter.calls[0])
+        self.assertIn(str(journal), adapter.calls[0])
+        report = engine.render_report(
+            self.cfg(), engine.Plan.parse(self.plan_dir))
+        self.assertIn("t001  DONE", report)
+
     def test_smooth_run_three_tasks(self):
         """順利劇本:三任務依序 DONE,三個 checkpoint,樹乾淨。"""
         p1 = self.add_task(1)
