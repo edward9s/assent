@@ -390,6 +390,275 @@ Each subcommand's `-h`/`--help` shows that layer's actual syntax; there is
 no top-level `--config` or other global option that applies to every
 subcommand.
 
+## Adapters, model tiers, and effort levels
+
+Assent works with different AI CLI tools via pluggable adapters. Each task file
+specifies an abstract **tier** (`prime`, `core`, or `lite`) instead of a concrete
+model name; the adapter's configuration table translates that tier into the actual
+CLI model for this run. Similarly, a task can request an abstract **effort** level
+(`low`, `medium`, or `high`), which the adapter translates to the vendor's
+concrete CLI value (if any).
+
+### Supported adapters
+
+**Claude** (`adapter.name = "claude"`)
+
+```toml
+[adapter.claude]
+command = "claude"
+extra_args = ["--permission-mode", "bypassPermissions"]
+
+[adapter.claude.models]
+prime = "fable"      # Fable 5 – fastest tier
+core  = "opus"       # Opus 4.8 – balanced tier
+lite  = "sonnet"     # Sonnet 5 – efficient tier
+```
+
+**Codex** (`adapter.name = "codex"`)
+
+```toml
+[adapter.codex]
+command = "codex"
+extra_args = ["--sandbox", "danger-full-access"]
+
+[adapter.codex.models]
+prime = "gpt-5.6-sol"    # largest model
+core  = "gpt-5.6-terra"  # balanced model
+lite  = "gpt-5.6-luna"   # efficient model
+```
+
+**Antigravity** (`adapter.name = "antigravity"`)
+
+The Antigravity adapter runs Google's Gemini models via `agy` (Antigravity CLI),
+a free locally-installed CLI that requires interactive login once per machine.
+This adapter communicates headlessly using print mode (plain-text output, no JSON
+events) and includes preflight validation of model/effort combinations before
+opening a session.
+
+```toml
+[adapter.antigravity]
+command = "agy"
+extra_args = ["--dangerously-skip-permissions"]
+
+[adapter.antigravity.models]
+prime = "gemini-3.1-pro"   # Gemini 3.1 Pro – highest quality
+core  = "gemini-3.6-flash" # Gemini 3.6 Flash – balanced (new)
+lite  = "gemini-3.5-flash" # Gemini 3.5 Flash – efficient
+
+# Antigravity effort translations per tier. The notes below explain each.
+[adapter.antigravity.default_effort]
+prime = "high"
+core  = "high"
+lite  = "high"
+
+# Gemini 3.1 Pro supports only low and high efforts, not medium. For quality,
+# medium is translated up to high (never silently downgraded).
+[adapter.antigravity.efforts.prime]
+medium = "high"
+
+# Gemini 3.5 Flash supports only low and medium, not high. The lite tier's high
+# is translated to medium (the family's ceiling), visible here in the config
+# table where it can be inspected and overridden if needed.
+[adapter.antigravity.efforts.lite]
+high = "medium"
+```
+
+### Model/effort matrix
+
+Task files specify an abstract tier and optional effort. The adapter translates
+this into the concrete CLI invocation. The full 9-cell grid below shows what
+each task-file (tier, effort) pair resolves to in each adapter:
+
+#### Claude adapter
+
+| Effort | prime<br/>(Fable) | core<br/>(Opus) | lite<br/>(Sonnet) |
+|--------|---|---|---|
+| low | `--model fable` | `--model opus` | `--model sonnet` |
+| medium | `--model fable --effort medium` | `--model opus --effort medium` | `--model sonnet --effort medium` |
+| high | `--model fable --effort high` | `--model opus --effort high` | `--model sonnet --effort high` |
+
+#### Codex adapter
+
+| Effort | prime<br/>(gpt-5.6-sol) | core<br/>(gpt-5.6-terra) | lite<br/>(gpt-5.6-luna) |
+|--------|---|---|---|
+| low | `--model gpt-5.6-sol` | `--model gpt-5.6-terra` | `--model gpt-5.6-luna` |
+| medium | `--model gpt-5.6-sol --effort medium` | `--model gpt-5.6-terra --effort medium` | `--model gpt-5.6-luna --effort medium` |
+| high | `--model gpt-5.6-sol --effort high` | `--model gpt-5.6-terra --effort high` | `--model gpt-5.6-luna --effort high` |
+
+#### Antigravity adapter (1.1.5+)
+
+| Effort | prime<br/>(3.1 Pro) | core<br/>(3.6 Flash) | lite<br/>(3.5 Flash) |
+|--------|---|---|---|
+| low | `--model gemini-3.1-pro --effort low` | `--model gemini-3.6-flash --effort low` | `--model gemini-3.5-flash --effort low` |
+| medium | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort medium` | `--model gemini-3.5-flash --effort medium` |
+| high | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort high` | `--model gemini-3.5-flash --effort medium` |
+
+Notes:
+- **Antigravity prime/medium**: Gemini 3.1 Pro does not support `medium`, so
+  assent chooses `high` instead (quality-first mapping). This is not a silent
+  fallback—the configuration table makes it visible and auditable.
+- **Antigravity lite/high**: Gemini 3.5 Flash has no `high` effort level, so
+  `high` is translated to `medium`, the family's maximum available.
+- **Antigravity 1.1.5 minimum**: This is the version that supports `--effort`,
+  stable model slugs, and the headless fixes required for unattended execution.
+  Earlier versions are rejected before opening a session.
+
+### Using Antigravity adapter
+
+**First-time setup**
+
+1. Install `agy` (Antigravity CLI) on your machine if not already present.
+2. Run `agy auth login` to interactively sign in once per machine.
+3. Verify your installation with `agy --version` (must be 1.1.5 or later) and
+   `agy models` (shows available models).
+
+Assent will **not** modify your `~/.gemini/antigravity-cli/settings.json`, run
+the login browser, or interact with credentials. Your login credentials and
+workspace trust remain under your control.
+
+**Example task file using Antigravity**
+
+```toml
+title = "Analyze code with high-quality reasoning"
+model = "prime"
+effort = "high"
+status = "TODO"
+scope = ["src/", "tests/"]
+verify = "python -m pytest"
+
+goal = "Use Gemini 3.1 Pro (highest quality) to review the codebase."
+```
+
+When `assent run` executes this task, it will:
+1. Validate that Antigravity 1.1.5+ is installed and can reach `gemini-3.1-pro
+   --effort high`.
+2. Open a headless session with `agy --print --model gemini-3.1-pro --effort
+   high --mode accept-edits ...`.
+3. Run the verification command and record the result.
+
+**Switching adapters in an existing project**
+
+Changing `[adapter]` name is a one-line config change. Existing task files do
+not need to change; they still use `model = "prime"` and `effort = "high"`, and
+the new adapter's configuration table translates those the same way. Once you
+have switched adapters, the next `assent check` will validate the new adapter
+before any session starts.
+
+### Configuring model and effort translations
+
+The config template in `.assent/assent.toml` shows how to customize the
+tier-to-model mapping and the abstract-to-CLI effort translations. The lookup
+order is always:
+
+1. Task file's explicit `effort` annotation (if present)
+2. Adapter's `default_effort` for this tier (if present)
+3. No effort flag (some adapters/tiers may not support one)
+
+And for effort translation:
+
+1. Tier-specific section: `[adapter.<name>.efforts.<tier>]`
+2. Flat section: `[adapter.<name>.efforts]`
+3. Identity (send the abstract value as-is)
+
+Example: if your Antigravity setup has a newer 3.1 Pro that supports medium,
+you can remove the quality-first mapping:
+
+```toml
+# Remove this line:
+# [adapter.antigravity.efforts.prime]
+# medium = "high"
+
+# Or set it to the actual value:
+[adapter.antigravity.efforts.prime]
+medium = "medium"
+```
+
+### Configuring Antigravity print timeout
+
+Antigravity's `--print-timeout` is independent of Assent's watchdog timeout.
+The print timeout limits how long the CLI will wait for a single print
+invocation to complete; the watchdog limits how long Assent will wait for any
+output before killing the session.
+
+In `.assent/assent.toml`:
+
+```toml
+[adapter.antigravity]
+print_timeout_minutes = 120  # AGY will wait up to 2 hours for an answer
+```
+
+Do not set this lower than your longest expected task; `assent check` will
+validate that the print timeout is positive.
+
+### Troubleshooting Antigravity configuration
+
+**Problem: `preflight failed: invalid model selection`**
+
+Antigravity rejected the model/effort combination during preflight. Check:
+
+```bash
+agy models                         # See what models are available
+agy --print --model <MODEL> ...    # Test your model/effort choice
+```
+
+Common causes:
+- **Unmapped model tier**: add the model to `[adapter.antigravity.models]`.
+- **Unsupported effort**: the model does not support that effort level. For
+  example, Gemini 3.1 Pro does not support `medium`. Fix the mapping in
+  `[adapter.antigravity.efforts.prime]`.
+
+**Problem: `authentication required` or `permission denied`**
+
+You must have logged in once on this machine:
+
+```bash
+agy auth login          # Opens a browser for Google sign-in
+```
+
+If you are running `assent run` unattended (e.g., at night), your login must
+complete before the run starts. Assent cannot open a browser, log you in, or
+detect when you are away; it only uses your existing login credentials.
+
+**Problem: `command not found: agy`**
+
+Antigravity CLI is not installed or not on your PATH. Visit the [Antigravity
+CLI installation docs](https://google-antigravity.github.io/install) and verify
+with `agy --version`.
+
+**Problem: Quota exhausted mid-task**
+
+When Antigravity reaches quota limits, `assent run` records a `WIP` checkpoint
+with the partial results. When your quota resets (Google typically resets daily
+or hourly depending on your plan), you can resume the same task:
+
+```bash
+assent run <FOLDER>  # Resumes from WIP automatically
+```
+
+The task journal records the exact quota-reset time (if available) and the
+scheduler will poll until then before retrying. If you need to run a different
+folder in the meantime, you can run it in a second terminal as long as it does
+not depend on the quota-limited folder.
+
+**Fixing configuration after a preflight error**
+
+Do not modify the task file's abstract tier or effort. Instead, update only the
+adapter configuration. For example, if prime/medium is mapped to high but you
+want to change it:
+
+```toml
+# Before
+[adapter.antigravity.efforts.prime]
+medium = "high"
+
+# After (if medium is now supported)
+[adapter.antigravity.efforts.prime]
+medium = "medium"
+```
+
+After fixing the config, no changes to the `.assent/` management files are
+needed; `assent check` will re-validate and `assent run` will retry.
+
 ## Plan format and config files
 
 - Full format contract: [assent/templates/format.md](assent/templates/format.md)

@@ -307,6 +307,252 @@ checkpoints 構成目前分支的連續尾段才會建立新的反向 commit,絕
 各子命令的 `-h`/`--help` 會顯示該層實際語法;頂層沒有可套用到所有子命令的
 `--config` 等全域選項。
 
+## Adapter、模型檔位與 effort 等級
+
+Assent 透過可插式 adapter 支援不同的 AI CLI 工具。每份任務檔用抽象**檔位**
+(`prime`、`core` 或 `lite`) 替代具體模型名稱;adapter 的組態表會把該檔位轉成
+這次執行的實際 CLI 模型。同樣地,任務可要求抽象 **effort** 等級(`low`、
+`medium` 或 `high`),adapter 會轉成廠商的具體 CLI 值(如果支援的話)。
+
+### 支援的 adapter
+
+**Claude** (`adapter.name = "claude"`)
+
+```toml
+[adapter.claude]
+command = "claude"
+extra_args = ["--permission-mode", "bypassPermissions"]
+
+[adapter.claude.models]
+prime = "fable"      # Fable 5 — 最快檔位
+core  = "opus"       # Opus 4.8 — 平衡檔位
+lite  = "sonnet"     # Sonnet 5 — 高效檔位
+```
+
+**Codex** (`adapter.name = "codex"`)
+
+```toml
+[adapter.codex]
+command = "codex"
+extra_args = ["--sandbox", "danger-full-access"]
+
+[adapter.codex.models]
+prime = "gpt-5.6-sol"    # 最大模型
+core  = "gpt-5.6-terra"  # 平衡模型
+lite  = "gpt-5.6-luna"   # 高效模型
+```
+
+**Antigravity** (`adapter.name = "antigravity"`)
+
+Antigravity adapter 透過 `agy`(Antigravity CLI) 執行 Google 的 Gemini 模型,
+是一份自由安裝的本地 CLI,每台機器需互動登入一次。本 adapter 用 print mode
+(純文字輸出、無 JSON 事件) 通訊,在開啟 session 前有 model/effort 組合的
+preflight 驗證。
+
+```toml
+[adapter.antigravity]
+command = "agy"
+extra_args = ["--dangerously-skip-permissions"]
+
+[adapter.antigravity.models]
+prime = "gemini-3.1-pro"   # Gemini 3.1 Pro — 最高品質
+core  = "gemini-3.6-flash" # Gemini 3.6 Flash — 平衡(新)
+lite  = "gemini-3.5-flash" # Gemini 3.5 Flash — 高效
+
+# Antigravity 各檔位的 effort 翻譯。下面說明每個。
+[adapter.antigravity.default_effort]
+prime = "high"
+core  = "high"
+lite  = "high"
+
+# Gemini 3.1 Pro 只支援 low 和 high effort,沒有 medium。
+# 為了品質,medium 翻譯上升為 high(絕不無聲降級)。
+[adapter.antigravity.efforts.prime]
+medium = "high"
+
+# Gemini 3.5 Flash 只支援 low 和 medium,沒有 high。Lite 檔位的 high
+# 翻譯為 medium(這個家族的上限),在組態表裡可見,可覆寫。
+[adapter.antigravity.efforts.lite]
+high = "medium"
+```
+
+### 模型/effort 矩陣
+
+任務檔指定抽象檔位和可選的 effort。Adapter 把它轉成具體 CLI 呼叫。
+完整 9 宮格如下,顯示每份任務檔 (檔位, effort) 配對在各 adapter 裡的轉譯:
+
+#### Claude adapter
+
+| Effort | prime<br/>(Fable) | core<br/>(Opus) | lite<br/>(Sonnet) |
+|--------|---|---|---|
+| low | `--model fable` | `--model opus` | `--model sonnet` |
+| medium | `--model fable --effort medium` | `--model opus --effort medium` | `--model sonnet --effort medium` |
+| high | `--model fable --effort high` | `--model opus --effort high` | `--model sonnet --effort high` |
+
+#### Codex adapter
+
+| Effort | prime<br/>(gpt-5.6-sol) | core<br/>(gpt-5.6-terra) | lite<br/>(gpt-5.6-luna) |
+|--------|---|---|---|
+| low | `--model gpt-5.6-sol` | `--model gpt-5.6-terra` | `--model gpt-5.6-luna` |
+| medium | `--model gpt-5.6-sol --effort medium` | `--model gpt-5.6-terra --effort medium` | `--model gpt-5.6-luna --effort medium` |
+| high | `--model gpt-5.6-sol --effort high` | `--model gpt-5.6-terra --effort high` | `--model gpt-5.6-luna --effort high` |
+
+#### Antigravity adapter (1.1.5+)
+
+| Effort | prime<br/>(3.1 Pro) | core<br/>(3.6 Flash) | lite<br/>(3.5 Flash) |
+|--------|---|---|---|
+| low | `--model gemini-3.1-pro --effort low` | `--model gemini-3.6-flash --effort low` | `--model gemini-3.5-flash --effort low` |
+| medium | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort medium` | `--model gemini-3.5-flash --effort medium` |
+| high | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort high` | `--model gemini-3.5-flash --effort medium` |
+
+說明:
+- **Antigravity prime/medium**: Gemini 3.1 Pro 不支援 `medium`,故 assent 改選
+  `high`(品質優先對應)。這不是無聲回落—組態表裡清楚可見、可審計。
+- **Antigravity lite/high**: Gemini 3.5 Flash 沒有 `high` effort 等級,故 `high`
+  轉成 `medium`(該家族的最大可用)。
+- **Antigravity 1.1.5 最低版**: 這是支援 `--effort`、穩定 model slug 及無人值班
+  執行所需 headless 修正的版本。舊版在開啟 session 前會被拒。
+
+### 使用 Antigravity adapter
+
+**首次設定**
+
+1. 在你的機器上安裝 `agy`(Antigravity CLI)(如無則裝)。
+2. 執行 `agy auth login` 在本機進行一次互動登入。
+3. 用 `agy --version` 驗證版本(必須 1.1.5 或更新)與 `agy models`(顯可用模型)。
+
+Assent **不會**修改 `~/.gemini/antigravity-cli/settings.json`、執行登入瀏覽器、
+或和認證互動。你的登入認證與 workspace 信任完全由你管。
+
+**使用 Antigravity 的任務檔範例**
+
+```toml
+title = "用高品質推理分析程式碼"
+model = "prime"
+effort = "high"
+status = "TODO"
+scope = ["src/", "tests/"]
+verify = "python -m pytest"
+
+goal = "用 Gemini 3.1 Pro(最高品質)審查程式碼庫。"
+```
+
+執行 `assent run` 時,會:
+1. 驗證 Antigravity 1.1.5+ 已安裝且能觸及 `gemini-3.1-pro --effort high`。
+2. 用 `agy --print --model gemini-3.1-pro --effort high --mode accept-edits ...`
+   開啟無標題 session。
+3. 執行驗證命令並紀錄結果。
+
+**在既有專案中切換 adapter**
+
+改 `[adapter]` name 只需一行。既有任務檔無需改動;它們仍用 `model = "prime"` 和
+`effort = "high"`,新 adapter 的組態表照樣轉譯。切換後,下一次 `assent check`
+會在任何 session 啟動前驗證新 adapter。
+
+### 設定模型與 effort 翻譯
+
+`.assent/assent.toml` 的組態範本顯示如何自訂檔位到模型的對應與抽象到 CLI
+effort 的翻譯。查找順序永遠是:
+
+1. 任務檔明示的 `effort` 註記(如有)
+2. Adapter 的 `default_effort` 為此檔位(如有)
+3. 無 effort flag(某些 adapter/檔位可能不支援)
+
+與 effort 翻譯:
+
+1. 檔位特定區段: `[adapter.<name>.efforts.<tier>]`
+2. 平面區段: `[adapter.<name>.efforts]`
+3. 恆等(直接送抽象值)
+
+範例:如果你的 Antigravity 設定有更新的 3.1 Pro 支援 medium,可移除品質優先對應:
+
+```toml
+# 移除這行:
+# [adapter.antigravity.efforts.prime]
+# medium = "high"
+
+# 或設為實際值:
+[adapter.antigravity.efforts.prime]
+medium = "medium"
+```
+
+### 設定 Antigravity print timeout
+
+Antigravity 的 `--print-timeout` 獨立於 Assent 的 watchdog timeout。Print
+timeout 限 CLI 等待單一 print 呼叫完成的時間;watchdog 限 Assent 等待任何
+輸出(殺掉 session 前)的時間。
+
+在 `.assent/assent.toml`:
+
+```toml
+[adapter.antigravity]
+print_timeout_minutes = 120  # AGY 最多等 2 小時得答案
+```
+
+別設低於你最長任務的預期時間;`assent check` 會驗證 print timeout 是正數。
+
+### Antigravity 組態故障排除
+
+**問題: `preflight failed: invalid model selection`**
+
+Antigravity 在 preflight 拒了 model/effort 組合。檢查:
+
+```bash
+agy models                         # 看有什麼模型
+agy --print --model <MODEL> ...    # 試試你的 model/effort 選擇
+```
+
+常見原因:
+- **未對應的 model tier**: 加到 `[adapter.antigravity.models]`。
+- **不支援的 effort**: 模型不支援那個 effort 等級。例如 Gemini 3.1 Pro
+  不支援 `medium`。在 `[adapter.antigravity.efforts.prime]` 裡修正對應。
+
+**問題: `authentication required` 或 `permission denied`**
+
+得在本機登入過一次:
+
+```bash
+agy auth login          # 開瀏覽器 Google 登入
+```
+
+如果你無人值班執行 `assent run`(例如晚上),登入必須在執行前完成。Assent
+無法開瀏覽器、幫你登入或察覺你是否離開;它只用你既有登入認證。
+
+**問題: `command not found: agy`**
+
+Antigravity CLI 未裝或不在 PATH。見 [Antigravity CLI 安裝文件]
+(https://google-antigravity.github.io/install) 並用 `agy --version` 確認。
+
+**問題: session 中途額度耗盡**
+
+Antigravity 達配額限時,`assent run` 紀錄 `WIP` checkpoint 保留部分成果。
+你的配額重設時(Google 通常日或小時級重設,視計劃),能續該任務:
+
+```bash
+assent run <FOLDER>  # 自動從 WIP 恢復
+```
+
+任務日誌紀錄確切配額重設時間(如可得)與調度器會輪詢等候的方式。
+同時要跑另一份資料夾,可在第二終端跑(只要它不依賴被配額限的那份)。
+
+**組態 preflight 錯誤後修正**
+
+別改任務檔的抽象檔位或 effort。只改 adapter 組態。例如 prime/medium 對應
+到 high 但想改:
+
+```toml
+# 之前
+[adapter.antigravity.efforts.prime]
+medium = "high"
+
+# 之後(如果 medium 現在支援)
+[adapter.antigravity.efforts.prime]
+medium = "medium"
+```
+
+修正組態後,無需改 `.assent/` 管理檔;`assent check` 會重新驗證,
+`assent run` 會重試。
+
 ## 計畫格式與設定檔
 
 - 格式契約全文:[assent/templates/format.md](assent/templates/format.md)

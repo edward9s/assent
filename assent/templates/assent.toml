@@ -10,7 +10,7 @@ retry_per_task = 1                # number of retries after a verification failu
 quota_poll_minutes = 30           # polling interval when the quota reset time cannot be parsed
 
 [adapter]
-name = "claude"                   # "claude" or "codex"
+name = "claude"                   # "claude", "codex", or "antigravity"
 
 [adapter.claude]
 command = "claude"
@@ -59,6 +59,35 @@ lite  = "low"
 # high = "high"
 # [adapter.codex.efforts.prime]
 # high = "xhigh"                # vendor-specific values appear only in the config translation layer
+
+[adapter.antigravity]
+command = "agy"
+# Antigravity is a locally-installed CLI that requires `agy auth login` once per machine.
+# Headless execution cannot answer permission prompts, so unattended runs use
+# --dangerously-skip-permissions. Assent will not modify your ~/.gemini/ settings,
+# install Antigravity, open a login browser, or change your workspace trust.
+extra_args = ["--dangerously-skip-permissions"]
+[adapter.antigravity.models]
+# These must be base family slugs that AGY 1.1.5+ accepts; verify with `agy models`
+prime = "gemini-3.1-pro"     # Gemini 3.1 Pro (low, high only)
+core  = "gemini-3.6-flash"   # Gemini 3.6 Flash (low, medium, high)
+lite  = "gemini-3.5-flash"   # Gemini 3.5 Flash (low, medium; no high)
+[adapter.antigravity.default_effort]
+prime = "high"
+core  = "high"
+lite  = "high"
+# Effort translation: Gemini 3.1 Pro does not support medium, so map it up to high
+# (quality-first, never silent downgrade). Gemini 3.5 Flash has no high, so map high
+# to medium (the family's ceiling), visible in the config for auditability.
+[adapter.antigravity.efforts.prime]
+medium = "high"
+[adapter.antigravity.efforts.lite]
+high = "medium"
+# Print mode timeout: how long AGY will wait for a single --print invocation.
+# Do not set lower than your longest expected task time. The watchdog timeout
+# (in the [watchdog] section below) is independent and limits total session time.
+# Antigravity 1.1.5+ defaults to 5 minutes; Assent requires this to be explicit.
+print_timeout_minutes = 120
 
 [prompt]
 # Overrides the default prompt template; available variables: {agents_md_path} {instructions_path} {task_path}
