@@ -1093,6 +1093,76 @@ class TestAdapterProcessOutcomes(EngineTestCase):
         self.assertNotIn("quota", [e["event"] for e in entries])
 
 
+class TestBillingAbort(EngineTestCase):
+    """A billing/insufficient-balance failure aborts the whole run without a retry.
+
+    Dispatch is purely on failure_kind="billing" (never an adapter name), so this uses a
+    plain ScriptedAdapter result, exactly how a fourth adapter would opt in."""
+
+    def billing_step(self, path):
+        def step(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text("kept", encoding="utf-8")
+            return TaskResult(
+                exit_code=1, output="Credit balance is too low",
+                quota_exhausted=False, reset_at=None, failure_kind="billing")
+        return step
+
+    def test_billing_consumes_no_retry_and_aborts_before_next_task(self):
+        p1 = self.write_task(1)
+        p2 = self.write_task(2)
+        cfg = self.build(retry=2)          # retries available, but none may be spent
+        self.commit_all()
+
+        # only one step: a second call (a retry, or advancing to t002) would raise
+        adapter = ScriptedAdapter([self.billing_step(p1)])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = engine.run(cfg, adapter=adapter)
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(adapter.calls), 1)             # no retry, no advance to t002
+        text = out.getvalue()
+        self.assertIn("billing/balance", text)
+        self.assertIn("Top up the account", text)
+
+        # the failing task stays resumable (WIP), the next task is untouched (TODO)
+        self.assertEqual(parse_task_file(p1).status, "WIP")
+        self.assertEqual(parse_task_file(p2).status, "TODO")
+
+        # progress kept in a wip checkpoint; no BLOCKED checkpoint was written
+        subjects = self.subjects()
+        self.assertTrue(any(s.startswith("wip(plan01/t001): ") for s in subjects))
+        self.assertFalse(any("BLOCKED" in s for s in subjects))
+        self.assertIn("src/partial.py", self._git_execution("ls-files"))
+
+        # a distinct billing journal entry, separate from a normal acceptance failure
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(p1))
+        billing = next(e for e in entries
+                       if e["by"] == "scheduler" and e["event"] == "billing")
+        self.assertIn("top-up", billing["summary"].lower())
+        self.assertEqual(billing["agent"], "claude")
+        self.assertEqual(billing["requested_model"], "lite")
+        self.assertNotIn("blocked", [e["event"] for e in entries])
+
+    def test_billing_task_resumes_cleanly_on_a_later_run(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([self.billing_step(path)])), 1)
+        self.assertEqual(parse_task_file(path).status, "WIP")
+
+        # after a top-up, the same task is picked up again and resumes with a continue prompt
+        adapter = ScriptedAdapter([self.ai_done(path)])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+        self.assertIn("resume", adapter.calls[0][0])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+
 class TestQuotaAndResume(EngineTestCase):
     def test_quota_waits_then_resumes_same_task(self):
         path = self.write_task(1)

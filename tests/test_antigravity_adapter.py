@@ -386,6 +386,8 @@ class TestOutputContract(unittest.TestCase):
             "Error: invalid model selection (--model \"x\")": "unsupported_model",
             "Error: Resource has been exhausted (e.g. check quota).": "quota",
             "Error: quota exceeded for this project": "quota",
+            "Error: your credit balance is too low": "billing",
+            "Error: insufficient funds on the account": "billing",
             "Error: permission denied for tool write_to_file": "permission",
             "Error: Agent Platform API has not been used in project": "permission",
             "Error: timed out waiting for the response": "timeout",
@@ -479,6 +481,16 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(stalled.stalled)
         self.assertFalse(stalled.quota_exhausted)
         self.assertEqual(stalled.failure_kind, "stall")
+
+    def test_billing_outcome_is_classified_and_is_not_quota(self):
+        # Print mode emits prose, so the billing phrase is matched against the transcript;
+        # it must classify as billing (fail fast) and never as quota (wait-and-resume).
+        self.patch_run(
+            lambda *a, **k: (1, "Error: your credit balance is too low", False))
+        result = make_adapter().run_task("p", "gemini-3.1-pro", "high", Path("."))
+        self.assertEqual(result.failure_kind, "billing")
+        self.assertFalse(result.quota_exhausted)
+        self.assertIsNone(result.reset_at)
 
     def test_unsupported_model_outcome_is_classified_for_the_scheduler(self):
         self.patch_run(lambda *a, **k: (

@@ -18,6 +18,13 @@ _QUOTA_TEXT_RE = re.compile(
     r"|out\s+of\s+\w*\s*credit|insufficient[_ ]quota",
     re.IGNORECASE,
 )
+# Account-level billing/insufficient-balance: distinct from quota because a prepaid balance
+# never refills on its own, so the scheduler must fail fast instead of waiting for a reset.
+_BILLING_TEXT_RE = re.compile(
+    r"credit\s+balance|balance\s+is\s+too\s+low"
+    r"|insufficient\s+(?:credit|funds|balance)|payment\s+required",
+    re.IGNORECASE,
+)
 
 
 def build_command(cfg: "Config", prompt: str, requested_model: str,
@@ -147,6 +154,35 @@ def parse_output_for_quota(output: str) -> bool:
     return False
 
 
+def parse_output_for_billing(output: str) -> bool:
+    """Best-effort billing/insufficient-balance detection from Codex error/failure events.
+
+    Mirrors ``parse_output_for_quota``'s event scan, so an account-level balance failure is
+    classified distinctly instead of falling through to a generic non-zero exit.
+    """
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            if _BILLING_TEXT_RE.search(line):
+                return True
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        item = event.get("item") or {}
+        is_agent_message = (kind in ("item.started", "item.completed", "item.updated")
+                            and isinstance(item, dict)
+                            and item.get("type") == "agent_message")
+        if kind in ("error", "turn.failed") or is_agent_message:
+            if any(_BILLING_TEXT_RE.search(text) for text in _strings(event)):
+                return True
+    return False
+
+
 class CodexAdapter(Adapter):
     def __init__(self, cfg: "Config") -> None:
         self.cfg = cfg
@@ -163,9 +199,15 @@ class CodexAdapter(Adapter):
         returncode, output, stalled = run_subprocess(
             command, cwd, stall_seconds, echo=self._echo_line)
         exhausted = False if stalled else parse_output_for_quota(output)
+        # Billing is a failure classification, so it is only meaningful for a failed session
+        # that is neither a stall nor quota exhaustion.
+        failure_kind = ("billing"
+                        if not stalled and not exhausted and returncode != 0
+                        and parse_output_for_billing(output)
+                        else None)
         return TaskResult(exit_code=returncode, output=output,
                           quota_exhausted=exhausted, reset_at=None,
-                          stalled=stalled)
+                          stalled=stalled, failure_kind=failure_kind)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

@@ -56,6 +56,16 @@ _QUOTA_TEXT_RE = re.compile(
     r"|hit\s+your\s+[\w'’ ]{0,40}limit|quota\s+(?:exceeded|exhausted)"
     r"|out\s+of\s+\w*\s*credit",
     re.IGNORECASE)
+# Account-level billing/insufficient-balance text: distinct from quota, because a prepaid
+# balance never refills on its own; the scheduler must fail fast, not wait for a reset that
+# will never come.  Same scan discipline as _QUOTA_TEXT_RE: only matched against human-readable
+# strings, never raw JSON key names.
+_BILLING_TEXT_RE = re.compile(
+    r"credit\s+balance|balance\s+is\s+too\s+low"
+    r"|insufficient\s+(?:credit|funds|balance)|payment\s+required",
+    re.IGNORECASE)
+# HTTP statuses the CLI reports on a result event for an account-level billing/balance problem.
+_BILLING_API_STATUSES = {400, 402}
 
 _SENTINEL = object()
 
@@ -289,6 +299,49 @@ def parse_output_for_quota(output: str) -> tuple[bool, datetime | None]:
     return exhausted, reset_at
 
 
+def parse_output_for_billing(output: str) -> bool:
+    """Detect an account-level billing/insufficient-balance failure in stream-json output.
+
+    Strongest source: a ``result`` event whose ``api_error_status`` is a billing status
+    (400/402) carrying billing text in its ``result``/``error`` field -- the exact shape the
+    real CLI emits once a prepaid balance hits zero. Fallback: billing phrasing in any
+    human-readable text (result/error text, assistant text, a non-JSON stderr line). Never
+    scanned against raw JSON key names, so ordinary output cannot false-positive.
+    """
+    human_texts: list[str] = []
+    for raw in output.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        evt = None
+        if s.startswith("{"):
+            try:
+                evt = json.loads(s)
+            except (json.JSONDecodeError, ValueError):
+                evt = None
+        if isinstance(evt, dict):
+            if evt.get("type") == "result":
+                status = evt.get("api_error_status")
+                texts = [evt.get(field) for field in ("result", "error")]
+                texts = [t for t in texts if isinstance(t, str)]
+                if (isinstance(status, int) and not isinstance(status, bool)
+                        and status in _BILLING_API_STATUSES
+                        and any(_BILLING_TEXT_RE.search(t) for t in texts)):
+                    return True
+                human_texts.extend(texts)
+            elif evt.get("type") == "assistant":
+                msg = evt.get("message") or {}
+                for block in msg.get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text")
+                        if isinstance(text, str):
+                            human_texts.append(text)
+        else:
+            human_texts.append(s)  # Non-JSON line (e.g. stderr text)
+
+    return any(_BILLING_TEXT_RE.search(text) for text in human_texts)
+
+
 class ClaudeAdapter(Adapter):
     """claude CLI adapter; config is injected by get_adapter."""
 
@@ -311,9 +364,15 @@ class ClaudeAdapter(Adapter):
                               quota_exhausted=False, reset_at=None,
                               stalled=True)
         exhausted, reset_at = parse_output_for_quota(output)
+        # Billing is a failure classification, so it is only meaningful for a failed session;
+        # a successful run whose prose merely mentions "credit balance" must never be flagged.
+        failure_kind = ("billing"
+                        if not exhausted and returncode != 0
+                        and parse_output_for_billing(output)
+                        else None)
         return TaskResult(exit_code=returncode, output=output,
                           quota_exhausted=exhausted, reset_at=reset_at,
-                          stalled=False)
+                          stalled=False, failure_kind=failure_kind)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

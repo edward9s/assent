@@ -89,6 +89,12 @@ _QUOTA_TEXT_RE = re.compile(
     r"|quota\s+(?:exceeded|exhausted)|usage\s+limit|rate\s+limit|session\s+limit"
     r"|limit\s+reached|hit\s+your\s+[\w'’ ]{0,40}limit|too\s+many\s+requests",
     re.IGNORECASE)
+# Account-level billing/insufficient-balance: distinct from quota because it never resets on
+# its own (a prepaid balance does not refill), so the scheduler must fail fast rather than wait.
+_BILLING_TEXT_RE = re.compile(
+    r"credit\s+balance|balance\s+is\s+too\s+low"
+    r"|insufficient\s+(?:credit|funds|balance)|payment\s+required",
+    re.IGNORECASE)
 _PERMISSION_TEXT_RE = re.compile(
     r"permission\s+denied|permission\s+request|soft-denied|not\s+authorized"
     r"|unauthorized|unauthenticated|forbidden|sign\s*in|log\s*in\s+required"
@@ -294,6 +300,8 @@ def classify_output(exit_code: int, stalled: bool, output: str) -> str | None:
         return "unsupported_model"
     if _QUOTA_TEXT_RE.search(output):
         return "quota"
+    if _BILLING_TEXT_RE.search(output):
+        return "billing"
     if _PERMISSION_TEXT_RE.search(output):
         return "permission"
     if _TIMEOUT_TEXT_RE.search(output):

@@ -109,6 +109,18 @@ class _SessionState:
     identity: _SessionIdentity | None = None
 
 
+class _BillingAbort(Exception):
+    """An account-level billing/insufficient-balance failure the adapter classified.
+
+    Unlike quota (a rate-limit window that resets on its own), a prepaid balance does not
+    refill, so retrying is provably futile and the next TODO task would hit the identical
+    failure.  This unwinds the whole run to the abort handler, which keeps progress in a wip
+    checkpoint and leaves the task unresolved for a clean resume after a manual top-up.  It is
+    dispatched purely on ``TaskResult.failure_kind == "billing"`` -- never on an adapter name --
+    so a future adapter gets the behaviour for free by setting the same string.
+    """
+
+
 # --------------------------------------------------------------------------- #
 # Prompt / small helpers
 # --------------------------------------------------------------------------- #
@@ -636,6 +648,27 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         _try_write_report(cfg)
         print("Interrupted.")
         return 130
+    except _BillingAbort as e:
+        # Distinct from an acceptance failure and from the infrastructure abort below: the
+        # account's prepaid balance is exhausted, which no retry or next task can resolve.
+        # Keep the current task's progress, leave it unresolved, and stop the whole run.
+        print(f"Run aborted (billing/balance): {e}")
+        print("The account's prepaid balance is exhausted; retrying cannot fix this. "
+              "Top up the account, then rerun to resume from the kept progress.")
+        if (current_task is not None and current_session is not None
+                and current_session.identity is not None):
+            _mark_billing_task(current_task, current_session.identity, str(e), now)
+        try:
+            subject = (_checkpoint_subject(
+                cfg, "wip", current_task, "billing abort, progress kept")
+                if current_task is not None
+                else f"wip({cfg.tasks_name}): billing abort, progress kept")
+            if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
+                print("Progress gathered into a wip checkpoint.")
+        except AssentError:
+            pass
+        _try_write_report(cfg)
+        return 1
     except (AssentError, OSError) as e:
         print(f"Run aborted (infrastructure error): {e}")
         if (current_task is not None and current_session is not None
@@ -689,6 +722,35 @@ def _mark_interrupted_task(task: Task, session: _SessionIdentity, summary: str,
         print(f"Writing the interrupt journal failed: {e} (working tree left as is, nothing discarded)")
 
 
+def _mark_billing_task(task: Task, session: _SessionIdentity, detail: str,
+                       now: Callable[[], datetime]) -> None:
+    """On a billing abort, persist the task as WIP and write a distinct billing journal entry.
+
+    The status is left unresolved (WIP, never BLOCKED) so the next run resumes it cleanly once
+    the account is topped up; the work already produced stays in the tree.  The summary names
+    the manual top-up requirement so it is unmistakable in the journal, separate from a normal
+    acceptance failure.  A secondary error here is only warned about, never masking the abort.
+    """
+    try:
+        fresh = parse_task_file(task.path)
+        if fresh.status != "BLOCKED":
+            set_status(task.path, "WIP")
+    except Exception as e:  # abort cleanup must not mask the billing abort with a secondary error
+        print(f"Writing back the billing task status failed: {e} (working tree left as is, nothing discarded)")
+
+    try:
+        append_entry(
+            task.journal_path, by="scheduler", event="billing",
+            summary=("Aborted: account balance/credit exhausted; this needs a manual "
+                     "top-up, then rerun to resume (no retry consumed, progress kept)"),
+            detail=detail,
+            agent=session.agent, requested_model=session.requested_model,
+            requested_effort=session.requested_effort,
+            time_str=now().isoformat(timespec="seconds"))
+    except Exception as e:  # status and journal are attempted independently; one failing does not block the other
+        print(f"Writing the billing journal failed: {e} (working tree left as is, nothing discarded)")
+
+
 def _process_task(cfg: Config, task: Task, adapter: Adapter,
                   sleep: Callable[[float], None],
                   now: Callable[[], datetime], session_state: _SessionState,
@@ -737,6 +799,17 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
             _wait_for_quota(cfg, result.reset_at, sleep, now)
             resumed = True
             continue  # resume the same task, without counting a retry
+
+        if result.failure_kind == "billing":
+            # A zero prepaid balance is an account-level condition, not a per-task one:
+            # retrying cannot fix it and every following TODO task would fail identically.
+            # Abort the whole run here (no retry consumed) so the abort handler keeps this
+            # task's progress and leaves it unresolved for a clean resume after a top-up.
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output,
+                result.failure_kind)
+            print(f"  Adapter failure: {reason}")
+            raise _BillingAbort(reason)
 
         if result.exit_code != 0 or result.stalled:
             reason = _adapter_failure_reason(

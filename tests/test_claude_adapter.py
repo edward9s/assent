@@ -14,8 +14,8 @@ from pathlib import Path
 from assent import AssentError
 from assent.adapters import TaskResult, get_adapter
 from assent.adapters.claude import (
-    ClaudeAdapter, build_command, format_stream_event, parse_output_for_quota,
-    run_subprocess)
+    ClaudeAdapter, build_command, format_stream_event, parse_output_for_billing,
+    parse_output_for_quota, run_subprocess)
 from assent.config import Config
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -122,6 +122,43 @@ class TestParseQuota(unittest.TestCase):
             "\n\nnot json at all\n{broken json\n")
         self.assertFalse(exhausted)
         self.assertIsNone(reset_at)
+
+
+class TestParseBilling(unittest.TestCase):
+    def test_real_ok_fixture_is_not_billing(self):
+        # A normal successful session never looks like a billing failure
+        output = (FIXTURES / "stream_json_ok.txt").read_text(encoding="utf-8")
+        self.assertFalse(parse_output_for_billing(output))
+
+    def test_recorded_billing_fixture_is_detected(self):
+        # The reproduced live shape: a result event with api_error_status 400 and
+        # "Credit balance is too low" in the result text (see stream_json_billing.txt)
+        output = (FIXTURES / "stream_json_billing.txt").read_text(encoding="utf-8")
+        self.assertTrue(parse_output_for_billing(output))
+        # billing is not quota: the wait-and-resume path must never be taken for it
+        exhausted, _ = parse_output_for_quota(output)
+        self.assertFalse(exhausted)
+
+    def test_api_error_status_402_with_billing_text_is_detected(self):
+        line = json.dumps({"type": "result", "subtype": "success",
+                           "api_error_status": 402,
+                           "result": "Insufficient credit balance"})
+        self.assertTrue(parse_output_for_billing(line + "\n"))
+
+    def test_billing_text_without_api_status_still_detected_via_fallback(self):
+        # Plain human-readable text is enough even when the structured status is absent
+        line = json.dumps({"type": "result",
+                           "result": "Payment required to continue"})
+        self.assertTrue(parse_output_for_billing(line + "\n"))
+        self.assertTrue(parse_output_for_billing("Error: your balance is too low\n"))
+
+    def test_ordinary_result_and_non_billing_status_do_not_false_positive(self):
+        ok = json.dumps({"type": "result", "result": "Task complete, all good"})
+        self.assertFalse(parse_output_for_billing(ok + "\n"))
+        # a 400 without billing text is some other bad request, not a balance problem
+        other = json.dumps({"type": "result", "api_error_status": 400,
+                            "result": "malformed request payload"})
+        self.assertFalse(parse_output_for_billing(other + "\n"))
 
 
 def _py(code: str) -> list[str]:
@@ -260,6 +297,29 @@ class TestRunTask(unittest.TestCase):
             "p", adapter.resolve_model("lite"), None, Path("."))
         self.assertTrue(result.quota_exhausted)
         self.assertEqual(result.reset_at, datetime.fromtimestamp(ts, tz=timezone.utc))
+
+    def test_billing_output_sets_failure_kind_not_quota(self):
+        output = (FIXTURES / "stream_json_billing.txt").read_text(encoding="utf-8")
+        # the real CLI exits non-zero on this api_error
+        self.patch_run(lambda c, w, s, echo=None: (1, output, False))
+        adapter = ClaudeAdapter(make_cfg())
+        result = adapter.run_task(
+            "p", adapter.resolve_model("lite"), None, Path("."))
+        self.assertFalse(result.quota_exhausted)
+        self.assertEqual(result.failure_kind, "billing")
+        self.assertIsNone(result.reset_at)
+
+    def test_billing_text_on_a_successful_exit_is_not_flagged(self):
+        # billing is a failure classification: an exit-0 session whose prose mentions a
+        # credit balance must never be classified as a billing failure
+        line = json.dumps({"type": "result",
+                           "result": "I checked the credit balance module, all good"})
+        self.patch_run(lambda c, w, s, echo=None: (0, line + "\n", False))
+        adapter = ClaudeAdapter(make_cfg())
+        result = adapter.run_task(
+            "p", adapter.resolve_model("lite"), None, Path("."))
+        self.assertIsNone(result.failure_kind)
+        self.assertFalse(result.quota_exhausted)
 
     def test_stall_is_failure_not_quota(self):
         # Even if a stall's output contains quota-looking text, it's always a task failure,

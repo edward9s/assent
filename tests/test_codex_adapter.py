@@ -6,7 +6,8 @@ from pathlib import Path
 from assent import AssentError
 from assent.adapters import TaskResult, get_adapter
 from assent.adapters.codex import (
-    CodexAdapter, build_command, format_stream_event, parse_output_for_quota,
+    CodexAdapter, build_command, format_stream_event, parse_output_for_billing,
+    parse_output_for_quota,
 )
 from assent.config import Config
 
@@ -93,6 +94,27 @@ class TestQuota(unittest.TestCase):
         self.assertFalse(parse_output_for_quota(output))
 
 
+class TestBilling(unittest.TestCase):
+    def test_error_and_failure_billing_messages_are_detected(self):
+        for event in (
+            {"type": "error", "message": "Insufficient credit balance"},
+            {"type": "turn.failed", "error": {"message": "payment required"}},
+            {"type": "item.completed", "item": {
+                "type": "agent_message", "text": "Your balance is too low"}},
+        ):
+            with self.subTest(event=event):
+                self.assertTrue(parse_output_for_billing(json.dumps(event)))
+                # billing must not also register as quota (mutually exclusive verdicts)
+                self.assertFalse(parse_output_for_quota(json.dumps(event)))
+
+    def test_tool_text_and_normal_completion_are_not_billing(self):
+        command = {"type": "item.completed", "item": {
+            "type": "command_execution", "command": "audit the credit balance report"}}
+        normal = {"type": "turn.completed", "usage": {"output_tokens": 1}}
+        output = json.dumps(command) + "\n" + json.dumps(normal)
+        self.assertFalse(parse_output_for_billing(output))
+
+
 class TestRunTask(unittest.TestCase):
     def patch_run(self, fake):
         import assent.adapters.codex as module
@@ -130,6 +152,23 @@ class TestRunTask(unittest.TestCase):
             "p", adapter.resolve_model("lite"), None, Path("."))
         self.assertTrue(stalled.stalled)
         self.assertFalse(stalled.quota_exhausted)
+
+    def test_billing_output_sets_failure_kind_not_quota(self):
+        billing = json.dumps({"type": "turn.failed",
+                              "error": {"message": "Credit balance is too low"}})
+        self.patch_run(lambda *args, **kwargs: (1, billing, False))
+        adapter = CodexAdapter(make_cfg())
+        result = adapter.run_task(
+            "p", adapter.resolve_model("lite"), None, Path("."))
+        self.assertFalse(result.quota_exhausted)
+        self.assertEqual(result.failure_kind, "billing")
+
+        # a stall carrying billing-looking text is still a stall, never billing
+        self.patch_run(lambda *args, **kwargs: (1, billing, True))
+        stalled = adapter.run_task(
+            "p", adapter.resolve_model("lite"), None, Path("."))
+        self.assertTrue(stalled.stalled)
+        self.assertIsNone(stalled.failure_kind)
 
     def test_unknown_tier_raises(self):
         with self.assertRaises(AssentError):
