@@ -26,6 +26,13 @@ Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
   - User-authored task titles, notes and reasons, existing task and history
     logs, upstream CLI raw output, and intentional Unicode or external-protocol
     fixtures stay verbatim and are not translated as data.
+  - A scheduler-generated checkpoint subject (`auto(...)`, `wip(...)`) embeds the
+    task title verbatim, so it is both generated text and user data. The verbatim
+    rule wins: assent never transliterates or translates a user's title on its way
+    into a commit. It follows that a project keeps the commit language it writes
+    its titles in — so in assent's own `.assent/` plan folders, write task titles
+    in English, and this repository's own history stays canonical English without
+    the tool having to rewrite anyone's words.
   - Do not place English and Chinese canonical contracts side by side in a
     generated `.assent/`; there is exactly one executable English contract.
 - Comments must not rely on internal codes only the author understands in the
