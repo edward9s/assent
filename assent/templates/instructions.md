@@ -52,6 +52,14 @@ the `_assent.log` inside a work folder.
   timeout may have left children running, do not run the command in parallel
   again and do not mark the task BLOCKED solely because of that timeout; the
   scheduler's post-session verification is authoritative.
+- Keep session output economical: state the fact once, skip narrated
+  tool-call preambles and restated plans, and quote a command or test
+  failure as its shortest decisive line rather than a full transcript,
+  unless the task or a human explicitly asks for more.
+- Prefer the smallest change that satisfies the task: reuse a helper,
+  type, or pattern already in the touched files before adding a new one,
+  and do not add abstractions, config, or scaffolding the task does not
+  ask for.
 
 The adapter result is authoritative for the session boundary: a nonzero exit
 code or watchdog stall is an adapter failure, not permission to claim DONE or
