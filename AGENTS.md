@@ -15,5 +15,8 @@ Windows 優先、跨平台。CLI 子命令:run / status / check / report / init�
   不用未經解釋的英語行話直譯。
 - 燒過 tokens 的產出絕不丟棄:任何流程改動不得引入「失敗即還原工作區」的行為。
 - scope 檢查 fail-closed 是安全底線,不得放寬其語意。
+- git 永遠必須,不得引入停用開關或無 git 的降級模式。
+- 不得引入手工維護的「目前資料夾」指標;工作資料夾由參數明示,或由任務檔
+  事實推導,歧義一律拒絕。
 - `build/lib/` 是舊建置產物,永遠不要改它。
 - 使用 agents 時,請先讀專案主工作樹的 `.agents/instructions.md`;worktree session 以調度器提示的絕對路徑為準。 <!-- agents-instructions -->

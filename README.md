@@ -86,6 +86,9 @@ agents run
 # 也可以用位置參數指定工作資料夾(與 --config 正交)
 agents run <資料夾>
 
+# 依資料夾 after 依賴順序執行全部未完成資料夾,最多同時跑 2 個
+agents run --all --jobs 2
+
 # 6. 隨時查看(另開終端、零 token)
 agents status
 agents report
@@ -102,10 +105,11 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 ## 平行執行
 
 可在 N 個終端各自指定不同的工作資料夾執行，例如 `agents run parallel01`、
-`agents run parallel02`。各資料夾內的任務與日誌分別使用
+`agents run parallel02`;也可用 `agents run --all --jobs N` 由調度器依資料夾
+依賴安排平行執行。各資料夾內的任務與日誌分別使用
 `tNNN_名稱.e.toml`、`tNNN_名稱.r.toml`。每個工作資料夾都有自己的
 `agents.lock`，同一資料夾
-同時只允許一個 run；Git 啟用時,每個資料夾一律使用
+同時只允許一個 run；Git 永遠啟用,每個資料夾一律使用
 `<專案名>.worktrees/<資料夾>/` 的獨立 worktree,這是安全平行處理的基礎。
 
 版控邊界刻意簡單:`AGENTS.md` 是專案規則;有進 Git 時使用 worktree 內的
@@ -147,19 +151,27 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 
 裁決落實 = AI 改任務檔(status 改回 TODO、補說明、加任務、標 SKIP),
 `agents check` 過了回第 2 幕。循環到全部 DONE → merge。
-新一輪計畫 = 開新工作資料夾 + 改 agents.toml,舊資料夾原地即歸檔。
+新一輪計畫 = 開新工作資料夾即可;舊資料夾可由 `_folder.toml` 的 `after`
+繼續作為前置參與依賴判定。資料夾完成由任務檔推導,全部任務為 DONE/SKIP
+才算完成。
 
 ## 指令參考
 
 `run`、`status`、`check`、`report` 的完整形式都是
-`agents <指令> [選項] [FOLDER]`。可省略的位置參數 `FOLDER` 覆寫設定檔
-`[plan] tasks` 的工作資料夾名稱；`--config PATH` 選擇設定檔，預設為
-`.agents/agents.toml`。兩者彼此正交，可以只用其中一個，也可以同時使用，例如
+`agents <指令> [選項] [FOLDER]`。`FOLDER` 可明示工作資料夾；省略時 `run`
+會依任務現況與 `_folder.toml` 的 `after` 前置推導唯一可執行資料夾,有歧義
+就拒絕。`status`、`check`、`report` 省略時作用於全部資料夾。`--config PATH`
+選擇設定檔,預設為 `.agents/agents.toml`;設定檔不再維護工作資料夾指標。
+兩者彼此正交,可以只用其中一個,也可以同時使用,例如
 `agents status --config configs/night.toml parallel01`。
+
+兩項舊設定已廢除:工作資料夾不再由設定檔中的手工指標維護,Git 也沒有停用
+開關或無 Git 降級模式;工作資料夾由命令列明示或依任務事實推導,Git 永遠啟用。
 
 | 指令與代表性命令 | 選項與作用 | token 消耗 |
 |---|---|---|
-| `agents run [FOLDER]`<br>`agents run parallel01` | 執行工作資料夾，直到任務全為 DONE/BLOCKED/SKIP。接受 `--config PATH`；`--once` 只執行下一個任務後停止；`--task ID` 指定單一任務且仍檢查前置，例如 `agents run --task t003 parallel01`。 | 僅執行 AI session 時消耗；`--once` 或 `--task` 最多執行單一任務 |
+| `agents run [FOLDER]`<br>`agents run parallel01` | 執行工作資料夾，直到任務全為 DONE/BLOCKED/SKIP。省略 `FOLDER` 時推導唯一可執行資料夾；`--once` 只執行下一個任務後停止；`--task ID` 指定單一任務且仍檢查前置，例如 `agents run --task t003 parallel01`。 | 僅執行 AI session 時消耗；`--once` 或 `--task` 最多執行單一任務 |
+| `agents run --all`<br>`agents run --all --jobs 2` | 依 `_folder.toml` 的資料夾依賴順序執行全部未完成資料夾；`--jobs N` 限制同時執行的資料夾數(預設 1)。不可與 `FOLDER`、`--once` 或 `--task` 並用。 | 僅執行 AI session 時消耗 |
 | `agents status [FOLDER]`<br>`agents status parallel01` | 顯示進度統計、下一個任務、分支與最後檢查點。接受 `--config PATH`。 | **零** |
 | `agents check [FOLDER]`<br>`agents check --config .agents/agents.toml parallel01` | 驗證任務檔格式、依賴無循環、設定與環境，是規劃會議的散會條件。接受 `--config PATH`。 | **零** |
 | `agents report [FOLDER]`<br>`agents report parallel01` | 生成並顯示工作資料夾內的人讀報告 `_report.md`。接受 `--config PATH`。 | **零** |
