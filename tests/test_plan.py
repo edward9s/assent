@@ -63,13 +63,13 @@ class TestParseTaskFile(PlanTestCase):
 
     def test_valid_task_parsed(self):
         path = self.write("t001_demo.e.toml", task_text(
-            title="Scaffold", deps=(), model="prime", effort="high",
+            title="Scaffold", deps=(), model="prime", effort="heavy",
             scope=("src/", "tests/"), notes="a note"))
         task = parse_task_file(path)
         self.assertEqual(task.id, "t001")
         self.assertEqual(task.title, "Scaffold")
         self.assertEqual(task.model, "prime")
-        self.assertEqual(task.effort, "high")
+        self.assertEqual(task.effort, "heavy")
         self.assertEqual(task.status, "TODO")
         self.assertEqual(task.scope, ["src/", "tests/"])
         self.assertEqual(task.journal_path.name, "t001_demo.r.toml")
@@ -128,6 +128,11 @@ class TestParseTaskFile(PlanTestCase):
     def test_bad_effort_rejected(self):
         path = self.write("t001_x.e.toml", task_text(effort="max"))
         with self.assertRaises(AssentError):
+            parse_task_file(path)
+
+    def test_old_effort_rejected_with_new_vocabulary(self):
+        path = self.write("t001_x.e.toml", task_text(effort="high"))
+        with self.assertRaisesRegex(AssentError, "heavy / normal / slight"):
             parse_task_file(path)
 
     def test_empty_scope_fail_closed(self):

@@ -277,7 +277,7 @@ class TestVerificationPrompt(VerificationEngineCase):
         self.write_status("TODO")
         task = engine.Plan.parse(self.tasks_dir).tasks[0]
         session = engine._SessionIdentity(
-            agent="codex", requested_model="model", effort="high",
+            agent="codex", requested_model="model", effort="heavy",
             requested_effort="high")
         prompt = engine._build_prompt(self.cfg, task, None, session)
         self.assertIn("focused task gate", prompt)

@@ -50,7 +50,7 @@ def make_adapter(**overrides) -> AntigravityAdapter:
     return AntigravityAdapter(make_cfg(**overrides), catalog=catalog())
 
 
-def request(task_id="t001", tier="prime", effort="high", *, cfg=None):
+def request(task_id="t001", tier="prime", effort="heavy", *, cfg=None):
     """Resolve one invocation exactly the way the engine does, from the config tables."""
     settings = (cfg or make_cfg()).adapter_settings(NAME)
     return InvocationRequest(
@@ -187,15 +187,15 @@ class TestBuildCommand(unittest.TestCase):
         cfg = make_cfg()
         settings = cfg.adapter_settings(NAME)
         grid = {
-            ("prime", "low"): ("gemini-3.1-pro", "low"),
-            ("prime", "medium"): ("gemini-3.1-pro", "high"),
-            ("prime", "high"): ("gemini-3.1-pro", "high"),
-            ("core", "low"): ("gemini-3.6-flash", "low"),
-            ("core", "medium"): ("gemini-3.6-flash", "medium"),
-            ("core", "high"): ("gemini-3.6-flash", "high"),
-            ("lite", "low"): ("gemini-3.5-flash", "low"),
-            ("lite", "medium"): ("gemini-3.5-flash", "medium"),
-            ("lite", "high"): ("gemini-3.5-flash", "medium"),
+            ("prime", "slight"): ("gemini-3.1-pro", "low"),
+            ("prime", "normal"): ("gemini-3.1-pro", "high"),
+            ("prime", "heavy"): ("gemini-3.1-pro", "high"),
+            ("core", "slight"): ("gemini-3.6-flash", "low"),
+            ("core", "normal"): ("gemini-3.6-flash", "medium"),
+            ("core", "heavy"): ("gemini-3.6-flash", "high"),
+            ("lite", "slight"): ("gemini-3.5-flash", "low"),
+            ("lite", "normal"): ("gemini-3.5-flash", "medium"),
+            ("lite", "heavy"): ("gemini-3.5-flash", "medium"),
         }
         parsed = catalog()
         for (tier, effort), (model, cli_effort) in grid.items():
@@ -244,18 +244,18 @@ class TestEffortPrecedence(unittest.TestCase):
 
     def test_task_annotation_wins_over_the_tier_default(self):
         settings = make_cfg().adapter_settings(NAME)
-        self.assertEqual(settings.resolve_effort("low", "prime"), "low")
-        self.assertEqual(settings.resolve_effort(None, "prime"), "high")
+        self.assertEqual(settings.resolve_effort("slight", "prime"), "slight")
+        self.assertEqual(settings.resolve_effort(None, "prime"), "heavy")
 
-    def test_translation_order_is_tier_then_flat_then_identity(self):
-        cfg = make_cfg(antigravity_efforts={"high": "flat-high"},
-                       antigravity_tier_efforts={"prime": {"high": "tier-high"}})
+    def test_translation_order_is_tier_then_flat_then_baseline(self):
+        cfg = make_cfg(antigravity_efforts={"heavy": "flat-heavy"},
+                       antigravity_tier_efforts={"prime": {"heavy": "tier-heavy"}})
         settings = cfg.adapter_settings(NAME)
-        self.assertEqual(settings.resolve_requested_effort("prime", "high"),
-                         "tier-high")
-        self.assertEqual(settings.resolve_requested_effort("core", "high"),
-                         "flat-high")
-        self.assertEqual(settings.resolve_requested_effort("core", "low"), "low")
+        self.assertEqual(settings.resolve_requested_effort("prime", "heavy"),
+                         "tier-heavy")
+        self.assertEqual(settings.resolve_requested_effort("core", "heavy"),
+                         "flat-heavy")
+        self.assertEqual(settings.resolve_requested_effort("core", "slight"), "low")
 
     def test_omitted_effort_sends_no_flag_and_invents_no_cli_default(self):
         cfg = make_cfg(antigravity_default_effort={},
@@ -281,9 +281,9 @@ class TestEffortPrecedence(unittest.TestCase):
 
         conflicting = make_cfg(
             antigravity_models={"prime": "gemini-3.1-pro-high"},
-            antigravity_tier_efforts={"prime": {"low": "low"}})
+            antigravity_tier_efforts={"prime": {"slight": "low"}})
         errors = AntigravityAdapter(conflicting, catalog=catalog()).preflight(
-            [request("t001", "prime", "low", cfg=conflicting)])
+            [request("t001", "prime", "slight", cfg=conflicting)])
         self.assertEqual(len(errors), 1)
         self.assertIn("conflicts with --effort=low", errors[0])
         self.assertIn("[adapter.antigravity.models] prime", errors[0])
@@ -295,20 +295,20 @@ class TestPreflight(unittest.TestCase):
         requests = [request(f"t00{i}", tier, effort)
                     for i, (tier, effort) in enumerate(
                         [(t, e) for t in ("prime", "core", "lite")
-                         for e in ("low", "medium", "high")], start=1)]
+                         for e in ("slight", "normal", "heavy")], start=1)]
         self.assertEqual(adapter.preflight(requests), [])
 
     def test_wrong_pro_medium_mapping_names_the_exact_owner_and_fix(self):
-        cfg = make_cfg(antigravity_tier_efforts={"prime": {"medium": "medium"}})
+        cfg = make_cfg(antigravity_tier_efforts={"prime": {"normal": "medium"}})
         adapter = AntigravityAdapter(cfg, catalog=catalog())
-        errors = adapter.preflight([request("t007", "prime", "medium", cfg=cfg)])
+        errors = adapter.preflight([request("t007", "prime", "normal", cfg=cfg)])
 
         self.assertEqual(len(errors), 1)
         message = errors[0]
         self.assertIn("t007", message)
         self.assertIn("--model gemini-3.1-pro --effort medium", message)
         self.assertIn("available: low, high", message)
-        self.assertIn("[adapter.antigravity.efforts.prime] medium = \"high\"", message)
+        self.assertIn("[adapter.antigravity.efforts.prime] normal = \"high\"", message)
         self.assertIn("current value 'medium'", message)
 
     def test_preflight_spends_no_subprocess_when_a_catalog_is_supplied(self):
@@ -320,7 +320,7 @@ class TestPreflight(unittest.TestCase):
     def test_unmapped_model_points_at_the_models_table(self):
         cfg = make_cfg(antigravity_models={"prime": "gemini-3.5-flash-lite"})
         adapter = AntigravityAdapter(cfg, catalog=catalog())
-        errors = adapter.preflight([request("t001", "prime", "high", cfg=cfg)])
+        errors = adapter.preflight([request("t001", "prime", "heavy", cfg=cfg)])
         self.assertEqual(len(errors), 1)
         self.assertIn("not in this installation's AGY catalog", errors[0])
         self.assertIn("[adapter.antigravity.models] prime", errors[0])
@@ -328,7 +328,7 @@ class TestPreflight(unittest.TestCase):
     def test_effortless_model_with_an_effort_is_refused(self):
         cfg = make_cfg(antigravity_models={"lite": "gemini-3-flash"})
         adapter = AntigravityAdapter(cfg, catalog=catalog())
-        errors = adapter.preflight([request("t002", "lite", "high", cfg=cfg)])
+        errors = adapter.preflight([request("t002", "lite", "heavy", cfg=cfg)])
         self.assertEqual(len(errors), 1)
         self.assertIn("supports no --effort at all", errors[0])
 
@@ -358,11 +358,11 @@ class TestPreflight(unittest.TestCase):
         self.assertIn("capability catalog is unavailable", errors[0])
 
     def test_duplicate_diagnostics_are_reported_once(self):
-        cfg = make_cfg(antigravity_tier_efforts={"prime": {"medium": "medium"}})
+        cfg = make_cfg(antigravity_tier_efforts={"prime": {"normal": "medium"}})
         adapter = AntigravityAdapter(cfg, catalog=catalog())
         errors = adapter.preflight([
-            request("t001", "prime", "medium", cfg=cfg),
-            request("t001", "prime", "medium", cfg=cfg)])
+            request("t001", "prime", "normal", cfg=cfg),
+            request("t001", "prime", "normal", cfg=cfg)])
         self.assertEqual(len(errors), 1)
 
     def test_recommendation_is_quality_first_then_the_family_ceiling(self):

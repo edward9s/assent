@@ -390,19 +390,19 @@ class TestRunSuccess(EngineTestCase):
         self.assertEqual(parse_task_file(p2).status, "DONE")
 
     def test_effort_from_task_overrides_default(self):
-        p1 = self.write_task(1, effort="low")
+        p1 = self.write_task(1, effort="slight")
         cfg = self.build(extra_config=
-            '[adapter.claude.default_effort]\nlite = "high"\n'
-            '[adapter.claude.efforts]\nlow = "minimal"\n')
+            '[adapter.claude.default_effort]\nlite = "heavy"\n'
+            '[adapter.claude.efforts]\nslight = "minimal"\n')
         self.commit_all()
         adapter = ScriptedAdapter([self.ai_done(p1)])
         self.run_quiet(cfg, once=True, adapter=adapter)
         self.assertEqual(adapter.calls[0][2], "minimal")
 
     def test_effort_default_applied_per_tier(self):
-        p1 = self.write_task(1, model="lite")  # built-in lite default is medium
+        p1 = self.write_task(1, model="lite")  # built-in lite default is normal
         cfg = self.build(extra_config=
-            '[adapter.claude.efforts]\nmedium = "balanced"\n')
+            '[adapter.claude.efforts]\nnormal = "balanced"\n')
         self.commit_all()
         adapter = ScriptedAdapter([self.ai_done(p1)])
         self.run_quiet(cfg, once=True, adapter=adapter)
@@ -413,7 +413,7 @@ class TestRunSuccess(EngineTestCase):
         p1 = self.write_task(1, model="lite")
         cfg = self.build(extra_config=
             '[adapter.claude.default_effort]\n'
-            '[adapter.claude.efforts]\nlow = "minimal"\n')
+            '[adapter.claude.efforts]\nslight = "minimal"\n')
         self.commit_all()
         adapter = ScriptedAdapter([self.ai_done(p1)])
         out = io.StringIO()
@@ -423,36 +423,36 @@ class TestRunSuccess(EngineTestCase):
         self.assertIn("effort(abstract)=unspecified", out.getvalue())
         self.assertIn("requested_effort(actual)=CLI default", out.getvalue())
 
-    def test_effort_translation_uses_tier_then_flat_then_identity(self):
+    def test_effort_translation_uses_tier_then_flat_then_baseline(self):
         cfg = self.build(extra_config=
             '[adapter.claude.efforts]\n'
-            'low = "minimal"\nmedium = "balanced"\n'
-            '[adapter.claude.efforts.lite]\nlow = "tiny"\n')
-        self.assertEqual(engine._resolve_requested_effort(cfg, "lite", "low"),
+            'slight = "minimal"\nnormal = "balanced"\n'
+            '[adapter.claude.efforts.lite]\nslight = "tiny"\n')
+        self.assertEqual(engine._resolve_requested_effort(cfg, "lite", "slight"),
                          "tiny")
         self.assertEqual(engine._resolve_requested_effort(
-            cfg, "lite", "medium"), "balanced")
-        self.assertEqual(engine._resolve_requested_effort(cfg, "lite", "high"),
+            cfg, "lite", "normal"), "balanced")
+        self.assertEqual(engine._resolve_requested_effort(cfg, "lite", "heavy"),
                          "high")
-        self.assertEqual(engine._resolve_requested_effort(cfg, "core", "low"),
+        self.assertEqual(engine._resolve_requested_effort(cfg, "core", "slight"),
                          "minimal")
-        self.assertEqual(engine._resolve_requested_effort(cfg, "core", "high"),
+        self.assertEqual(engine._resolve_requested_effort(cfg, "core", "heavy"),
                          "high")
 
         tier_only = self.build(extra_config=
-            '[adapter.claude.efforts.lite]\nhigh = "max"\n')
+            '[adapter.claude.efforts.lite]\nheavy = "max"\n')
         self.assertEqual(engine._resolve_requested_effort(
-            tier_only, "lite", "high"), "max")
+            tier_only, "lite", "heavy"), "max")
         self.assertEqual(engine._resolve_requested_effort(
-            tier_only, "lite", "low"), "low")
+            tier_only, "lite", "slight"), "low")
         self.assertEqual(engine._resolve_requested_effort(
-            tier_only, "core", "high"), "high")
+            tier_only, "core", "heavy"), "high")
 
     def test_codex_uses_its_own_effort_translation(self):
-        p1 = self.write_task(1, model="lite", effort="high")
+        p1 = self.write_task(1, model="lite", effort="heavy")
         cfg = self.build(adapter_name="codex", extra_config=
-            '[adapter.claude.efforts]\nhigh = "claude-value"\n'
-            '[adapter.codex.efforts.lite]\nhigh = "max"\n')
+            '[adapter.claude.efforts]\nheavy = "claude-value"\n'
+            '[adapter.codex.efforts.lite]\nheavy = "max"\n')
         self.commit_all()
         adapter = ScriptedAdapter([
             self.ai_done(p1, by="codex", requested_model="gpt-cli")],
@@ -473,7 +473,7 @@ class TestRunSuccess(EngineTestCase):
         self.assertIn(_OK, prompt)
         self.assertIn('by = "claude"', prompt)
         self.assertIn('requested_model = "lite"', prompt)
-        self.assertIn('abstract effort = "medium"', prompt)
+        self.assertIn('abstract effort = "normal"', prompt)
         self.assertIn('requested_effort = "medium"', prompt)
 
     def test_codex_prompt_uses_resolved_cli_model(self):
@@ -506,18 +506,18 @@ class TestRunSuccess(EngineTestCase):
             resolved_model="cli-model")
         self.run_quiet(cfg, once=True, adapter=adapter)
         self.assertEqual(adapter.calls[0][0],
-                         "claude|cli-model|medium|medium|t001")
+                         "claude|cli-model|normal|medium|t001")
 
     def test_session_output_distinguishes_abstract_and_requested_effort(self):
-        p1 = self.write_task(1, model="lite", effort="high")
+        p1 = self.write_task(1, model="lite", effort="heavy")
         cfg = self.build(extra_config=
-            '[adapter.claude.efforts.lite]\nhigh = "max"\n')
+            '[adapter.claude.efforts.lite]\nheavy = "max"\n')
         self.commit_all()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             engine.run(cfg, once=True,
                        adapter=ScriptedAdapter([self.ai_done(p1)]))
-        self.assertIn("effort(abstract)=high", out.getvalue())
+        self.assertIn("effort(abstract)=heavy", out.getvalue())
         self.assertIn("requested_effort(actual)=max", out.getvalue())
 
     def test_worktree_default_verify_uses_main_script_and_worktree_cwd(self):
@@ -540,9 +540,9 @@ class TestInvocationResolution(EngineTestCase):
     def test_resolved_effort_is_consistent_across_prompt_call_label_journal(self):
         # One resolved abstract/concrete pair must appear identically in the prompt
         # placeholders, the adapter call, the terminal label, and the scheduler journal.
-        p1 = self.write_task(1, model="lite", effort="high")
+        p1 = self.write_task(1, model="lite", effort="heavy")
         cfg = self.build(extra_config=
-            '[adapter.claude.efforts.lite]\nhigh = "max"\n')
+            '[adapter.claude.efforts.lite]\nheavy = "max"\n')
         self.commit_all()
         adapter = ScriptedAdapter([self.ai_done(p1)])
         out = io.StringIO()
@@ -552,9 +552,9 @@ class TestInvocationResolution(EngineTestCase):
         prompt, requested_model, requested_effort = adapter.calls[0]
         self.assertEqual(requested_model, "lite")
         self.assertEqual(requested_effort, "max")            # concrete CLI value
-        self.assertIn('abstract effort = "high"', prompt)    # abstract kept distinct
+        self.assertIn('abstract effort = "heavy"', prompt)    # abstract kept distinct
         self.assertIn('requested_effort = "max"', prompt)
-        self.assertIn("effort(abstract)=high", out.getvalue())
+        self.assertIn("effort(abstract)=heavy", out.getvalue())
         self.assertIn("requested_effort(actual)=max", out.getvalue())
 
         from assent.plan import read_entries
@@ -616,8 +616,8 @@ class TestAntigravityCapabilityPreflight(EngineTestCase):
     that exercises the shared gate; the adapters without one keep passing it trivially.
     """
 
-    BAD_PRO_MEDIUM = ('[adapter]\nname = "antigravity"\n'
-                      '[adapter.antigravity.efforts.prime]\nmedium = "medium"\n')
+    BAD_PRO_NORMAL = ('[adapter]\nname = "antigravity"\n'
+                      '[adapter.antigravity.efforts.prime]\nnormal = "medium"\n')
 
     def setUp(self):
         super().setUp()
@@ -637,13 +637,13 @@ class TestAntigravityCapabilityPreflight(EngineTestCase):
         self.session = session_patch.start()
         self.addCleanup(session_patch.stop)
 
-    def antigravity_cfg(self, extra_config=BAD_PRO_MEDIUM):
+    def antigravity_cfg(self, extra_config=BAD_PRO_NORMAL):
         (self.root / ".assent" / "assent.toml").write_text(
             extra_config, encoding="utf-8")
         return load_config(self.root / ".assent" / "assent.toml", "plan01")
 
-    def test_run_refuses_pro_medium_before_session_status_or_git_change(self):
-        path = self.write_task(1, model="prime", effort="medium")
+    def test_run_refuses_pro_normal_before_session_status_or_git_change(self):
+        path = self.write_task(1, model="prime", effort="normal")
         cfg = self.antigravity_cfg()
         self.commit_all()
         commits_before = self._git("log", "--pretty=%H")
@@ -656,7 +656,7 @@ class TestAntigravityCapabilityPreflight(EngineTestCase):
         self.assertIn("antigravity capability preflight: FAIL", text)
         self.assertIn("--model gemini-3.1-pro --effort medium", text)
         self.assertIn("available: low, high", text)
-        self.assertIn('[adapter.antigravity.efforts.prime] medium = "high"', text)
+        self.assertIn('[adapter.antigravity.efforts.prime] normal = "high"', text)
         # nothing was started, marked, journalled or committed
         self.session.assert_not_called()
         self.assertEqual(parse_task_file(path).status, "TODO")
@@ -666,7 +666,7 @@ class TestAntigravityCapabilityPreflight(EngineTestCase):
         self.assertEqual(gitops.branches_with_prefix(self.root, "plan01/"), [])
 
     def test_check_refuses_the_same_mapping_with_the_same_diagnostic(self):
-        self.write_task(1, model="prime", effort="medium")
+        self.write_task(1, model="prime", effort="normal")
         cfg = self.antigravity_cfg()
         self.commit_all()
 
@@ -676,7 +676,7 @@ class TestAntigravityCapabilityPreflight(EngineTestCase):
 
         text = out.getvalue()
         self.assertIn("antigravity capability preflight: FAIL", text)
-        self.assertIn('[adapter.antigravity.efforts.prime] medium = "high"', text)
+        self.assertIn('[adapter.antigravity.efforts.prime] normal = "high"', text)
         self.session.assert_not_called()
 
     def test_shipped_mapping_passes_the_preflight_for_every_tier(self):
@@ -691,7 +691,7 @@ class TestAntigravityCapabilityPreflight(EngineTestCase):
         self.assertIn("antigravity capability preflight: OK", out.getvalue())
 
     def test_settled_tasks_do_not_gate_a_run_they_cannot_join(self):
-        self.write_task(1, model="prime", effort="medium", status="DONE")
+        self.write_task(1, model="prime", effort="normal", status="DONE")
         path = self.write_task(2, model="core")
         cfg = self.antigravity_cfg()
         self.commit_all()
@@ -798,7 +798,7 @@ class TestAntigravitySession(EngineTestCase):
         """A quota round and its resume must resolve to the exact same requested_model /
         requested_effort in the prompt, the CLI command, the terminal output, and both the
         scheduler's quota journal entry and the execution AI's own done entry."""
-        path = self.write_task(1, model="prime", effort="low")
+        path = self.write_task(1, model="prime", effort="slight")
         (self.root / ".assent" / "assent.toml").write_text(
             '[adapter]\nname = "antigravity"\n', encoding="utf-8")
         cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")

@@ -19,7 +19,11 @@ from assent.lockfile import LOCK_NAME
 
 _TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt", "verification"}
 _MODEL_TIERS = {"prime", "core", "lite"}
-_EFFORT_LEVELS = {"low", "medium", "high"}
+_EFFORT_LEVELS = {"heavy", "normal", "slight"}
+# Abstract effort names intentionally differ from vendor names.  A missing translation must
+# resolve through this settings-layer baseline rather than passing the abstract value through;
+# this table is not vendor knowledge embedded in adapter code.
+_EFFORT_BASELINE = {"heavy": "high", "normal": "medium", "slight": "low"}
 
 # Who refreshes the folder verification receipt.  "manual" (the default) leaves it
 # to an explicit `assent verify [--batch]`, so a batch workflow verifies once
@@ -35,13 +39,13 @@ _TASK_FILE_RE = re.compile(r"^t\d{3}_.+\.e\.toml$")
 _DEFAULT_EXTRA_ARGS = ["--permission-mode", "acceptEdits"]
 # Abstract tier -> claude CLI --model argument
 _DEFAULT_MODELS = {"prime": "fable", "core": "opus", "lite": "sonnet"}
-_DEFAULT_EFFORT = {"prime": "high", "core": "high", "lite": "medium"}
+_DEFAULT_EFFORT = {"prime": "heavy", "core": "heavy", "lite": "normal"}
 
 _DEFAULT_CODEX_EXTRA_ARGS = ["--sandbox", "workspace-write"]
 _DEFAULT_CODEX_MODELS = {
     "prime": "gpt-5.6-sol", "core": "gpt-5.6-terra", "lite": "gpt-5.6-luna",
 }
-_DEFAULT_CODEX_EFFORT = {"prime": "high", "core": "medium", "lite": "low"}
+_DEFAULT_CODEX_EFFORT = {"prime": "heavy", "core": "normal", "lite": "slight"}
 
 # Antigravity defaults.  The slugs and the effort translations below are the base family
 # names AGY 1.1.5 proved it accepts; the reasoning behind each one, and the recorded probe
@@ -54,13 +58,13 @@ _DEFAULT_ANTIGRAVITY_MODELS = {
     "core": "gemini-3.6-flash",    # low/medium/high
     "lite": "gemini-3.5-flash",    # low/medium; AGY exposes no Flash Lite at all
 }
-_DEFAULT_ANTIGRAVITY_EFFORT = {"prime": "high", "core": "high", "lite": "high"}
-# Vendor effort translation lives here, never in adapter code: Gemini 3.1 Pro has no medium
-# (quality-first, so medium goes up to high), and Gemini 3.5 Flash has no high (so the lite
-# tier's high lands on that family's ceiling instead of being sent and refused).
+_DEFAULT_ANTIGRAVITY_EFFORT = {"prime": "heavy", "core": "heavy", "lite": "heavy"}
+# Vendor effort translation lives here, never in adapter code: Gemini 3.1 Pro has no normal
+# (quality-first, so normal goes up to high), and Gemini 3.5 Flash has no heavy (so the lite
+# tier's heavy lands on that family's ceiling instead of being sent and refused).
 _DEFAULT_ANTIGRAVITY_TIER_EFFORTS = {
-    "prime": {"medium": "high"},
-    "lite": {"high": "medium"},
+    "prime": {"normal": "high"},
+    "lite": {"heavy": "medium"},
 }
 _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES = 120
 
@@ -72,7 +76,7 @@ class AdapterSettings:
     Both resolution orders are fixed and live here so no caller has to branch on an adapter
     name to resolve an invocation:
     - abstract effort selection: task annotation > this adapter's tier default > unset;
-    - vendor effort translation: tier-specific > flat > identity.
+    - vendor effort translation: tier-specific > flat > built-in baseline.
     An empty ``default_effort`` for a tier means no abstract effort is chosen, so no effort flag
     is passed and no CLI default is invented.
     """
@@ -102,11 +106,11 @@ class AdapterSettings:
 
     def resolve_requested_effort(self, model: str,
                                  effort: str | None) -> str | None:
-        """Translate the abstract effort to the actual CLI value by tier-specific > flat > identity."""
+        """Translate the abstract effort by tier-specific > flat > built-in baseline."""
         if effort is None:
             return None
         return self.tier_efforts.get(model, {}).get(
-            effort, self.efforts.get(effort, effort))
+            effort, self.efforts.get(effort, _EFFORT_BASELINE.get(effort, effort)))
 
 
 @dataclass
