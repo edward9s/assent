@@ -192,13 +192,13 @@ class TestDispatch(MainTestCase):
         config = self.write_config()
         code, out = self.run_main(["status", "bad/name", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("命令列工作資料夾", out)
+        self.assertIn("Command-line task folder", out)
 
     def test_removed_plan_section_rejected_as_unknown_key(self):
         config = self.write_config('[plan]\ntasks = "A"\n')
         code, out = self.run_main(["status", "A", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("未知的頂層鍵", out)
+        self.assertIn("unknown top-level keys", out)
 
     def test_run_without_folder_selects_unique_ongoing_folder(self):
         config = self.write_config()

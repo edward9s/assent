@@ -1,4 +1,4 @@
-"""agents.toml 載入與驗證測試。"""
+"""Tests for loading and validating agents.toml."""
 import shutil
 import tempfile
 import unittest
@@ -66,7 +66,7 @@ class TestLoadConfig(ConfigTestCase):
             load_config(self.agents_dir / "agents.toml", "plan01")
 
     def test_removed_plan_section_rejected_as_unknown_key(self):
-        with self.assertRaisesRegex(AgentsError, "未知的頂層鍵"):
+        with self.assertRaisesRegex(AgentsError, "unknown top-level keys"):
             load_config(self.write('[plan]\ntasks = "plan01"\n'), "plan01")
 
     def test_invalid_toml_raises(self):
@@ -74,15 +74,15 @@ class TestLoadConfig(ConfigTestCase):
             load_config(self.write("[run\nretry_per_task ="), "plan01")
 
     def test_unknown_top_level_key_raises(self):
-        with self.assertRaisesRegex(AgentsError, "未知的頂層鍵"):
+        with self.assertRaisesRegex(AgentsError, "unknown top-level keys"):
             load_config(self.write("[plann]\nx = 1\n"), "plan01")
 
     def test_removed_git_section_rejected_as_unknown_key(self):
-        with self.assertRaisesRegex(AgentsError, "未知的頂層鍵"):
+        with self.assertRaisesRegex(AgentsError, "unknown top-level keys"):
             load_config(self.write("[git]\nenabled = false\n"), "plan01")
 
     def test_folder_name_with_space_rejected(self):
-        with self.assertRaisesRegex(AgentsError, "工作資料夾名稱"):
+        with self.assertRaisesRegex(AgentsError, "not a valid task folder name"):
             load_config(self.write(_MINIMAL), "my plan")
 
     def test_folder_name_with_slash_rejected(self):
@@ -96,11 +96,11 @@ class TestLoadConfig(ConfigTestCase):
                 load_config(self.write(_MINIMAL), bad)
 
     def test_invalid_folder_override_rejected(self):
-        with self.assertRaisesRegex(AgentsError, "命令列工作資料夾"):
+        with self.assertRaisesRegex(AgentsError, "Command-line task folder"):
             load_config(self.write(_MINIMAL), folder="bad/name")
 
     def test_type_error_reported(self):
-        with self.assertRaisesRegex(AgentsError, "型別錯誤"):
+        with self.assertRaisesRegex(AgentsError, "wrong type"):
             load_config(self.write("[watchdog]\nstall_minutes = \"x\"\n"), "plan01")
 
     def test_negative_stall_rejected(self):
@@ -110,7 +110,7 @@ class TestLoadConfig(ConfigTestCase):
     def test_models_table_full_replacement(self):
         cfg = load_config(self.write(
             '[adapter.claude.models]\nprime = "x"\n'), "plan01")
-        self.assertEqual(cfg.claude_models, {"prime": "x"})  # 整表取代,不合併
+        self.assertEqual(cfg.claude_models, {"prime": "x"})  # whole table replaced, not merged
 
     def test_bad_default_effort_rejected(self):
         with self.assertRaisesRegex(AgentsError, "effort"):
@@ -145,13 +145,13 @@ class TestLoadConfig(ConfigTestCase):
     def test_bad_efforts_values_rejected(self):
         cases = (
             ('[adapter.claude.efforts]\nlow = ""\n',
-             r"\[adapter\.claude\.efforts\].*非空字串"),
+             r"\[adapter\.claude\.efforts\].*non-empty string"),
             ('[adapter.claude.efforts]\nlow = 1\n',
-             r"\[adapter\.claude\.efforts\].*非空字串"),
+             r"\[adapter\.claude\.efforts\].*non-empty string"),
             ('[adapter.codex.efforts.lite]\nhigh = "   "\n',
-             r"\[adapter\.codex\.efforts\.lite\].*非空字串"),
+             r"\[adapter\.codex\.efforts\.lite\].*non-empty string"),
             ('[adapter.codex.efforts.lite]\nhigh = false\n',
-             r"\[adapter\.codex\.efforts\.lite\].*非空字串"),
+             r"\[adapter\.codex\.efforts\.lite\].*non-empty string"),
         )
         for text, message in cases:
             with self.subTest(text=text), self.assertRaisesRegex(

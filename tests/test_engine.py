@@ -161,8 +161,8 @@ class TestRunSuccess(EngineTestCase):
                     result = engine.run(cfg, adapter=adapter, **options)
                 self.assertEqual(result, 1)
                 self.assertIn(
-                    "前置資料夾 base 尚有 3 個未完成任務"
-                    "(TODO 1、WIP 1、BLOCKED 1)", out.getvalue())
+                    "Prerequisite folder base still has 3 unfinished task(s)"
+                    " (TODO 1, WIP 1, BLOCKED 1)", out.getvalue())
                 hold_lock.assert_not_called()
         self.assertEqual(adapter.calls, [])
 
@@ -786,14 +786,14 @@ class TestSchedulingAndRefusals(EngineTestCase):
         check_out = io.StringIO()
         with contextlib.redirect_stdout(check_out):
             self.assertEqual(engine.check(cfg), 1)
-        self.assertIn("舊任務檔", check_out.getvalue())
-        self.assertIn("搬移", check_out.getvalue())
+        self.assertIn("retired legacy task files", check_out.getvalue())
+        self.assertIn("move them", check_out.getvalue())
 
         run_out = io.StringIO()
         with contextlib.redirect_stdout(run_out):
             self.assertEqual(engine.run(cfg, adapter=adapter), 1)
-        self.assertIn("舊任務檔", run_out.getvalue())
-        self.assertIn("搬移", run_out.getvalue())
+        self.assertIn("retired legacy task files", run_out.getvalue())
+        self.assertIn("move them", run_out.getvalue())
         self.assertEqual(adapter.calls, [])
 
 
@@ -874,7 +874,7 @@ class TestQueries(EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.check(cfg), 1)
         self.assertIn("資料夾依賴:FAIL", out.getvalue())
-        self.assertIn("未知鍵", out.getvalue())
+        self.assertIn("unknown keys", out.getvalue())
 
     def test_report_lists_checkpoints_and_blocked_summary(self):
         p1 = self.write_task(1)

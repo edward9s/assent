@@ -1,8 +1,11 @@
-"""agents.toml 讀取、工作資料夾列舉與驗證。
+"""Loading agents.toml, and enumerating and validating task folders.
 
-- agents.toml 位於專案的 .agents/ 內;專案根目錄 = .agents 的上層目錄。
-- 工作資料夾名稱由呼叫端提供;git 分支前綴 = 該名稱 + "/"。
-- 未提供的欄位套預設值;未知的頂層鍵一律報錯(防打錯字靜默失效)。
+- agents.toml lives inside the project's .agents/; the project root is the
+  parent directory of .agents.
+- The task folder name is supplied by the caller; the git branch prefix is
+  that name plus "/".
+- Fields not supplied fall back to defaults; an unknown top-level key is
+  always an error (so a typo cannot fail silently).
 """
 from __future__ import annotations
 
@@ -18,12 +21,13 @@ _TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt"}
 _MODEL_TIERS = {"prime", "core", "lite"}
 _EFFORT_LEVELS = {"low", "medium", "high"}
 
-# 工作資料夾名稱:不含空白與路徑分隔符,不以 - 或 . 開頭(它會成為 git 分支前綴)
+# Task folder name: no whitespace or path separators, must not start with
+# - or . (it becomes the git branch prefix)
 _FOLDER_RE = re.compile(r"^[^\s/\\]+$")
 _TASK_FILE_RE = re.compile(r"^t\d{3}_.+\.e\.toml$")
 
 _DEFAULT_EXTRA_ARGS = ["--permission-mode", "acceptEdits"]
-# 抽象檔位 -> claude CLI --model 參數
+# Abstract tier -> claude CLI --model argument
 _DEFAULT_MODELS = {"prime": "fable", "core": "opus", "lite": "sonnet"}
 _DEFAULT_EFFORT = {"prime": "high", "core": "high", "lite": "medium"}
 
@@ -36,11 +40,11 @@ _DEFAULT_CODEX_EFFORT = {"prime": "high", "core": "medium", "lite": "low"}
 
 @dataclass
 class Config:
-    root: Path                     # 專案根目錄 = .agents 的上層
-    agents_dir: Path               # .agents 目錄(= 設定檔所在目錄)
-    tasks_dir: Path                # 工作資料夾(.agents/<tasks>)
-    tasks_name: str                # 工作資料夾名稱(= git 分支前綴的字首)
-    stall_minutes: int = 30        # 0 = 關閉 watchdog
+    root: Path                     # Project root = parent of .agents
+    agents_dir: Path               # .agents directory (= where the config file lives)
+    tasks_dir: Path                # Task folder (.agents/<tasks>)
+    tasks_name: str                # Task folder name (= git branch prefix stem)
+    stall_minutes: int = 30        # 0 = watchdog disabled
     retry_per_task: int = 1
     quota_poll_minutes: int = 30
     adapter_name: str = "claude"
@@ -63,14 +67,14 @@ class Config:
     codex_efforts: dict[str, str] = field(default_factory=dict)
     codex_tier_efforts: dict[str, dict[str, str]] = field(default_factory=dict)
     prompt_template: str | None = None
-    source_root: Path | None = None  # 隔離執行時的原始主工作樹;不來自設定檔
+    source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
 
     @property
     def branch_prefix(self) -> str:
         return f"{self.tasks_name}/"
 
     def rel(self, path: Path) -> str:
-        """供提示詞使用的路徑;專案內用相對路徑,外部真本則用絕對路徑。"""
+        """Path for use in prompts; relative inside the project, absolute for an external source of truth."""
         resolved = path.resolve()
         try:
             return resolved.relative_to(self.root.resolve()).as_posix()
@@ -81,7 +85,7 @@ class Config:
             raise
 
     def git_rel(self, path: Path) -> str:
-        """把主樹或 worktree 內的路徑轉成 repo 相對路徑,供 git pathspec。"""
+        """Convert a path in the main tree or a worktree to a repo-relative path for git pathspecs."""
         resolved = path.resolve()
         roots = (self.root, self.source_root) if self.source_root else (self.root,)
         for root in roots:
@@ -89,10 +93,10 @@ class Config:
                 return resolved.relative_to(root.resolve()).as_posix()
             except ValueError:
                 continue
-        raise ValueError(f"路徑不在專案工作樹內:{resolved}")
+        raise ValueError(f"Path is outside the project worktree: {resolved}")
 
     def for_worktree(self, root: Path) -> "Config":
-        """派生只把程式碼/git 根目錄移入 worktree 的等效執行設定。"""
+        """Derive an equivalent config that only moves the code/git root into a worktree."""
         return replace(self, root=root.resolve(), source_root=self.root.resolve())
 
     @property
@@ -109,14 +113,14 @@ class Config:
 
     @property
     def git_excludes(self) -> tuple[str, ...]:
-        """執行期產物:不參與乾淨檢查、scope 檢查與 checkpoint commit。"""
+        """Runtime artifacts: excluded from the clean check, scope check, and checkpoint commit."""
         return (self.runtime_log_rel, self.report_rel, self.lockfile_rel)
 
 
 def _section(data: dict, name: str) -> dict:
     val = data.get(name, {})
     if not isinstance(val, dict):
-        raise AgentsError(f"設定檔 [{name}] 應為表(table),不是純值")
+        raise AgentsError(f"Config [{name}] must be a table, not a scalar")
     return val
 
 
@@ -125,7 +129,7 @@ def _typed(section: dict, owner: str, key: str, typ: type, default):
         return default
     val = section[key]
     if not isinstance(val, typ) or (typ is not bool and isinstance(val, bool)):
-        raise AgentsError(f"設定檔 {owner} 的 {key} 型別錯誤:應為 {typ.__name__}")
+        raise AgentsError(f"Config {owner}.{key} has the wrong type: expected {typ.__name__}")
     return val
 
 
@@ -134,7 +138,7 @@ def _str_list(section: dict, owner: str, key: str, default: list[str]) -> list[s
     if val is None:
         return list(default)
     if not all(isinstance(x, str) for x in val):
-        raise AgentsError(f"設定檔 {owner} 的 {key} 每個元素都應為字串")
+        raise AgentsError(f"Config {owner}.{key} must have all-string elements")
     return list(val)
 
 
@@ -143,13 +147,13 @@ def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> di
     if val is None:
         return dict(default)
     if not all(isinstance(v, str) for v in val.values()):
-        raise AgentsError(f"設定檔 [{owner}.{key}] 每個值都應為字串")
+        raise AgentsError(f"Config [{owner}.{key}] must have all-string values")
     return dict(val)
 
 
 def _effort_maps(section: dict, owner: str
                  ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
-    """解析 efforts 的平面與檔位分節對照表,並對所有結構 fail-closed。"""
+    """Parse the flat and per-tier ``efforts`` maps, fail-closed on any bad structure."""
     raw = _typed(section, f"[{owner}]", "efforts", dict, None)
     if raw is None:
         return {}, {}
@@ -160,18 +164,18 @@ def _effort_maps(section: dict, owner: str
         if isinstance(value, dict):
             if key not in _MODEL_TIERS:
                 raise AgentsError(
-                    f"設定檔 [{owner}.efforts] 的分節 {key!r} 不合法"
-                    f"({'/'.join(sorted(_MODEL_TIERS))})")
+                    f"Config [{owner}.efforts] section {key!r} is invalid"
+                    f" ({'/'.join(sorted(_MODEL_TIERS))})")
             tier_values: dict[str, str] = {}
             block = f"[{owner}.efforts.{key}]"
             for effort, requested in value.items():
                 if effort not in _EFFORT_LEVELS:
                     raise AgentsError(
-                        f"設定檔 {block} 的鍵 {effort!r} 不是有效 effort"
-                        f"({'/'.join(sorted(_EFFORT_LEVELS))})")
+                        f"Config {block} key {effort!r} is not a valid effort"
+                        f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
                 if not isinstance(requested, str) or not requested.strip():
                     raise AgentsError(
-                        f"設定檔 {block} 的 {effort} 應為非空字串")
+                        f"Config {block} {effort} must be a non-empty string")
                 tier_values[effort] = requested
             by_tier[key] = tier_values
             continue
@@ -179,51 +183,53 @@ def _effort_maps(section: dict, owner: str
         block = f"[{owner}.efforts]"
         if key not in _EFFORT_LEVELS:
             raise AgentsError(
-                f"設定檔 {block} 的鍵 {key!r} 不是有效 effort"
-                f"({'/'.join(sorted(_EFFORT_LEVELS))})")
+                f"Config {block} key {key!r} is not a valid effort"
+                f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
         if not isinstance(value, str) or not value.strip():
-            raise AgentsError(f"設定檔 {block} 的 {key} 應為非空字串")
+            raise AgentsError(f"Config {block} {key} must be a non-empty string")
         flat[key] = value
     return flat, by_tier
 
 
 def _validate_tasks_name(tasks_name: str, owner: str) -> None:
-    """驗證工作資料夾名稱，確保它可安全作為 git 分支前綴。"""
+    """Validate a task folder name so it is safe to use as a git branch prefix."""
     if not _FOLDER_RE.match(tasks_name) or tasks_name[0] in "-.":
         raise AgentsError(
-            f"{owner} = {tasks_name!r} 不是合法的工作資料夾名稱"
-            "(不可含空白或路徑分隔符,不可以 - 或 . 開頭;它同時是 git 分支前綴)")
+            f"{owner} = {tasks_name!r} is not a valid task folder name"
+            " (no whitespace or path separators, must not start with - or .;"
+            " it also becomes the git branch prefix)")
 
 
 def _load_data(path: str | Path) -> tuple[Path, dict]:
-    """讀取並驗證不依賴工作資料夾的設定內容。"""
+    """Read and validate the config content that does not depend on a task folder."""
     path = Path(path)
     if not path.is_file():
         raise AgentsError(
-            f"找不到設定檔:{path}(還沒初始化?請在專案根目錄執行 agents init)")
+            f"Config file not found: {path}"
+            " (not initialized yet? run agents init in the project root)")
     with open(path, "rb") as f:
         try:
             data = tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
-            raise AgentsError(f"設定檔不是有效的 TOML({path}):{e}") from e
+            raise AgentsError(f"Config file is not valid TOML ({path}): {e}") from e
 
     unknown = sorted(set(data) - _TOP_LEVEL_KEYS)
     if unknown:
         raise AgentsError(
-            f"設定檔含未知的頂層鍵:{', '.join(unknown)}"
-            f"(有效鍵:{', '.join(sorted(_TOP_LEVEL_KEYS))})")
+            f"Config file has unknown top-level keys: {', '.join(unknown)}"
+            f" (valid keys: {', '.join(sorted(_TOP_LEVEL_KEYS))})")
 
     return path.resolve(), data
 
 
 def validate_config(path: str | Path) -> Path:
-    """驗證設定檔並回傳其所在的 ``.agents`` 目錄。"""
+    """Validate the config file and return the ``.agents`` directory it lives in."""
     resolved, _ = _load_data(path)
     return resolved.parent
 
 
 def list_task_folders(agents_dir: str | Path) -> list[str]:
-    """列出含正式任務檔的工作資料夾,名稱依字典序排列。"""
+    """List task folders that contain a formal task file, sorted lexicographically."""
     agents_dir = Path(agents_dir)
     if not agents_dir.is_dir():
         return []
@@ -239,9 +245,9 @@ def list_task_folders(agents_dir: str | Path) -> list[str]:
 
 
 def load_config(path: str | Path, folder: str) -> Config:
-    """載入設定,並以呼叫端提供的工作資料夾名稱建構衍生路徑。"""
+    """Load the config and build derived paths from the caller-supplied task folder name."""
     resolved, data = _load_data(path)
-    _validate_tasks_name(folder, "命令列工作資料夾")
+    _validate_tasks_name(folder, "Command-line task folder")
 
     agents_dir = resolved.parent
     root = agents_dir.parent
@@ -289,17 +295,17 @@ def load_config(path: str | Path, folder: str) -> Config:
     )
 
     if cfg.stall_minutes < 0:
-        raise AgentsError("[watchdog] stall_minutes 不可為負(0 = 關閉)")
+        raise AgentsError("[watchdog] stall_minutes must not be negative (0 = disabled)")
     if cfg.retry_per_task < 0:
-        raise AgentsError("[run] retry_per_task 不可為負")
+        raise AgentsError("[run] retry_per_task must not be negative")
     if cfg.quota_poll_minutes < 1:
-        raise AgentsError("[run] quota_poll_minutes 至少為 1")
+        raise AgentsError("[run] quota_poll_minutes must be at least 1")
     for owner, efforts in (
             ("adapter.claude", cfg.claude_default_effort),
             ("adapter.codex", cfg.codex_default_effort)):
         for model, eff in efforts.items():
             if eff not in _EFFORT_LEVELS:
                 raise AgentsError(
-                    f"[{owner}.default_effort] {model} = {eff!r} 不是有效 effort"
-                    f"({'/'.join(sorted(_EFFORT_LEVELS))})")
+                    f"[{owner}.default_effort] {model} = {eff!r} is not a valid effort"
+                    f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
     return cfg
