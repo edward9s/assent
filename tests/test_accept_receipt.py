@@ -313,7 +313,8 @@ class TestStackedReceiptLifecycle(AcceptReceiptCase):
         self._write_task(self.downstream)
         downstream_tasks = self.assent_dir / self.downstream
         (downstream_tasks / "_folder.toml").write_text(
-            f'after = ["{self.upstream}"]\n', encoding="utf-8")
+            f'after = ["{self.upstream}"]\n'
+            f'base = "{self.upstream}"\n', encoding="utf-8")
         downstream_source, downstream_branch = self._make_source(
             self.downstream, base_ref=upstream_branch)
         (downstream_source / "shared.txt").write_text(

@@ -274,32 +274,29 @@ def _source_snapshot(cfg: Config, main: Path) -> tuple[str, str, Path | None]:
 
 def _stack_sources(cfg: Config, target_tip: str,
                    downstream_tip: str) -> tuple[gitops.FolderSourceSnapshot, ...]:
-    """Snapshot direct upstreams and prove the downstream contains each one.
+    """Snapshot the declared live base and prove the downstream contains it.
 
     Only direct dependencies participate here.  An unrelated malformed folder
     must not invalidate this folder's receipt, while every declared live
-    upstream is required to be complete and to retain one clean, attached source
-    identity.  At most one source may still be absent from the integration
-    target.
+    upstream is required to be complete.  Only the explicitly declared base
+    contributes a source identity or ancestry requirement; non-base ``after``
+    entries provide ordering only.
 
     An archived upstream is proven complete by the roster and has no source
-    left to snapshot, so it is filtered out first (see ``live_upstreams``): both
-    ancestry checks below would be asking whether content that is already in the
-    target is in the target, and it can never be an unaccepted candidate.
+    left to snapshot, so it is filtered out first (see ``live_upstreams``).
     """
     dependencies = parse_folder_dependencies(cfg.tasks_dir)
     sources: list[gitops.FolderSourceSnapshot] = []
-    unaccepted: list[gitops.FolderSourceSnapshot] = []
     for folder in live_upstreams(cfg.assent_dir, dependencies):
         completion = infer_folder_completion(cfg.assent_dir / folder)
         if not completion.complete:
             raise AssentError(
                 f"upstream folder {folder} is incomplete: {completion.reason}")
+        if dependencies.base != folder:
+            continue
         source = gitops.resolve_folder_source(
             cfg.root, folder, cfg.git_excludes)
         sources.append(source)
-        if not gitops.is_ancestor(cfg.root, source.tip, target_tip):
-            unaccepted.append(source)
         if not gitops.is_ancestor(cfg.root, source.tip, downstream_tip):
             raise AssentError(
                 f"stale stack for {cfg.tasks_name}: current upstream {folder} tip "
@@ -308,12 +305,6 @@ def _stack_sources(cfg: Config, target_tip: str,
                 f"were preserved. Run `assent rework {cfg.tasks_name}` after "
                 "deciding how to handle the upstream change, or replan the "
                 "dependency")
-    if len(unaccepted) > 1:
-        detail = ", ".join(
-            f"{source.folder} ({source.tip})" for source in unaccepted)
-        raise AssentError(
-            "multiple unaccepted upstream folders cannot form one speculative "
-            f"verification candidate: {detail}")
     return tuple(sources)
 
 
