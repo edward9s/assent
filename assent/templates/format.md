@@ -66,8 +66,11 @@ project/
   branch currently checked out in the main worktree. `FOLDER` and `--all` are
   mutually exclusive alternatives: `--all` serially accepts every finished
   work folder in `after` dependency order, refreshing a stale verification
-  receipt with a full unattended verification before accepting each folder,
-  and stops the chain fail-closed at the first failure while
+  receipt with a full unattended verification before accepting each folder --
+  unless the folder is already merged (its source tip an ancestor of the
+  target), in which case it no-ops by ancestry alone, requiring no receipt and
+  unaffected by a stale receipt or a changed verification script -- and stops
+  the chain fail-closed at the first failure while
   already-published merges remain published. A finished folder whose source
   branch and worktree have both already been cleaned away is skipped instead
   of verified, and the skip does not count as a chain failure; only `--all`
@@ -466,7 +469,10 @@ finished work folder in dependency order and accepts each in turn. Each
 branch currently checked out in the main worktree. It verifies the source and
 the integrated result, records an auditable `--no-ff` merge, and keeps the
 source worktree and branch for later inspection or cleanup. A successful
-rerun is idempotent and does not create a duplicate merge.
+rerun is idempotent and does not create a duplicate merge: once the source
+tip is an ancestor of the target, acceptance is judged by ancestry alone and
+requires no receipt, unaffected by a stale receipt or a changed verification
+script.
 
 Acceptance refuses incomplete, locked, dirty, detached, ambiguous, or
 dependency-unsafe state. A source or post-merge verification failure and a
