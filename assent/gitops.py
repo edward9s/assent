@@ -521,6 +521,114 @@ def working_tree_status(root: Path,
     return WorkingTreeStatus(staged, unstaged, untracked)
 
 
+def dirty_paths(root: Path, excludes: Sequence[str] = ()) -> set[str]:
+    """Return the set of normalized paths with any uncommitted change (including untracked).
+
+    Used to snapshot the main worktree before and after an isolated session so the caller can
+    diff the two sets and find paths a session wrote outside its isolated worktree.
+    """
+    out = _git(root, "status", "--porcelain")
+    return {_status_path(line) for line in _meaningful_status_lines(out, excludes)}
+
+
+def _run_git_stdin(root: Path, args: Sequence[str],
+                   input_text: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["git", "-c", "core.quotepath=false", *args], cwd=root, input=input_text,
+            capture_output=True, encoding="utf-8", errors="replace")
+    except FileNotFoundError as e:
+        raise AssentError("git executable not found; confirm git is installed and on PATH") from e
+
+
+@dataclass(frozen=True)
+class _EscapeClassification:
+    """Escaped paths, split by how they can be ported back."""
+
+    tracked: list[str]     # existing tracked files modified in place: ported via a patch
+    untracked: list[str]   # brand-new files: ported via a content copy
+    unsupported: list[str]  # deletes/renames/type changes/anything else: not auto-portable
+
+
+def _classify_escape_paths(root: Path, paths: Sequence[str]) -> _EscapeClassification:
+    codes: dict[str, str] = {}
+    for line in _git(root, "status", "--porcelain").splitlines():
+        if not line.strip():
+            continue
+        codes[_status_path(line)] = line[:2]
+
+    tracked: list[str] = []
+    untracked: list[str] = []
+    unsupported: list[str] = []
+    for path in paths:
+        code = codes.get(path)
+        if code == "??":
+            untracked.append(path)
+        elif code in (" M", "M ", "MM"):
+            tracked.append(path)
+        else:
+            # Missing (no longer dirty), deleted, renamed, type-changed, or a conflict: none
+            # of these has a safe, unambiguous automatic port-back, so refuse to guess.
+            unsupported.append(path)
+    return _EscapeClassification(tracked, untracked, unsupported)
+
+
+def port_back_main_tree_escape(main_root: Path, worktree_root: Path,
+                               paths: Sequence[str]) -> tuple[bool, str | None]:
+    """Port paths a session wrote into ``main_root`` back into ``worktree_root``, then restore
+    ``main_root`` at those paths -- all or nothing.
+
+    Every path is validated (patch dry-run / target-collision check) before anything is
+    mutated. If every check passes, the worktree is updated and only then is the main tree
+    restored, so a mid-way failure cannot leave the main tree reverted while the escaped
+    content is lost -- token-burned output is never discarded. Returns ``(True, None)`` on
+    success, or ``(False, reason)`` with *both* trees left completely untouched.
+    """
+    plan = _classify_escape_paths(main_root, paths)
+    if plan.unsupported:
+        shown = ", ".join(sorted(plan.unsupported)[:5])
+        more = " ..." if len(plan.unsupported) > 5 else ""
+        return False, f"unsupported change type for automatic port-back: {shown}{more}"
+
+    diffs: dict[str, str] = {path: _git(main_root, "diff", "--", path)
+                             for path in plan.tracked}
+    for path, diff_text in diffs.items():
+        if not diff_text.strip() or _run_git_stdin(
+                worktree_root, ["apply", "--check", "-"], diff_text).returncode != 0:
+            return False, f"the worktree copy of {path} has diverged from the main tree"
+    for path in plan.untracked:
+        if (worktree_root / path).exists():
+            return False, f"the worktree already has a conflicting {path}"
+
+    applied_tracked: list[str] = []
+    applied_untracked: list[str] = []
+    try:
+        for path, diff_text in diffs.items():
+            result = _run_git_stdin(worktree_root, ["apply", "-"], diff_text)
+            if result.returncode != 0:
+                raise AssentError(
+                    f"git apply failed for {path}: "
+                    f"{result.stderr.strip() or result.stdout.strip()}")
+            applied_tracked.append(path)
+        for path in plan.untracked:
+            dst = worktree_root / path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(main_root / path, dst)
+            applied_untracked.append(path)
+    except (AssentError, OSError) as e:
+        for path in applied_untracked:
+            (worktree_root / path).unlink(missing_ok=True)
+        for path in reversed(applied_tracked):
+            _run_git_stdin(worktree_root, ["apply", "-R", "-"], diffs[path])
+        return False, f"porting escaped changes into the worktree failed: {e}"
+
+    for path in plan.tracked:
+        _git(main_root, "checkout", "--", path)
+    for path in plan.untracked:
+        (main_root / path).unlink(missing_ok=True)
+    return True, None
+
+
 def folder_worktree(root: Path, folder: str) -> Path | None:
     """Return a folder's valid fixed worktree, if it exists."""
     primary = main_worktree(root)
