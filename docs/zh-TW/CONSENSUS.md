@@ -3,11 +3,11 @@
 *[English](../CONSENSUS.md)*
 
 > 本檔為 [../CONSENSUS.md](../CONSENSUS.md) 的正體中文(台灣用語)翻譯。內容若
-> 與英文版不一致,以英文版為準。翻譯所依版本:`92e1e39` (2026-07-20)。
+> 與英文版不一致,以英文版為準。翻譯所依版本:`58604e5` (2026-07-29)。
 
 > 源自三輪討論(Claude Fable × GPT-5.6)的共識,隨架構演進持續更新。
 > 目標:在「輸出品質可信可靠」與「極致節省 tokens」之間取得最穩健的平衡。
-> 現行格式的唯一契約是 `.assent/format.md`(源碼在
+> 現行格式的唯一契約是 `~/.assent/format.md`(源碼在
 > `assent/templates/format.md`);本檔記錄格式背後的設計原則。本檔是專案的
 > 非規範性設計理念說明,不是可執行的任務格式契約本身——那份契約僅為
 > `assent/templates/format.md`。
@@ -21,7 +21,8 @@
 
 ```text
 專案規則   → AGENTS.md(root,工具自動載入的入口,是否進版控由專案決定)
-工作指示   → .assent/instructions.md(assent session 行為與跨專案共通規則)
+工作指示   → ~/.assent/instructions.md(assent session 行為與跨專案共通規則,
+             每台機器一份)
 本次任務   → .assent/<工作資料夾>/tNNN_name.toml(任務檔,執行上自包含)
 目前狀態   → 任務檔的 status + git(任務檔即狀態,沒有另外的狀態檔)
 歷史證據   → rNNN_name.toml(一任務一檔日誌,append-only,預設不讀)
@@ -109,9 +110,13 @@ unittest、pytest、npm test、Flutter test 或 custom argv 命令。打包 temp
 不能回報 `verify: OK`。
 
 重跑 `assent init` 永不取代既有 `.assent/verify.py`,已有 verifier 時提供 `--test`
-會拒絕。它會從打包契約刷新 `format.md` 與 `instructions.md`,並從打包組態只補入
-遺漏的 active table/key path,保留既有及自訂值。輸入與 TOML 驗證都完成後才會改動
-受管 `.assent` 檔案。verifier digest 改變會使舊 receipt stale,因此接受前必須在
+會拒絕。它會從打包契約刷新 `~/.assent/format.md` 與 `~/.assent/instructions.md`,
+並把打包組態中遺漏的 active table/key path 補進 `~/.assent/assent.toml`,保留既有
+及自訂值。專案內舊的契約副本只有與打包文字完全相同時才會被移除;不同的會保留並
+發出警告,因為 session 讀的都是使用者家目錄的契約。輸入與 TOML 驗證都完成後才會
+改動任何受管檔案。開任何 session 之前,兩份使用者家目錄契約都必須存在、可讀且與
+這套安裝的打包文字逐位元組相同,否則 run 會 fail-closed 並指向 `assent init`,而不
+是在執行中途修補它們。verifier digest 改變會使舊 receipt stale,因此接受前必須在
 無人值守階段以 `assent verify <FOLDER>` refresh 證據。
 
 worktree 是變更隔離、衝突管理、稽核與 Git 復原邊界,不是安全 sandbox。`danger-full-access`
@@ -124,17 +129,34 @@ container 或 VM sandbox。
 - `AGENTS.md` 必須留在 project root——agent 工具自動在 root 尋找指令檔,
   位置本身就是功能。它只放專案規則與一行 assent 橋接;進版控時使用
   worktree 內的分支版本,未進版控時由調度器提示主樹絕對路徑。
-- assent session 行為與跨專案共通規則放在 `.assent/instructions.md`,不混入
-  專案 AGENTS.md。其餘管理檔也全部收進 `.assent/`,root 保持乾淨。
+- assent session 行為與跨專案共通規則放在 `~/.assent/instructions.md`,不混入
+  專案 AGENTS.md。它與同目錄的 `~/.assent/format.md` 描述的是工具而非任何單一
+  專案,所以每台機器只安裝一份,專案不會拿到副本;共用的
+  `~/.assent/assent.toml` 設定也放在旁邊。其餘專案專屬管理檔則全部收進專案自己
+  的 `.assent/`,root 保持乾淨。
+- 設定解析順序是內建預設值、`~/.assent/assent.toml`、選用的
+  `.assent/assent.toml` 專案覆寫,最後是指令有提供時的顯式 CLI 選擇。table 依
+  key 合併,scalar 與 array 整個取代,因此覆寫會就它寫出的那些 key 遮蔽日後對
+  共用設定的修改;`assent init` 逐位元組保留這種檔案,絕不搬移它。只有省略才
+  代表繼承:`key =` 是無效 TOML,空 table 表示不覆寫任何葉節點,空 array 在該
+  欄位允許時是顯式取代,空字串對需要有意義文字的設定一律拒絕,而不是安靜地把
+  下層值放回來。
+- 專案保有真正屬於自己的東西:`AGENTS.md`、`.assent/verify.py`、工作資料夾與
+  其中的執行期產物。`assent init` 只刷新前者裡那一行 bridge,也絕不覆寫後者。
 - 整個 `.assent/` 由 `.gitignore` 排除,只留在主工作樹;調度器用絕對路徑
-  把 instructions、t/r 與預設驗收腳本交給 worktree session,不製造第二份真本。
+  把 t/r 與預設驗收腳本(主樹路徑)以及兩份契約(`~/.assent` 路徑)交給
+  worktree session,不製造第二份真本。
 - 驗收腳本預設在主樹 `.assent/verify.py`,內容是專案自己的檢查命令;
   從主樹載入腳本,但以 worktree 為 cwd 驗收隔離後的成果。
 - Git 永遠啟用並一律使用 worktree,不得以切換開關或無 Git 降級模式取代;
   這是安全平行處理多個工作資料夾的必要條件。任何已追蹤的 `.assent/` 檔案
   都會 fail-closed,避免第二份真本。
 - 工作資料夾內的 `assent.lock` 保證同一資料夾一個 run;worktree 路徑為
-  `<專案名>.worktrees/<資料夾>/`,可用位置參數指定工作資料夾。
+  `<專案名>.worktrees/<資料夾>/`,可用位置參數指定工作資料夾。所有權是綁在
+  開啟檔案 handle 上的 OS 層級鎖,正常結束、Ctrl+C、當機與強制終止都會釋放;
+  檔案本身刻意留下作為診斷資料,從來不是需要清理的 stale lock 問題。
+  `run --all` 在任何離開路徑結束前都會回收它擁有的工作資料夾子行程,因此紀錄
+  的 PID 若仍存活,代表真的有行程在跑,而不是殘留檔案。
 - 工作資料夾名稱採可攜的 Windows/Git-ref 契約:不可為空,不可含空白、路徑
   分隔符、控制字元、Git-ref 禁用字元(`~`、`^`、`:`、`?`、`*`、`[`),或
   Windows 禁用字元(`<`、`>`、`"`、`|`);不可 `-` 或 `.` 開頭,不可含 `..`
@@ -268,7 +290,7 @@ audio 或 video 欄位,不提供 adapter 附件協定,不推測模型的媒體�
 ## 維護紀律
 
 - AI 交接最容易在 session 尾聲、上下文快滿時鬆掉 → 收尾協定寫死在
-  `.assent/instructions.md`,且不靠自覺:調度器的結構比對讓「放寬自己的驗收」
+  `~/.assent/instructions.md`,且不靠自覺:調度器的結構比對讓「放寬自己的驗收」
   直接判失敗,scope 豁免只有任務自己的 t 檔與 r 檔。
 - 人的角色只剩審查與裁決:讀 `_report.md`(零 token),只對要裁決的任務
   開 session 下指令;人不手改檔案,改檔一律由 AI 依指示執行。

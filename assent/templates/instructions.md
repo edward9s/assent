@@ -1,8 +1,11 @@
 # assent working instructions
 
-> This file lives at `.assent/instructions.md` in the project's main worktree
-> and defines only the behavior of an assent session. The single contract for
-> the plan format is `format.md` in the same directory.
+> This file lives at `~/.assent/instructions.md`, the per-user assent home
+> shared by every project on this machine, and defines only the behavior of an
+> assent session. The single contract for the plan format is `format.md` in
+> that same directory. Both are installed and refreshed by `assent init`; a
+> project's own `.assent/` never carries a copy of either one. A scheduled
+> session is handed both as absolute paths rather than deriving them.
 
 ## Cross-project common rules
 
@@ -15,8 +18,8 @@
 A **meeting / interactive session** reads only, to get started:
 
 1. The project root `AGENTS.md` (if present)
-2. This file
-3. `.assent/format.md` (required before creating or modifying a task file)
+2. This file, at `~/.assent/instructions.md`
+3. `~/.assent/format.md` (required before creating or modifying a task file)
 4. The current work folder's task files and `_report.md` (during a review
    meeting)
 5. The source and tests the task directly touches
@@ -29,11 +32,15 @@ An **assent-scheduled task session** reads only:
 3. The absolute path to the one assigned task file the scheduler provides
 4. The source and tests the task directly touches
 
-A worktree does not contain `.assent/`; a task session must not guess the
-location of management files from relative paths, and always uses the main
-worktree absolute path the scheduler provides. Do not read by default: old work
-folders, r files (logs; read only when debugging or explicitly referenced), and
-the `_assent.log` inside a work folder.
+The two contracts live in the user home, and a project's `.assent/` holds only
+that project's own material: its `verify.py`, its work folders, the runtime
+artifacts inside them, and at most a deliberate legacy `assent.toml` override.
+A worktree contains neither directory, so a task session must not guess the
+location of any management file from relative paths; it uses the absolute paths
+the scheduler provides — the user home for the contracts, the main worktree for
+this project's task and r files. Do not read by default: old work folders, r
+files (logs; read only when debugging or explicitly referenced), and the
+`_assent.log` inside a work folder.
 
 ## Working rules
 
@@ -43,6 +50,8 @@ the `_assent.log` inside a work folder.
   has exactly two writable exceptions: your own task file's status line and
   your own r file; everything else, including the main tree's source and
   tests, is read-only. Writing into the main worktree fails that task run.
+  The user home `~/.assent` is read-only to a session in every case: its
+  contracts and shared settings belong to `assent init`, not to a task.
 - Do not modify files unrelated to the current task.
 - Reference shared specifications; do not copy them into each task file.
 - Keep conjecture, changed, verified, and unverified separately recorded.
@@ -149,7 +158,7 @@ and account environments; Assent does not create a container or VM sandbox.
 ## Meeting session closeout (when interactive)
 
 1. Settle consensus into task files on the spot; do not leave it in the
-   conversation. Format follows `.assent/format.md`.
+   conversation. Format follows `~/.assent/format.md`.
 2. Run `assent check` — passing is what adjourns the meeting; not passing means
    the plan is not finished.
 3. Decisions that stay valid across plans go into the project `AGENTS.md`

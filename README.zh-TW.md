@@ -3,7 +3,7 @@
 *[English](README.md)*
 
 > 本檔為 [README.md](README.md) 的正體中文(台灣用語)翻譯。內容若與英文版
-> 不一致,以英文版為準。翻譯所依版本:`92e1e39` (2026-07-20)。
+> 不一致,以英文版為準。翻譯所依版本:`58604e5` (2026-07-29)。
 
 一套讓 AI 在長期專案中以最小上下文正確工作的檔案體系,加上讀懂這套體系、
 無人值守執行的調度器。
@@ -53,8 +53,10 @@
   (append-only、預設不讀)。妥善處理的中斷會留下 WIP,重新 `assent run` 即可
   續作;若程序或主機突然中斷而留下未提交變更,調度器會拒絕猜測,等候人工檢查
   並建立檢查點。
-- **格式契約**:`.assent/format.md`(`assent init` 會放進專案),
-  規劃 AI 讀它產生任務檔,調度器解析器與它逐字對齊。
+- **格式契約**:`~/.assent/format.md`(`assent init` 安裝到每台機器共用的
+  使用者家目錄,一台機器只有一份),規劃 AI 讀它產生任務檔,調度器解析器與它
+  逐字對齊。同目錄的 `~/.assent/instructions.md` 則是 session 規則;兩者都不會
+  複製進任何專案。
 - **session 過程即時可見**:AI 說的話(`AI|`)、用的工具(`Tool|`)、token
   用量(`--|`)同步印在終端,並留存於 `.assent/<工作資料夾>/_assent.log`。
 
@@ -70,19 +72,89 @@ pip install -e .
 驗證:任何目錄執行 `assent --version`;它會印出已安裝套件的版本。
 `assent --help` 會顯示頂層 CLI 說明。零第三方依賴,不會下載任何外部套件。
 
+## 檔案放在哪裡
+
+描述 assent 本身的檔案,一台機器只有一份;描述你的專案的檔案,留在你的專案裡。
+
+```text
+~/.assent/                  # 每位使用者的 assent 家目錄,所有專案共用
+├── assent.toml             # 你的設定:adapter、檔位對應表、watchdog、重試
+├── instructions.md         # session 規則契約     (assent 擁有這個檔)
+└── format.md               # 計畫格式契約         (assent 擁有這個檔)
+
+<專案>/
+├── AGENTS.md               # 你的專案規則 + 一行 assent bridge
+└── .assent/                # 被 git 忽略,只存在於主工作樹
+    ├── verify.py           # 你這個專案的驗收腳本
+    ├── assent.toml         # 選用:舊版遺留或刻意設定的專案覆寫
+    ├── <工作資料夾>/        # 任務檔、r 檔、_report.md、_assent.log、
+    │                       #   assent.lock,以及該資料夾的驗證 receipt
+    ├── _batch_verification.toml   # batch 驗證 receipt(衍生物)
+    ├── _archived.toml      # 已退役工作資料夾的名冊
+    └── _archive/           # 那些資料夾各壓成一個 zip
+```
+
+`instructions.md` 與 `format.md` 描述的是工具本身,所以每台機器各一份,專案永遠
+不會拿到副本。`AGENTS.md` 與 `.assent/verify.py` 則是你的:`assent init` 只會刷新
+前者裡那一行 bridge,也絕不覆寫後者。
+
+### 設定優先序
+
+由低到高:
+
+1. assent 的內建預設值
+2. 你的使用者設定 `~/.assent/assent.toml`
+3. 選用的專案覆寫 `.assent/assent.toml`
+4. 指令有提供時的顯式 CLI 選擇(`--config PATH` 決定由哪個專案層檔案擔任第 3 層;
+   `--jobs` 之類的旗標則對該次執行覆寫對應設定)
+
+table 依 key 合併,scalar 與 array 整個取代。因此專案覆寫會就它所寫出的那些 key,
+遮蔽你日後對共用設定的修改;`assent init` 不會把它搬進使用者家目錄,也不會改它
+——只逐位元組保留並回報它是一個覆寫。
+
+只有「省略某個 key」才會繼承下層:
+
+- `key =` 不是「沒有值」,那是無效 TOML,整個檔案載入失敗。
+- 空 table 表示不覆寫任何葉節點,裡面每個 key 仍由下層解析。
+- 空 array 在該欄位允許時是一次顯式取代,不是要求回退。
+- 空字串或只有空白的字串,對任何需要有意義文字的設定(命令、adapter 名稱、
+  effort 值)一律拒絕。錯誤訊息會指出那個 dotted key 與寫出它的檔案,而不是
+  安靜地把下層值放回來。
+
+### `assent init` 重跑時做什麼
+
+它會把兩份使用者家目錄契約刷新成這套安裝的打包版本,並只補上你的 `assent.toml`
+尚未寫出的打包設定 key,絕不取代你寫過的值。在專案端,它保留既有的 `verify.py`
+(已存在時提供 `--test` 會拒絕),維持 `AGENTS.md` 的 bridge 那一行為最新,並讓
+`.gitignore` 保有 `.assent/` 條目。所有讀取、解析與合併都在第一次寫入前完成,
+因此無效 TOML 或無效的 `--test` 選擇會直接拒絕,不會留下半升級狀態。
+
+升級舊專案時,它印出警告而不替你決定。專案內的 `instructions.md` 或 `format.md`
+副本,只有與打包文字完全相同時才會被移除;不同的會保留並回報——反正 session 讀的
+是使用者家目錄的契約,請自行把還想保留的內容搬出來後再刪掉。既有的
+`.assent/assent.toml` 一樣保留,並回報為優先於你的使用者設定的相容性覆寫。
+
+開任何 session 之前,除非兩份使用者家目錄契約都存在、可讀,且與這套安裝的打包
+文字逐位元組相同,否則 assent 會 fail-closed。缺少、無法讀取或過期的契約會指出
+路徑並要你執行 `assent init`,絕不會在執行中途自行修補或重新生成。比對以
+universal newlines 讀取文字,因此被編輯器改成 CRLF 的檔案仍算同一份契約。
+
 ## 快速開始
 
 ```
 # 0. cd 到目標專案根目錄(需為 git repo)
 
-# 1. 生成 .assent 骨架與 AGENTS.md,先選擇真正的專案測試
+# 1. 安裝使用者家目錄(~/.assent:共用設定 + 兩份契約),以及專案的 .assent
+#    骨架與 AGENTS.md,先選擇真正的專案測試
 #    (可互動選平行 unittest、pytest、npm test、Flutter test 或 custom argv;
 #     script 可用 --test,例如)
 assent init --test unittest
 #    custom 命令可寫成: assent init --test "custom:python -m unittest"
-#    重跑 init 不提問:保留 verify.py,刷新共同契約,補入遺漏的設定預設值
+#    重跑 init 不提問:保留專案的 verify.py,刷新兩份使用者家目錄契約,
+#    只補入遺漏的設定 key
 
-# 2. 填 AGENTS.md 的專案描述/硬限制、.assent/verify.py 的實際檢查命令
+# 2. 檢視 ~/.assent/assent.toml 的共用設定(本機每個專案都會讀),再填
+#    AGENTS.md 的專案描述/硬限制、.assent/verify.py 的實際檢查命令
 #    AGENTS.md 可自行決定是否提交;整個 .assent/ 留在主工作樹,不提交
 
 # 3. 開 AI 會議產出任務檔(這一步是互動 session,見下方「使用循環」)
@@ -340,12 +412,37 @@ conflict 不屬於本指令——那組仍走 `verify --batch` 的略過決定,�
 同時只允許一個 run;Git 永遠啟用,每個資料夾一律使用
 `<專案名>.worktrees/<資料夾>/` 的獨立 worktree,這是安全平行處理的基礎。
 
+### 鎖檔是診斷資料,不是鎖本身
+
+`assent.lock` 在 run 結束後刻意留在磁碟上。它只是一份診斷紀錄——上一次 run 的
+PID、開始時間與資料夾名稱——沒有任何判斷會依據它的內容或存在與否。
+
+真正的所有權是綁在開啟檔案 handle 上的 OS 層級互斥鎖(Windows 用 msvcrt,
+POSIX 用 fcntl),在行程存活期間持有。正常結束、Ctrl+C、當機與強制終止都會由
+OS 關閉 handle 而自動釋放。因此這裡不存在 stale lock,沒有 PID 重用問題,也沒有
+任何清理程序:
+
+- 不要把檔案存在解讀成「有 run 正在進行」——只要該資料夾跑過一次,它就會一直在。
+- 不要為了「復原」而刪除它。刪除只會引入 race 而修不好任何事;下一次 run 會重用
+  它,`assent archive` 甚至會在它不存在時建立,因為缺少鎖檔正是「沒有人持有這個
+  資料夾」的證明。
+- 資料夾若真的忙碌,下一次 `assent run` 會在取鎖失敗時明講。那個拒絕才是訊號,
+  檔案不是。
+
+紀錄的 PID 唯一能告訴你的,是關於一個「還活著」的行程:`assent run --all` 在
+任何離開路徑上——包含拒絕與調度錯誤——都要等它擁有的工作資料夾子行程全部結束
+並被回收,才會結束自己的中斷處理。所以紀錄的 PID 若仍存活,那就是一個真正還在
+跑的行程,值得等待,而不是需要手動清理的殘留檔案。
+
+值得知道的限制與 stale 無關:`flock` 與 `msvcrt.locking` 的語意在部分網路檔案
+系統上並不可靠,因此這個鎖只保證本機檔案系統上的互斥。
+
 版控邊界刻意簡單:`AGENTS.md` 是專案規則;有進 Git 時使用 worktree 內的
 分支版本,未進 Git 時由提示詞提供主樹絕對路徑。整個 `.assent/` 是 assent
 管理面,由 `.gitignore` 排除並只留在主工作樹。調度器同樣以絕對路徑提供
-instructions、t/r 與預設驗收腳本;驗收腳本雖從主樹載入,執行 cwd 仍是
-worktree。任何 `.assent/` 檔案已進 Git 時,調度器會在開 session 前
-fail-closed 拒絕執行,避免 worktree 出現第二份真本。
+t/r 與預設驗收腳本(主樹路徑)與兩份契約(`~/.assent` 路徑);驗收腳本雖從主樹
+載入,執行 cwd 仍是 worktree。任何 `.assent/` 檔案已進 Git 時,調度器會在開
+session 前 fail-closed 拒絕執行,避免 worktree 出現第二份真本。
 
 AI 會議在主樹進行。從主樹可直接用 `git worktree list`、`git log <分支>` 與
 `git diff main...<分支>` 審查各 worktree 的 checkpoint,不必進入其目錄。
@@ -357,7 +454,7 @@ AI 會議在主樹進行。從主樹可直接用 `git worktree list`、`git log 
 **第 1 幕:規劃會議**(互動 session)
 
 ```text
-開始規劃。請讀 AGENTS.md、.assent/instructions.md 與 .assent/format.md,
+開始規劃。請讀 AGENTS.md、~/.assent/instructions.md 與 ~/.assent/format.md,
 然後跟我討論以下目標,把共識逐步寫成 .assent/<工作資料夾>/ 的任務檔:
 <你的目標>
 ```
@@ -386,10 +483,10 @@ Flutter test 或 custom 命令,並把它安全地渲染成 argv。打包 templat
 會失敗而不會從空骨架回報 `verify: OK`。
 
 重跑初始化時,`assent init` 永不覆寫既有 verifier,已有 verifier 時提供 `--test`
-會拒絕。它會用打包版本取代 `.assent/format.md` 與 `.assent/instructions.md`,並從
-打包的 `assent.toml` 補入遺漏的 active 設定,不改既有或自訂值。無效 TOML 或輸入
-會在四個受管 `.assent` 檔案改動前拒絕。verifier digest 改變會使舊 receipt stale,
-應在無人值守驗證時執行 `assent verify <FOLDER>` 後再請人接受。
+會拒絕。它會用打包版本取代 `~/.assent/format.md` 與 `~/.assent/instructions.md`,
+並把打包 `assent.toml` 中遺漏的 active 設定補進 `~/.assent/assent.toml`,不改既有
+或自訂值。無效 TOML 或輸入會在任何受管檔案改動前拒絕。verifier digest 改變會使舊
+receipt stale,應在無人值守驗證時執行 `assent verify <FOLDER>` 後再請人接受。
 
 **自己重跑驗證**:任務的 focused `verify` 命令記錄在該任務
 `tNNN_name.e.toml` 的 `verify` 欄位,可在該工作資料夾的隔離 worktree
@@ -453,8 +550,11 @@ batch evidence 缺少/過期時才走逐資料夾驗證 fallback。沒有 task `
 `assent <指令> [選項] [FOLDER]`。`FOLDER` 可明示工作資料夾;省略時 `run`
 會依任務現況與 `_folder.toml` 的 `after` 前置推導唯一可執行資料夾,有歧義
 就拒絕。`status`、`check`、`report` 省略時作用於全部資料夾。`--config PATH`
-選擇設定檔,預設為 `.assent/assent.toml`;設定檔不再維護工作資料夾指標。
-兩者彼此正交,可以只用其中一個,也可以同時使用,例如
+選擇專案層設定檔,預設為 `.assent/assent.toml`。該檔是疊在
+`~/.assent/assent.toml` 之上的選用覆寫層,同時也用來定位專案(專案根目錄就是
+該路徑所在 `.assent` 目錄的上一層),因此即使檔案不存在,這個路徑仍有意義。
+設定檔不再維護工作資料夾指標。`--config` 與 `FOLDER` 彼此正交,可以只用其中一個,
+也可以同時使用,例如
 `assent status --config configs/night.toml parallel01`。
 
 工作資料夾名稱必須是可攜的 Windows/Git-ref 名稱:不可為空,不可含空白、路徑
@@ -516,7 +616,7 @@ checkpoints 構成目前分支的連續尾段才會建立新的反向 commit,絕
 | `assent clean [FOLDER]`<br>`assent clean parallel01` | 只清理已完全併入且乾淨的 worktree 與同資料夾前綴分支;任何證明不足就跳過,不碰 `.assent/`,且沒有強制選項。省略 `FOLDER` 時作用於全部工作資料夾。 | **零** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | 人工裁決駁回:封存未提交變更後強制刪除該資料夾的 worktree 與同前綴分支(刪除前以完整 tip hash 存證),並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔保存 Git 存證。`FOLDER` 必填;run 進行中拒絕。 | **零** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "驗收不符"` | 非破壞性重開單一任務;預設保留程式碼,`--cascade` 明示連動下游。`--revert-code` 僅在 checkpoints 是連續分支尾段時建立新反向 commit。成功後更新報告,不自動執行 run。接受 `--config PATH`。 | **零** |
-| `assent init --test CHOICE`<br>`assent init --path C:\work\my-project --test pytest` | 在目標專案生成 `.assent` 骨架並精確選一個真正的專案測試:平行 unittest、pytest、npm test、Flutter test 或 custom argv。新鮮 init 省略 `--test` 時顯示編號選單;重跑不提問、保留既有 verifier、刷新 `format.md` 與 `instructions.md`,並補入遺漏的 active 設定。無效輸入/TOML 會在受管 `.assent` 檔案改動前拒絕。 | **零** |
+| `assent init --test CHOICE`<br>`assent init --path C:\work\my-project --test pytest` | 安裝使用者家目錄 `~/.assent`(共用設定與 `instructions.md`、`format.md` 兩份契約),以及專案的 `.assent/verify.py`、`AGENTS.md` bridge 那一行與 `.gitignore` 條目,並精確選一個真正的專案測試:平行 unittest、pytest、npm test、Flutter test 或 custom argv。新鮮 init 省略 `--test` 時顯示編號選單;重跑不提問、保留既有 verifier、刷新兩份使用者家目錄契約,並只補入遺漏的 active 設定。專案內舊契約副本只有與打包文字完全相同時才移除;專案 `assent.toml` 保留為覆寫並回報。無效輸入/TOML 會在任何受管檔案改動前拒絕。 | **零** |
 | `assent doctor`<br>`assent doctor` | 診斷機器環境(Python 版本、git、adapter CLIs、temp 目錄可寫性);不需要 `FOLDER` 或 `--config`,也不需要既有的 `.assent/` 專案就能執行。 | **零** |
 | `assent --version` | 印出 `assent` 加上已安裝的 distribution 版本後離開;不需要專案或子命令即可執行。 | **零** |
 
@@ -667,7 +767,7 @@ goal = "用 Gemini 3.1 Pro(最高品質)審查程式碼庫。"
 
 ### 設定模型與 effort 翻譯
 
-`.assent/assent.toml` 的組態範本顯示如何自訂檔位到模型的對應與抽象到 CLI
+`~/.assent/assent.toml` 的設定顯示如何自訂檔位到模型的對應與抽象到 CLI
 effort 的翻譯。查找順序永遠是:
 
 1. 任務檔明示的 `effort` 註記(如有)
@@ -717,7 +817,7 @@ Antigravity 的 `--print-timeout` 獨立於 Assent 的 watchdog timeout。Print
 timeout 限 CLI 等待單一 print 呼叫完成的時間;watchdog 限 Assent 等待任何
 輸出(殺掉 session 前)的時間。
 
-在 `.assent/assent.toml`:
+在 `~/.assent/assent.toml`(或專案覆寫):
 
 ```toml
 [adapter.antigravity]
@@ -793,14 +893,19 @@ normal = "medium"
 ## 計畫格式與設定檔
 
 - 格式契約全文:[assent/templates/format.md](assent/templates/format.md)
-  (新專案由 `assent init` 複製,成功重跑時刷新)。
+  ——安裝到 `~/.assent/format.md`,每次成功 `assent init` 都在那裡刷新。
 - 工作指示範本:[assent/templates/instructions.md](assent/templates/instructions.md)
-  ——assent session 行為與跨專案共通規則;新鮮 init 複製、成功重跑時刷新;
-  專案規則留在 `AGENTS.md`。
+  ——assent session 行為與跨專案共通規則;安裝到 `~/.assent/instructions.md`,
+  每次成功 `assent init` 都在那裡刷新;專案規則留在 `AGENTS.md`。
 - 設定檔範本:[assent/templates/assent.toml](assent/templates/assent.toml)
   ——adapter 選擇、抽象檔位(prime/core/lite)對照表、
   抽象 effort(heavy/normal/slight)的預設與 CLI 值翻譯、watchdog 與重試參數。
-  新鮮 init 複製;重跑只補遺漏的 active table/key path,保留既有及自訂值。
+  第一次 init 用它建立 `~/.assent/assent.toml`;之後的 init 只在那裡補遺漏的
+  active table/key path,保留既有及自訂值。
+
+這三份是工具自己的檔案,因此每台機器各一份。專案只持有自己的 `AGENTS.md`、
+`.assent/verify.py`、工作資料夾,以及——僅在舊版佈局或刻意決定放置時——一份專案
+`.assent/assent.toml` 覆寫。
 
 ### 使用專案媒體檔的任務
 
@@ -827,7 +932,9 @@ adapter,或推測某個模型能讀哪種媒體。
 **Q:中途斷電/當機怎麼辦?**
 先檢查隔離 worktree。若中斷已妥善處理且任務停在 WIP,`assent run` 會以
 「接續」提示續作;若突然中斷留下未提交變更,調度器會拒絕 dirty worktree,
-而不是自行猜測。檢查並建立檢查點後再重新執行。
+而不是自行猜測。檢查並建立檢查點後再重新執行。資料夾裡看到的 `assent.lock`
+不屬於這個復原流程:行程死亡時 OS 已釋放真正的鎖,檔案只是上一次 run 的診斷
+紀錄,不要動它。
 
 **Q:執行 AI 亂改任務檔放寬自己的驗收怎麼辦?**
 三層防禦:scope 豁免只有它自己的 `tNNN_name.toml` 任務檔與

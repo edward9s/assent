@@ -5,7 +5,7 @@
 > Distilled from three rounds of discussion (Claude Fable × GPT-5.6), updated
 > as the architecture evolves. Goal: the most robust balance between
 > "trustworthy, reliable output" and "aggressive token savings". The single
-> contract for the current format is `.assent/format.md` (source lives at
+> contract for the current format is `~/.assent/format.md` (source lives at
 > `assent/templates/format.md`); this document records the design principles
 > behind the format. This document is normative design rationale for the
 > project, not the executable task-format contract itself — that contract is
@@ -22,8 +22,8 @@ context sufficient to start work unambiguously".
 ```text
 Project rules    → AGENTS.md (root; the entry point tools auto-load;
                     whether it is versioned is the project's call)
-Working instructions → .assent/instructions.md (assent session behavior and
-                    cross-project common rules)
+Working instructions → ~/.assent/instructions.md (assent session behavior and
+                    cross-project common rules; one copy per machine)
 This task         → .assent/<work folder>/tNNN_name.toml (task file,
                     self-contained for execution)
 Current state     → the task file's status + git (the task file is the
@@ -139,12 +139,18 @@ the generated copy activates exactly one, so an empty project cannot report
 `verify: OK` without its selected test.
 
 Repeat `assent init` never replaces an existing `.assent/verify.py` and refuses
-`--test` when that verifier exists. It refreshes `format.md` and
-`instructions.md` from the packaged contracts and merges only missing active
-table/key paths from the packaged config, preserving existing and custom values.
-Input and TOML validation finish before any managed `.assent` file changes.
-Changing the verifier digest makes prior receipts stale, so unattended
-`assent verify <FOLDER>` must refresh the evidence before acceptance.
+`--test` when that verifier exists. It refreshes `~/.assent/format.md` and
+`~/.assent/instructions.md` from the packaged contracts and merges only missing
+active table/key paths into `~/.assent/assent.toml`, preserving existing and
+custom values. An older project copy of a contract is removed only when it
+matches the packaged text exactly; one that differs is kept and warned about,
+because sessions read the user-home contract either way. Input and TOML
+validation finish before any managed file changes. Before any session opens,
+both user-home contracts must be present, readable, and byte-identical to this
+installation's packaged text, or the run fails closed and points at
+`assent init` rather than patching them mid-run. Changing the verifier digest
+makes prior receipts stale, so unattended `assent verify <FOLDER>` must refresh
+the evidence before acceptance.
 
 A worktree is the boundary for change isolation, conflict management, audit,
 and Git recovery, not a security sandbox. Full-permission modes such as
@@ -161,9 +167,25 @@ environments; the product does not add a container or VM sandbox.
   the worktree's branch version is used, and when not versioned, the
   scheduler's prompt supplies the main-tree absolute path.
 - assent session behavior and cross-project common rules live in
-  `.assent/instructions.md`, not mixed into the project's `AGENTS.md`. Every
-  other management file is likewise kept under `.assent/`, leaving root
-  clean.
+  `~/.assent/instructions.md`, not mixed into the project's `AGENTS.md`. That
+  file and its sibling `~/.assent/format.md` describe the tool rather than any
+  one project, so they are installed once per machine and no project receives
+  a copy; the shared `~/.assent/assent.toml` settings live beside them. Every
+  project-specific management file is likewise kept under the project's own
+  `.assent/`, leaving root clean.
+- Settings resolve through built-in defaults, then `~/.assent/assent.toml`,
+  then an optional `.assent/assent.toml` project override, then an explicit CLI
+  selection where one exists. Tables merge by key while scalars and arrays are
+  replaced whole, so an override shadows later edits to the shared settings for
+  exactly the keys it states; `assent init` preserves such a file byte for byte
+  and never migrates it. Omission is the only inheritance: `key =` is invalid
+  TOML, an empty table states no leaf override, an empty array is an explicit
+  replacement where permitted, and a blank string is refused for settings that
+  require useful text rather than quietly reinstating a lower layer.
+- The project keeps what is genuinely its own: `AGENTS.md`, `.assent/verify.py`,
+  its work folders, and the runtime artifacts inside them. `assent init`
+  refreshes the single bridge line in the first and never overwrites the
+  second.
 - The entire `.assent/` is excluded by `.gitignore` and kept only in the
   main worktree; the scheduler hands instructions, t/r files, and the
   default verification script to a worktree session as absolute paths,
@@ -177,7 +199,12 @@ environments; the product does not add a container or VM sandbox.
   file fails closed, to prevent a second source of truth.
 - A work folder's `assent.lock` guarantees one run per folder; a worktree
   path is `<project name>.worktrees/<folder>/`, and the work folder can be
-  stated via a positional argument.
+  stated via a positional argument. Ownership is an OS-level lock tied to the
+  open file handle, so normal exit, Ctrl+C, a crash, and a forced kill all
+  release it; the file itself is deliberately left behind as diagnostics and is
+  never a stale-lock problem to clean up. `run --all` reaps every work-folder
+  child it owns before finishing any exit path, so a living recorded PID means
+  a genuinely running process rather than a leftover file.
 - Work-folder names use the portable Windows/Git-ref contract: non-empty, no
   whitespace, path separators, control characters, Git-ref-forbidden
   characters (`~`, `^`, `:`, `?`, `*`, `[`), or Windows-forbidden characters
@@ -346,7 +373,7 @@ and verification output that each task session needs to check.
 
 - AI handoff most easily slips at the end of a session, when context is
   nearly full → the closeout protocol is fixed in
-  `.assent/instructions.md` and does not rely on self-discipline: the
+  `~/.assent/instructions.md` and does not rely on self-discipline: the
   scheduler's structural diff makes "relaxing your own review" an
   immediate failure, and the scope exemption covers only the task's own t
   file and r file.

@@ -98,6 +98,7 @@ Traditional Chinese reader documentation is translated prose only. It never
 duplicates an executable contract: `assent/templates/format.md` and the
 rest of the packaged templates are English-only, and `assent init` never
 generates a second-language variant of a task-format or session-rules file.
-`.assent/instructions.md` is the one documented session-rules path in every
-language; translated documentation refers to it by that same path rather
-than introducing a second name or a migration story.
+`~/.assent/instructions.md` is the one documented session-rules path in every
+language, and `~/.assent/format.md` the one documented format path; translated
+documentation refers to them by those same paths rather than introducing a
+second name or a migration story.
