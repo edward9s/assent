@@ -59,6 +59,44 @@ while operating an assent-managed session live in
 - Human approval is the explicit `assent accept FOLDER` action plus the resulting
   Git integration; do not add a second per-task `review` state alongside task
   execution status.
+- The literal ASCII token `...` is remainder syntax shared by every
+  folder-taking command (`run`, `verify`, `accept`, `clean`, `archive`): given
+  once, as the last positional argument, it means "and every remaining folder
+  the command itself would discover". It is not an alias for `--all` and may
+  not be combined with it (nor with `verify --batch`/`--focus`, `run --once`/
+  `--task`, or `archive --restore`, which takes exactly one folder). The
+  expansion is snapshotted once, before anything is mutated, and each command
+  keeps its own discovery rule: `verify` and `accept` add only finished folders,
+  `run`, `clean` and `archive` add every work folder and decide per folder
+  afterwards. The remainder is appended after the explicit prefix, and each
+  command then applies its own native ordering: `run` keeps the stated prefix
+  order and takes the remainder in folder-dependency order, `verify` and
+  `accept` normalize the whole selection to dependency order, and `clean`
+  normalizes it upstream-first.
+- Selection cardinality is what picks a command's path, not the presence of
+  `...`: one folder is the single-folder path (folder receipt, direct accept,
+  `archive_folder`), two or more is the exact selected batch. A
+  remainder-expanded selection is an ordinary exact selection, so selected
+  acceptance still requires evidence for exactly the expanded set and still
+  never verifies.
+- `run --verify` chains complete verification onto a successful run only: a
+  nonzero run is returned as-is and verifies nothing, and the exit code of the
+  verification becomes the command's exit code. It matches the selection --
+  one folder as a folder receipt, an exact multi-folder selection as that
+  selected batch, `--all` or a bare `...` as the whole-project batch -- and is
+  refused with `--once` or `--task`, which stop before folder closeout on
+  purpose. It is an invocation-level request and does not consult the
+  configured receipt-refresh policy.
+- A multi-folder `archive A B` keeps `archive FOLDER`'s contract, not `--all`'s:
+  the human named those folders, so an ineligible one is a refusal that exits
+  nonzero after every named folder has been attempted, while `--all` skips an
+  ineligible folder without failing.
+- argparse help may be colorized by the standard library; only the `usage:`
+  prefix and section headings are re-themed, away from Python 3.14's barely
+  legible dark blue, and only inside argparse's own `_set_color`, so
+  `NO_COLOR`, `FORCE_COLOR`, `PYTHON_COLORS`, and a redirected or unsupported
+  stream still decide whether any escape is emitted. Never promise colored
+  help, and never emit an escape sequence argparse's own checks turned off.
 - Expensive full-project verification belongs to unattended `run` / `verify`,
   not the interactive acceptance decision. Human approval is the explicit
   `assent accept` action plus the resulting Git integration. Direct

@@ -139,7 +139,14 @@ rewrote with CRLF still counts as the same contract.
   normal exit, Ctrl+C, a crash, and forced termination alike. Do not read an
   existing `assent.lock` as an active run and do not delete it as a recovery
   step; there is no stale-lock procedure.
-- **Cleanup**: `assent clean [FOLDER]` handles only the fixed-location redundant
+- **Selecting folders**: every folder-taking command (`run`, `verify`, `accept`,
+  `clean`, `archive`) accepts the literal token `...` once, as the last
+  positional argument, meaning "and every remaining folder this command would
+  discover". It is a remainder operator, not an alias for `--all`, and cannot be
+  combined with it; the expansion is snapshotted before anything is mutated, and
+  cardinality still decides between the single-folder and the exact selected
+  batch path.
+- **Cleanup**: `assent clean [FOLDER ...]` handles only the fixed-location redundant
   worktrees and `<folder>/*` branches; it may remove one only after proving that
   the folder is not locked, the worktree is clean, and the worktree and branch
   results are fully merged into the main tree's current HEAD. If it cannot prove
@@ -148,8 +155,9 @@ rewrote with CRLF still counts as the same contract.
   `git clean` — it deletes nothing untracked or unmerged. It also refuses to
   clean an upstream source while an unaccepted dependent folder still needs
   that source.
-- **Archive**: `assent archive <FOLDER>` (or `--all`) one-way retires a
-  finished folder: it strictly contains `clean` (clean never archives in
+- **Archive**: `assent archive <FOLDER...>` (or `--all`) one-way retires
+  finished folders; named folders must all archive or the command fails, while
+  `--all` skips an ineligible folder. It strictly contains `clean` (clean never archives in
   return) by reusing its mechanical merge proof and removal for any
   still-present source branch or worktree, then acquires the folder's
   `assent.lock` -- creating it if missing, since a missing lock file is proof
@@ -616,6 +624,35 @@ runs that explicit sequence and, only if it succeeds, runs the remaining
 incomplete folders in folder-dependency order through the `--all` scheduler.
 Neither form verifies or accepts a folder implicitly.
 
+The literal token `...`, given once as the last positional argument, is the
+remainder selector shared by `run`, `verify`, `accept`, `clean`, and `archive`:
+`assent run A B ...` means A, then B, then every other work folder, in
+folder-dependency order. It is a remainder operator, not an alias for `--all`.
+The whole selection is snapshotted before anything is mutated, so a folder that
+appears during the operation cannot join it, and the expanded set is printed
+first. Each command expands by its own discovery rule -- `verify` and `accept`
+add only finished folders, `run`, `clean`, and `archive` add every work folder
+and decide per folder afterwards -- and then applies its own ordering: `run`
+keeps the stated prefix order and takes the remainder in folder-dependency
+order, `verify` and `accept` normalize the whole selection to dependency order,
+and `clean` normalizes it upstream-first. A folder name can never contain `..`, so the token cannot
+collide with one. `...` more than once, or anywhere but last, is a usage error,
+as is combining it with `--all`, `verify --batch`, `verify --focus`,
+`run --once`, `run --task`, or the one-folder `archive --restore`. An expansion
+that selects no folder is refused rather than treated as a no-op.
+
+`assent run --verify` runs one complete verification after the run, and only
+when the run exited zero: a failing run is returned as it is, because there is
+no finished plan to certify. The verification matches the selection -- one
+folder (named or auto-selected) as a folder receipt, an exact multi-folder
+selection, including a `...`-expanded one, as that selected batch, and `--all`
+or a bare `...` as the whole-project dynamic batch, which is why a bare `...`
+happens to verify like `--all` while an explicit prefix plus `...` certifies
+exactly the folders it ran. The verification's exit code becomes the command's
+exit code. `--verify` cannot be combined with `--once` or `--task`, which stop
+before folder closeout on purpose, and as an invocation-level request it
+verifies regardless of the configured `receipt_refresh` policy.
+
 `assent verify FOLDER --focus` is the distinct focused mode and requires one
 folder. It runs each distinct `verify` command belonging to a `DONE` task in
 that folder's source worktree. It creates no integration candidate and writes
@@ -630,16 +667,22 @@ to skip or silently shrinking it. A successful PASSED batch receipt records the
 exact selected folders, source identities, intermediate trees, final tree, and
 verifier digest; a failed request may leave a localized PASSED prefix but
 still returns failure and cannot authorize the original selection. Verification
-changes no target ref and performs no acceptance.
+changes no target ref and performs no acceptance. `assent verify A ...` is the
+same selected batch, expanded over the finished folders; cardinality still
+chooses the path, so an expansion down to one folder is the single-folder
+receipt refresh and rejects `--no-bisect` exactly as `assent verify FOLDER`
+does.
 
 When `status`, `check`, and `report` state `FOLDER` explicitly they act only on
 that folder, and act on all folders when it is omitted. `check` additionally
 validates the full dependency graph and cycles; a read-only command that hits an
 error in any folder finishes as a failure.
 
-`assent clean [FOLDER]` removes provably redundant worktrees and same-folder
-prefix branches at fixed locations; when `FOLDER` is omitted it acts on all work
-folders. Each folder must be able to acquire the existing `assent.lock`, have a
+`assent clean [FOLDER ...]` removes provably redundant worktrees and same-folder
+prefix branches at fixed locations; it takes one folder, several
+(`assent clean A B`, or `assent clean A ...`), and acts on all work folders when
+none is named. Several folders are cleaned in one upstream-first pass with every
+folder's own evidence rule unchanged. Each folder must be able to acquire the existing `assent.lock`, have a
 fully clean worktree, and have all same-prefix branches and detached HEADs
 merged into the main tree's current HEAD, before it first removes the worktree
 with ordinary protection and then deletes branches with `git branch -d`. Any
@@ -664,7 +707,12 @@ mutually exclusive, and bare
 `archive` naming neither is a parser error so a missed folder name cannot
 archive everything by accident; `--all` archives every eligible folder in
 lexicographic order, prints a skip reason for each ineligible one, and exits 0
-unless a real error occurred. Every step is crash-resumable: a re-run resolves
+unless a real error occurred. Two or more names (`assent archive A B`, or
+`assent archive A ...`) archive an explicit selection and keep single-folder
+`archive`'s contract rather than `--all`'s: the human named those folders, so a
+folder that is merely ineligible is a refused request. Every named folder is
+attempted so one refusal does not hide the rest, a summary line reports how many
+were archived, and the command exits nonzero if any was not. Every step is crash-resumable: a re-run resolves
 the current on-disk state against the roster and finishes only the steps still
 missing. `archive --restore FOLDER` (incompatible with `--all`) reverses one
 archive by extracting the zip back to the live directory, deregistering the
@@ -723,7 +771,12 @@ assent accept <FOLDER>
 ```
 
 `FOLDER` and `--all` are mutually exclusive alternatives. Two or more explicit
-folder names select an exact batch, for example `assent accept A B`.
+folder names select an exact batch, for example `assent accept A B`, and
+`assent accept A ...` expands that selection over the remaining finished
+folders. A remainder-expanded selection is an ordinary exact selection: it
+takes the single-folder path when it expands to one folder and the selected
+batch path otherwise, it requires evidence for exactly the expanded set, and it
+never starts the verifier. `...` and `--all` cannot be combined.
 
 `assent accept FOLDER` is explicit human approval for one finished folder. It
 never runs the full verifier. If the current source tip is already an ancestor

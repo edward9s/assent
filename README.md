@@ -207,11 +207,18 @@ assent run <FOLDER>
 
 # Run exactly A, then B, in the order written
 assent run A B
-# Run A and B in that order, then every remaining incomplete folder
+# Run A and B in that order, then hand the rest to the --all scheduler
 assent run A B --all
+# The literal `...` is the remainder selector: run A, then B, then every other
+# work folder, as one selection snapshotted before anything starts
+assent run A B ...
 
 # Run every incomplete folder in dependency order, at most 2 folders at once
 assent run --all --jobs 2
+
+# Chain complete verification onto a run that exited zero (a failing run
+# verifies nothing); the verification's exit code becomes the exit code
+assent run --all --verify
 
 # 6. Under the default [verification] receipt_refresh = "manual", run closeout
 #    leaves no receipt behind, and direct/selected acceptance is refused with a
@@ -223,6 +230,8 @@ assent verify --batch
 assent verify <FOLDER>
 # Run complete verification for exactly A and B as one dependency-ordered batch
 assent verify A B
+# Verify A plus every other finished folder as one exact selected batch
+assent verify A ...
 # Rerun DONE-task focused checks in FOLDER's source worktree (no receipt)
 assent verify <FOLDER> --focus
 # Set receipt_refresh = "auto" instead if you want run closeout to refresh
@@ -237,12 +246,21 @@ assent accept --all
 assent accept <FOLDER>
 # Accept exactly A and B from a matching verified batch receipt
 assent accept A B
+# Accept A plus every other finished folder; still an exact selection, so it
+# needs a receipt for exactly that expanded set and never verifies
+assent accept A ...
 # After acceptance, optionally sync with ordinary Git (or your own AI workflow)
 git push
 # Once acceptance and any desired sync are complete, remove redundant artifacts
 assent clean <FOLDER>
+# Clean several folders, upstream-first (`assent clean` alone still means all)
+assent clean A B
+assent clean A ...
 # Once a folder is no longer needed, retire its plan into _archive/
 assent archive --all
+# Or name the folders to retire; an ineligible named folder is a failure,
+# unlike --all, which skips it
+assent archive A B
 
 # When a review meeting orders a single task redone (keeps code by default;
 # does not run automatically)
@@ -341,6 +359,87 @@ configuration or run failure. `assent run A B --all` first completes that
 explicit sequence, then hands every remaining incomplete folder to the normal
 dependency-ordered `--all` scheduler. Neither command verifies a full
 integration candidate or accepts anything as a hidden side effect.
+
+#### The `...` remainder selector
+
+The literal ASCII token `...` is a final positional argument shared by `run`,
+`verify`, `accept`, `clean`, and `archive`. It means "and every remaining
+folder this command would discover", so `assent run A B ...` is "A, then B,
+then everything else". It is not a spelling of `--all`: `...` produces one
+exact folder selection, snapshotted before anything is mutated, while `--all`
+keeps its own dynamic whole-project mode. Combining the two is a usage error,
+as is giving `...` more than once or anywhere but last. Folder names may never
+contain `..`, so the token can never collide with a real folder.
+
+Each command expands the remainder by its own discovery rule. `verify` and
+`accept` add only finished folders, because that is the set their whole-project
+modes work on. `run`, `clean`, and `archive` consider every work folder and
+make their usual per-folder decision afterwards. The remainder is appended
+after the explicit prefix, and each command then applies its own ordering:
+`run` keeps the stated prefix order and takes the remainder in
+folder-dependency order, `verify` and `accept` normalize the whole selection to
+dependency order, and `clean` normalizes it upstream-first. The expanded
+selection is printed before the work starts, and an expansion that selects no
+folder is refused. `...` selects folders; it does not switch a command over to
+another mode, so even a bare `assent run ...` walks the expanded selection
+through the ordinary explicit-folder path rather than the `--all` scheduler,
+and `--jobs` remains an `--all` option.
+
+Cardinality, not the token, still picks the path: one folder is the
+single-folder path (a folder receipt, a direct accept, one `archive`), and two
+or more is the exact selected batch. So `assent verify A ...` writes a batch
+receipt for exactly the expanded set, and `assent accept A ...` requires a
+fresh receipt for exactly that same set and still never verifies. `...` is
+rejected with `verify --batch`, `verify --focus`, `run --once`, `run --task`,
+and `archive --restore`, which restores exactly one folder.
+
+#### `run --verify`
+
+`assent run --verify` chains one complete verification onto a run that exited
+zero; a failing run is returned exactly as it is and verifies nothing, because
+there is no finished plan to certify. The verification matches the selection:
+
+| Invocation | What is verified |
+| --- | --- |
+| `assent run --verify` (auto-selected folder) | that folder's receipt |
+| `assent run A --verify` | A's folder receipt |
+| `assent run A B --verify` | A and B as one selected batch |
+| `assent run A ... --verify` | the exact expanded selection as one batch |
+| `assent run --all --verify` | the whole-project dynamic batch |
+| `assent run ... --verify` | the whole-project dynamic batch |
+
+A bare `...` is a whole-project request and therefore happens to land on the
+same dynamic batch `--all` uses, rather than freezing a set the scheduler may
+still extend; an explicit prefix plus `...` stays an exact expanded selection
+and is verified as exactly the folders it ran. The verification's exit code
+becomes the command's exit code. `--verify` is refused with `--once` and
+`--task`, which stop before folder closeout on purpose, and it is an
+invocation-level request that runs regardless of the configured
+`receipt_refresh` policy.
+
+#### Multi-folder `clean` and `archive`
+
+`assent clean A B` and `assent clean A ...` clean several folders in one
+upstream-first pass, with every folder's own evidence rule unchanged; bare
+`assent clean` still means all folders. `assent archive A B` archives each
+named folder and keeps single-folder `archive`'s contract rather than
+`--all`'s: the human named those folders, so a folder that is merely
+ineligible is a refused request. Every named folder is attempted, a summary
+line reports how many were archived, and the command exits nonzero if any was
+not — while `assent archive --all` skips an ineligible folder without failing.
+`archive --restore FOLDER` reverses exactly one archive and takes neither
+`--all` nor `...`.
+
+#### Colored help
+
+Where the standard library colorizes `--help` (Python 3.14 and later), assent
+re-themes only the `usage:` prefix and the section headings, so they are not
+the barely legible dark blue of the default theme; every other option and
+label color is the standard one. The swap happens inside argparse's own color
+decision, so `NO_COLOR`, `FORCE_COLOR`, `PYTHON_COLORS`, and a redirected or
+unsupported stream still decide whether any escape sequence is emitted at all.
+On Python 3.11-3.13, whose argparse has no color support, help is plain text.
+Color is therefore never promised — help stays readable without it.
 
 `assent verify A B` selects exactly A and B, normalizes them to dependency
 order, builds one integration candidate, and runs the complete verifier once.
@@ -738,7 +837,7 @@ external Git writers; do not run writing Git commands in the same main
 worktree during acceptance. Re-running after success is idempotent where the
 source is already integrated.
 
-`assent clean [FOLDER]` only deletes worktrees and branches that are fully
+`assent clean [FOLDER ...]` only deletes worktrees and branches that are fully
 merged and clean; when it cannot prove that, it skips the folder. It never
 touches `.assent/`, has no force option, and is unrelated to `git clean`.
 
@@ -769,19 +868,21 @@ derived from task-file facts, and Git is always enabled.
 | Command and a representative invocation | Options and effect | Token cost |
 |---|---|---|
 | `assent run [FOLDER]`<br>`assent run parallel01` | Runs a work folder until every task is DONE/BLOCKED/SKIP. Omitting `FOLDER` derives the single runnable folder; `--once` stops after the next task; `--task ID` runs a single task while still checking its upstreams, e.g. `assent run --task t003 parallel01`. | Only spent while an AI session runs; `--once` or `--task` run at most one task |
-| `assent run A B`<br>`assent run A B --all` | Runs exactly A then B in the stated order and stops on the first failure. With `--all`, it then runs every remaining incomplete folder in dependency order; neither form verifies or accepts implicitly. | Only spent while an AI session runs |
+| `assent run A B`<br>`assent run A B --all`<br>`assent run A B ...` | Runs exactly A then B in the stated order and stops on the first failure. With `--all`, it then runs every remaining incomplete folder in dependency order; the literal `...` instead appends every remaining folder as one selection snapshotted before the run starts. `...` and `--all` cannot be combined, and neither form verifies or accepts implicitly. | Only spent while an AI session runs |
+| `assent run --all --verify`<br>`assent run A B --verify` | Runs, then — only if the run exited zero — runs the complete verification that matches the selection: one folder as a folder receipt, an exact multi-folder selection as that selected batch, `--all` or a bare `...` as the whole-project batch. The verification's exit code becomes the command's; incompatible with `--once` and `--task`. | Only spent while an AI session runs; the verification itself is **zero** |
 | `assent run --all`<br>`assent run --all --jobs 2` | Runs every incomplete folder in `_folder.toml` dependency order; `--jobs N` caps how many folders run at once (default 1), with the parent terminal live-tagging each subprocess's output as `[folder] message`. | Only spent while an AI session runs |
 | `assent status [FOLDER]`<br>`assent status parallel01` | Shows progress statistics, the next task, the branch, and the last checkpoint. Accepts `--config PATH`. | **Zero** |
 | `assent check [FOLDER]`<br>`assent check --config .assent/assent.toml parallel01` | Validates task-file format, dependency-cycle freedom, config, and environment; this is the planning meeting's adjournment condition. Accepts `--config PATH`. | **Zero** |
 | `assent report [FOLDER]`<br>`assent report parallel01` | Generates and displays the work folder's human-readable report `_report.md`. Accepts `--config PATH`. | **Zero** |
 | `assent verify <FOLDER>`<br>`assent verify parallel01` | Runs the complete verifier once for one folder's temporary integration candidate and refreshes the derived receipt; no target change and no AI session. Report status is `PASSED`/`FAILED`, `fresh`/`stale`. | **Zero** |
-| `assent verify A B`<br>`assent verify A B --no-bisect` | Verifies exactly A and B in dependency order with one integration candidate and one full verifier run, writing one batch receipt for that exact set. A selected conflict refuses rather than skipping. | **Zero** |
+| `assent verify A B`<br>`assent verify A ...` | Verifies exactly A and B in dependency order with one integration candidate and one full verifier run, writing one batch receipt for that exact set; `--no-bisect` applies to a batch only. A selected conflict refuses rather than skipping. `A ...` expands the selection over the remaining finished folders and is still exact. | **Zero** |
 | `assent verify <FOLDER> --focus`<br>`assent verify parallel01 --focus` | Repeats distinct DONE-task verify commands in the source worktree; writes no receipt and cannot authorize acceptance. | **Zero** |
 | `assent accept <FOLDER>`<br>`assent accept parallel01` | Explicit human approval for one folder. Never runs complete verification; except for an ancestry no-op, it requires a fresh exact `PASSED` receipt and quickly rebuilds the candidate. | **Zero** |
-| `assent accept A B`<br>`assent accept A B --config PATH` | Explicit human approval for exactly A and B from their matching fresh batch receipt; replays the dependency-ordered chain without verification and publishes all or none. It never expands the set or falls back. | **Zero** |
+| `assent accept A B`<br>`assent accept A ...` | Explicit human approval for exactly A and B from their matching fresh batch receipt; replays the dependency-ordered chain without verification and publishes all or none. It never expands the set or falls back. `A ...` selects the remaining finished folders too and still requires evidence for exactly that expanded set. | **Zero** |
 | `assent accept --all` | Fresh PASSED batch receipt: atomic replay without new verification. Missing/expired evidence: sequential `verify_folder_if_needed` then accept in dependency order, stopping on failure while preserving earlier publications. Malformed evidence refuses; already-integrated folders no-op and cleaned sources skip. | **Zero** |
 | `assent reconcile <FOLDER>`<br>`assent reconcile --continue parallel01` | Prepares one finished folder's source-versus-target conflict in the isolated worktree `<project>.reconcile/<FOLDER>` so a human can resolve the reported files by hand; `--continue` stages and validates that resolution, commits the merge, and fast-forwards the source branch; `--abort` discards only the proven managed worktree and branch. Never changes the target, resolves content, runs focused or complete verification, writes a receipt, or accepts. `FOLDER` is required; no `--all`. | **Zero** |
-| `assent clean [FOLDER]`<br>`assent clean parallel01` | Cleans up only worktrees and same-folder-prefix branches that are fully merged and clean; skips anything it cannot prove, never touches `.assent/`, and has no force option. Acts on all work folders when `FOLDER` is omitted. | **Zero** |
+| `assent clean [FOLDER ...]`<br>`assent clean A B`<br>`assent clean A ...` | Cleans up only worktrees and same-folder-prefix branches that are fully merged and clean; skips anything it cannot prove, never touches `.assent/`, and has no force option. Takes one folder, several, or the literal `...` remainder, and acts on all work folders when none is named; several folders are cleaned in one upstream-first pass. | **Zero** |
+| `assent archive <FOLDER ...>`<br>`assent archive --all`<br>`assent archive --restore FOLDER` | Retires finished folders: contains `clean`, then compresses the plan into `_archive/` and registers it in the roster. Named folders keep single-folder `archive`'s contract — every one is attempted and an ineligible one exits nonzero — while `--all` skips an ineligible folder without failing. `--restore` reverses exactly one archive and takes neither `--all` nor `...`. | **Zero** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | Human-adjudicated rejection: archives uncommitted changes, then force-deletes that folder's worktree and same-prefix branches (recording full tip hashes before deletion), and resets DONE/WIP/BLOCKED tasks to TODO with Git evidence kept in the r file. `FOLDER` is required; refuses while a run is in progress. | **Zero** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "review rejected"` | Non-destructively reopens a single task; keeps code by default, `--cascade` states downstream propagation explicitly. `--revert-code` creates a new reverse commit only when checkpoints form a contiguous tail. Updates the report on success, does not run automatically. Accepts `--config PATH`. | **Zero** |
 | `assent init --test CHOICE`<br>`assent init --path C:\work\my-project --test pytest` | Installs the user home `~/.assent` (shared settings plus the `instructions.md` and `format.md` contracts) and the project's `.assent/verify.py`, `AGENTS.md` bridge line, and `.gitignore` entry, after selecting exactly one real project test: parallel unittest, pytest, npm test, Flutter test, or custom argv. Without `--test`, fresh init shows a numbered menu. Repeat init does not prompt, preserves an existing verifier, refreshes both user-home contracts, and merges only missing active config defaults. An old project copy of a contract is removed only when it matches the packaged text exactly; a project `assent.toml` is preserved as an override and reported. Invalid input/TOML refuses before any managed file changes. | **Zero** |
