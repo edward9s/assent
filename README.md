@@ -62,8 +62,9 @@ it unattended.
 - **The task file is the state**: each task is one `tNNN_name.e.toml` file
   (status, dependencies, tier, scope, verify, acceptance conditions); its log
   is the same-stem `tNNN_name.r.toml` (append-only, not read by default).
-  After a power loss, crash, or quota interruption, running `agents run`
-  again picks up exactly where things stood.
+  After a handled interruption records WIP, running `agents run` resumes that
+  task. An abrupt process or host failure can instead leave a dirty worktree;
+  the scheduler then refuses to guess until you review and checkpoint it.
 - **Format contract**: `.agents/format.md` (installed by `agents init`) is
   what a planning AI reads to produce task files, and what the scheduler's
   parser is aligned with byte-for-byte.
@@ -300,9 +301,11 @@ any file content to a model — the executing AI reads task files with its own
 tools.
 
 **Q: What if I lose power or crash midway?**
-Run `agents run` again. The state lives in the task files and git; there is
-no hidden state. A task left at WIP automatically resumes with a "continue"
-prompt.
+Inspect the isolated worktree first. If the interruption was handled and the
+task was left at WIP, `agents run` resumes it with a "continue" prompt. An
+abrupt failure can leave uncommitted changes; in that case the scheduler
+refuses the dirty worktree instead of guessing, so review and checkpoint the
+changes before rerunning.
 
 **Q: What if the executing AI edits its task file to loosen its own review?**
 Three layers of defense: the scope exemption covers only its own
