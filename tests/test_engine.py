@@ -157,7 +157,7 @@ class TestRunSuccess(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertTrue(journal.is_file())
         self.assertFalse(path.with_name("t001_task.e.r.toml").exists())
-        self.assertTrue(any(s.startswith("auto(t001)")
+        self.assertTrue(any(s.startswith("auto(plan01/t001): ")
                             for s in self.subjects()))
 
     def test_once_success_creates_checkpoint(self):
@@ -169,7 +169,10 @@ class TestRunSuccess(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertTrue(path.with_name("t001_task.r.toml").is_file())
         self.assertFalse(path.with_name("r001_task.toml").exists())
-        self.assertTrue(any(s.startswith("auto(t001)") for s in self.subjects()))
+        subject = next(s for s in self.subjects()
+                       if s.startswith("auto(plan01/t001): "))
+        self.assertNotIn("Co-Authored-By", subject)
+        self.assertNotIn("Generated with", subject)
         # 工作樹除 _report.md、agents.lock(執行期產物)外乾淨
         porcelain = [ln for ln in self._git("status", "--porcelain").splitlines()
                      if ln.strip() and "_report.md" not in ln
@@ -206,7 +209,8 @@ class TestRunSuccess(EngineTestCase):
             self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
 
         self.assertEqual(parse_task_file(path).status, "DONE")
-        self.assertTrue(any(s.startswith("auto(t001)") for s in self.subjects()))
+        self.assertTrue(any(s.startswith("auto(plan01/t001): ")
+                            for s in self.subjects()))
 
     def test_try_write_report_does_not_swallow_process_control_exceptions(self):
         cfg = self.build(git_enabled=False)
@@ -405,6 +409,10 @@ class TestAcceptanceGates(EngineTestCase):
         self.commit_all()
 
         def step(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "failed.py").write_text(
+                "x", encoding="utf-8")
             set_status(path, "DONE")
             return ok_result()
 
@@ -412,6 +420,28 @@ class TestAcceptanceGates(EngineTestCase):
         self.run_quiet(cfg, once=True, adapter=adapter)
         self.assertEqual(len(adapter.calls), 1)
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        self.assertTrue(any(
+            s.startswith("auto(plan01/t001): BLOCKED - ")
+            for s in self.subjects()))
+
+    def test_self_blocked_creates_namespaced_checkpoint(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+
+        def step(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text(
+                "x", encoding="utf-8")
+            set_status(path, "BLOCKED")
+            return ok_result()
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([step])), 0)
+        self.assertTrue(any(
+            s == "auto(plan01/t001): BLOCKED(執行 AI 自標)"
+            for s in self.subjects()))
 
 
 class TestQuotaAndResume(EngineTestCase):
@@ -438,7 +468,8 @@ class TestQuotaAndResume(EngineTestCase):
         self.assertIn("接續", adapter.calls[1][0])
         self.assertEqual(adapter.resolve_calls, ["lite", "lite"])
         subjects = self.subjects()
-        self.assertTrue(any(s.startswith("wip(t001)") for s in subjects))
+        self.assertTrue(any(s.startswith("wip(plan01/t001): ")
+                            for s in subjects))
         from agents.plan import read_entries
         entries = read_entries(journal_path_for(path))
         quota = next(e for e in entries if e["event"] == "quota")
@@ -716,6 +747,50 @@ class TestQueries(EngineTestCase):
         # _report.md 已寫出,但不進版控
         self.assertTrue((cfg.tasks_dir / "_report.md").is_file())
         self.assertNotIn("_report.md", self._git_execution("ls-files"))
+
+    def test_report_isolates_namespaced_checkpoints(self):
+        self.write_task(1, status="DONE", title="目前一")
+        self.write_task(3, status="DONE", title="目前三")
+        other_dir = self.root / ".agents" / "plan010"
+        other_dir.mkdir()
+        (other_dir / "t001_other.e.toml").write_text(
+            task_text(status="DONE", title="其他一"), encoding="utf-8",
+            newline="\n")
+        (other_dir / "t003_other.e.toml").write_text(
+            task_text(status="DONE", title="其他三"), encoding="utf-8",
+            newline="\n")
+        cfg = self.build()
+        other_cfg = load_config(
+            self.root / ".agents" / "agents.toml", folder="plan010")
+        self.commit_all()
+
+        def checkpoint(subject):
+            self._git("commit", "--allow-empty", "-m", subject)
+            return self._git("rev-parse", "--short", "HEAD").strip()
+
+        other_t1 = checkpoint("auto(plan010/t001): 其他一")
+        other_t3 = checkpoint("auto(plan010/t003): 其他三")
+        legacy_t3 = checkpoint("auto(t003): 舊格式歸屬不明")
+        wrong_id = checkpoint("auto(plan01/t0010): 任務 id 僅為前綴")
+        current_t1 = checkpoint("auto(plan01/t001): 目前一")
+        current_t3 = checkpoint("auto(plan01/t003): 目前三")
+
+        current = engine.render_report(cfg, engine.Plan.parse(cfg.tasks_dir))
+        other = engine.render_report(
+            other_cfg, engine.Plan.parse(other_cfg.tasks_dir))
+
+        self.assertIn(f"t001  DONE     目前一  [{current_t1}]", current)
+        self.assertIn(f"t003  DONE     目前三  [{current_t3}]", current)
+        self.assertNotIn(other_t1, current)
+        self.assertNotIn(other_t3, current)
+        self.assertNotIn(legacy_t3, current)
+        self.assertNotIn(wrong_id, current)
+        self.assertIn(f"t001  DONE     其他一  [{other_t1}]", other)
+        self.assertIn(f"t003  DONE     其他三  [{other_t3}]", other)
+        self.assertNotIn(current_t1, other)
+        self.assertNotIn(current_t3, other)
+        self.assertIn("進度:DONE 2 / BLOCKED 0 / WIP 0 / TODO 0 / SKIP 0(共 2)",
+                      current)
 
     def test_report_reads_legacy_ai_entry_without_identity_fields(self):
         path = self.write_task(1, status="BLOCKED")

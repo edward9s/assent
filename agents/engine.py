@@ -111,6 +111,11 @@ def _short(text: str, limit: int = 60) -> str:
     return " ".join(text.split())[:limit]
 
 
+def _checkpoint_subject(cfg: Config, kind: str, task: Task, detail: str) -> str:
+    """建立含工作資料夾命名空間的任務檢查點主旨。"""
+    return f"{kind}({cfg.tasks_name}/{task.id}): {detail}"
+
+
 def _resolve_effort(cfg: Config, task: Task) -> str | None:
     """任務檔標註優先;無則套設定檔 default_effort;都沒有 -> None(不傳 --effort)。"""
     if task.effort:
@@ -291,8 +296,11 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 detail="run 收到 Ctrl+C")
         if cfg.git_enabled:
             try:
-                if gitops.commit_if_dirty(cfg.root, "wip: 使用者中斷,保留進度",
-                                          cfg.git_excludes):
+                subject = (_checkpoint_subject(
+                    cfg, "wip", current_task, "使用者中斷,保留進度")
+                    if current_task is not None
+                    else f"wip({cfg.tasks_name}): 使用者中斷,保留進度")
+                if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
                     print("已把進度收進 wip 檢查點(不滿意可自行 git 回退)。")
             except AgentsError as e:
                 print(f"wip 檢查點建立失敗:{e}(工作區保持原樣,未丟棄)")
@@ -309,8 +317,11 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 detail=str(e))
         if cfg.git_enabled:
             try:
-                if gitops.commit_if_dirty(cfg.root, "wip: 基礎設施錯誤中止,保留進度",
-                                          cfg.git_excludes):
+                subject = (_checkpoint_subject(
+                    cfg, "wip", current_task, "基礎設施錯誤中止,保留進度")
+                    if current_task is not None
+                    else f"wip({cfg.tasks_name}): 基礎設施錯誤中止,保留進度")
+                if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
                     print("已把進度收進 wip 檢查點。")
             except AgentsError:
                 pass
@@ -382,7 +393,8 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
                          requested_model=session.requested_model,
                          time_str=now().isoformat(timespec="seconds"))
             if cfg.git_enabled and gitops.commit_if_dirty(
-                    cfg.root, f"wip({task.id}): 額度中斷,保留進度",
+                    cfg.root, _checkpoint_subject(
+                        cfg, "wip", task, "額度中斷,保留進度"),
                     cfg.git_excludes):
                 print("  已建立 wip 檢查點。")
             _try_write_report(cfg)
@@ -394,7 +406,8 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
         if outcome == "done":
             print("  驗收通過 -> 建立檢查點")
             if cfg.git_enabled and not gitops.commit_if_dirty(
-                    cfg.root, f"auto({task.id}): {_short(task.title) or '完成'}",
+                    cfg.root, _checkpoint_subject(
+                        cfg, "auto", task, _short(task.title) or "完成"),
                     cfg.git_excludes):
                 print("  (工作區無新變更,進度已在先前的 wip 檢查點內)")
             _try_write_report(cfg)
@@ -402,9 +415,10 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
         if outcome == "self_blocked":
             print("  執行 AI 自標 BLOCKED(合法產出,交人類裁決)-> 建立檢查點")
             if cfg.git_enabled:
-                gitops.commit_if_dirty(cfg.root,
-                                       f"auto({task.id}): BLOCKED(執行 AI 自標)",
-                                       cfg.git_excludes)
+                gitops.commit_if_dirty(
+                    cfg.root, _checkpoint_subject(
+                        cfg, "auto", task, "BLOCKED(執行 AI 自標)"),
+                    cfg.git_excludes)
             _try_write_report(cfg)
             return
 
@@ -505,9 +519,10 @@ def _mark_blocked(cfg: Config, task: Task, session: _SessionIdentity, reason: st
                  requested_model=session.requested_model,
                  time_str=now().isoformat(timespec="seconds"))
     if cfg.git_enabled:
-        gitops.commit_if_dirty(cfg.root,
-                               f"auto({task.id}): BLOCKED - {_short(reason, 50)}",
-                               cfg.git_excludes)
+        gitops.commit_if_dirty(
+            cfg.root, _checkpoint_subject(
+                cfg, "auto", task, f"BLOCKED - {_short(reason, 50)}"),
+            cfg.git_excludes)
 
 
 def _quota_wait_seconds(cfg: Config, reset_at: datetime | None,
@@ -598,7 +613,8 @@ def render_report(cfg: Config, plan: Plan,
         for line in log.splitlines():
             h, _, subject = line.partition("\t")
             for t in plan.tasks:
-                if t.id not in checkpoints and subject.startswith(f"auto({t.id})"):
+                prefix = f"auto({cfg.tasks_name}/{t.id}): "
+                if t.id not in checkpoints and subject.startswith(prefix):
                     checkpoints[t.id] = h
 
     branch = _git_read(git_root, "branch", "--show-current") or "N/A"

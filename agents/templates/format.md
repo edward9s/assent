@@ -199,11 +199,12 @@ summary = "額度耗盡,保留進度等待重置後接續"
    `scope` 內;自己的 t 檔/r 檔與執行期產物豁免。
 4. **驗收命令**:執行該任務的 `verify`,退出碼 0 = 通過。
 
-- 通過 -> `auto(tNNN): <title>` 檢查點 commit。自標 BLOCKED -> 免驗直接 commit
-  (BLOCKED 也是合法產出,交人類裁決)。
+- 通過 -> `auto(<工作資料夾>/tNNN): <title>` 檢查點 commit。自標 BLOCKED ->
+  免驗直接使用同一命名空間 commit(BLOCKED 也是合法產出,交人類裁決)。
 - 失敗 -> **不還原工作區**,帶失敗原因重試;重試用盡 -> 調度器標 BLOCKED +
   r 檔機器記錄 + 連同未通過的成果 commit。**燒過 tokens 的產出絕不丟棄。**
-- 額度耗盡 -> 不計失敗:r 檔記 `quota`、進度收進 `wip(tNNN)` 檢查點、
+- 額度耗盡 -> 不計失敗:r 檔記 `quota`、進度收進
+  `wip(<工作資料夾>/tNNN)` 檢查點、
   倒數等待重置、帶「接續」提示重跑同一任務。
 - 執行 AI 永不執行 git commit——檢查點由調度器建立。
 
@@ -220,6 +221,8 @@ summary = "額度耗盡,保留進度等待重置後接續"
 `agents report`(或 run 收尾)把 t/r 檔與 git 資訊彙整成一頁純文字報告:
 進度統計、每任務一行(狀態 + 檢查點 commit)、BLOCKED/WIP 任務附最後一筆
 r 檔 summary。**彙整是機械工作,零 token**;AI 永遠不做「幫我總結整輪」這種事。
+檢查點 commit 只接受與目前工作資料夾及任務 id 完整相符的
+`auto(<工作資料夾>/tNNN)`；舊 `auto(tNNN)` 無法安全判定歸屬,不顯示其 hash。
 _report.md 是執行期產物:不進版控、不參與乾淨/scope 檢查,每次生成整檔重寫。
 
 ## 會議規範
@@ -228,7 +231,8 @@ _report.md 是執行期產物:不進版控、不參與乾淨/scope 檢查,每次
   (草稿可以是散文,
   定稿必須是任務檔),散會條件 = `agents check` 通過。
 - 驗收會議:人先讀 `_report.md`(零 token),只對要裁決的任務開 AI session,
-  指名「讀 tNNN 的 `.e.toml` 任務檔、共同主幹 `.r.toml` 日誌與對應 commit」;
+  指名「讀 tNNN 的 `.e.toml` 任務檔、共同主幹 `.r.toml` 日誌與
+  `auto(<工作資料夾>/tNNN)` 對應 commit」;
   裁決落實 =
   改任務檔(status 改回 TODO、
   補充說明、加新任務、標 SKIP),若裁決回退某任務的檢查點(git revert),同一次會議

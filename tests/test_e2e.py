@@ -237,7 +237,8 @@ class TestScenarios(E2ETestCase):
         self.assertAlmostEqual(sum(sleeps), 420, delta=1)
         self.assertIn("接續", adapter.calls[1])
         subjects = self.subjects()
-        self.assertTrue(any(s.startswith("wip(t001)") for s in subjects))
+        self.assertTrue(any(s.startswith("wip(plan01/t001): ")
+                            for s in subjects))
         self.assertEqual(parse_task_file(p1).status, "DONE")
         from agents.plan import read_entries
         events = [e["event"] for e in read_entries(journal_path_for(p1))]
@@ -295,14 +296,16 @@ class TestWorktreeScenarios(E2ETestCase):
         worktree_branch = self.git_at(
             worktree, "branch", "--show-current").strip()
         self.assertTrue(worktree_branch.startswith("plan01/"))
-        self.assertNotIn("auto(t001)", self._git("log", "--pretty=%s"))
-        self.assertIn("auto(t001)", self.git_at(worktree, "log", "--pretty=%s"))
+        self.assertNotIn("auto(plan01/t001)",
+                         self._git("log", "--pretty=%s"))
+        self.assertIn("auto(plan01/t001)",
+                      self.git_at(worktree, "log", "--pretty=%s"))
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.status(cfg), 0)
         self.assertIn(f"目前分支:{worktree_branch}", out.getvalue())
-        self.assertIn("auto(t001)", out.getvalue())
+        self.assertIn("auto(plan01/t001)", out.getvalue())
         report = engine.render_report(cfg, engine.Plan.parse(cfg.tasks_dir))
         self.assertIn(f"分支:{worktree_branch}", report)
         self.assertIn("t001  DONE", report)
