@@ -78,6 +78,13 @@ _RESUME_SUFFIX = ("\nThe previous run of this task was interrupted (quota exhaus
                   "interrupt); the partial work already done is kept in the working tree "
                   "(possibly including a wip checkpoint). Review the current state first, "
                   "resume and finish the remaining part, and do not redo what is already done.")
+_REWORK_SUFFIX = ("\nThe previous implementation of this task was rejected by a human "
+                  "reviewer, and its status was reset to TODO.{reject_reason_clause}\n"
+                  "The previous implementation and its tests may still be present in the "
+                  "working tree; do not assume the existing code or existing tests are "
+                  "correct as-is, re-evaluate their correctness from scratch. If the task "
+                  "file has since been amended with new clauses, the task file is "
+                  "authoritative.")
 
 _QUOTA_BUFFER = timedelta(minutes=2)  # reset time + buffer, to avoid being blocked again right at the edge
 _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
@@ -90,6 +97,8 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 _BEARER_RE = re.compile(r"(?i)(\bbearer\s+)[^\s,;]+")
 _KNOWN_TOKEN_RE = re.compile(
     r"\b(?:sk(?:-ant)?|ghp|github_pat)-[A-Za-z0-9_-]{8,}\b")
+_REWORK_REASON_RE = re.compile(
+    r"(?:^|\n)reason: (.*?)(?=\nHEAD before operation:|\Z)", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -143,9 +152,36 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
             .replace("{requested_effort}", session.requested_effort or ""))
     if resumed:
         text += _RESUME_SUFFIX
+    else:
+        text += _rework_prompt_suffix(task)
     if failure_reason:
         text += _RETRY_SUFFIX.replace("{failure_reason}", failure_reason)
     return text
+
+
+def _rework_prompt_suffix(task: Task) -> str:
+    """Carry a rejection reason into the next TODO run of a task the human just reworked.
+
+    Triggers only when the task's journal's last entry is a pending ``rework_requested``
+    record (written by ``rework.py``, never modified here). Any read/parse problem, or a
+    reason that cannot be located in that entry's detail text, degrades to a warning-only
+    suffix (or none at all, if the trigger condition itself cannot be established) rather than
+    failing prompt assembly.
+    """
+    try:
+        entries = read_entries(task.journal_path)
+    except AssentError:
+        return ""
+    if not entries or entries[-1].get("event") != "rework_requested":
+        return ""
+    detail = entries[-1].get("detail")
+    reason = None
+    if isinstance(detail, str):
+        m = _REWORK_REASON_RE.search(detail)
+        if m:
+            reason = m.group(1).strip()
+    clause = f" Rejection reason: {reason}" if reason else ""
+    return _REWORK_SUFFIX.replace("{reject_reason_clause}", clause)
 
 
 def _resolve_session(cfg: Config, adapter: Adapter,

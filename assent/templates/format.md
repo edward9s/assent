@@ -402,6 +402,10 @@ start an AI, and does not run `run` automatically.
 
 Within any folder: a `WIP` task -> prefer it, carrying a "resume" prompt to
 continue; otherwise take the first `TODO` whose every `dep` is `DONE` / `SKIP`.
+When a `TODO` task's r file last entry is `rework_requested`, the scheduler
+likewise attaches to the prompt the rejection reason plus a reminder that any
+remaining old implementation and old tests must be re-evaluated from scratch,
+not treated as spec.
 A `BLOCKED` task only blocks tasks that have it as an upstream; other tasks run
 as usual. When every task is `DONE` / `BLOCKED` / `SKIP` it finishes, prints a
 summary, and updates the `_report.md` inside the work folder.
@@ -537,9 +541,12 @@ generation.
   propagation is needed; add `--revert-code` only after confirming a reversal is
   wanted and it passes the contiguous-tail precheck. The command does not run
   automatically; the human first inspects the updated report, then explicitly
-  continues the run. Adding tasks, adding clarifications, or marking SKIP are
-  still made by the AI per the adjudication; a mismatch between status and code
-  facts means unfinished, and adjourning still requires `assent check` to pass.
+  continues the run. After a rework, the AI turns the rejection reason into
+  explicit behavior/acceptance clauses in the task file (updating verify too
+  when needed) before the run is continued; adding tasks, adding
+  clarifications, or marking SKIP are still made by the AI per the
+  adjudication; a mismatch between status and code facts means unfinished, and
+  adjourning still requires `assent check` to pass.
 - Project-specific decisions that stay valid across plans settle into AGENTS.md,
   not carried by a closed task file; assent rules common across projects update
   the instructions template.
