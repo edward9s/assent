@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agents.__main__ import main
 from agents.init import init as run_init
@@ -44,6 +45,31 @@ class TestDispatch(MainTestCase):
         code, out = self.run_main(
             ["run", "--config", str(self.root / "nope" / "agents.toml")])
         self.assertEqual(code, 1)
+
+    def test_all_plan_commands_accept_folder_override(self):
+        agents_dir = self.root / ".agents"
+        agents_dir.mkdir()
+        config = agents_dir / "agents.toml"
+        config.write_text('[plan]\ntasks = "A"\n', encoding="utf-8")
+        commands = (("run", "run"), ("status", "status"),
+                    ("check", "check"), ("report", "report"))
+        for command, engine_name in commands:
+            with self.subTest(command=command), patch(
+                    f"agents.__main__.engine.{engine_name}", return_value=0) as mocked:
+                code, _ = self.run_main([command, "B", "--config", str(config)])
+                self.assertEqual(code, 0)
+                cfg = mocked.call_args.args[0]
+                self.assertEqual(cfg.tasks_name, "B")
+                self.assertEqual(cfg.tasks_dir, agents_dir.resolve() / "B")
+
+    def test_invalid_folder_override_reports_error(self):
+        agents_dir = self.root / ".agents"
+        agents_dir.mkdir()
+        config = agents_dir / "agents.toml"
+        config.write_text('[plan]\ntasks = "A"\n', encoding="utf-8")
+        code, out = self.run_main(["status", "bad/name", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertIn("命令列工作資料夾", out)
 
 
 class TestInit(MainTestCase):

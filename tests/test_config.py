@@ -47,7 +47,15 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.lockfile_rel, ".agents/plan01/agents.lock")
         self.assertEqual(cfg.git_excludes,
                          (".agents/agents.log", ".agents/plan01/report.md",
-                          ".agents/plan01/agents.lock"))
+                         ".agents/plan01/agents.lock"))
+
+    def test_folder_override_updates_all_derived_paths(self):
+        cfg = load_config(self.write(_MINIMAL), folder="parallel02")
+        self.assertEqual(cfg.tasks_name, "parallel02")
+        self.assertEqual(cfg.tasks_dir, self.agents_dir.resolve() / "parallel02")
+        self.assertEqual(cfg.branch_prefix, "parallel02/")
+        self.assertEqual(cfg.report_rel, ".agents/parallel02/report.md")
+        self.assertEqual(cfg.lockfile_rel, ".agents/parallel02/agents.lock")
 
     def test_missing_file_raises(self):
         with self.assertRaises(AgentsError):
@@ -78,6 +86,10 @@ class TestLoadConfig(ConfigTestCase):
         for bad in ("-x", ".x"):
             with self.assertRaises(AgentsError):
                 load_config(self.write(f'[plan]\ntasks = "{bad}"\n'))
+
+    def test_invalid_folder_override_rejected(self):
+        with self.assertRaisesRegex(AgentsError, "命令列工作資料夾"):
+            load_config(self.write(_MINIMAL), folder="bad/name")
 
     def test_type_error_reported(self):
         with self.assertRaisesRegex(AgentsError, "型別錯誤"):

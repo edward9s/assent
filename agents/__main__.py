@@ -35,6 +35,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="目標專案根目錄(預設:目前目錄)")
 
     for p in (run_p, status_p, check_p, report_p):
+        p.add_argument("folder", nargs="?", metavar="FOLDER",
+                       help="覆寫 [plan] tasks 的工作資料夾名稱")
         p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                        help=f"設定檔位置(預設:{_DEFAULT_CONFIG})")
     return parser
@@ -47,7 +49,7 @@ def _dispatch(argv: list[str]) -> int:
         return run_init(args.path)
 
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(args.config, folder=args.folder)
     except AgentsError as e:
         print(f"設定檔錯誤:{e}")
         return 1

@@ -166,7 +166,8 @@ class Plan:
         tasks_dir = Path(tasks_dir)
         if not tasks_dir.is_dir():
             raise AgentsError(
-                f"找不到工作資料夾:{tasks_dir}(agents.toml 的 [plan] tasks 指錯了?)")
+                f"找不到工作資料夾:{tasks_dir}"
+                "(命令列參數或 agents.toml 的 [plan] tasks 指錯了?)")
         files = sorted(p for p in tasks_dir.iterdir()
                        if p.is_file() and _FILENAME_RE.match(p.name))
         if not files:

@@ -119,7 +119,15 @@ def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> di
     return dict(val)
 
 
-def load_config(path: str | Path) -> Config:
+def _validate_tasks_name(tasks_name: str, owner: str) -> None:
+    """驗證工作資料夾名稱，確保它可安全作為 git 分支前綴。"""
+    if not _FOLDER_RE.match(tasks_name) or tasks_name[0] in "-.":
+        raise AgentsError(
+            f"{owner} = {tasks_name!r} 不是合法的工作資料夾名稱"
+            "(不可含空白或路徑分隔符,不可以 - 或 . 開頭;它同時是 git 分支前綴)")
+
+
+def load_config(path: str | Path, folder: str | None = None) -> Config:
     path = Path(path)
     if not path.is_file():
         raise AgentsError(
@@ -143,10 +151,10 @@ def load_config(path: str | Path) -> Config:
     tasks_name = _typed(plan, "[plan]", "tasks", str, None)
     if tasks_name is None:
         raise AgentsError("設定檔缺少必要欄位:[plan] tasks(工作資料夾名稱)")
-    if not _FOLDER_RE.match(tasks_name) or tasks_name[0] in "-.":
-        raise AgentsError(
-            f"[plan] tasks = {tasks_name!r} 不是合法的工作資料夾名稱"
-            "(不可含空白或路徑分隔符,不可以 - 或 . 開頭;它同時是 git 分支前綴)")
+    _validate_tasks_name(tasks_name, "[plan] tasks")
+    if folder is not None:
+        _validate_tasks_name(folder, "命令列工作資料夾")
+        tasks_name = folder
 
     git = _section(data, "git")
     watchdog = _section(data, "watchdog")
