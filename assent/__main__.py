@@ -11,7 +11,7 @@ import sys
 import threading
 from collections import Counter
 
-from assent import AssentError, engine
+from assent import AssentError, engine, inspection
 from assent.accept import accept_folder
 from assent.archive import archive_all, archive_folder, restore_folder
 from assent.batch_accept import accept_all, accept_selected_batch
@@ -299,7 +299,7 @@ def _dispatch_all(command: str, config_path: str, folders: list[str]) -> int:
     if not folders:
         print("No work folder with a task file found.")
         return 1
-    operation = getattr(engine, command)
+    operation = getattr(inspection, command)
     result = 0
     for index, folder in enumerate(folders):
         if index:
@@ -521,11 +521,11 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "run":
         return engine.run(cfg, once=args.once, task_id=args.task)
     if args.command == "status":
-        return engine.status(cfg)
+        return inspection.status(cfg)
     if args.command == "check":
-        return engine.check(cfg)
+        return inspection.check(cfg)
     if args.command == "report":
-        return engine.report(cfg)
+        return inspection.report(cfg)
     return 2  # argparse required=True already guards this; defensive fallback
 
 

@@ -85,7 +85,7 @@ class TestRunVerificationHandoff(VerificationEngineCase):
                 mock.patch("assent.engine._run_locked", side_effect=body), \
                 mock.patch("assent.engine.verification.verify_folder_if_needed",
                            side_effect=verify), \
-                mock.patch("assent.engine._try_write_report"):
+                mock.patch("assent.engine.try_write_report"):
             with contextlib.redirect_stdout(io.StringIO()):
                 result = engine.run(self.cfg, **options)
         return result, events
@@ -165,7 +165,7 @@ class TestRunCloseoutReceiptPolicy(VerificationEngineCase):
                 mock.patch("assent.engine._run_locked", side_effect=body), \
                 mock.patch("assent.engine.verification.verify_folder_if_needed",
                            side_effect=verify), \
-                mock.patch("assent.engine._try_write_report") as report:
+                mock.patch("assent.engine.try_write_report") as report:
             with contextlib.redirect_stdout(out):
                 result = engine.run(self.cfg, once=True, **options)
         self.assertTrue(report.called)
@@ -271,7 +271,7 @@ class TestVerificationPrompt(VerificationEngineCase):
     def test_timeout_is_not_defined_as_sufficient_for_blocked(self):
         self.write_status("TODO")
         task = engine.Plan.parse(self.tasks_dir).tasks[0]
-        session = engine._SessionIdentity(
+        session = engine.SessionIdentity(
             agent="codex", requested_model="model", effort="heavy",
             requested_effort="high")
         prompt = engine._build_prompt(self.cfg, task, None, session)

@@ -258,6 +258,63 @@ class AcceptanceModuleBoundaries(unittest.TestCase):
                                  "assent.batch_accept")
 
 
+class ExecutionAndInspectionBoundaries(unittest.TestCase):
+    """Unattended execution, read-only inspection, and their shared preflight.
+
+    ``assent.engine`` runs sessions; ``assent.inspection`` owns report/status/
+    check; ``assent.preflight`` owns the decisions both must answer identically
+    (effort, adapter capability, assignment rendering, git layering, stack
+    state).  The edges run one way -- engine -> inspection -> preflight -- so a
+    query command never has to load the scheduler, and preflight never has to
+    load either of its callers.
+    """
+
+    def test_neither_new_module_imports_the_engine(self) -> None:
+        for module in ("inspection", "preflight"):
+            with self.subTest(module=module):
+                self.assertNotIn("engine", _imported_assent_modules(module))
+
+    def test_preflight_does_not_import_inspection(self) -> None:
+        self.assertNotIn("inspection", _imported_assent_modules("preflight"))
+
+    def test_the_engine_takes_report_and_preflight_from_their_owners(self) -> None:
+        imported = _imported_assent_modules("engine")
+        self.assertIn("inspection", imported)
+        self.assertIn("preflight", imported)
+
+    def test_each_module_defines_only_its_own_entry_points(self) -> None:
+        from assent import engine, inspection, preflight
+        for owner, name in ((engine, "run"),
+                            (engine, "verify_focused"),
+                            (inspection, "report"),
+                            (inspection, "status"),
+                            (inspection, "check"),
+                            (inspection, "render_report"),
+                            (inspection, "write_report"),
+                            (inspection, "try_write_report"),
+                            (preflight, "resolve_session"),
+                            (preflight, "capability_errors"),
+                            (preflight, "resolve_stack_state")):
+            with self.subTest(symbol=f"{owner.__name__}.{name}"):
+                function = getattr(owner, name)
+                self.assertTrue(callable(function))
+                self.assertEqual(function.__module__, owner.__name__)
+        for absent in ("report", "status", "check", "render_report"):
+            with self.subTest(absent=absent):
+                self.assertFalse(hasattr(engine, absent))
+
+    def test_the_cli_and_rework_take_reporting_from_inspection(self) -> None:
+        """The command syntax is unchanged, so the dispatch targets must be too."""
+        from assent import __main__, rework
+        for name in ("report", "status", "check"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    getattr(__main__.inspection, name).__module__,
+                    "assent.inspection")
+        self.assertEqual(rework.write_report.__module__, "assent.inspection")
+        self.assertNotIn("engine", _imported_assent_modules("rework"))
+
+
 class VendorAdapterIndependence(unittest.TestCase):
     """One vendor's adapter never depends on another vendor's adapter module.
 

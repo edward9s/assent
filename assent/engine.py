@@ -1,4 +1,9 @@
-"""Main loop: select task -> run -> accept -> checkpoint/retry/quota wait + report generation.
+"""Main loop: select task -> run -> accept -> checkpoint/retry/quota wait.
+
+The pre-session decisions this loop shares with the read-only query commands
+live in ``assent.preflight``; the report it refreshes as a best-effort side
+effect is rendered by ``assent.inspection``.  Both are imported here and neither
+imports back, so the query commands stay loadable without the scheduler.
 
 Iron rules inherited from field experience on the workflow project: **never discard
 output the execution AI has already burned tokens to produce.**
@@ -29,22 +34,22 @@ import shlex
 import subprocess
 import sys
 import time
-import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Callable, TextIO
 
 from assent import AssentError, gitops, lockfile, verification
-from assent.adapters import Adapter, InvocationRequest, get_adapter
+from assent.adapters import Adapter, get_adapter
 from assent.config import Config
-from assent.folderdeps import (FolderBaseResolution,
-                               find_unfinished_prerequisites,
-                               parse_folder_dependencies,
-                               resolve_folder_base)
+from assent.folderdeps import find_unfinished_prerequisites
+from assent.inspection import try_write_report
 from assent.plan import (Plan, Task, append_entry, parse_task_file,
                          read_entries, same_except_status, set_status)
+from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
+                              StackState, capability_errors, has_git_marker,
+                              resolve_session, resolve_stack_state,
+                              worktree_configuration_errors)
 
 # Default prompt template (overridable via [prompt] template; variables are substituted
 # literally, tolerating other braces inside the template).
@@ -106,11 +111,7 @@ _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
 # it bounds that delivery delay without changing the total wait.
 _COUNTDOWN_SEGMENT = 60.0
 _DEFAULT_VERIFY_COMMAND = "python .assent/verify.py"
-_GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
 _ADAPTER_DIAGNOSTIC_LIMIT = 240
-_ASSIGNMENT_NAME_WIDTH = 26
-_ASSIGNMENT_ABSTRACT_WIDTH = 14
-_ASSIGNMENT_LINE_WIDTH = 78
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)([\"']?(?:api[_ -]?key|access[_ -]?token|token|password|secret|"
     r"authorization)[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;]+)")
@@ -121,21 +122,11 @@ _REWORK_REASON_RE = re.compile(
     r"(?:^|\n)reason: (.*?)(?=\nHEAD before operation:|\Z)", re.DOTALL)
 
 
-@dataclass(frozen=True)
-class _SessionIdentity:
-    """The abstract choices and actual CLI identity shared by one task run."""
-
-    agent: str
-    requested_model: str
-    effort: str | None
-    requested_effort: str | None
-
-
 @dataclass
 class _SessionState:
     """Lets the outer interrupt handler read the resolved identity of the current session."""
 
-    identity: _SessionIdentity | None = None
+    identity: SessionIdentity | None = None
 
 
 @dataclass
@@ -185,7 +176,7 @@ class _BillingAbort(Exception):
 # Prompt / small helpers
 # --------------------------------------------------------------------------- #
 def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
-                  session: _SessionIdentity, resumed: bool = False) -> str:
+                  session: SessionIdentity, resumed: bool = False) -> str:
     template = cfg.prompt_template or _DEFAULT_PROMPT_TEMPLATE
     text = (template
             .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
@@ -237,23 +228,8 @@ def _rework_prompt_suffix(task: Task) -> str:
     return _REWORK_SUFFIX.replace("{reject_reason_clause}", clause)
 
 
-def _resolve_session(cfg: Config, adapter: Adapter, task: Task,
-                     adapter_name: str | None = None) -> _SessionIdentity:
-    """Resolve the identity before starting the adapter; the same result feeds the prompt,
-    journal, and CLI command."""
-    name = adapter_name or cfg.adapter_name
-    effort = _resolve_effort(cfg, task, name)
-    return _SessionIdentity(
-        agent=name,
-        requested_model=adapter.resolve_model(task.model),
-        effort=effort,
-        requested_effort=_resolve_requested_effort(
-            cfg, task.model, effort, name),
-    )
-
-
 def _session_line(adapter_name: str, task: Task,
-                  session: _SessionIdentity) -> str:
+                  session: SessionIdentity) -> str:
     """The one opening line that states the whole resolved session identity.
 
     Four facts, in the order they are decided: which adapter runs, and each abstract choice
@@ -262,47 +238,6 @@ def _session_line(adapter_name: str, task: Task,
     """
     return (f"  Session: {adapter_name} | {task.model}->{session.requested_model}"
             f" | {session.effort}->{session.requested_effort}")
-
-
-def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
-                         task_id: str | None = None,
-                         adapter_name: str | None = None) -> list[InvocationRequest]:
-    """Resolve every invocation this run could still issue, without starting anything.
-
-    Only tasks that can still run are resolved: a settled task will not open a session, and
-    refusing a run because of a mapping a finished task once used would be noise.
-    """
-    name = adapter_name or cfg.adapter_name
-    requests: list[InvocationRequest] = []
-    for task in plan.tasks:
-        if task_id is not None and task.id != task_id:
-            continue
-        if task.status not in ("TODO", "WIP"):
-            continue
-        effort = _resolve_effort(cfg, task, name)
-        requests.append(InvocationRequest(
-            task_id=task.id, model=task.model, effort=effort,
-            requested_model=adapter.resolve_model(task.model),
-            requested_effort=_resolve_requested_effort(
-                cfg, task.model, effort, name)))
-    return requests
-
-
-def _capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
-                       task_id: str | None = None,
-                       adapter_name: str | None = None) -> list[str]:
-    """Ask the active adapter to prove every planned model/effort before anything starts.
-
-    This is a zero-token gate: it runs before an AI session, a task checkpoint or any status
-    write, so an invocation the vendor would refuse costs no quota and leaves no trace.  A
-    resolution error (an unmapped tier, say) is itself a preflight failure.
-    """
-    try:
-        requests = _planned_invocations(
-            cfg, adapter, plan, task_id, adapter_name)
-    except AssentError as e:
-        return [str(e)]
-    return adapter.preflight(requests)
 
 
 def _short(text: str, limit: int = 60) -> str:
@@ -342,7 +277,7 @@ def _adapter_failure_reason(exit_code: int, stalled: bool, output: str,
             f"bounded diagnostic: {diagnostic}")
 
 
-def _append_adapter_failure_entry(task: Task, session: _SessionIdentity,
+def _append_adapter_failure_entry(task: Task, session: SessionIdentity,
                                   exit_code: int, stalled: bool, summary: str,
                                   now: Callable[[], datetime],
                                   failure_kind: str | None = None) -> None:
@@ -387,132 +322,11 @@ def _checkpoint_subject(cfg: Config, kind: str, task: Task, detail: str) -> str:
     return f"{kind}({cfg.tasks_name}/{task.id}): {detail}"
 
 
-def _resolve_effort(cfg: Config, task: Task,
-                    adapter_name: str | None = None) -> str | None:
-    """Abstract effort for the current adapter: task-file annotation wins; otherwise the
-    adapter's tier default, which a loaded config states for every known tier.
-
-    The current adapter's settings are looked up by name and fail closed for an unknown adapter,
-    so a third adapter never inherits Claude's defaults."""
-    return cfg.adapter_settings(adapter_name or cfg.adapter_name).resolve_effort(
-        task.effort, task.model)
-
-
-def _resolve_requested_effort(cfg: Config, model: str,
-                              effort: str | None,
-                              adapter_name: str | None = None) -> str | None:
-    """Translate the abstract effort to the actual CLI value for the current adapter, by
-    "tier section > flat > identity". Unknown adapters fail closed rather than falling back to
-    Claude's translation table."""
-    return cfg.adapter_settings(
-        adapter_name or cfg.adapter_name).resolve_requested_effort(
-        model, effort)
-
-
-def _display_width(text: str) -> int:
-    """Return terminal columns using the project's W/F CJK width rule."""
-    return sum(2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
-               for char in text)
-
-
-def _truncate_display(text: str, width: int) -> str:
-    """Truncate a display field to ``width`` columns with one ellipsis."""
-    if width <= 0:
-        return ""
-    if _display_width(text) <= width:
-        return text
-    ellipsis = "…"
-    remaining = width - _display_width(ellipsis)
-    if remaining <= 0:
-        return ellipsis if width >= _display_width(ellipsis) else ""
-    kept: list[str] = []
-    used = 0
-    for char in text:
-        char_width = _display_width(char)
-        if used + char_width > remaining:
-            break
-        kept.append(char)
-        used += char_width
-    return "".join(kept) + ellipsis
-
-
-def _pad_display(text: str, width: int) -> str:
-    """Left-align a field to a fixed terminal-column width."""
-    text = _truncate_display(text, width)
-    return text + " " * max(0, width - _display_width(text))
-
-
-def _task_assignment_line(task: Task, session: _SessionIdentity) -> str:
-    """Render one assignment without allowing a long configured value to wrap."""
-    task_name = task.path.name[:-len(".e.toml")]
-    abstract = task.model
-    if session.effort is not None:
-        abstract += f"/{session.effort}"
-        if task.effort is None:
-            abstract += "*"
-    actual = session.requested_model
-    if session.requested_effort is not None:
-        actual += f"/{session.requested_effort}"
-
-    prefix = (f"  {_pad_display(task_name, _ASSIGNMENT_NAME_WIDTH)} "
-              f"{_pad_display(abstract, _ASSIGNMENT_ABSTRACT_WIDTH)} -> ")
-    remaining = max(0, _ASSIGNMENT_LINE_WIDTH - _display_width(prefix))
-    return prefix + _truncate_display(actual, remaining)
-
-
-def _resolve_task_assignments(
-        cfg: Config, plan: Plan
-        ) -> list[tuple[str, list[tuple[Task, _SessionIdentity]]]]:
-    """Resolve every task through the same identity path used by ``run``."""
-    blocks: list[tuple[str, list[tuple[Task, _SessionIdentity]]]] = []
-    for adapter_name in cfg.adapter_names:
-        adapter = get_adapter(adapter_name, cfg)
-        assignments = [
-            (task, _resolve_session(cfg, adapter, task, adapter_name))
-            for task in plan.tasks
-        ]
-        blocks.append((adapter_name, assignments))
-    return blocks
-
-
-def _print_task_assignments(
-        blocks: list[tuple[str, list[tuple[Task, _SessionIdentity]]]]) -> None:
-    """Print one complete assignment block per configured adapter."""
-    for adapter_name, assignments in blocks:
-        print(f"Task assignment (adapter = {adapter_name}):")
-        used_default = False
-        for task, session in assignments:
-            used_default = used_default or (
-                task.effort is None and session.effort is not None)
-            print(_task_assignment_line(task, session))
-        if used_default:
-            print("  (* effort filled from default_effort)")
-
-
 def _task_excludes(cfg: Config, task: Task) -> list[str]:
     """The scope-check exemption list for this task: its own t file and r file (the status
     update and journal are part of the job) plus the global runtime artifacts."""
     return [cfg.git_rel(task.path), cfg.git_rel(task.journal_path),
             *cfg.git_excludes]
-
-
-def _git_read(root, *args: str) -> str | None:
-    """Read-only git query; a missing git or a non-zero exit returns None (used by
-    status/check, so it never raises a traceback)."""
-    try:
-        result = subprocess.run(
-            ["git", *args], cwd=str(root),
-            capture_output=True, encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
-
-
-def _has_git_marker(root: Path) -> bool:
-    """The project root must initialize its own git; it may not borrow a parent directory's repo."""
-    return (root / ".git").exists()
 
 
 def _verify_command_for_prompt(cfg: Config, command: str) -> str:
@@ -537,51 +351,7 @@ def _agents_md_path_for_prompt(cfg: Config) -> str:
     return "AGENTS.md (if present; skip if absent)"
 
 
-def _worktree_configuration_errors(cfg: Config) -> list[str]:
-    """The .assent management surface must stay in the main tree; it must not produce a
-    second real copy inside a worktree."""
-    errors: list[str] = []
-    assent_path = cfg.git_rel(cfg.assent_dir)
-    tracked = sorted(set(gitops.tracked_paths(cfg.root, assent_path))
-                     | set(gitops.tracked_paths(cfg.root, assent_path,
-                                                ref="HEAD")))
-    if tracked:
-        shown = ", ".join(tracked[:5]) + (" ..." if len(tracked) > 5 else "")
-        errors.append(f".assent already has Git-tracked files: {shown}"
-                      " (with Git enabled the whole .assent must stay in the main working tree)")
-    return errors
-
-
-@dataclass(frozen=True)
-class _StackState:
-    """Resolved base plus the declared base identity used to verify races."""
-
-    base: FolderBaseResolution
-    sources: tuple[gitops.FolderSourceSnapshot, ...]
-
-
-def _resolve_stack_state(cfg: Config) -> _StackState:
-    """Resolve a reproducible base and snapshot only its live source tip.
-
-    A folder without an unaccepted declared base has no source to snapshot:
-    ordering-only ``after`` entries do not provide Git lineage or race evidence.
-    """
-    base = resolve_folder_base(
-        cfg.root, cfg.tasks_dir, excludes=cfg.git_excludes)
-    if base.speculative_upstream is None:
-        sources = ()
-    else:
-        source = gitops.resolve_folder_source(
-            cfg.root, base.speculative_upstream.folder, cfg.git_excludes)
-        sources = (source,)
-        if (source.folder != base.speculative_upstream.folder
-                or source.tip != base.speculative_upstream.tip):
-            raise AssentError(
-                "upstream source changed while the stack base was being resolved")
-    return _StackState(base, sources)
-
-
-def _require_stack_ancestry(cfg: Config, state: _StackState,
+def _require_stack_ancestry(cfg: Config, state: StackState,
                             downstream_tip: str) -> None:
     """Require the downstream tip to contain the current declared base, if any."""
     source = state.base.speculative_upstream
@@ -597,12 +367,12 @@ def _require_stack_ancestry(cfg: Config, state: _StackState,
 
 def _prepare_worktree(cfg: Config) -> Config:
     """Create or validate the folder worktree before any adapter is started."""
-    errors = _worktree_configuration_errors(cfg)
+    errors = worktree_configuration_errors(cfg)
     if errors:
         detail = "\n".join(f"  - {error}" for error in errors)
         raise AssentError(f"git worktree version-control layering error:\n{detail}")
 
-    state_before = _resolve_stack_state(cfg)
+    state_before = resolve_stack_state(cfg)
     candidate = gitops.worktree_path(cfg.root, cfg.tasks_name)
     existed_before = candidate.exists()
     try:
@@ -644,7 +414,7 @@ def _prepare_worktree(cfg: Config) -> Config:
                 f"new worktree HEAD {downstream_tip} does not match resolved base "
                 f"{state_before.base.resolved_base}")
 
-        state_after = _resolve_stack_state(cfg)
+        state_after = resolve_stack_state(cfg)
         tips_before = {source.folder: source.tip for source in state_before.sources}
         tips_after = {source.folder: source.tip for source in state_after.sources}
         if tips_after != tips_before:
@@ -711,8 +481,8 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
             print(f"  - {prerequisite.message()}")
         return 1
 
-    if not _has_git_marker(cfg.root):
-        print(_GIT_REQUIRED_MESSAGE)
+    if not has_git_marker(cfg.root):
+        print(GIT_REQUIRED_MESSAGE)
         return 1
 
     if sleep is None:
@@ -747,7 +517,7 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
             # mostly expire before acceptance anyway.
             print(f"verify {cfg.tasks_name}: receipt refresh deferred (default); "
                   "run `assent verify [--batch]` before accepting")
-        _try_write_report(cfg)
+        try_write_report(cfg)
     return result
 
 
@@ -781,7 +551,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     rotation = _AdapterRotation(cfg.adapter_names, tuple(adapters))
     preflight_failures: list[tuple[str, list[str]]] = []
     for name, current_adapter in zip(rotation.names, rotation.adapters):
-        errors = _capability_errors(
+        errors = capability_errors(
             cfg, current_adapter, plan, task_id, name)
         if errors:
             preflight_failures.append((name, errors))
@@ -865,7 +635,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 print("Progress gathered into a wip checkpoint (git revert it yourself if unsatisfied).")
         except AssentError as e:
             print(f"wip checkpoint failed: {e} (working tree left as is, nothing discarded)")
-        _try_write_report(cfg)
+        try_write_report(cfg)
         print("Interrupted.")
         return 130
     except _BillingAbort as e:
@@ -887,7 +657,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 print("Progress gathered into a wip checkpoint.")
         except AssentError:
             pass
-        _try_write_report(cfg)
+        try_write_report(cfg)
         return 1
     except (AssentError, OSError) as e:
         print(f"Run aborted (infrastructure error): {e}")
@@ -906,11 +676,11 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 print("Progress gathered into a wip checkpoint.")
         except AssentError:
             pass
-        _try_write_report(cfg)
+        try_write_report(cfg)
         return 1
 
     _print_summary(Plan.parse(cfg.tasks_dir))
-    _try_write_report(cfg)
+    try_write_report(cfg)
     return 0
 
 
@@ -996,7 +766,7 @@ def _mark_recovered_task(task: Task, now: Callable[[], datetime]) -> None:
         print(f"Writing the recovery journal failed: {e} (working tree left as is, nothing discarded)")
 
 
-def _mark_interrupted_task(task: Task, session: _SessionIdentity, summary: str,
+def _mark_interrupted_task(task: Task, session: SessionIdentity, summary: str,
                            now: Callable[[], datetime], *, detail: str) -> None:
     """On abort, persist the current task as WIP and write a machine journal entry; a
     secondary error is only warned about.
@@ -1024,7 +794,7 @@ def _mark_interrupted_task(task: Task, session: _SessionIdentity, summary: str,
         print(f"Writing the interrupt journal failed: {e} (working tree left as is, nothing discarded)")
 
 
-def _mark_billing_task(task: Task, session: _SessionIdentity, detail: str,
+def _mark_billing_task(task: Task, session: SessionIdentity, detail: str,
                        now: Callable[[], datetime]) -> None:
     """On a billing abort, persist the task as WIP and write a distinct billing journal entry.
 
@@ -1130,7 +900,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     while True:
         adapter = rotation.adapter
         adapter_name = rotation.name
-        session = _resolve_session(cfg, adapter, task, adapter_name)
+        session = resolve_session(cfg, adapter, task, adapter_name)
         session_state.identity = session
         prompt = _build_prompt(cfg, task, failure_reason, session, resumed)
         print(_session_line(adapter_name, task, session))
@@ -1160,7 +930,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                         cfg, "wip", task, "quota interrupt, progress kept"),
                     cfg.git_excludes):
                 print("  wip checkpoint created.")
-            _try_write_report(cfg)
+            try_write_report(cfg)
             if len(rotation.names) == 1:
                 _wait_for_quota(cfg, result.reset_at, sleep, now)
             else:
@@ -1210,7 +980,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                         cfg, "auto", task, _short(task.title) or "done"),
                     cfg.git_excludes):
                 print("  (no new changes in the working tree; progress is already in a prior wip checkpoint)")
-            _try_write_report(cfg)
+            try_write_report(cfg)
             return
         if outcome == "self_blocked":
             print("  Execution AI self-marked BLOCKED (legal output, handed to a human) -> creating checkpoint")
@@ -1218,7 +988,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 cfg.root, _checkpoint_subject(
                     cfg, "auto", task, "BLOCKED (execution AI self-marked)"),
                 cfg.git_excludes)
-            _try_write_report(cfg)
+            try_write_report(cfg)
             return
 
         # outcome == "fail": no restore (output kept), retry with the reason; once retries are
@@ -1233,7 +1003,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         print("  Retries exhausted -> scheduler marks BLOCKED (the not-yet-passing work is kept too)")
         _mark_blocked(cfg, task, session, reason or "acceptance failed", now,
                       attempts=attempts_used)
-        _try_write_report(cfg)
+        try_write_report(cfg)
         return
 
 
@@ -1396,7 +1166,7 @@ def _run_verify_quiet(cfg: Config, command: str) -> int:
     return _verify_subprocess(cfg, command).returncode
 
 
-def _mark_blocked(cfg: Config, task: Task, session: _SessionIdentity, reason: str,
+def _mark_blocked(cfg: Config, task: Task, session: SessionIdentity, reason: str,
                   now: Callable[[], datetime], attempts: int | None = None) -> None:
     """The scheduler marks the task BLOCKED + appends a machine record to the r file + creates a checkpoint.
 
@@ -1507,255 +1277,3 @@ def _print_summary(plan: Plan) -> None:
     if counts.get("TODO", 0) == 0 and counts.get("WIP", 0) == 0:
         print("All tasks are DONE/BLOCKED/SKIP.")
 
-
-# --------------------------------------------------------------------------- #
-# report: zero-token human-readable report (the acceptance meeting's agenda)
-# --------------------------------------------------------------------------- #
-def render_report(cfg: Config, plan: Plan,
-                  now: Callable[[], datetime] | None = None) -> str:
-    """Aggregate the t/r files and git info into a one-page plain-text report. Aggregation is
-    mechanical work, zero tokens."""
-    if now is None:
-        now = lambda: datetime.now(timezone.utc)  # noqa: E731
-    counts = Counter(t.status for t in plan.tasks)
-
-    git_root = _query_git_root(cfg)
-    checkpoints: dict[str, str] = {}
-    log = _git_read(git_root, "log", "--pretty=%h\t%s")
-    if log:
-        for line in log.splitlines():
-            h, _, subject = line.partition("\t")
-            for t in plan.tasks:
-                prefix = f"auto({cfg.tasks_name}/{t.id}): "
-                if t.id not in checkpoints and subject.startswith(prefix):
-                    checkpoints[t.id] = h
-
-    branch = _git_read(git_root, "branch", "--show-current") or "N/A"
-    stamp = now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
-
-    lines = [
-        "Run report (_report.md; auto-generated by assent, do not edit by hand; regenerate: assent report)",
-        "=" * 60,
-        f"Plan folder: {cfg.tasks_name}",
-        f"Generated at: {stamp}",
-        f"Branch: {branch}",
-        f"Progress: DONE {counts.get('DONE', 0)} / BLOCKED {counts.get('BLOCKED', 0)} / "
-        f"WIP {counts.get('WIP', 0)} / TODO {counts.get('TODO', 0)} / "
-        f"SKIP {counts.get('SKIP', 0)} ({len(plan.tasks)} total)",
-        *_stack_report_lines(cfg, plan),
-        "",
-    ]
-    for t in plan.tasks:
-        mark = checkpoints.get(t.id)
-        lines.append(f"{t.id}  {t.status:<8} {t.title}"
-                     + (f"  [{mark}]" if mark else ""))
-        if t.status in ("BLOCKED", "WIP"):
-            entries = read_entries(t.journal_path)
-            if entries:
-                last = entries[-1]
-                summary = str(last.get("summary", "")).strip()
-                by = last.get("by", "?")
-                if summary:
-                    lines.append(f"      last journal ({by}): {summary}")
-    blocked = [t for t in plan.tasks if t.status == "BLOCKED"]
-    if blocked:
-        lines += ["", "To decide: compare each BLOCKED task's r file and checkpoint commit, "
-                      "edit the task file and set status back to TODO to continue, or mark SKIP to abandon."]
-    lines += ["", *verification.receipt_report_lines(cfg)]
-    return "\n".join(lines) + "\n"
-
-
-def write_report(cfg: Config, plan: Plan,
-                 now: Callable[[], datetime] | None = None) -> Path:
-    """Write the report to the task folder's _report.md (a runtime artifact, not version-controlled)."""
-    path = cfg.tasks_dir / "_report.md"
-    path.write_text(render_report(cfg, plan, now), encoding="utf-8")
-    return path
-
-
-def _try_write_report(cfg: Config) -> None:
-    """Best-effort report update at run wrap-up; a report failure never affects the main
-    flow's result or exit code."""
-    try:
-        write_report(cfg, Plan.parse(cfg.tasks_dir))
-    # This is a deliberate best-effort isolation boundary: any ordinary error including
-    # permissions, file locks, and content parsing must not mask the task result;
-    # KeyboardInterrupt/SystemExit still propagate as usual.
-    except Exception:
-        pass
-
-
-def _stack_report_lines(cfg: Config, plan: Plan) -> list[str]:
-    """Describe the currently derived stack without authorizing any action."""
-    if all(t.status in ("DONE", "SKIP") for t in plan.tasks):
-        return ["Stack base: not applicable (folder complete)"]
-    try:
-        state = _resolve_stack_state(cfg)
-    except AssentError as e:
-        return [f"Stack base: unavailable ({e})"]
-    upstream = state.base.speculative_upstream
-    if upstream is None:
-        return ["Stack base: current target main",
-                "Speculative upstream: none (all direct upstreams accepted)"]
-    return [f"Stack base: {state.base.resolved_base}",
-            f"Speculative upstream: {upstream.folder} @ {upstream.tip} (unaccepted)"]
-
-
-def report(cfg: Config) -> int:
-    """Subcommand: generate _report.md and print it to the terminal (zero tokens)."""
-    try:
-        plan = Plan.parse(cfg.tasks_dir)
-    except AssentError as e:
-        print(f"Failed to parse task folder: {e}")
-        return 1
-    text = render_report(cfg, plan)
-    path = write_report(cfg, plan)
-    print(text, end="")
-    print(f"(written to {path})")
-    return 0
-
-
-# --------------------------------------------------------------------------- #
-# status: zero-token progress query
-# --------------------------------------------------------------------------- #
-def status(cfg: Config) -> int:
-    try:
-        plan = Plan.parse(cfg.tasks_dir)
-    except AssentError as e:
-        print(f"Failed to parse task folder: {e}")
-        return 1
-
-    counts = Counter(t.status for t in plan.tasks)
-    print(f"Task folder: {cfg.tasks_dir}")
-    print(f"Progress: DONE {counts.get('DONE', 0)} / BLOCKED {counts.get('BLOCKED', 0)} / "
-          f"SKIP {counts.get('SKIP', 0)} / WIP {counts.get('WIP', 0)} / "
-          f"TODO {counts.get('TODO', 0)} ({len(plan.tasks)} total)")
-
-    git_root = _query_git_root(cfg)
-    branch = _git_read(git_root, "branch", "--show-current")
-    print(f"Current branch: {branch or 'N/A'}")
-    last = _git_read(git_root, "log", "-1", "--grep=^auto(", "--pretty=%h %s")
-    print(f"Last checkpoint: {last or '(no auto() commit yet)'}")
-    for line in _stack_report_lines(cfg, plan):
-        print(line)
-
-    selected = plan.next_task()
-    if selected is not None:
-        nxt, resumed = selected
-        try:
-            effort = _resolve_effort(cfg, nxt)
-            requested_effort = _resolve_requested_effort(cfg, nxt.model, effort)
-            effort_label = f"{effort} -> {requested_effort}"
-        except AssentError as e:
-            effort_label = f"unavailable ({e})"
-        tag = " (WIP resume)" if resumed else ""
-        print(f"Next task: {nxt.id} [{nxt.model} / {effort_label}] "
-              f"{nxt.title}{tag}")
-    elif counts.get("TODO", 0):
-        print("Next task: (TODO remains, but blocked by unfinished prerequisites or a BLOCKED task)")
-    else:
-        print("Next task: (none, all DONE/BLOCKED/SKIP)")
-    return 0
-
-
-def _query_git_root(cfg: Config) -> Path:
-    """When a valid worktree already exists, read git info from the isolated branch instead."""
-    if cfg.source_root is not None:
-        return cfg.root
-    candidate = gitops.worktree_path(cfg.root, cfg.tasks_name)
-    top = _git_read(candidate, "rev-parse", "--show-toplevel")
-    if top and Path(top).resolve() == candidate.resolve():
-        return candidate
-    return cfg.root
-
-
-# --------------------------------------------------------------------------- #
-# check: zero-token environment and format validation (the meeting's adjourn condition)
-# --------------------------------------------------------------------------- #
-def check(cfg: Config) -> int:
-    if not _has_git_marker(cfg.root):
-        print(_GIT_REQUIRED_MESSAGE)
-        return 1
-
-    ok = True
-    print(f"Config: OK ({cfg.assent_dir / 'assent.toml'} loaded, "
-          f"task folder = {cfg.tasks_name})")
-
-    # Task folder and task-file format (parsing is the full check: required fields, tiers,
-    # non-empty scope, deps exist without cycles, no duplicate ids)
-    plan: Plan | None = None
-    try:
-        plan = Plan.parse(cfg.tasks_dir)
-        print(f"Task-file format: OK ({len(plan.tasks)} tasks, dependencies acyclic)")
-        try:
-            _print_task_assignments(_resolve_task_assignments(cfg, plan))
-        except AssentError as e:
-            ok = False
-            print(f"Task assignment: FAIL ({e})")
-    except AssentError as e:
-        ok = False
-        print(f"Task-file format: FAIL ({e})")
-
-    # Dependency declaration format and reference integrity of the selected folder; the
-    # whole-graph cycle check is validated by the no-argument CLI check.
-    try:
-        dependencies = parse_folder_dependencies(cfg.tasks_dir)
-        after = ", ".join(dependencies.after) or "none"
-        print(f"Folder dependencies: OK (after = {after})")
-    except AssentError as e:
-        ok = False
-        print(f"Folder dependencies: FAIL ({e})")
-
-    # adapter resolves
-    adapter: Adapter | None = None
-    try:
-        adapter = get_adapter(cfg.adapter_name, cfg)
-        print(f"adapter: OK ({cfg.adapter_name})")
-    except AssentError as e:
-        ok = False
-        print(f"adapter: FAIL ({e})")
-
-    # Every model/effort the plan could still send, proven against the active adapter's
-    # capability contract; the same gate `run` applies before opening a session.
-    if adapter is not None and plan is not None:
-        capability_errors = _capability_errors(cfg, adapter, plan)
-        if capability_errors:
-            ok = False
-            print(f"{cfg.adapter_name} capability preflight: FAIL")
-            for message in capability_errors:
-                print(f"  - {message}")
-        else:
-            print(f"{cfg.adapter_name} capability preflight: OK")
-
-    # git repo
-    inside = _git_read(cfg.root, "rev-parse", "--is-inside-work-tree")
-    if inside == "true":
-        print("git repo: OK")
-        try:
-            errors = _worktree_configuration_errors(cfg)
-        except AssentError as e:
-            errors = [str(e)]
-        if errors:
-            ok = False
-            print("worktree version-control layering: FAIL")
-            for error in errors:
-                print(f"  - {error}")
-        else:
-            print("worktree version-control layering: OK")
-    else:
-        ok = False
-        print("git repo: FAIL (project root is not a git working tree, or git is not installed/on PATH)")
-
-    # The current adapter's CLI is executable (the probe is provided by the adapter itself, so
-    # this is not hardcoded to only claude/codex; an unresolved adapter has already failed above)
-    if adapter is not None:
-        label = cfg.adapter_name
-        probe_ok, message = adapter.probe_cli()
-        if probe_ok:
-            print(f"{label} CLI: OK ({message})")
-        else:
-            ok = False
-            print(f"{label} CLI: FAIL ({message})")
-
-    print("Result: passed" if ok else "Result: some items failed")
-    return 0 if ok else 1

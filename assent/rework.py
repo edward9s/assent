@@ -10,7 +10,7 @@ from pathlib import Path
 
 from assent import AssentError, gitops, verification
 from assent.config import Config
-from assent.engine import write_report
+from assent.inspection import write_report
 from assent.lockfile import LockBusy, LockMissing, probe_lock
 from assent.plan import Plan, Task, append_entry, read_entries, set_status
 

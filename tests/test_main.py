@@ -200,11 +200,11 @@ class TestDispatch(MainTestCase):
     def test_all_plan_commands_accept_folder_override(self):
         config = self.write_config()
         assent_dir = config.parent
-        commands = (("run", "run"), ("status", "status"),
-                    ("check", "check"), ("report", "report"))
-        for command, engine_name in commands:
+        commands = (("run", "engine"), ("status", "inspection"),
+                    ("check", "inspection"), ("report", "inspection"))
+        for command, owner in commands:
             with self.subTest(command=command), patch(
-                    f"assent.__main__.engine.{engine_name}", return_value=0) as mocked:
+                    f"assent.__main__.{owner}.{command}", return_value=0) as mocked:
                 code, _ = self.run_main([command, "B", "--config", str(config)])
                 self.assertEqual(code, 0)
                 cfg = mocked.call_args.args[0]
@@ -534,7 +534,7 @@ class TestDispatch(MainTestCase):
         self.write_task("alpha")
         for command in ("status", "check", "report"):
             with self.subTest(command=command), patch(
-                    f"assent.__main__.engine.{command}", return_value=0) as mocked:
+                    f"assent.__main__.inspection.{command}", return_value=0) as mocked:
                 code, _ = self.run_main([command, "--config", str(config)])
                 self.assertEqual(code, 0)
                 self.assertEqual(
@@ -545,7 +545,7 @@ class TestDispatch(MainTestCase):
         config = self.write_config()
         self.write_task("alpha")
         self.write_task("beta")
-        with patch("assent.__main__.engine.check", side_effect=[0, 1]) as mocked:
+        with patch("assent.__main__.inspection.check", side_effect=[0, 1]) as mocked:
             code, _ = self.run_main(["check", "--config", str(config)])
         self.assertEqual(code, 1)
         self.assertEqual(mocked.call_count, 2)
@@ -567,7 +567,7 @@ class TestDispatch(MainTestCase):
                     self.write_task("beta")
                     (config.parent / "beta" / "_folder.toml").write_text(
                         declarations[1], encoding="utf-8")
-                with patch("assent.__main__.engine.check", return_value=0):
+                with patch("assent.__main__.inspection.check", return_value=0):
                     code, out = self.run_main(
                         ["check", "--config", str(config)])
                 self.assertEqual(code, 1)
