@@ -1,14 +1,15 @@
-"""Terminal output tee for ``agents``.
+"""把 ``agents run`` 的終端輸出同步寫入當次工作資料夾。
 
-The terminal keeps its native output (including colours and carriage-return
-updates), while ``.agents/agents.log`` receives portable, immediately-flushed
-text.
+終端保留原生輸出(含色彩與歸位更新),工作資料夾內的 ``_agents.log`` 則保存
+可攜、即時 flush 的純文字。設定載入前也可能發生錯誤,因此本模組自行以
+best-effort 判讀設定,不依賴 config.py 且不向外拋錯。
 """
 from __future__ import annotations
 
 import re
 import sys
 import threading
+import tomllib
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ _EMOJI_RE = re.compile(
 )
 
 _DEFAULT_CONFIG = ".agents/agents.toml"
+_FOLDER_RE = re.compile(r"^[^\s/\\]+$")
 
 
 def sanitize_log_text(text: str) -> str:
@@ -89,8 +91,49 @@ class TeeTextIO:
         return getattr(self.terminal, "errors", None)
 
 
+def _valid_folder(value: object) -> str | None:
+    """回傳可安全作為工作資料夾名稱的字串,否則回傳 None。"""
+    if (not isinstance(value, str) or not value
+            or not _FOLDER_RE.match(value) or value[0] in "-."):
+        return None
+    return value
+
+
+def _folder_from_config(path: Path) -> str | None:
+    """Best-effort 讀取 [plan] tasks;任何讀取或 TOML 錯誤皆視為未知。"""
+    try:
+        with open(path, "rb") as stream:
+            data = tomllib.load(stream)
+        plan = data.get("plan")
+        if not isinstance(plan, dict):
+            return None
+        return _valid_folder(plan.get("tasks"))
+    # logging 早於正式設定載入;連編碼錯誤等非預期壞檔也不可阻斷原命令。
+    except Exception:
+        return None
+
+
+def _folder_from_argv(argv: list[str]) -> str | None:
+    """從 run 的位置參數找工作資料夾,略過已知選項及其值。"""
+    if not argv or argv[0] != "run":
+        return None
+    idx = 1
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg in ("--config", "--task"):
+            idx += 2
+            continue
+        if arg == "--once" or arg.startswith(("--config=", "--task=")):
+            idx += 1
+            continue
+        if not arg.startswith("-"):
+            return _valid_folder(arg)
+        idx += 1
+    return None
+
+
 def log_path_for_argv(argv: list[str]) -> Path:
-    """Put the log beside the selected config (i.e. inside .agents/)."""
+    """Best-effort 決定工作資料夾日誌路徑,失敗時退回設定檔旁。"""
     config = _DEFAULT_CONFIG
     for idx, arg in enumerate(argv):
         if arg == "--config" and idx + 1 < len(argv):
@@ -100,15 +143,21 @@ def log_path_for_argv(argv: list[str]) -> Path:
     path = Path(config).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
-    return path.resolve().parent / "agents.log"
+    path = path.resolve()
+    folder = _folder_from_argv(argv) or _folder_from_config(path)
+    parent = path.parent / folder if folder is not None else path.parent
+    return parent / "_agents.log"
 
 
 @contextmanager
 def terminal_logging(argv: list[str]) -> Iterator[Path]:
-    """Tee this invocation's complete terminal output to ``agents.log``."""
+    """只把 run 的完整終端輸出寫入日誌;每次 run 起點截斷舊現場。"""
     log_path = log_path_for_argv(argv)
+    if not argv or argv[0] != "run":
+        yield log_path
+        return
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_path, "a", encoding="utf-8", buffering=1, newline="\n") as log:
+    with open(log_path, "w", encoding="utf-8", buffering=1, newline="\n") as log:
         sink = _LogSink(log)
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout = TeeTextIO(old_stdout, sink)

@@ -400,7 +400,7 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
     remaining = seconds
 
     # terminal_log.TeeTextIO 提供 terminal-only 通道:倒數是瞬時 UI,
-    # 不應每秒 append 到 agents.log。測試用/一般 TextIO 則沿用 write。
+    # 不應每秒寫入 _agents.log。測試用/一般 TextIO 則沿用 write。
     terminal_only = getattr(stream, "write_terminal_only", None)
 
     def transient_write(text: str) -> None:

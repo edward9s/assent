@@ -1,8 +1,8 @@
 """git 操作:worktree、分支、乾淨/scope 檢查、commit、還原。
 
 全部以 cwd=專案根目錄執行 git,回傳前先檢查 returncode;git 缺席時給清楚錯誤訊息
-而非 traceback。`excludes` 為執行期產物的相對路徑清單(.agents/agents.log、
-report.md 等):它們永遠不是輸入也不是檢查點內容,故不參與乾淨檢查、scope 檢查
+而非 traceback。`excludes` 為執行期產物的相對路徑清單(_agents.log、report.md
+等):它們永遠不是輸入也不是檢查點內容,故不參與乾淨檢查、scope 檢查
 與 commit。
 """
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""CLI 進入點與 init 測試。main() 會 tee 到 .agents/agents.log,
+"""CLI 進入點與 init 測試。run 會 tee 到工作資料夾的 _agents.log,
 故一律 chdir 到臨時目錄執行,避免弄髒測試程序的工作目錄。"""
 import contextlib
 import io

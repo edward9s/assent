@@ -93,7 +93,7 @@ class Config:
 
     @property
     def runtime_log_rel(self) -> str:
-        return self.git_rel(self.agents_dir / "agents.log")
+        return self.git_rel(self.tasks_dir / "_agents.log")
 
     @property
     def report_rel(self) -> str:

@@ -23,40 +23,91 @@ class TestTerminalLogging(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
-    def test_config_parent_selects_log_path(self):
-        expected = self.root.resolve() / ".agents" / "agents.log"
+    def write_config(self, text='[plan]\ntasks = "plan01"\n'):
+        config = self.root / ".agents" / "agents.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(text, encoding="utf-8")
+        return config
+
+    def test_config_tasks_selects_log_path(self):
+        config = self.write_config()
+        expected = self.root.resolve() / ".agents" / "plan01" / "_agents.log"
         self.assertEqual(log_path_for_argv(
-            ["run", "--config", str(self.root / ".agents" / "agents.toml")]),
+            ["run", "--config", str(config)]),
             expected)
+
+    def test_config_option_and_folder_override_select_log_path(self):
+        config = self.write_config()
+        expected = self.root.resolve() / ".agents" / "parallel02" / "_agents.log"
+        self.assertEqual(log_path_for_argv(
+            ["run", "--task", "t001", "parallel02", f"--config={config}"]),
+            expected)
+
+    def test_missing_or_bad_config_falls_back_beside_config(self):
+        config = self.root / ".agents" / "agents.toml"
+        expected = self.root.resolve() / ".agents" / "_agents.log"
+        self.assertEqual(log_path_for_argv(["run", "--config", str(config)]),
+                         expected)
+        self.write_config("[plan\ntasks =")
+        self.assertEqual(log_path_for_argv(["run", "--config", str(config)]),
+                         expected)
+        config.write_bytes(b"[plan]\ntasks = \xff\n")
+        self.assertEqual(log_path_for_argv(["run", "--config", str(config)]),
+                         expected)
 
     def test_stdout_stderr_are_flushed_incrementally_with_start_header(self):
         terminal_out = io.StringIO()
         terminal_err = io.StringIO()
-        config = self.root / "agents.toml"
+        config = self.write_config()
         with contextlib.redirect_stdout(terminal_out), contextlib.redirect_stderr(terminal_err):
-            with terminal_logging(["check", "--config", str(config)]) as path:
+            with terminal_logging(["run", "--config", str(config)]) as path:
                 print("\x1b[32mAI| hello " + chr(0x1F680) + "\x1b[0m", end="")
                 print("error", file=__import__("sys").stderr)
                 # The data is visible before the context exits: writes are incremental.
                 during = path.read_text(encoding="utf-8")
                 self.assertIn("AI| hello ", during)
                 self.assertIn("error", during)
-        logged = (self.root / "agents.log").read_text(encoding="utf-8")
+        logged = path.read_text(encoding="utf-8")
         self.assertIn("AGENTS START", logged)
-        self.assertIn("COMMAND      | agents check", logged)
+        self.assertIn("COMMAND      | agents run", logged)
         self.assertNotIn("\x1b", logged)
         self.assertNotIn(chr(0x1F680), logged)
         self.assertIn("AI| hello " + chr(0x1F680), terminal_out.getvalue())
 
     def test_terminal_only_output_is_not_logged(self):
         terminal = io.StringIO()
-        config = self.root / "agents.toml"
+        config = self.write_config()
         with contextlib.redirect_stdout(terminal):
             with terminal_logging(["run", "--config", str(config)]) as path:
                 __import__("sys").stdout.write_terminal_only(
                     "\r  額度重置:倒數 00:00:03 後重跑...")
                 self.assertNotIn("倒數", path.read_text(encoding="utf-8"))
         self.assertIn("倒數 00:00:03", terminal.getvalue())
+
+    def test_each_run_truncates_previous_log(self):
+        config = self.write_config()
+        with terminal_logging(["run", "--config", str(config)]) as path:
+            print("第一次現場")
+        with terminal_logging(["run", "--config", str(config)]):
+            print("第二次現場")
+        logged = path.read_text(encoding="utf-8")
+        self.assertNotIn("第一次現場", logged)
+        self.assertIn("第二次現場", logged)
+
+    def test_non_run_commands_do_not_create_or_change_log(self):
+        config = self.write_config()
+        log_path = self.root / ".agents" / "plan01" / "_agents.log"
+        for command in ("status", "check", "report", "init"):
+            with terminal_logging([command, "--config", str(config)]):
+                print(f"{command} 輸出")
+            self.assertFalse(log_path.exists())
+
+        log_path.parent.mkdir(parents=True)
+        log_path.write_text("既有 run 現場", encoding="utf-8")
+        for command in ("status", "check", "report"):
+            with terminal_logging([command, "--config", str(config)]):
+                print(f"{command} 輸出")
+        self.assertEqual(log_path.read_text(encoding="utf-8"), "既有 run 現場")
 
 
 if __name__ == "__main__":
