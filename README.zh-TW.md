@@ -226,6 +226,15 @@ target、不開 AI session。報告會顯示 `PASSED`/`FAILED` 與 `fresh`/`stal
 既有檔案。verifier digest 改變會使舊 receipt stale,應在無人值守驗證時執行
 `assent verify <FOLDER>` 後再請人接受。
 
+**自己重跑驗證**:任務的 focused `verify` 命令記錄在該任務
+`tNNN_name.toml` 的 `verify` 欄位,可在該工作資料夾的隔離 worktree
+`<專案>.worktrees/<資料夾>/` 內直接執行同一命令。`assent run` 的執行輸出
+會把同一段文字印成 `verify: <command>` 這一列,緊接著印出 `verify passed
+(exit 0)` 或 `verify failed (exit N)`,因此這一列印出的就是可手動重跑的
+原文命令。完整階段則用 `assent verify <FOLDER>` 無人值守重跑整套並換發
+新 receipt,零 token;想看逐測試輸出,可在同一 worktree 內執行
+`.assent/verify.py`,或直接執行 `python -m unittest discover -s tests -v`。
+
 worktree 是變更隔離、衝突管理、稽核與復原邊界,不是安全 sandbox。`danger-full-access`
 或 `bypassPermissions` 下,AI 仍可使用其 OS 身分可存取的 network、credential、外部
 Git 寫入者與 worktree 外檔案。只有在可信任的專案與帳號環境才應啟用無人值守執行;

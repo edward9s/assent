@@ -285,6 +285,18 @@ project manually when synchronizing. A verifier digest change makes old
 receipts stale, so refresh them with `assent verify <FOLDER>` during unattended
 verification before asking a human to accept.
 
+**Rerunning verification yourself**: a task's focused `verify` command is
+recorded in its `tNNN_name.e.toml` `verify` field, and you can run that exact
+command yourself from inside that work folder's isolated worktree at
+`<project>.worktrees/<folder>/`. During `assent run`, the run output echoes
+the same text as a `verify: <command>` line, immediately followed by `verify
+passed (exit 0)` or `verify failed (exit N)`, so that printed line is the
+literal command to rerun by hand. For the complete stage, `assent verify
+<FOLDER>` reruns the whole suite unattended and issues a fresh receipt with
+zero tokens; to watch the test-by-test output yourself, run
+`.assent/verify.py` from inside that same worktree, or run `python -m
+unittest discover -s tests -v` directly.
+
 A worktree is a change-isolation, conflict-management, audit, and recovery
 boundary, not a security sandbox. `danger-full-access` or `bypassPermissions`
 still permits an AI to reach resources available to its OS identity, including
