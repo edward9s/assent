@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, TextIO
 
-from assent import AssentError, gitops, lockfile
+from assent import AssentError, gitops, lockfile, verification
 from assent.adapters import Adapter, get_adapter
 from assent.config import Config
 from assent.folderdeps import (find_unfinished_prerequisites,
@@ -53,6 +53,10 @@ _DEFAULT_PROMPT_TEMPLATE = (
     "requested_effort is the value actually passed to the AI CLI this run; an empty string\n"
     "means it is not passed and the CLI default applies.\n"
     "To verify yourself, run this in the current working tree: {verify_command}\n"
+    "This is the focused task gate. If an outer tool times out while the child result is\n"
+    "unknown, do not start a concurrent duplicate and do not mark the task BLOCKED solely\n"
+    "because of that timeout; determine the child result serially. The scheduler runs the\n"
+    "same command after the AI session and owns the checkpoint/retry decision.\n"
     "When done:\n"
     "1. Change the status of {task_path} to DONE or BLOCKED -- the status line is the only\n"
     "   line you may change in the whole task file.\n"
@@ -263,12 +267,28 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     if now is None:
         now = lambda: datetime.now(timezone.utc)  # noqa: E731
 
+    result: int
     try:
         with lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name):
-            return _run_locked(cfg, once, task_id, adapter, sleep, now)
+            result = _run_locked(cfg, once, task_id, adapter, sleep, now)
     except lockfile.LockBusy as e:
         print(str(e))
         return 1
+    if result != 0:
+        return result
+
+    # Full candidate verification is outside the AI session and outside the
+    # folder lock above.  The verification layer reacquires locks in the one
+    # safe order used by accept: repository integration, then folder.
+    try:
+        plan = Plan.parse(cfg.tasks_dir)
+    except AssentError as e:
+        print(f"Failed to parse task folder after run: {e}")
+        return 1
+    if all(task.status in ("DONE", "SKIP") for task in plan.tasks):
+        result = verification.verify_folder_if_needed(cfg)
+        _try_write_report(cfg)
+    return result
 
 
 def _run_locked(cfg: Config, once: bool, task_id: str | None,
@@ -727,6 +747,7 @@ def render_report(cfg: Config, plan: Plan,
     if blocked:
         lines += ["", "To decide: compare each BLOCKED task's r file and checkpoint commit, "
                       "edit the task file and set status back to TODO to continue, or mark SKIP to abandon."]
+    lines += ["", *verification.receipt_report_lines(cfg)]
     return "\n".join(lines) + "\n"
 
 

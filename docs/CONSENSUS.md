@@ -63,10 +63,40 @@ Proof of correctness → the task file's verify command
 4. **Tests prove correctness**
    Prose states intent; `verify` proves correctness. "The executing AI
    claims DONE" is only a claim — completion is objectively reviewed by the
-   scheduler: status → structural diff (tamper guard) → scope → verify exit
-   0, and only committed as a checkpoint once every step passes. A summary
+   scheduler: status → structural diff (tamper guard) → scope → the task's
+   focused verify exit 0, and only committed as a checkpoint once every step
+   passes. A summary
    states only verifiable facts; pending must not be dressed up as
    completed.
+
+## Verification, receipts, and human acceptance
+
+The scheduler separates focused task verification from complete candidate
+verification. The AI session runs only the task's `verify` command. After a
+folder is complete, scheduler code outside the AI session builds one temporary
+integration candidate and runs the full `.assent/verify.py`; the result is a
+derived `_verification.toml` receipt. `assent verify <FOLDER>` is the zero-token
+receipt refresh and reports `PASSED`/`FAILED` plus `fresh`/`stale` state.
+
+`DONE` is the executing AI's claim, the receipt is the scheduler's complete
+verification evidence, and `assent accept <FOLDER>` is the human approval.
+Accept requires one explicit folder and is intentionally fast: it rebuilds the
+candidate and compares source tip, integration tree, and verifier digest with a
+fresh `PASSED` receipt, without rerunning the full verifier. A missing or stale
+receipt must be refreshed with `assent verify`. The task format has no `review`
+field.
+
+Receipts are disposable derived artifacts and never outrank Git. A target tip
+change is acceptable when the rebuilt integration tree is identical; a content
+change makes the receipt stale. Acceptance refuses after the source worktree or
+branch disappears. Passive merge metadata is for human audit only, not a
+post-clean state database; retain upstream sources while dependents remain
+unaccepted.
+
+The lifecycle is `run` -> full unattended verification receipt -> human review
+-> `accept` -> ordinary Git synchronization, if desired -> `clean`. Acceptance
+is local-only and single-folder: no `--all`, `--push`, remote or PR operation,
+pull, rebase, force, automatic conflict resolution, or source deletion.
 
 ## Location conventions
 

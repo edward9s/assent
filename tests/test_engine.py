@@ -84,6 +84,12 @@ class EngineTestCase(unittest.TestCase):
         (self.root / "AGENTS.md").write_text("專案規則\n", encoding="utf-8")
         self.plan_dir = self.root / ".assent" / "plan01"
         self.plan_dir.mkdir(parents=True)
+        # These tests exercise task-session scheduling and focused checkpoint
+        # gates.  Full candidate verification has its own engine handoff tests.
+        verifier = mock.patch(
+            "assent.engine.verification.verify_folder_if_needed", return_value=0)
+        verifier.start()
+        self.addCleanup(verifier.stop)
 
     def _git(self, *args) -> str:
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True,

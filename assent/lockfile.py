@@ -27,6 +27,7 @@ from typing import Iterator
 from assent import AssentError
 
 LOCK_NAME = "assent.lock"
+INTEGRATION_LOCK_NAME = "integration.lock"
 
 # Windows msvcrt.locking is a mandatory lock: it blocks even a "read" of that region by
 # others. The lock is placed at a high byte offset far from the content, and content is
@@ -149,6 +150,47 @@ def hold_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
         if not _try_lock(handle):
             raise LockBusy(_busy_message(tasks_name, _read_diag(path)))
         _write_diag(handle, tasks_name)
+        try:
+            yield
+        finally:
+            _unlock(handle)
+    finally:
+        handle.close()
+
+
+def _integration_busy_message(diag: dict) -> str:
+    pid = diag.get("pid")
+    detail = ""
+    if isinstance(pid, int):
+        detail = f" (PID {pid}"
+        hhmm = _short_time(diag.get("started_at"))
+        if hhmm:
+            detail += f", started at {hhmm}"
+        detail += ")"
+    return ("Another assent integration is already running on this repository"
+            f"{detail}. Only one integration may run at a time.")
+
+
+@contextlib.contextmanager
+def hold_integration_lock(assent_dir: Path) -> Iterator[None]:
+    """Hold the repository-wide integration lock in Git's common directory.
+
+    ``assent_dir`` remains the management-directory argument used by callers,
+    but it does not identify the lock.  Resolving through the parent repository
+    means alternate configuration/management directories and linked worktrees
+    all contend on the same inode.
+    """
+    from assent.gitops import git_common_dir
+
+    assent_dir = Path(assent_dir)
+    repository = assent_dir.resolve().parent
+    path = git_common_dir(repository) / INTEGRATION_LOCK_NAME
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    handle = os.fdopen(os.open(str(path), flags, 0o644), "r+b")
+    try:
+        if not _try_lock(handle):
+            raise LockBusy(_integration_busy_message(_read_diag(path)))
+        _write_diag(handle, "integration")
         try:
             yield
         finally:

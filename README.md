@@ -10,9 +10,10 @@ it unattended.
   immediately fixed into task files under `.assent/`, and adjournment =
   `assent check` passes.
 - **Execution**: `assent run` finishes every task unattended — picking a
-  task, opening a headless AI session, objectively reviewing the result,
-  committing a git checkpoint, waiting out quota exhaustion and resuming —
-  the scheduler loop itself burns zero tokens.
+  task, opening a headless AI session, running its focused verification,
+  committing a git checkpoint, waiting out quota exhaustion and resuming. Once
+  a folder is complete, the scheduler runs the full candidate verification
+  outside the AI session; the scheduler loop itself burns zero tokens.
 - **Review**: a human reads the program-generated `.assent/<work
   folder>/_report.md` (zero tokens), and opens a session only for the tasks
   that need a decision.
@@ -119,10 +120,18 @@ assent run <FOLDER>
 # Run every incomplete folder in dependency order, at most 2 folders at once
 assent run --all --jobs 2
 
-# 6. Check in any time (a separate terminal, zero tokens)
+# 6. Refresh the complete verification receipt while away (zero tokens)
+assent verify <FOLDER>
+
+# 7. Check in any time (a separate terminal, zero tokens), then review
 assent status
 assent report
-assent clean [FOLDER]
+# After human review, accept one completed folder into the current target branch
+assent accept <FOLDER>
+# After acceptance, optionally sync with ordinary Git (or your own AI workflow)
+git push
+# Once acceptance and any desired sync are complete, remove redundant artifacts
+assent clean <FOLDER>
 
 # When a review meeting orders a single task redone (keeps code by default;
 # does not run automatically)
@@ -138,7 +147,10 @@ Human review after a run finishes:
 ```
 git log --oneline <folder name>/<run-id>   # one commit per task, review one by one
 git diff main...<folder name>/<run-id>     # or look at the overall diff
-# Accept → merge; reject a single task → assent rework <folder> <task>
+# The human decides; Assent performs the guarded local integration
+assent accept <folder>
+# Then choose your own ordinary Git sync, such as `git push`, or an AI you delegate to
+# Reject a single task → assent rework <folder> <task>
 # There is downstream work already started → add --cascade
 # Confirmed you want the code reverted → add --revert-code
 # Reject the whole folder's implementation → assent reject <folder>
@@ -148,6 +160,33 @@ git diff main...<folder name>/<run-id>     # or look at the overall diff
 full report or start an AI; only after the human confirms the reopened TODO
 and its blast radius are correct should they explicitly run
 `assent run <FOLDER>`.
+
+`DONE` is the executing AI's completion claim, not human approval. A human
+must first read `_report.md`, inspect the report and checkpoint evidence, and
+then make the acceptance decision by calling `assent accept <FOLDER>`.
+The receipt is the scheduler's complete-verification evidence; `accept` is the
+human approval. `assent verify <FOLDER>` is the zero-token way to refresh a
+missing or stale receipt without changing the target or opening an AI session.
+`FOLDER` is required: `accept` has no `--all`, `--push`, or `push` subcommand,
+and it does not connect to remote hosting, pull, rebase, or delete source
+worktrees. After a successful local acceptance, use ordinary Git commands—or
+an AI workflow you operate—to synchronize as a separate decision; Assent does
+not provide that workflow as a built-in feature. Run `assent clean <FOLDER>`
+only when the accepted source is no longer needed and the cleanup proof is
+available. Do not clean an upstream source branch while a dependent remains
+unaccepted; if its source worktree or branch disappears, a later `accept`
+refuses rather than using passive merge metadata as a state database.
+
+Acceptance requires the main worktree to be on its target branch and the
+folder source to be complete, clean, uniquely identified, and dependency-safe.
+Assent verifies the source and the integrated result, records a `--no-ff`
+merge as auditable evidence, and makes a repeat acceptance idempotent. It
+refuses when completion, lock, cleanliness, branch, dependency, or ambiguity
+proof is insufficient. Verification failure or a merge conflict leaves the
+target unadvanced; Assent never resolves conflicts, pulls, rebases, force
+pushes, or claims that its integration lock can stop unrelated external Git
+writers. Do not run Git commands that write the same main worktree during
+`accept`; the lock only serializes Assent accept operations.
 
 ## Parallel execution
 
@@ -203,7 +242,14 @@ Every consensus reached during the meeting is immediately fixed into a task
 file; before adjourning, run `assent check` — not passing means the meeting
 isn't done.
 
-**Act 2: unattended execution**: `assent run`, then go to sleep.
+**Act 2: unattended execution**: `assent run`, then go to sleep. Each task
+session runs only its focused `verify`; after the folder completes, the
+scheduler builds a temporary integration candidate and runs the full
+`.assent/verify.py` outside the AI session.
+
+`assent verify <FOLDER>` refreshes that complete verification receipt with zero
+tokens and no AI session. Its `PASSED`/`FAILED` and `fresh`/`stale` state is
+shown in the report, so a stale receipt can be refreshed unattended.
 
 **Act 3: review meeting** (interactive session)
 
@@ -219,7 +265,14 @@ propose a fix.
 
 Carrying out the decision means the AI edits the task file (status back to
 TODO, added clarification, new tasks, marked SKIP); once `assent check`
-passes, go back to Act 2. Loop until everything is DONE → merge. A new round
+passes, go back to Act 2. `DONE` remains an execution claim until a human
+reviews the report. The verification receipt is scheduler evidence, not
+approval. `assent accept <FOLDER>` quickly rebuilds the candidate and publishes
+only when its source tip, integration tree, and verifier digest exactly
+reproduce a fresh `PASSED` receipt; it does not run the full tests. Missing or
+stale receipts require `assent verify <FOLDER>` first. Remote synchronization
+remains a separate ordinary Git decision, and `assent clean <FOLDER>` is the
+final optional cleanup. A new round
 of planning = just open a new work folder; an old folder can keep taking
 part in dependency resolution via `_folder.toml`'s `after`. A folder's
 completion is derived from its task files — it is complete only once every
@@ -236,6 +289,19 @@ state and `_folder.toml`'s `after` upstreams, and refuses on ambiguity.
 `.assent/assent.toml`; the config file no longer maintains a work-folder
 pointer. The two are orthogonal — use either alone or together, e.g.
 `assent status --config configs/night.toml parallel01`.
+
+`assent verify <FOLDER>` is a zero-token, single-folder receipt refresh; it
+never changes the target or opens an AI session. `assent accept <FOLDER>` is the
+explicit human approval for one completed folder. It quickly rebuilds a
+candidate and compares source tip, integration tree, and verifier digest with
+a fresh `PASSED` receipt, then records a guarded `--no-ff` merge; it does not
+run the full tests. A receipt is disposable derived evidence, and content
+changes make it stale. It refuses when the source worktree or branch is gone.
+There is no `review` task field. It never connects to a remote, uses `--all` or
+`--push`, pulls, rebases, force pushes, resolves conflicts, deletes source, or
+offers automatic conflict resolution. The integration lock cannot stop
+external Git writers; do not run writing Git commands in the same main
+worktree during acceptance. Re-running after success is idempotent.
 
 `assent clean [FOLDER]` only deletes worktrees and branches that are fully
 merged and clean; when it cannot prove that, it skips the folder. It never
@@ -272,6 +338,8 @@ derived from task-file facts, and Git is always enabled.
 | `assent status [FOLDER]`<br>`assent status parallel01` | Shows progress statistics, the next task, the branch, and the last checkpoint. Accepts `--config PATH`. | **Zero** |
 | `assent check [FOLDER]`<br>`assent check --config .assent/assent.toml parallel01` | Validates task-file format, dependency-cycle freedom, config, and environment; this is the planning meeting's adjournment condition. Accepts `--config PATH`. | **Zero** |
 | `assent report [FOLDER]`<br>`assent report parallel01` | Generates and displays the work folder's human-readable report `_report.md`. Accepts `--config PATH`. | **Zero** |
+| `assent verify <FOLDER>`<br>`assent verify parallel01` | Runs the complete verifier once for one folder's temporary integration candidate and refreshes the derived receipt; no target change and no AI session. Report status is `PASSED`/`FAILED`, `fresh`/`stale`. No `--all`. | **Zero** |
+| `assent accept <FOLDER>`<br>`assent accept parallel01` | Human approval for exactly one completed folder. Quickly rebuilds the candidate and publishes only an exact fresh `PASSED` receipt match; it does not run complete verification. Missing/stale receipt requires `assent verify`. No `--all`, `--push`, remote, pull, rebase, force, conflict resolution, or source deletion. | **Zero** |
 | `assent clean [FOLDER]`<br>`assent clean parallel01` | Cleans up only worktrees and same-folder-prefix branches that are fully merged and clean; skips anything it cannot prove, never touches `.assent/`, and has no force option. Acts on all work folders when `FOLDER` is omitted. | **Zero** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | Human-adjudicated rejection: archives uncommitted changes, then force-deletes that folder's worktree and same-prefix branches (recording full tip hashes before deletion), and resets DONE/WIP/BLOCKED tasks to TODO with Git evidence kept in the r file. `FOLDER` is required; refuses while a run is in progress. | **Zero** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "review rejected"` | Non-destructively reopens a single task; keeps code by default, `--cascade` states downstream propagation explicitly. `--revert-code` creates a new reverse commit only when checkpoints form a contiguous tail. Updates the report on success, does not run automatically. Accepts `--config PATH`. | **Zero** |

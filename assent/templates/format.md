@@ -59,6 +59,19 @@ project/
   this it skips and explains why; it does not touch `.assent/` (the t/r files
   there are the archive itself), has no `--force`, and is unrelated to
   `git clean` — it deletes nothing untracked or unmerged.
+- **Acceptance**: `assent accept <FOLDER>` records a human acceptance decision
+  by transactionally integrating exactly one completed folder into the normal
+  branch currently checked out in the main worktree. `FOLDER` is required; the
+  command has no batch, push, remote, pull-request, or hosting behavior, and no
+  other command infers acceptance from DONE tasks. It quickly rebuilds the
+  temporary integration candidate and compares the source tip, integration
+  tree, and verifier digest with a PASSED receipt; it does not run the full
+  verifier. Missing or stale receipts require `assent verify <FOLDER>` first.
+  A matching receipt is published with an auditable `--no-ff` merge, and the
+  source branch and worktree remain. Its repository integration lock coordinates Assent commands,
+  not arbitrary external Git writers; observed target changes are refused, but
+  callers must not treat the lock as cross-process atomicity against Git commands
+  run outside Assent.
 - **Rejection**: `assent reject <FOLDER>` is an explicit human-adjudicated
   rejection, kept separate from routine cleanup: after archiving uncommitted
   changes it force-deletes that folder's worktree and same-prefix branches
@@ -345,7 +358,59 @@ A `BLOCKED` task only blocks tasks that have it as an upstream; other tasks run
 as usual. When every task is `DONE` / `BLOCKED` / `SKIP` it finishes, prints a
 summary, and updates the `_report.md` inside the work folder.
 
+## Review, acceptance, and cleanup lifecycle
+
+`DONE` is the executing AI's completion claim, not a human approval. A human
+must read the folder's `_report.md`, inspect the task results and checkpoint
+evidence, and make the acceptance decision explicitly with:
+
+```text
+assent accept <FOLDER>
+```
+
+`FOLDER` is required. `accept` integrates exactly one completed folder into
+the target branch currently checked out in the main worktree. It verifies the
+source and the integrated result, records an auditable `--no-ff` merge, and
+keeps the source worktree and branch for later inspection or cleanup. A
+successful rerun is idempotent and does not create a duplicate merge.
+
+Acceptance refuses incomplete, locked, dirty, detached, ambiguous, or
+dependency-unsafe state. A source or post-merge verification failure and a
+conflict do not advance the target. Assent never resolves conflicts, pulls,
+rebases, force pushes, or deletes source, and it has no `--all`, `--push`, or
+`push` subcommand. Remote synchronization is an independent Git operation
+chosen by the human after local acceptance; it is not an Assent feature.
+
+The integration lock serializes Assent `accept` operations. It is not an
+atomic barrier against external programs, so users must not run Git commands
+that write the same main worktree during acceptance. After acceptance and any
+separately chosen synchronization, `assent clean <FOLDER>` may remove the
+source only when its independent merged-and-clean proof succeeds; cleanup
+never deletes source before that proof.
+
 ## Lifecycle and review (the objective gate)
+
+`assent run` uses two verification stages. During each AI task session, the
+scheduler runs only that task's focused `verify` command before creating its
+checkpoint. After every task in a folder is complete, the scheduler builds one
+temporary integration candidate outside any AI session and runs the complete
+`.assent/verify.py` once. Its result is a derived `_verification.toml` receipt;
+the report shows whether the receipt is `PASSED` or `FAILED` and `fresh` or
+`stale`.
+
+`assent verify <FOLDER>` is a zero-token, unattended receipt refresh. It does
+not change the target or open an AI session. It may be run again whenever the
+receipt is stale or missing. A receipt is derived and disposable: it never
+outranks Git and can be deleted and rebuilt. A changed target commit does not
+by itself make acceptance impossible when the rebuilt candidate tree is
+identical; a changed candidate tree makes the receipt stale.
+
+There is no `review` task-file field. `DONE` is the executing AI's completion
+claim, the receipt is the scheduler's complete-verification evidence, and
+calling `accept` is the human approval. The lifecycle is:
+
+`run` -> full unattended verification receipt -> human review -> `accept` ->
+ordinary Git synchronization, if desired -> `clean`.
 
 For each task: open a headless session -> after the session ends the scheduler
 checks in order, and commits only when all pass:
@@ -358,7 +423,9 @@ checks in order, and commits only when all pass:
 3. **scope check**: all changes since the task's start (including wip
    checkpoints) fall within the task's `scope`; its own t file / r file and
    runtime artifacts are exempt.
-4. **verification command**: run the task's `verify`, exit code 0 = pass.
+4. **focused verification command**: run the task's `verify`, exit code 0 =
+   pass. Full candidate verification belongs to the post-folder scheduler
+   stage, not to the AI tool.
 
 - Pass -> an `auto(<work folder>/tNNN): <title>` checkpoint commit. A
   self-marked BLOCKED -> committed directly in the same namespace without

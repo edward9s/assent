@@ -8,10 +8,15 @@ or commits.
 """
 from __future__ import annotations
 
+import contextlib
+import re
+import shutil
 import subprocess
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from assent import AssentError
 
@@ -371,3 +376,317 @@ def restore(root: Path) -> None:
     """
     _git(root, "checkout", "--", ".")
     _git(root, "clean", "-fd")
+
+
+# --- Local accept integration foundation ---
+
+
+def main_worktree(root: Path) -> Path:
+    """Return the main worktree from either it or one of its linked worktrees."""
+    out = _git(root, "worktree", "list", "--porcelain")
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            return Path(line.removeprefix("worktree ")).resolve()
+    raise AssentError(
+        "unable to determine the main worktree from `git worktree list` output")
+
+
+def git_common_dir(root: Path) -> Path:
+    """Return the repository-wide Git directory shared by all linked worktrees."""
+    return _resolved_git_path(
+        Path(root).resolve(), _git(Path(root), "rev-parse", "--git-common-dir"))
+
+
+def require_current_branch(root: Path) -> str:
+    """Return the current branch, refusing a detached integration target."""
+    branch = current_branch(root)
+    if not branch:
+        raise AssentError(
+            f"{root} is in detached HEAD state; check out a normal branch before "
+            "integrating accepted work")
+    return branch
+
+
+@dataclass(frozen=True)
+class WorkingTreeStatus:
+    """Categorized porcelain status for an integration target."""
+
+    staged: list[str]
+    unstaged: list[str]
+    untracked: list[str]
+
+    @property
+    def is_clean(self) -> bool:
+        return not (self.staged or self.unstaged or self.untracked)
+
+
+def working_tree_status(root: Path,
+                        excludes: Sequence[str] = ()) -> WorkingTreeStatus:
+    """Return staged, unstaged, and untracked paths separately."""
+    excluded = {_normalize(value) for value in excludes}
+    staged: list[str] = []
+    unstaged: list[str] = []
+    untracked: list[str] = []
+    for line in _git(root, "status", "--porcelain").splitlines():
+        if not line.strip():
+            continue
+        path = _status_path(line)
+        if path in excluded:
+            continue
+        code = line[:2]
+        if code == "??":
+            untracked.append(path)
+            continue
+        if code[0] not in (" ", "?"):
+            staged.append(path)
+        if code[1] not in (" ", "?"):
+            unstaged.append(path)
+    return WorkingTreeStatus(staged, unstaged, untracked)
+
+
+def folder_worktree(root: Path, folder: str) -> Path | None:
+    """Return a folder's valid fixed worktree, if it exists."""
+    primary = main_worktree(root)
+    path = worktree_path(primary, folder)
+    if is_repo_worktree(primary, path):
+        return path.resolve()
+    return None
+
+
+def folder_branches(root: Path, folder: str) -> list[str]:
+    """Return local branches belonging to ``<folder>/*``."""
+    return branches_with_prefix(root, f"{folder}/")
+
+
+def unique_folder_branch(root: Path, folder: str) -> str | None:
+    """Return the folder's sole local branch, or refuse an ambiguous set."""
+    branches = folder_branches(root, folder)
+    if not branches:
+        return None
+    if len(branches) != 1:
+        raise AssentError(
+            f"task folder {folder} has multiple local branches: {', '.join(branches)}")
+    return branches[0]
+
+
+def branch_tip(root: Path, branch: str) -> str:
+    """Return the full commit hash at a branch tip."""
+    return commit_of(root, branch)
+
+
+# Machine-readable evidence recorded on an accept merge.
+ACCEPT_TRAILER_FOLDER = "Assent-Folder"
+ACCEPT_TRAILER_SOURCE_BRANCH = "Assent-Source-Branch"
+ACCEPT_TRAILER_SOURCE_TIP = "Assent-Source-Tip"
+ACCEPT_TRAILER_VERIFIED_TREE = "Assent-Verified-Tree"
+ACCEPT_TRAILER_VERIFIER_SHA256 = "Assent-Verifier-SHA256"
+
+_OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _validate_evidence_value(name: str, value: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise AssentError(f"accept evidence {name} must be a non-empty string")
+    if value != value.strip():
+        raise AssentError(
+            f"accept evidence {name} must not have leading or trailing whitespace")
+    if any(ord(character) < 0x20 or ord(character) == 0x7f
+           for character in value):
+        raise AssentError(
+            f"accept evidence {name} must not contain control characters")
+
+
+def build_accept_trailers(folder: str, source_branch: str,
+                          source_tip: str, verified_tree: str,
+                          verifier_sha256: str) -> str:
+    """Build passive, human-readable audit metadata for an accept merge."""
+    _validate_evidence_value("folder", folder)
+    _validate_evidence_value("source branch", source_branch)
+    _validate_evidence_value("source tip", source_tip)
+    _validate_evidence_value("verified tree", verified_tree)
+    _validate_evidence_value("verifier digest", verifier_sha256)
+    if not source_branch.startswith(f"{folder}/") or source_branch == f"{folder}/":
+        raise AssentError(
+            f"accept evidence source branch must belong to task folder {folder}")
+    if not _OBJECT_ID_RE.fullmatch(source_tip):
+        raise AssentError(
+            "accept evidence source tip must be a 40- or 64-character lowercase "
+            "hexadecimal object id")
+    if not _OBJECT_ID_RE.fullmatch(verified_tree):
+        raise AssentError(
+            "accept evidence verified tree must be a 40- or 64-character lowercase "
+            "hexadecimal object id")
+    if not _SHA256_RE.fullmatch(verifier_sha256):
+        raise AssentError(
+            "accept evidence verifier digest must be a 64-character lowercase "
+            "hexadecimal SHA-256 digest")
+    return (f"{ACCEPT_TRAILER_FOLDER}: {folder}\n"
+            f"{ACCEPT_TRAILER_SOURCE_BRANCH}: {source_branch}\n"
+            f"{ACCEPT_TRAILER_SOURCE_TIP}: {source_tip}\n"
+            f"{ACCEPT_TRAILER_VERIFIED_TREE}: {verified_tree}\n"
+            f"{ACCEPT_TRAILER_VERIFIER_SHA256}: {verifier_sha256}")
+
+
+def accept_commit_message(subject: str, folder: str, source_branch: str,
+                          source_tip: str, verified_tree: str,
+                          verifier_sha256: str) -> str:
+    """Compose a one-line subject and passive accept audit metadata."""
+    _validate_evidence_value("subject", subject)
+    trailers = build_accept_trailers(
+        folder, source_branch, source_tip, verified_tree, verifier_sha256)
+    return f"{subject}\n\n{trailers}\n"
+
+
+def _temporary_container(root: Path) -> Path:
+    return root.parent / f"{root.name}.integration"
+
+
+def _cleanup_temporary_worktree(root: Path, path: Path,
+                                branch: str | None = None) -> None:
+    """Remove this call's temporary resources and report any incomplete cleanup."""
+    problems: list[str] = []
+    if path.exists():
+        removed = _run_git(root, "worktree", "remove", "--force", str(path))
+        if removed.returncode != 0:
+            try:
+                shutil.rmtree(path)
+            except OSError as e:
+                problems.append(f"unable to remove temporary path {path}: {e}")
+    pruned = _run_git(root, "worktree", "prune")
+    if pruned.returncode != 0:
+        problems.append(
+            "git worktree prune failed: "
+            f"{pruned.stderr.strip() or pruned.stdout.strip() or 'unknown error'}")
+    if branch is not None:
+        exists = _run_git(root, "show-ref", "--verify", "--quiet",
+                          f"refs/heads/{branch}")
+        if exists.returncode == 0:
+            deleted = _run_git(root, "branch", "-D", branch)
+            if deleted.returncode != 0:
+                problems.append(
+                    f"unable to delete temporary branch {branch}: "
+                    f"{deleted.stderr.strip() or deleted.stdout.strip() or 'unknown error'}")
+        elif exists.returncode not in (1,):
+            problems.append(f"unable to inspect temporary branch {branch}")
+    if path.exists():
+        problems.append(f"temporary worktree path remains: {path}")
+    with contextlib.suppress(OSError):
+        _temporary_container(root).rmdir()
+    if problems:
+        raise AssentError("Temporary integration cleanup was incomplete: "
+                          + "; ".join(problems))
+
+
+def _commit_snapshot(root: Path, committish: str) -> str:
+    _validate_evidence_value("commit", committish)
+    return commit_of(root, f"{committish}^{{commit}}")
+
+
+@contextlib.contextmanager
+def temporary_source_worktree(root: Path, commit: str) -> Iterator[Path]:
+    """Create a detached temporary source worktree at an explicit commit."""
+    primary = main_worktree(root)
+    snapshot = _commit_snapshot(primary, commit)
+    suffix = uuid.uuid4().hex
+    path = _temporary_container(primary) / f"source-{suffix}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    primary_error: BaseException | None = None
+    try:
+        _git(primary, "worktree", "add", "--detach", str(path), snapshot)
+        yield path
+    except BaseException as e:
+        primary_error = e
+        raise
+    finally:
+        try:
+            _cleanup_temporary_worktree(primary, path)
+        except AssentError as cleanup_error:
+            if primary_error is None:
+                raise
+            primary_error.add_note(str(cleanup_error))
+
+
+@dataclass(frozen=True)
+class MergeOutcome:
+    """Result of a no-fast-forward merge attempt."""
+
+    ok: bool
+    conflicts: tuple[str, ...] = ()
+    exit_code: int = 0
+
+
+def conflict_paths(worktree: Path) -> list[str]:
+    """List unmerged paths in stable order."""
+    out = _git(worktree, "diff", "--name-only", "--diff-filter=U")
+    return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+
+def merge_no_ff(worktree: Path, commit: str, message: str) -> MergeOutcome:
+    """Merge an explicit commit without fast-forwarding or resolving conflicts."""
+    snapshot = _commit_snapshot(worktree, commit)
+    result = _run_git(worktree, "merge", "--no-ff", "-m", message, snapshot)
+    if result.returncode == 0:
+        return MergeOutcome(True)
+    conflicts = conflict_paths(worktree)
+    if not conflicts:
+        raise AssentError(
+            f"git merge --no-ff {snapshot} failed (exit code {result.returncode}): "
+            f"{result.stderr.strip() or result.stdout.strip()}")
+    _run_git(worktree, "merge", "--abort")
+    return MergeOutcome(False, tuple(conflicts), result.returncode)
+
+
+def tree_of(root: Path, committish: str) -> str:
+    """Return the full tree object id for a commit or tree-ish."""
+    _validate_evidence_value("tree-ish", committish)
+    return _git(root, "rev-parse", f"{committish}^{{tree}}").strip()
+
+
+def commit_parents(root: Path, committish: str = "HEAD") -> tuple[str, ...]:
+    """Return one commit's parent object ids without scanning repository history."""
+    snapshot = _commit_snapshot(root, committish)
+    fields = _git(root, "show", "-s", "--format=%P", snapshot).strip().split()
+    if not all(_OBJECT_ID_RE.fullmatch(parent) for parent in fields):
+        raise AssentError("unable to parse Git commit parents")
+    return tuple(fields)
+
+
+def object_type(root: Path, object_id: str) -> str:
+    """Return an object's Git type, failing if the object does not exist."""
+    _validate_evidence_value("object id", object_id)
+    return _git(root, "cat-file", "-t", object_id).strip()
+
+
+def fast_forward(root: Path, commit: str) -> None:
+    """Advance the checked-out branch only when Git can fast-forward it."""
+    snapshot = _commit_snapshot(root, commit)
+    _git(root, "merge", "--ff-only", snapshot)
+
+
+@contextlib.contextmanager
+def temporary_integration_worktree(
+        root: Path, folder: str,
+        target_snapshot: str) -> Iterator[tuple[Path, str]]:
+    """Create a temporary branch/worktree from an explicit target snapshot."""
+    _validate_evidence_value("folder", folder)
+    primary = main_worktree(root)
+    snapshot = _commit_snapshot(primary, target_snapshot)
+    suffix = uuid.uuid4().hex
+    branch = f"assent-integration/{folder}/{suffix}"
+    path = _temporary_container(primary) / f"target-{suffix}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    primary_error: BaseException | None = None
+    try:
+        _git(primary, "worktree", "add", "-b", branch, str(path), snapshot)
+        yield path, branch
+    except BaseException as e:
+        primary_error = e
+        raise
+    finally:
+        try:
+            _cleanup_temporary_worktree(primary, path, branch)
+        except AssentError as cleanup_error:
+            if primary_error is None:
+                raise
+            primary_error.add_note(str(cleanup_error))

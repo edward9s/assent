@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from assent import engine
 from assent import gitops
@@ -122,7 +123,12 @@ class E2ETestCase(unittest.TestCase):
         return step
 
     def run_engine(self, adapter, **kw) -> int:
-        with contextlib.redirect_stdout(io.StringIO()):
+        # Folder-final verification has separate authority tests in
+        # tests.test_verification_engine.  These scenarios exercise task and
+        # worktree behavior only, so avoid imposing candidate-source fixtures.
+        with contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch("assent.engine.verification.verify_folder_if_needed",
+                           return_value=0):
             return engine.run(self.cfg(), adapter=adapter, **kw)
 
     def subjects(self):

@@ -48,9 +48,12 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.runtime_log_rel, ".assent/plan01/_assent.log")
         self.assertEqual(cfg.report_rel, ".assent/plan01/_report.md")
         self.assertEqual(cfg.lockfile_rel, ".assent/plan01/assent.lock")
+        self.assertEqual(cfg.verification_receipt_rel,
+                         ".assent/plan01/_verification.toml")
         self.assertEqual(cfg.git_excludes,
                          (".assent/plan01/_assent.log", ".assent/plan01/_report.md",
-                         ".assent/plan01/assent.lock"))
+                         ".assent/plan01/assent.lock",
+                         ".assent/plan01/_verification.toml"))
 
     def test_provided_folder_updates_all_derived_paths(self):
         cfg = load_config(self.write(_MINIMAL), folder="parallel02")
@@ -60,6 +63,13 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.runtime_log_rel, ".assent/parallel02/_assent.log")
         self.assertEqual(cfg.report_rel, ".assent/parallel02/_report.md")
         self.assertEqual(cfg.lockfile_rel, ".assent/parallel02/assent.lock")
+        self.assertEqual(cfg.verification_receipt_rel,
+                         ".assent/parallel02/_verification.toml")
+        self.assertEqual(cfg.git_excludes,
+                         (".assent/parallel02/_assent.log",
+                          ".assent/parallel02/_report.md",
+                          ".assent/parallel02/assent.lock",
+                          ".assent/parallel02/_verification.toml"))
 
     def test_missing_file_raises(self):
         with self.assertRaises(AssentError):

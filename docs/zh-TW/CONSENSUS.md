@@ -51,8 +51,31 @@
 4. **測試證明正確**
    文字說明意圖,verify 證明正確。「執行 AI 自稱 DONE」只是宣稱,
    完成與否由調度器客觀驗收:狀態 → 結構比對(防竄改)→ scope →
-   verify exit 0,全部通過才 commit 檢查點。
+   task focused verify exit 0,全部通過才 commit 檢查點。
    摘要只寫可驗證事實;pending 不得包裝成 completed。
+
+## 驗證、receipt 與人類接受
+
+調度器分開 focused task verification 與完整 candidate verification。AI session
+只執行任務的 `verify`;資料夾全部完成後,AI session 外的 scheduler 建立一次臨時
+integration candidate,執行完整 `.assent/verify.py`,結果寫成可刪除重建的
+`_verification.toml` derived receipt。`assent verify <FOLDER>` 是零 token 的
+receipt refresh,報告會顯示 `PASSED`/`FAILED` 以及 `fresh`/`stale`。
+
+`DONE` 是執行 AI 的主張,receipt 是 scheduler 的完整驗證證據,呼叫
+`assent accept <FOLDER>` 才是人類批准。accept 必須明示單一資料夾,只快速重建
+candidate 並比對 source tip、integration tree、verifier digest 與 fresh `PASSED`
+receipt,不重跑完整 verifier。missing/stale receipt 必須先執行
+`assent verify`;task format 沒有 `review` 欄位。
+
+receipt 是 derived artifact,不凌駕 Git。target tip 改變但重建後 integration tree
+完全相同仍可接受;內容改變就 stale。source worktree 或 branch 消失後拒絕;passive
+merge metadata 只供人讀稽核,不是 clean 後的狀態資料庫。dependent 尚未接受時,
+保留 upstream source。
+
+流程是 `run` -> 無人值守完整驗證 receipt -> 人類審查 -> `accept` -> 可選的一般
+Git 同步 -> `clean`。accept 僅限本地、單一資料夾,沒有 `--all`、`--push`、remote/PR、
+pull、rebase、force、自動解衝突或刪 source。
 
 ## 位置慣例
 
