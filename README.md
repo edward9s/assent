@@ -682,6 +682,9 @@ The task journal records the exact quota-reset time (if available) and the
 scheduler will poll until then before retrying. If you need to run a different
 folder in the meantime, you can run it in a second terminal as long as it does
 not depend on the quota-limited folder.
+When `[adapter].name` is a list, quota exhaustion rotates to the next adapter
+in order; the scheduler waits for the rotation poll only after every adapter
+in the rotation is exhausted.
 
 **Fixing configuration after a preflight error**
 
