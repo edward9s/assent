@@ -31,7 +31,6 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.tasks_name, "plan01")
         self.assertEqual(cfg.tasks_dir, self.agents_dir.resolve() / "plan01")
         self.assertEqual(cfg.branch_prefix, "plan01/")
-        self.assertTrue(cfg.git_enabled)
         self.assertEqual(cfg.stall_minutes, 30)
         self.assertEqual(cfg.retry_per_task, 1)
         self.assertEqual(cfg.quota_poll_minutes, 30)
@@ -73,6 +72,10 @@ class TestLoadConfig(ConfigTestCase):
     def test_unknown_top_level_key_raises(self):
         with self.assertRaisesRegex(AgentsError, "未知的頂層鍵"):
             load_config(self.write(_MINIMAL + "[plann]\nx = 1\n"))
+
+    def test_git_section_reports_dedicated_removal_error(self):
+        with self.assertRaisesRegex(AgentsError, r"\[git\].*已廢除"):
+            load_config(self.write(_MINIMAL + "[git]\nenabled = false\n"))
 
     def test_folder_name_with_space_rejected(self):
         with self.assertRaisesRegex(AgentsError, "工作資料夾名稱"):

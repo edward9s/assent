@@ -100,6 +100,9 @@ def init(path: str | Path = ".") -> int:
     if not root.is_dir():
         print(f"錯誤:目錄不存在:{root}")
         return 1
+    if not (root / ".git").exists():
+        print("本專案尚未初始化 git,請先執行 git init")
+        return 1
 
     agents_dir = root / ".agents"
     made: list[str] = []

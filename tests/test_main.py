@@ -4,6 +4,7 @@ import contextlib
 import io
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,6 +74,11 @@ class TestDispatch(MainTestCase):
 
 
 class TestInit(MainTestCase):
+    def setUp(self):
+        super().setUp()
+        subprocess.run(["git", "init"], cwd=self.root, check=True,
+                       capture_output=True)
+
     def test_creates_skeleton(self):
         code, out = self.run_main(["init"])
         self.assertEqual(code, 0)
@@ -88,6 +94,9 @@ class TestInit(MainTestCase):
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertEqual(agents_md.count("<!-- agents-instructions -->"), 1)
         self.assertNotIn("## AI 工作體系", agents_md)
+        config = (self.root / ".agents" / "agents.toml").read_text(
+            encoding="utf-8")
+        self.assertNotIn("[git]", config)
 
     def test_idempotent_no_overwrite_no_duplicates(self):
         run_init(self.root)
@@ -145,6 +154,15 @@ class TestInit(MainTestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(run_init(self.root / "nope"), 1)
+
+    def test_no_git_refuses_without_creating_files(self):
+        target = self.root / "not-repo"
+        target.mkdir()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(run_init(target), 1)
+        self.assertIn("本專案尚未初始化 git,請先執行 git init", out.getvalue())
+        self.assertFalse((target / ".agents").exists())
 
 
 if __name__ == "__main__":

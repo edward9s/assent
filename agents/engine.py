@@ -55,6 +55,7 @@ _RESUME_SUFFIX = ("\n上次執行此任務時中斷(額度耗盡或使用者中�
 _QUOTA_BUFFER = timedelta(minutes=2)  # 重置時間 + 緩衝,避免剛好卡在邊界又被擋
 _QUOTA_TICK = 1.0                     # 倒數的更新間隔(秒)
 _DEFAULT_VERIFY_COMMAND = "python .agents/verify.py"
+_GIT_REQUIRED_MESSAGE = "本專案尚未初始化 git,請先執行 git init"
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,11 @@ def _git_read(root, *args: str) -> str | None:
     return result.stdout.strip()
 
 
+def _has_git_marker(root: Path) -> bool:
+    """專案根目錄必須自行初始化 git,不可借用父目錄的 repo。"""
+    return (root / ".git").exists()
+
+
 def _verify_command_for_prompt(cfg: Config, command: str) -> str:
     """隔離執行時把預設驗收腳本展開成主樹絕對路徑。"""
     if cfg.source_root is None or command.strip() != _DEFAULT_VERIFY_COMMAND:
@@ -193,6 +199,10 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     (含額度等待的長睡眠);同資料夾已有 run 在跑就印訊息、以退出碼 1 失敗,
     不碰工作區任何東西。status / check / report 唯讀,不取鎖,可在 run 進行中使用。
     """
+    if not _has_git_marker(cfg.root):
+        print(_GIT_REQUIRED_MESSAGE)
+        return 1
+
     if sleep is None:
         sleep = time.sleep
     if now is None:
@@ -211,7 +221,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
     """已持有工作資料夾鎖後的實際 run 主體。"""
-    if cfg.git_enabled and cfg.source_root is None:
+    if cfg.source_root is None:
         try:
             errors = _worktree_configuration_errors(cfg)
             if errors:
@@ -239,14 +249,13 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             print(str(e))
             return 1
 
-    if cfg.git_enabled:
-        try:
-            gitops.ensure_clean(cfg.root, cfg.git_excludes)
-            branch = gitops.ensure_branch(cfg.root, cfg.branch_prefix)
-            print(f"工作分支:{branch}")
-        except AgentsError as e:
-            print(f"git 準備失敗:{e}")
-            return 1
+    try:
+        gitops.ensure_clean(cfg.root, cfg.git_excludes)
+        branch = gitops.ensure_branch(cfg.root, cfg.branch_prefix)
+        print(f"工作分支:{branch}")
+    except AgentsError as e:
+        print(f"git 準備失敗:{e}")
+        return 1
 
     current_task: Task | None = None
     current_session: _SessionState | None = None
@@ -294,16 +303,15 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 current_task, current_session.identity,
                 "使用者中斷,保留進度供下次接續", now,
                 detail="run 收到 Ctrl+C")
-        if cfg.git_enabled:
-            try:
-                subject = (_checkpoint_subject(
-                    cfg, "wip", current_task, "使用者中斷,保留進度")
-                    if current_task is not None
-                    else f"wip({cfg.tasks_name}): 使用者中斷,保留進度")
-                if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
-                    print("已把進度收進 wip 檢查點(不滿意可自行 git 回退)。")
-            except AgentsError as e:
-                print(f"wip 檢查點建立失敗:{e}(工作區保持原樣,未丟棄)")
+        try:
+            subject = (_checkpoint_subject(
+                cfg, "wip", current_task, "使用者中斷,保留進度")
+                if current_task is not None
+                else f"wip({cfg.tasks_name}): 使用者中斷,保留進度")
+            if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
+                print("已把進度收進 wip 檢查點(不滿意可自行 git 回退)。")
+        except AgentsError as e:
+            print(f"wip 檢查點建立失敗:{e}(工作區保持原樣,未丟棄)")
         _try_write_report(cfg)
         print("已中斷。")
         return 130
@@ -315,16 +323,15 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 current_task, current_session.identity,
                 "基礎設施錯誤中止,保留進度供下次接續", now,
                 detail=str(e))
-        if cfg.git_enabled:
-            try:
-                subject = (_checkpoint_subject(
-                    cfg, "wip", current_task, "基礎設施錯誤中止,保留進度")
-                    if current_task is not None
-                    else f"wip({cfg.tasks_name}): 基礎設施錯誤中止,保留進度")
-                if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
-                    print("已把進度收進 wip 檢查點。")
-            except AgentsError:
-                pass
+        try:
+            subject = (_checkpoint_subject(
+                cfg, "wip", current_task, "基礎設施錯誤中止,保留進度")
+                if current_task is not None
+                else f"wip({cfg.tasks_name}): 基礎設施錯誤中止,保留進度")
+            if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
+                print("已把進度收進 wip 檢查點。")
+        except AgentsError:
+            pass
         _try_write_report(cfg)
         return 1
 
@@ -371,7 +378,7 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
         print("  (偵測到 WIP:上次中斷的任務,帶接續提示續作)")
 
     # 該任務起點的 HEAD:scope 檢查要涵蓋起點以來的全部改動(含 wip 檢查點)。
-    start_ref = gitops.head_ref(cfg.root) if cfg.git_enabled else None
+    start_ref = gitops.head_ref(cfg.root)
 
     attempts_used = 0
     failure_reason: str | None = None
@@ -392,7 +399,7 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
                          agent=session.agent,
                          requested_model=session.requested_model,
                          time_str=now().isoformat(timespec="seconds"))
-            if cfg.git_enabled and gitops.commit_if_dirty(
+            if gitops.commit_if_dirty(
                     cfg.root, _checkpoint_subject(
                         cfg, "wip", task, "額度中斷,保留進度"),
                     cfg.git_excludes):
@@ -405,7 +412,7 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
         outcome, reason = _evaluate(cfg, task, start_ref)
         if outcome == "done":
             print("  驗收通過 -> 建立檢查點")
-            if cfg.git_enabled and not gitops.commit_if_dirty(
+            if not gitops.commit_if_dirty(
                     cfg.root, _checkpoint_subject(
                         cfg, "auto", task, _short(task.title) or "完成"),
                     cfg.git_excludes):
@@ -414,11 +421,10 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
             return
         if outcome == "self_blocked":
             print("  執行 AI 自標 BLOCKED(合法產出,交人類裁決)-> 建立檢查點")
-            if cfg.git_enabled:
-                gitops.commit_if_dirty(
-                    cfg.root, _checkpoint_subject(
-                        cfg, "auto", task, "BLOCKED(執行 AI 自標)"),
-                    cfg.git_excludes)
+            gitops.commit_if_dirty(
+                cfg.root, _checkpoint_subject(
+                    cfg, "auto", task, "BLOCKED(執行 AI 自標)"),
+                cfg.git_excludes)
             _try_write_report(cfg)
             return
 
@@ -463,13 +469,12 @@ def _evaluate(cfg: Config, task: Task,
 
     # scope 檢查(以可信的檢查點 scope 為準,含 wip 檢查點內的改動;
     # 自己的 t 檔/r 檔與執行期產物豁免)
-    if cfg.git_enabled:
-        outside = gitops.changes_outside_scope(
-            cfg.root, task.scope, since_ref=start_ref,
-            excludes=_task_excludes(cfg, task))
-        if outside:
-            shown = ", ".join(outside[:5]) + (" ..." if len(outside) > 5 else "")
-            return "fail", f"出現 scope 外的變更:{shown}"
+    outside = gitops.changes_outside_scope(
+        cfg.root, task.scope, since_ref=start_ref,
+        excludes=_task_excludes(cfg, task))
+    if outside:
+        shown = ", ".join(outside[:5]) + (" ..." if len(outside) > 5 else "")
+        return "fail", f"出現 scope 外的變更:{shown}"
 
     # 驗收命令(以可信的檢查點 verify 為準)
     rc = _run_verify(cfg, task.verify)
@@ -518,11 +523,10 @@ def _mark_blocked(cfg: Config, task: Task, session: _SessionIdentity, reason: st
                  agent=session.agent,
                  requested_model=session.requested_model,
                  time_str=now().isoformat(timespec="seconds"))
-    if cfg.git_enabled:
-        gitops.commit_if_dirty(
-            cfg.root, _checkpoint_subject(
-                cfg, "auto", task, f"BLOCKED - {_short(reason, 50)}"),
-            cfg.git_excludes)
+    gitops.commit_if_dirty(
+        cfg.root, _checkpoint_subject(
+            cfg, "auto", task, f"BLOCKED - {_short(reason, 50)}"),
+        cfg.git_excludes)
 
 
 def _quota_wait_seconds(cfg: Config, reset_at: datetime | None,
@@ -718,8 +722,8 @@ def status(cfg: Config) -> int:
 
 
 def _query_git_root(cfg: Config) -> Path:
-    """Git 啟用且已有有效 worktree 時,改從隔離分支讀 git 資訊。"""
-    if not cfg.git_enabled or cfg.source_root is not None:
+    """已有有效 worktree 時,改從隔離分支讀 git 資訊。"""
+    if cfg.source_root is not None:
         return cfg.root
     candidate = gitops.worktree_path(cfg.root, cfg.tasks_name)
     top = _git_read(candidate, "rev-parse", "--show-toplevel")
@@ -732,6 +736,10 @@ def _query_git_root(cfg: Config) -> Path:
 # check:零 token 環境與格式驗證(會議的散會條件)
 # --------------------------------------------------------------------------- #
 def check(cfg: Config) -> int:
+    if not _has_git_marker(cfg.root):
+        print(_GIT_REQUIRED_MESSAGE)
+        return 1
+
     ok = True
     print(f"設定檔:OK({cfg.agents_dir / 'agents.toml'} 已載入,"
           f"工作資料夾 = {cfg.tasks_name})")
@@ -757,23 +765,20 @@ def check(cfg: Config) -> int:
     inside = _git_read(cfg.root, "rev-parse", "--is-inside-work-tree")
     if inside == "true":
         print("git repo:OK")
-        if cfg.git_enabled:
-            try:
-                errors = _worktree_configuration_errors(cfg)
-            except AgentsError as e:
-                errors = [str(e)]
-            if errors:
-                ok = False
-                print("worktree 版控分層:FAIL")
-                for error in errors:
-                    print(f"  - {error}")
-            else:
-                print("worktree 版控分層:OK")
-    elif cfg.git_enabled:
+        try:
+            errors = _worktree_configuration_errors(cfg)
+        except AgentsError as e:
+            errors = [str(e)]
+        if errors:
+            ok = False
+            print("worktree 版控分層:FAIL")
+            for error in errors:
+                print(f"  - {error}")
+        else:
+            print("worktree 版控分層:OK")
+    else:
         ok = False
         print("git repo:FAIL(專案根目錄不是 git 工作樹,或 git 未安裝/未在 PATH)")
-    else:
-        print("git repo:未檢查(git 已停用)")
 
     # 目前 adapter 的 CLI 可執行
     if cfg.adapter_name in ("claude", "codex"):

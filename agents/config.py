@@ -14,7 +14,7 @@ from pathlib import Path
 from agents import AgentsError
 from agents.lockfile import LOCK_NAME
 
-_TOP_LEVEL_KEYS = {"plan", "git", "watchdog", "run", "adapter", "prompt"}
+_TOP_LEVEL_KEYS = {"plan", "watchdog", "run", "adapter", "prompt"}
 _EFFORT_LEVELS = {"low", "medium", "high"}
 
 # 工作資料夾名稱:不含空白與路徑分隔符,不以 - 或 . 開頭(它會成為 git 分支前綴)
@@ -38,7 +38,6 @@ class Config:
     agents_dir: Path               # .agents 目錄(= 設定檔所在目錄)
     tasks_dir: Path                # 工作資料夾(.agents/<tasks>)
     tasks_name: str                # 工作資料夾名稱(= git 分支前綴的字首)
-    git_enabled: bool = True
     stall_minutes: int = 30        # 0 = 關閉 watchdog
     retry_per_task: int = 1
     quota_poll_minutes: int = 30
@@ -161,6 +160,10 @@ def load_config(path: str | Path, folder: str | None = None) -> Config:
         except tomllib.TOMLDecodeError as e:
             raise AgentsError(f"設定檔不是有效的 TOML({path}):{e}") from e
 
+    if "git" in data:
+        raise AgentsError(
+            "設定檔 [git] 區塊已廢除:git 永遠啟用,請刪除該區塊")
+
     unknown = sorted(set(data) - _TOP_LEVEL_KEYS)
     if unknown:
         raise AgentsError(
@@ -179,7 +182,6 @@ def load_config(path: str | Path, folder: str | None = None) -> Config:
         _validate_tasks_name(folder, "命令列工作資料夾")
         tasks_name = folder
 
-    git = _section(data, "git")
     watchdog = _section(data, "watchdog")
     run = _section(data, "run")
     adapter = _section(data, "adapter")
@@ -192,7 +194,6 @@ def load_config(path: str | Path, folder: str | None = None) -> Config:
         agents_dir=agents_dir,
         tasks_dir=agents_dir / tasks_name,
         tasks_name=tasks_name,
-        git_enabled=_typed(git, "[git]", "enabled", bool, True),
         stall_minutes=_typed(watchdog, "[watchdog]", "stall_minutes", int, 30),
         retry_per_task=_typed(run, "[run]", "retry_per_task", int, 1),
         quota_poll_minutes=_typed(run, "[run]", "quota_poll_minutes", int, 30),

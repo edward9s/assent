@@ -94,13 +94,11 @@ class EngineTestCase(unittest.TestCase):
             ["git", *args], cwd=self.execution_root(), capture_output=True,
             encoding="utf-8", check=True).stdout
 
-    def build(self, retry=1, git_enabled=True, adapter_name="claude",
-              prompt_template=None):
+    def build(self, retry=1, adapter_name="claude", prompt_template=None):
         prompt = (f'[prompt]\ntemplate = {json.dumps(prompt_template)}\n'
                   if prompt_template is not None else "")
         (self.root / ".agents" / "agents.toml").write_text(
             '[plan]\ntasks = "plan01"\n'
-            f"[git]\nenabled = {'true' if git_enabled else 'false'}\n"
             f"[run]\nretry_per_task = {retry}\n"
             f'[adapter]\nname = "{adapter_name}"\n'
             '[adapter.claude]\ncommand = "python"\n'
@@ -213,7 +211,7 @@ class TestRunSuccess(EngineTestCase):
                             for s in self.subjects()))
 
     def test_try_write_report_does_not_swallow_process_control_exceptions(self):
-        cfg = self.build(git_enabled=False)
+        cfg = self.build()
         self.write_task(1)
         with mock.patch.object(engine, "write_report", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
@@ -296,7 +294,7 @@ class TestRunSuccess(EngineTestCase):
         self.assertEqual(adapter.calls[0][0], "claude|cli-model|t001")
 
     def test_worktree_default_verify_uses_main_script_and_worktree_cwd(self):
-        cfg = self.build(git_enabled=False)
+        cfg = self.build()
         worktree = self.root / "isolated"
         worktree.mkdir()
         (cfg.agents_dir / "verify.py").write_text(
@@ -567,7 +565,8 @@ class TestInterruptedTaskResume(EngineTestCase):
 
     def test_idle_interrupt_does_not_mark_any_task(self):
         path = self.write_task(1)
-        cfg = self.build(git_enabled=False)
+        cfg = self.build()
+        self.commit_all()
         real_parse = engine.Plan.parse
         calls = 0
 
@@ -587,6 +586,28 @@ class TestInterruptedTaskResume(EngineTestCase):
 
 
 class TestSchedulingAndRefusals(EngineTestCase):
+    def test_run_and_check_refuse_root_without_own_git_marker(self):
+        nested_root = self.root / "not-repo"
+        nested_plan = nested_root / ".agents" / "plan01"
+        nested_plan.mkdir(parents=True)
+        config = nested_root / ".agents" / "agents.toml"
+        config.write_text('[plan]\ntasks = "plan01"\n', encoding="utf-8")
+        cfg = load_config(config)
+        adapter = ScriptedAdapter([])
+
+        for name, operation in (
+                ("run", lambda: engine.run(cfg, adapter=adapter)),
+                ("check", lambda: engine.check(cfg))):
+            with self.subTest(command=name):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(operation(), 1)
+                self.assertIn(
+                    "本專案尚未初始化 git,請先執行 git init", out.getvalue())
+
+        self.assertEqual(adapter.calls, [])
+        self.assertFalse((nested_plan / "agents.lock").exists())
+
     def test_blocked_gates_downstream_but_others_run(self):
         p1 = self.write_task(1, verify=_FAILV)
         p2 = self.write_task(2, deps=("t001",))
@@ -640,7 +661,8 @@ class TestSchedulingAndRefusals(EngineTestCase):
     def test_retired_task_file_makes_check_and_run_fail_closed(self):
         (self.plan_dir / "t001_old.toml").write_text(
             task_text(), encoding="utf-8", newline="\n")
-        cfg = self.build(git_enabled=False)
+        cfg = self.build()
+        self.commit_all()
         adapter = ScriptedAdapter([])
 
         check_out = io.StringIO()
@@ -798,7 +820,7 @@ class TestQueries(EngineTestCase):
             '[[entry]]\ntime = "2026-07-17T00:00:00+00:00"\n'
             'by = "ai"\nevent = "blocked"\nsummary = "舊日誌仍可讀"\n',
             encoding="utf-8")
-        cfg = self.build(git_enabled=False)
+        cfg = self.build()
         from agents.plan import Plan
         text = engine.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("最後日誌(ai):舊日誌仍可讀", text)
