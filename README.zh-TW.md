@@ -235,6 +235,16 @@ target、不開 AI session。報告會顯示 `PASSED`/`FAILED` 與 `fresh`/`stal
 新 receipt,零 token;想看逐測試輸出,可在同一 worktree 內執行
 `.assent/verify.py`,或直接執行 `python -m unittest discover -s tests -v`。
 
+**平行執行測試**:打包的 `.assent/verify.py` template 提供
+`run_unittest_parallel()`,預設以註解停用;啟用後會把 `tests/test_*.py`
+底下每個模組各自丟進獨立 subprocess 平行執行,而非單一行程依序跑完整套件,
+因此總耗時約等於最慢那個模組,而非全部加總。之所以用行程隔離而非執行緒,
+是因為 unittest 模組會改動行程層級的全域狀態(`os.chdir`、`os.environ`),
+共用同一個直譯器會讓模組間互相汙染。並發數預設是 `min(模組數, CPU 數)`,
+可用 `ASSENT_VERIFY_JOBS` 覆寫。修改 `.assent/verify.py` 啟用它會改變
+verifier digest,使既有 receipt 過期一次;重跑 `assent verify <FOLDER>`
+即可換發。
+
 worktree 是變更隔離、衝突管理、稽核與復原邊界,不是安全 sandbox。`danger-full-access`
 或 `bypassPermissions` 下,AI 仍可使用其 OS 身分可存取的 network、credential、外部
 Git 寫入者與 worktree 外檔案。只有在可信任的專案與帳號環境才應啟用無人值守執行;

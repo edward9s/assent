@@ -297,6 +297,18 @@ zero tokens; to watch the test-by-test output yourself, run
 `.assent/verify.py` from inside that same worktree, or run `python -m
 unittest discover -s tests -v` directly.
 
+**Parallel test execution**: the packaged `.assent/verify.py` template
+provides `run_unittest_parallel()`, commented out by default, which runs each
+`tests/test_*.py` module in its own subprocess concurrently instead of one
+process running the whole suite serially, so total wall time is roughly the
+slowest module's time rather than the sum of all of them. Process isolation
+is deliberate: unittest modules mutate process-global state (`os.chdir`,
+`os.environ`), so sharing one interpreter across modules would let them
+corrupt each other. Concurrency defaults to `min(module count, CPU count)`;
+set `ASSENT_VERIFY_JOBS` to override it. Opting in by editing
+`.assent/verify.py` changes the verifier digest, so it expires existing
+receipts once; rerun `assent verify <FOLDER>` to reissue them.
+
 A worktree is a change-isolation, conflict-management, audit, and recovery
 boundary, not a security sandbox. `danger-full-access` or `bypassPermissions`
 still permits an AI to reach resources available to its OS identity, including
