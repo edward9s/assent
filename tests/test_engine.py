@@ -9,8 +9,9 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
-from agents import engine
+from agents import AgentsError, engine
 from agents.adapters import Adapter, TaskResult
 from agents.config import load_config
 from agents.plan import append_entry, journal_path_for, parse_task_file, set_status
@@ -303,6 +304,103 @@ class TestQuotaAndResume(EngineTestCase):
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
         self.assertIn("接續", adapter.calls[0][0])
         self.assertEqual(parse_task_file(path).status, "DONE")
+
+
+class TestInterruptedTaskResume(EngineTestCase):
+    def test_keyboard_interrupt_marks_unverified_done_wip_then_resumes(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+
+        def interrupted(prompt):
+            set_status(path, "DONE")
+            raise KeyboardInterrupt
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([interrupted])), 130)
+        self.assertEqual(parse_task_file(path).status, "WIP")
+        from agents.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertTrue(any(e["by"] == "scheduler"
+                            and e["event"] == "interrupt"
+                            and "使用者中斷" in e["summary"]
+                            for e in entries))
+
+        adapter = ScriptedAdapter([self.ai_done(path)])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+        self.assertIn("接續", adapter.calls[0][0])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+    def test_agents_error_marks_current_task_wip_and_keeps_exit_code(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+
+        def failed(prompt):
+            raise AgentsError("連線中斷")
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([failed])), 1)
+        self.assertEqual(parse_task_file(path).status, "WIP")
+        from agents.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertTrue(any(e["event"] == "interrupt"
+                            and "基礎設施錯誤" in e["summary"]
+                            for e in entries))
+
+    def test_interrupted_self_blocked_task_is_not_overwritten(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+
+        def blocked_then_interrupted(prompt):
+            set_status(path, "BLOCKED")
+            raise KeyboardInterrupt
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True,
+            adapter=ScriptedAdapter([blocked_then_interrupted])), 130)
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+
+    def test_quota_wait_interrupt_marks_task_wip(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+
+        quota = TaskResult(exit_code=1, output="", quota_exhausted=True,
+                           reset_at=None)
+
+        def interrupt_sleep(seconds):
+            raise KeyboardInterrupt
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([quota]),
+            sleep=interrupt_sleep), 130)
+        self.assertEqual(parse_task_file(path).status, "WIP")
+        from agents.plan import read_entries
+        events = [e["event"] for e in read_entries(journal_path_for(path))]
+        self.assertIn("quota", events)
+        self.assertIn("interrupt", events)
+
+    def test_idle_interrupt_does_not_mark_any_task(self):
+        path = self.write_task(1)
+        cfg = self.build(git_enabled=False)
+        real_parse = engine.Plan.parse
+        calls = 0
+
+        def parse_then_interrupt(plan_dir):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt
+            return real_parse(plan_dir)
+
+        with mock.patch.object(engine.Plan, "parse",
+                               side_effect=parse_then_interrupt):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([])), 130)
+        self.assertEqual(parse_task_file(path).status, "TODO")
+        self.assertFalse(journal_path_for(path).exists())
 
 
 class TestSchedulingAndRefusals(EngineTestCase):

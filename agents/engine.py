@@ -163,6 +163,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             print(f"git 準備失敗:{e}")
             return 1
 
+    current_task: Task | None = None
     try:
         while True:
             plan = Plan.parse(cfg.tasks_dir)
@@ -188,7 +189,9 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                     break
                 task, resumed = selected
 
+            current_task = task
             _process_task(cfg, task, adapter, sleep, now, resumed)
+            current_task = None
 
             if once or task_id is not None:
                 break
@@ -196,6 +199,10 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         # Windows 主控台的 Ctrl+C 會同時送達子程序(AI session),故 session 由 OS
         # 訊號終止;engine 這裡把已產出的進度收進 wip 檢查點(絕不丟棄)後以 130 退出。
         print("\n收到中斷(Ctrl+C):session 已終止,保留目前進度...")
+        if current_task is not None:
+            _mark_interrupted_task(
+                current_task, "使用者中斷,保留進度供下次接續", now,
+                detail="run 收到 Ctrl+C")
         if cfg.git_enabled:
             try:
                 if gitops.commit_if_dirty(cfg.root, "wip: 使用者中斷,保留進度",
@@ -208,6 +215,10 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         return 130
     except AgentsError as e:
         print(f"執行中止(基礎設施錯誤):{e}")
+        if current_task is not None:
+            _mark_interrupted_task(
+                current_task, "基礎設施錯誤中止,保留進度供下次接續", now,
+                detail=str(e))
         if cfg.git_enabled:
             try:
                 if gitops.commit_if_dirty(cfg.root, "wip: 基礎設施錯誤中止,保留進度",
@@ -221,6 +232,29 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     _print_summary(Plan.parse(cfg.tasks_dir))
     _try_write_report(cfg)
     return 0
+
+
+def _mark_interrupted_task(task: Task, summary: str,
+                           now: Callable[[], datetime], *, detail: str) -> None:
+    """中止時把目前任務持久化為 WIP 並寫機器日誌;二次錯誤只警告。
+
+    BLOCKED 是執行 AI 可產生的合法終態,不可被中止處理覆寫。DONE 在調度器驗收
+    通過前尚非可信終態,因此仍改回 WIP,讓下次 run 接續並重新通過閘門。
+    """
+    try:
+        fresh = parse_task_file(task.path)
+        if fresh.status != "BLOCKED":
+            set_status(task.path, "WIP")
+    except Exception as e:  # 中止收尾不得用二次錯誤掩蓋原始退出碼
+        print(f"中斷任務狀態寫回失敗:{e}(工作區保持原樣,未丟棄)")
+
+    try:
+        append_entry(
+            task.journal_path, by="scheduler", event="interrupt",
+            summary=summary, detail=detail,
+            time_str=now().isoformat(timespec="seconds"))
+    except Exception as e:  # 狀態與日誌各自嘗試,其中一項失敗不妨礙另一項
+        print(f"中斷日誌寫入失敗:{e}(工作區保持原樣,未丟棄)")
 
 
 def _process_task(cfg: Config, task: Task, adapter: Adapter,
