@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, TextIO
 
-from assent import AssentError, gitops, lockfile, verification
+from assent import AssentError, contracts, gitops, lockfile, verification
 from assent.adapters import Adapter, get_adapter
 from assent.config import Config
 from assent.folderdeps import find_unfinished_prerequisites
@@ -180,8 +180,7 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
     template = cfg.prompt_template or _DEFAULT_PROMPT_TEMPLATE
     text = (template
             .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
-            .replace("{instructions_path}",
-                     cfg.rel(cfg.assent_dir / "instructions.md"))
+            .replace("{instructions_path}", _instructions_path_for_prompt(cfg))
             .replace("{task_path}", cfg.rel(task.path))
             .replace("{journal_path}", cfg.rel(task.journal_path))
             .replace("{verify_command}",
@@ -336,6 +335,21 @@ def _verify_command_for_prompt(cfg: Config, command: str) -> str:
     parts = [sys.executable, str((cfg.assent_dir / "verify.py").resolve())]
     return (subprocess.list2cmdline(parts) if sys.platform == "win32"
             else shlex.join(parts))
+
+
+def _instructions_path_for_prompt(cfg: Config) -> str:
+    """Name the global working instructions the session is expected to read.
+
+    ``assent run`` refuses before opening any adapter process when that contract is
+    missing, so every scheduled session names the single absolute ``~/.assent`` file.
+    A direct ``engine.run`` library call bypasses the CLI gate; there the project's own
+    copy stays the answer, because a prompt must never point the execution AI at a file
+    that is not on disk.
+    """
+    path = contracts.instructions_path()
+    if path.is_file():
+        return str(path)
+    return cfg.rel(cfg.assent_dir / "instructions.md")
 
 
 def _agents_md_path_for_prompt(cfg: Config) -> str:

@@ -30,6 +30,9 @@ _EMOJI_RE = re.compile(
     "]",
 )
 
+# The project locator, not a file that has to exist: a run's log belongs to the
+# project's own .assent directory even when every setting comes from the user-wide
+# ~/.assent/assent.toml, so the user home is never consulted here.
 _DEFAULT_CONFIG = ".assent/assent.toml"
 _FOLDER_RE = re.compile(r"^[^\s/\\]+$")
 
@@ -139,7 +142,11 @@ def _folder_from_argv(argv: list[str]) -> str | None:
 
 
 def _config_path_for_argv(argv: list[str]) -> Path:
-    """Resolve the configured management file without loading or validating it."""
+    """Resolve the located management file without loading or validating it.
+
+    An explicit ``--config PATH`` still selects another project's management
+    directory; without it the log stays under this project's ``.assent``.
+    """
     config = _DEFAULT_CONFIG
     for idx, arg in enumerate(argv):
         if arg == "--config" and idx + 1 < len(argv):

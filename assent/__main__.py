@@ -11,7 +11,7 @@ import sys
 import threading
 from collections import Counter
 
-from assent import AssentError, engine, inspection
+from assent import AssentError, contracts, engine, inspection
 from assent.accept import accept_folder
 from assent.archive import archive_all, archive_folder, restore_folder
 from assent.batch_accept import accept_all, accept_selected_batch
@@ -32,6 +32,12 @@ from assent.verification import (verify_batch, verify_folder,
                                   verify_selected_batch)
 
 _DEFAULT_CONFIG = ".assent/assent.toml"
+# The project settings file is optional: it layers over the user-wide settings and
+# locates the project whether or not it exists, so its absence is not an error.
+_CONFIG_HELP = (
+    "Optional project settings file, layered over the user-wide "
+    "~/.assent/assent.toml, and the locator of the project's .assent directory "
+    f"(default: {_DEFAULT_CONFIG})")
 # Set by the parent scheduler on a spawned `assent run <folder>` child to opt
 # that child into the stdin stop channel; a hand-typed `assent run` never sees
 # it, so an interactive stdin (possibly a tty) is left completely alone.
@@ -114,7 +120,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "accept and creates no receipt")
     verify_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
-        help=f"Config file location (default: {_DEFAULT_CONFIG})")
+        help=_CONFIG_HELP)
     clean_p = sub.add_parser(
         "clean", help="Remove worktrees and merged branches that are provably redundant")
 
@@ -135,7 +141,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "deregister it, and delete the zip (cannot be combined with --all)")
     archive_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
-        help=f"Config file location (default: {_DEFAULT_CONFIG})")
+        help=_CONFIG_HELP)
 
     accept_p = sub.add_parser(
         "accept", help="Transactionally integrate one reviewed, finished folder "
@@ -151,7 +157,7 @@ def _build_parser() -> argparse.ArgumentParser:
              "refreshing any stale verification receipt first (sequential only)")
     accept_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
-        help=f"Config file location (default: {_DEFAULT_CONFIG})")
+        help=_CONFIG_HELP)
 
     reconcile_p = sub.add_parser(
         "reconcile", help="Resolve one folder's source-versus-target conflict "
@@ -178,7 +184,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Discard the reconciliation attempt; the source and the "
              "integration target are left unchanged")
     reconcile_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
-                             help=f"Config file location (default: {_DEFAULT_CONFIG})")
+                             help=_CONFIG_HELP)
 
     reject_p = sub.add_parser(
         "reject", help="Human ruling: reject a folder by archiving it, force-"
@@ -188,7 +194,7 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="The work folder to reject (required; cannot "
                                "target all folders)")
     reject_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
-                          help=f"Config file location (default: {_DEFAULT_CONFIG})")
+                          help=_CONFIG_HELP)
 
     rework_p = sub.add_parser(
         "rework", help="Human ruling: reopen a single task, keeping its code "
@@ -214,7 +220,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rework_p.add_argument("--reason", default="", metavar="TEXT",
                           help="The human ruling's reason, written to the rework log")
     rework_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
-                          help=f"Config file location (default: {_DEFAULT_CONFIG})")
+                          help=_CONFIG_HELP)
 
     init_p = sub.add_parser(
         "init", help="Generate or upgrade the .assent skeleton and managed project files")
@@ -237,11 +243,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "folder", nargs="?", metavar="FOLDER",
             help="The work folder; omit to act on all folders")
         p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
-                       help=f"Config file location (default: {_DEFAULT_CONFIG})")
+                       help=_CONFIG_HELP)
     # ``run`` has its own ordered positional list and still accepts the same
     # config option as the other plan commands.
     run_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
-                       help=f"Config file location (default: {_DEFAULT_CONFIG})")
+                       help=_CONFIG_HELP)
     return parser
 
 
@@ -410,6 +416,14 @@ def _dispatch(argv: list[str]) -> int:
         return 1
 
     if args.command == "run":
+        # The session gate for the global contracts: a run that would point the
+        # execution AI at a missing or out-of-date ~/.assent contract is refused
+        # here, before any folder is opened and before any adapter process exists.
+        try:
+            contracts.require_contracts()
+        except AssentError as e:
+            print(f"Global contracts: FAIL ({e})")
+            return 1
         if args.folders:
             result = _dispatch_run_folders(
                 args.config, args.folders, once=args.once, task_id=args.task)
