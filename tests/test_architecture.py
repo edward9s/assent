@@ -141,6 +141,80 @@ class NeutralFolderServices(unittest.TestCase):
         self.assertEqual(imported & commands, set())
 
 
+class VerificationModuleBoundaries(unittest.TestCase):
+    """Verification is a facade over two receipt leaves and one common base.
+
+    ``assent.verification`` re-exports; ``folder_verification`` and
+    ``batch_receipt`` own one receipt model each; ``batch_verification`` runs the
+    batch and writes the evidence ``batch_receipt`` defines; and
+    ``verification_common`` sits under all three without knowing any of them.
+    """
+
+    LEAVES = ("folder_verification", "batch_receipt", "batch_verification")
+
+    def _imported_assent_modules(self, name: str) -> set[str]:
+        """Every ``assent`` submodule the named module imports, by bare name."""
+        tree = ast.parse((PACKAGE / f"{name}.py").read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level:
+                    continue
+                if module == "assent":
+                    imported.update(alias.name for alias in node.names)
+                elif module.startswith("assent."):
+                    imported.add(module.split(".", 1)[1])
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("assent."):
+                        imported.add(alias.name.split(".", 1)[1])
+        return imported
+
+    def test_the_facade_defines_no_implementation_of_its_own(self) -> None:
+        tree = ast.parse((PACKAGE / "verification.py").read_text(
+            encoding="utf-8"))
+        defined = [node.name for node in tree.body
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                        ast.ClassDef))]
+        self.assertEqual(defined, [])
+
+    def test_the_common_base_knows_none_of_the_modules_above_it(self) -> None:
+        imported = self._imported_assent_modules("verification_common")
+        self.assertEqual(imported & {*self.LEAVES, "verification"}, set())
+
+    def test_the_leaves_form_no_import_cycle(self) -> None:
+        # Batch execution may use the batch receipt it writes; no other edge
+        # between the four is allowed, and none of them imports the facade.
+        allowed = {
+            "folder_verification": set(),
+            "batch_receipt": set(),
+            "batch_verification": {"batch_receipt"},
+        }
+        for leaf in self.LEAVES:
+            with self.subTest(module=leaf):
+                imported = self._imported_assent_modules(leaf)
+                self.assertNotIn("verification", imported)
+                self.assertEqual(imported & set(self.LEAVES), allowed[leaf])
+
+    def test_every_verification_entry_point_stays_importable(self) -> None:
+        from assent import verification
+        for name in ("verify_folder", "verify_folder_if_needed", "verify_batch",
+                     "verify_selected_batch", "receipt_matches_current_candidate",
+                     "receipt_report_lines", "invalidate_folder_receipt",
+                     "invalidate_batch_receipt", "read_receipt", "write_receipt",
+                     "read_batch_receipt", "write_batch_receipt",
+                     "batch_receipt_staleness", "build_batch_candidate",
+                     "verifier_digest"):
+            with self.subTest(name=name):
+                self.assertTrue(callable(getattr(verification, name)))
+        for name in ("RECEIPT_NAME", "BATCH_RECEIPT_NAME", "VERIFY_COMMAND",
+                     "VerificationReceipt", "BatchVerificationReceipt",
+                     "BatchSource"):
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(verification, name))
+
+
 class VendorAdapterIndependence(unittest.TestCase):
     """One vendor's adapter never depends on another vendor's adapter module.
 
