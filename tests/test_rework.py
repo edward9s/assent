@@ -316,7 +316,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(missing_code, 1)
         self.assertEqual(self._status(task), "DONE")
         self.assertIn("run 進行中", busy_output)
-        self.assertIn("沒有既有 agents.lock", missing_output)
+        self.assertIn("has no existing agents.lock", missing_output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
 
     def test_partial_journal_write_can_be_retried_without_duplicates(self) -> None:
@@ -475,7 +475,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
         self.assertEqual(self._status(task), "DONE")
         self.assertTrue(dirty.exists())
-        self.assertIn("工作樹不乾淨", output)
+        self.assertIn("Working tree is not clean", output)
         self.assertFalse(task.with_name("t001_task.r.toml").exists())
 
     def test_revert_code_requires_checkpoint_continuous_at_head(self) -> None:

@@ -214,7 +214,7 @@ class TestClean(unittest.TestCase):
         self.assertFalse((self.tasks_dir / "agents.lock").exists())
         self.assertIn(branch, gitops.branches_with_prefix(
             self.root, f"{self.folder}/"))
-        self.assertIn("無法在不改動 .agents", output)
+        self.assertIn("without modifying .agents", output)
 
     def test_clean_detached_unmerged_head_is_retained(self) -> None:
         worktree = gitops.ensure_worktree(self.root, self.folder)

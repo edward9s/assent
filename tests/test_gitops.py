@@ -1,4 +1,4 @@
-"""gitops 測試:全部在 tempfile.mkdtemp() 建的臨時 repo 中進行(鐵則 4)。"""
+"""gitops tests: all run inside a temporary repo created by tempfile.mkdtemp() (Rule 4)."""
 import shutil
 import subprocess
 import tempfile
@@ -36,7 +36,7 @@ class GitTestCase(unittest.TestCase):
 
 class TestEnsureClean(GitTestCase):
     def test_clean_repo_passes(self):
-        ensure_clean(self.root)  # 不應拋錯
+        ensure_clean(self.root)  # should not raise
 
     def test_dirty_repo_raises(self):
         (self.root / "new.txt").write_text("x", encoding="utf-8")
@@ -49,7 +49,8 @@ class TestEnsureClean(GitTestCase):
             ensure_clean(self.root)
 
     def test_excluded_runtime_artifacts_are_ignored(self):
-        # .agents 內先有被追蹤的檔,porcelain 才會逐檔列出(整目錄未追蹤時只列目錄)
+        # .agents needs an already-tracked file first, or porcelain lists the whole
+        # untracked directory instead of individual files.
         (self.root / ".agents").mkdir()
         (self.root / ".agents" / "agents.toml").write_text("x", encoding="utf-8")
         _run(self.root, "add", "-A")
@@ -78,7 +79,8 @@ class TestEnsureBranch(GitTestCase):
         self.assertEqual(first, second)
 
     def test_run_id_unique_across_prefixless_calls(self):
-        # 從非 workflow 分支起始,兩次呼叫(先切回)應各自建立
+        # Starting from a non-workflow branch, two calls (switching back first) should
+        # each create their own branch.
         branch1 = ensure_branch(self.root, "workflow/")
         _run(self.root, "checkout", "master")
         branch2 = ensure_branch(self.root, "workflow/")
@@ -138,12 +140,12 @@ class TestEnsureWorktree(GitTestCase):
     def test_existing_non_worktree_directory_raises(self):
         path = worktree_path(self.root, "parallel01")
         path.mkdir(parents=True)
-        (path / "keep.txt").write_text("不可覆蓋\n", encoding="utf-8")
+        (path / "keep.txt").write_text("do not overwrite\n", encoding="utf-8")
 
-        with self.assertRaisesRegex(AgentsError, "不是本 repo 的有效 worktree"):
+        with self.assertRaisesRegex(AgentsError, "not a valid worktree of this repo"):
             ensure_worktree(self.root, "parallel01")
         self.assertEqual((path / "keep.txt").read_text(encoding="utf-8"),
-                         "不可覆蓋\n")
+                         "do not overwrite\n")
 
     def test_branch_and_commit_do_not_affect_main_worktree(self):
         main_branch = subprocess.run(
@@ -217,23 +219,26 @@ class TestChangesOutsideScope(GitTestCase):
         self.assertEqual(outside, [])
 
     def test_empty_scope_denies_all(self):
-        # 計畫檔未設定 workflow:scope 標記 → scope=[] → fail-closed,任何變更皆視為越界
+        # Task file has no workflow: scope entry -> scope=[] -> fail-closed, every change
+        # counts as out of scope
         (self.root / "anything.py").write_text("x", encoding="utf-8")
         outside = changes_outside_scope(self.root, [])
         self.assertIn("anything.py", outside)
 
     def test_non_ascii_filename_not_octal_escaped(self):
-        # core.quotepath=false:中文檔名應直接以 UTF-8 顯示,不是 \NNN 八進位跳脫
+        # core.quotepath=false: Chinese filenames should show directly as UTF-8, not \NNN
+        # octal-escaped
         (self.root / "測試.py").write_text("x", encoding="utf-8")
         outside = changes_outside_scope(self.root, ["tests/"])
         self.assertIn("測試.py", outside)
 
     def test_since_ref_covers_committed_wip_changes(self):
-        # 額度中斷的 wip 檢查點把越界檔 commit 掉之後,工作樹是乾淨的;
-        # 給 since_ref 才能把「任務起點以來」已 commit 的越界改動也抓出來
+        # After a quota-interruption wip checkpoint commits the out-of-scope file, the
+        # working tree is clean; only since_ref lets committed out-of-scope changes "since
+        # the task started" be caught too.
         start = head_ref(self.root)
         (self.root / "secret.py").write_text("x", encoding="utf-8")
-        commit_all(self.root, "wip(T1): 額度中斷,保留進度")
+        commit_all(self.root, "wip(T1): quota interrupted, progress preserved")
         self.assertEqual(changes_outside_scope(self.root, ["tests/"]), [])
         outside = changes_outside_scope(self.root, ["tests/"], since_ref=start)
         self.assertIn("secret.py", outside)
@@ -241,8 +246,8 @@ class TestChangesOutsideScope(GitTestCase):
     def test_since_ref_deduplicates_with_working_tree(self):
         start = head_ref(self.root)
         (self.root / "secret.py").write_text("x", encoding="utf-8")
-        commit_all(self.root, "wip: 保留")
-        (self.root / "secret.py").write_text("y", encoding="utf-8")  # 又改了同一檔
+        commit_all(self.root, "wip: preserved")
+        (self.root / "secret.py").write_text("y", encoding="utf-8")  # changed the same file again
         outside = changes_outside_scope(self.root, ["tests/"], since_ref=start)
         self.assertEqual(outside.count("secret.py"), 1)
 
@@ -265,14 +270,15 @@ class TestCommitAll(GitTestCase):
         self.assertEqual(log, "auto(W2): message check")
 
     def test_excludes_inside_gitignored_dir_do_not_crash(self):
-        # 回歸:整個 .agents/ 被 .gitignore 時,排除項 pathspec 點名 ignored
-        # 路徑會讓 git add 退出碼 1(狗糧實測炸點);過濾後必須能正常 commit。
+        # Regression: when the whole .agents/ is gitignored, naming an ignored path in the
+        # exclude pathspec makes git add exit 1 (found via dogfooding); filtering must let
+        # commit succeed normally.
         (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
         agents_dir = self.root / ".agents"
         agents_dir.mkdir()
         (agents_dir / "agents.log").write_text("log", encoding="utf-8")
         (self.root / "new.txt").write_text("x", encoding="utf-8")
-        commit_all(self.root, "auto(t001): 不應因 ignored 排除項而失敗",
+        commit_all(self.root, "auto(t001): must not fail due to an ignored exclude entry",
                    excludes=(".agents/agents.log", ".agents/plan01/_report.md"))
         status = subprocess.run(
             ["git", "status", "--porcelain"], cwd=self.root,
@@ -280,52 +286,53 @@ class TestCommitAll(GitTestCase):
         self.assertEqual(status.strip(), "")
 
     def test_live_excludes_still_excluded_when_mixed_with_ignored(self):
-        # 混合情境:一項被 gitignore(濾掉)、一項未被 ignore(仍要生效排除)
+        # Mixed case: one entry is gitignored (filtered out), one is not ignored (must
+        # still take effect as an exclude)
         (self.root / ".gitignore").write_text("ignored.log\n", encoding="utf-8")
         (self.root / "ignored.log").write_text("x", encoding="utf-8")
         (self.root / "live.log").write_text("x", encoding="utf-8")
         (self.root / "new.txt").write_text("x", encoding="utf-8")
-        commit_all(self.root, "auto(t001): 混合排除",
+        commit_all(self.root, "auto(t001): mixed excludes",
                    excludes=("ignored.log", "live.log"))
         tracked = subprocess.run(
             ["git", "ls-files"], cwd=self.root,
             capture_output=True, encoding="utf-8", check=True).stdout
         self.assertIn("new.txt", tracked)
-        self.assertNotIn("live.log", tracked)   # 未被 ignore 的排除項仍生效
+        self.assertNotIn("live.log", tracked)   # exclude entry not covered by ignore still applies
         self.assertNotIn("ignored.log", tracked)
 
     def test_embedded_repo_without_commit_is_skipped(self):
         nested = self.root / ".test-tmp" / "probe" / "inner"
         nested.mkdir(parents=True)
         _run(nested, "init")
-        (nested / "orphan.txt").write_text("未提交\n", encoding="utf-8")
-        (self.root / "normal.txt").write_text("正常變更\n", encoding="utf-8")
+        (nested / "orphan.txt").write_text("uncommitted\n", encoding="utf-8")
+        (self.root / "normal.txt").write_text("normal change\n", encoding="utf-8")
 
         output = StringIO()
         with redirect_stdout(output):
-            commit_all(self.root, "auto(t010): 跳過內嵌 repo")
+            commit_all(self.root, "auto(t010): skip embedded repo")
 
         tracked = subprocess.run(
             ["git", "ls-files"], cwd=self.root, capture_output=True,
             encoding="utf-8", check=True).stdout.splitlines()
         self.assertIn("normal.txt", tracked)
         self.assertFalse(any(path.startswith(".test-tmp/") for path in tracked))
-        self.assertIn("跳過內嵌 repo:.test-tmp/probe/inner,請人工處理",
+        self.assertIn("warning: skipped embedded repo: .test-tmp/probe/inner, handle it manually",
                       output.getvalue())
 
 
 class TestCommitIfDirty(GitTestCase):
     def test_dirty_tree_commits_and_returns_true(self):
         (self.root / "wip.txt").write_text("x", encoding="utf-8")
-        self.assertTrue(commit_if_dirty(self.root, "wip(T1): 額度中斷,保留進度"))
+        self.assertTrue(commit_if_dirty(self.root, "wip(T1): quota interrupted, progress preserved"))
         log = subprocess.run(
             ["git", "log", "-1", "--pretty=%s"], cwd=self.root,
             capture_output=True, encoding="utf-8", check=True).stdout.strip()
-        self.assertEqual(log, "wip(T1): 額度中斷,保留進度")
+        self.assertEqual(log, "wip(T1): quota interrupted, progress preserved")
 
     def test_clean_tree_returns_false_without_commit(self):
         before = head_ref(self.root)
-        self.assertFalse(commit_if_dirty(self.root, "不該出現"))
+        self.assertFalse(commit_if_dirty(self.root, "should not appear"))
         self.assertEqual(head_ref(self.root), before)
 
     def test_excluded_artifact_alone_does_not_create_commit(self):

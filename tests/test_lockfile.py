@@ -1,8 +1,9 @@
-"""工作資料夾檔案鎖測試。
+"""Task-folder file lock tests.
 
-跨進程互斥用 subprocess 起一個持鎖子進程來驗證(比照 tests/test_e2e.py 以
-subprocess 演練真實行為的慣例);同一進程內以假 flock 難以模擬跨 run 的
-OS 層互斥,故走真子進程。
+Cross-process mutual exclusion is verified by launching a lock-holding subprocess (following
+the tests/test_e2e.py convention of exercising real behavior via subprocess); faking flock
+within a single process cannot simulate the OS-level mutual exclusion across separate runs,
+hence a real subprocess.
 """
 import shutil
 import subprocess
@@ -15,11 +16,12 @@ from pathlib import Path
 from agents.config import load_config
 from agents.lockfile import LOCK_NAME, LockBusy, hold_lock
 
-# import agents 需要 repo 根目錄在路徑上;子進程以此為 cwd。
+# Importing agents requires the repo root on the path; the subprocess uses it as cwd.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# 子進程:取得鎖後印一行 LOCKED 通知父進程,再讀 stdin 阻塞持鎖;
-# 父進程關閉其 stdin 即釋放鎖並退出。
+# Subprocess: after acquiring the lock, print a LOCKED line to notify the parent, then
+# block on reading stdin while holding the lock; the parent closing its stdin releases
+# the lock and lets it exit.
 _HOLDER = textwrap.dedent(
     """
     import sys
@@ -46,7 +48,7 @@ class TestHoldLock(unittest.TestCase):
             cwd=str(_REPO_ROOT), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             encoding="utf-8")
         self.addCleanup(self._cleanup_holder, proc)
-        line = proc.stdout.readline()  # 阻塞直到子進程確認持鎖
+        line = proc.stdout.readline()  # blocks until the subprocess confirms it holds the lock
         self.assertEqual(line.strip(), "LOCKED")
         return proc
 
@@ -56,11 +58,11 @@ class TestHoldLock(unittest.TestCase):
             proc.wait(timeout=10)
 
     def _release_holder(self, proc: subprocess.Popen) -> None:
-        proc.stdin.close()  # 子進程 readline 收到 EOF -> 離開 with -> 釋放鎖
+        proc.stdin.close()  # subprocess readline gets EOF -> exits the with block -> releases the lock
         self.assertEqual(proc.wait(timeout=10), 0)
 
     def test_second_run_blocked_with_pid_and_folder(self):
-        """子進程持鎖時,同資料夾第二次取鎖立即失敗,訊息含先行者 PID 與資料夾名。"""
+        """While the subprocess holds the lock, a second acquire on the same folder fails immediately, with a message including the holder's PID and folder name."""
         proc = self._start_holder()
         with self.assertRaises(LockBusy) as ctx:
             with hold_lock(self.tasks_dir, "parallel01"):
@@ -70,14 +72,14 @@ class TestHoldLock(unittest.TestCase):
         self.assertIn(str(proc.pid), msg)
 
     def test_reacquire_after_release(self):
-        """持鎖進程結束後,無需任何清理即可立即再次取鎖。"""
+        """After the lock-holding process exits, the lock can be reacquired immediately with no cleanup."""
         proc = self._start_holder()
         self._release_holder(proc)
         with hold_lock(self.tasks_dir, "parallel01"):
-            pass  # 不拋即代表再次取鎖成功
+            pass  # not raising means reacquiring succeeded
 
     def test_reacquire_after_kill(self):
-        """持鎖進程被 kill(非正常結束)後,OS 自動釋放鎖,可立即再取。"""
+        """After the lock-holding process is killed (abnormal exit), the OS releases the lock automatically and it can be reacquired immediately."""
         proc = self._start_holder()
         proc.kill()
         proc.wait(timeout=10)
@@ -85,13 +87,13 @@ class TestHoldLock(unittest.TestCase):
             pass
 
     def test_lockfile_survives_release(self):
-        """鎖檔是執行期產物,釋放後仍留在磁碟(刪檔會引入 race)。"""
+        """The lock file is a runtime artifact and stays on disk after release (deleting it would introduce a race)."""
         with hold_lock(self.tasks_dir, "parallel01"):
             pass
         self.assertTrue((self.tasks_dir / LOCK_NAME).is_file())
 
     def test_git_excludes_contains_lockfile(self):
-        """Config.git_excludes 含鎖檔相對路徑(不進版控、不參與乾淨/scope 檢查)。"""
+        """Config.git_excludes contains the lock file's relative path (not tracked by git, not part of clean/scope checks)."""
         (self.root / ".agents" / "agents.toml").write_text(
             '', encoding="utf-8")
         cfg = load_config(

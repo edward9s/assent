@@ -1,15 +1,18 @@
-"""工作資料夾檔案鎖:同一工作資料夾同時只允許一個 agents run。
+"""Task-folder file lock: only one agents run may operate on a given task folder at a time.
 
-run 啟動時對工作資料夾取得 OS 層「非阻塞獨占鎖」(Windows 用 msvcrt、POSIX 用
-fcntl),進程存活期間持有。鎖的生命週期綁定檔案控制代碼:進程無論如何終止
-(crash / kill / Ctrl+C),OS 都會自動釋放——因此不留 stale lock、無 PID 重用
-問題,也不需要任何人工清理。這正是不採「PID lock file + 存活檢查」方案的原因。
+When a run starts, it acquires an OS-level "non-blocking exclusive lock" on the task folder
+(msvcrt on Windows, fcntl on POSIX), held for the process's lifetime. The lock's lifetime is
+tied to the file handle: however the process terminates (crash / kill / Ctrl+C), the OS
+releases it automatically — so there is no stale lock, no PID-reuse problem, and no manual
+cleanup needed. This is exactly why a "PID lock file + liveness check" scheme was not used.
 
-鎖檔為 <tasks_dir>/agents.lock,平時留在磁碟、永不刪除(刪檔會引入 race)。
-檔內只寫 PID、啟動時間、資料夾名供診斷,不作為判斷依據。
+The lock file is <tasks_dir>/agents.lock; it stays on disk and is never deleted (deleting it
+would introduce a race). Its contents are only PID, start time, and folder name for
+diagnostics — never used to decide anything.
 
-限制:網路檔案系統上 flock / msvcrt.locking 的語意不可靠(部分 NFS、SMB
-實作不保證跨主機互斥);本鎖只保證本機同一檔案系統上的互斥。
+Limitation: flock / msvcrt.locking semantics are unreliable on network filesystems (some NFS
+and SMB implementations do not guarantee cross-host mutual exclusion); this lock only
+guarantees mutual exclusion on the local filesystem.
 """
 from __future__ import annotations
 
@@ -25,10 +28,12 @@ from agents import AgentsError
 
 LOCK_NAME = "agents.lock"
 
-# Windows 的 msvcrt.locking 是強制鎖(mandatory):會擋掉他人對該區段的「讀取」。
-# 把鎖放在遠離內容的高位元組、永不寫入該處,搶輸的一方才讀得到檔頭的診斷內容
-# (Windows 允許鎖定 EOF 之後的區段,不會撐大檔案)。POSIX flock 是勸告鎖、
-# 且鎖整個開啟描述,offset 對它無意義,一併沿用不影響。
+# Windows msvcrt.locking is a mandatory lock: it blocks even a "read" of that region by
+# others. The lock is placed at a high byte offset far from the content, and content is
+# never written there, so the losing side can still read the header's diagnostic content
+# (Windows allows locking a region past EOF without growing the file). POSIX flock is
+# advisory and locks the whole open file description, so offset is meaningless to it —
+# reusing the same offset is harmless.
 _LOCK_OFFSET = 1 << 30  # 1 GiB
 _LOCK_BYTES = 1
 
@@ -68,15 +73,15 @@ else:
 
 
 class LockBusy(AgentsError):
-    """工作資料夾已被另一個 run 持鎖;訊息已含先行者的 PID 與資料夾名。"""
+    """The task folder is already held by another run; the message includes the holder's PID and folder name."""
 
 
 class LockMissing(AgentsError):
-    """鎖檔不存在；不建立檔案的呼叫端無法安全取得同一把鎖。"""
+    """The lock file does not exist; a caller that must not create it cannot safely acquire the same lock."""
 
 
 def _write_diag(handle, tasks_name: str) -> None:
-    """把 PID、啟動時間(ISO 8601)、資料夾名寫入鎖檔(truncate 重寫,僅供診斷)。"""
+    """Write PID, start time (ISO 8601), and folder name into the lock file (rewritten by truncation, diagnostics only)."""
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     body = (
         f"pid = {os.getpid()}\n"
@@ -90,7 +95,7 @@ def _write_diag(handle, tasks_name: str) -> None:
 
 
 def _read_diag(path: Path) -> dict:
-    """讀鎖檔診斷內容;讀不到或壞格式一律回空 dict(診斷不影響互斥判斷)。"""
+    """Read the lock file's diagnostic content; unreadable or malformed content returns an empty dict (diagnostics never affect the mutual-exclusion decision)."""
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
@@ -99,7 +104,7 @@ def _read_diag(path: Path) -> dict:
 
 
 def _short_time(started_at) -> str:
-    """ISO 8601 時間字串取 HH:MM 供訊息用;取不到回空字串。"""
+    """Take HH:MM from an ISO 8601 time string for message use; returns an empty string on failure."""
     if not isinstance(started_at, str):
         return ""
     try:
@@ -115,25 +120,29 @@ def _busy_message(tasks_name: str, diag: dict) -> str:
         detail = f"(PID {pid}"
         hhmm = _short_time(diag.get("started_at"))
         if hhmm:
-            detail += f",自 {hhmm} 起"
+            detail += f", started at {hhmm}"
         detail += ")"
-    return (f"另一個 agents run 正在處理工作資料夾 {tasks_name}{detail}。"
-            "同一工作資料夾同時只能有一個 run。")
+    return (f"Another agents run is already processing task folder {tasks_name}{detail}. "
+            "Only one run may operate on a task folder at a time.")
 
 
 @contextlib.contextmanager
 def hold_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
-    """對 <tasks_dir>/agents.lock 取得 OS 層非阻塞獨占鎖,持有至離開 with 區塊。
+    """Acquire an OS-level non-blocking exclusive lock on <tasks_dir>/agents.lock, held until the with block exits.
 
-    搶不到鎖:讀出鎖檔診斷內容,拋 LockBusy(訊息含先行者 PID 與資料夾名);
-    呼叫端據此以退出碼 1 失敗,不碰工作區任何東西。取鎖成功即把診斷內容寫回鎖檔。
+    If the lock cannot be acquired: read the lock file's diagnostic content and raise
+    LockBusy (message includes the holder's PID and folder name); the caller fails with
+    exit code 1 based on this, without touching anything in the working tree. On success,
+    the diagnostic content is written back into the lock file.
     """
     tasks_dir = Path(tasks_dir)
     tasks_dir.mkdir(parents=True, exist_ok=True)
     path = tasks_dir / LOCK_NAME
-    # O_CREAT 但不 O_TRUNC:建立缺檔又不截斷既有內容(截斷會砸掉持鎖者寫的診斷)。
-    # 走二進位:鎖要 seek 到 _LOCK_OFFSET 這種大位移,text 串流只認 tell() 回傳的
-    # 不透明 cookie、不接受任意位移;O_BINARY 同時避開 Windows 的換行轉換。
+    # O_CREAT but not O_TRUNC: create the file if missing without truncating existing content
+    # (truncating would destroy the holder's diagnostics). Binary mode: locking needs to seek
+    # to a large offset like _LOCK_OFFSET, and text streams only accept the opaque cookie
+    # returned by tell(), not an arbitrary offset; O_BINARY also avoids Windows newline
+    # translation.
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
     handle = os.fdopen(os.open(str(path), flags, 0o644), "r+b")
     try:
@@ -150,11 +159,12 @@ def hold_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
 
 @contextlib.contextmanager
 def probe_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
-    """取得既有工作資料夾鎖，但完全不建立或改寫 ``agents.lock``。
+    """Acquire an existing task-folder lock without ever creating or rewriting ``agents.lock``.
 
-    ``clean`` 必須與 ``run`` 使用同一把鎖，卻又不得碰觸 ``.agents/`` 的計畫
-    歸檔。鎖檔不存在時若先建立再刪除，會在釋鎖與刪檔之間留下競態；因此直接
-    保守拒絕，由呼叫端跳過清理。正常曾執行過 ``run`` 的資料夾已有鎖檔。
+    ``clean`` must use the same lock as ``run``, yet must never touch ``.agents/`` plan
+    archival. If the lock file did not exist and were created then deleted, a race would open
+    between unlocking and deleting; so this refuses conservatively instead, and the caller
+    skips cleanup. A folder that has run ``run`` normally already has a lock file.
     """
     path = Path(tasks_dir) / LOCK_NAME
     flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
@@ -162,10 +172,10 @@ def probe_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
         descriptor = os.open(str(path), flags)
     except FileNotFoundError as e:
         raise LockMissing(
-            f"工作資料夾 {tasks_name} 沒有既有 {LOCK_NAME}，"
-            "無法在不改動 .agents 的前提下證明未被鎖") from e
+            f"Task folder {tasks_name} has no existing {LOCK_NAME}; "
+            "cannot prove it is unlocked without modifying .agents") from e
     except OSError as e:
-        raise AgentsError(f"無法開啟工作資料夾 {tasks_name} 的鎖檔:{e}") from e
+        raise AgentsError(f"Unable to open lock file for task folder {tasks_name}: {e}") from e
 
     handle = os.fdopen(descriptor, "r+b")
     try:
