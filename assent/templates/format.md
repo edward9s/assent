@@ -703,6 +703,29 @@ human.
    no cycles, no duplicate ids, all fields present — the run main loop reparses
    each round, and a broken file or a deactivated task file always fails closed.
 
+### History rewrites
+
+A history rewrite of this project (author/email or message) touches three
+load-bearing points; a rewrite tool must preserve all three, not just avoid
+touching Git in general.
+
+1. The machine subject prefixes (`auto(<folder>/tNNN):`, `wip(`, `rework(`,
+   `accept(`) are load-bearing structure: report attribution, rework tail
+   matching, and clean/reject branch judgment all depend on them. A rewrite
+   tool may touch the author, email, or the rest of a message, but the subject
+   prefix must survive byte-for-byte.
+2. A rework revert checkpoint embeds `original_head` and the reverted hashes
+   in the commit message body, and that checkpoint necessarily sits on the
+   owning work folder's branch worktree. A rewrite must find no rework in
+   progress beforehand. This project's rewrite tool's apply preconditions
+   (clean tree, exactly one worktree, only `main` and `origin/main` refs)
+   already fail closed against that state — the defense lives in the rewrite
+   tool, not in a new command.
+3. A verification receipt (`_verification.toml` and the like) goes stale the
+   moment history is rewritten, in every case. That is an expected cost:
+   rebuild it through the standard `verify` flow. A receipt is a disposable
+   cache, never a long-term source of truth.
+
 ## _report.md (the review meeting's agenda)
 
 `assent report` (or run closeout, or after a successful rework) aggregates the
