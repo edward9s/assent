@@ -1,14 +1,20 @@
 """全部工作資料夾調度的依賴順序、平行與卡住判定測試。"""
 import contextlib
 import io
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agents.folder_scheduler import run_all
+from agents.folder_scheduler import _send_interrupt, run_all
 from agents.plan import set_status
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def task_text(status: str) -> str:
@@ -178,6 +184,24 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertIn("工作資料夾失敗:work(退出碼 7", out.getvalue())
         self.assertIn("_agents.log", out.getvalue())
 
+    def test_status_control_c_exit_code_is_treated_as_interrupt(self):
+        self.make_folder("work")
+
+        class ControlCExitProcess:
+            def poll(self):
+                return 3221225786
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch(
+                "agents.folder_scheduler._start_folder",
+                return_value=ControlCExitProcess()):
+            code = run_all(str(self.config), self.agents_dir)
+
+        self.assertEqual(code, 130)
+        self.assertIn("工作資料夾已中斷:work(退出碼 3221225786)",
+                      out.getvalue())
+        self.assertNotIn("工作資料夾失敗", out.getvalue())
+
     def test_keyboard_interrupt_is_forwarded_and_waits_for_child(self):
         self.make_folder("work")
 
@@ -201,6 +225,57 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(code, 130)
         send.assert_called_once_with(process)
         self.assertTrue(process.waited)
+
+
+@unittest.skipUnless(os.name == "nt", "CTRL_BREAK_EVENT 收尾為 Windows 限定")
+class TestBreakHandlerInterrupt(unittest.TestCase):
+    """實測:註冊處理器的子行程收到 CTRL_BREAK_EVENT 會走 KeyboardInterrupt。"""
+
+    # 以「短睡迴圈」等訊號,不用單發 time.sleep 也不用忙等待:
+    #   * 單發 time.sleep 在 Windows 不會被 SIGBREAK 喚醒;
+    #   * 純忙等待會讓主執行緒霸佔 GIL,餓死 Windows 產生的主控台控制處理器
+    #     執行緒,導致 SIGBREAK 有時來不及轉呈、被 OS 預設處理器直接終止
+    #     (退出碼 3221225786)。
+    # 每輪短睡都釋放 GIL 讓處理器執行緒跑,睡醒的位元組碼檢查點再把待處理的
+    # SIGBREAK 轉成 KeyboardInterrupt——這也貼近真實 run 阻塞在會釋放 GIL 的
+    # 子行程 wait 上的情形。註冊後全部動作都包在 try 內,確保訊號落在任一處都接得住。
+    _PROBE = textwrap.dedent(
+        """
+        import sys, time
+        from agents.__main__ import _install_break_handler
+        _install_break_handler()
+        try:
+            print("READY", flush=True)
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                time.sleep(0.005)
+        except KeyboardInterrupt:
+            sys.exit(130)
+        sys.exit(1)
+        """
+    )
+
+    def test_ctrl_break_event_reaches_keyboard_interrupt_and_exits_130(self):
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(_PROJECT_ROOT)
+        process = subprocess.Popen(
+            [sys.executable, "-c", self._PROBE],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            text=True,
+        )
+        self.addCleanup(process.kill)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), "READY")
+            _send_interrupt(process)
+            returncode = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:  # pragma: no cover - 卡死才會走到
+            process.kill()
+            raise
+        self.assertEqual(returncode, 130)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 from collections import Counter
 
@@ -194,7 +195,22 @@ def _dispatch(argv: list[str]) -> int:
     return 2  # argparse required=True 已擋住,防禦性保底
 
 
+def _install_break_handler() -> None:
+    """Windows 限定:讓 CTRL_BREAK_EVENT 轉為 KeyboardInterrupt。
+
+    ``run --all`` 以 CREATE_NEW_PROCESS_GROUP 啟動子行程,中斷時只能送
+    CTRL_BREAK_EVENT(對應 SIGBREAK)。子行程若未註冊處理器,收到訊號會被 OS
+    直接終止(退出碼 3221225786),engine 的中斷收尾(WIP 標記、r 檔 interrupt
+    條目、wip 檢查點)完全不會執行,違反「燒過 tokens 的產出絕不丟棄」。改綁
+    default_int_handler 後,SIGBREAK 會走與 Ctrl+C 相同的 KeyboardInterrupt 路徑。
+    POSIX 無 SIGBREAK,行為不變。
+    """
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)
+
+
 def main(argv: list[str] | None = None) -> int:
+    _install_break_handler()
     # Windows 下 stdout/stderr 導向管線/檔案時預設用系統 code page,中文會變亂碼
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):

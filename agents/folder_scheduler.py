@@ -18,6 +18,10 @@ from agents.plan import Plan
 
 _POLL_SECONDS = 0.05
 _GIT_REQUIRED_MESSAGE = "本專案尚未初始化 git,請先執行 git init"
+# 130 是子行程正常走 KeyboardInterrupt 收尾後的退出碼;3221225786(0xC000013A,
+# STATUS_CONTROL_C_EXIT)是 Windows 上仍未裝處理器的路徑被 OS 直接終止的碼——
+# 兩者都是「已中斷」而非「資料夾失敗」,避免誤報。
+_INTERRUPT_RETURNCODES = (130, 3221225786)
 
 
 def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
@@ -174,8 +178,8 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
                 attempted.add(folder)
                 if returncode == 0:
                     print(f"完成工作資料夾:{folder}(退出碼 0)")
-                elif returncode == 130:
-                    print(f"工作資料夾已中斷:{folder}(退出碼 130)")
+                elif returncode in _INTERRUPT_RETURNCODES:
+                    print(f"工作資料夾已中斷:{folder}(退出碼 {returncode})")
                     interrupted = True
                 else:
                     log_path = agents_dir / folder / "_agents.log"
