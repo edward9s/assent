@@ -1,6 +1,7 @@
 """Tests for the archive subcommand: preconditions, the archive/restore round trip,
 crash-resume idempotency at every interrupt point, and roster content."""
 import contextlib
+import hashlib
 import io
 import json
 import shutil
@@ -9,14 +10,16 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
-from assent import gitops
+from assent import gitops, pathops
 from assent.archive import (archive_all, archive_folder, archive_selected,
                             read_roster, restore_folder, _archive_dir,
                             _write_roster, _zip_path)
 from assent.config import load_config
 from assent.lockfile import LockBusy, hold_lock
 from assent.__main__ import _dispatch
+from tests.link_support import make_directory_link, safe_rmtree
 
 
 _VERIFY = 'python -c "raise SystemExit(0)"'
@@ -46,7 +49,7 @@ def _git(root: Path, *args: str) -> str:
 class TestArchive(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.addCleanup(safe_rmtree, self.root)
         _git(self.root, "init")
         _git(self.root, "config", "user.name", "Test")
         _git(self.root, "config", "user.email", "test@example.com")
@@ -72,7 +75,7 @@ class TestArchive(unittest.TestCase):
         self.addCleanup(self._cleanup_worktrees)
 
     def _cleanup_worktrees(self) -> None:
-        shutil.rmtree(self.container, ignore_errors=True)
+        safe_rmtree(self.container)
         subprocess.run(["git", "worktree", "prune"], cwd=self.root,
                        capture_output=True)
 
@@ -118,6 +121,47 @@ class TestArchive(unittest.TestCase):
     def _integrate(self, branch: str) -> None:
         """Merge a source into the target the way an accepted folder leaves it."""
         _git(self.root, "merge", "--no-ff", branch, "-m", f"accept: {branch}")
+
+    def _linked_accepted_source(self) -> tuple[Path, str, list[tuple[str, str]]]:
+        """Build the incident shape: source links point at ignored main-tree data."""
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\nassets/\nlib/l10n/arb/\n", encoding="utf-8")
+        (self.root / "lib" / "l10n").mkdir(parents=True)
+        (self.root / "lib" / "l10n" / "app_en.arb").write_text(
+            "{}\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore", "lib/l10n/app_en.arb")
+        _git(self.root, "commit", "-m", "provision ignored archive targets")
+
+        files = {
+            "pkg": {"sentinel.txt": "pkg sentinel\n", "nested/data.txt": "pkg data\n"},
+            "assets": {"sentinel.txt": "assets sentinel\n"},
+            "lib/l10n/arb": {"app.arb": '{"keep": true}\n'},
+        }
+        for directory, contents in files.items():
+            for relative, content in contents.items():
+                target = self.root / directory / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+        before = self._target_inventory(files)
+
+        worktree = gitops.ensure_worktree(self.root, self.folder)
+        branch = gitops.ensure_branch(worktree, f"{self.folder}/")
+        make_directory_link(worktree / "pkg", self.root / "pkg")
+        make_directory_link(worktree / "assets", self.root / "assets")
+        make_directory_link(
+            worktree / "lib" / "l10n" / "arb", self.root / "lib" / "l10n" / "arb")
+        (worktree / "result.txt").write_text("accepted result\n", encoding="utf-8")
+        gitops.commit_all(worktree, "finish linked archive source")
+        self._integrate(branch)
+        return worktree, branch, before
+
+    def _target_inventory(self, files: dict[str, dict[str, str]]) -> list[tuple[str, str]]:
+        return sorted(
+            (str(path.relative_to(self.root)).replace("\\", "/"),
+             hashlib.sha256(path.read_bytes()).hexdigest())
+            for directory in files
+            for path in (self.root / directory).rglob("*")
+            if path.is_file())
 
     # ---- preconditions ---------------------------------------------------
 
@@ -257,6 +301,62 @@ class TestArchive(unittest.TestCase):
             (self.tasks_dir / "t001_task.e.toml").read_text(encoding="utf-8"),
             _task_text())
         self.assertFalse(zip_path.exists())
+        self.assertEqual(read_roster(self.assent_dir), [])
+
+    def test_archive_detaches_main_tree_links_before_publishing(self) -> None:
+        worktree, branch, before = self._linked_accepted_source()
+
+        code, output = self._archive()
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(worktree.exists())
+        self.assertEqual(gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"), [])
+        self.assertEqual(self._target_inventory({
+            "pkg": {"sentinel.txt": "", "nested/data.txt": ""},
+            "assets": {"sentinel.txt": ""},
+            "lib/l10n/arb": {"app.arb": ""},
+        }), before)
+        self._assert_fully_archived()
+
+    def test_archive_all_detaches_main_tree_links_before_publishing(self) -> None:
+        worktree, branch, before = self._linked_accepted_source()
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = archive_all(str(self.config_path), self.assent_dir)
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertIn(f"{self.folder}: archived", output.getvalue())
+        self.assertFalse(worktree.exists())
+        self.assertEqual(gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"), [])
+        self.assertEqual(self._target_inventory({
+            "pkg": {"sentinel.txt": "", "nested/data.txt": ""},
+            "assets": {"sentinel.txt": ""},
+            "lib/l10n/arb": {"app.arb": ""},
+        }), before)
+        self._assert_fully_archived()
+
+    def test_archive_detachment_failure_keeps_targets_and_publication_state(self) -> None:
+        worktree, branch, before = self._linked_accepted_source()
+
+        with patch.object(pathops, "detach_directory_link",
+                          side_effect=OSError("simulated detachment failure")):
+            code, output = self._archive()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("linked target content was not touched", output)
+        self.assertIn(str(worktree / "assets"), output)
+        self.assertTrue(worktree.exists())
+        self.assertIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"))
+        self.assertEqual(self._target_inventory({
+            "pkg": {"sentinel.txt": "", "nested/data.txt": ""},
+            "assets": {"sentinel.txt": ""},
+            "lib/l10n/arb": {"app.arb": ""},
+        }), before)
+        self.assertFalse(_zip_path(self.assent_dir, self.folder).exists())
         self.assertEqual(read_roster(self.assent_dir), [])
 
     def test_restore_refuses_when_live_directory_exists(self) -> None:

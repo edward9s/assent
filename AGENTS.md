@@ -49,6 +49,15 @@ while operating an assent-managed session live in
   context.
 - Token-burned output is never discarded: no process change may introduce
   "revert the workspace on failure" behavior.
+- Assent cleanup must never pass a directory tree containing a junction,
+  directory symlink, or other directory reparse point to Git or a recursive
+  remover. It first detaches the link object itself without traversing its
+  target; deleting a link object is distinct from deleting anything through
+  its resolved path. Assent detaches each directory-link object before any
+  recursive Git or filesystem removal and never traverses its resolved target.
+  External link targets survive success, refusal, failure, interruption, and
+  retry. If inventory, ownership, or detachment cannot be proven, cleanup
+  refuses and retains the managed path for an Assent-owned retry.
 - The fail-closed scope check is a safety floor; its meaning must not be
   relaxed.
 - git is always required; no disable switch or git-less degraded mode may be

@@ -1,4 +1,5 @@
 """gitops tests: all run inside a temporary repo created by tempfile.mkdtemp() (Rule 4)."""
+import os
 import shutil
 import subprocess
 import tempfile
@@ -6,13 +7,15 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
-from assent import AssentError
+from assent import AssentError, pathops
 from assent.gitops import (
     branches_with_prefix, changes_outside_scope, commit_all, commit_if_dirty,
     cleanup_unstarted_worktree, ensure_branch,
     ensure_clean, ensure_worktree, head_ref, resolve_folder_source, restore, tracked_paths,
     worktree_path)
+from tests.link_support import cleanup_worktree, make_directory_link, safe_rmtree
 
 
 def _run(root: Path, *args: str) -> None:
@@ -31,7 +34,7 @@ class GitTestCase(unittest.TestCase):
         _run(self.root, "commit", "-m", "init")
 
     def tearDown(self) -> None:
-        shutil.rmtree(self.root, ignore_errors=True)
+        safe_rmtree(self.root)
 
 
 class TestEnsureClean(GitTestCase):
@@ -99,10 +102,12 @@ class TestEnsureWorktree(GitTestCase):
         container = self.root.parent / f"{self.root.name}.worktrees"
         if container.exists():
             for path in container.iterdir():
-                if (path / ".git").is_file():
-                    _run(self.root, "worktree", "remove", "--force", str(path))
+                if pathops.is_link(path):
+                    safe_rmtree(path)
+                elif (path / ".git").is_file():
+                    cleanup_worktree(self.root, path)
                 else:
-                    shutil.rmtree(path)
+                    safe_rmtree(path)
             container.rmdir()
         _run(self.root, "worktree", "prune")
         super().tearDown()
@@ -160,6 +165,31 @@ class TestEnsureWorktree(GitTestCase):
         self.assertFalse(path.exists())
         self.assertNotIn(branch, branches_with_prefix(self.root, "parallel01/"))
 
+    def test_cleanup_detaches_links_and_leaves_their_targets_untouched(self):
+        # Setup-failure cleanup runs `git worktree remove`, which walks an
+        # ignored junction into its target and deletes what it finds there, so
+        # the link objects have to be gone before Git starts.
+        (self.root / ".gitignore").write_text("pkg/\n", encoding="utf-8")
+        _run(self.root, "add", "-A")
+        _run(self.root, "commit", "-m", "ignore pkg")
+        snapshot = head_ref(self.root)
+        path = ensure_worktree(self.root, "parallel01", snapshot)
+        branch = ensure_branch(path, "parallel01/")
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(safe_rmtree, target)
+        (target / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+        make_directory_link(path / "pkg", target)
+
+        cleanup_unstarted_worktree(
+            self.root, "parallel01", snapshot, "parallel01/")
+
+        self.assertFalse(path.exists())
+        self.assertNotIn(branch, branches_with_prefix(self.root, "parallel01/"))
+        self.assertEqual([entry.name for entry in target.iterdir()],
+                         ["sentinel.txt"])
+        self.assertEqual((target / "sentinel.txt").read_text(encoding="utf-8"),
+                         "keep\n")
+
     def test_cleanup_refuses_dirty_new_worktree_and_preserves_it(self):
         snapshot = head_ref(self.root)
         path = ensure_worktree(self.root, "parallel01", snapshot)
@@ -175,7 +205,7 @@ class TestEnsureWorktree(GitTestCase):
 
     def test_prunes_stale_metadata_and_recreates_deleted_worktree(self):
         path = ensure_worktree(self.root, "parallel01")
-        shutil.rmtree(path)
+        safe_rmtree(path)
 
         rebuilt = ensure_worktree(self.root, "parallel01")
         self.assertEqual(rebuilt, path)
@@ -210,15 +240,85 @@ class TestEnsureWorktree(GitTestCase):
                          "init\n")
 
 
+class TestNonTraversingInventory(GitTestCase):
+    """The shared boundary refuses by name rather than widening what it deletes."""
+
+    def tearDown(self) -> None:
+        container = self.root.parent / f"{self.root.name}.worktrees"
+        if container.exists():
+            for path in container.iterdir():
+                cleanup_worktree(self.root, path)
+            container.rmdir()
+        _run(self.root, "worktree", "prune")
+        super().tearDown()
+
+    def test_a_missing_path_has_nothing_to_detach(self):
+        # Idempotence: a rerun after an interrupted cleanup must not fail here.
+        self.assertEqual(
+            pathops.inventory_directory_links(self.root / "already gone"), ())
+
+    def test_a_linked_root_is_refused_instead_of_resolved(self):
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(safe_rmtree, target)
+        (target / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+        link = self.root / "linked root"
+        make_directory_link(link, target)
+
+        with self.assertRaisesRegex(AssentError, "root is itself a link"):
+            pathops.inventory_directory_links(link)
+        self.assertTrue((target / "sentinel.txt").is_file())
+
+    def test_a_file_root_is_refused_by_name(self):
+        with self.assertRaisesRegex(AssentError, "is not a directory"):
+            pathops.inventory_directory_links(self.root / "README.md")
+
+    def test_an_unreadable_entry_is_refused_by_name(self):
+        (self.root / "unreadable").mkdir()
+        real_lstat = os.lstat
+
+        def failing_lstat(path, *args, **kwargs):
+            if Path(path).name == "unreadable":
+                raise PermissionError("simulated unreadable entry")
+            return real_lstat(path, *args, **kwargs)
+
+        with mock.patch("os.lstat", failing_lstat):
+            with self.assertRaisesRegex(AssentError, "unable to inspect .*unreadable"):
+                pathops.inventory_directory_links(self.root)
+
+    def test_a_refused_detachment_stops_setup_failure_cleanup(self):
+        (self.root / ".gitignore").write_text("pkg/\n", encoding="utf-8")
+        _run(self.root, "add", "-A")
+        _run(self.root, "commit", "-m", "ignore pkg")
+        snapshot = head_ref(self.root)
+        path = ensure_worktree(self.root, "parallel01", snapshot)
+        ensure_branch(path, "parallel01/")
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(safe_rmtree, target)
+        (target / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+        make_directory_link(path / "pkg", target)
+
+        with mock.patch.object(pathops, "detach_directory_link",
+                               side_effect=OSError("simulated detachment failure")):
+            with self.assertRaisesRegex(AssentError, "recoverable path retained"):
+                cleanup_unstarted_worktree(
+                    self.root, "parallel01", snapshot, "parallel01/")
+
+        self.assertTrue(path.is_dir())
+        self.assertTrue((path / "pkg").exists())
+        self.assertTrue((target / "sentinel.txt").is_file())
+
+
 class TestResolveFolderSource(GitTestCase):
     def tearDown(self) -> None:
         container = self.root.parent / f"{self.root.name}.worktrees"
         if container.exists():
             for path in container.iterdir():
-                if (path / ".git").is_file():
-                    _run(self.root, "worktree", "remove", "--force", str(path))
+                if pathops.is_link(path):
+                    safe_rmtree(path)
+                elif (path / ".git").is_file():
+                    cleanup_worktree(self.root, path)
                 else:
-                    shutil.rmtree(path)
+                    safe_rmtree(path)
             container.rmdir()
         _run(self.root, "worktree", "prune")
         super().tearDown()
@@ -465,7 +565,7 @@ class TestHeadRef(GitTestCase):
             _run(empty, "init")
             self.assertIsNone(head_ref(empty))
         finally:
-            shutil.rmtree(empty, ignore_errors=True)
+            safe_rmtree(empty)
 
 
 class TestRestore(GitTestCase):

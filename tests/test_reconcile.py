@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import shutil
 import subprocess
@@ -11,13 +12,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import engine, gitops, verification
+from assent import engine, gitops, pathops, verification
 from assent import accept as accept_mod
 from assent import batch_accept as batch_accept_mod
 from assent import plan as plan_mod
 from assent.config import load_config
 from assent.reconcile import (reconcile_abort, reconcile_commit_message,
                               reconcile_continue, reconcile_start)
+from tests.link_support import cleanup_worktree, make_directory_link, safe_rmtree
 
 
 def _git(root: Path, *args: str) -> str:
@@ -65,10 +67,8 @@ class ReconcileRepositoryCase(unittest.TestCase):
                     continue
                 path = Path(line.removeprefix("worktree "))
                 if path.resolve() != self.root.resolve():
-                    subprocess.run(
-                        ["git", "worktree", "remove", "--force", str(path)],
-                        cwd=self.root, capture_output=True)
-        shutil.rmtree(self.parent, ignore_errors=True)
+                    cleanup_worktree(self.root, path)
+        safe_rmtree(self.parent)
 
     # --- fixture helpers ---
 
@@ -106,6 +106,42 @@ class ReconcileRepositoryCase(unittest.TestCase):
         """Source and target both rewrite ``shared.txt`` from the same base."""
         self._make_source()
         self._advance_target()
+
+    def _provision_linked_targets(self) -> list[tuple[str, str]]:
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\nassets/\nlib/l10n/arb/\n", encoding="utf-8")
+        (self.root / "lib" / "l10n").mkdir(parents=True)
+        (self.root / "lib" / "l10n" / "app_en.arb").write_text(
+            "{}\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore", "lib/l10n/app_en.arb")
+        _git(self.root, "commit", "-m", "provision ignored reconciliation targets")
+
+        targets = {
+            "pkg": {"sentinel.txt": "pkg sentinel\n"},
+            "assets": {"sentinel.txt": "assets sentinel\n"},
+            "lib/l10n/arb": {"app.arb": '{"keep": true}\n'},
+        }
+        for directory, contents in targets.items():
+            for relative, content in contents.items():
+                target = self.root / directory / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+        return self._target_inventory(targets)
+
+    def _target_inventory(self, targets: dict[str, dict[str, str]]) -> list[tuple[str, str]]:
+        return sorted(
+            (str(path.relative_to(self.root)).replace("\\", "/"),
+             hashlib.sha256(path.read_bytes()).hexdigest())
+            for directory in targets
+            for path in (self.root / directory).rglob("*")
+            if path.is_file())
+
+    def _add_managed_links(self) -> None:
+        make_directory_link(self._managed_path() / "pkg", self.root / "pkg")
+        make_directory_link(self._managed_path() / "assets", self.root / "assets")
+        make_directory_link(
+            self._managed_path() / "lib" / "l10n" / "arb",
+            self.root / "lib" / "l10n" / "arb")
 
     def _config(self):
         return load_config(self.config_path, self.folder)
@@ -275,6 +311,23 @@ class StartTest(ReconcileRepositoryCase):
 
 
 class ContinueTest(ReconcileRepositoryCase):
+    def test_continue_detaches_main_tree_links_before_managed_cleanup(self) -> None:
+        before = self._provision_linked_targets()
+        self._conflicting_repository()
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        self._add_managed_links()
+        self._resolve()
+
+        code, output = self._run(reconcile_continue)
+
+        self.assertEqual(code, 0, output)
+        self._assert_managed_gone()
+        self.assertEqual(self._target_inventory({
+            "pkg": {"sentinel.txt": ""},
+            "assets": {"sentinel.txt": ""},
+            "lib/l10n/arb": {"app.arb": ""},
+        }), before)
+
     def test_continue_creates_the_merge_and_fast_forwards_only_the_source(self) -> None:
         self._conflicting_repository()
         self.assertEqual(self._run(reconcile_start)[0], 0)
@@ -456,6 +509,52 @@ class ContinueTest(ReconcileRepositoryCase):
 
 
 class AbortTest(ReconcileRepositoryCase):
+    def test_abort_detaches_main_tree_links_without_changing_targets(self) -> None:
+        before = self._provision_linked_targets()
+        self._conflicting_repository()
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        self._add_managed_links()
+
+        code, output = self._run(reconcile_abort)
+
+        self.assertEqual(code, 0, output)
+        self._assert_managed_gone()
+        self.assertEqual(self._target_inventory({
+            "pkg": {"sentinel.txt": ""},
+            "assets": {"sentinel.txt": ""},
+            "lib/l10n/arb": {"app.arb": ""},
+        }), before)
+
+    def test_abort_detachment_failure_retains_managed_resources_for_retry(self) -> None:
+        before = self._provision_linked_targets()
+        self._conflicting_repository()
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        self._add_managed_links()
+
+        with patch.object(pathops, "detach_directory_link",
+                          side_effect=OSError("simulated detachment failure")):
+            code, output = self._run(reconcile_abort)
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("linked target content was not touched", output)
+        self.assertTrue(self._managed_path().exists())
+        self.assertTrue(gitops.branch_exists(self.root, self._managed_branch()))
+        self.assertEqual(self._target_inventory({
+            "pkg": {"sentinel.txt": ""},
+            "assets": {"sentinel.txt": ""},
+            "lib/l10n/arb": {"app.arb": ""},
+        }), before)
+
+        code, output = self._run(reconcile_abort)
+
+        self.assertEqual(code, 0, output)
+        self._assert_managed_gone()
+        self.assertEqual(self._target_inventory({
+            "pkg": {"sentinel.txt": ""},
+            "assets": {"sentinel.txt": ""},
+            "lib/l10n/arb": {"app.arb": ""},
+        }), before)
+
     def test_abort_removes_only_the_managed_resources_and_is_idempotent(self) -> None:
         self._conflicting_repository()
         self.assertEqual(self._run(reconcile_start)[0], 0)

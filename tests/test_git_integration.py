@@ -1,4 +1,6 @@
 """Tests for the local accept Git integration foundation."""
+import hashlib
+import os
 import shutil
 import subprocess
 import tempfile
@@ -7,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import AssentError
-from assent import gitops
+from assent import gitops, pathops
 from assent.gitops import (
     accept_commit_message,
     branch_tip,
@@ -28,6 +30,7 @@ from assent.gitops import (
 )
 from assent.verification_common import (ProvisionedLink,
                                         provisioned_candidate_links)
+from tests.link_support import cleanup_worktree, make_directory_link, safe_rmtree
 
 
 def _git(root: Path, *args: str) -> str:
@@ -62,10 +65,8 @@ class GitRepositoryCase(unittest.TestCase):
                     continue
                 path = Path(line.removeprefix("worktree "))
                 if path.resolve() != self.root.resolve():
-                    subprocess.run(
-                        ["git", "worktree", "remove", "--force", str(path)],
-                        cwd=self.root, capture_output=True)
-        shutil.rmtree(self.parent, ignore_errors=True)
+                    cleanup_worktree(self.root, path)
+        safe_rmtree(self.parent)
 
     def _source(self, branch: str = "plan01/run") -> str:
         _git(self.root, "checkout", "-b", branch)
@@ -251,6 +252,37 @@ class TestTemporaryWorktrees(GitRepositoryCase):
             "refs/heads/").splitlines())
         self.assertEqual(self._metadata_paths(), [self.root.resolve()])
 
+    def test_detachment_failure_retains_temporary_branch_until_retry(self) -> None:
+        (self.root / ".gitignore").write_text("pkg/\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "ignore temporary link")
+        snapshot = commit_of(self.root, "HEAD")
+        target = self.parent / "temporary target"
+        target.mkdir()
+        (target / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+
+        with mock.patch.object(
+                pathops, "detach_directory_link",
+                side_effect=OSError("simulated detachment refusal")):
+            with self.assertRaisesRegex(AssentError, "cleanup was incomplete"):
+                with temporary_integration_worktree(
+                        self.root, "plan01", snapshot) as (path, branch):
+                    make_directory_link(path / "pkg", target)
+
+        self.assertTrue(path.exists())
+        self.assertIn(branch, _git(
+            self.root, "for-each-ref", "--format=%(refname:short)",
+            "refs/heads/").splitlines())
+        self.assertTrue((target / "sentinel.txt").is_file())
+
+        gitops._cleanup_temporary_worktree(self.root, path, branch)
+
+        self.assertFalse(path.exists())
+        self.assertNotIn(branch, _git(
+            self.root, "for-each-ref", "--format=%(refname:short)",
+            "refs/heads/").splitlines())
+        self.assertTrue((target / "sentinel.txt").is_file())
+
     def test_a_mirrored_link_is_removed_before_the_candidate_worktree(self) -> None:
         """Candidate cleanup must never reach an external linked target.
 
@@ -319,6 +351,162 @@ class TestTemporaryWorktrees(GitRepositoryCase):
             "simulated cleanup diagnostic" in note
             for note in getattr(caught.exception, "__notes__", ())))
         self.assertEqual(self._temporary_entries(), [])
+
+
+class TestNonTraversingWorktreeRemoval(GitRepositoryCase):
+    """Removing a worktree must detach its directory links, never walk them.
+
+    With Git 2.46.0.windows.1 a plain ``git worktree remove`` reports success
+    after walking an ignored junction and deleting the sentinel on the other
+    side, and ``shutil.rmtree`` is no safer, so every removal path empties the
+    worktree of link objects first.  Everything here uses a real junction on
+    Windows and a real directory symlink elsewhere, at the worktree root and
+    nested below a tracked directory.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.root / ".gitignore").write_text(
+            "pkg/\nlib/build/\ngenerated/\n", encoding="utf-8")
+        (self.root / "lib").mkdir()
+        (self.root / "lib" / "app.py").write_text("tracked\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "ignore the provisioned link paths")
+        self.snapshot = commit_of(self.root, "HEAD")
+
+    def _external(self, name: str) -> Path:
+        """An external directory holding sentinels at two depths."""
+        target = self.parent / f"external {name}"
+        (target / "nested").mkdir(parents=True)
+        (target / "sentinel.txt").write_text(f"{name}\n", encoding="utf-8")
+        (target / "nested" / "deep.txt").write_text(
+            f"{name} deep\n", encoding="utf-8")
+        return target
+
+    def _contents(self, *targets: Path) -> list[tuple[str, str]]:
+        """Every filename and content digest below the given targets."""
+        return sorted(
+            (str(path.relative_to(target.parent)).replace("\\", "/"),
+             hashlib.sha256(path.read_bytes()).hexdigest())
+            for target in targets
+            for path in target.rglob("*") if path.is_file())
+
+    def _linked_worktree(self, folder: str) -> tuple[Path, Path, Path]:
+        """A detached worktree with one root-level and one nested link."""
+        path = self.parent / f"{self.root.name}.worktrees" / folder
+        path.parent.mkdir(exist_ok=True)
+        _git(self.root, "worktree", "add", "--detach", str(path), self.snapshot)
+        root_target = self._external(f"{folder} pkg")
+        nested_target = self._external(f"{folder} build")
+        make_directory_link(path / "pkg", root_target)
+        make_directory_link(path / "lib" / "build", nested_target)
+        return path, root_target, nested_target
+
+    def _listed_worktrees(self) -> list[Path]:
+        return [Path(line.removeprefix("worktree ")).resolve()
+                for line in _git(
+                    self.root, "worktree", "list", "--porcelain").splitlines()
+                if line.startswith("worktree ")]
+
+    def test_the_inventory_lists_every_link_without_entering_one(self) -> None:
+        path, root_target, nested_target = self._linked_worktree("plan01")
+        opened: list[Path] = []
+        real_scandir = os.scandir
+
+        def recording_scandir(directory):
+            opened.append(Path(directory))
+            return real_scandir(directory)
+
+        with mock.patch("os.scandir", recording_scandir):
+            links = pathops.inventory_directory_links(path)
+
+        self.assertEqual(links, (path / "lib" / "build", path / "pkg"))
+        # Only the worktree's ordinary directories were ever opened: neither
+        # link, and nothing on the far side of one.
+        self.assertEqual(sorted(opened), [path, path / "lib"])
+        self.assertTrue((root_target / "sentinel.txt").is_file())
+        self.assertTrue((nested_target / "sentinel.txt").is_file())
+
+    def test_ordinary_removal_keeps_every_linked_target_unchanged(self) -> None:
+        path, root_target, nested_target = self._linked_worktree("plan01")
+        before = self._contents(root_target, nested_target)
+
+        gitops.remove_worktree(self.root, path)
+
+        self.assertFalse(path.exists())
+        self.assertEqual(self._listed_worktrees(), [self.root.resolve()])
+        self.assertEqual(self._contents(root_target, nested_target), before)
+
+    def test_a_target_inside_the_main_worktree_survives_removal(self) -> None:
+        path, _root_target, _nested_target = self._linked_worktree("plan01")
+        inside = self.root / "generated"
+        inside.mkdir()
+        (inside / "sentinel.txt").write_text("main tree\n", encoding="utf-8")
+        make_directory_link(path / "generated", inside)
+
+        gitops.remove_worktree(self.root, path)
+
+        self.assertFalse(path.exists())
+        self.assertEqual([entry.name for entry in inside.iterdir()],
+                         ["sentinel.txt"])
+        self.assertEqual((inside / "sentinel.txt").read_text(encoding="utf-8"),
+                         "main tree\n")
+
+    def test_forced_temporary_cleanup_keeps_every_linked_target_unchanged(
+            self) -> None:
+        root_target = self._external("temporary pkg")
+        nested_target = self._external("temporary build")
+        before = self._contents(root_target, nested_target)
+
+        with temporary_integration_worktree(
+                self.root, "plan01", self.snapshot) as (path, branch):
+            make_directory_link(path / "pkg", root_target)
+            make_directory_link(path / "lib" / "build", nested_target)
+
+        self.assertFalse(path.exists())
+        self.assertEqual(self._listed_worktrees(), [self.root.resolve()])
+        self.assertNotIn(branch, folder_branches(self.root, "assent-integration"))
+        self.assertEqual(self._contents(root_target, nested_target), before)
+
+    def test_an_unclean_worktree_is_refused_with_its_links_retained(self) -> None:
+        path, root_target, nested_target = self._linked_worktree("plan01")
+        before = self._contents(root_target, nested_target)
+        (path / "README.md").write_text("uncommitted\n", encoding="utf-8")
+
+        with self.assertRaises(AssentError):
+            gitops.remove_worktree(self.root, path)
+
+        # Git's own refusal still retains the worktree in full, links included.
+        self.assertTrue((path / "pkg" / "sentinel.txt").is_file())
+        self.assertTrue((path / "lib" / "build" / "sentinel.txt").is_file())
+        self.assertEqual(self._contents(root_target, nested_target), before)
+
+    def test_a_refused_boundary_starts_neither_git_nor_the_fallback(self) -> None:
+        failures = (
+            ("inventory", "inventory_directory_links",
+             AssentError("simulated inventory refusal")),
+            ("detachment", "detach_directory_link",
+             OSError("simulated detachment refusal")),
+        )
+        for label, helper, failure in failures:
+            with self.subTest(failure=label):
+                path, root_target, nested_target = self._linked_worktree(
+                    f"plan {label}")
+                before = self._contents(root_target, nested_target)
+                with mock.patch.object(pathops, helper, side_effect=failure), \
+                        mock.patch.object(gitops.shutil, "rmtree") as rmtree:
+                    with self.assertRaises(AssentError):
+                        gitops.remove_worktree(self.root, path)
+                    with self.assertRaisesRegex(
+                            AssentError, "cleanup was incomplete"):
+                        gitops._cleanup_temporary_worktree(self.root, path)
+
+                rmtree.assert_not_called()
+                self.assertIn(path.resolve(), self._listed_worktrees())
+                self.assertTrue((path / "pkg" / "sentinel.txt").is_file())
+                self.assertEqual(
+                    self._contents(root_target, nested_target), before)
+                cleanup_worktree(self.root, path)
 
 
 if __name__ == "__main__":

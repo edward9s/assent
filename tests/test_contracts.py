@@ -15,6 +15,8 @@ from unittest import mock
 from assent import AssentError, contracts
 from assent.user_home import ASSENT_HOME_ENV
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def install_global_contracts(case: unittest.TestCase) -> Path:
     """Point ASSENT_HOME at a temporary user home holding the current contracts.
@@ -86,6 +88,51 @@ class TestContractContent(unittest.TestCase):
                 "removed before the temporary worktree"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
+
+    def test_link_cleanup_contract_is_present_in_all_reader_documents(self):
+        documents = {
+            "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
+                encoding="utf-8"),
+            "format.md": contracts.installed_contract_text("format.md"),
+            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+                encoding="utf-8"),
+        }
+        required = (
+            "Assent detaches each directory-link object before any recursive "
+            "Git or filesystem removal and never traverses its resolved target.",
+            "External link targets survive success, refusal, failure, "
+            "interruption, and retry.",
+        )
+        for name, text in documents.items():
+            compact = " ".join(text.split())
+            for phrase in required:
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+
+        chinese = (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+            encoding="utf-8")
+        compact = "".join(chinese.split())
+        for phrase in (
+                "連結目標清理警告",
+                "Assent在任何遞迴Git或檔案系統移除前,都會先解除每個目錄連結物件,"
+                "絕不沿解析後的目標路徑走訪。",
+                "外部連結目標在成功、拒絕、失敗、中斷與重試後都存活。"):
+            with self.subTest(document="README.zh-TW.md", phrase=phrase):
+                self.assertIn(phrase, compact)
+
+    def test_reader_recovery_never_recommends_raw_recursive_worktree_removal(self):
+        paths = (
+            _PROJECT_ROOT / "AGENTS.md",
+            _PROJECT_ROOT / "assent/templates/format.md",
+            _PROJECT_ROOT / "README.md",
+            _PROJECT_ROOT / "README.zh-TW.md",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("git worktree remove", text)
+                self.assertNotIn("Remove residue manually", text)
+                self.assertNotIn("請自行執行\n`git", text)
 
 
 class TestContractValidation(unittest.TestCase):

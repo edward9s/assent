@@ -12,7 +12,6 @@ verbatim.
 import contextlib
 import io
 import json
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -23,6 +22,7 @@ from assent import engine, gitops
 from assent.adapters import Adapter, TaskResult
 from assent.config import load_config
 from assent.plan import append_entry, journal_path_for, set_status
+from tests.link_support import safe_rmtree
 
 _OK = 'python -c "raise SystemExit(0)"'
 _FAILV = 'python -c "raise SystemExit(3)"'
@@ -78,9 +78,9 @@ class ScriptedAdapter(Adapter):
 class EngineTestCase(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.addCleanup(safe_rmtree, self.root)
         self.worktrees_root = self.root.parent / f"{self.root.name}.worktrees"
-        self.addCleanup(shutil.rmtree, self.worktrees_root, ignore_errors=True)
+        self.addCleanup(safe_rmtree, self.worktrees_root)
         self._git("init")
         self._git("config", "user.name", "Test")
         self._git("config", "user.email", "test@example.com")
