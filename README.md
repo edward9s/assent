@@ -92,6 +92,7 @@ agents run --all --jobs 2
 # 6. 隨時查看(另開終端、零 token)
 agents status
 agents report
+agents clean [FOLDER]
 ```
 
 跑完後人類驗收:
@@ -165,6 +166,9 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 兩者彼此正交,可以只用其中一個,也可以同時使用,例如
 `agents status --config configs/night.toml parallel01`。
 
+`agents clean [FOLDER]` 只刪除已完全併入且乾淨的 worktree 與分支；證明不了就跳過，
+不碰 `.agents/`，也沒有強制選項，且與 `git clean` 無關。
+
 兩項舊設定已廢除:工作資料夾不再由設定檔中的手工指標維護,Git 也沒有停用
 開關或無 Git 降級模式;工作資料夾由命令列明示或依任務事實推導,Git 永遠啟用。
 
@@ -175,6 +179,7 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 | `agents status [FOLDER]`<br>`agents status parallel01` | 顯示進度統計、下一個任務、分支與最後檢查點。接受 `--config PATH`。 | **零** |
 | `agents check [FOLDER]`<br>`agents check --config .agents/agents.toml parallel01` | 驗證任務檔格式、依賴無循環、設定與環境，是規劃會議的散會條件。接受 `--config PATH`。 | **零** |
 | `agents report [FOLDER]`<br>`agents report parallel01` | 生成並顯示工作資料夾內的人讀報告 `_report.md`。接受 `--config PATH`。 | **零** |
+| `agents clean [FOLDER]`<br>`agents clean parallel01` | 只清理已完全併入且乾淨的 worktree 與同資料夾前綴分支；任何證明不足就跳過，不碰 `.agents/`，且沒有強制選項。省略 `FOLDER` 時作用於全部工作資料夾。 | **零** |
 | `agents init`<br>`agents init --path C:\\work\\my-project` | 在目標專案生成 `.agents` 骨架與 `AGENTS.md`；`--path DIR` 預設為目前目錄。它不接受 `FOLDER` 或 `--config`。 | **零** |
 
 各子命令的 `-h`／`--help` 會顯示該層實際語法；頂層沒有可套用到所有子命令的

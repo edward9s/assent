@@ -40,6 +40,11 @@ project/
   `agents.lock` 鎖定；不同資料夾可在不同終端平行執行。Git 永遠啟用並一律使用
   `<專案名>.worktrees/<資料夾>/` 的專屬 worktree；位置參數可用
   `agents run <資料夾>` 明示工作資料夾，並與 `--config` 正交。
+- **清理**:`agents clean [FOLDER]` 只處理固定位置的冗餘 worktree 與
+  `<資料夾>/*` 分支；只有同時證明該資料夾未被鎖定、worktree 乾淨、且 worktree
+  與分支成果已完全併入主樹目前 HEAD，才可移除。證明不了就跳過並說明原因；
+  不碰 `.agents/`（其中的 t/r 檔是歸檔本體），沒有 `--force`，也與 `git clean`
+  無關，不刪未追蹤或未合併的內容。
 
 ### 專案規則與 agents 管理面
 
