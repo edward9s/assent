@@ -162,6 +162,36 @@ class TestCommitAll(GitTestCase):
             capture_output=True, encoding="utf-8", check=True).stdout.strip()
         self.assertEqual(log, "auto(W2): message check")
 
+    def test_excludes_inside_gitignored_dir_do_not_crash(self):
+        # 回歸:整個 .agents/ 被 .gitignore 時,排除項 pathspec 點名 ignored
+        # 路徑會讓 git add 退出碼 1(狗糧實測炸點);過濾後必須能正常 commit。
+        (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
+        agents_dir = self.root / ".agents"
+        agents_dir.mkdir()
+        (agents_dir / "agents.log").write_text("log", encoding="utf-8")
+        (self.root / "new.txt").write_text("x", encoding="utf-8")
+        commit_all(self.root, "auto(t001): 不應因 ignored 排除項而失敗",
+                   excludes=(".agents/agents.log", ".agents/plan01/report.md"))
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout
+        self.assertEqual(status.strip(), "")
+
+    def test_live_excludes_still_excluded_when_mixed_with_ignored(self):
+        # 混合情境:一項被 gitignore(濾掉)、一項未被 ignore(仍要生效排除)
+        (self.root / ".gitignore").write_text("ignored.log\n", encoding="utf-8")
+        (self.root / "ignored.log").write_text("x", encoding="utf-8")
+        (self.root / "live.log").write_text("x", encoding="utf-8")
+        (self.root / "new.txt").write_text("x", encoding="utf-8")
+        commit_all(self.root, "auto(t001): 混合排除",
+                   excludes=("ignored.log", "live.log"))
+        tracked = subprocess.run(
+            ["git", "ls-files"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout
+        self.assertIn("new.txt", tracked)
+        self.assertNotIn("live.log", tracked)   # 未被 ignore 的排除項仍生效
+        self.assertNotIn("ignored.log", tracked)
+
 
 class TestCommitIfDirty(GitTestCase):
     def test_dirty_tree_commits_and_returns_true(self):

@@ -135,9 +135,26 @@ def changes_outside_scope(root: Path, scope: list[str],
     return outside
 
 
+def _pathspec_excludes(root: Path, excludes: Sequence[str]) -> list[str]:
+    """過濾排除清單,只留可安全寫進 :(exclude) pathspec 的項目。
+
+    已被 .gitignore 覆蓋的項目(如整個 .agents/ 不進版控的專案)本來就不會被
+    add,而且 pathspec 點名 ignored 路徑會讓 git add 以退出碼 1 拒絕——
+    check-ignore 退出碼 0 = ignored -> 濾掉;1 = 未忽略、128 = 錯誤 -> 保留
+    (保留錯誤項是保守選擇:真有問題時 add 會 fail-loud,不靜默吞掉)。
+    """
+    keep: list[str] = []
+    for e in excludes:
+        result = _run_git(root, "check-ignore", "-q", "--", e)
+        if result.returncode != 0:
+            keep.append(e)
+    return keep
+
+
 def commit_all(root: Path, message: str, excludes: Sequence[str] = ()) -> None:
     """git add -A(排除執行期產物)&& git commit -m message。"""
-    spec = ["--", "."] + [f":(exclude){e}" for e in excludes]
+    spec = ["--", "."] + [f":(exclude){e}"
+                          for e in _pathspec_excludes(root, excludes)]
     _git(root, "add", "-A", *spec)
     _git(root, "commit", "-m", message)
 
