@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 NAME = "antigravity"
 MINIMUM_VERSION = (1, 1, 5)
+# AGY model slug suffixes and vendor effort values; unrelated to abstract task levels.
 _EFFORT_ORDER = ("low", "medium", "high")
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
@@ -198,10 +199,11 @@ def parse_version(banner: str) -> tuple[int, int, int] | None:
 
 
 def recommended_effort(supported: Sequence[str], effort: str) -> str:
-    """Quality-first suggestion: the lowest supported effort at or above the requested one.
+    """Suggest the lowest supported vendor effort at or above the requested vendor effort.
 
-    When the family's ceiling is below the request there is nothing above it, so the ceiling
-    itself is suggested rather than a value the CLI would refuse.
+    Both arguments use vendor vocabulary.  When the family's ceiling is below the request
+    there is nothing above it, so the ceiling itself is suggested rather than a value the CLI
+    would refuse; that existing behavior is intentionally unchanged.
     """
     order = [level for level in _EFFORT_ORDER if level in supported]
     if not order:
@@ -381,8 +383,8 @@ class AntigravityAdapter(Adapter):
         head = (f"task {request.task_id}: model tier {request.model!r} resolves to "
                 f"{sent}, but {reason}")
         supported = catalog.families.get(request.requested_model)
-        if supported and request.effort:
-            suggestion = recommended_effort(supported, request.effort)
+        if supported and request.effort and request.requested_effort:
+            suggestion = recommended_effort(supported, request.requested_effort)
             return (f"{head}; set [adapter.{NAME}.efforts.{request.model}] "
                     f"{request.effort} = \"{suggestion}\" "
                     f"(current value {request.requested_effort!r})")

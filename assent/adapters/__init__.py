@@ -41,7 +41,7 @@ class InvocationRequest:
 
     task_id: str
     model: str                     # abstract tier (prime / core / lite)
-    effort: str | None             # abstract effort (low / medium / high), None = unset
+    effort: str | None             # abstract effort (heavy / normal / slight), None = unset
     requested_model: str           # the actual --model value
     requested_effort: str | None    # the actual effort value, None = no effort flag
 

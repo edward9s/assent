@@ -37,19 +37,20 @@ extra_args = ["--permission-mode", "bypassPermissions"]
 prime = "fable"
 core  = "opus"
 lite  = "sonnet"
-# default value per tier when a task file states no effort (low/medium/high)
+# default value per tier when a task file states no effort (heavy/normal/slight)
 [adapter.claude.default_effort]
-prime = "high"
-core  = "high"
-lite  = "medium"
-# abstract effort -> actual CLI value; lookup order: tier subsection > flat > identity.
-# both layers and every key are optional; omit everything for low/medium/high identity pass-through.
+prime = "heavy"
+core  = "heavy"
+lite  = "normal"
+# abstract effort -> actual CLI value; lookup order: tier subsection > flat > built-in baseline.
+# built-in baseline: heavy = "high", normal = "medium", slight = "low".
+# Abstract words are not legal CLI values, so they are never sent directly.
 # [adapter.claude.efforts]
-# low = "low"
-# medium = "medium"
-# high = "high"
+# heavy = "high"
+# normal = "medium"
+# slight = "low"
 # [adapter.claude.efforts.lite]
-# high = "max"                  # overrides only lite/high, other tiers unaffected
+# heavy = "max"                  # overrides only lite/heavy, other tiers unaffected
 
 [adapter.codex]
 command = "codex"
@@ -63,15 +64,15 @@ prime = "gpt-5.6-sol"
 core  = "gpt-5.6-terra"
 lite  = "gpt-5.6-luna"
 [adapter.codex.default_effort]
-prime = "high"
-core  = "medium"
-lite  = "low"
+prime = "heavy"
+core  = "normal"
+lite  = "slight"
 # [adapter.codex.efforts]
-# low = "low"
-# medium = "medium"
-# high = "high"
+# heavy = "high"
+# normal = "medium"
+# slight = "low"
 # [adapter.codex.efforts.prime]
-# high = "xhigh"                # vendor-specific values appear only in the config translation layer
+# heavy = "xhigh"                # vendor-specific values appear only in the config translation layer
 
 [adapter.antigravity]
 command = "agy"
@@ -91,21 +92,21 @@ prime = "gemini-3.1-pro"     # Gemini 3.1 Pro (low, high only)
 core  = "gemini-3.6-flash"   # Gemini 3.6 Flash (low, medium, high)
 lite  = "gemini-3.5-flash"   # Gemini 3.5 Flash (low, medium; no high)
 [adapter.antigravity.default_effort]
-prime = "high"
-core  = "high"
-lite  = "high"
-# Effort translation: Gemini 3.1 Pro does not support medium, so map it up to high
-# (quality-first, never silent downgrade). Gemini 3.5 Flash has no high, so map high
+prime = "heavy"
+core  = "heavy"
+lite  = "heavy"
+# Effort translation: Gemini 3.1 Pro does not support medium, so map normal up to high
+# (quality-first, never silent downgrade). Gemini 3.5 Flash has no high, so map heavy
 # to medium (the family's ceiling), visible in the config for auditability.
 [adapter.antigravity.efforts.prime]
-medium = "high"
+normal = "high"
 [adapter.antigravity.efforts.lite]
-high = "medium"
+heavy = "medium"
 
 [prompt]
 # Overrides the default prompt template; available variables: {agents_md_path} {instructions_path} {task_path}
 # {journal_path} {verify_command} {task_id} {task_title} {agent} {requested_model}
 # {effort} {requested_effort}
 # {agent} is codex or claude; {requested_model} is the --model value passed to the AI CLI this run.
-# {effort} is the abstract low/medium/high; {requested_effort} is the actual CLI value, empty string when not passed.
+# {effort} is the abstract heavy/normal/slight; {requested_effort} is the actual CLI value, empty string when not passed.
 # template = """..."""

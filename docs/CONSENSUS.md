@@ -168,18 +168,22 @@ a separate state database.
 ## Model and reasoning-investment consensus
 
 `model` and `effort` are orthogonal abstract tiers. A task's model is fixed
-to `prime` / `core` / `lite`; the optional effort is fixed to `low` /
-`medium` / `high`, usually omitted and written explicitly only when
+to `prime` / `core` / `lite`; the optional effort is fixed to `heavy` /
+`normal` / `slight`, usually omitted and written explicitly only when
 deliberately deviating from the adapter's default for that model. The three
 effort values describe a portable relative investment, not a precise
-budget; `high` does not claim to equal any vendor's native maximum tier.
+budget; `heavy` does not claim to equal any vendor's native maximum tier.
 
 Effort resolves in two steps, selection then translation: a task's explicit
 value takes precedence over `default_effort[model]`, and if neither is set,
 no value is passed and the CLI default is used. After the abstract value is
 selected, the engine looks up the `efforts` config in the order "tier
-subsection > flat > identity". The flat layer expresses the adapter's
-general rule; a model-tier subsection only needs to hold the few
+subsection > flat > built-in baseline". The built-in baseline maps `heavy` to
+`high`, `normal` to `medium`, and `slight` to `low`; each abstract key falls
+back independently from the tier subsection to the flat table and then to the
+baseline. Abstract and vendor effort names intentionally differ, so an
+abstract value cannot be sent through unchanged. The flat layer expresses the
+adapter's general rule; a model-tier subsection only needs to hold the few
 exceptions. Vendor-specific effort values are configuration data at the same
 level as the models mapping table, and must not enter the task format,
 `default_effort`, or adapter code; the adapter interface only receives the

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from assent import AssentError
-from assent.config import list_task_folders, load_config
+from assent.config import _ADAPTER_NAMES, list_task_folders, load_config
 
 _MINIMAL = ""
 
@@ -95,13 +95,13 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.antigravity_models,
                          {"prime": "gemini-3.1-pro", "core": "gemini-3.6-flash",
                           "lite": "gemini-3.5-flash"})
-        # every tier defaults to a high investment; the vendor translation below is what
+        # every tier defaults to a heavy investment; the vendor translation below is what
         # keeps that request sendable for families with a lower ceiling
         self.assertEqual(cfg.antigravity_default_effort,
-                         {"prime": "high", "core": "high", "lite": "high"})
+                         {"prime": "heavy", "core": "heavy", "lite": "heavy"})
         self.assertEqual(cfg.antigravity_efforts, {})
         self.assertEqual(cfg.antigravity_tier_efforts,
-                         {"prime": {"medium": "high"}, "lite": {"high": "medium"}})
+                         {"prime": {"normal": "high"}, "lite": {"heavy": "medium"}})
         self.assertEqual(cfg.antigravity_print_timeout_minutes, 120)
 
     def test_shipped_template_loads_with_expected_adapter_settings(self):
@@ -110,7 +110,7 @@ class TestLoadConfig(ConfigTestCase):
         cfg = load_config(self.write(template.read_text(encoding="utf-8")),
                           "template01")
         tiers = {"prime", "core", "lite"}
-        efforts = {"low", "medium", "high"}
+        efforts = {"slight", "normal", "heavy"}
         for adapter in ("claude", "codex", "antigravity"):
             with self.subTest(adapter=adapter):
                 settings = cfg.adapter_settings(adapter)
@@ -121,9 +121,9 @@ class TestLoadConfig(ConfigTestCase):
 
     def test_antigravity_effort_table_is_replaced_whole_not_merged(self):
         cfg = load_config(self.write(
-            '[adapter.antigravity.efforts.prime]\nmedium = "medium"\n'), "plan01")
+            '[adapter.antigravity.efforts.prime]\nnormal = "medium"\n'), "plan01")
         self.assertEqual(cfg.antigravity_tier_efforts,
-                         {"prime": {"medium": "medium"}})
+                         {"prime": {"normal": "medium"}})
 
     def test_antigravity_print_timeout_must_be_positive(self):
         with self.assertRaisesRegex(AssentError, "print_timeout_minutes"):
@@ -212,27 +212,27 @@ class TestLoadConfig(ConfigTestCase):
     def test_bad_default_effort_rejected(self):
         with self.assertRaisesRegex(AssentError, "effort"):
             load_config(self.write(
-                '[adapter.claude.default_effort]\nprime = "max"\n'), "plan01")
+                '[adapter.claude.default_effort]\nprime = "high"\n'), "plan01")
 
     def test_efforts_flat_and_tier_sections_loaded(self):
         cfg = load_config(self.write(
             '[adapter.codex.efforts]\n'
-            'low = "minimal"\nmedium = "balanced"\n'
+            'heavy = "minimal"\nnormal = "balanced"\n'
             '[adapter.codex.efforts.lite]\n'
-            'high = "max"\n'), "plan01")
+            'slight = "max"\n'), "plan01")
         self.assertEqual(cfg.codex_efforts,
-                         {"low": "minimal", "medium": "balanced"})
+                         {"heavy": "minimal", "normal": "balanced"})
         self.assertEqual(cfg.codex_tier_efforts,
-                         {"lite": {"high": "max"}})
+                         {"lite": {"slight": "max"}})
 
     def test_bad_efforts_keys_and_section_names_rejected(self):
         cases = (
-            ('[adapter.claude.efforts]\nmax = "x"\n',
-             r"\[adapter\.claude\.efforts\].*max"),
-            ('[adapter.codex.efforts.ultra]\nlow = "x"\n',
+            ('[adapter.claude.efforts]\nlow = "x"\n',
+             r"\[adapter\.claude\.efforts\].*low"),
+            ('[adapter.codex.efforts.ultra]\nheavy = "x"\n',
              r"\[adapter\.codex\.efforts\].*ultra"),
-            ('[adapter.codex.efforts.lite]\nmax = "x"\n',
-             r"\[adapter\.codex\.efforts\.lite\].*max"),
+            ('[adapter.codex.efforts.lite]\nhigh = "x"\n',
+             r"\[adapter\.codex\.efforts\.lite\].*high"),
         )
         for text, message in cases:
             with self.subTest(text=text), self.assertRaisesRegex(
@@ -241,13 +241,13 @@ class TestLoadConfig(ConfigTestCase):
 
     def test_bad_efforts_values_rejected(self):
         cases = (
-            ('[adapter.claude.efforts]\nlow = ""\n',
+            ('[adapter.claude.efforts]\nheavy = ""\n',
              r"\[adapter\.claude\.efforts\].*non-empty string"),
-            ('[adapter.claude.efforts]\nlow = 1\n',
+            ('[adapter.claude.efforts]\nnormal = 1\n',
              r"\[adapter\.claude\.efforts\].*non-empty string"),
-            ('[adapter.codex.efforts.lite]\nhigh = "   "\n',
+            ('[adapter.codex.efforts.lite]\nslight = "   "\n',
              r"\[adapter\.codex\.efforts\.lite\].*non-empty string"),
-            ('[adapter.codex.efforts.lite]\nhigh = false\n',
+            ('[adapter.codex.efforts.lite]\nheavy = false\n',
              r"\[adapter\.codex\.efforts\.lite\].*non-empty string"),
         )
         for text, message in cases:
@@ -295,8 +295,8 @@ class TestAdapterSettings(ConfigTestCase):
     def test_settings_carry_vendor_specific_command_and_maps(self):
         cfg = load_config(self.write(
             '[adapter.codex]\ncommand = "codex.cmd"\n'
-            '[adapter.codex.efforts]\nlow = "minimal"\nmedium = "balanced"\n'
-            '[adapter.codex.efforts.lite]\nhigh = "max"\n'), "plan01")
+            '[adapter.codex.efforts]\nheavy = "minimal"\nnormal = "balanced"\n'
+            '[adapter.codex.efforts.lite]\nslight = "max"\n'), "plan01")
         codex = cfg.adapter_settings("codex")
         self.assertEqual(codex.name, "codex")
         self.assertEqual(codex.command, "codex.cmd")
@@ -309,13 +309,13 @@ class TestAdapterSettings(ConfigTestCase):
     def test_resolve_effort_precedence_task_then_default_then_none(self):
         cfg = load_config(self.write(
             '[adapter.claude.default_effort]\n'
-            'prime = "high"\ncore = "medium"\n'), "plan01")
+            'prime = "heavy"\ncore = "normal"\n'), "plan01")
         settings = cfg.adapter_settings("claude")
         # task annotation wins over the tier default
-        self.assertEqual(settings.resolve_effort("low", "prime"), "low")
+        self.assertEqual(settings.resolve_effort("slight", "prime"), "slight")
         # tier default applies when the task omits effort
-        self.assertEqual(settings.resolve_effort(None, "prime"), "high")
-        self.assertEqual(settings.resolve_effort(None, "core"), "medium")
+        self.assertEqual(settings.resolve_effort(None, "prime"), "heavy")
+        self.assertEqual(settings.resolve_effort(None, "core"), "normal")
         # no default for this tier -> None (no effort chosen)
         self.assertIsNone(settings.resolve_effort(None, "lite"))
 
@@ -328,42 +328,65 @@ class TestAdapterSettings(ConfigTestCase):
             # nothing chosen -> nothing translated, no invented CLI default
             self.assertIsNone(settings.resolve_requested_effort(model, None))
 
-    def test_requested_effort_grid_tier_then_flat_then_identity(self):
+    def test_requested_effort_grid_tier_then_flat_then_baseline(self):
         cfg = load_config(self.write(
             '[adapter.claude.efforts]\n'
-            'low = "minimal"\nmedium = "balanced"\n'   # no flat "high" -> identity
-            '[adapter.claude.efforts.lite]\nlow = "tiny"\n'), "plan01")
+            'heavy = "minimal"\nnormal = "balanced"\n'   # no flat "slight" -> baseline
+            '[adapter.claude.efforts.lite]\nheavy = "tiny"\n'), "plan01")
         settings = cfg.adapter_settings("claude")
         grid = {
-            ("prime", "low"): "minimal", ("prime", "medium"): "balanced",
-            ("prime", "high"): "high",
-            ("core", "low"): "minimal", ("core", "medium"): "balanced",
-            ("core", "high"): "high",
-            ("lite", "low"): "tiny",      # tier-specific beats flat
-            ("lite", "medium"): "balanced",
-            ("lite", "high"): "high",     # identity fallback
+            ("prime", "heavy"): "minimal", ("prime", "normal"): "balanced",
+            ("prime", "slight"): "low",
+            ("core", "heavy"): "minimal", ("core", "normal"): "balanced",
+            ("core", "slight"): "low",
+            ("lite", "heavy"): "tiny",      # tier-specific beats flat
+            ("lite", "normal"): "balanced",
+            ("lite", "slight"): "low",     # built-in baseline fallback
         }
         for (model, effort), expected in grid.items():
             with self.subTest(model=model, effort=effort):
                 self.assertEqual(
                     settings.resolve_requested_effort(model, effort), expected)
 
+    def test_requested_effort_without_table_uses_builtin_baseline(self):
+        settings = load_config(self.write(_MINIMAL), "plan01").adapter_settings("claude")
+        self.assertEqual(settings.resolve_requested_effort("core", "heavy"), "high")
+        self.assertEqual(settings.resolve_requested_effort("core", "normal"), "medium")
+        self.assertEqual(settings.resolve_requested_effort("core", "slight"), "low")
+
+    def test_requested_effort_flat_mapping_falls_back_per_key_to_baseline(self):
+        settings = load_config(self.write(
+            '[adapter.claude.efforts]\nheavy = "custom-heavy"\n'),
+            "plan01").adapter_settings("claude")
+        self.assertEqual(settings.resolve_requested_effort("core", "heavy"), "custom-heavy")
+        self.assertEqual(settings.resolve_requested_effort("core", "normal"), "medium")
+        self.assertEqual(settings.resolve_requested_effort("core", "slight"), "low")
+
+    def test_requested_effort_precedence_is_tier_then_flat_then_baseline(self):
+        settings = load_config(self.write(
+            '[adapter.claude.efforts]\nheavy = "flat-heavy"\n'
+            '[adapter.claude.efforts.lite]\nheavy = "tier-heavy"\n'),
+            "plan01").adapter_settings("claude")
+        self.assertEqual(settings.resolve_requested_effort("lite", "heavy"), "tier-heavy")
+        self.assertEqual(settings.resolve_requested_effort("core", "heavy"), "flat-heavy")
+        self.assertEqual(settings.resolve_requested_effort("core", "normal"), "medium")
+
 
     def test_antigravity_shipped_grid_is_complete_and_monotone(self):
         cfg = load_config(self.write(_MINIMAL), "plan01")
         settings = cfg.adapter_settings("antigravity")
         grid = {
-            # Gemini 3.1 Pro exposes low and high only: medium goes up, quality first.
-            ("prime", "low"): ("gemini-3.1-pro", "low"),
-            ("prime", "medium"): ("gemini-3.1-pro", "high"),
-            ("prime", "high"): ("gemini-3.1-pro", "high"),
-            ("core", "low"): ("gemini-3.6-flash", "low"),
-            ("core", "medium"): ("gemini-3.6-flash", "medium"),
-            ("core", "high"): ("gemini-3.6-flash", "high"),
+            # Gemini 3.1 Pro exposes low and high only: normal goes up, quality first.
+            ("prime", "slight"): ("gemini-3.1-pro", "low"),
+            ("prime", "normal"): ("gemini-3.1-pro", "high"),
+            ("prime", "heavy"): ("gemini-3.1-pro", "high"),
+            ("core", "slight"): ("gemini-3.6-flash", "low"),
+            ("core", "normal"): ("gemini-3.6-flash", "medium"),
+            ("core", "heavy"): ("gemini-3.6-flash", "high"),
             # AGY exposes no Flash Lite, so lite uses 3.5 Flash, whose ceiling is medium.
-            ("lite", "low"): ("gemini-3.5-flash", "low"),
-            ("lite", "medium"): ("gemini-3.5-flash", "medium"),
-            ("lite", "high"): ("gemini-3.5-flash", "medium"),
+            ("lite", "slight"): ("gemini-3.5-flash", "low"),
+            ("lite", "normal"): ("gemini-3.5-flash", "medium"),
+            ("lite", "heavy"): ("gemini-3.5-flash", "medium"),
         }
         for (tier, effort), expected in grid.items():
             with self.subTest(tier=tier, effort=effort):
@@ -371,9 +394,9 @@ class TestAdapterSettings(ConfigTestCase):
                     (settings.resolve_model(tier),
                      settings.resolve_requested_effort(tier, effort)),
                     expected)
-        # an omitted task effort still lands on the tier default, which is high everywhere
+        # an omitted task effort still lands on the tier default, which is heavy everywhere
         for tier in ("prime", "core", "lite"):
-            self.assertEqual(settings.resolve_effort(None, tier), "high")
+            self.assertEqual(settings.resolve_effort(None, tier), "heavy")
 
 
 class TestListTaskFolders(ConfigTestCase):
@@ -390,6 +413,14 @@ class TestListTaskFolders(ConfigTestCase):
 
     def test_missing_assent_directory_is_empty(self):
         self.assertEqual(list_task_folders(self.root / "missing"), [])
+
+
+class TestAdapterRegistry(unittest.TestCase):
+    def test_builtin_registry_holds_exactly_the_supported_adapters(self):
+        # Set comparison, so this stays independent of declaration order and
+        # fails both when a supported adapter drops out and when an unknown
+        # name creeps in.
+        self.assertEqual(_ADAPTER_NAMES, {"claude", "codex", "antigravity"})
 
 
 if __name__ == "__main__":

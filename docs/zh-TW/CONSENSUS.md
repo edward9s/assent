@@ -128,13 +128,16 @@ exact-tree verification 覆蓋,conflict 則 target 不變交由人工作裁決�
 ## 模型與推理投入共識
 
 `model` 與 `effort` 是正交的抽象檔位。任務的 model 固定使用
-`prime` / `core` / `lite`;選填 effort 固定使用 `low` / `medium` / `high`,
+`prime` / `core` / `lite`;選填 effort 固定使用 `heavy` / `normal` / `slight`,
 通常省略,只有刻意偏離 adapter 對該 model 的預設時才明寫。三個 effort 值
-描述可攜的相對投入,不是精確預算;`high` 也不宣稱等於廠牌原生最高檔。
+描述可攜的相對投入,不是精確預算;`heavy` 也不宣稱等於廠牌原生最高檔。
 
 effort 分成選擇與翻譯兩步:任務明寫值優先於 `default_effort[model]`,兩者皆無
-就不傳值、採 CLI 預設;選出抽象值後,engine 依「檔位分節 > 平面 > 等值」查
-`efforts` 設定。平面層表達 adapter 的通例,model 檔位分節只寫少數例外格。
+就不傳值、採 CLI 預設;選出抽象值後,engine 依「檔位分節 > 平面 > 內建基準」查
+`efforts` 設定。內建基準把 `heavy` 對應 `high`,`normal` 對應 `medium`,把
+`slight` 對應 `low`;每個抽象鍵都會獨立地從檔位分節退回平面表,再退回基準表。
+抽象詞與廠商 effort 詞刻意不同字,因此抽象值不能原值直通。平面層表達 adapter
+的通例,model 檔位分節只寫少數例外格。
 廠牌特有 effort 是與 models 對照表同級的設定資料,不得進入任務格式、
 `default_effort` 或 Adapter 程式碼;Adapter 介面只接收翻譯後的實際值。
 

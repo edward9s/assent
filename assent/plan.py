@@ -25,7 +25,7 @@ _RETIRED_FILENAME_RE = re.compile(r"^t\d{3}_.+\.toml$")
 _ID_RE = re.compile(r"^t\d{3}$")
 _STATUS_VALUES = {"TODO", "WIP", "DONE", "BLOCKED", "SKIP"}
 _MODEL_TIERS = {"prime", "core", "lite"}
-_EFFORT_LEVELS = {"low", "medium", "high"}
+_EFFORT_LEVELS = {"heavy", "normal", "slight"}
 _KNOWN_KEYS = {"title", "deps", "model", "effort", "status", "scope", "verify",
                "goal", "behavior", "acceptance", "notes"}
 # Journal identities a new write may claim.  Reading is deliberately unrestricted, so a
@@ -44,7 +44,7 @@ class Task:
     title: str
     deps: list[str]
     model: str                     # prime | core | lite
-    effort: str | None             # low | medium | high; omitted means the engine applies its default
+    effort: str | None             # heavy | normal | slight; omitted means the engine applies its default
     status: str                    # TODO | WIP | DONE | BLOCKED | SKIP
     scope: list[str]               # Allowed path prefixes; fail-closed, must not be empty
     verify: str                    # Acceptance command
@@ -152,7 +152,7 @@ def parse_task_file(path: Path) -> Task:
     if effort_raw and effort_raw not in _EFFORT_LEVELS:
         raise AssentError(
             f"Task file {path.name} has effort = {effort_raw!r}, which is invalid"
-            " (low / medium / high, or omit it to use the assent.toml default)")
+            " (heavy / normal / slight, or omit it to use the assent.toml default)")
 
     deps = _str_list(data, path, "deps")
     for dep in deps:
