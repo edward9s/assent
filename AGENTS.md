@@ -82,4 +82,19 @@ Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
   name as a CLI value. Vendor-specific effort values belong to configuration
   mappings (peers of the models table) and must not be hardcoded in adapter
   code.
+- Effort selection is deterministic: task explicit value, then the configured
+  per-tier `default_effort` override, then the built-in per-tier default. A
+  stated `default_effort` table overrides per tier rather than replacing the
+  built-in one, so an absent, empty, or partial table still leaves every known
+  tier with a value. Every supported invocation therefore passes a concrete
+  requested effort; no code path may reintroduce "pass no effort and inherit
+  the vendor CLI default".
+- Media inputs (image, PDF, audio, and the like) are ordinary project context,
+  not a schema feature. The fixed task fields stay as they are: a task names an
+  existing media file by project-relative path and purpose in `behavior` or
+  `notes`, and lists in `scope` only the media it may create or modify.
+  Do not add `inputs`, image, audio, or video fields, an adapter attachment
+  protocol, media-capability inference, or a second review state; `verify`
+  keeps the machine-checkable requirements and perceptual judgment stays part
+  of the explicit `accept`.
 - When using assent, first read `.assent/instructions.md` in the project's main worktree; a worktree session uses the absolute path the scheduler provides. <!-- assent-instructions -->

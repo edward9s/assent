@@ -37,7 +37,11 @@ extra_args = ["--permission-mode", "bypassPermissions"]
 prime = "fable"
 core  = "opus"
 lite  = "sonnet"
-# default value per tier when a task file states no effort (heavy/normal/slight)
+# default value per tier when a task file states no effort (heavy/normal/slight).
+# This table overrides per tier; it does not replace the built-in defaults, so an
+# absent, empty, or partial table keeps the built-in value for every omitted tier.
+# Every tier therefore resolves to a concrete effort -- assent never falls back to
+# the vendor CLI's own default.
 [adapter.claude.default_effort]
 prime = "heavy"
 core  = "heavy"
@@ -63,6 +67,7 @@ extra_args = ["--sandbox", "danger-full-access"]
 prime = "gpt-5.6-sol"
 core  = "gpt-5.6-terra"
 lite  = "gpt-5.6-luna"
+# Per-tier override of the built-in defaults; omitted tiers keep their built-in value.
 [adapter.codex.default_effort]
 prime = "heavy"
 core  = "normal"
@@ -91,6 +96,7 @@ print_timeout_minutes = 120
 prime = "gemini-3.1-pro"     # Gemini 3.1 Pro (low, high only)
 core  = "gemini-3.6-flash"   # Gemini 3.6 Flash (low, medium, high)
 lite  = "gemini-3.5-flash"   # Gemini 3.5 Flash (low, medium; no high)
+# Per-tier override of the built-in defaults; omitted tiers keep their built-in value.
 [adapter.antigravity.default_effort]
 prime = "heavy"
 core  = "heavy"
@@ -108,5 +114,5 @@ heavy = "medium"
 # {journal_path} {verify_command} {task_id} {task_title} {agent} {requested_model}
 # {effort} {requested_effort}
 # {agent} is codex or claude; {requested_model} is the --model value passed to the AI CLI this run.
-# {effort} is the abstract heavy/normal/slight; {requested_effort} is the actual CLI value, empty string when not passed.
+# {effort} is the abstract heavy/normal/slight; {requested_effort} is the actual CLI value it translates to.
 # template = """..."""

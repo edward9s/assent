@@ -326,8 +326,11 @@ cross-vendor portable high tier, not any vendor's native maximum tier. Usually
 from the current adapter's default for that model.
 
 The engine first selects the abstract effort by "task explicit value >
-`[adapter.<name>.default_effort]` model default > unspecified"; when
-unspecified it passes no effort and explicitly adopts the CLI default. After
+configured `[adapter.<name>.default_effort]` per-tier override > built-in
+per-tier default". That table overrides per tier instead of replacing the
+built-in one, so an absent, empty, or partial table still leaves every known
+tier with a value: every supported invocation passes a concrete requested
+effort and never inherits the vendor CLI's own default. After
 selection it consults `[adapter.<name>.efforts]`: a tier subsection key takes
 precedence over a flat key, and a flat key over the built-in baseline. For
 example `[adapter.codex.efforts] heavy = "xhigh"` is the common case for all
@@ -367,6 +370,49 @@ a failed `verify` restarts a whole session under [Lifecycle and review].
   the folder reaches DONE/SKIP (see "Lifecycle and review"); repeating it
   per task multiplies suite runtime by task count for no added safety.
 
+### Media inputs and outputs
+
+Media a task needs — an image, a PDF, an audio file, a video — is ordinary
+project context, not a schema feature. The fixed fields above do not change:
+there is no `inputs`, image, audio, or video field, assent does not attach a
+file to an adapter for you, and it infers nothing about a model's media
+capabilities.
+
+- A media file that already exists in the project is named by its
+  project-relative path, with its purpose, in `behavior` or `notes`. A path
+  that is only read need not appear in `scope`.
+- Every media file the task may create or modify must be covered by `scope`,
+  exactly like source.
+- Prefer versioned files in the worktree so a run is reproducible; do not put
+  source media in the generated `.assent/` management plane.
+- `verify` still carries only the machine-checkable requirements (the file
+  exists, its dimensions, its format). Visual or perceptual judgment stays with
+  the human at `accept`; it does not become a second review state.
+
+```toml
+title = "Redraw the pipeline diagram from the reviewed sketch"
+deps = []
+model = "core"
+status = "TODO"
+scope = ["docs/images/"]         # writable output only; the read-only reference is not listed
+verify = "python tools/check_diagram.py"
+
+goal = """
+Replace the outdated pipeline diagram with one matching the reviewed sketch.
+"""
+
+behavior = """
+1. Read the approved sketch at `docs/design/pipeline-sketch.png` (read-only
+   reference) for the box order and the arrow labels.
+2. Write the replacement to `docs/images/pipeline.svg` at 1600x900.
+"""
+
+acceptance = """
+- `docs/images/pipeline.svg` exists at 1600x900 and every sketch label appears (checked by verify).
+- A human confirms at `accept` that the diagram reads clearly at README width.
+"""
+```
+
 ### Status semantics
 
 | Status | Meaning |
@@ -397,7 +443,7 @@ not exist.
 time = "2026-07-17T02:03:04+00:00"
 by = "claude"                    # executor: claude | codex | antigravity
 requested_model = "fable"       # the --model value passed to the AI CLI this run
-requested_effort = "high"       # written only when an effort was passed; the actual value sent to the CLI this run
+requested_effort = "high"       # the actual effort value sent to the CLI this run
 event = "done"                   # suggested values: done | blocked | quota | interrupt | note
 summary = "skeleton done, 37 tests all green"
 detail = '''
@@ -406,17 +452,19 @@ Longer process notes, blockers, a summary of verification output.
 ```
 
 - The executing AI uses `by = "claude"`, `by = "codex"`, or `by = "antigravity"`
-  at each session closeout and writes `requested_model`; when an effort was
-  passed that run it also writes `requested_effort`. Its summary is quoted
+  at each session closeout and writes `requested_model` and `requested_effort`.
+  Its summary is quoted
   directly by report, so write verifiable facts, not self-narration.
 - `requested_model` precisely represents the `--model` value passed to the AI
   CLI this run after the assent.toml mapping; it does not guarantee the model
   the service ultimately adopts or reports. A task file's `model` still only
   writes `prime` / `core` / `lite`.
 - `requested_effort` precisely represents the value actually passed to the AI
-  CLI this run after the efforts mapping; it is omitted when no abstract effort
-  was selected. Task files and `default_effort` still accept only the three
-  abstract values: `heavy` / `normal` / `slight`.
+  CLI this run after the efforts mapping. Because selection always resolves to
+  a concrete value, a supported run always has one to write. Task files and
+  `default_effort` still accept only the three abstract values:
+  `heavy` / `normal` / `slight`. Old entries written before this rule may still
+  omit the field; they stay readable and are not migrated.
 - The scheduler's machine events use `by = "scheduler"`, additionally writing
   `agent = "claude"`, `agent = "codex"`, or `agent = "antigravity"` and the
   same run's `requested_model`. Existing events include a quota interruption

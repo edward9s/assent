@@ -155,8 +155,12 @@ source evidence。
 通常省略,只有刻意偏離 adapter 對該 model 的預設時才明寫。三個 effort 值
 描述可攜的相對投入,不是精確預算;`heavy` 也不宣稱等於廠牌原生最高檔。
 
-effort 分成選擇與翻譯兩步:任務明寫值優先於 `default_effort[model]`,兩者皆無
-就不傳值、採 CLI 預設;選出抽象值後,engine 依「檔位分節 > 平面 > 內建基準」查
+effort 分成選擇與翻譯兩步。選擇是決定性的,依序有三個來源:任務明寫值、組態中
+該檔位的 `default_effort` 覆寫、該檔位的內建預設值。寫出來的 `default_effort`
+表是逐檔位覆寫,不是整張取代內建表,所以該表缺席、為空或只寫一部分時,每個已知
+檔位仍然都有值。由此得到本次定案的結論:每一次受支援的呼叫都會傳入具體的
+requested effort,assent 絕不省略該旗標去沿用廠商 CLI 自己的預設。
+選出抽象值後,engine 依「檔位分節 > 平面 > 內建基準」查
 `efforts` 設定。內建基準把 `heavy` 對應 `high`,`normal` 對應 `medium`,把
 `slight` 對應 `low`;每個抽象鍵都會獨立地從檔位分節退回平面表,再退回基準表。
 抽象詞與廠商 effort 詞刻意不同字,因此抽象值不能原值直通。平面層表達 adapter

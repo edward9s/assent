@@ -647,8 +647,15 @@ tier-to-model mapping and the abstract-to-CLI effort translations. The lookup
 order is always:
 
 1. Task file's explicit `effort` annotation (if present)
-2. Adapter's `default_effort` for this tier (if present)
-3. No effort flag (some adapters/tiers may not support one)
+2. The configured `default_effort` override for this tier (if present)
+3. The built-in default for this tier
+
+A stated `[adapter.<name>.default_effort]` table overrides per tier; it does
+not replace the built-in table. An absent, empty, or partial table therefore
+still leaves every tier with a value — name only `lite` and `prime`/`core` keep
+their built-in defaults. The result is that every supported invocation passes a
+concrete effort to the CLI; assent never omits the flag and inherits the
+vendor's own default.
 
 And for effort translation:
 
@@ -670,6 +677,22 @@ you can remove the quality-first mapping:
 [adapter.antigravity.efforts.prime]
 normal = "medium"
 ```
+
+### Reading the session line
+
+When `run` opens a session it prints one compact line stating the whole
+resolved identity:
+
+```
+  Session: codex | core->gpt-5.6-terra | heavy->high
+```
+
+Read it as adapter, then two mappings. Each arrow points from the portable
+abstract value the task file states, on the left, to the actual argument sent
+to that adapter's CLI, on the right — so `core->gpt-5.6-terra` is the `--model`
+value and `heavy->high` is the `--effort` value for this run. All four audit
+facts (adapter, tier, model, effort) are on the line; it stays a single line
+and is not expanded back into verbose labels.
 
 ### Configuring Antigravity print timeout
 
@@ -771,6 +794,24 @@ needed; `assent check` will re-validate and `assent run` will retry.
   — adapter selection, the abstract tier (prime/core/lite) mapping table,
   abstract effort (heavy/normal/slight) defaults and CLI-value translation,
   watchdog, and retry parameters.
+
+### Tasks that use project media
+
+An image, PDF, audio file, or other media a task needs is ordinary project
+context, so the plan schema stays unchanged — there is no `inputs`, image,
+audio, or video field, and assent never attaches a file to an adapter or infers
+what media a model can read.
+
+- Name an existing media file by its project-relative path, with its purpose,
+  in the task's `behavior` or `notes`. A read-only reference path does not need
+  to enter `scope`.
+- Every media file the task may create or modify must be covered by `scope`.
+- Prefer versioned worktree files so the run is reproducible; do not put source
+  media in the generated `.assent/` management plane.
+- `verify` keeps the objective checks; visual or perceptual judgment stays a
+  human call at `accept`, not a second review state.
+
+The format contract carries a worked example.
 
 ## FAQ
 
