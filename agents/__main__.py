@@ -162,9 +162,9 @@ def _dispatch(argv: list[str]) -> int:
         print(f"設定檔錯誤:{e}")
         return 1
 
-    folders = list_task_folders(agents_dir)
     if args.command == "run" and args.all_folders:
         return run_all(args.config, agents_dir, args.jobs or 1)
+    folders = list_task_folders(agents_dir)
     if args.folder is None:
         if args.command == "run":
             folder = _select_run_folder(args.config, folders)

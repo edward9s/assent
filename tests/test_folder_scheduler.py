@@ -46,6 +46,8 @@ class FolderSchedulerTestCase(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp())
         self.agents_dir = self.root / ".agents"
         self.agents_dir.mkdir()
+        self.git_marker = self.root / ".git"
+        self.git_marker.mkdir()
         self.config = self.agents_dir / "agents.toml"
         self.config.write_text("", encoding="utf-8")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
@@ -64,6 +66,23 @@ class FolderSchedulerTestCase(unittest.TestCase):
 
 
 class TestRunAll(FolderSchedulerTestCase):
+    def test_no_git_rejects_completed_folders_before_inspection(self):
+        self.make_folder("done", "DONE")
+        self.make_folder("skipped", "SKIP")
+        self.git_marker.rmdir()
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out), patch(
+                "agents.folder_scheduler.parse_folder_dependency_graph") as parse, \
+                patch("agents.folder_scheduler._start_folder") as start:
+            code = run_all(str(self.config), self.agents_dir)
+
+        self.assertEqual(code, 1)
+        self.assertIn("本專案尚未初始化 git,請先執行 git init",
+                      out.getvalue())
+        parse.assert_not_called()
+        start.assert_not_called()
+
     def test_completion_unlocks_downstream_in_topological_order(self):
         first = self.make_folder("first")
         second = self.make_folder("second", after=("first",))

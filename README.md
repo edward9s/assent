@@ -187,7 +187,7 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 - 工作指示範本:[agents/templates/instructions.md](agents/templates/instructions.md)
   ——agents session 行為與跨專案共通規則;專案規則留在 `AGENTS.md`。
 - 設定檔範本:[agents/templates/agents.toml](agents/templates/agents.toml)
-  ——工作資料夾名稱、adapter 選擇、抽象檔位(prime/core/lite)對照表、
+  ——adapter 選擇、抽象檔位(prime/core/lite)對照表、
   watchdog 與重試參數。
 
 ## 常見問題

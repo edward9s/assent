@@ -17,6 +17,7 @@ from agents.folderdeps import parse_folder_dependency_graph
 from agents.plan import Plan
 
 _POLL_SECONDS = 0.05
+_GIT_REQUIRED_MESSAGE = "本專案尚未初始化 git,請先執行 git init"
 
 
 def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
@@ -110,6 +111,9 @@ def _interrupt_and_wait(active: dict[str, subprocess.Popen]) -> None:
 def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
     """依資料夾依賴圖執行全部未完成工作資料夾。"""
     agents_dir = Path(agents_dir)
+    if not (agents_dir.parent / ".git").exists():
+        print(_GIT_REQUIRED_MESSAGE)
+        return 1
     active: dict[str, subprocess.Popen] = {}
     attempted: set[str] = set()
     failure = False
