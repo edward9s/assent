@@ -117,7 +117,8 @@ class TestScenarios(E2ETestCase):
         for p in (p1, p2, p3):
             self.assertEqual(parse_task_file(p).status, "DONE")
         porcelain = [ln for ln in self._git("status", "--porcelain").splitlines()
-                     if ln.strip() and "report.md" not in ln]
+                     if ln.strip() and "report.md" not in ln
+                     and "agents.lock" not in ln]
         self.assertEqual(porcelain, [])
 
     def test_fail_retry_then_pass(self):

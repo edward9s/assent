@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agents import AgentsError
+from agents.lockfile import LOCK_NAME
 
 _TOP_LEVEL_KEYS = {"plan", "git", "watchdog", "run", "adapter", "prompt"}
 _EFFORT_LEVELS = {"low", "medium", "high"}
@@ -75,9 +76,13 @@ class Config:
         return self.rel(self.tasks_dir / "report.md")
 
     @property
+    def lockfile_rel(self) -> str:
+        return self.rel(self.tasks_dir / LOCK_NAME)
+
+    @property
     def git_excludes(self) -> tuple[str, ...]:
         """執行期產物:不參與乾淨檢查、scope 檢查與 checkpoint commit。"""
-        return (self.runtime_log_rel, self.report_rel)
+        return (self.runtime_log_rel, self.report_rel, self.lockfile_rel)
 
 
 def _section(data: dict, name: str) -> dict:

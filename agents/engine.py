@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, TextIO
 
-from agents import AgentsError, gitops
+from agents import AgentsError, gitops, lockfile
 from agents.adapters import Adapter, get_adapter
 from agents.config import Config
 from agents.plan import (Plan, Task, append_entry, parse_task_file,
@@ -107,12 +107,30 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         adapter: Adapter | None = None,
         sleep: Callable[[float], None] | None = None,
         now: Callable[[], datetime] | None = None) -> int:
-    """執行任務直到全部 DONE/BLOCKED/SKIP(或 once/task_id 只做一個)。回傳進程退出碼。"""
+    """執行任務直到全部 DONE/BLOCKED/SKIP(或 once/task_id 只做一個)。回傳進程退出碼。
+
+    起手先取工作資料夾檔案鎖(在任何驗證與 git 動作之前),鎖涵蓋整個 run
+    (含額度等待的長睡眠);同資料夾已有 run 在跑就印訊息、以退出碼 1 失敗,
+    不碰工作區任何東西。status / check / report 唯讀,不取鎖,可在 run 進行中使用。
+    """
     if sleep is None:
         sleep = time.sleep
     if now is None:
         now = lambda: datetime.now(timezone.utc)  # noqa: E731
 
+    try:
+        with lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name):
+            return _run_locked(cfg, once, task_id, adapter, sleep, now)
+    except lockfile.LockBusy as e:
+        print(str(e))
+        return 1
+
+
+def _run_locked(cfg: Config, once: bool, task_id: str | None,
+                adapter: Adapter | None,
+                sleep: Callable[[float], None],
+                now: Callable[[], datetime]) -> int:
+    """已持有工作資料夾鎖後的實際 run 主體。"""
     try:
         Plan.parse(cfg.tasks_dir)  # 早期驗證:任何任務檔壞格式,零 token 就拒跑
     except AgentsError as e:

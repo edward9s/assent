@@ -44,8 +44,10 @@ class TestLoadConfig(ConfigTestCase):
         cfg = load_config(self.write(_MINIMAL))
         self.assertEqual(cfg.runtime_log_rel, ".agents/agents.log")
         self.assertEqual(cfg.report_rel, ".agents/plan01/report.md")
+        self.assertEqual(cfg.lockfile_rel, ".agents/plan01/agents.lock")
         self.assertEqual(cfg.git_excludes,
-                         (".agents/agents.log", ".agents/plan01/report.md"))
+                         (".agents/agents.log", ".agents/plan01/report.md",
+                          ".agents/plan01/agents.lock"))
 
     def test_missing_file_raises(self):
         with self.assertRaises(AgentsError):
