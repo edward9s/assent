@@ -3,6 +3,10 @@
 ``assent accept FOLDER`` never runs a verifier.  It reconstructs the current
 integration candidate and publishes it only when its exact tree matches a
 PASSED verification receipt for the current source and verifier.
+
+``assent accept --all`` (``accept_all`` below) is the only caller that may
+run a verifier: for each finished folder in dependency order it refreshes a
+stale receipt first, then publishes through the same ``accept_folder``.
 """
 from __future__ import annotations
 
@@ -10,8 +14,10 @@ from pathlib import Path
 from typing import Sequence
 
 from assent import AssentError, gitops, verification
-from assent.config import Config
-from assent.folderdeps import infer_folder_completion, parse_folder_dependencies
+from assent.config import Config, load_config
+from assent.folderdeps import (FolderDependencies, infer_folder_completion,
+                               parse_folder_dependencies,
+                               parse_folder_dependency_graph)
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 
@@ -319,3 +325,120 @@ def _accept_locked(cfg: Config) -> int:
     print("  The integration lock coordinates Assent commands only; do not run "
           "concurrent external Git writes during acceptance.")
     return 0
+
+
+def _order_finished_folders(
+        graph: dict[str, FolderDependencies], finished: set[str]) -> list[str]:
+    """Topologically sort the finished folders, breaking ties lexicographically.
+
+    ``graph`` keys are already lexicographically sorted (parsed from
+    ``list_task_folders``), so repeatedly picking the smallest ready name
+    reproduces ``run --all``'s dependency-then-lexicographic ordering, just
+    serialized instead of concurrency-scheduled.
+    """
+    edges = {name: {dep for dep in graph[name].after if dep in finished}
+             for name in finished}
+    ordered: list[str] = []
+    resolved: set[str] = set()
+    remaining = set(finished)
+    while remaining:
+        ready = sorted(name for name in remaining if edges[name] <= resolved)
+        if not ready:
+            raise AssentError(
+                "Folder dependencies among finished folders form a cycle; "
+                "this should be unreachable because the full graph is "
+                "already checked acyclic")
+        picked = ready[0]
+        ordered.append(picked)
+        resolved.add(picked)
+        remaining.discard(picked)
+    return ordered
+
+
+def _already_integrated(cfg: Config) -> bool:
+    """Best-effort check for a folder whose current source is already an
+    ancestor of the current target -- i.e. a prior accept already published
+    it and nothing has changed since.
+
+    This lets a rerun route straight to ``accept_folder``'s own idempotent
+    "Nothing to do" path instead of re-deriving a fresh candidate: rebuilding
+    a merge whose source is already fully contained is a Git no-op, not a
+    two-parent commit, which the verify-side freshness rebuild does not
+    expect. Any ambiguity here (no source, detached, ...) is not this
+    function's job to diagnose, so it defers to the normal verify/accept
+    path, which reports it precisely.
+    """
+    try:
+        main = gitops.main_worktree(cfg.root)
+        target_tip = gitops.commit_of(main, gitops.require_current_branch(main))
+        _branch, source_tip, _worktree = _source_snapshot(
+            main, cfg.tasks_name, cfg.git_excludes)
+    except AssentError:
+        return False
+    return gitops.is_ancestor(main, source_tip, target_tip)
+
+
+def accept_all(config_path: str, assent_dir: Path) -> int:
+    """Verify-then-accept every finished work folder, serially, fail-closed.
+
+    Selection and ordering reuse ``folderdeps`` exactly as ``run --all``
+    does. Each folder refreshes its verification receipt only when stale
+    (``verify_folder_if_needed``, the same unattended full verification as
+    ``assent verify FOLDER``), then reuses ``accept_folder`` unchanged. A
+    folder already published by a prior run skips straight to
+    ``accept_folder``'s own idempotent path (see ``_already_integrated``).
+    The first failure stops the remaining chain; folders already published
+    stay published.
+    """
+    assent_dir = Path(assent_dir)
+    try:
+        graph = parse_folder_dependency_graph(assent_dir)
+    except AssentError as e:
+        print(f"accept --all: refused, folder dependency graph is invalid ({e})")
+        return 1
+    if not graph:
+        print("accept --all: no work folder with a task file found.")
+        return 0
+
+    finished: set[str] = set()
+    for folder in graph:
+        completion = infer_folder_completion(assent_dir / folder)
+        if completion.complete:
+            finished.add(folder)
+        else:
+            print(f"accept --all: skip {folder} (not finished: {completion.reason})")
+    if not finished:
+        print("accept --all: no finished work folder to accept.")
+        return 0
+
+    try:
+        order = _order_finished_folders(graph, finished)
+    except AssentError as e:
+        print(f"accept --all: refused, {e}")
+        return 1
+
+    accepted: list[str] = []
+    failure: tuple[str, str] | None = None
+    for folder in order:
+        try:
+            cfg = load_config(config_path, folder)
+        except AssentError as e:
+            failure = (folder, f"config error: {e}")
+            break
+        if (not _already_integrated(cfg)
+                and verification.verify_folder_if_needed(cfg) != 0):
+            failure = (folder, "verification refused or failed")
+            break
+        if accept_folder(cfg) != 0:
+            failure = (folder, "accept refused or failed")
+            break
+        accepted.append(folder)
+
+    remaining = order[len(accepted) + (1 if failure else 0):]
+    print("accept --all: summary")
+    print(f"  accepted:  {', '.join(accepted) if accepted else '(none)'}")
+    if failure is not None:
+        folder, reason = failure
+        print(f"  failed:    {folder} ({reason})")
+    print(f"  remaining: {', '.join(remaining) if remaining else '(none)'}")
+    return 1 if failure is not None else 0
