@@ -106,23 +106,26 @@ class TestRunTask(unittest.TestCase):
             return 0, json.dumps({"type": "turn.completed"}), False
 
         self.patch_run(fake)
-        result = CodexAdapter(make_cfg()).run_task("p", "prime", "high", Path("/p"))
+        adapter = CodexAdapter(make_cfg())
+        requested_model = adapter.resolve_model("prime")
+        result = adapter.run_task("p", requested_model, "high", Path("/p"))
         self.assertIsInstance(result, TaskResult)
         self.assertEqual(captured["command"][captured["command"].index("--model") + 1],
-                         "gpt-5.6-sol")
+                         requested_model)
         self.assertEqual(captured["cwd"], Path("/p"))
         self.assertFalse(result.quota_exhausted)
 
     def test_quota_and_stall_behavior(self):
         quota = json.dumps({"type": "error", "message": "usage limit reached"})
         self.patch_run(lambda *args, **kwargs: (1, quota, False))
-        self.assertTrue(CodexAdapter(make_cfg()).run_task(
-            "p", "lite", None, Path(".")).quota_exhausted)
+        adapter = CodexAdapter(make_cfg())
+        self.assertTrue(adapter.run_task(
+            "p", adapter.resolve_model("lite"), None, Path(".")).quota_exhausted)
 
     def test_unknown_tier_raises(self):
         with self.assertRaises(AgentsError):
-            CodexAdapter(make_cfg(codex_models={"core": "x"})).run_task(
-                "p", "prime", None, Path("."))
+            CodexAdapter(make_cfg(codex_models={"core": "x"})).resolve_model(
+                "prime")
 
 
 class TestGetAdapter(unittest.TestCase):

@@ -110,8 +110,8 @@ class E2ETestCase(unittest.TestCase):
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content, encoding="utf-8")
             set_status(path, "DONE")
-            append_entry(journal_path_for(path), by="ai", event="done",
-                         summary="完成")
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="done", summary="完成")
             return ok_result()
         return step
 
@@ -221,6 +221,9 @@ class TestScenarios(E2ETestCase):
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(t001)") for s in subjects))
         self.assertEqual(parse_task_file(p1).status, "DONE")
+        from agents.plan import read_entries
+        events = [e["event"] for e in read_entries(journal_path_for(p1))]
+        self.assertNotIn("session", events)
 
 
 class TestWorktreeScenarios(E2ETestCase):
@@ -239,8 +242,8 @@ class TestWorktreeScenarios(E2ETestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
             set_status(path, "DONE")
-            append_entry(journal_path_for(path), by="ai", event="done",
-                         summary="完成")
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="done", summary="完成")
             return ok_result()
         return step
 

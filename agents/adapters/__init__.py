@@ -24,7 +24,11 @@ class TaskResult:
 
 
 class Adapter:                     # 各廠牌 adapter 的基底
-    def run_task(self, prompt: str, model: str, effort: str | None,
+    def resolve_model(self, model: str) -> str:
+        """把任務抽象檔位解析成這次傳給 CLI 的 ``--model`` 值。"""
+        return model
+
+    def run_task(self, prompt: str, requested_model: str, effort: str | None,
                  cwd: Path) -> TaskResult:
         raise NotImplementedError
 

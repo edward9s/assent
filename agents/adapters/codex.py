@@ -152,14 +152,18 @@ class CodexAdapter(Adapter):
     def __init__(self, cfg: "Config") -> None:
         self.cfg = cfg
 
-    def run_task(self, prompt: str, model: str, effort: str | None,
-                 cwd: Path) -> TaskResult:
+    def resolve_model(self, model: str) -> str:
+        """把抽象檔位解析成 Codex CLI 實際接收的模型參數。"""
         alias = self.cfg.codex_models.get(model)
         if alias is None:
             raise AgentsError(
                 f"模型檔位 {model!r} 不在 [adapter.codex.models] 對照表中;"
                 f"請檢查計畫檔的建議模型或設定檔對照表")
-        command = build_command(self.cfg, prompt, alias, effort)
+        return alias
+
+    def run_task(self, prompt: str, requested_model: str, effort: str | None,
+                 cwd: Path) -> TaskResult:
+        command = build_command(self.cfg, prompt, requested_model, effort)
         stall_seconds = self.cfg.stall_minutes * 60 if self.cfg.stall_minutes else 0
         returncode, output, stalled = run_subprocess(
             command, cwd, stall_seconds, echo=self._echo_line)

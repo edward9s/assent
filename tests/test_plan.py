@@ -271,27 +271,56 @@ class TestStructuralCompare(PlanTestCase):
 class TestJournal(PlanTestCase):
     def test_append_creates_valid_toml_and_accumulates(self):
         journal = self.dir / "r001_x.toml"
-        append_entry(journal, by="ai", event="done", summary="第一筆",
+        append_entry(journal, by="codex", requested_model="gpt-test",
+                     event="done", summary="第一筆",
                      detail="細節\n多行", time_str="2026-07-17T00:00:00+00:00")
-        append_entry(journal, by="scheduler", event="blocked", summary="第二筆")
+        append_entry(journal, by="scheduler", agent="codex",
+                     requested_model="gpt-test", event="blocked",
+                     summary="第二筆")
         entries = read_entries(journal)
         self.assertEqual(len(entries), 2)
         self.assertEqual(entries[0]["summary"], "第一筆")
+        self.assertEqual(entries[0]["requested_model"], "gpt-test")
         self.assertIn("多行", entries[0]["detail"])
         self.assertEqual(entries[1]["by"], "scheduler")
+        self.assertEqual(entries[1]["agent"], "codex")
+
+        lines = journal.read_text(encoding="utf-8").splitlines()
+        first = lines.index('by = "codex"')
+        self.assertEqual(lines[first + 1], 'requested_model = "gpt-test"')
+        second = lines.index('by = "scheduler"')
+        self.assertEqual(lines[second + 1], 'agent = "codex"')
+        self.assertEqual(lines[second + 2], 'requested_model = "gpt-test"')
 
     def test_summary_with_quotes_and_backslashes(self):
         journal = self.dir / "r001_x.toml"
         tricky = 'He said "C:\\Users\\L" fails'
-        append_entry(journal, by="ai", event="note", summary=tricky)
+        append_entry(journal, by="claude", requested_model="sonnet",
+                     event="note", summary=tricky)
         self.assertEqual(read_entries(journal)[0]["summary"], tricky)
 
     def test_detail_with_triple_quotes_sanitized(self):
         journal = self.dir / "r001_x.toml"
-        append_entry(journal, by="ai", event="note", summary="s",
+        append_entry(journal, by="claude", requested_model="sonnet",
+                     event="note", summary="s",
                      detail="含 ''' 的內容")
         with open(journal, "rb") as f:
             tomllib.load(f)  # 仍是有效 TOML 即可
+
+    def test_new_entry_rejects_legacy_ai_identity(self):
+        with self.assertRaises(AgentsError):
+            append_entry(self.dir / "r001_x.toml", by="ai", event="done",
+                         summary="s")
+
+    def test_read_legacy_ai_entry_without_new_fields(self):
+        journal = self.dir / "r001_x.toml"
+        journal.write_text(
+            '[[entry]]\ntime = "2026-07-17T00:00:00+00:00"\n'
+            'by = "ai"\nevent = "done"\nsummary = "舊資料"\n',
+            encoding="utf-8")
+        entries = read_entries(journal)
+        self.assertEqual(entries[0]["by"], "ai")
+        self.assertNotIn("requested_model", entries[0])
 
     def test_bad_by_rejected(self):
         with self.assertRaises(AgentsError):

@@ -23,7 +23,8 @@ _MODEL_TIERS = {"prime", "core", "lite"}
 _EFFORT_LEVELS = {"low", "medium", "high"}
 _KNOWN_KEYS = {"title", "deps", "model", "effort", "status", "scope", "verify",
                "goal", "behavior", "acceptance", "notes"}
-_ENTRY_BY = {"ai", "scheduler"}
+_ENTRY_BY = {"codex", "claude", "scheduler"}
+_ENTRY_AGENT = {"codex", "claude"}
 # status 行:行首的 status = "VALUE"(容忍前置空白與行尾註解)
 _STATUS_LINE_RE = re.compile(
     r'^(\s*status\s*=\s*")(TODO|WIP|DONE|BLOCKED|SKIP)("\s*(?:#.*)?)$')
@@ -291,10 +292,21 @@ def _toml_multiline(value: str) -> str:
 
 
 def append_entry(journal: Path, *, by: str, event: str, summary: str,
-                 detail: str = "", time_str: str | None = None) -> None:
-    """在 r 檔尾 append 一筆 [[entry]];檔案不存在就建立。寫後解析驗證。"""
+                 detail: str = "", time_str: str | None = None,
+                 agent: str | None = None,
+                 requested_model: str | None = None) -> None:
+    """在 r 檔尾 append 一筆 [[entry]];檔案不存在就建立。寫後解析驗證。
+
+    ``agent`` 與 ``requested_model`` 是新版選填欄位;舊日誌仍由 ``read_entries``
+    原樣讀取,但新寫入不再接受無法辨認 adapter 的籠統 ``by = "ai"``。
+    """
     if by not in _ENTRY_BY:
-        raise AgentsError(f"日誌 by 欄位不合法:{by!r}(ai / scheduler)")
+        raise AgentsError(
+            f"日誌 by 欄位不合法:{by!r}(codex / claude / scheduler)")
+    if agent is not None and agent not in _ENTRY_AGENT:
+        raise AgentsError(f"日誌 agent 欄位不合法:{agent!r}(codex / claude)")
+    if requested_model is not None and not requested_model.strip():
+        raise AgentsError("日誌 requested_model 不可為空字串")
     if time_str is None:
         time_str = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -302,6 +314,13 @@ def append_entry(journal: Path, *, by: str, event: str, summary: str,
         "[[entry]]",
         f"time = {_toml_str(time_str)}",
         f"by = {_toml_str(by)}",
+    ]
+    if agent is not None:
+        block_lines.append(f"agent = {_toml_str(agent)}")
+    if requested_model is not None:
+        block_lines.append(
+            f"requested_model = {_toml_str(requested_model)}")
+    block_lines += [
         f"event = {_toml_str(event)}",
         f"summary = {_toml_str(summary)}",
     ]

@@ -49,9 +49,15 @@ def ok_result() -> TaskResult:
 
 
 class ScriptedAdapter(Adapter):
-    def __init__(self, steps):
+    def __init__(self, steps, resolved_model=None):
         self.steps = list(steps)
         self.calls: list[tuple[str, str, str | None]] = []
+        self.resolved_model = resolved_model
+        self.resolve_calls: list[str] = []
+
+    def resolve_model(self, model):
+        self.resolve_calls.append(model)
+        return self.resolved_model or model
 
     def run_task(self, prompt, model, effort, cwd):
         self.calls.append((prompt, model, effort))
@@ -88,13 +94,17 @@ class EngineTestCase(unittest.TestCase):
             ["git", *args], cwd=self.execution_root(), capture_output=True,
             encoding="utf-8", check=True).stdout
 
-    def build(self, retry=1, git_enabled=True):
+    def build(self, retry=1, git_enabled=True, adapter_name="claude",
+              prompt_template=None):
+        prompt = (f'[prompt]\ntemplate = {json.dumps(prompt_template)}\n'
+                  if prompt_template is not None else "")
         (self.root / ".agents" / "agents.toml").write_text(
             '[plan]\ntasks = "plan01"\n'
             f"[git]\nenabled = {'true' if git_enabled else 'false'}\n"
             f"[run]\nretry_per_task = {retry}\n"
-            '[adapter]\nname = "claude"\n'
-            '[adapter.claude]\ncommand = "python"\n',
+            f'[adapter]\nname = "{adapter_name}"\n'
+            '[adapter.claude]\ncommand = "python"\n'
+            + prompt,
             encoding="utf-8")
         return load_config(self.root / ".agents" / "agents.toml")
 
@@ -115,14 +125,16 @@ class EngineTestCase(unittest.TestCase):
         return self._git_execution("log", "--pretty=%s").splitlines()
 
     # AI 行為模擬
-    def ai_done(self, task_path, files=None):
+    def ai_done(self, task_path, files=None, *, by="claude",
+                requested_model="lite"):
         def step(prompt):
             for rel, content in (files or {}).items():
                 p = self.execution_root() / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content, encoding="utf-8")
             set_status(task_path, "DONE")
-            append_entry(journal_path_for(task_path), by="ai", event="done",
+            append_entry(journal_path_for(task_path), by=by,
+                         requested_model=requested_model, event="done",
                          summary="完成")
             return ok_result()
         return step
@@ -225,6 +237,38 @@ class TestRunSuccess(EngineTestCase):
         self.assertIn(str(p1), prompt)
         self.assertIn(str(p1.with_name("r001_task.toml")), prompt)
         self.assertIn(_OK, prompt)
+        self.assertIn('by = "claude"', prompt)
+        self.assertIn('requested_model = "lite"', prompt)
+
+    def test_codex_prompt_uses_resolved_cli_model(self):
+        p1 = self.write_task(1)
+        cfg = self.build(adapter_name="codex")
+        self.commit_all()
+
+        def done(prompt):
+            set_status(p1, "DONE")
+            append_entry(journal_path_for(p1), by="codex",
+                         requested_model="gpt-cli", event="done",
+                         summary="完成")
+            return ok_result()
+
+        adapter = ScriptedAdapter([done], resolved_model="gpt-cli")
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+        prompt, requested_model, _ = adapter.calls[0]
+        self.assertIn('by = "codex"', prompt)
+        self.assertIn('requested_model = "gpt-cli"', prompt)
+        self.assertEqual(requested_model, "gpt-cli")
+
+    def test_custom_prompt_can_use_agent_and_requested_model(self):
+        p1 = self.write_task(1)
+        cfg = self.build(
+            prompt_template="{agent}|{requested_model}|{task_id}")
+        self.commit_all()
+        adapter = ScriptedAdapter(
+            [self.ai_done(p1, requested_model="cli-model")],
+            resolved_model="cli-model")
+        self.run_quiet(cfg, once=True, adapter=adapter)
+        self.assertEqual(adapter.calls[0][0], "claude|cli-model|t001")
 
     def test_worktree_default_verify_uses_main_script_and_worktree_cwd(self):
         cfg = self.build(git_enabled=False)
@@ -254,7 +298,8 @@ class TestAcceptanceGates(EngineTestCase):
             (root / "src").mkdir(exist_ok=True)
             (root / "src" / "half.py").write_text("x", encoding="utf-8")
             set_status(path, "BLOCKED")
-            append_entry(journal_path_for(path), by="ai", event="blocked",
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="blocked",
                          summary="卡在相依")
             return ok_result()
 
@@ -290,8 +335,10 @@ class TestAcceptanceGates(EngineTestCase):
             "ls-files"))  # 產出不丟棄,收進檢查點
         from agents.plan import read_entries
         entries = read_entries(journal_path_for(path))
-        self.assertTrue(any(e["by"] == "scheduler" and e["event"] == "blocked"
-                            for e in entries))
+        blocked = next(e for e in entries if e["by"] == "scheduler"
+                       and e["event"] == "blocked")
+        self.assertEqual(blocked["agent"], "claude")
+        self.assertEqual(blocked["requested_model"], "lite")
 
     def test_verify_failure_then_success_on_retry(self):
         path = self.write_task(1, verify=_NEEDS_OK_TXT)
@@ -368,11 +415,15 @@ class TestQuotaAndResume(EngineTestCase):
         self.assertEqual(rc, 0)
         self.assertAlmostEqual(sum(sleeps), (5 + 2) * 60, delta=1)  # +2 分鐘緩衝
         self.assertIn("接續", adapter.calls[1][0])
+        self.assertEqual(adapter.resolve_calls, ["lite", "lite"])
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(t001)") for s in subjects))
         from agents.plan import read_entries
-        self.assertTrue(any(e["event"] == "quota"
-                            for e in read_entries(journal_path_for(path))))
+        entries = read_entries(journal_path_for(path))
+        quota = next(e for e in entries if e["event"] == "quota")
+        self.assertEqual(quota["agent"], "claude")
+        self.assertEqual(quota["requested_model"], "lite")
+        self.assertNotIn("session", [e["event"] for e in entries])
 
     def test_wip_task_resumed_on_startup(self):
         path = self.write_task(1, status="WIP")
@@ -399,10 +450,12 @@ class TestInterruptedTaskResume(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "WIP")
         from agents.plan import read_entries
         entries = read_entries(journal_path_for(path))
-        self.assertTrue(any(e["by"] == "scheduler"
-                            and e["event"] == "interrupt"
-                            and "使用者中斷" in e["summary"]
-                            for e in entries))
+        interrupt = next(e for e in entries
+                         if e["by"] == "scheduler"
+                         and e["event"] == "interrupt"
+                         and "使用者中斷" in e["summary"])
+        self.assertEqual(interrupt["agent"], "claude")
+        self.assertEqual(interrupt["requested_model"], "lite")
 
         adapter = ScriptedAdapter([self.ai_done(path)])
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
@@ -622,6 +675,17 @@ class TestQueries(EngineTestCase):
         # _report.md 已寫出,但不進版控
         self.assertTrue((cfg.tasks_dir / "_report.md").is_file())
         self.assertNotIn("_report.md", self._git_execution("ls-files"))
+
+    def test_report_reads_legacy_ai_entry_without_identity_fields(self):
+        path = self.write_task(1, status="BLOCKED")
+        journal_path_for(path).write_text(
+            '[[entry]]\ntime = "2026-07-17T00:00:00+00:00"\n'
+            'by = "ai"\nevent = "blocked"\nsummary = "舊日誌仍可讀"\n',
+            encoding="utf-8")
+        cfg = self.build(git_enabled=False)
+        from agents.plan import Plan
+        text = engine.render_report(cfg, Plan.parse(cfg.tasks_dir))
+        self.assertIn("最後日誌(ai):舊日誌仍可讀", text)
 
 
 if __name__ == "__main__":

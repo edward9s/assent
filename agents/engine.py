@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, TextIO
@@ -35,11 +36,14 @@ _DEFAULT_PROMPT_TEMPLATE = (
     "你是 agents 的執行 AI。先讀專案規則 {agents_md_path},\n"
     "再讀 agents 工作指示 {instructions_path} 與任務檔 {task_path}。\n"
     "只執行任務 {task_id},不要碰其他任務檔。\n"
+    "本次日誌身分為 by = \"{agent}\",requested_model = \"{requested_model}\";\n"
+    "requested_model 是本次傳給 AI CLI 的 --model 值。\n"
     "自行驗證時在目前工作樹執行:{verify_command}\n"
     "完成後:\n"
     "1. 把 {task_path} 的 status 改為 DONE 或 BLOCKED——整份任務檔只准改這一行。\n"
     "2. 在 {journal_path} 檔尾 append 一筆 [[entry]] 日誌(TOML,含 time、\n"
-    "   by = \"ai\"、event、summary、detail;檔案不存在就建立)。\n"
+    "   by = \"{agent}\"、requested_model = \"{requested_model}\"、event、summary、\n"
+    "   detail;檔案不存在就建立)。\n"
     "不要執行 git commit,檢查點由調度器負責。"
 )
 _RETRY_SUFFIX = ("\n上一輪未通過驗收,原因:{failure_reason}。"
@@ -53,11 +57,26 @@ _QUOTA_TICK = 1.0                     # 倒數的更新間隔(秒)
 _DEFAULT_VERIFY_COMMAND = "python .agents/verify.py"
 
 
+@dataclass(frozen=True)
+class _SessionIdentity:
+    """一次任務執行共用的 adapter 身分與 CLI 模型參數。"""
+
+    agent: str
+    requested_model: str
+
+
+@dataclass
+class _SessionState:
+    """讓外層中斷收尾取得目前這一輪 session 的解析身分。"""
+
+    identity: _SessionIdentity | None = None
+
+
 # --------------------------------------------------------------------------- #
 # 提示詞 / 小工具
 # --------------------------------------------------------------------------- #
 def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
-                  resumed: bool = False) -> str:
+                  session: _SessionIdentity, resumed: bool = False) -> str:
     template = cfg.prompt_template or _DEFAULT_PROMPT_TEMPLATE
     text = (template
             .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
@@ -68,12 +87,23 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
             .replace("{verify_command}",
                      _verify_command_for_prompt(cfg, task.verify))
             .replace("{task_id}", task.id)
-            .replace("{task_title}", task.title))
+            .replace("{task_title}", task.title)
+            .replace("{agent}", session.agent)
+            .replace("{requested_model}", session.requested_model))
     if resumed:
         text += _RESUME_SUFFIX
     if failure_reason:
         text += _RETRY_SUFFIX.replace("{failure_reason}", failure_reason)
     return text
+
+
+def _resolve_session(cfg: Config, adapter: Adapter,
+                     task: Task) -> _SessionIdentity:
+    """在啟動 adapter 前解析身分;同一結果供提示、日誌與 CLI 命令共用。"""
+    return _SessionIdentity(
+        agent=cfg.adapter_name,
+        requested_model=adapter.resolve_model(task.model),
+    )
 
 
 def _short(text: str, limit: int = 60) -> str:
@@ -214,6 +244,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             return 1
 
     current_task: Task | None = None
+    current_session: _SessionState | None = None
     try:
         while True:
             plan = Plan.parse(cfg.tasks_dir)
@@ -239,9 +270,12 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                     break
                 task, resumed = selected
 
+            session = _SessionState()
             current_task = task
-            _process_task(cfg, task, adapter, sleep, now, resumed)
+            current_session = session
+            _process_task(cfg, task, adapter, sleep, now, session, resumed)
             current_task = None
+            current_session = None
 
             if once or task_id is not None:
                 break
@@ -249,9 +283,11 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         # Windows 主控台的 Ctrl+C 會同時送達子程序(AI session),故 session 由 OS
         # 訊號終止;engine 這裡把已產出的進度收進 wip 檢查點(絕不丟棄)後以 130 退出。
         print("\n收到中斷(Ctrl+C):session 已終止,保留目前進度...")
-        if current_task is not None:
+        if (current_task is not None and current_session is not None
+                and current_session.identity is not None):
             _mark_interrupted_task(
-                current_task, "使用者中斷,保留進度供下次接續", now,
+                current_task, current_session.identity,
+                "使用者中斷,保留進度供下次接續", now,
                 detail="run 收到 Ctrl+C")
         if cfg.git_enabled:
             try:
@@ -265,9 +301,11 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         return 130
     except AgentsError as e:
         print(f"執行中止(基礎設施錯誤):{e}")
-        if current_task is not None:
+        if (current_task is not None and current_session is not None
+                and current_session.identity is not None):
             _mark_interrupted_task(
-                current_task, "基礎設施錯誤中止,保留進度供下次接續", now,
+                current_task, current_session.identity,
+                "基礎設施錯誤中止,保留進度供下次接續", now,
                 detail=str(e))
         if cfg.git_enabled:
             try:
@@ -284,7 +322,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     return 0
 
 
-def _mark_interrupted_task(task: Task, summary: str,
+def _mark_interrupted_task(task: Task, session: _SessionIdentity, summary: str,
                            now: Callable[[], datetime], *, detail: str) -> None:
     """中止時把目前任務持久化為 WIP 並寫機器日誌;二次錯誤只警告。
 
@@ -302,6 +340,7 @@ def _mark_interrupted_task(task: Task, summary: str,
         append_entry(
             task.journal_path, by="scheduler", event="interrupt",
             summary=summary, detail=detail,
+            agent=session.agent, requested_model=session.requested_model,
             time_str=now().isoformat(timespec="seconds"))
     except Exception as e:  # 狀態與日誌各自嘗試,其中一項失敗不妨礙另一項
         print(f"中斷日誌寫入失敗:{e}(工作區保持原樣,未丟棄)")
@@ -309,7 +348,8 @@ def _mark_interrupted_task(task: Task, summary: str,
 
 def _process_task(cfg: Config, task: Task, adapter: Adapter,
                   sleep: Callable[[float], None],
-                  now: Callable[[], datetime], resumed: bool = False) -> None:
+                  now: Callable[[], datetime], session_state: _SessionState,
+                  resumed: bool = False) -> None:
     """跑單一任務的完整生命週期;內部處理額度等待與重試,結束時該任務已 DONE/BLOCKED。
 
     `task` 是選任務當下(= 上一個檢查點)解析的可信版本:scope/verify 與全部欄位
@@ -325,15 +365,21 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
     attempts_used = 0
     failure_reason: str | None = None
     while True:
+        session = _resolve_session(cfg, adapter, task)
+        session_state.identity = session
         effort = _resolve_effort(cfg, task)
-        prompt = _build_prompt(cfg, task, failure_reason, resumed)
-        print(f"  開 session(model={task.model}, effort={effort or 'CLI 預設'})...")
-        result = adapter.run_task(prompt, task.model, effort, cfg.root)
+        prompt = _build_prompt(cfg, task, failure_reason, session, resumed)
+        print(f"  開 session(model={task.model} -> {session.requested_model}, "
+              f"effort={effort or 'CLI 預設'})...")
+        result = adapter.run_task(
+            prompt, session.requested_model, effort, cfg.root)
 
         if result.quota_exhausted:  # 額度耗盡不計失敗
             print("  額度耗盡 -> 保留進度(wip 檢查點)並等待重置後接續...")
             append_entry(task.journal_path, by="scheduler", event="quota",
                          summary="額度耗盡,保留進度等待重置後接續",
+                         agent=session.agent,
+                         requested_model=session.requested_model,
                          time_str=now().isoformat(timespec="seconds"))
             if cfg.git_enabled and gitops.commit_if_dirty(
                     cfg.root, f"wip({task.id}): 額度中斷,保留進度",
@@ -371,7 +417,8 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
             print(f"  保留現有成果,帶失敗原因重試(第 {attempts_used} 次)...")
             continue
         print("  重試次數用盡 -> 調度器標記 BLOCKED(未通過的工作一併保留)")
-        _mark_blocked(cfg, task, reason or "驗收未通過", now, attempts=attempts_used)
+        _mark_blocked(cfg, task, session, reason or "驗收未通過", now,
+                      attempts=attempts_used)
         _try_write_report(cfg)
         return
 
@@ -442,7 +489,7 @@ def _run_verify(cfg: Config, command: str) -> int:
     return result.returncode
 
 
-def _mark_blocked(cfg: Config, task: Task, reason: str,
+def _mark_blocked(cfg: Config, task: Task, session: _SessionIdentity, reason: str,
                   now: Callable[[], datetime], attempts: int | None = None) -> None:
     """調度器把任務標 BLOCKED + r 檔 append 機器記錄 + 建檢查點。
 
@@ -454,6 +501,8 @@ def _mark_blocked(cfg: Config, task: Task, reason: str,
               else "未經重試即判定失敗")
     append_entry(task.journal_path, by="scheduler", event="blocked",
                  summary=f"調度器標 BLOCKED:{reason}", detail=detail,
+                 agent=session.agent,
+                 requested_model=session.requested_model,
                  time_str=now().isoformat(timespec="seconds"))
     if cfg.git_enabled:
         gitops.commit_if_dirty(cfg.root,

@@ -55,5 +55,6 @@ lite  = "low"
 
 [prompt]
 # 可覆寫預設提示詞模板;可用變數:{agents_md_path} {instructions_path} {task_path}
-# {journal_path} {verify_command} {task_id} {task_title}
+# {journal_path} {verify_command} {task_id} {task_title} {agent} {requested_model}
+# {agent} 是 codex 或 claude;{requested_model} 是本次傳給 AI CLI 的 --model 值。
 # template = """..."""

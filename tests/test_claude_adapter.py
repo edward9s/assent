@@ -225,33 +225,41 @@ class TestRunTask(unittest.TestCase):
 
         self.patch_run(fake)
         adapter = ClaudeAdapter(make_cfg())
-        result = adapter.run_task("提示", "prime", "high", Path("/proj"))
+        requested_model = adapter.resolve_model("prime")
+        result = adapter.run_task(
+            "提示", requested_model, "high", Path("/proj"))
         self.assertIsInstance(result, TaskResult)
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(result.quota_exhausted)
         # prime → fable(內建對照);且命令帶上 alias 與 effort
-        self.assertEqual(captured["cmd"][captured["cmd"].index("--model") + 1], "fable")
+        self.assertEqual(
+            captured["cmd"][captured["cmd"].index("--model") + 1],
+            requested_model)
         self.assertEqual(captured["cmd"][captured["cmd"].index("--effort") + 1], "high")
         self.assertEqual(captured["cwd"], Path("/proj"))
 
     def test_unknown_tier_raises(self):
         adapter = ClaudeAdapter(make_cfg(claude_models={"core": "opus"}))
         with self.assertRaises(AgentsError):
-            adapter.run_task("提示", "prime", "high", Path("."))
+            adapter.resolve_model("prime")
 
     def test_quota_output_sets_flags(self):
         ts = 1784041800
         quota_line = json.dumps({"type": "rate_limit_event", "rate_limit_info": {
             "status": "rejected", "resetsAt": ts}}) + "\n"
         self.patch_run(lambda c, w, s, echo=None: (0, quota_line, False))
-        result = ClaudeAdapter(make_cfg()).run_task("p", "lite", None, Path("."))
+        adapter = ClaudeAdapter(make_cfg())
+        result = adapter.run_task(
+            "p", adapter.resolve_model("lite"), None, Path("."))
         self.assertTrue(result.quota_exhausted)
         self.assertEqual(result.reset_at, datetime.fromtimestamp(ts, tz=timezone.utc))
 
     def test_stall_is_failure_not_quota(self):
         # 停滯回傳的輸出即使含額度字樣,也一律當任務失敗、絕不誤判額度(2.5)
         self.patch_run(lambda c, w, s, echo=None: (1, "rate limit exceeded\n", True))
-        result = ClaudeAdapter(make_cfg()).run_task("p", "lite", None, Path("."))
+        adapter = ClaudeAdapter(make_cfg())
+        result = adapter.run_task(
+            "p", adapter.resolve_model("lite"), None, Path("."))
         self.assertFalse(result.quota_exhausted)
         self.assertIsNone(result.reset_at)
         self.assertNotEqual(result.exit_code, 0)

@@ -135,18 +135,38 @@ notes = """
 ```toml
 [[entry]]
 time = "2026-07-17T02:03:04+00:00"
-by = "ai"                        # ai | scheduler
-event = "done"                   # 建議值:done | blocked | quota | retry | note
+by = "codex"                     # 執行者:codex | claude
+requested_model = "gpt-5.6-sol" # 本次傳給 AI CLI 的 --model 值
+event = "done"                   # 建議值:done | blocked | quota | interrupt | note
 summary = "完成骨架,37 測試全綠"
 detail = '''
 較長的過程記錄、卡點、驗證輸出摘要。
 '''                              # 可省略
 ```
 
-- 執行 AI 每次 session 收尾 append 一筆(它的 summary 會被 report 直接引用,
-  請寫可驗證事實,不寫自我敘事)。
-- 調度器的機器事件(額度中斷 `quota`、標 BLOCKED `blocked`)也 append 到同一檔
-  ——該任務的完整歷史就在這一檔。
+- 執行 AI 每次 session 收尾使用 `by = "codex"` 或 `by = "claude"`,並寫入
+  `requested_model`。它的 summary 會被 report 直接引用,請寫可驗證事實,
+  不寫自我敘事。
+- `requested_model` 精確表示 agents.toml 對照後、本次傳給 AI CLI 的
+  `--model` 值;不保證是服務端最終採用或回報的模型。任務檔的 `model` 仍只寫
+  `prime` / `core` / `lite`。
+- 調度器的機器事件使用 `by = "scheduler"`,另寫 `agent = "codex"` 或
+  `agent = "claude"` 與同一次的 `requested_model`。既有事件包括額度中斷
+  `quota`、使用者或基礎設施中斷 `interrupt`、標記 `blocked`;不另寫 session
+  啟動事件。
+- 舊日誌的 `by = "ai"` 與缺少新欄位的條目維持可讀,不遷移、不覆寫。
+
+調度器事件範例:
+
+```toml
+[[entry]]
+time = "2026-07-17T02:05:06+00:00"
+by = "scheduler"
+agent = "claude"
+requested_model = "fable"
+event = "quota"
+summary = "額度耗盡,保留進度等待重置後接續"
+```
 
 ## 任務挑選規則(調度器執行語意)
 
