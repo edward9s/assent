@@ -68,8 +68,11 @@ class FolderBaseResolution:
     resolved_base: str
 
 
-def _archived_folder_names(assent_dir: str | Path) -> set[str]:
+def archived_folder_names(assent_dir: str | Path) -> set[str]:
     """Folder names registered in the archive roster (empty when it is absent).
+
+    This and :func:`live_upstreams` are the only roster readers the rest of the
+    codebase may use; no ``after`` consumer reimplements roster lookup.
 
     Imported lazily because ``assent.archive`` depends on this module, so a
     top-level import here would be circular.  ``read_roster`` fails closed on a
@@ -124,7 +127,7 @@ def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
         raise AssentError(f"Folder dependency file {path} field after must be an array of strings")
 
     available = set(list_task_folders(tasks_dir.parent))
-    archived = _archived_folder_names(tasks_dir.parent)
+    archived = archived_folder_names(tasks_dir.parent)
     for dependency in after:
         _validate_tasks_name(dependency, f"Folder {name}'s after element")
         if dependency == name:
@@ -168,7 +171,7 @@ def is_upstream_complete(
 
     ``plans`` holds the freshly reparsed *live* task folders and ``archived`` is
     the roster set for the same ``.assent`` directory (from
-    ``_archived_folder_names``).  A live folder is judged on the spot from its
+    ``archived_folder_names``).  A live folder is judged on the spot from its
     task files (all DONE/SKIP); an archived folder is proven complete by roster
     membership alone (never by any stored hash); a name in neither fails closed
     as an unresolved reference.  ``parse_folder_dependency_graph`` already
@@ -188,6 +191,28 @@ def is_upstream_complete(
         f"archive roster")
 
 
+def live_upstreams(assent_dir: str | Path,
+                   dependencies: FolderDependencies) -> list[str]:
+    """The direct ``after`` upstreams that still have a live folder, in order.
+
+    This is the single filter every consumer of ``after`` applies before it
+    looks for an upstream's task files or its ``<folder>/*`` Git identity.  An
+    archived upstream has neither: archival requires ``clean``'s mechanical
+    proof that the folder's content is already merged into the integration
+    target, and it then deletes the branch and the live directory.  So an
+    archived name is complete, already integrated, and contributes no source
+    tip, no speculative base, and no ancestry check -- a downstream base cut
+    from the target already contains its content.
+
+    The judgement is roster membership alone, never a hash recorded in the
+    roster, because the project may rewrite Git history.
+    ``parse_folder_dependencies`` has already refused any name that is neither
+    live nor archived, so what this returns is exactly the live upstreams.
+    """
+    archived = archived_folder_names(assent_dir)
+    return [name for name in dependencies.after if name not in archived]
+
+
 def find_unfinished_prerequisites(
         tasks_dir: str | Path) -> list[UnfinishedPrerequisite]:
     """Check direct ``after`` prerequisites, returning any not entirely ``DONE/SKIP``.
@@ -197,14 +222,11 @@ def find_unfinished_prerequisites(
     """
     tasks_dir = Path(tasks_dir)
     dependencies = parse_folder_dependencies(tasks_dir)
-    archived = _archived_folder_names(tasks_dir.parent)
     unfinished: list[UnfinishedPrerequisite] = []
     status_order = ("TODO", "WIP", "BLOCKED")
-    for name in dependencies.after:
-        if name in archived:
-            # An archived upstream is proven complete and integrated; its live
-            # directory is gone, so there is nothing left to be unfinished.
-            continue
+    # An archived upstream is proven complete and integrated; its live directory
+    # is gone, so there is nothing left to be unfinished.
+    for name in live_upstreams(tasks_dir.parent, dependencies):
         plan = Plan.parse(tasks_dir.parent / name)
         counts = Counter(
             task.status for task in plan.tasks
@@ -257,15 +279,10 @@ def resolve_folder_base(
 
     target = gitops.main_worktree(root)
     target_snapshot = gitops.commit_of(target, "HEAD")
-    archived = _archived_folder_names(tasks_dir.parent)
     candidates: list[gitops.FolderSourceSnapshot] = []
-    for folder in dependencies.after:
-        if folder in archived:
-            # An archived upstream's content is already proven merged into the
-            # target (archive contains clean's integration proof) and its branch
-            # is gone, so it is complete and contributes no speculative base --
-            # judged purely by roster membership, never by any stored hash.
-            continue
+    # An archived upstream is complete and already merged into the target, so it
+    # contributes no speculative base (see live_upstreams).
+    for folder in live_upstreams(tasks_dir.parent, dependencies):
         completion = infer_folder_completion(tasks_dir.parent / folder)
         if not completion.complete:
             raise AssentError(

@@ -189,11 +189,18 @@ An `after` name resolves in order: a live folder first, then the
 `.assent/_archived.toml` archive roster, and only then the pre-existing typo
 error (which now also notes that the roster was checked). A name present in
 both a live folder and the roster is a fail-closed contradiction, since a
-normal archive/restore cycle never leaves that state. An archived upstream
-counts as complete for the unfinished-prerequisite check and contributes no
-speculative base to base resolution -- its content is already proven merged
-into the target by archive's own clean precondition -- and the judgement rests
-solely on roster membership, never on any hash recorded in the roster.
+normal archive/restore cycle never leaves that state.
+
+An archived upstream is complete and already integrated: archive requires
+`clean`'s mechanical proof that the folder's content is merged into the target,
+and then deletes its branch and live directory. Every consumer of `after`
+therefore treats it uniformly -- it counts as complete for scheduling and the
+unfinished-prerequisite check, and it supplies no source tip, so it contributes
+no speculative base, no upstream-race snapshot when a worktree is created, no
+ancestry requirement during verification, and no prerequisite tip during
+accept. Downstream `run`, `verify`, and `accept` all keep working after an
+upstream is archived, with no `_folder.toml` edit. The judgement rests solely on
+roster membership, never on any hash recorded in the roster.
 
 ### Execution permissions and the worktree boundary
 

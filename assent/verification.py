@@ -21,7 +21,8 @@ from pathlib import Path
 
 from assent import AssentError, gitops
 from assent.config import Config
-from assent.folderdeps import infer_folder_completion, parse_folder_dependencies
+from assent.folderdeps import (infer_folder_completion, live_upstreams,
+                               parse_folder_dependencies)
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 
@@ -258,14 +259,20 @@ def _stack_sources(cfg: Config, target_tip: str,
     """Snapshot direct upstreams and prove the downstream contains each one.
 
     Only direct dependencies participate here.  An unrelated malformed folder
-    must not invalidate this folder's receipt, while every declared upstream is
-    required to be complete and to retain one clean, attached source identity.
-    At most one source may still be absent from the integration target.
+    must not invalidate this folder's receipt, while every declared live
+    upstream is required to be complete and to retain one clean, attached source
+    identity.  At most one source may still be absent from the integration
+    target.
+
+    An archived upstream is proven complete by the roster and has no source
+    left to snapshot, so it is filtered out first (see ``live_upstreams``): both
+    ancestry checks below would be asking whether content that is already in the
+    target is in the target, and it can never be an unaccepted candidate.
     """
     dependencies = parse_folder_dependencies(cfg.tasks_dir)
     sources: list[gitops.FolderSourceSnapshot] = []
     unaccepted: list[gitops.FolderSourceSnapshot] = []
-    for folder in dependencies.after:
+    for folder in live_upstreams(cfg.assent_dir, dependencies):
         completion = infer_folder_completion(cfg.assent_dir / folder)
         if not completion.complete:
             raise AssentError(

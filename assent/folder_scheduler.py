@@ -18,7 +18,7 @@ from typing import TextIO
 
 from assent import AssentError, gitops
 from assent.config import load_config
-from assent.folderdeps import (_archived_folder_names, is_upstream_complete,
+from assent.folderdeps import (archived_folder_names, is_upstream_complete,
                                parse_folder_dependency_graph,
                                resolve_folder_base)
 from assent.plan import Plan
@@ -256,7 +256,7 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
                 # judge every after-name through the shared completion
                 # predicate so an archived name resolves instead of raising a
                 # KeyError, and an unresolved name fails closed here.
-                archived = _archived_folder_names(assent_dir)
+                archived = archived_folder_names(assent_dir)
 
                 if not active and all(
                         _is_complete(plan) for plan in plans.values()):
