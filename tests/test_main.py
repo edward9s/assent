@@ -414,6 +414,17 @@ class TestStdinStopWatcher(unittest.TestCase):
     """The stdin stop channel is opt-in: only a scheduler-spawned child gets
     ASSENT_STDIN_STOP, so a hand-typed `assent run` keeps its stdin."""
 
+    _GIT_PROBE = """
+import sys
+from pathlib import Path
+from assent.__main__ import _start_stdin_stop_watcher
+from assent.gitops import _run_git
+
+_start_stdin_stop_watcher()
+result = _run_git(Path.cwd(), "ls-files", "--", ".assent")
+print(result.returncode, flush=True)
+"""
+
     def test_no_watcher_thread_without_the_environment_variable(self):
         environment = dict(os.environ)
         environment.pop("ASSENT_STDIN_STOP", None)
@@ -440,6 +451,37 @@ class TestStdinStopWatcher(unittest.TestCase):
 
         self.assertFalse(thread.is_alive())
         interrupt.assert_called_once_with()
+
+    @unittest.skipUnless(os.name == "nt", "stdin pipe inheritance hang is Windows-only")
+    def test_watcher_pipe_is_not_inherited_by_git_subprocess(self):
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = str(_PROJECT_ROOT)
+        environment["ASSENT_STDIN_STOP"] = "1"
+        process = subprocess.Popen(
+            [sys.executable, "-c", self._GIT_PROBE],
+            cwd=_PROJECT_ROOT, env=environment,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+        timed_out = False
+        try:
+            try:
+                returncode = process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                process.stdin.close()
+                returncode = process.wait(timeout=10)
+            output = process.stdout.read()
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+            for stream in (process.stdin, process.stdout):
+                if stream is not None and not stream.closed:
+                    stream.close()
+
+        self.assertFalse(timed_out, "Git inherited the stop pipe and hung")
+        self.assertEqual(returncode, 0, output)
+        self.assertEqual(output.strip(), "0")
 
 
 class TestInit(MainTestCase):

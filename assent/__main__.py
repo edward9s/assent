@@ -455,11 +455,37 @@ def _start_stdin_stop_watcher() -> threading.Thread | None:
     if stream is None:
         return None
 
+    # The scheduler's pipe belongs only to this watcher.  If fd 0 is left
+    # attached to it, subprocesses started by the run inherit the same pipe.
+    # On Windows a blocking read in this thread can then keep even a simple
+    # captured Git command from reaching EOF.  Retain a private, non-inherited
+    # duplicate for stop requests and make descendants' stdin non-interactive.
+    watcher_stream = stream
+    owns_watcher_stream = False
+    try:
+        stream_fd = stream.fileno()
+        watcher_fd = os.dup(stream_fd)
+        try:
+            with open(os.devnull, "rb", buffering=0) as devnull:
+                os.dup2(devnull.fileno(), stream_fd, inheritable=True)
+            watcher_stream = os.fdopen(watcher_fd, "rb", buffering=0)
+            owns_watcher_stream = True
+        except (OSError, ValueError):
+            os.close(watcher_fd)
+            raise
+    except (AttributeError, OSError, ValueError):
+        # Embedded/test streams without a real file descriptor still retain
+        # the original stop behavior; they cannot leak an OS pipe to a child.
+        watcher_stream = stream
+
     def watch() -> None:
         try:
-            stream.read(1)
+            watcher_stream.read(1)
         except (OSError, ValueError):
             pass  # stdin torn down under us -- still a stop request
+        finally:
+            if owns_watcher_stream:
+                watcher_stream.close()
         _thread.interrupt_main()
 
     thread = threading.Thread(target=watch, name="assent-stdin-stop", daemon=True)
