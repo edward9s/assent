@@ -15,8 +15,9 @@ from typing import Sequence
 
 from assent import AssentError, gitops, verification
 from assent.config import Config, load_config
-from assent.folderdeps import (FolderDependencies, infer_folder_completion,
-                               live_upstreams, parse_folder_dependencies,
+from assent.folderdeps import (infer_folder_completion, live_upstreams,
+                               order_folders_by_dependency,
+                               parse_folder_dependencies,
                                parse_folder_dependency_graph)
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
@@ -329,34 +330,6 @@ def _accept_locked(cfg: Config) -> int:
     return 0
 
 
-def _order_finished_folders(
-        graph: dict[str, FolderDependencies], finished: set[str]) -> list[str]:
-    """Topologically sort the finished folders, breaking ties lexicographically.
-
-    ``graph`` keys are already lexicographically sorted (parsed from
-    ``list_task_folders``), so repeatedly picking the smallest ready name
-    reproduces ``run --all``'s dependency-then-lexicographic ordering, just
-    serialized instead of concurrency-scheduled.
-    """
-    edges = {name: {dep for dep in graph[name].after if dep in finished}
-             for name in finished}
-    ordered: list[str] = []
-    resolved: set[str] = set()
-    remaining = set(finished)
-    while remaining:
-        ready = sorted(name for name in remaining if edges[name] <= resolved)
-        if not ready:
-            raise AssentError(
-                "Folder dependencies among finished folders form a cycle; "
-                "this should be unreachable because the full graph is "
-                "already checked acyclic")
-        picked = ready[0]
-        ordered.append(picked)
-        resolved.add(picked)
-        remaining.discard(picked)
-    return ordered
-
-
 def _already_integrated(cfg: Config) -> bool:
     """Best-effort check for a folder whose current source is already an
     ancestor of the current target -- i.e. a prior accept already published
@@ -433,7 +406,7 @@ def accept_all(config_path: str, assent_dir: Path) -> int:
         return 0
 
     try:
-        order = _order_finished_folders(graph, finished)
+        order = order_folders_by_dependency(graph, finished)
     except AssentError as e:
         print(f"accept --all: refused, {e}")
         return 1

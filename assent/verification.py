@@ -872,6 +872,33 @@ def read_batch_receipt(path: Path,
     return receipt
 
 
+def _merge_chain(candidate: Path,
+                 sources: Sequence[tuple[str, str]]) -> BatchCandidate:
+    """Merge every ``(folder, source_tip)`` into an open candidate worktree.
+
+    Each step is asserted before the next one starts: a no-fast-forward merge
+    must produce exactly the two expected parents, the previous step and this
+    folder's source.  Anything else (a source already contained in the chain, so
+    that Git reports "already up to date" and creates no commit) is an
+    unexpected shape rather than a conflict, and fails closed instead of
+    recording a step tree that no release could reproduce.
+    """
+    step_trees: list[str] = []
+    for folder, source_tip in sources:
+        previous = gitops.commit_of(candidate, "HEAD")
+        message = f"verify(batch/{folder}): temporary integration candidate"
+        outcome = gitops.merge_no_ff(candidate, source_tip, message)
+        if not outcome.ok:
+            return BatchCandidate(
+                tuple(step_trees), folder, tuple(outcome.conflicts))
+        if gitops.commit_parents(candidate, "HEAD") != (previous, source_tip):
+            raise AssentError(
+                f"merging {folder} did not produce the expected two-parent "
+                "batch candidate")
+        step_trees.append(gitops.tree_of(candidate, "HEAD"))
+    return BatchCandidate(tuple(step_trees))
+
+
 def build_batch_candidate(main: Path, target_tip: str,
                           sources: Sequence[tuple[str, str]]) -> BatchCandidate:
     """Merge every ``(folder, source_tip)`` in order and return each step tree.
@@ -882,17 +909,9 @@ def build_batch_candidate(main: Path, target_tip: str,
     """
     if not sources:
         raise AssentError("a batch candidate needs at least one source folder")
-    step_trees: list[str] = []
     with gitops.temporary_integration_worktree(
             main, "batch", target_tip) as (candidate, _branch):
-        for folder, source_tip in sources:
-            message = f"verify(batch/{folder}): temporary integration candidate"
-            outcome = gitops.merge_no_ff(candidate, source_tip, message)
-            if not outcome.ok:
-                return BatchCandidate(
-                    tuple(step_trees), folder, tuple(outcome.conflicts))
-            step_trees.append(gitops.tree_of(candidate, "HEAD"))
-    return BatchCandidate(tuple(step_trees))
+        return _merge_chain(candidate, sources)
 
 
 def batch_receipt_staleness(cfg: Config,
@@ -962,3 +981,241 @@ def batch_receipt_is_current(cfg: Config,
     if receipt.status != "PASSED":
         return False
     return not batch_receipt_staleness(cfg, receipt)
+
+
+# --- assent verify --batch: one full verification for every queued folder ------
+
+
+@dataclass(frozen=True)
+class BatchSelection:
+    """Which folders enter one batch candidate, and why the others do not."""
+
+    sources: tuple[tuple[str, str], ...] = ()
+    skipped: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def folders(self) -> tuple[str, ...]:
+        return tuple(folder for folder, _tip in self.sources)
+
+
+def _new_batch_receipt(*, status: str, target_tip: str,
+                       sources: Sequence[tuple[str, str]],
+                       step_trees: Sequence[str], digest: str, exit_code: int,
+                       failure_summary: str = "") -> BatchVerificationReceipt:
+    entries = tuple(
+        BatchSource(folder, source_tip, step_tree)
+        for (folder, source_tip), step_tree in zip(sources, step_trees))
+    return BatchVerificationReceipt(
+        version=BATCH_RECEIPT_VERSION,
+        status=status,
+        target_tip=target_tip,
+        sources=entries,
+        final_tree=step_trees[-1],
+        verify_script_sha256=digest,
+        verify_command=VERIFY_COMMAND,
+        exit_code=exit_code,
+        completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        failure_summary=_summary(failure_summary),
+    )
+
+
+def select_batch_folders(config_path: str, assent_dir: Path, main: Path,
+                         target_tip: str) -> tuple[BatchSelection,
+                                                   dict[str, Config]]:
+    """Pick every finished folder that still has work to publish, in merge order.
+
+    Selection reuses the folder dependency graph and the same on-the-spot
+    completion inference the scheduler uses, so a batch merges folders in
+    exactly the order ``accept --all`` would publish them.  Two situations are a
+    skip rather than a failure, matching ``accept --all``:
+
+    * a folder that is not finished has nothing to verify yet;
+    * a finished folder whose source branch and worktree are both gone was
+      already integrated and cleaned, so there is nothing left to merge.
+
+    A source tip already reachable from the target is likewise skipped: merging
+    it would be a Git no-op, not a step a release could reproduce.  Any other
+    unresolved source identity (detached, ambiguous, dirty) fails the whole
+    batch instead of being silently dropped from the candidate.
+    """
+    graph = parse_folder_dependency_graph(assent_dir)
+    finished: set[str] = set()
+    skipped: list[tuple[str, str]] = []
+    for folder in graph:
+        completion = infer_folder_completion(assent_dir / folder)
+        if completion.complete:
+            finished.add(folder)
+        else:
+            skipped.append((folder, f"not finished: {completion.reason}"))
+
+    configs: dict[str, Config] = {}
+    sources: list[tuple[str, str]] = []
+    for folder in order_folders_by_dependency(graph, finished):
+        cfg = load_config(config_path, folder)
+        if (gitops.folder_worktree(main, folder) is None
+                and not gitops.folder_branches(main, folder)):
+            skipped.append((folder, "no source branch remains; already "
+                                    "integrated and cleaned"))
+            continue
+        _branch, source_tip, _worktree = _source_snapshot(cfg, main)
+        if gitops.is_ancestor(main, source_tip, target_tip):
+            skipped.append(
+                (folder, f"current source {source_tip[:12]} is already "
+                         "contained in the target"))
+            continue
+        configs[folder] = cfg
+        sources.append((folder, source_tip))
+    return BatchSelection(tuple(sources), tuple(skipped)), configs
+
+
+def _batch_drift(configs: dict[str, Config], main: Path, excludes: Sequence[str],
+                 target_branch: str, target_tip: str,
+                 sources: Sequence[tuple[str, str]], script: Path,
+                 digest: str) -> list[str]:
+    """Re-observe every identity the batch receipt is about to certify."""
+    changed: list[str] = []
+    if gitops.current_branch(main) != target_branch:
+        changed.append("target branch changed")
+    elif gitops.commit_of(main, target_branch) != target_tip:
+        changed.append("target tip changed")
+    if not gitops.working_tree_status(main, excludes).is_clean:
+        changed.append("target worktree became dirty")
+    for folder, source_tip in sources:
+        try:
+            _branch, current, _worktree = _source_snapshot(configs[folder], main)
+        except AssentError as e:
+            changed.append(f"source for {folder} changed: {e}")
+        else:
+            if current != source_tip:
+                changed.append(f"source tip for {folder} changed")
+    if _sha256(script) != digest:
+        changed.append("verification script changed")
+    return changed
+
+
+def _verify_batch_locked(config_path: str, assent_dir: Path) -> int:
+    """Build, verify, and record one batch candidate with every lock held."""
+    root = assent_dir.parent
+    main = gitops.main_worktree(root)
+    path = batch_receipt_path(assent_dir)
+    # A malformed batch receipt is evidence of an unsafe state, not permission
+    # to erase it; this mirrors the single-folder path.
+    if path.exists():
+        read_batch_receipt(path, main)
+
+    target_branch = gitops.require_current_branch(main)
+    target_tip = gitops.commit_of(main, target_branch)
+    selection, configs = select_batch_folders(
+        config_path, assent_dir, main, target_tip)
+    for folder, reason in selection.skipped:
+        print(f"verify --batch: skip {folder} ({reason})")
+    if not selection.sources:
+        print("verify --batch: no folder has anything left to verify; "
+              "no receipt was written.")
+        return 0
+
+    with contextlib.ExitStack() as locks:
+        # The repository integration lock is already held; taking every queued
+        # folder's own lock next keeps the fixed integration-then-folder order
+        # and refuses to verify a folder that is currently running.
+        for folder in selection.folders:
+            locks.enter_context(hold_lock(configs[folder].tasks_dir, folder))
+
+        excludes = configs[selection.folders[0]].git_excludes
+        if not gitops.working_tree_status(main, excludes).is_clean:
+            raise AssentError(f"target worktree {main} is not clean")
+        for folder, source_tip in selection.sources:
+            _branch, current, _worktree = _source_snapshot(configs[folder], main)
+            if current != source_tip:
+                raise AssentError(
+                    f"source tip for {folder} changed while the batch locks "
+                    "were being acquired")
+        script = (assent_dir / "verify.py").resolve()
+        if not script.is_file():
+            raise AssentError(f"Verification script not found: {script}")
+        digest = _sha256(script)
+
+        print("verify --batch: merging "
+              f"{len(selection.sources)} folder(s) in dependency order: "
+              + ", ".join(selection.folders))
+        _invalidate_receipt(path)
+
+        candidate_result = BatchCandidate()
+        result: subprocess.CompletedProcess[str] | None = None
+        start_failure = ""
+        with gitops.temporary_integration_worktree(
+                main, "batch", target_tip) as (candidate, _branch):
+            candidate_result = _merge_chain(candidate, selection.sources)
+            if candidate_result.ok:
+                try:
+                    result = _run_full_verifier(script, candidate)
+                except OSError as e:
+                    start_failure = f"Unable to start verification: {e}"
+
+        if not candidate_result.ok:
+            print(f"verify --batch: refused, merging {candidate_result.conflict_folder} "
+                  "into the batch candidate conflicts. The target was not "
+                  "changed and no receipt was written. Conflicting file(s):")
+            for conflicting in candidate_result.conflicts:
+                print(f"  - {conflicting}")
+            print("Resolve the conflict in "
+                  f"{candidate_result.conflict_folder} (or accept the folders "
+                  "ahead of it) before verifying the batch again")
+            return 1
+
+        if start_failure:
+            receipt = _new_batch_receipt(
+                status="FAILED", target_tip=target_tip,
+                sources=selection.sources,
+                step_trees=candidate_result.step_trees, digest=digest,
+                exit_code=1, failure_summary=start_failure)
+        else:
+            assert result is not None
+            receipt = _new_batch_receipt(
+                status="PASSED" if result.returncode == 0 else "FAILED",
+                target_tip=target_tip, sources=selection.sources,
+                step_trees=candidate_result.step_trees, digest=digest,
+                exit_code=result.returncode,
+                failure_summary=("" if result.returncode == 0 else _summary(
+                    result.stdout, result.stderr,
+                    f"Verification command failed: {VERIFY_COMMAND} "
+                    f"(exit code {result.returncode})")))
+
+        changed = _batch_drift(
+            configs, main, excludes, target_branch, target_tip,
+            selection.sources, script, digest)
+        if changed:
+            receipt = _new_batch_receipt(
+                status="FAILED", target_tip=target_tip,
+                sources=selection.sources,
+                step_trees=candidate_result.step_trees, digest=digest,
+                exit_code=1, failure_summary="; ".join(changed))
+
+        write_batch_receipt(path, receipt, main)
+
+    for source in receipt.sources:
+        print(f"  {source.folder}: source {source.source_tip[:12]} "
+              f"-> tree {source.step_tree}")
+    if receipt.status == "PASSED":
+        print(f"verify --batch: passed ({receipt.final_tree})")
+        return 0
+    print(f"verify --batch: failed ({receipt.failure_summary.splitlines()[0]})")
+    return 1
+
+
+def verify_batch(config_path: str, assent_dir: str | Path) -> int:
+    """Verify every queued folder as one candidate; zero only for PASSED.
+
+    An empty batch is success with no receipt: there is nothing to certify, so
+    inventing a receipt would be inventing evidence.
+    """
+    assent_dir = Path(assent_dir)
+    try:
+        with hold_integration_lock(assent_dir):
+            return _verify_batch_locked(config_path, assent_dir)
+    except LockBusy as e:
+        print(f"verify --batch: refused ({e})")
+        return 1
+    except AssentError as e:
+        print(f"verify --batch: failed ({e})")
+        return 1
