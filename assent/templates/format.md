@@ -61,6 +61,18 @@ project/
   `git clean` — it deletes nothing untracked or unmerged. It also refuses to
   clean an upstream source while an unaccepted dependent folder still needs
   that source.
+- **Archive**: `assent archive <FOLDER>` (or `--all`) one-way retires a
+  finished folder: it strictly contains `clean` (clean never archives in
+  return) by reusing its mechanical merge proof and removal for any
+  still-present source branch or worktree, then compresses
+  `.assent/<FOLDER>/` into `.assent/_archive/<FOLDER>.zip`, registers the
+  folder in the `.assent/_archived.toml` roster, and deletes the live
+  directory. Every step is crash-resumable and idempotent, resolving the
+  current on-disk state against the roster on each re-run. `--restore FOLDER`
+  reverses one archive: it extracts the zip back to the live directory,
+  deregisters the folder, and deletes the zip. A downstream folder's `after`
+  reference resolves an archived upstream through the roster, so no
+  `_folder.toml` edit is needed once its upstream is archived.
 - **Acceptance**: `assent accept <FOLDER>` records a human acceptance decision
   by transactionally integrating exactly one completed folder into the normal
   branch currently checked out in the main worktree. `FOLDER` and `--all` are
@@ -169,6 +181,16 @@ upstreams are complete; incomplete upstreams, missing files, or parse errors all
 refuse execution. `check` validates the full folder dependency graph and detects
 and refuses cycles; any validation or dependency-resolution error stays fail
 closed.
+
+An `after` name resolves in order: a live folder first, then the
+`.assent/_archived.toml` archive roster, and only then the pre-existing typo
+error (which now also notes that the roster was checked). A name present in
+both a live folder and the roster is a fail-closed contradiction, since a
+normal archive/restore cycle never leaves that state. An archived upstream
+counts as complete for the unfinished-prerequisite check and contributes no
+speculative base to base resolution -- its content is already proven merged
+into the target by archive's own clean precondition -- and the judgement rests
+solely on roster membership, never on any hash recorded in the roster.
 
 ### Execution permissions and the worktree boundary
 
@@ -418,6 +440,26 @@ merged into the main tree's current HEAD, before it first removes the worktree
 with ordinary protection and then deletes branches with `git branch -d`. Any
 insufficient proof keeps it and states the reason; there is no force-delete
 option, and it never touches `.assent/`.
+
+`assent archive <FOLDER>` (or `--all`) one-way retires a finished folder: it
+strictly contains `clean` -- reusing its mechanical proof and removal for any
+still-present source branch/worktree -- then compresses `.assent/<FOLDER>/`
+into `.assent/_archive/<FOLDER>.zip`, registers the folder in the
+`.assent/_archived.toml` roster, and deletes the live directory; `clean` never
+archives in return. `FOLDER` and `--all` are mutually exclusive, and bare
+`archive` naming neither is a parser error so a missed folder name cannot
+archive everything by accident; `--all` archives every eligible folder in
+lexicographic order, prints a skip reason for each ineligible one, and exits 0
+unless a real error occurred. Every step is crash-resumable: a re-run resolves
+the current on-disk state against the roster and finishes only the steps still
+missing. `archive --restore FOLDER` (incompatible with `--all`) reverses one
+archive by extracting the zip back to the live directory, deregistering the
+folder, and deleting the zip; it refuses when the live directory already
+exists or no archive exists. The two archived file bodies carry separate
+responsibilities: the zip under `.assent/_archive/` exists only to serve
+`--restore` and may be deleted or moved elsewhere at any time, losing only the
+ability to restore, while `.assent/_archived.toml` is the sole basis for
+dependency resolution and must be kept.
 
 `assent reject <FOLDER>` lets a review meeting reject a whole folder's
 implementation: after acquiring the same `assent.lock`, it first fully parses
