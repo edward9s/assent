@@ -85,7 +85,11 @@ project/
   (recording full tip hashes before deletion), reverts DONE/WIP/BLOCKED tasks
   back to TODO, and leaves a `rejected` record in the r file with full Git
   evidence (SKIP is not overturned). `FOLDER` is required; it refuses while a
-  run is in progress.
+  run is in progress. Before touching Git state it also resolves the folder
+  dependency graph for direct dependents: an unaccepted direct dependent
+  defaults to refusing and lists it, proceeding only after an explicit human
+  confirmation to accept stranding it; a dependent whose own run lock is
+  currently busy always refuses without prompting.
 - **Rework**: `assent rework <FOLDER> <TASK>` non-destructively reopens a single
   task, keeping the code by default and only reverting the target back to TODO;
   downstream propagation requires an explicit `--cascade`. `--revert-code`
@@ -381,13 +385,19 @@ option, and it never touches `.assent/`.
 
 `assent reject <FOLDER>` lets a review meeting reject a whole folder's
 implementation: after acquiring the same `assent.lock`, it first fully parses
-the task files, then stashes uncommitted changes as a wip commit, records each
-branch's full tip hash as evidence, then force-removes the worktree, deletes
-same-prefix branches with `git branch -D`, and finally reverts DONE/WIP/BLOCKED
-tasks back to TODO and appends a `rejected` record with full Git evidence to the
-r file. The status reset is intrinsic to rejection, not an exception to routine
-cleanup; if any Git step fails it does not enter the task-file reset, and
-rerunning the same command finishes the job.
+the task files, then resolves the folder dependency graph for direct
+dependents. A dependent whose own run lock is busy always refuses the whole
+command without prompting; otherwise any dependent not yet provably accepted
+defaults to refusing and is listed, and proceeding past it requires an
+explicit human confirmation to accept stranding it. It then stashes
+uncommitted changes as a wip commit, records each branch's full tip hash as
+evidence, then force-removes the worktree, deletes same-prefix branches with
+`git branch -D`, and finally reverts DONE/WIP/BLOCKED tasks back to TODO and
+appends a `rejected` record with full Git evidence, plus the confirmed
+would-be-stranded dependent list when there was one, to the r file. The
+status reset is intrinsic to rejection, not an exception to routine cleanup;
+if any Git step fails it does not enter the task-file reset, and rerunning
+the same command finishes the job.
 
 `assent rework <FOLDER> <TASK>` lets a review meeting reopen a single task; both
 positional arguments are required, with no omission-derivation, `--all`, or
