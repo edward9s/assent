@@ -68,12 +68,27 @@ class FolderBaseResolution:
     resolved_base: str
 
 
+def _archived_folder_names(assent_dir: str | Path) -> set[str]:
+    """Folder names registered in the archive roster (empty when it is absent).
+
+    Imported lazily because ``assent.archive`` depends on this module, so a
+    top-level import here would be circular.  ``read_roster`` fails closed on a
+    malformed roster, so any dependency parse (and thus ``check``) incidentally
+    validates the roster format.
+    """
+    from assent.archive import read_roster
+    return {entry["folder"] for entry in read_roster(assent_dir)}
+
+
 def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
     """Parse and validate a task folder's ``_folder.toml``.
 
-    A referenced task folder must be a folder with a formal task file under
-    the same ``.assent`` directory. A missing ``_folder.toml`` yields an
-    empty ``after``.
+    A referenced task folder must resolve to either a live folder with a formal
+    task file under the same ``.assent`` directory, or an entry in the
+    ``.assent/_archived.toml`` roster (an upstream already archived after being
+    proven integrated).  A name present in neither is refused as a typo; a name
+    present in both is a contradictory state and fails closed.  A missing
+    ``_folder.toml`` yields an empty ``after``.
     """
     tasks_dir = Path(tasks_dir)
     if not tasks_dir.is_dir():
@@ -109,14 +124,22 @@ def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
         raise AssentError(f"Folder dependency file {path} field after must be an array of strings")
 
     available = set(list_task_folders(tasks_dir.parent))
+    archived = _archived_folder_names(tasks_dir.parent)
     for dependency in after:
         _validate_tasks_name(dependency, f"Folder {name}'s after element")
         if dependency == name:
             raise AssentError(f"Folder {name}'s after must not depend on itself")
-        if dependency not in available:
+        in_live = dependency in available
+        in_archive = dependency in archived
+        if in_live and in_archive:
+            raise AssentError(
+                f"Folder {name}'s after references {dependency}, which exists both as a"
+                " live task folder and in the archive roster; this contradictory state"
+                " needs manual resolution (a normal restore deregisters the folder)")
+        if not in_live and not in_archive:
             raise AssentError(
                 f"Folder {name}'s after references a task folder that does not exist"
-                f" or has no task files: {dependency}")
+                f" or has no task files, and is not in the archive roster: {dependency}")
 
     return FolderDependencies(
         name=name, after=list(after), path=path.resolve())
@@ -148,9 +171,14 @@ def find_unfinished_prerequisites(
     """
     tasks_dir = Path(tasks_dir)
     dependencies = parse_folder_dependencies(tasks_dir)
+    archived = _archived_folder_names(tasks_dir.parent)
     unfinished: list[UnfinishedPrerequisite] = []
     status_order = ("TODO", "WIP", "BLOCKED")
     for name in dependencies.after:
+        if name in archived:
+            # An archived upstream is proven complete and integrated; its live
+            # directory is gone, so there is nothing left to be unfinished.
+            continue
         plan = Plan.parse(tasks_dir.parent / name)
         counts = Counter(
             task.status for task in plan.tasks
@@ -203,8 +231,15 @@ def resolve_folder_base(
 
     target = gitops.main_worktree(root)
     target_snapshot = gitops.commit_of(target, "HEAD")
+    archived = _archived_folder_names(tasks_dir.parent)
     candidates: list[gitops.FolderSourceSnapshot] = []
     for folder in dependencies.after:
+        if folder in archived:
+            # An archived upstream's content is already proven merged into the
+            # target (archive contains clean's integration proof) and its branch
+            # is gone, so it is complete and contributes no speculative base --
+            # judged purely by roster membership, never by any stored hash.
+            continue
         completion = infer_folder_completion(tasks_dir.parent / folder)
         if not completion.complete:
             raise AssentError(
@@ -255,8 +290,14 @@ def _ensure_acyclic(dependencies: dict[str, FolderDependencies]) -> None:
         if state.get(node) == 1:
             cycle = " -> ".join(chain[chain.index(node):] + [node])
             raise AssentError(f"Folder dependencies form a cycle: {cycle}")
+        node_deps = dependencies.get(node)
+        if node_deps is None:
+            # An archived upstream is not a live graph node; it is a resolved,
+            # integrated leaf with no outgoing edges and cannot join a cycle.
+            state[node] = 2
+            return
         state[node] = 1
-        for dependency in dependencies[node].after:
+        for dependency in node_deps.after:
             visit(dependency, chain + [node])
         state[node] = 2
 

@@ -51,6 +51,19 @@ class FolderDepsTestCase(unittest.TestCase):
                 task_text(status), encoding="utf-8")
         return folder
 
+    def write_roster(self, *names: str) -> None:
+        """Write an archive roster listing ``names`` (no live directory needed)."""
+        lines: list[str] = []
+        for name in names:
+            lines.extend((
+                "[[archived]]",
+                f"folder = {json.dumps(name)}",
+                'archived_at = "2026-07-25T00:00:00+00:00"',
+                "",
+            ))
+        (self.assent_dir / "_archived.toml").write_text(
+            "\n".join(lines), encoding="utf-8")
+
 
 class TestParseFolderDependencies(FolderDepsTestCase):
     def test_valid_declaration(self):
@@ -125,6 +138,43 @@ class TestParseFolderDependencies(FolderDepsTestCase):
         result = infer_folder_completion(folder)
         self.assertTrue(result.complete)
 
+    def test_archived_dependency_resolves_without_live_folder(self):
+        # "first" has been archived (no live directory), yet the after reference
+        # still resolves through the roster.
+        folder = self.make_folder("work", "TODO")
+        (folder / "_folder.toml").write_text(
+            'after = ["first"]\n', encoding="utf-8")
+        self.write_roster("first")
+        self.assertEqual(parse_folder_dependencies(folder).after, ["first"])
+
+    def test_missing_folder_message_notes_roster_was_checked(self):
+        folder = self.make_folder("work", "TODO")
+        (folder / "_folder.toml").write_text(
+            'after = ["missing"]\n', encoding="utf-8")
+        self.write_roster("other")
+        with self.assertRaisesRegex(
+                AssentError, "does not exist.*not in the archive roster"):
+            parse_folder_dependencies(folder)
+
+    def test_live_and_archived_same_name_fails_closed(self):
+        self.make_folder("dup", "DONE")
+        folder = self.make_folder("work", "TODO")
+        (folder / "_folder.toml").write_text(
+            'after = ["dup"]\n', encoding="utf-8")
+        self.write_roster("dup")
+        with self.assertRaisesRegex(
+                AssentError, "both as a live task folder and in the archive roster"):
+            parse_folder_dependencies(folder)
+
+    def test_malformed_roster_fails_closed(self):
+        folder = self.make_folder("work", "TODO")
+        (folder / "_folder.toml").write_text(
+            'after = ["first"]\n', encoding="utf-8")
+        (self.assent_dir / "_archived.toml").write_text(
+            "archived = [\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "not valid TOML"):
+            parse_folder_dependencies(folder)
+
 
 class TestInferFolderCompletion(FolderDepsTestCase):
     def test_all_done_and_skip_is_complete(self):
@@ -171,6 +221,24 @@ class TestInferFolderCompletion(FolderDepsTestCase):
             result[0].message(),
             "Prerequisite folder base still has 3 unfinished task(s) (TODO 1, WIP 1, BLOCKED 1)")
 
+    def test_archived_prerequisite_counts_as_finished(self):
+        folder = self.make_folder("work", "TODO")
+        (folder / "_folder.toml").write_text(
+            'after = ["arch"]\n', encoding="utf-8")
+        self.write_roster("arch")
+        self.assertEqual(find_unfinished_prerequisites(folder), [])
+
+    def test_archived_and_live_unfinished_reports_only_live(self):
+        self.make_folder("live", "TODO")
+        folder = self.make_folder("work", "TODO")
+        (folder / "_folder.toml").write_text(
+            'after = ["arch", "live"]\n', encoding="utf-8")
+        self.write_roster("arch")
+
+        result = find_unfinished_prerequisites(folder)
+
+        self.assertEqual([item.name for item in result], ["live"])
+
 
 class TestFolderDependencyGraph(FolderDepsTestCase):
     def test_acyclic_graph_parsed(self):
@@ -194,6 +262,26 @@ class TestFolderDependencyGraph(FolderDepsTestCase):
         with self.assertRaisesRegex(
                 AssentError, "first -> second -> third -> first"):
             parse_folder_dependency_graph(self.assent_dir)
+
+    def test_archived_upstream_is_a_terminal_leaf(self):
+        # An archived upstream has no live directory (so it is not a graph node)
+        # yet must resolve as a leaf without a KeyError or a spurious cycle.
+        second = self.make_folder("second", "TODO")
+        (second / "_folder.toml").write_text(
+            'after = ["first"]\n', encoding="utf-8")
+        self.write_roster("first")
+        graph = parse_folder_dependency_graph(self.assent_dir)
+        self.assertEqual(graph["second"].after, ["first"])
+        self.assertNotIn("first", graph)
+
+    def test_missing_roster_leaves_resolution_unchanged(self):
+        self.make_folder("first", "DONE")
+        second = self.make_folder("second", "TODO")
+        (second / "_folder.toml").write_text(
+            'after = ["first"]\n', encoding="utf-8")
+        self.assertFalse((self.assent_dir / "_archived.toml").exists())
+        graph = parse_folder_dependency_graph(self.assent_dir)
+        self.assertEqual(graph["second"].after, ["first"])
 
 
 def _git(root: Path, *args: str) -> str:
@@ -392,6 +480,34 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
             self.root, downstream, downstream_tip=downstream_tip)
 
         self.assertEqual(result.resolved_base, upstream_tip)
+
+    def test_archived_upstream_resolves_to_target_without_speculation(self):
+        # An archived upstream (roster only, no live folder or branch) is proven
+        # integrated, so the base is the exact target HEAD with no speculation.
+        downstream = self.make_folder("downstream", "TODO")
+        (downstream / "_folder.toml").write_text(
+            'after = ["upstream"]\n', encoding="utf-8")
+        self.write_roster("upstream")
+        target = _git(self.root, "rev-parse", "HEAD")
+
+        result = resolve_folder_base(self.root, downstream)
+
+        self.assertEqual(result.target_snapshot, target)
+        self.assertIsNone(result.speculative_upstream)
+        self.assertEqual(result.resolved_base, target)
+
+    def test_archived_upstream_ignored_beside_one_live_speculative(self):
+        self.make_folder("live", "DONE", "SKIP")
+        downstream = self.make_folder("downstream", "TODO")
+        (downstream / "_folder.toml").write_text(
+            'after = ["arch", "live"]\n', encoding="utf-8")
+        self.write_roster("arch")
+        _, tip = self.make_source("live")
+
+        result = resolve_folder_base(self.root, downstream)
+
+        self.assertEqual(result.speculative_upstream.folder, "live")
+        self.assertEqual(result.resolved_base, tip)
 
     def test_sha1_and_sha256_object_ids_are_preserved_exactly(self):
         for object_format, oid_length in (("sha1", 40), ("sha256", 64)):
