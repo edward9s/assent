@@ -64,8 +64,11 @@ project/
 - **Archive**: `assent archive <FOLDER>` (or `--all`) one-way retires a
   finished folder: it strictly contains `clean` (clean never archives in
   return) by reusing its mechanical merge proof and removal for any
-  still-present source branch or worktree, then compresses
-  `.assent/<FOLDER>/` into `.assent/_archive/<FOLDER>.zip`, registers the
+  still-present source branch or worktree, then acquires the folder's
+  `assent.lock` -- creating it if missing, since a missing lock file is proof
+  nobody holds the folder rather than a reason to skip -- and holds it while
+  it compresses `.assent/<FOLDER>/` (excluding `assent.lock` itself, a
+  runtime artifact) into `.assent/_archive/<FOLDER>.zip`, registers the
   folder in the `.assent/_archived.toml` roster, and deletes the live
   directory. Every step is crash-resumable and idempotent, resolving the
   current on-disk state against the roster on each re-run. `--restore FOLDER`
@@ -443,10 +446,19 @@ option, and it never touches `.assent/`.
 
 `assent archive <FOLDER>` (or `--all`) one-way retires a finished folder: it
 strictly contains `clean` -- reusing its mechanical proof and removal for any
-still-present source branch/worktree -- then compresses `.assent/<FOLDER>/`
-into `.assent/_archive/<FOLDER>.zip`, registers the folder in the
-`.assent/_archived.toml` roster, and deletes the live directory; `clean` never
-archives in return. `FOLDER` and `--all` are mutually exclusive, and bare
+still-present source branch/worktree -- then acquires the folder's
+`assent.lock`, creating it if missing: unlike `clean`'s `probe_lock`, which
+refuses to touch `.assent/` and so cannot tell a missing lock file from an
+unprovable one, archive already writes into `.assent/<FOLDER>/`, so a missing
+lock file is proof nobody holds the folder rather than a reason to skip.
+Holding that lock across the rest of the operation blocks a concurrent
+run/reject/rework and closes the probe-then-act window; it then compresses
+`.assent/<FOLDER>/` (excluding `assent.lock` itself, a runtime artifact that
+never enters the zip) into `.assent/_archive/<FOLDER>.zip`, registers the
+folder in the `.assent/_archived.toml` roster, and deletes the live
+directory -- which also removes the lock file, so there is no separate
+release step; `clean` never archives in return. `FOLDER` and `--all` are
+mutually exclusive, and bare
 `archive` naming neither is a parser error so a missed folder name cannot
 archive everything by accident; `--all` archives every eligible folder in
 lexicographic order, prints a skip reason for each ineligible one, and exits 0

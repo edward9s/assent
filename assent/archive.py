@@ -38,8 +38,8 @@ from assent import AssentError, gitops
 from assent.clean import _clean_locked, _has_cleanup_target
 from assent.config import Config, list_task_folders, load_config
 from assent.folderdeps import infer_folder_completion
-from assent.lockfile import (LockBusy, LockMissing, hold_integration_lock,
-                             probe_lock)
+from assent.lockfile import (LOCK_NAME, LockBusy, hold_lock,
+                             hold_integration_lock)
 
 _ARCHIVE_DIRNAME = "_archive"
 _ROSTER_NAME = "_archived.toml"
@@ -141,12 +141,22 @@ def _in_roster(entries: list[dict], folder: str) -> bool:
 
 
 def _compress_plan(src_dir: Path, tmp_zip: Path) -> None:
-    """Compress every file under ``src_dir`` into ``tmp_zip`` (paths relative to it)."""
+    """Compress every file under ``src_dir`` into ``tmp_zip`` (paths relative to it).
+
+    The folder lock (``assent.lock``) is a runtime management artifact, not plan
+    content: archive creates and holds it for the duration of the operation and it
+    disappears with the deleted live directory, so it is excluded here rather than
+    captured as a stale lock inside the archive.
+    """
     tmp_zip.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(src_dir.rglob("*")):
-            if path.is_file():
-                archive.write(path, path.relative_to(src_dir).as_posix())
+            if not path.is_file():
+                continue
+            relative = path.relative_to(src_dir).as_posix()
+            if relative == LOCK_NAME:
+                continue
+            archive.write(path, relative)
 
 
 def _delete_plan_dir(path: Path) -> None:
@@ -279,13 +289,18 @@ def _archive_one(cfg: Config) -> ArchiveResult:
                 _print_result(name, result)
                 return result
 
+            # Acquire the folder lock, creating assent.lock when it is missing: a
+            # missing lock file is positive proof nobody holds the folder (lockfile
+            # distinguishes LockMissing from a live lock), so archive takes the lock
+            # rather than refusing.  Holding a real lock across the prove/clean/
+            # compress/register/publish work blocks concurrent run/reject/rework and
+            # closes the probe-then-act window; the lock vanishes with the deleted
+            # directory (excluded from the zip), so there is no separate release step.
             try:
-                with probe_lock(cfg.tasks_dir, name):
+                with hold_lock(cfg.tasks_dir, name):
                     result = _do_archive_new(cfg, entries)
             except LockBusy:
                 result = ArchiveResult("skipped", "a run is in progress")
-            except LockMissing as e:
-                result = ArchiveResult("skipped", str(e))
             except AssentError as e:
                 result = ArchiveResult(
                     "error", f"folder lock could not be acquired: {e}")
