@@ -11,8 +11,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agents.folder_scheduler import _send_interrupt, run_all
+from agents.folder_scheduler import _send_interrupt, _start_folder, run_all
 from agents.plan import set_status
+from agents.terminal_log import terminal_logging
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -47,6 +48,18 @@ class FinishedProcess:
         return 0
 
 
+class OutputProcess(FinishedProcess):
+    """帶文字管線的完成子行程替身。"""
+
+    def __init__(self, task: Path, output: str | bytes) -> None:
+        super().__init__(task)
+        if isinstance(output, bytes):
+            self.stdout = io.TextIOWrapper(
+                io.BytesIO(output), encoding="utf-8", errors="replace")
+        else:
+            self.stdout = io.StringIO(output)
+
+
 class FolderSchedulerTestCase(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
@@ -72,6 +85,112 @@ class FolderSchedulerTestCase(unittest.TestCase):
 
 
 class TestRunAll(FolderSchedulerTestCase):
+    def test_child_uses_utf8_merged_text_pipe_and_process_group(self):
+        process = object()
+        with patch("agents.folder_scheduler.subprocess.Popen",
+                   return_value=process) as popen:
+            actual = _start_folder(str(self.config), "work")
+
+        self.assertIs(actual, process)
+        command = popen.call_args.args[0]
+        options = popen.call_args.kwargs
+        self.assertEqual(command[:3], [sys.executable, "-m", "agents"])
+        self.assertEqual(command[3:5], ["run", "work"])
+        self.assertEqual(options["stdin"], subprocess.DEVNULL)
+        self.assertEqual(options["stdout"], subprocess.PIPE)
+        self.assertEqual(options["stderr"], subprocess.STDOUT)
+        self.assertIs(options["text"], True)
+        self.assertEqual(options["encoding"], "utf-8")
+        self.assertEqual(options["errors"], "replace")
+        if os.name == "nt":
+            self.assertEqual(options["creationflags"],
+                             subprocess.CREATE_NEW_PROCESS_GROUP)
+            self.assertNotIn("start_new_session", options)
+        else:
+            self.assertIs(options["start_new_session"], True)
+            self.assertNotIn("creationflags", options)
+
+    def test_jobs_one_forwards_each_line_with_folder_prefix(self):
+        task = self.make_folder("serial")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch(
+                "agents.folder_scheduler._start_folder",
+                return_value=OutputProcess(task, "第一列\n最後一列")):
+            code = run_all(str(self.config), self.agents_dir)
+
+        self.assertEqual(code, 0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines.count("[serial] 第一列"), 1)
+        self.assertEqual(lines.count("[serial] 最後一列"), 1)
+        self.assertLess(lines.index("[serial] 最後一列"),
+                        lines.index("完成工作資料夾:serial(退出碼 0)"))
+
+    def test_jobs_two_serializes_lines_with_correct_source(self):
+        tasks = {
+            "alpha": self.make_folder("alpha"),
+            "beta": self.make_folder("beta"),
+        }
+        outputs = {
+            "alpha": "甲一\n甲二\n",
+            "beta": "乙一\n乙二\n",
+        }
+        out = io.StringIO()
+
+        def fake_start(_config, folder):
+            return OutputProcess(tasks[folder], outputs[folder])
+
+        with contextlib.redirect_stdout(out), patch(
+                "agents.folder_scheduler._start_folder", side_effect=fake_start):
+            code = run_all(str(self.config), self.agents_dir, jobs=2)
+
+        self.assertEqual(code, 0)
+        forwarded = [line for line in out.getvalue().splitlines()
+                     if line.startswith("[")]
+        self.assertCountEqual(
+            forwarded,
+            ["[alpha] 甲一", "[alpha] 甲二", "[beta] 乙一", "[beta] 乙二"],
+        )
+
+    def test_merged_stderr_bad_utf8_and_unterminated_line_are_forwarded(self):
+        task = self.make_folder("encoded")
+        out = io.StringIO()
+        raw = "標準錯誤\n".encode("utf-8") + b"bad:\xff"
+        with contextlib.redirect_stdout(out), patch(
+                "agents.folder_scheduler._start_folder",
+                return_value=OutputProcess(task, raw)):
+            code = run_all(str(self.config), self.agents_dir)
+
+        self.assertEqual(code, 0)
+        self.assertIn("[encoded] 標準錯誤\n", out.getvalue())
+        self.assertIn("[encoded] bad:\ufffd\n", out.getvalue())
+
+    def test_terminal_only_forwarding_does_not_enter_root_log_or_child_log(self):
+        task = self.make_folder("work")
+        child_log = task.parent / "_agents.log"
+        terminal = io.StringIO()
+
+        def fake_start(_config, _folder):
+            child_log.write_text("子行程原始訊息\n", encoding="utf-8")
+            return OutputProcess(task, "子行程原始訊息\n")
+
+        argv = ["run", "--all", "--config", str(self.config)]
+        with contextlib.redirect_stdout(terminal):
+            with terminal_logging(argv) as root_log, patch(
+                    "agents.folder_scheduler._start_folder",
+                    side_effect=fake_start):
+                code = run_all(str(self.config), self.agents_dir)
+
+        self.assertEqual(code, 0)
+        terminal_text = terminal.getvalue()
+        root_text = root_log.read_text(encoding="utf-8")
+        self.assertIn("[work] 子行程原始訊息", terminal_text)
+        self.assertIn("AGENTS START", root_text)
+        self.assertIn("啟動工作資料夾:work", root_text)
+        self.assertIn("完成工作資料夾:work", root_text)
+        self.assertNotIn("子行程原始訊息", root_text)
+        self.assertEqual(child_log.read_text(encoding="utf-8"),
+                         "子行程原始訊息\n")
+
     def test_no_git_rejects_completed_folders_before_inspection(self):
         self.make_folder("done", "DONE")
         self.make_folder("skipped", "SKIP")

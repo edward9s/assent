@@ -107,8 +107,13 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 
 可在 N 個終端各自指定不同的工作資料夾執行，例如 `agents run parallel01`、
 `agents run parallel02`;也可用 `agents run --all --jobs N` 由調度器依資料夾
-依賴安排平行執行。各資料夾內的任務與日誌分別使用
-`tNNN_名稱.e.toml`、`tNNN_名稱.r.toml`。每個工作資料夾都有自己的
+依賴安排平行執行。`run --all` 維持單一前景終端,並把各子行程訊息即時顯示為
+`[工作資料夾] 訊息`;平行執行時可由前綴辨識每一列的來源。
+
+家長終端會顯示上述帶前綴訊息,根層 `.agents/_agents.log` 只保存啟動標頭與
+工作資料夾啟動、完成或失敗等調度摘要。各工作資料夾自己的 `_agents.log`
+則由子行程保存完整原始輸出,不含家長前綴且不會重複寫入。各資料夾內的任務
+與日誌分別使用 `tNNN_名稱.e.toml`、`tNNN_名稱.r.toml`。每個工作資料夾都有自己的
 `agents.lock`，同一資料夾
 同時只允許一個 run；Git 永遠啟用,每個資料夾一律使用
 `<專案名>.worktrees/<資料夾>/` 的獨立 worktree,這是安全平行處理的基礎。
@@ -175,7 +180,7 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 | 指令與代表性命令 | 選項與作用 | token 消耗 |
 |---|---|---|
 | `agents run [FOLDER]`<br>`agents run parallel01` | 執行工作資料夾，直到任務全為 DONE/BLOCKED/SKIP。省略 `FOLDER` 時推導唯一可執行資料夾；`--once` 只執行下一個任務後停止；`--task ID` 指定單一任務且仍檢查前置，例如 `agents run --task t003 parallel01`。 | 僅執行 AI session 時消耗；`--once` 或 `--task` 最多執行單一任務 |
-| `agents run --all`<br>`agents run --all --jobs 2` | 依 `_folder.toml` 的資料夾依賴順序執行全部未完成資料夾；`--jobs N` 限制同時執行的資料夾數(預設 1)。不可與 `FOLDER`、`--once` 或 `--task` 並用。 | 僅執行 AI session 時消耗 |
+| `agents run --all`<br>`agents run --all --jobs 2` | 依 `_folder.toml` 的資料夾依賴順序執行全部未完成資料夾；`--jobs N` 限制同時執行的資料夾數(預設 1)，家長終端以 `[工作資料夾] 訊息` 即時標示各子行程輸出。不可與 `FOLDER`、`--once` 或 `--task` 並用。 | 僅執行 AI session 時消耗 |
 | `agents status [FOLDER]`<br>`agents status parallel01` | 顯示進度統計、下一個任務、分支與最後檢查點。接受 `--config PATH`。 | **零** |
 | `agents check [FOLDER]`<br>`agents check --config .agents/agents.toml parallel01` | 驗證任務檔格式、依賴無循環、設定與環境，是規劃會議的散會條件。接受 `--config PATH`。 | **零** |
 | `agents report [FOLDER]`<br>`agents report parallel01` | 生成並顯示工作資料夾內的人讀報告 `_report.md`。接受 `--config PATH`。 | **零** |

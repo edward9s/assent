@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import os
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import TextIO
 
 from agents import AgentsError
 from agents.folderdeps import parse_folder_dependency_graph
@@ -32,14 +35,76 @@ def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
     ]
     kwargs = {
         "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "bufsize": 1,
     }
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
     return subprocess.Popen(command, **kwargs)
+
+
+def _read_folder_output(
+        folder: str, stream: TextIO,
+        output: queue.Queue[tuple[str, str]]) -> None:
+    """持續排空單一子行程管線,把完整實體列送回家長執行緒。"""
+    try:
+        for line in stream:
+            output.put((folder, line))
+    finally:
+        stream.close()
+
+
+def _start_output_reader(
+        folder: str, process: subprocess.Popen,
+        output: queue.Queue[tuple[str, str]]) -> threading.Thread | None:
+    """為具有 stdout 管線的子行程啟動背景讀取執行緒。"""
+    stream = getattr(process, "stdout", None)
+    if stream is None:
+        # 測試替身與第三方直接呼叫可能只實作最小 Popen 介面。
+        return None
+    reader = threading.Thread(
+        target=_read_folder_output,
+        args=(folder, stream, output),
+        name=f"agents-output-{folder}",
+        daemon=True,
+    )
+    reader.start()
+    return reader
+
+
+def _write_folder_line(folder: str, line: str) -> None:
+    """把一列子行程訊息只寫到家長終端,沒有專用通道時退回 stdout。"""
+    content = line.removesuffix("\n").removesuffix("\r")
+    stream = sys.stdout
+    write = getattr(stream, "write_terminal_only", stream.write)
+    write(f"[{folder}] {content}\n")
+    stream.flush()
+
+
+def _drain_output(output: queue.Queue[tuple[str, str]]) -> None:
+    """由家長執行緒序列化目前已收到的完整輸出列。"""
+    while True:
+        try:
+            folder, line = output.get_nowait()
+        except queue.Empty:
+            return
+        _write_folder_line(folder, line)
+
+
+def _finish_folder_output(
+        folder: str, readers: dict[str, threading.Thread],
+        output: queue.Queue[tuple[str, str]]) -> None:
+    """等待指定管線讀到 EOF,並在完成摘要前排空最後輸出。"""
+    reader = readers.pop(folder, None)
+    if reader is not None:
+        reader.join()
+    _drain_output(output)
 
 
 def _folder_plans(agents_dir: Path, folders: list[str]) -> dict[str, Plan]:
@@ -95,7 +160,10 @@ def _send_interrupt(process: subprocess.Popen) -> None:
         os.killpg(process.pid, signal.SIGINT)
 
 
-def _interrupt_and_wait(active: dict[str, subprocess.Popen]) -> None:
+def _interrupt_and_wait(
+        active: dict[str, subprocess.Popen],
+        readers: dict[str, threading.Thread],
+        output: queue.Queue[tuple[str, str]]) -> None:
     """轉送中斷後等待各子行程自行保存現場並退出。"""
     print("\n收到中斷(Ctrl+C):通知執行中的工作資料夾自行收尾...")
     for folder, process in active.items():
@@ -107,9 +175,11 @@ def _interrupt_and_wait(active: dict[str, subprocess.Popen]) -> None:
     for folder, process in active.items():
         try:
             returncode = process.wait()
+            _finish_folder_output(folder, readers, output)
             print(f"工作資料夾已收尾:{folder}(退出碼 {returncode})")
         except OSError as e:
             print(f"等待工作資料夾收尾失敗:{folder}({e})")
+    _drain_output(output)
 
 
 def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
@@ -119,6 +189,8 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
         print(_GIT_REQUIRED_MESSAGE)
         return 1
     active: dict[str, subprocess.Popen] = {}
+    readers: dict[str, threading.Thread] = {}
+    output: queue.Queue[tuple[str, str]] = queue.Queue()
     attempted: set[str] = set()
     failure = False
     try:
@@ -150,7 +222,11 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
             while not failure and runnable and len(active) < jobs:
                 folder = runnable.pop(0)
                 try:
-                    active[folder] = _start_folder(config_path, folder)
+                    process = _start_folder(config_path, folder)
+                    active[folder] = process
+                    reader = _start_output_reader(folder, process, output)
+                    if reader is not None:
+                        readers[folder] = reader
                 except OSError as e:
                     print(f"工作資料夾啟動失敗:{folder}({e})")
                     failure = True
@@ -165,6 +241,7 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
 
             completed: list[tuple[str, int]] = []
             while not completed:
+                _drain_output(output)
                 for folder, process in active.items():
                     returncode = process.poll()
                     if returncode is not None:
@@ -176,6 +253,7 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
             for folder, returncode in completed:
                 del active[folder]
                 attempted.add(folder)
+                _finish_folder_output(folder, readers, output)
                 if returncode == 0:
                     print(f"完成工作資料夾:{folder}(退出碼 0)")
                 elif returncode in _INTERRUPT_RETURNCODES:
@@ -187,10 +265,10 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
                           f"詳情見 {log_path})")
                     failure = True
             if interrupted:
-                _interrupt_and_wait(active)
+                _interrupt_and_wait(active, readers, output)
                 return 130
             if failure and not active:
                 return 1
     except KeyboardInterrupt:
-        _interrupt_and_wait(active)
+        _interrupt_and_wait(active, readers, output)
         return 130
