@@ -19,7 +19,11 @@ name = "claude"                   # "claude" 或 "codex"
 
 [adapter.claude]
 command = "claude"
-extra_args = ["--permission-mode", "acceptEdits"]
+# bypassPermissions:執行 AI 需能跑測試自測自修、寫 .agents/ 內自己的 t/r 檔收尾;
+# acceptEdits 會卡命令執行審批(headless 無人可批)。客觀閘門(scope 檢查、verify、
+# 檢查點)不依賴 session 權限,信任等級實質同本地開發。要收緊可改回 acceptEdits
+# 並搭配 --allowedTools 逐項放行(如 "Bash(python:*)")。
+extra_args = ["--permission-mode", "bypassPermissions"]
 # 抽象檔位 -> CLI --model 參數(任務檔只寫 prime/core/lite)
 [adapter.claude.models]
 prime = "fable"
@@ -33,7 +37,11 @@ lite  = "medium"
 
 [adapter.codex]
 command = "codex"
-extra_args = ["--sandbox", "workspace-write"]
+# danger-full-access:workspace-write 沙箱有兩個實測炸點——(1)tempfile 型測試
+# 寫系統暫存目錄被拒;(2).agents/ 被 .gitignore 的專案會被劃成「專案外」唯讀,
+# 執行 AI 改不了自己任務檔的 status,任務全數假性 BLOCKED。客觀閘門不受影響。
+# 要收緊可改回 workspace-write 並以 writable_roots 放行暫存目錄(僅解炸點 1)。
+extra_args = ["--sandbox", "danger-full-access"]
 [adapter.codex.models]
 prime = "gpt-5.6-sol"
 core  = "gpt-5.6-terra"
