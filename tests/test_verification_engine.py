@@ -24,7 +24,7 @@ from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
 from assent.verification import (
     VerificationReceipt, _run_full_verifier, _verify_locked,
-    verify_batch, verify_folder_if_needed, verify_selected_batch,
+    verify_batch, verify_folder, verify_folder_if_needed, verify_selected_batch,
 )
 
 
@@ -799,6 +799,42 @@ class TestBatchConflictSkip(BatchVerifyRepositoryCase):
         self.assertIn("two.txt", output)
         self.assertEqual(self.read_batch_receipt().folders, ("aa", "cc"))
 
+    def test_a_peer_only_conflict_is_not_presented_as_a_target_conflict(self
+                                                                        ) -> None:
+        self.make_source("aa", filename="shared.txt", content="from aa\n")
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+
+        code, output = self.run_batch(answer=True)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("bb merges into the integration target cleanly on its "
+                      "own", output)
+        self.assertIn("never merges speculative peers", output)
+        # Single-folder reconciliation cannot resolve a peer conflict, so it is
+        # not offered, and the invalid one-argument rework is not either.
+        self.assertNotIn("assent reconcile bb", output)
+        self.assertIn("assent rework <FOLDER> <TASK>", output)
+        self.assertIn("assent reject bb", output)
+
+    def test_a_conflict_with_the_target_itself_points_at_reconcile(self) -> None:
+        (self.root / "shared.txt").write_text("base\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "shared base")
+        self.make_source("aa")
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+        (self.root / "shared.txt").write_text("from trunk\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "advance trunk")
+
+        code, output = self.run_batch(answer=True)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("bb conflicts with the integration target on its own",
+                      output)
+        self.assertIn("assent reconcile bb", output)
+        self.assertNotIn("merges into the integration target cleanly", output)
+        self.assertEqual(self.read_batch_receipt().folders, ("aa",))
+
     def test_no_runs_no_verifier_writes_no_receipt_and_changes_nothing(self
                                                                       ) -> None:
         self.make_source("aa", filename="shared.txt", content="from aa\n")
@@ -894,6 +930,34 @@ class TestBatchConflictSkip(BatchVerifyRepositoryCase):
         receipt = self.read_batch_receipt()
         self.assertEqual(receipt.status, "FAILED")
         self.assertEqual(receipt.folders, ("aa", "cc"))
+
+
+class TestFolderConflictDiagnostic(BatchVerifyRepositoryCase):
+    """A single folder that conflicts with the target is sent to reconcile."""
+
+    def test_a_conflicting_source_names_reconcile_and_not_a_one_argument_rework(
+            self) -> None:
+        (self.root / "shared.txt").write_text("base\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "shared base")
+        self.make_source("aa", filename="shared.txt", content="from aa\n")
+        (self.root / "shared.txt").write_text("from trunk\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "advance trunk")
+
+        cfg = load_config(str(self.config_path), "aa")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = verify_folder(cfg)
+        text = output.getvalue()
+
+        self.assertEqual(code, 1, text)
+        self.assertIn("Integration conflict: shared.txt", text)
+        self.assertIn("assent reconcile aa", text)
+        self.assertNotIn("assent rework aa", text)
+        receipt = verification.read_receipt(
+            verification.receipt_path(cfg), self.root)
+        self.assertEqual(receipt.status, "FAILED")
 
 
 class TestBatchFailureLocalization(BatchVerifyRepositoryCase):

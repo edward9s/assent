@@ -779,6 +779,41 @@ source folder, skipped or merged, are left exactly as they were, and the
 conflicting folder's own source still needs a human decision through `assent
 rework` or `assent reject` before it can rejoin a batch.
 
+Skipping is not resolution, and `assent reconcile <FOLDER>` is the separate,
+single-folder way a human resolves one source-versus-target conflict. The
+human edits only the conflicted files; Assent owns every Git operation around
+those edits. Start requires a finished folder, a clean main worktree, and a
+source with its own branch and worktree; it captures the target tip and merges
+it into the exact source tip inside the dedicated worktree
+`<project>.reconcile/<FOLDER>` on the temporary branch
+`assent-reconcile/<FOLDER>`. The merge is source-first, so the source branch
+can be fast-forwarded onto it: the source is never rewritten, the main and
+source worktrees stay clean, and the integration target is never changed.
+`--continue` stages exactly the still-unmerged paths, refuses a resolution
+that leaves an unmerged path, a conflict marker or whitespace error, or an
+edit outside the conflict-resolution scene, then commits the merge,
+fast-forwards the source branch, and removes the managed worktree and branch
+after re-proving ownership of each. `--abort` discards the attempt, removing
+only those same proven resources and refusing while uncommitted changes
+remain. There is no state file: the worktree, the temporary branch, `HEAD`,
+`MERGE_HEAD`, and the merge parents say how far an interrupted run got, so
+`--continue` resumes, and any mismatch refuses while preserving the worktree,
+the branch, and every edit.
+
+Reconciliation produces no evidence and no approval. `--continue` runs neither
+the focused task tests nor the complete verification and writes no receipt;
+since the source really advanced, it deletes the folder receipt, and the batch
+receipt when any source identity it records is no longer current (an
+unreadable batch receipt is kept for inspection instead). `assent verify
+<FOLDER>` remains the human-controlled expensive complete verification against
+the then-current target, and `assent accept <FOLDER>` remains the explicit
+approval that still requires a fresh, reproducible `PASSED` receipt. Reconcile
+handles exactly one folder against the current integration target: it never
+resolves file content, never combines speculative peer folders, never runs an
+AI adapter, and never edits a task status, so a conflict that exists only
+between two unaccepted sources in a batch candidate stays with `verify
+--batch`'s skip decision and then `rework` or `reject`.
+
 On failure, `verify --batch` bisects the chain by default to the first
 folder whose merge turns the full verification red, at most
 `ceil(log2(N))` extra full verifications for `N` folders. The folders ahead

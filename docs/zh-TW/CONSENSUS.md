@@ -177,6 +177,28 @@ batch receipt 的 release 路徑只在一次原子 ref 更新中發佈 receipt �
 `archive --all` 延伸 `clean` 已在強制的 upstream-first 規則:只封存獨立符合資格的
 資料夾,並持續保留尚未被接受的 dependent 仍需要的 source evidence。
 
+## 人工調解共識(2026-07-27)
+
+Conflict 在內容上仍是人類的決定,但圍繞該決定的 Git 機制歸 Assent 掌管。
+`assent reconcile FOLDER` 把兩者分開:人類只編輯衝突檔案,Assent 執行每一個
+Git 操作。start 會在專屬 worktree `<project>.reconcile/<FOLDER>` 內、於臨時
+分支 `assent-reconcile/<FOLDER>` 上,把擷取到的 target tip 合併進確切的
+資料夾 source;這個 merge 以 source 為先建立,因此 source 可以被 fast-forward
+到它上面。主 worktree 與 source worktree 維持乾淨,整合 target 從不被改變。
+`--continue` 把解決加入索引、驗證、提交 merge、推進 source 分支並清理;
+`--abort` 只移除它重新證明過自己所管理的資源。沒有狀態檔——worktree、臨時
+分支、`HEAD`、`MERGE_HEAD` 與 merge parents 就是可續行的狀態,因此任何中斷
+與拒絕都會保留 worktree、分支與每一筆編輯。
+
+驗證邊界並未移動。`--continue` 既不執行聚焦任務測試也不執行完整驗證,且不寫
+receipt;由於 source 確實前進,它會刪除依舊 source 身分寫成的 receipt——那是
+derived artifact,重建的代價只是一次 `assent verify`。`assent verify FOLDER`
+仍是由人控制的昂貴步驟,`assent accept FOLDER` 仍是明確批准,並且仍要求一份
+fresh、可重現的 `PASSED` 完整驗證 receipt。Reconcile 不是整合引擎:只處理單一
+資料夾對當前整合 target、不自動解決內容;兩個未被接受 source 之間、只在批次中
+出現的 conflict 仍留給 `verify --batch` 的略過決定,再由 `rework` 或 `reject`
+處理。
+
 ## 模型與推理投入共識
 
 `model` 與 `effort` 是正交的抽象檔位。任務的 model 固定使用

@@ -1,9 +1,10 @@
 """CLI entry point: argparse subcommands run/status/check/report/verify/clean/
-accept/reject/rework/archive/init."""
+accept/reconcile/reject/rework/archive/init."""
 from __future__ import annotations
 
 import _thread
 import argparse
+import importlib.metadata
 import os
 import signal
 import sys
@@ -21,6 +22,8 @@ from assent.folderdeps import (find_unfinished_prerequisites,
 from assent.folder_scheduler import run_all
 from assent.init import init as run_init
 from assent.plan import Plan
+from assent.reconcile import (reconcile_abort, reconcile_continue,
+                              reconcile_start)
 from assent.reject import reject_folder
 from assent.rework import rework_task
 from assent.terminal_log import terminal_logging
@@ -52,8 +55,13 @@ def _build_parser() -> argparse.ArgumentParser:
                     ".assent work folders, opens an AI session per task, "
                     "checks acceptance objectively, and auto-checkpoints git.",
     )
+    parser.add_argument(
+        "--version", action="version",
+        version=f"%(prog)s {importlib.metadata.version('assent')}",
+        help="Show the installed assent distribution version and exit",
+    )
     sub = parser.add_subparsers(dest="command", required=True,
-                                metavar="{run,status,check,report,verify,clean,accept,reject,rework,archive,init,doctor}")
+                                metavar="{run,status,check,report,verify,clean,accept,reconcile,reject,rework,archive,init,doctor}")
 
     run_p = sub.add_parser(
         "run", help="Run one or more folders in order until all are "
@@ -143,6 +151,33 @@ def _build_parser() -> argparse.ArgumentParser:
     accept_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
         help=f"Config file location (default: {_DEFAULT_CONFIG})")
+
+    reconcile_p = sub.add_parser(
+        "reconcile", help="Resolve one folder's source-versus-target conflict "
+                          "by hand in an isolated worktree; runs no "
+                          "verification and integrates nothing",
+        description=(
+            "Prepares the conflict in a dedicated worktree, and with "
+            "--continue turns the human's resolution into a merge commit the "
+            "folder's own source branch is fast-forwarded onto. It never "
+            "touches the integration target, never runs the focused or the "
+            "complete verification, and never accepts: `assent verify FOLDER` "
+            "and then `assent accept FOLDER` stay separate, explicit steps."))
+    reconcile_p.add_argument(
+        "folder", metavar="FOLDER",
+        help="The finished work folder to reconcile (required; one folder "
+             "only, never a speculative set of peers)")
+    reconcile_action = reconcile_p.add_mutually_exclusive_group()
+    reconcile_action.add_argument(
+        "--continue", action="store_true", dest="continue_reconcile",
+        help="Finish the reconciliation started earlier: stage the resolved "
+             "conflict, commit the merge, and fast-forward the source branch")
+    reconcile_action.add_argument(
+        "--abort", action="store_true",
+        help="Discard the reconciliation attempt; the source and the "
+             "integration target are left unchanged")
+    reconcile_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
+                             help=f"Config file location (default: {_DEFAULT_CONFIG})")
 
     reject_p = sub.add_parser(
         "reject", help="Human ruling: reject a folder by archiving it, force-"
@@ -417,6 +452,17 @@ def _dispatch(argv: list[str]) -> int:
         except KeyboardInterrupt:
             print("\nverify interrupted; temporary resources were cleaned up.")
             return 130
+    if args.command == "reconcile":
+        try:
+            cfg = load_config(args.config, args.folder)
+        except AssentError as e:
+            print(f"Config error: {e}")
+            return 1
+        if args.continue_reconcile:
+            return reconcile_continue(cfg)
+        if args.abort:
+            return reconcile_abort(cfg)
+        return reconcile_start(cfg)
     if args.command == "reject":
         try:
             cfg = load_config(args.config, args.folder)
@@ -555,15 +601,15 @@ def _start_stdin_stop_watcher() -> threading.Thread | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    _install_break_handler()
     actual_argv = list(sys.argv[1:] if argv is None else argv)
+    _install_break_handler()
     # The stop channel belongs to a real scheduler-spawned ``run`` process.
     # ``main(argv)`` is also the in-process CLI entry point used by tests and
     # library callers; starting a watcher there would let the caller's closed
     # stdin interrupt unrelated dispatch.  Help should likewise remain a
     # normal parser operation even when it inherits the scheduler environment.
-    if (argv is None and actual_argv and actual_argv[0] == "run"
-            and "--help" not in actual_argv and "-h" not in actual_argv):
+    if (argv is None and actual_argv[:1] == ["run"]
+            and "-h" not in actual_argv and "--help" not in actual_argv):
         _start_stdin_stop_watcher()
     # On Windows, stdout/stderr default to the system code page when
     # redirected to a pipe/file, which mangles non-ASCII output.

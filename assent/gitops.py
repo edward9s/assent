@@ -881,6 +881,102 @@ def fast_forward(root: Path, commit: str) -> None:
     _git(root, "merge", "--ff-only", snapshot)
 
 
+# --- Conflict reconciliation primitives ---
+
+
+def reconcile_worktree_path(root: Path, folder: str) -> Path:
+    """Return the fixed reconciliation worktree path for one task folder.
+
+    A sibling container beside ``<repo>.worktrees`` keeps a reconciliation out of
+    the folder-source namespace, so a reconciliation worktree can never be
+    mistaken for (or clean up as) a folder's own source worktree.
+    """
+    return root.parent / f"{root.name}.reconcile" / folder
+
+
+def branch_exists(root: Path, branch: str) -> bool:
+    """Report whether a local branch ref exists; a broken query fails loudly."""
+    result = _run_git(root, "show-ref", "--verify", "--quiet",
+                      f"refs/heads/{branch}")
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise AssentError(
+        f"unable to inspect branch {branch} (exit code {result.returncode}): "
+        f"{result.stderr.strip() or result.stdout.strip()}")
+
+
+def add_worktree_branch(root: Path, branch: str, path: Path,
+                        start_commit: str) -> None:
+    """Create a worktree on a new branch starting at an exact commit."""
+    snapshot = _commit_snapshot(root, start_commit)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _git(root, "worktree", "add", "-b", branch, str(path), snapshot)
+
+
+def merge_no_commit(worktree: Path, commit: str) -> MergeOutcome:
+    """Merge an explicit commit without fast-forwarding, committing, or auto-aborting.
+
+    Unlike :func:`merge_no_ff`, a textual conflict is deliberately left in the
+    worktree's merge state so a human can resolve it there; the caller owns every
+    later decision about that state.
+    """
+    snapshot = _commit_snapshot(worktree, commit)
+    result = _run_git(worktree, "merge", "--no-ff", "--no-commit", snapshot)
+    if result.returncode == 0:
+        return MergeOutcome(True)
+    conflicts = conflict_paths(worktree)
+    if not conflicts:
+        raise AssentError(
+            f"git merge --no-ff --no-commit {snapshot} failed "
+            f"(exit code {result.returncode}): "
+            f"{result.stderr.strip() or result.stdout.strip()}")
+    return MergeOutcome(False, tuple(conflicts), result.returncode)
+
+
+def merge_head(worktree: Path) -> str | None:
+    """Return ``MERGE_HEAD`` while a merge is in progress, otherwise ``None``."""
+    result = _run_git(worktree, "rev-parse", "--quiet", "--verify",
+                      "MERGE_HEAD^{commit}")
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def abort_merge(worktree: Path) -> None:
+    """Abort an in-progress merge, returning to the state before it started."""
+    _git(worktree, "merge", "--abort")
+
+
+def stage_paths(worktree: Path, paths: Sequence[str]) -> None:
+    """Stage exactly the named paths, including a path the human deleted."""
+    if not paths:
+        return
+    _git(worktree, "add", "-A", "--", *[_normalize(path) for path in paths])
+
+
+def diff_cached_check(worktree: Path) -> str | None:
+    """Return git's complaint about the staged content, or ``None`` when it is clean.
+
+    ``git diff --cached --check`` is what catches a leftover conflict marker, so a
+    "resolution" that still contains one never reaches a commit.
+    """
+    result = _run_git(worktree, "diff", "--cached", "--check")
+    if result.returncode == 0:
+        return None
+    return (result.stdout.strip() or result.stderr.strip()
+            or f"git diff --cached --check exited {result.returncode}")
+
+
+def commit_merge(worktree: Path, message: str) -> str:
+    """Commit the staged in-progress merge and return the new commit hash."""
+    if merge_head(worktree) is None:
+        raise AssentError(f"no merge is in progress in {worktree}")
+    _git(worktree, "commit", "-m", message)
+    return commit_of(worktree, "HEAD")
+
+
 @contextlib.contextmanager
 def temporary_integration_worktree(
         root: Path, folder: str,

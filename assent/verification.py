@@ -47,6 +47,9 @@ _RECEIPT_STATUSES = ("PASSED", "FAILED")
 _OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _SUMMARY_LIMIT = 4000
+# The receipt records a source/target conflict with this prefix, which is also
+# what tells a failed `verify FOLDER` to point at `assent reconcile`.
+_CONFLICT_SUMMARY_PREFIX = "Integration conflict: "
 _RECEIPT_KEYS = {
     "version", "status", "source_tip", "target_tip", "integration_tree",
     "verify_script_sha256", "verify_command", "exit_code", "completed_at",
@@ -80,6 +83,19 @@ def _invalidate_receipt(path: Path) -> None:
     except OSError as e:
         raise AssentError(
             f"Unable to invalidate old verification receipt {path}: {e}") from e
+
+
+def invalidate_folder_receipt(cfg: Config) -> bool:
+    """Delete one folder's receipt so no accept can consume it; True if one existed.
+
+    Every command that changes what the receipt was written against uses this
+    rather than unlinking the file itself.  The receipt is derived and
+    disposable, so deleting it only ever costs one ``assent verify FOLDER``.
+    """
+    path = receipt_path(cfg)
+    existed = path.exists()
+    _invalidate_receipt(path)
+    return existed
 
 
 def _sha256(path: Path) -> str:
@@ -416,7 +432,7 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
                 status="FAILED", source_tip=source_tip, target_tip=target_tip,
                 integration_tree=candidate_tree, digest=digest,
                 exit_code=outcome.exit_code or 1,
-                failure_summary=f"Integration conflict: {conflicts}")
+                failure_summary=f"{_CONFLICT_SUMMARY_PREFIX}{conflicts}")
         else:
             history = gitops.commit_history(candidate, "HEAD")
             if not history or history[0][1] != (target_tip, source_tip):
@@ -495,6 +511,9 @@ def verify_folder(cfg: Config) -> int:
         print(f"verify {folder}: passed ({receipt.integration_tree})")
         return 0
     print(f"verify {folder}: failed ({receipt.failure_summary})")
+    if receipt.failure_summary.startswith(_CONFLICT_SUMMARY_PREFIX):
+        print(f"Run `assent reconcile {folder}` to resolve the source-versus-"
+              "target conflict in an isolated worktree, then verify again.")
     return 1
 
 
@@ -1325,6 +1344,7 @@ class BatchConflict:
 
     folder: str
     conflicts: tuple[str, ...] = ()
+    source_tip: str = ""
 
 
 @dataclass(frozen=True)
@@ -1376,7 +1396,8 @@ def _merge_chain_skipping_conflicts(
         message = f"verify(batch/{folder}): temporary integration candidate"
         outcome = gitops.merge_no_ff(candidate, source_tip, message)
         if not outcome.ok:
-            conflicts.append(BatchConflict(folder, tuple(outcome.conflicts)))
+            conflicts.append(
+                BatchConflict(folder, tuple(outcome.conflicts), source_tip))
             for downstream in _dependent_folders(graph, folder, queued):
                 excluded.setdefault(downstream, folder)
             continue
@@ -1406,20 +1427,48 @@ def confirm_on_terminal(question: str) -> bool:
     return answer.strip().lower() in ("", "y", "yes")
 
 
-def _report_batch_conflicts(chain: FilteredBatchChain) -> None:
+def _conflicts_with_target_alone(main: Path, conflict: BatchConflict,
+                                 target_tip: str) -> bool:
+    """True when the folder's own source already conflicts with the target.
+
+    A batch conflict has two very different causes, and only this second,
+    single-folder merge tells them apart: a source that conflicts with the
+    integration target itself, and a source that conflicts only with an earlier
+    unaccepted peer in the same batch.  ``reconcile`` addresses exactly the
+    first one, so the distinction decides which advice is honest.
+    """
+    _tree, outcome = _candidate_tree(
+        main, conflict.folder, target_tip, conflict.source_tip)
+    return not outcome.ok
+
+
+def _report_batch_conflicts(chain: FilteredBatchChain, main: Path,
+                            target_tip: str) -> None:
     """State every conflicting folder, its paths, and its excluded downstream."""
     for conflict in chain.conflicts:
         print(f"verify --batch: merging {conflict.folder} into the batch "
               "candidate conflicts. Conflicting file(s):")
         for conflicting in conflict.conflicts:
             print(f"  - {conflicting}")
+        if _conflicts_with_target_alone(main, conflict, target_tip):
+            print(f"verify --batch: {conflict.folder} conflicts with the "
+                  "integration target on its own. Run `assent reconcile "
+                  f"{conflict.folder}` to resolve that source-versus-target "
+                  "conflict in an isolated worktree.")
+        else:
+            print(f"verify --batch: {conflict.folder} merges into the "
+                  "integration target cleanly on its own; it conflicts only "
+                  "with an earlier not-yet-accepted source in this batch. "
+                  "`assent reconcile` handles one folder against the target "
+                  "and never merges speculative peers, so it cannot resolve "
+                  "this; accept the earlier folder first and verify again, or "
+                  "reopen the folder with `assent rework <FOLDER> <TASK>` or "
+                  f"drop it with `assent reject {conflict.folder}`.")
     for folder, cause in chain.skipped_after:
         print(f"verify --batch: {folder} is queued after {cause}, so it is "
               "skipped with it rather than verified without it")
-    print("verify --batch: a source conflict is a human decision. Accepting "
-          "the folders ahead of it does not resolve it; the conflicting "
-          "folder's own source has to be reworked against the target "
-          "(`assent rework`) or dropped (`assent reject`).")
+    print("verify --batch: a source conflict is a human decision; accepting "
+          "the folders ahead of it does not resolve it.")
 
 
 def _skip_question(chain: FilteredBatchChain) -> str:
@@ -1573,7 +1622,7 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                 chain = _merge_chain_skipping_conflicts(
                     candidate, selection.sources, graph)
                 if chain.conflicts:
-                    _report_batch_conflicts(chain)
+                    _report_batch_conflicts(chain, main, target_tip)
                 if chain.conflicts and not chain.sources:
                     # Nothing is left to offer, so there is no decision to ask for.
                     refusal = ("every queued folder conflicts, so no independent "
