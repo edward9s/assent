@@ -179,7 +179,10 @@ to the system temp directory — tempfile-style tests write there, and
 uses `danger-full-access` rather than `workspace-write`; both must be permitted
 when tightening the sandbox. The worktree isolates changes, supports conflict
 management, and gives Git auditable recovery boundaries; it is not a security
-sandbox. With `danger-full-access` or `bypassPermissions`, the AI can still
+sandbox. The main-tree escape detection described under [Lifecycle and review]
+is a mechanical, after-the-fact defense, not a preventive one, and does not
+change this non-sandbox positioning. With `danger-full-access` or
+`bypassPermissions`, the AI can still
 reach resources available to its OS identity, including external Git writers,
 network, credentials, and files outside the worktree. Use unattended execution
 only in trusted project and account environments. Assent does not create a
@@ -510,6 +513,18 @@ ordinary Git synchronization, if desired -> `clean`.
 
 For each task: open a headless session -> after the session ends the scheduler
 checks in order, and commits only when all pass:
+
+When execution is isolated, the scheduler also detects writes that landed in
+the main tree instead of the worktree: it diffs a main-tree dirty-path
+snapshot taken just before the session against one taken just after: any new
+dirt is what the session itself wrote there. When every escaped path falls
+inside the task's scope, the scheduler ports it into the worktree, restores
+the main tree, records the port-back in the r file, and this attempt's
+evaluation is judged a failure and goes to retry like any other checkpoint
+failure. An escaped path outside scope, or an in-scope path whose port-back
+itself fails (for example the worktree copy already diverged), is
+fail-closed: both trees are left untouched and the state is handed to a
+human.
 
 1. **Status check**: the task's status has been updated by the executing AI to
    `DONE` or `BLOCKED`. When only this check fails and the structural
