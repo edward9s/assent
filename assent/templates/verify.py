@@ -46,7 +46,8 @@ def check_committed_delta() -> None:
         first_parent = parent.stdout.strip()
         if not first_parent:
             fail("git returned an empty first parent")
-        run("git", "diff", "--check", first_parent, "HEAD")
+        run("git", "-c", "core.whitespace=cr-at-eol", "diff", "--check",
+            first_parent, "HEAD")
     elif parent.returncode != 128:
         fail("unable to determine the candidate's first parent")
 
@@ -115,7 +116,9 @@ def run_unittest_parallel(start_dir: str = "tests", jobs: int | None = None) -> 
 
 
 # --- Worktree integrity check (keep) ---
-run("git", "diff", "--check")
+# core.whitespace=cr-at-eol is set per invocation so a CR stored before LF is not
+# reported as trailing whitespace; real trailing spaces and tabs still fail.
+run("git", "-c", "core.whitespace=cr-at-eol", "diff", "--check")
 check_committed_delta()
 
 # --- Project test choice (assent init activates exactly one line) ---

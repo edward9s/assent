@@ -1,4 +1,5 @@
-"""Fixture tests for the packaged run_unittest_parallel() verify helper."""
+"""Fixture tests for the packaged verify.py template: its git whitespace gates
+and its run_unittest_parallel() helper."""
 from __future__ import annotations
 
 import os
@@ -26,16 +27,23 @@ _FAIL_MODULE = (
 )
 
 
-class RunUnittestParallelCase(unittest.TestCase):
+class VerifyTemplateFixture(unittest.TestCase):
+    """Builds a throwaway git repo running the packaged template as run_verify.py."""
+
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="assent verify template "))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         subprocess.run(["git", "init"], cwd=self.root, check=True,
                        capture_output=True)
         for key, value in (("user.name", "Verify Template Test"),
-                           ("user.email", "verify-template@example.invalid")):
+                           ("user.email", "verify-template@example.invalid"),
+                           ("core.autocrlf", "false")):
             subprocess.run(["git", "config", key, value], cwd=self.root,
                            check=True, capture_output=True)
+        # Repository-local core.autocrlf=false plus "* -text" keeps every blob
+        # byte-identical to the worktree file, so the LF and CRLF fixtures below
+        # mean the same thing on any operator's machine.
+        (self.root / ".gitattributes").write_bytes(b"* -text\n")
 
         template_text = TEMPLATE.read_text(encoding="utf-8")
         self.assertIn("# run_unittest_parallel()", template_text)
@@ -47,6 +55,30 @@ class RunUnittestParallelCase(unittest.TestCase):
         self.tests_dir = self.root / "tests"
         self.tests_dir.mkdir()
 
+    def _write_module(self, name: str, source: str) -> None:
+        (self.tests_dir / f"{name}.py").write_text(source, encoding="utf-8")
+
+    def _write_bytes(self, name: str, data: bytes) -> None:
+        (self.root / name).write_bytes(data)
+
+    def _commit(self, message: str) -> None:
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-m", message], cwd=self.root,
+                       check=True, capture_output=True)
+
+    def _run(self, env_overrides: dict[str, str] | None = None
+             ) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        env.pop("ASSENT_VERIFY_JOBS", None)
+        if env_overrides:
+            env.update(env_overrides)
+        return subprocess.run(
+            [sys.executable, str(self.script)], cwd=self.root,
+            capture_output=True, encoding="utf-8", errors="replace", env=env)
+
+
+class RunUnittestParallelCase(VerifyTemplateFixture):
     def test_packaged_project_test_examples_are_all_commented(self) -> None:
         lines = {
             line.strip() for line in TEMPLATE.read_text(encoding="utf-8").splitlines()
@@ -68,25 +100,6 @@ class RunUnittestParallelCase(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no test_*.py modules found", result.stdout)
         self.assertNotIn("verify: OK", result.stdout)
-
-    def _write_module(self, name: str, source: str) -> None:
-        (self.tests_dir / f"{name}.py").write_text(source, encoding="utf-8")
-
-    def _commit(self, message: str) -> None:
-        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True,
-                       capture_output=True)
-        subprocess.run(["git", "commit", "-m", message], cwd=self.root,
-                       check=True, capture_output=True)
-
-    def _run(self, env_overrides: dict[str, str] | None = None
-             ) -> subprocess.CompletedProcess[str]:
-        env = dict(os.environ)
-        env.pop("ASSENT_VERIFY_JOBS", None)
-        if env_overrides:
-            env.update(env_overrides)
-        return subprocess.run(
-            [sys.executable, str(self.script)], cwd=self.root,
-            capture_output=True, encoding="utf-8", errors="replace", env=env)
 
     def test_all_green_exits_zero_with_sorted_summary(self) -> None:
         self._write_module("test_b", _PASS_MODULE)
@@ -139,6 +152,66 @@ class RunUnittestParallelCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("test_a: pass (", result.stdout)
         self.assertIn("test_b: pass (", result.stdout)
+
+
+class LineEndingWhitespaceCase(VerifyTemplateFixture):
+    """The template's two git diff --check gates must accept LF and CRLF alike."""
+
+    def _prepare(self, baseline: bytes) -> None:
+        self._write_module("test_a", _PASS_MODULE)
+        self._write_bytes("data.txt", baseline)
+        self._commit("line ending baseline")
+
+    def test_clean_lf_worktree_delta_passes(self) -> None:
+        self._prepare(b"alpha\n")
+        self._write_bytes("data.txt", b"alpha\nbeta\n")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("verify: OK", result.stdout)
+
+    def test_clean_crlf_worktree_delta_passes(self) -> None:
+        self._prepare(b"alpha\r\n")
+        self._write_bytes("data.txt", b"alpha\r\nbeta\r\n")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("verify: OK", result.stdout)
+
+    def test_clean_crlf_committed_delta_passes(self) -> None:
+        self._prepare(b"alpha\r\n")
+        self._write_bytes("data.txt", b"alpha\r\nbeta\r\n")
+        self._commit("crlf candidate")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("verify: OK", result.stdout)
+
+    def test_trailing_space_before_lf_still_fails(self) -> None:
+        self._prepare(b"alpha\n")
+        self._write_bytes("data.txt", b"alpha\nbeta \n")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("trailing whitespace", result.stdout + result.stderr)
+        self.assertIn("verify: FAIL", result.stdout)
+        self.assertNotIn("verify: OK", result.stdout)
+
+    def test_trailing_tab_before_crlf_in_committed_delta_still_fails(self) -> None:
+        self._prepare(b"alpha\r\n")
+        self._write_bytes("data.txt", b"alpha\r\nbeta\t\r\n")
+        self._commit("crlf whitespace candidate")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("trailing whitespace", result.stdout + result.stderr)
+        self.assertIn("verify: FAIL", result.stdout)
+        self.assertNotIn("verify: OK", result.stdout)
 
 
 if __name__ == "__main__":
