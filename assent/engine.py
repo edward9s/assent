@@ -1055,6 +1055,7 @@ def _run_verify(cfg: Config, command: str) -> int:
     commands keep their original shell semantics; the cwd for both is the current target
     working tree.
     """
+    print(f"  verify: {command}")
     if cfg.source_root is not None and command.strip() == _DEFAULT_VERIFY_COMMAND:
         result = subprocess.run(
             [sys.executable, str((cfg.assent_dir / "verify.py").resolve())],
@@ -1065,11 +1066,14 @@ def _run_verify(cfg: Config, command: str) -> int:
             command, shell=True, cwd=str(cfg.root),
             capture_output=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
+        print(f"  verify failed (exit {result.returncode})")
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-8:]
         if tail:
             print("  -- verify output (tail) --")
             for line in tail:
                 print(f"  | {line}")
+    else:
+        print("  verify passed (exit 0)")
     return result.returncode
 
 

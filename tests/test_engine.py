@@ -946,6 +946,45 @@ class TestAcceptanceGates(EngineTestCase):
             s == "auto(plan01/t001): BLOCKED (execution AI self-marked)"
             for s in self.subjects()))
 
+    def test_verify_echo_on_success(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, once=True, adapter=ScriptedAdapter([self.ai_done(path)])), 0)
+        text = out.getvalue()
+        self.assertIn(f"  verify: {_OK}", text)
+        self.assertIn("  verify passed (exit 0)", text)
+        self.assertLess(text.index(f"  verify: {_OK}"),
+                        text.index("  verify passed (exit 0)"))
+
+    def test_verify_echo_on_failure_keeps_tail_after_failed_line(self):
+        failing_verify = ('python -c "import sys;'
+                          "sys.stderr.write('boom'); sys.exit(3)\"")
+        path = self.write_task(1, verify=failing_verify)
+        cfg = self.build(retry=0)
+        self.commit_all()
+
+        def step(prompt):
+            set_status(path, "DONE")
+            return ok_result()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, once=True, adapter=ScriptedAdapter([step])), 0)
+        text = out.getvalue()
+        self.assertIn(f"  verify: {failing_verify}", text)
+        self.assertIn("  verify failed (exit 3)", text)
+        self.assertIn("boom", text)
+        i_cmd = text.index(f"  verify: {failing_verify}")
+        i_failed = text.index("  verify failed (exit 3)")
+        i_tail = text.index("boom", i_failed)
+        self.assertLess(i_cmd, i_failed)
+        self.assertLess(i_failed, i_tail)
+
 
 class TestAdapterProcessOutcomes(EngineTestCase):
     def test_nonzero_done_retries_without_done_checkpoint_then_succeeds(self):
