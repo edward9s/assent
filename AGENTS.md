@@ -22,5 +22,6 @@ Windows 優先、跨平台。CLI 子命令:run / status / check / report / init�
 - `model` 與 `effort` 是正交的抽象檔位:`model` 使用 prime/core/lite;
   選填的 `effort` 使用 low/medium/high,只在任務需偏離模型預設時明寫。
   `high` 表示可攜的高推理投入,不等於廠牌原生最高檔;adapter 不得靜默忽略
-  或升降任務明寫的 effort。
+  或升降任務明寫的 effort。廠牌特有 effort 值屬設定檔對映(與 models
+  對照表同級),不得硬編於 adapter 程式碼。
 - 使用 agents 時,請先讀專案主工作樹的 `.agents/instructions.md`;worktree session 以調度器提示的絕對路徑為準。 <!-- agents-instructions -->
