@@ -14,7 +14,7 @@ from assent.config import load_config
 from assent.gitops import (branch_tip, commit_of, folder_branches, tree_of,
                            working_tree_status)
 from assent.verification import (
-    RECEIPT_NAME, VerificationReceipt, read_receipt,
+    RECEIPT_NAME, VerificationReceipt, _summary, read_receipt,
     receipt_matches_current_candidate, verify_folder, write_receipt,
 )
 
@@ -69,7 +69,8 @@ class VerificationRepositoryCase(unittest.TestCase):
         self.cfg = load_config(self.assent_dir / "assent.toml", "plan測試")
         self.addCleanup(self._cleanup)
 
-    def _write_verifier(self, exit_code: int, output_size: int = 0) -> None:
+    def _write_verifier(self, exit_code: int, output_size: int = 0,
+                        stderr: str = "") -> None:
         script = (
             "from pathlib import Path\n"
             "import subprocess\n"
@@ -80,7 +81,9 @@ class VerificationRepositoryCase(unittest.TestCase):
             "parents = subprocess.run(['git', 'rev-list', '--parents', '-n', '1', "
             "'HEAD'], capture_output=True, text=True, check=True).stdout.strip()\n"
             "observed.write_text(str(Path.cwd()) + '\\n' + parents, encoding='utf-8')\n"
+            "print('successful test noise begins')\n"
             f"print('x' * {output_size})\n"
+            f"print({stderr!r}, file=__import__('sys').stderr)\n"
             f"raise SystemExit({exit_code})\n"
         )
         (self.assent_dir / "verify.py").write_text(script, encoding="utf-8")
@@ -99,8 +102,9 @@ class VerificationRepositoryCase(unittest.TestCase):
                             cwd=self.root, capture_output=True)
         shutil.rmtree(self.parent, ignore_errors=True)
 
-    def _commit_target_verifier(self, exit_code: int, output_size: int = 0) -> None:
-        self._write_verifier(exit_code, output_size)
+    def _commit_target_verifier(self, exit_code: int, output_size: int = 0,
+                                stderr: str = "") -> None:
+        self._write_verifier(exit_code, output_size, stderr)
         _git(self.root, "add", ".assent/verify.py")
         _git(self.root, "commit", "-m", "change full verifier")
 
@@ -134,16 +138,46 @@ class TestVerificationRun(VerificationRepositoryCase):
             self.root, self.cfg.git_excludes).is_clean)
         self.assertEqual(self._temporary_resources(), ([], []))
 
-    def test_nonzero_writes_truncated_failed_receipt(self):
-        self._commit_target_verifier(exit_code=7, output_size=5000)
+    def test_nonzero_receipt_retains_actionable_tail_after_noisy_stdout(self):
+        traceback = (
+            "Traceback (most recent call last):\r\n"
+            "  File 'verify.py', line 42, in <module>\r\n"
+            "AssertionError: expected failure diagnosis\x00")
+        self._commit_target_verifier(
+            exit_code=7, output_size=5000, stderr=traceback)
         self.assertEqual(verify_folder(self.cfg), 1)
         receipt = read_receipt(self.tasks_dir / RECEIPT_NAME, self.root)
         self.assertEqual(receipt.status, "FAILED")
         self.assertEqual(receipt.exit_code, 7)
         self.assertLessEqual(len(receipt.failure_summary), 4000)
-        self.assertIn("[truncated]", receipt.failure_summary)
+        self.assertTrue(receipt.failure_summary.startswith(
+            "...[earlier output truncated]"))
+        self.assertNotIn("successful test noise begins", receipt.failure_summary)
+        self.assertIn("Traceback (most recent call last):", receipt.failure_summary)
+        self.assertIn("AssertionError: expected failure diagnosis?", receipt.failure_summary)
+        self.assertIn(
+            "Verification command failed: python .assent/verify.py (exit code 7)",
+            receipt.failure_summary)
+        self.assertNotIn("\r", receipt.failure_summary)
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
         self.assertEqual(self._temporary_resources(), ([], []))
+
+    def test_short_summary_is_unchanged_except_normalization(self):
+        summary = _summary("short\r\noutput 診斷", "stderr\x00tail")
+        self.assertEqual(
+            summary,
+            "short\noutput 診斷\nstderr?tail")
+        receipt = VerificationReceipt(
+            version=1, status="FAILED", source_tip=self.source_tip,
+            target_tip=self.target_tip,
+            integration_tree=tree_of(self.root, self.source_tip),
+            verify_script_sha256="a" * 64,
+            verify_command="python .assent/verify.py", exit_code=1,
+            completed_at="2026-01-01T00:00:00+00:00",
+            failure_summary=summary)
+        path = self.tasks_dir / "normalized.toml"
+        write_receipt(path, receipt, self.root)
+        self.assertEqual(read_receipt(path, self.root), receipt)
 
     def test_conflict_never_runs_suite_or_leaves_passed_receipt(self):
         (self.source_worktree / "README.md").write_text(

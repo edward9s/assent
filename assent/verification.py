@@ -80,13 +80,15 @@ def verifier_digest(cfg: Config) -> str:
 def _summary(*parts: str) -> str:
     """Normalize child diagnostics and bound receipt growth."""
     text = "\n".join(part.strip() for part in parts if part and part.strip())
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = "".join(
-        character if character in "\n\t" or ord(character) >= 0x20 else "?"
+        character if (character in "\n\t" or ord(character) >= 0x20)
+        and character != "\ufffd" else "?"
         for character in text
     )
     if len(text) > _SUMMARY_LIMIT:
-        marker = "\n...[truncated]"
-        text = text[:_SUMMARY_LIMIT - len(marker)] + marker
+        marker = "...[earlier output truncated]\n"
+        text = marker + text[-(_SUMMARY_LIMIT - len(marker)):]
     return text
 
 
@@ -373,7 +375,9 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
                     integration_tree=candidate_tree, digest=digest,
                     exit_code=result.returncode,
                     failure_summary=("" if result.returncode == 0 else _summary(
-                        result.stdout, result.stderr)),
+                        result.stdout, result.stderr,
+                        f"Verification command failed: {VERIFY_COMMAND} "
+                        f"(exit code {result.returncode})")),
                 )
 
     # External Git writes are unsupported, but detecting them keeps the receipt
