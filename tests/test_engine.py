@@ -1363,6 +1363,11 @@ class TestBillingAbort(EngineTestCase):
 
 
 class TestQuotaAndResume(EngineTestCase):
+    def rotation_config(self):
+        cfg = self.build()
+        cfg.adapter_names = ("claude", "codex")
+        return cfg
+
     def test_quota_waits_then_resumes_same_task(self):
         path = self.write_task(1)
         cfg = self.build()
@@ -1396,6 +1401,88 @@ class TestQuotaAndResume(EngineTestCase):
         self.assertEqual(quota["requested_model"], "lite")
         self.assertEqual(quota["requested_effort"], "medium")
         self.assertNotIn("session", [e["event"] for e in entries])
+
+    def test_quota_rotates_to_next_adapter_and_records_each_identity(self):
+        path = self.write_task(1)
+        cfg = self.rotation_config()
+        self.commit_all()
+
+        def quota_step(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text("kept", encoding="utf-8")
+            return TaskResult(
+                exit_code=1, output="", quota_exhausted=True, reset_at=None)
+
+        claude = ScriptedAdapter([quota_step], resolved_model="claude-lite")
+        codex = ScriptedAdapter(
+            [self.ai_done(
+                path, by="codex", requested_model="codex-lite")],
+            resolved_model="codex-lite")
+        sleeps: list[float] = []
+
+        with mock.patch("assent.engine.get_adapter", return_value=codex):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=claude, sleep=sleeps.append), 0)
+
+        self.assertEqual(sleeps, [])
+        self.assertIn("resume", codex.calls[0][0])
+        self.assertTrue(any(
+            subject.startswith("wip(plan01/t001): ")
+            for subject in self.subjects()))
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        quota = next(entry for entry in entries if entry["event"] == "quota")
+        self.assertEqual(quota["agent"], "claude")
+        self.assertEqual(quota["requested_model"], "claude-lite")
+        done = next(entry for entry in entries if entry["by"] == "codex")
+        self.assertEqual(done["requested_model"], "codex-lite")
+
+    def test_complete_quota_rotation_waits_then_continues_from_next_adapter(self):
+        path = self.write_task(1)
+        cfg = self.rotation_config()
+        cfg.rotation_poll_minutes = 2
+        self.commit_all()
+        quota = TaskResult(
+            exit_code=1, output="", quota_exhausted=True, reset_at=None)
+        claude = ScriptedAdapter(
+            [quota, self.ai_done(path)], resolved_model="claude-lite")
+        codex = ScriptedAdapter([quota], resolved_model="codex-lite")
+        sleeps: list[float] = []
+        out = io.StringIO()
+
+        with mock.patch("assent.engine.get_adapter", return_value=codex):
+            with contextlib.redirect_stdout(out):
+                result = engine.run(
+                    cfg, once=True, adapter=claude, sleep=sleeps.append)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(sum(sleeps), 2 * 60)
+        self.assertEqual(len(claude.calls), 2)
+        self.assertEqual(len(codex.calls), 1)
+        self.assertIn("Every adapter in the rotation is quota-exhausted",
+                      out.getvalue())
+        self.assertIn("continuing with claude", out.getvalue())
+
+    def test_all_rotation_adapters_are_preflighted_before_worktree_creation(self):
+        self.write_task(1)
+        cfg = self.rotation_config()
+        self.commit_all()
+        claude = ScriptedAdapter([ok_result()])
+        codex = ScriptedAdapter([])
+        codex.preflight = mock.Mock(return_value=["unsupported invocation"])
+        out = io.StringIO()
+
+        with mock.patch("assent.engine.get_adapter", return_value=codex):
+            with contextlib.redirect_stdout(out):
+                result = engine.run(cfg, once=True, adapter=claude)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(claude.calls, [])
+        self.assertEqual(codex.calls, [])
+        self.assertFalse(gitops.worktree_path(self.root, "plan01").exists())
+        codex.preflight.assert_called_once()
+        self.assertIn("codex capability preflight: FAIL", out.getvalue())
 
     def test_wip_task_resumed_on_startup(self):
         path = self.write_task(1, status="WIP")
@@ -1708,13 +1795,35 @@ class TestQuotaMath(EngineTestCase):
         self.assertEqual(engine._quota_wait_seconds(cfg, None, lambda: t0),
                          cfg.quota_poll_minutes * 60)
 
-    def test_countdown_non_tty_single_line(self):
+    def test_countdown_non_tty_single_line_in_bounded_segments(self):
         stream = io.StringIO()  # isatty() False
         sleeps: list[float] = []
-        engine._countdown(90, "Quota reset", sleeps.append, stream=stream)
-        self.assertEqual(sleeps, [90])
+        engine._countdown(150, "Quota reset", sleeps.append, stream=stream)
+        # One message, but never one long sleep: the total is unchanged and no
+        # single segment exceeds the constant.
+        self.assertEqual(sum(sleeps), 150)
+        self.assertLessEqual(max(sleeps), engine._COUNTDOWN_SEGMENT)
         self.assertEqual(stream.getvalue().count("\n"), 1)
         self.assertNotIn("\r", stream.getvalue())
+
+    def test_countdown_non_tty_stop_lands_within_one_segment(self):
+        """A stop request reaches a multi-hour quota wait promptly.
+
+        The stdin stop channel calls _thread.interrupt_main(); on POSIX that
+        only makes the exception pending until bytecode next runs, which is
+        the end of a segment. The injected sleep stands in for that delivery.
+        """
+        stream = io.StringIO()
+        sleeps: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            engine._countdown(10405, "Quota reset", sleep, segment=0.5,
+                              stream=stream)
+        self.assertEqual(sleeps, [0.5])
 
     def test_countdown_tty_updates_in_place(self):
         class Tty(io.StringIO):
@@ -1774,6 +1883,88 @@ class TestQueries(EngineTestCase):
             self.assertEqual(engine.check(cfg), 1)
         self.assertIn("Folder dependencies: FAIL", out.getvalue())
         self.assertIn("unknown keys", out.getvalue())
+
+    def test_check_displays_resolved_assignment_and_default_marker(self):
+        self.write_task(1, slug="任務分配顯示", model="core")
+        self.write_task(2, slug="explicit", model="lite", effort="heavy",
+                        status="DONE")
+        cfg = self.build(adapter_name="codex", extra_config=(
+            '[adapter.codex]\ncommand = "python"\n'
+            '[adapter.codex.models]\n'
+            'core = "gpt-5.6-luna"\n'
+            'lite = "gpt-lite"\n'
+            '[adapter.codex.default_effort]\n'
+            'core = "heavy"\n'
+            'lite = "slight"\n'
+            '[adapter.codex.efforts.core]\n'
+            'heavy = "max"\n'
+            '[adapter.codex.efforts.lite]\n'
+            'heavy = "max"\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 0)
+        text = out.getvalue()
+        self.assertIn("Task assignment (adapter = codex):", text)
+        self.assertIn("t001_任務分配顯示", text)
+        self.assertIn("core/heavy*", text)
+        self.assertIn("gpt-5.6-luna/max", text)
+        self.assertIn("lite/heavy", text)
+        self.assertIn("gpt-lite/max", text)
+        self.assertIn("(* effort filled from default_effort)", text)
+
+    def test_check_omits_actual_effort_when_no_effort_flag_is_resolved(self):
+        self.write_task(1, model="core")
+        cfg = self.build(adapter_name="codex", extra_config=(
+            '[adapter.codex]\ncommand = "python"\n'
+            '[adapter.codex.models]\ncore = "gpt-core"\n'
+            '[adapter.codex.default_effort]\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 0)
+        line = next(line for line in out.getvalue().splitlines()
+                    if "t001_task" in line)
+        self.assertRegex(line, r"core\s+-> gpt-core$")
+        self.assertNotIn("gpt-core/", line)
+        self.assertNotIn("effort filled from default_effort", out.getvalue())
+
+    def test_check_truncates_cjk_task_names_without_exceeding_line_width(self):
+        self.write_task(1, slug="這是一個非常非常長的任務名稱甲乙丙丁戊己庚辛壬癸",
+                        model="core", effort="slight")
+        cfg = self.build(adapter_name="codex", extra_config=(
+            '[adapter.codex]\ncommand = "python"\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 0)
+        line = next(line for line in out.getvalue().splitlines()
+                    if line.startswith("  t001_"))
+        self.assertEqual(line.count("…"), 1)
+        self.assertLessEqual(engine._display_width(line), 78)
+
+    def test_check_displays_one_assignment_block_per_adapter(self):
+        self.write_task(1, model="core", effort="slight")
+        (self.root / ".assent" / "assent.toml").write_text(
+            '[adapter]\nname = ["claude", "codex"]\n'
+            '[adapter.claude]\ncommand = "python"\n'
+            '[adapter.codex]\ncommand = "python"\n',
+            encoding="utf-8")
+        cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 0)
+        text = out.getvalue()
+        self.assertEqual(text.count("Task assignment (adapter = "), 2)
+        self.assertIn("Task assignment (adapter = claude):", text)
+        self.assertIn("Task assignment (adapter = codex):", text)
+        self.assertIn("opus/low", text)
+        self.assertIn("gpt-5.6-terra/low", text)
 
     def test_report_lists_checkpoints_and_blocked_summary(self):
         p1 = self.write_task(1)

@@ -241,13 +241,21 @@ target、不開 AI session;`assent verify --batch` 則對每個已完成、尚�
 `assent verify <FOLDER>` 後再請人接受。
 
 **自己重跑驗證**:任務的 focused `verify` 命令記錄在該任務
-`tNNN_name.toml` 的 `verify` 欄位,可在該工作資料夾的隔離 worktree
+`tNNN_name.e.toml` 的 `verify` 欄位,可在該工作資料夾的隔離 worktree
 `<專案>.worktrees/<資料夾>/` 內直接執行同一命令。`assent run` 的執行輸出
 會把同一段文字印成 `verify: <command>` 這一列,緊接著印出 `verify passed
 (exit 0)` 或 `verify failed (exit N)`,因此這一列印出的就是可手動重跑的
-原文命令。完整階段則用 `assent verify <FOLDER>` 無人值守重跑整套並換發
-新 receipt,零 token;想看逐測試輸出,可在同一 worktree 內執行
-`.assent/verify.py`,或直接執行 `python -m unittest discover -s tests -v`。
+原文命令。完整階段由 `assent verify <FOLDER>` 在臨時整合候選中執行；候選
+的路徑形狀是 `<project>.integration/target-<uuid>`,它和
+`<project>.worktrees/` 同層,使用分支
+`assent-integration/<folder>/<uuid>`。這是合併後、由完整
+`.assent/verify.py` 驗證且由 receipt 認證的樹;它在整套測試執行期間都存在,
+測試結束後移除。要手動重現或觀看逐測試輸出,須在候選仍存在時以它作為
+cwd,並從主工作樹執行 verifier,例如 `python <main-worktree>/.assent/verify.py`;
+不要把 source worktree 當成整合候選。清理在 `finally` 中進行,所以正常結束、
+Python 例外與 Ctrl-C 都會清除;只有硬殺(例如 `taskkill /F`)或斷電可能留下
+殘留。assent 沒有自動回收殘留的機制;請自行執行
+`git worktree remove --force <path>` 與 `git branch -D <branch>` 清除。
 
 **平行執行測試**:打包的 `.assent/verify.py` template 提供
 `run_unittest_parallel()`,預設以註解停用;啟用後會把 `tests/test_*.py`
@@ -569,6 +577,8 @@ assent run <FOLDER>  # 自動從 WIP 恢復
 
 任務日誌紀錄確切配額重設時間(如可得)與調度器會輪詢等候的方式。
 同時要跑另一份資料夾,可在第二終端跑(只要它不依賴被配額限的那份)。
+若 `[adapter].name` 設為名單,額度耗盡會依序輪替到下一個 adapter;
+只有整輪 adapter 都耗盡時,調度器才等待輪詢間隔。
 
 **組態 preflight 錯誤後修正**
 

@@ -34,7 +34,9 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.stall_minutes, 30)
         self.assertEqual(cfg.retry_per_task, 1)
         self.assertEqual(cfg.quota_poll_minutes, 30)
+        self.assertEqual(cfg.rotation_poll_minutes, 1)
         self.assertEqual(cfg.adapter_name, "claude")
+        self.assertEqual(cfg.adapter_names, ("claude",))
         self.assertEqual(cfg.claude_models["prime"], "fable")
         self.assertEqual(cfg.codex_models["lite"], "gpt-5.6-luna")
         self.assertEqual(cfg.claude_efforts, {})
@@ -43,6 +45,47 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.codex_tier_efforts, {})
         self.assertIsNone(cfg.prompt_template)
         self.assertEqual(cfg.receipt_refresh, "manual")
+
+    def test_scalar_and_singleton_adapter_name_are_equivalent(self):
+        scalar = load_config(self.write('[adapter]\nname = "claude"\n'), "plan01")
+        singleton = load_config(
+            self.write('[adapter]\nname = ["claude"]\n'), "plan01")
+        self.assertEqual(scalar.adapter_names, ("claude",))
+        self.assertEqual(singleton.adapter_names, ("claude",))
+        self.assertEqual(scalar.adapter_name, singleton.adapter_name)
+        self.assertEqual(scalar.adapter_name, singleton.adapter_names[0])
+
+    def test_adapter_name_rotation_list_preserves_order(self):
+        cfg = load_config(self.write(
+            '[adapter]\nname = ["codex", "antigravity", "claude"]\n'), "plan01")
+        self.assertEqual(cfg.adapter_names, ("codex", "antigravity", "claude"))
+        self.assertEqual(cfg.adapter_name, "codex")
+
+    def test_adapter_name_rotation_list_rejects_empty_unknown_duplicate_and_bad_type(self):
+        cases = (
+            ('[adapter]\nname = []\n', "non-empty"),
+            ('[adapter]\nname = ["nowhere"]\n', "unknown adapter name"),
+            ('[adapter]\nname = ["claude", "claude"]\n', "duplicate"),
+            ('[adapter]\nname = 1\n', "wrong type"),
+            ('[adapter]\nname = ["claude", 1]\n', r"name\[1\].*string"),
+        )
+        for text, message in cases:
+            with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):
+                load_config(self.write(text), "plan01")
+
+    def test_rotation_poll_minutes_default_custom_and_invalid_values(self):
+        self.assertEqual(load_config(self.write(_MINIMAL), "plan01").rotation_poll_minutes, 1)
+        cfg = load_config(self.write(
+            "[run]\nrotation_poll_minutes = 7\n"), "plan01")
+        self.assertEqual(cfg.rotation_poll_minutes, 7)
+        for value in (0, -1):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    AssentError, "rotation_poll_minutes"):
+                load_config(self.write(
+                    f"[run]\nrotation_poll_minutes = {value}\n"), "plan01")
+        with self.assertRaisesRegex(AssentError, "wrong type"):
+            load_config(self.write(
+                '[run]\nrotation_poll_minutes = "1"\n'), "plan01")
 
     def test_antigravity_defaults_match_the_probed_agy_capability(self):
         cfg = load_config(self.write(_MINIMAL), "plan01")
@@ -59,6 +102,21 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.antigravity_efforts, {})
         self.assertEqual(cfg.antigravity_tier_efforts,
                          {"prime": {"normal": "high"}, "lite": {"heavy": "medium"}})
+        self.assertEqual(cfg.antigravity_print_timeout_minutes, 120)
+
+    def test_shipped_template_loads_with_expected_adapter_settings(self):
+        template = (Path(__file__).resolve().parents[1]
+                    / "assent" / "templates" / "assent.toml")
+        cfg = load_config(self.write(template.read_text(encoding="utf-8")),
+                          "template01")
+        tiers = {"prime", "core", "lite"}
+        efforts = {"slight", "normal", "heavy"}
+        for adapter in ("claude", "codex", "antigravity"):
+            with self.subTest(adapter=adapter):
+                settings = cfg.adapter_settings(adapter)
+                self.assertEqual(set(settings.models), tiers)
+                self.assertTrue(set(settings.default_effort) <= tiers)
+                self.assertTrue(set(settings.default_effort.values()) <= efforts)
         self.assertEqual(cfg.antigravity_print_timeout_minutes, 120)
 
     def test_antigravity_effort_table_is_replaced_whole_not_merged(self):

@@ -610,9 +610,20 @@ never deletes source before that proof.
 `assent run` uses two verification stages. During each AI task session, the
 scheduler runs only that task's focused `verify` command before creating its
 checkpoint. The second stage builds one temporary integration candidate outside
-any AI session and runs the complete `.assent/verify.py` once. Its result is a
-derived `_verification.toml` receipt; the report shows whether the receipt is
-`PASSED` or `FAILED` and `fresh` or `stale`.
+any AI session and runs the complete `.assent/verify.py` once. The candidate is
+at `<project>.integration/target-<uuid>`, a sibling of
+`<project>.worktrees/`, on branch `assent-integration/<folder>/<uuid>`. It is
+the merged tree being verified and remains present throughout the entire test
+run, then is removed after the tests finish. Its result is a derived
+`_verification.toml` receipt; the report shows whether the receipt is `PASSED`
+or `FAILED` and `fresh` or `stale`. To reproduce the stage manually, use that
+candidate as the verifier's cwd while it exists and run the verifier script
+from the main worktree, such as `python <main-worktree>/.assent/verify.py`.
+Cleanup runs in a `finally` block, covering normal completion, Python
+exceptions, and Ctrl-C. Only a hard kill, such as `taskkill /F`, or power loss
+can leave residue; Assent has no automatic stale-candidate recovery. Remove
+residue manually with `git worktree remove --force <path>` and `git branch -D
+<branch>`.
 
 Who starts that second stage is a project policy, `receipt_refresh` in
 `assent.toml`'s `[verification]` section. Under the default `"manual"`, run
@@ -712,6 +723,9 @@ human.
 - Quota exhausted -> not counted as a failure: the r file records `quota`,
   progress is gathered into a `wip(<work folder>/tNNN)` checkpoint, a countdown
   waits for the reset, and the same task reruns carrying a "resume" prompt.
+  When `[adapter].name` is a list, quota exhaustion rotates to the next adapter
+  in order; the scheduler waits for the rotation poll only after every adapter
+  in the rotation is exhausted.
 - Unclean exit (power loss, a forced kill) never reaches the Ctrl+C/quota
   interrupt handlers, so a dirty worktree can survive to the next `run`
   startup. The startup gate checks whether every uncommitted change is
@@ -730,6 +744,29 @@ human.
 3. `assent check` validates reference integrity: deps point to existing tasks,
    no cycles, no duplicate ids, all fields present — the run main loop reparses
    each round, and a broken file or a deactivated task file always fails closed.
+
+### History rewrites
+
+A history rewrite of this project (author/email or message) touches three
+load-bearing points; a rewrite tool must preserve all three, not just avoid
+touching Git in general.
+
+1. The machine subject prefixes (`auto(<folder>/tNNN):`, `wip(`, `rework(`,
+   `accept(`) are load-bearing structure: report attribution, rework tail
+   matching, and clean/reject branch judgment all depend on them. A rewrite
+   tool may touch the author, email, or the rest of a message, but the subject
+   prefix must survive byte-for-byte.
+2. A rework revert checkpoint embeds `original_head` and the reverted hashes
+   in the commit message body, and that checkpoint necessarily sits on the
+   owning work folder's branch worktree. A rewrite must find no rework in
+   progress beforehand. This project's rewrite tool's apply preconditions
+   (clean tree, exactly one worktree, only `main` and `origin/main` refs)
+   already fail closed against that state — the defense lives in the rewrite
+   tool, not in a new command.
+3. A verification receipt (`_verification.toml` and the like) goes stale the
+   moment history is rewritten, in every case. That is an expected cost:
+   rebuild it through the standard `verify` flow. A receipt is a disposable
+   cache, never a long-term source of truth.
 
 ## _report.md (the review meeting's agenda)
 

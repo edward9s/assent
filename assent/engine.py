@@ -29,8 +29,9 @@ import shlex
 import subprocess
 import sys
 import time
+import unicodedata
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, TextIO
@@ -99,9 +100,18 @@ _CLOSEOUT_RETRY_SUFFIX = (
 
 _QUOTA_BUFFER = timedelta(minutes=2)  # reset time + buffer, to avoid being blocked again right at the edge
 _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
+# Longest single sleep the non-tty countdown may take. A quota wait is often
+# hours long, and a lone multi-hour sleep is what made a stop request invisible:
+# on POSIX _thread.interrupt_main() only sets a pending exception that is
+# delivered when bytecode next runs, so the wait had to finish first. Splitting
+# it bounds that delivery delay without changing the total wait.
+_COUNTDOWN_SEGMENT = 60.0
 _DEFAULT_VERIFY_COMMAND = "python .assent/verify.py"
 _GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
 _ADAPTER_DIAGNOSTIC_LIMIT = 240
+_ASSIGNMENT_NAME_WIDTH = 26
+_ASSIGNMENT_ABSTRACT_WIDTH = 14
+_ASSIGNMENT_LINE_WIDTH = 78
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)([\"']?(?:api[_ -]?key|access[_ -]?token|token|password|secret|"
     r"authorization)[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;]+)")
@@ -127,6 +137,37 @@ class _SessionState:
     """Lets the outer interrupt handler read the resolved identity of the current session."""
 
     identity: _SessionIdentity | None = None
+
+
+@dataclass
+class _AdapterRotation:
+    """Run-scoped adapter cursor and quota evidence shared across tasks."""
+
+    names: tuple[str, ...]
+    adapters: tuple[Adapter, ...]
+    index: int = 0
+    exhausted: set[str] = field(default_factory=set)
+
+    @property
+    def name(self) -> str:
+        return self.names[self.index]
+
+    @property
+    def adapter(self) -> Adapter:
+        return self.adapters[self.index]
+
+    def session_opened(self) -> None:
+        """A non-quota result proves the rotation is no longer fully exhausted."""
+        self.exhausted.clear()
+
+    def advance_after_quota(self) -> bool:
+        """Move to the next adapter; return whether this exhausted one complete cycle."""
+        self.exhausted.add(self.name)
+        self.index = (self.index + 1) % len(self.names)
+        cycle_exhausted = len(self.exhausted) == len(self.names)
+        if cycle_exhausted:
+            self.exhausted.clear()
+        return cycle_exhausted
 
 
 class _BillingAbort(Exception):
@@ -197,42 +238,48 @@ def _rework_prompt_suffix(task: Task) -> str:
     return _REWORK_SUFFIX.replace("{reject_reason_clause}", clause)
 
 
-def _resolve_session(cfg: Config, adapter: Adapter,
-                     task: Task) -> _SessionIdentity:
+def _resolve_session(cfg: Config, adapter: Adapter, task: Task,
+                     adapter_name: str | None = None) -> _SessionIdentity:
     """Resolve the identity before starting the adapter; the same result feeds the prompt,
     journal, and CLI command."""
-    effort = _resolve_effort(cfg, task)
+    name = adapter_name or cfg.adapter_name
+    effort = _resolve_effort(cfg, task, name)
     return _SessionIdentity(
-        agent=cfg.adapter_name,
+        agent=name,
         requested_model=adapter.resolve_model(task.model),
         effort=effort,
-        requested_effort=_resolve_requested_effort(cfg, task.model, effort),
+        requested_effort=_resolve_requested_effort(
+            cfg, task.model, effort, name),
     )
 
 
 def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
-                         task_id: str | None = None) -> list[InvocationRequest]:
+                         task_id: str | None = None,
+                         adapter_name: str | None = None) -> list[InvocationRequest]:
     """Resolve every invocation this run could still issue, without starting anything.
 
     Only tasks that can still run are resolved: a settled task will not open a session, and
     refusing a run because of a mapping a finished task once used would be noise.
     """
+    name = adapter_name or cfg.adapter_name
     requests: list[InvocationRequest] = []
     for task in plan.tasks:
         if task_id is not None and task.id != task_id:
             continue
         if task.status not in ("TODO", "WIP"):
             continue
-        effort = _resolve_effort(cfg, task)
+        effort = _resolve_effort(cfg, task, name)
         requests.append(InvocationRequest(
             task_id=task.id, model=task.model, effort=effort,
             requested_model=adapter.resolve_model(task.model),
-            requested_effort=_resolve_requested_effort(cfg, task.model, effort)))
+            requested_effort=_resolve_requested_effort(
+                cfg, task.model, effort, name)))
     return requests
 
 
 def _capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
-                       task_id: str | None = None) -> list[str]:
+                       task_id: str | None = None,
+                       adapter_name: str | None = None) -> list[str]:
     """Ask the active adapter to prove every planned model/effort before anything starts.
 
     This is a zero-token gate: it runs before an AI session, a task checkpoint or any status
@@ -240,7 +287,8 @@ def _capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
     resolution error (an unmapped tier, say) is itself a preflight failure.
     """
     try:
-        requests = _planned_invocations(cfg, adapter, plan, task_id)
+        requests = _planned_invocations(
+            cfg, adapter, plan, task_id, adapter_name)
     except AssentError as e:
         return [str(e)]
     return adapter.preflight(requests)
@@ -328,23 +376,106 @@ def _checkpoint_subject(cfg: Config, kind: str, task: Task, detail: str) -> str:
     return f"{kind}({cfg.tasks_name}/{task.id}): {detail}"
 
 
-def _resolve_effort(cfg: Config, task: Task) -> str | None:
+def _resolve_effort(cfg: Config, task: Task,
+                    adapter_name: str | None = None) -> str | None:
     """Abstract effort for the current adapter: task-file annotation wins; otherwise the
     adapter's tier default; if neither -> None (do not pass --effort).
 
     The current adapter's settings are looked up by name and fail closed for an unknown adapter,
     so a third adapter never inherits Claude's defaults."""
-    return cfg.adapter_settings(cfg.adapter_name).resolve_effort(
+    return cfg.adapter_settings(adapter_name or cfg.adapter_name).resolve_effort(
         task.effort, task.model)
 
 
 def _resolve_requested_effort(cfg: Config, model: str,
-                              effort: str | None) -> str | None:
+                              effort: str | None,
+                              adapter_name: str | None = None) -> str | None:
     """Translate the abstract effort to the actual CLI value for the current adapter, by
     "tier section > flat > identity". Unknown adapters fail closed rather than falling back to
     Claude's translation table."""
-    return cfg.adapter_settings(cfg.adapter_name).resolve_requested_effort(
+    return cfg.adapter_settings(
+        adapter_name or cfg.adapter_name).resolve_requested_effort(
         model, effort)
+
+
+def _display_width(text: str) -> int:
+    """Return terminal columns using the project's W/F CJK width rule."""
+    return sum(2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+               for char in text)
+
+
+def _truncate_display(text: str, width: int) -> str:
+    """Truncate a display field to ``width`` columns with one ellipsis."""
+    if width <= 0:
+        return ""
+    if _display_width(text) <= width:
+        return text
+    ellipsis = "…"
+    remaining = width - _display_width(ellipsis)
+    if remaining <= 0:
+        return ellipsis if width >= _display_width(ellipsis) else ""
+    kept: list[str] = []
+    used = 0
+    for char in text:
+        char_width = _display_width(char)
+        if used + char_width > remaining:
+            break
+        kept.append(char)
+        used += char_width
+    return "".join(kept) + ellipsis
+
+
+def _pad_display(text: str, width: int) -> str:
+    """Left-align a field to a fixed terminal-column width."""
+    text = _truncate_display(text, width)
+    return text + " " * max(0, width - _display_width(text))
+
+
+def _task_assignment_line(task: Task, session: _SessionIdentity) -> str:
+    """Render one assignment without allowing a long configured value to wrap."""
+    task_name = task.path.name[:-len(".e.toml")]
+    abstract = task.model
+    if session.effort is not None:
+        abstract += f"/{session.effort}"
+        if task.effort is None:
+            abstract += "*"
+    actual = session.requested_model
+    if session.requested_effort is not None:
+        actual += f"/{session.requested_effort}"
+
+    prefix = (f"  {_pad_display(task_name, _ASSIGNMENT_NAME_WIDTH)} "
+              f"{_pad_display(abstract, _ASSIGNMENT_ABSTRACT_WIDTH)} -> ")
+    remaining = max(0, _ASSIGNMENT_LINE_WIDTH - _display_width(prefix))
+    return prefix + _truncate_display(actual, remaining)
+
+
+def _resolve_task_assignments(
+        cfg: Config, plan: Plan
+        ) -> list[tuple[str, list[tuple[Task, _SessionIdentity]]]]:
+    """Resolve every task through the same identity path used by ``run``."""
+    blocks: list[tuple[str, list[tuple[Task, _SessionIdentity]]]] = []
+    for adapter_name in cfg.adapter_names:
+        adapter = get_adapter(adapter_name, cfg)
+        assignments = [
+            (task, _resolve_session(cfg, adapter, task, adapter_name))
+            for task in plan.tasks
+        ]
+        blocks.append((adapter_name, assignments))
+    return blocks
+
+
+def _print_task_assignments(
+        blocks: list[tuple[str, list[tuple[Task, _SessionIdentity]]]]) -> None:
+    """Print one complete assignment block per configured adapter."""
+    for adapter_name, assignments in blocks:
+        print(f"Task assignment (adapter = {adapter_name}):")
+        used_default = False
+        for task, session in assignments:
+            used_default = used_default or (
+                task.effort is None and session.effort is not None)
+            print(_task_assignment_line(task, session))
+        if used_default:
+            print("  (* effort filled from default_effort)")
 
 
 def _task_excludes(cfg: Config, task: Task) -> list[str]:
@@ -622,22 +753,33 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         print(f"Failed to parse task folder: {e}")
         return 1
 
-    # The adapter is resolved and its planned invocations proven before the worktree exists,
-    # so a configuration the vendor would refuse costs no quota, no status write and no Git
-    # change at all.
-    if adapter is None:
-        try:
-            adapter = get_adapter(cfg.adapter_name, cfg)
-        except AssentError as e:
-            print(str(e))
-            return 1
+    # Every adapter is resolved and its planned invocations proven before the worktree exists,
+    # so rotating later can never discover a configuration the vendor would refuse after a
+    # session, status write, or Git change.  The injected adapter is the first slot's test seam;
+    # production runs resolve every slot through get_adapter().
+    adapters: list[Adapter] = []
+    try:
+        for index, name in enumerate(cfg.adapter_names):
+            adapters.append(
+                adapter if index == 0 and adapter is not None
+                else get_adapter(name, cfg))
+    except AssentError as e:
+        print(str(e))
+        return 1
 
-    capability_errors = _capability_errors(cfg, adapter, plan, task_id)
-    if capability_errors:
-        print(f"{cfg.adapter_name} capability preflight: FAIL "
-              "(refusing before any AI session)")
-        for message in capability_errors:
-            print(f"  - {message}")
+    rotation = _AdapterRotation(cfg.adapter_names, tuple(adapters))
+    preflight_failures: list[tuple[str, list[str]]] = []
+    for name, current_adapter in zip(rotation.names, rotation.adapters):
+        errors = _capability_errors(
+            cfg, current_adapter, plan, task_id, name)
+        if errors:
+            preflight_failures.append((name, errors))
+    if preflight_failures:
+        for name, errors in preflight_failures:
+            print(f"{name} capability preflight: FAIL "
+                  "(refusing before any AI session)")
+            for message in errors:
+                print(f"  - {message}")
         return 1
 
     if cfg.source_root is None:
@@ -686,7 +828,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             session = _SessionState()
             current_task = task
             current_session = session
-            _process_task(cfg, task, adapter, sleep, now, session, resumed)
+            _process_task(cfg, task, rotation, sleep, now, session, resumed)
             current_task = None
             current_session = None
 
@@ -953,7 +1095,7 @@ def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
     return f"session wrote outside the isolated worktree; changes ported back ({shown})"
 
 
-def _process_task(cfg: Config, task: Task, adapter: Adapter,
+def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   sleep: Callable[[float], None],
                   now: Callable[[], datetime], session_state: _SessionState,
                   resumed: bool = False) -> None:
@@ -975,7 +1117,9 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
     attempts_used = 0
     failure_reason: str | None = None
     while True:
-        session = _resolve_session(cfg, adapter, task)
+        adapter = rotation.adapter
+        adapter_name = rotation.name
+        session = _resolve_session(cfg, adapter, task, adapter_name)
         session_state.identity = session
         prompt = _build_prompt(cfg, task, failure_reason, session, resumed)
         print(f"  Opening session (model={task.model} -> {session.requested_model}, "
@@ -985,6 +1129,8 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
                               if cfg.source_root is not None else None)
         result = adapter.run_task(
             prompt, session.requested_model, session.requested_effort, cfg.root)
+        if not result.quota_exhausted:
+            rotation.session_opened()
         escape_reason = (
             _handle_main_tree_escape(cfg, task, main_tree_baseline, now)
             if main_tree_baseline is not None else None)
@@ -1006,7 +1152,17 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
                     cfg.git_excludes):
                 print("  wip checkpoint created.")
             _try_write_report(cfg)
-            _wait_for_quota(cfg, result.reset_at, sleep, now)
+            if len(rotation.names) == 1:
+                _wait_for_quota(cfg, result.reset_at, sleep, now)
+            else:
+                cycle_exhausted = rotation.advance_after_quota()
+                print(f"  Switching adapter {adapter_name} -> {rotation.name}; "
+                      "resuming the same task without consuming a retry.")
+                if cycle_exhausted:
+                    print("  Every adapter in the rotation is quota-exhausted; "
+                          f"waiting {cfg.rotation_poll_minutes} minute(s) before "
+                          f"continuing with {rotation.name}.")
+                    _wait_for_rotation(cfg, sleep)
             resumed = True
             continue  # resume the same task, without counting a retry
         elif result.failure_kind == "billing":
@@ -1225,11 +1381,21 @@ def _wait_for_quota(cfg: Config, reset_at: datetime | None,
     _countdown(seconds, label, sleep)
 
 
+def _wait_for_rotation(cfg: Config, sleep: Callable[[float], None]) -> None:
+    """Wait one fixed polling interval after every adapter exhausted its quota."""
+    seconds = float(cfg.rotation_poll_minutes * 60)
+    label = f"Adapter rotation poll (every {cfg.rotation_poll_minutes} minutes)"
+    _countdown(seconds, label, sleep)
+
+
 def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
-               tick: float = _QUOTA_TICK, stream: TextIO | None = None) -> None:
+               tick: float = _QUOTA_TICK, segment: float = _COUNTDOWN_SEGMENT,
+               stream: TextIO | None = None) -> None:
     """Countdown wait. Terminal (tty) -> update one line in place with \\r, without stacking
-    lines; non-tty (redirected to a file/pipe) -> print only one line to avoid flooding the
-    log. The injected sleep lets tests avoid really sleeping."""
+    lines; non-tty (redirected to a file/pipe) -> print one message, then sleep in segments of
+    at most ``segment`` seconds so a stop request lands within one segment on every platform
+    (see _COUNTDOWN_SEGMENT); the total wait is unchanged. The injected sleep lets tests avoid
+    really sleeping."""
     if seconds <= 0:
         return
     stream = stream or sys.stdout
@@ -1237,7 +1403,11 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
     if not interactive:
         stream.write(f"  {label}: waiting about {int(seconds)} seconds before rerunning.\n")
         stream.flush()
-        sleep(seconds)
+        left = seconds
+        while left > 0:
+            step = segment if segment < left else left
+            sleep(step)
+            left -= step
         return
     remaining = seconds
 
@@ -1457,6 +1627,11 @@ def check(cfg: Config) -> int:
     try:
         plan = Plan.parse(cfg.tasks_dir)
         print(f"Task-file format: OK ({len(plan.tasks)} tasks, dependencies acyclic)")
+        try:
+            _print_task_assignments(_resolve_task_assignments(cfg, plan))
+        except AssentError as e:
+            ok = False
+            print(f"Task assignment: FAIL ({e})")
     except AssentError as e:
         ok = False
         print(f"Task-file format: FAIL ({e})")

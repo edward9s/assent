@@ -312,11 +312,20 @@ command yourself from inside that work folder's isolated worktree at
 `<project>.worktrees/<folder>/`. During `assent run`, the run output echoes
 the same text as a `verify: <command>` line, immediately followed by `verify
 passed (exit 0)` or `verify failed (exit N)`, so that printed line is the
-literal command to rerun by hand. For the complete stage, `assent verify
-<FOLDER>` reruns the whole suite unattended and issues a fresh receipt with
-zero tokens; to watch the test-by-test output yourself, run
-`.assent/verify.py` from inside that same worktree, or run `python -m
-unittest discover -s tests -v` directly.
+literal command to rerun by hand. The complete stage runs `assent verify
+<FOLDER>` in a temporary integration candidate at
+`<project>.integration/target-<uuid>`, a sibling of `<project>.worktrees/`, on
+branch `assent-integration/<folder>/<uuid>`. This is the merged candidate tree
+that the complete `.assent/verify.py` verifies and the receipt certifies; it
+exists throughout the entire test run and is removed after the tests finish.
+To reproduce or watch that stage manually, use the candidate as the command's
+cwd while it exists and run the verifier script from the main worktree, for
+example `python <main-worktree>/.assent/verify.py`; do not run it from the
+source worktree as if that were the integration candidate. Cleanup runs in a
+`finally` block, so normal completion, a Python exception, and Ctrl-C clean it
+up. Only a hard kill (such as `taskkill /F`) or power loss can leave residue;
+assent has no automatic stale-candidate recovery. Remove residue manually with
+`git worktree remove --force <path>` and `git branch -D <branch>`.
 
 **Parallel test execution**: the packaged `.assent/verify.py` template
 provides `run_unittest_parallel()`, commented out by default, which runs each
@@ -687,6 +696,9 @@ The task journal records the exact quota-reset time (if available) and the
 scheduler will poll until then before retrying. If you need to run a different
 folder in the meantime, you can run it in a second terminal as long as it does
 not depend on the quota-limited folder.
+When `[adapter].name` is a list, quota exhaustion rotates to the next adapter
+in order; the scheduler waits for the rotation poll only after every adapter
+in the rotation is exhausted.
 
 **Fixing configuration after a preflight error**
 

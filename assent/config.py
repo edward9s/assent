@@ -123,7 +123,9 @@ class Config:
     stall_minutes: int = 30        # 0 = watchdog disabled
     retry_per_task: int = 1
     quota_poll_minutes: int = 30
+    rotation_poll_minutes: int = 1
     adapter_name: str = "claude"
+    adapter_names: tuple[str, ...] = field(default_factory=tuple)
     claude_command: str = "claude"
     claude_extra_args: list[str] = field(
         default_factory=lambda: list(_DEFAULT_EXTRA_ARGS))
@@ -159,6 +161,14 @@ class Config:
     prompt_template: str | None = None
     receipt_refresh: str = "manual"  # "manual" = explicit verify only, "auto" = also at run closeout
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
+
+    def __post_init__(self) -> None:
+        """Keep the legacy adapter name and the normalized rotation list aligned."""
+        if not self.adapter_names:
+            self.adapter_names = (self.adapter_name,)
+        else:
+            self.adapter_names = tuple(self.adapter_names)
+            self.adapter_name = self.adapter_names[0]
 
     @property
     def branch_prefix(self) -> str:
@@ -281,6 +291,53 @@ def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> di
     return dict(val)
 
 
+def _parse_adapter_names(section: dict) -> tuple[str, ...]:
+    """Parse the configured adapter name or ordered rotation list."""
+    if "name" not in section:
+        raw = "claude"
+        names = (raw,)
+    else:
+        raw = section["name"]
+        if isinstance(raw, str):
+            # Preserve the legacy scalar path; adapter_settings() remains the
+            # fail-closed validator for an unknown single adapter name.
+            names = (raw,)
+        elif isinstance(raw, list):
+            if not raw:
+                raise AssentError(
+                    "Config [adapter].name must be a non-empty list of adapter names")
+            for index, name in enumerate(raw):
+                if not isinstance(name, str):
+                    raise AssentError(
+                        f"Config [adapter].name[{index}] must be a string")
+            names = tuple(raw)
+        else:
+            raise AssentError(
+                "Config [adapter].name has the wrong type: expected a string or"
+                " a list of strings")
+
+    if isinstance(raw, str):
+        return names
+
+    unknown = [name for name in names if name not in _ADAPTER_NAMES]
+    if unknown:
+        raise AssentError(
+            f"Config [adapter].name contains unknown adapter name(s): {', '.join(repr(name) for name in unknown)}"
+            f" (built in: {', '.join(sorted(_ADAPTER_NAMES))})")
+
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for name in names:
+        if name in seen and name not in duplicates:
+            duplicates.append(name)
+        seen.add(name)
+    if duplicates:
+        raise AssentError(
+            f"Config [adapter].name contains duplicate adapter name(s): "
+            f"{', '.join(repr(name) for name in duplicates)}")
+    return names
+
+
 def _effort_maps(section: dict, owner: str,
                  default_flat: dict[str, str] | None = None,
                  default_tier: dict[str, dict[str, str]] | None = None
@@ -401,6 +458,7 @@ def load_config(path: str | Path, folder: str) -> Config:
                    if "antigravity" in adapter else {})
     prompt = _section(data, "prompt")
     verification_section = _section(data, "verification")
+    adapter_names = _parse_adapter_names(adapter)
     claude_efforts, claude_tier_efforts = _effort_maps(
         claude, "adapter.claude")
     codex_efforts, codex_tier_efforts = _effort_maps(
@@ -417,7 +475,9 @@ def load_config(path: str | Path, folder: str) -> Config:
         stall_minutes=_typed(watchdog, "[watchdog]", "stall_minutes", int, 30),
         retry_per_task=_typed(run, "[run]", "retry_per_task", int, 1),
         quota_poll_minutes=_typed(run, "[run]", "quota_poll_minutes", int, 30),
-        adapter_name=_typed(adapter, "[adapter]", "name", str, "claude"),
+        rotation_poll_minutes=_typed(run, "[run]", "rotation_poll_minutes", int, 1),
+        adapter_name=adapter_names[0],
+        adapter_names=adapter_names,
         claude_command=_typed(claude, "[adapter.claude]", "command", str, "claude"),
         claude_extra_args=_str_list(claude, "[adapter.claude]", "extra_args",
                                     _DEFAULT_EXTRA_ARGS),
@@ -461,6 +521,8 @@ def load_config(path: str | Path, folder: str) -> Config:
         raise AssentError("[run] retry_per_task must not be negative")
     if cfg.quota_poll_minutes < 1:
         raise AssentError("[run] quota_poll_minutes must be at least 1")
+    if cfg.rotation_poll_minutes < 1:
+        raise AssentError("[run] rotation_poll_minutes must be at least 1")
     if cfg.receipt_refresh not in _RECEIPT_REFRESH_MODES:
         raise AssentError(
             f"[verification] receipt_refresh = {cfg.receipt_refresh!r} is not valid"
