@@ -2,7 +2,7 @@
 
 All Git commands run with cwd=project root, and the return code is checked before use;
 a missing git binary gets a clear error message instead of a traceback. `excludes` is a
-list of relative paths for runtime artifacts (_agents.log, _report.md, etc.): they are
+list of relative paths for runtime artifacts (_assent.log, _report.md, etc.): they are
 never input or checkpoint content, so they never take part in clean checks, scope checks,
 or commits.
 """
@@ -297,7 +297,7 @@ def changes_outside_scope(root: Path, scope: list[str],
 def _pathspec_excludes(root: Path, excludes: Sequence[str]) -> list[str]:
     """Filter the exclude list down to entries safe to write into a :(exclude) pathspec.
 
-    Entries already covered by .gitignore (e.g. a project where the whole .agents/ is
+    Entries already covered by .gitignore (e.g. a project where the whole .assent/ is
     untracked) would never be added anyway, and naming an ignored path in a pathspec makes
     ``git add`` refuse with exit code 1 — check-ignore exit code 0 = ignored -> drop it;
     1 = not ignored, 128 = error -> keep it (keeping error cases is the conservative choice:

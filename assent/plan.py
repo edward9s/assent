@@ -143,13 +143,13 @@ def parse_task_file(path: Path) -> Task:
         raise AssentError(
             f"Task file {path.name} has model = {model!r}, not a valid tier"
             " (prime / core / lite; do not write a vendor model name, the mapping"
-            " lives in agents.toml)")
+            " lives in assent.toml)")
 
     effort_raw = _optional_str(data, path, "effort").strip().lower()
     if effort_raw and effort_raw not in _EFFORT_LEVELS:
         raise AssentError(
             f"Task file {path.name} has effort = {effort_raw!r}, which is invalid"
-            " (low / medium / high, or omit it to use the agents.toml default)")
+            " (low / medium / high, or omit it to use the assent.toml default)")
 
     deps = _str_list(data, path, "deps")
     for dep in deps:

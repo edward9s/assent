@@ -1,7 +1,7 @@
 """assent - a plan format + zero-token automatic scheduler for AI projects.
 
 See assent/templates/format.md for the format contract (assent init copies it into
-the project's .agents/). Zero third-party dependencies at runtime: this package may
+the project's .assent/). Zero third-party dependencies at runtime: this package may
 import only the Python standard library.
 """
 

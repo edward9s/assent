@@ -1,6 +1,6 @@
 # assent working instructions
 
-> This file lives at `.agents/instructions.md` in the project's main worktree
+> This file lives at `.assent/instructions.md` in the project's main worktree
 > and defines only the behavior of an assent session. The single contract for
 > the plan format is `format.md` in the same directory.
 
@@ -16,7 +16,7 @@ A **meeting / interactive session** reads only, to get started:
 
 1. The project root `AGENTS.md` (if present)
 2. This file
-3. `.agents/format.md` (required before creating or modifying a task file)
+3. `.assent/format.md` (required before creating or modifying a task file)
 4. The current work folder's task files and `_report.md` (during a review
    meeting)
 5. The source and tests the task directly touches
@@ -29,11 +29,11 @@ An **assent-scheduled task session** reads only:
 3. The absolute path to the one assigned task file the scheduler provides
 4. The source and tests the task directly touches
 
-A worktree does not contain `.agents/`; a task session must not guess the
+A worktree does not contain `.assent/`; a task session must not guess the
 location of management files from relative paths, and always uses the main
 worktree absolute path the scheduler provides. Do not read by default: old work
 folders, r files (logs; read only when debugging or explicitly referenced), and
-the `_agents.log` inside a work folder.
+the `_assent.log` inside a work folder.
 
 ## Working rules
 
@@ -68,7 +68,7 @@ the `_agents.log` inside a work folder.
 ## Meeting session closeout (when interactive)
 
 1. Settle consensus into task files on the spot; do not leave it in the
-   conversation. Format follows `.agents/format.md`.
+   conversation. Format follows `.assent/format.md`.
 2. Run `assent check` — passing is what adjourns the meeting; not passing means
    the plan is not finished.
 3. Decisions that stay valid across plans go into the project `AGENTS.md`

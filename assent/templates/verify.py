@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shared verification script: a task is not complete unless the verify command exits 0.
 
-A task file's verify field points to this script by default (python .agents/verify.py);
+A task file's verify field points to this script by default (python .assent/verify.py);
 individual tasks may swap in a faster or stricter command.
 TODO: replace the "project checks" examples below with your project's actual check commands.
 """

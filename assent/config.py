@@ -1,7 +1,7 @@
-"""Loading agents.toml, and enumerating and validating task folders.
+"""Loading assent.toml, and enumerating and validating task folders.
 
-- agents.toml lives inside the project's .agents/; the project root is the
-  parent directory of .agents.
+- assent.toml lives inside the project's .assent/; the project root is the
+  parent directory of .assent.
 - The task folder name is supplied by the caller; the git branch prefix is
   that name plus "/".
 - Fields not supplied fall back to defaults; an unknown top-level key is
@@ -40,9 +40,9 @@ _DEFAULT_CODEX_EFFORT = {"prime": "high", "core": "medium", "lite": "low"}
 
 @dataclass
 class Config:
-    root: Path                     # Project root = parent of .agents
-    agents_dir: Path               # .agents directory (= where the config file lives)
-    tasks_dir: Path                # Task folder (.agents/<tasks>)
+    root: Path                     # Project root = parent of .assent
+    assent_dir: Path               # .assent directory (= where the config file lives)
+    tasks_dir: Path                # Task folder (.assent/<tasks>)
     tasks_name: str                # Task folder name (= git branch prefix stem)
     stall_minutes: int = 30        # 0 = watchdog disabled
     retry_per_task: int = 1
@@ -101,7 +101,7 @@ class Config:
 
     @property
     def runtime_log_rel(self) -> str:
-        return self.git_rel(self.tasks_dir / "_agents.log")
+        return self.git_rel(self.tasks_dir / "_assent.log")
 
     @property
     def report_rel(self) -> str:
@@ -202,7 +202,24 @@ def _validate_tasks_name(tasks_name: str, owner: str) -> None:
 
 def _load_data(path: str | Path) -> tuple[Path, dict]:
     """Read and validate the config content that does not depend on a task folder."""
-    path = Path(path)
+    path = Path(path).resolve()
+    management_dir = path.parent
+    # Old-brand paths below are compatibility-detection data only; loading
+    # them would revive a second management contract.
+    if management_dir.name == ".agents":
+        raise AssentError(
+            f"Legacy .agents management directory is not supported: {management_dir}; "
+            "migrate it explicitly to .assent before running assent")
+    if management_dir.name == ".assent":
+        legacy_dir = management_dir.parent / ".agents"
+        if legacy_dir.exists():
+            if management_dir.exists():
+                raise AssentError(
+                    f"Ambiguous management state: both {legacy_dir} and "
+                    f"{management_dir} exist; resolve the legacy installation first")
+            raise AssentError(
+                f"Legacy .agents management directory detected: {legacy_dir}; "
+                "migrate it explicitly to .assent before running assent")
     if not path.is_file():
         raise AssentError(
             f"Config file not found: {path}"
@@ -223,18 +240,18 @@ def _load_data(path: str | Path) -> tuple[Path, dict]:
 
 
 def validate_config(path: str | Path) -> Path:
-    """Validate the config file and return the ``.agents`` directory it lives in."""
+    """Validate the config file and return the ``.assent`` directory it lives in."""
     resolved, _ = _load_data(path)
     return resolved.parent
 
 
-def list_task_folders(agents_dir: str | Path) -> list[str]:
+def list_task_folders(assent_dir: str | Path) -> list[str]:
     """List task folders that contain a formal task file, sorted lexicographically."""
-    agents_dir = Path(agents_dir)
-    if not agents_dir.is_dir():
+    assent_dir = Path(assent_dir)
+    if not assent_dir.is_dir():
         return []
     folders = []
-    for entry in agents_dir.iterdir():
+    for entry in assent_dir.iterdir():
         if (not entry.is_dir() or entry.name == "__pycache__"
                 or entry.name.startswith("_")):
             continue
@@ -249,8 +266,8 @@ def load_config(path: str | Path, folder: str) -> Config:
     resolved, data = _load_data(path)
     _validate_tasks_name(folder, "Command-line task folder")
 
-    agents_dir = resolved.parent
-    root = agents_dir.parent
+    assent_dir = resolved.parent
+    root = assent_dir.parent
 
     tasks_name = folder
 
@@ -267,8 +284,8 @@ def load_config(path: str | Path, folder: str) -> Config:
 
     cfg = Config(
         root=root,
-        agents_dir=agents_dir,
-        tasks_dir=agents_dir / tasks_name,
+        assent_dir=assent_dir,
+        tasks_dir=assent_dir / tasks_name,
         tasks_name=tasks_name,
         stall_minutes=_typed(watchdog, "[watchdog]", "stall_minutes", int, 30),
         retry_per_task=_typed(run, "[run]", "retry_per_task", int, 1),

@@ -71,7 +71,7 @@ _RESUME_SUFFIX = ("\nThe previous run of this task was interrupted (quota exhaus
 
 _QUOTA_BUFFER = timedelta(minutes=2)  # reset time + buffer, to avoid being blocked again right at the edge
 _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
-_DEFAULT_VERIFY_COMMAND = "python .agents/verify.py"
+_DEFAULT_VERIFY_COMMAND = "python .assent/verify.py"
 _GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
 
 
@@ -101,7 +101,7 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
     text = (template
             .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
             .replace("{instructions_path}",
-                     cfg.rel(cfg.agents_dir / "instructions.md"))
+                     cfg.rel(cfg.assent_dir / "instructions.md"))
             .replace("{task_path}", cfg.rel(task.path))
             .replace("{journal_path}", cfg.rel(task.journal_path))
             .replace("{verify_command}",
@@ -194,7 +194,7 @@ def _verify_command_for_prompt(cfg: Config, command: str) -> str:
     """When running isolated, expand the default verify script to the main tree's absolute path."""
     if cfg.source_root is None or command.strip() != _DEFAULT_VERIFY_COMMAND:
         return command
-    parts = [sys.executable, str((cfg.agents_dir / "verify.py").resolve())]
+    parts = [sys.executable, str((cfg.assent_dir / "verify.py").resolve())]
     return (subprocess.list2cmdline(parts) if sys.platform == "win32"
             else shlex.join(parts))
 
@@ -213,17 +213,17 @@ def _agents_md_path_for_prompt(cfg: Config) -> str:
 
 
 def _worktree_configuration_errors(cfg: Config) -> list[str]:
-    """The .agents management surface must stay in the main tree; it must not produce a
+    """The .assent management surface must stay in the main tree; it must not produce a
     second real copy inside a worktree."""
     errors: list[str] = []
-    agents_path = cfg.git_rel(cfg.agents_dir)
-    tracked = sorted(set(gitops.tracked_paths(cfg.root, agents_path))
-                     | set(gitops.tracked_paths(cfg.root, agents_path,
+    assent_path = cfg.git_rel(cfg.assent_dir)
+    tracked = sorted(set(gitops.tracked_paths(cfg.root, assent_path))
+                     | set(gitops.tracked_paths(cfg.root, assent_path,
                                                 ref="HEAD")))
     if tracked:
         shown = ", ".join(tracked[:5]) + (" ..." if len(tracked) > 5 else "")
-        errors.append(f".agents already has Git-tracked files: {shown}"
-                      " (with Git enabled the whole .agents must stay in the main working tree)")
+        errors.append(f".assent already has Git-tracked files: {shown}"
+                      " (with Git enabled the whole .assent must stay in the main working tree)")
     return errors
 
 
@@ -561,7 +561,7 @@ def _run_verify(cfg: Config, command: str) -> int:
     """
     if cfg.source_root is not None and command.strip() == _DEFAULT_VERIFY_COMMAND:
         result = subprocess.run(
-            [sys.executable, str((cfg.agents_dir / "verify.py").resolve())],
+            [sys.executable, str((cfg.assent_dir / "verify.py").resolve())],
             cwd=str(cfg.root), capture_output=True, encoding="utf-8",
             errors="replace")
     else:
@@ -640,7 +640,7 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
     remaining = seconds
 
     # terminal_log.TeeTextIO provides a terminal-only channel: the countdown is a transient
-    # UI and should not be written to _agents.log every second. A test/plain TextIO falls
+    # UI and should not be written to _assent.log every second. A test/plain TextIO falls
     # back to write.
     terminal_only = getattr(stream, "write_terminal_only", None)
 
@@ -823,7 +823,7 @@ def check(cfg: Config) -> int:
         return 1
 
     ok = True
-    print(f"Config: OK ({cfg.agents_dir / 'agents.toml'} loaded, "
+    print(f"Config: OK ({cfg.assent_dir / 'assent.toml'} loaded, "
           f"task folder = {cfg.tasks_name})")
 
     # Task folder and task-file format (parsing is the full check: required fields, tiers,

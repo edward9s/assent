@@ -23,8 +23,8 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 def make_cfg(**overrides) -> Config:
     """Build a test Config; the default tier mapping uses the built-ins (prime -> fable, etc.)."""
-    base = dict(root=Path("."), agents_dir=Path("./.agents"),
-                tasks_dir=Path("./.agents/plan01"), tasks_name="plan01")
+    base = dict(root=Path("."), assent_dir=Path("./.assent"),
+                tasks_dir=Path("./.assent/plan01"), tasks_name="plan01")
     base.update(overrides)
     return Config(**base)
 

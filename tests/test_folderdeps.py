@@ -36,12 +36,12 @@ def task_text(status: str = "TODO") -> str:
 class FolderDepsTestCase(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
-        self.agents_dir = self.root / ".agents"
-        self.agents_dir.mkdir()
+        self.assent_dir = self.root / ".assent"
+        self.assent_dir.mkdir()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def make_folder(self, name: str, *statuses: str) -> Path:
-        folder = self.agents_dir / name
+        folder = self.assent_dir / name
         folder.mkdir()
         for index, status in enumerate(statuses, 1):
             (folder / f"t{index:03d}_task.e.toml").write_text(
@@ -108,7 +108,7 @@ class TestParseFolderDependencies(FolderDepsTestCase):
             parse_folder_dependencies(folder)
 
     def test_folder_without_tasks_rejected(self):
-        empty = self.agents_dir / "empty"
+        empty = self.assent_dir / "empty"
         empty.mkdir()
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
@@ -175,7 +175,7 @@ class TestFolderDependencyGraph(FolderDepsTestCase):
         second = self.make_folder("second", "TODO")
         (second / "_folder.toml").write_text(
             'after = ["first"]\n', encoding="utf-8")
-        graph = parse_folder_dependency_graph(self.agents_dir)
+        graph = parse_folder_dependency_graph(self.assent_dir)
         self.assertEqual(graph["second"].after, ["first"])
 
     def test_cycle_reports_complete_path(self):
@@ -190,7 +190,7 @@ class TestFolderDependencyGraph(FolderDepsTestCase):
             'after = ["first"]\n', encoding="utf-8")
         with self.assertRaisesRegex(
                 AssentError, "first -> second -> third -> first"):
-            parse_folder_dependency_graph(self.agents_dir)
+            parse_folder_dependency_graph(self.assent_dir)
 
 
 if __name__ == "__main__":

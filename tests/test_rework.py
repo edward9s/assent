@@ -31,17 +31,17 @@ class TestRework(unittest.TestCase):
         _git(self.root, "init")
         _git(self.root, "config", "user.name", "Test")
         _git(self.root, "config", "user.email", "test@example.com")
-        (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text(".assent/\n", encoding="utf-8")
         (self.root / "README.md").write_text("起點\n", encoding="utf-8")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "init")
 
         self.folder = "plan01"
-        self.tasks_dir = self.root / ".agents" / self.folder
+        self.tasks_dir = self.root / ".assent" / self.folder
         self.tasks_dir.mkdir(parents=True)
-        self.config_path = self.root / ".agents" / "agents.toml"
+        self.config_path = self.root / ".assent" / "assent.toml"
         self.config_path.write_text("", encoding="utf-8")
-        (self.tasks_dir / "agents.lock").write_text(
+        (self.tasks_dir / "assent.lock").write_text(
             'folder = "plan01"\n', encoding="utf-8")
         self.cfg = load_config(self.config_path, self.folder)
         self.container = self.root.parent / f"{self.root.name}.worktrees"
@@ -308,7 +308,7 @@ class TestRework(unittest.TestCase):
         task = self._write_task(1, "DONE")
         with hold_lock(self.tasks_dir, self.folder):
             busy_code, busy_output = self._run()
-        (self.tasks_dir / "agents.lock").unlink()
+        (self.tasks_dir / "assent.lock").unlink()
 
         missing_code, missing_output = self._run()
 
@@ -316,7 +316,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(missing_code, 1)
         self.assertEqual(self._status(task), "DONE")
         self.assertIn("a run is in progress", busy_output)
-        self.assertIn("has no existing agents.lock", missing_output)
+        self.assertIn("has no existing assent.lock", missing_output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
 
     def test_partial_journal_write_can_be_retried_without_duplicates(self) -> None:

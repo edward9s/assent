@@ -14,8 +14,8 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def make_cfg(**overrides) -> Config:
-    values = dict(root=Path("."), agents_dir=Path("./.agents"),
-                  tasks_dir=Path("./.agents/plan01"), tasks_name="plan01",
+    values = dict(root=Path("."), assent_dir=Path("./.assent"),
+                  tasks_dir=Path("./.assent/plan01"), tasks_name="plan01",
                   adapter_name="codex")
     values.update(overrides)
     return Config(**values)

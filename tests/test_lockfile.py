@@ -39,7 +39,7 @@ class TestHoldLock(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        self.tasks_dir = self.root / ".agents" / "parallel01"
+        self.tasks_dir = self.root / ".assent" / "parallel01"
         self.tasks_dir.mkdir(parents=True)
 
     def _start_holder(self) -> subprocess.Popen:
@@ -100,12 +100,12 @@ class TestHoldLock(unittest.TestCase):
 
     def test_git_excludes_contains_lockfile(self):
         """Config.git_excludes contains the lock file's relative path (not tracked by git, not part of clean/scope checks)."""
-        (self.root / ".agents" / "agents.toml").write_text(
+        (self.root / ".assent" / "assent.toml").write_text(
             '', encoding="utf-8")
         cfg = load_config(
-            self.root / ".agents" / "agents.toml", "parallel01")
-        self.assertEqual(cfg.lockfile_rel, ".agents/parallel01/agents.lock")
-        self.assertIn(".agents/parallel01/agents.lock", cfg.git_excludes)
+            self.root / ".assent" / "assent.toml", "parallel01")
+        self.assertEqual(cfg.lockfile_rel, ".assent/parallel01/assent.lock")
+        self.assertIn(".assent/parallel01/assent.lock", cfg.git_excludes)
 
 
 if __name__ == "__main__":

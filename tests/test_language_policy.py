@@ -88,7 +88,7 @@ class LanguagePolicyTests(unittest.TestCase):
             for path in (ROOT / "assent").rglob("*.py")
         ]
         paths.extend([
-            Path("assent/templates/agents.toml"),
+            Path("assent/templates/assent.toml"),
             Path("pyproject.toml"),
             Path(".gitignore"),
         ])
@@ -174,7 +174,7 @@ class LanguagePolicyTests(unittest.TestCase):
         )
         for path in documentation:
             with self.subTest(path=path):
-                self.assertNotIn(".agents/agents.md", _read(path))
+                self.assertNotIn(".assent/agents.md", _read(path))
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -183,8 +183,8 @@ class LanguagePolicyTests(unittest.TestCase):
             )
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(run_init(root), 0)
-            self.assertTrue((root / ".agents/instructions.md").is_file())
-            self.assertFalse((root / ".agents/agents.md").exists())
+            self.assertTrue((root / ".assent/instructions.md").is_file())
+            self.assertFalse((root / ".assent/agents.md").exists())
 
 
 if __name__ == "__main__":

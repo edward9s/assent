@@ -62,7 +62,7 @@ def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
     """Parse and validate a task folder's ``_folder.toml``.
 
     A referenced task folder must be a folder with a formal task file under
-    the same ``.agents`` directory. A missing ``_folder.toml`` yields an
+    the same ``.assent`` directory. A missing ``_folder.toml`` yields an
     empty ``after``.
     """
     tasks_dir = Path(tasks_dir)
@@ -155,12 +155,12 @@ def find_unfinished_prerequisites(
 
 
 def parse_folder_dependency_graph(
-        agents_dir: str | Path) -> dict[str, FolderDependencies]:
+        assent_dir: str | Path) -> dict[str, FolderDependencies]:
     """Parse the ``after`` graph for every task folder and check for cycles."""
-    agents_dir = Path(agents_dir)
+    assent_dir = Path(assent_dir)
     dependencies = {
-        name: parse_folder_dependencies(agents_dir / name)
-        for name in list_task_folders(agents_dir)
+        name: parse_folder_dependencies(assent_dir / name)
+        for name in list_task_folders(assent_dir)
     }
     _ensure_acyclic(dependencies)
     return dependencies

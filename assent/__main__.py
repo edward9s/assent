@@ -19,7 +19,7 @@ from assent.reject import reject_folder
 from assent.rework import rework_task
 from assent.terminal_log import terminal_logging
 
-_DEFAULT_CONFIG = ".agents/agents.toml"
+_DEFAULT_CONFIG = ".assent/assent.toml"
 
 
 def _positive_int(value: str) -> int:
@@ -37,7 +37,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="assent",
         description="An AI plan format plus an automatic scheduler: reads "
-                    ".agents work folders, opens an AI session per task, "
+                    ".assent work folders, opens an AI session per task, "
                     "checks acceptance objectively, and auto-checkpoints git.",
     )
     sub = parser.add_subparsers(dest="command", required=True,
@@ -104,7 +104,7 @@ def _build_parser() -> argparse.ArgumentParser:
                           help=f"Config file location (default: {_DEFAULT_CONFIG})")
 
     init_p = sub.add_parser(
-        "init", help="Generate the .agents skeleton and AGENTS.md in a project")
+        "init", help="Generate the .assent skeleton and AGENTS.md in a project")
     init_p.add_argument("--path", default=".", metavar="DIR",
                         help="Target project root directory (default: current directory)")
 
@@ -188,12 +188,12 @@ def _dispatch_all(command: str, config_path: str, folders: list[str]) -> int:
     return result
 
 
-def _dispatch_check_all(config_path: str, agents_dir, folders: list[str]) -> int:
+def _dispatch_check_all(config_path: str, assent_dir, folders: list[str]) -> int:
     """Validate every folder itself, plus the complete dependency graph and
     check for cycles."""
     graph_ok = True
     try:
-        graph = parse_folder_dependency_graph(agents_dir)
+        graph = parse_folder_dependency_graph(assent_dir)
         print(f"Folder dependency graph: OK ({len(graph)} work folder(s), "
               f"references complete and acyclic)")
     except AssentError as e:
@@ -219,13 +219,13 @@ def _dispatch(argv: list[str]) -> int:
         return run_init(args.path)
 
     try:
-        agents_dir = validate_config(args.config)
+        assent_dir = validate_config(args.config)
     except AssentError as e:
         print(f"Config error: {e}")
         return 1
 
     if args.command == "run" and args.all_folders:
-        return run_all(args.config, agents_dir, args.jobs or 1)
+        return run_all(args.config, assent_dir, args.jobs or 1)
     if args.command == "reject":
         try:
             cfg = load_config(args.config, args.folder)
@@ -242,7 +242,7 @@ def _dispatch(argv: list[str]) -> int:
         return rework_task(
             cfg, args.task, cascade=args.cascade,
             reason=args.reason, revert_code=args.revert_code)
-    folders = list_task_folders(agents_dir)
+    folders = list_task_folders(assent_dir)
     if args.command == "clean":
         selected = folders if args.folder is None else [args.folder]
         if not selected:
@@ -262,7 +262,7 @@ def _dispatch(argv: list[str]) -> int:
             if folder is None:
                 return 1
         elif args.command == "check":
-            return _dispatch_check_all(args.config, agents_dir, folders)
+            return _dispatch_check_all(args.config, assent_dir, folders)
         else:
             return _dispatch_all(args.command, args.config, folders)
     else:

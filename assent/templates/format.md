@@ -1,4 +1,4 @@
-# .agents plan format (the assent format contract)
+# .assent plan format (the assent format contract)
 
 > This file is the single format contract that both "plans produced by an AI
 > meeting" and "automatic execution by the assent scheduler" obey.
@@ -14,14 +14,14 @@
 ```text
 project/
 ├── AGENTS.md                    # project rules (root; versioning is the project's call; keep one assent bridge line)
-└── .agents/
-    ├── agents.toml              # scheduler config: adapter, tier mapping tables
+└── .assent/
+    ├── assent.toml              # scheduler config: adapter, tier mapping tables
     ├── instructions.md          # assent session instructions and cross-project common rules
     ├── format.md                # this file
     ├── verify.py                # shared verification script (default choice for a task file's verify field)
     └── bootstrap01/             # work folder (named after the nature of the work, decided by the meeting, = git branch prefix)
-        ├── agents.lock          # file lock for one run of this folder
-        ├── _agents.log          # this folder's runtime terminal output (not versioned)
+        ├── assent.lock          # file lock for one run of this folder
+        ├── _assent.log          # this folder's runtime terminal output (not versioned)
         ├── t001_skeleton_and_test_infra.e.toml  # task file (produced by the meeting)
         ├── t001_skeleton_and_test_infra.r.toml  # log file (produced after execution, paired with the task file)
         ├── _folder.toml             # work-folder upstream dependency declaration (optional)
@@ -31,7 +31,7 @@ project/
 
 ## Work folders
 
-- Located inside `.agents/`, containing at least one `tNNN_name.e.toml` formal
+- Located inside `.assent/`, containing at least one `tNNN_name.e.toml` formal
   task file.
 - Named after the nature of the work (such as `bootstrap01`, `loginfix01`),
   with no reserved words or conventional names; the rule: no whitespace or path
@@ -47,7 +47,7 @@ project/
   new task with a new number, do not renumber existing tasks, so that deps
   references never break.
 - **Parallel execution**: a single work folder allows only one `run` at a time,
-  locked by the `agents.lock` inside that folder; different folders can run in
+  locked by the `assent.lock` inside that folder; different folders can run in
   parallel in different terminals. Git is always enabled and always uses a
   dedicated worktree at `<project name>.worktrees/<folder>/`; the positional
   argument `assent run <folder>` can state the work folder explicitly, and is
@@ -56,7 +56,7 @@ project/
   worktrees and `<folder>/*` branches; it may remove one only after proving that
   the folder is not locked, the worktree is clean, and the worktree and branch
   results are fully merged into the main tree's current HEAD. If it cannot prove
-  this it skips and explains why; it does not touch `.agents/` (the t/r files
+  this it skips and explains why; it does not touch `.assent/` (the t/r files
   there are the archive itself), has no `--force`, and is unrelated to
   `git clean` — it deletes nothing untracked or unmerged.
 - **Rejection**: `assent reject <FOLDER>` is an explicit human-adjudicated
@@ -76,22 +76,22 @@ project/
 ### Project rules and the assent management plane
 
 `AGENTS.md` is the project rules, keeping only one bridge line inside that
-requires reading `.agents/instructions.md` in the main worktree when using
+requires reading `.assent/instructions.md` in the main worktree when using
 assent. If it is versioned, the executing AI reads the branch version inside the
 worktree; if it is not versioned, the scheduler instead provides the main-tree
 absolute path. Project-specific constraints are not mixed into the same
 tool-managed block as the assent session flow.
 
-The entire `.agents/` is the scheduler's management plane, excluded by
+The entire `.assent/` is the scheduler's management plane, excluded by
 `.gitignore` by default and always kept in the main worktree; a worktree does
-not contain `.agents/`. The scheduler's prompt expands instructions, t/r files,
+not contain `.assent/`. The scheduler's prompt expands instructions, t/r files,
 and the default verification script into main-tree absolute paths. The body of
-`.agents/verify.py` is loaded from the main tree, but the execution cwd is the
+`.assent/verify.py` is loaded from the main tree, but the execution cwd is the
 worktree, so the verification target is still the isolated worktree. Any
-`.agents/` file that has entered Git fails closed, to prevent a worktree from
+`.assent/` file that has entered Git fails closed, to prevent a worktree from
 producing a second source of truth.
 
-`.agents/` has the main-tree disk as its only copy; backups are the project's
+`.assent/` has the main-tree disk as its only copy; backups are the project's
 own responsibility. Git is always enabled and always isolated into a worktree,
 not to be replaced by a toggle or a git-less degraded mode; this is what makes
 running multiple work folders in parallel safe.
@@ -106,7 +106,7 @@ after = ["bootstrap01"]
 ```
 
 No `_folder.toml` means `after = []`; if the file exists, `after` must be
-written explicitly, and every name must be a folder under the same `.agents/`
+written explicitly, and every name must be a folder under the same `.assent/`
 that contains a formal task file, and it may not depend on itself. A folder's
 completion state is not stored separately; it is derived on the spot each time
 from all formal task files in it: complete only when every one is `DONE` or
@@ -118,10 +118,10 @@ closed.
 
 ### Hard requirements for the adapter sandbox
 
-The executing AI must be able to write to the main-tree `.agents/`, because
+The executing AI must be able to write to the main-tree `.assent/`, because
 changing its own task file's status and appending to the r file are part of its
-job. If a project whose entire `.agents/` is gitignored uses codex
-`workspace-write`, the main-tree `.agents/` will be read-only, which does not
+job. If a project whose entire `.assent/` is gitignored uses codex
+`workspace-write`, the main-tree `.assent/` will be read-only, which does not
 meet the task closeout requirement. The executing AI must also be able to write
 to the system temp directory — tempfile-style tests write there, and
 `workspace-write` refuses that too. These two are why the default configuration
@@ -150,7 +150,7 @@ model = "prime"                  # prime | core | lite (never write a vendor mod
 effort = "high"                  # low | medium | high; usually omitted, written only to deliberately deviate from the default
 status = "TODO"                  # TODO | WIP | DONE | BLOCKED | SKIP
 scope = ["assent/", "tests/"]    # allowed path prefixes for changes; fail-closed, must not be empty
-verify = "python .agents/verify.py"   # verification command, exit 0 = pass
+verify = "python .assent/verify.py"   # verification command, exit 0 = pass
 
 goal = """
 What to achieve, in one or two sentences.
@@ -188,7 +188,7 @@ Rules:
 ### The three tiers (model)
 
 A task file writes only the abstract tier; the actual vendor model is translated
-by the `[adapter.<name>.models]` mapping table in agents.toml — swap the adapter
+by the `[adapter.<name>.models]` mapping table in assent.toml — swap the adapter
 on the same plan and you swap vendors without changing the task file.
 
 | Tier | Position | Suited for |
@@ -261,7 +261,7 @@ Longer process notes, blockers, a summary of verification output.
   also writes `requested_effort`. Its summary is quoted directly by report, so
   write verifiable facts, not self-narration.
 - `requested_model` precisely represents the `--model` value passed to the AI
-  CLI this run after the agents.toml mapping; it does not guarantee the model
+  CLI this run after the assent.toml mapping; it does not guarantee the model
   the service ultimately adopts or reports. A task file's `model` still only
   writes `prime` / `core` / `lite`.
 - `requested_effort` precisely represents the value actually passed to the AI
@@ -311,15 +311,15 @@ error in any folder finishes as a failure.
 
 `assent clean [FOLDER]` removes provably redundant worktrees and same-folder
 prefix branches at fixed locations; when `FOLDER` is omitted it acts on all work
-folders. Each folder must be able to acquire the existing `agents.lock`, have a
+folders. Each folder must be able to acquire the existing `assent.lock`, have a
 fully clean worktree, and have all same-prefix branches and detached HEADs
 merged into the main tree's current HEAD, before it first removes the worktree
 with ordinary protection and then deletes branches with `git branch -d`. Any
 insufficient proof keeps it and states the reason; there is no force-delete
-option, and it never touches `.agents/`.
+option, and it never touches `.assent/`.
 
 `assent reject <FOLDER>` lets a review meeting reject a whole folder's
-implementation: after acquiring the same `agents.lock`, it first fully parses
+implementation: after acquiring the same `assent.lock`, it first fully parses
 the task files, then stashes uncommitted changes as a wip commit, records each
 branch's full tip hash as evidence, then force-removes the worktree, deletes
 same-prefix branches with `git branch -D`, and finally reverts DONE/WIP/BLOCKED
@@ -377,7 +377,7 @@ checks in order, and commits only when all pass:
 ## Defensive rules (summary)
 
 1. scope fail-closed + minimal exemptions: the executing AI's only legitimate
-   changes in `.agents/` are its own t file's status and its own r file.
+   changes in `.assent/` are its own t file's status and its own r file.
 2. Structural comparison: any other field of the t file being touched is a
    failure; scope/verify always take the checkpoint version.
 3. `assent check` validates reference integrity: deps point to existing tasks,

@@ -1,4 +1,4 @@
-"""Tests for loading and validating agents.toml."""
+"""Tests for loading and validating assent.toml."""
 import shutil
 import tempfile
 import unittest
@@ -13,12 +13,12 @@ _MINIMAL = ""
 class ConfigTestCase(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
-        self.agents_dir = self.root / ".agents"
-        self.agents_dir.mkdir()
+        self.assent_dir = self.root / ".assent"
+        self.assent_dir.mkdir()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def write(self, text: str) -> Path:
-        path = self.agents_dir / "agents.toml"
+        path = self.assent_dir / "assent.toml"
         path.write_text(text, encoding="utf-8")
         return path
 
@@ -27,9 +27,9 @@ class TestLoadConfig(ConfigTestCase):
     def test_minimal_config_and_defaults(self):
         cfg = load_config(self.write(_MINIMAL), "plan01")
         self.assertEqual(cfg.root, self.root.resolve())
-        self.assertEqual(cfg.agents_dir, self.agents_dir.resolve())
+        self.assertEqual(cfg.assent_dir, self.assent_dir.resolve())
         self.assertEqual(cfg.tasks_name, "plan01")
-        self.assertEqual(cfg.tasks_dir, self.agents_dir.resolve() / "plan01")
+        self.assertEqual(cfg.tasks_dir, self.assent_dir.resolve() / "plan01")
         self.assertEqual(cfg.branch_prefix, "plan01/")
         self.assertEqual(cfg.stall_minutes, 30)
         self.assertEqual(cfg.retry_per_task, 1)
@@ -45,25 +45,40 @@ class TestLoadConfig(ConfigTestCase):
 
     def test_runtime_artifact_paths(self):
         cfg = load_config(self.write(_MINIMAL), "plan01")
-        self.assertEqual(cfg.runtime_log_rel, ".agents/plan01/_agents.log")
-        self.assertEqual(cfg.report_rel, ".agents/plan01/_report.md")
-        self.assertEqual(cfg.lockfile_rel, ".agents/plan01/agents.lock")
+        self.assertEqual(cfg.runtime_log_rel, ".assent/plan01/_assent.log")
+        self.assertEqual(cfg.report_rel, ".assent/plan01/_report.md")
+        self.assertEqual(cfg.lockfile_rel, ".assent/plan01/assent.lock")
         self.assertEqual(cfg.git_excludes,
-                         (".agents/plan01/_agents.log", ".agents/plan01/_report.md",
-                         ".agents/plan01/agents.lock"))
+                         (".assent/plan01/_assent.log", ".assent/plan01/_report.md",
+                         ".assent/plan01/assent.lock"))
 
     def test_provided_folder_updates_all_derived_paths(self):
         cfg = load_config(self.write(_MINIMAL), folder="parallel02")
         self.assertEqual(cfg.tasks_name, "parallel02")
-        self.assertEqual(cfg.tasks_dir, self.agents_dir.resolve() / "parallel02")
+        self.assertEqual(cfg.tasks_dir, self.assent_dir.resolve() / "parallel02")
         self.assertEqual(cfg.branch_prefix, "parallel02/")
-        self.assertEqual(cfg.runtime_log_rel, ".agents/parallel02/_agents.log")
-        self.assertEqual(cfg.report_rel, ".agents/parallel02/_report.md")
-        self.assertEqual(cfg.lockfile_rel, ".agents/parallel02/agents.lock")
+        self.assertEqual(cfg.runtime_log_rel, ".assent/parallel02/_assent.log")
+        self.assertEqual(cfg.report_rel, ".assent/parallel02/_report.md")
+        self.assertEqual(cfg.lockfile_rel, ".assent/parallel02/assent.lock")
 
     def test_missing_file_raises(self):
         with self.assertRaises(AssentError):
-            load_config(self.agents_dir / "agents.toml", "plan01")
+            load_config(self.assent_dir / "assent.toml", "plan01")
+
+    def test_legacy_agents_config_path_is_refused_explicitly(self):
+        # This old-brand path is intentional legacy-installation fixture data.
+        legacy_dir = self.root / ".agents"
+        legacy_dir.mkdir()
+        legacy_config = legacy_dir / "agents.toml"
+        legacy_config.write_text("", encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "Legacy .agents"):
+            load_config(legacy_config, "plan01")
+
+    def test_dual_management_directories_are_refused_as_ambiguous(self):
+        # The old-brand directory is intentional ambiguity-fixture data.
+        (self.root / ".agents").mkdir()
+        with self.assertRaisesRegex(AssentError, "Ambiguous management state"):
+            load_config(self.write(_MINIMAL), "plan01")
 
     def test_removed_plan_section_rejected_as_unknown_key(self):
         with self.assertRaisesRegex(AssentError, "unknown top-level keys"):
@@ -171,12 +186,12 @@ class TestListTaskFolders(ConfigTestCase):
                                ("empty", "notes.txt"),
                                ("_hidden", "t001_h.e.toml"),
                                ("__pycache__", "t001_c.e.toml")):
-            folder = self.agents_dir / name
+            folder = self.assent_dir / name
             folder.mkdir()
             (folder / filename).write_text("", encoding="utf-8")
-        self.assertEqual(list_task_folders(self.agents_dir), ["alpha", "beta"])
+        self.assertEqual(list_task_folders(self.assent_dir), ["alpha", "beta"])
 
-    def test_missing_agents_directory_is_empty(self):
+    def test_missing_assent_directory_is_empty(self):
         self.assertEqual(list_task_folders(self.root / "missing"), [])
 
 

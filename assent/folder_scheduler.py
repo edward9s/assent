@@ -115,10 +115,10 @@ def _finish_folder_output(
     _drain_output(output)
 
 
-def _folder_plans(agents_dir: Path, folders: list[str]) -> dict[str, Plan]:
+def _folder_plans(assent_dir: Path, folders: list[str]) -> dict[str, Plan]:
     """Reparse every formal task file; any bad file refuses to continue
     scheduling."""
-    return {folder: Plan.parse(agents_dir / folder) for folder in folders}
+    return {folder: Plan.parse(assent_dir / folder) for folder in folders}
 
 
 def _is_complete(plan: Plan) -> bool:
@@ -195,10 +195,10 @@ def _interrupt_and_wait(
     _drain_output(output)
 
 
-def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
+def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
     """Run every unfinished work folder in folder-dependency order."""
-    agents_dir = Path(agents_dir)
-    if not (agents_dir.parent / ".git").exists():
+    assent_dir = Path(assent_dir)
+    if not (assent_dir.parent / ".git").exists():
         print(_GIT_REQUIRED_MESSAGE)
         return 1
     active: dict[str, subprocess.Popen] = {}
@@ -209,14 +209,14 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
     try:
         while True:
             try:
-                graph = parse_folder_dependency_graph(agents_dir)
+                graph = parse_folder_dependency_graph(assent_dir)
                 if not graph:
                     print("No work folder with a task file found.")
                     return 1
                 inactive = [folder for folder in graph if folder not in active]
                 # Another child process may be writing its own task file;
                 # only reparse folders that are not currently running.
-                plans = _folder_plans(agents_dir, inactive)
+                plans = _folder_plans(assent_dir, inactive)
             except AssentError as e:
                 print(f"Folder scheduling failed: {e}")
                 return 1
@@ -274,7 +274,7 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
                     print(f"Work folder interrupted: {folder} (exit code {returncode})")
                     interrupted = True
                 else:
-                    log_path = agents_dir / folder / "_agents.log"
+                    log_path = assent_dir / folder / "_assent.log"
                     print(f"Work folder failed: {folder} (exit code {returncode}; "
                           f"see {log_path} for details)")
                     failure = True
