@@ -1,13 +1,16 @@
 import contextlib
 import io
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from assent.terminal_log import (
     log_path_for_argv, sanitize_log_text, terminal_logging,
 )
+from assent.user_home import ASSENT_HOME_ENV
 
 
 class TestSanitize(unittest.TestCase):
@@ -77,6 +80,44 @@ class TestTerminalLogging(unittest.TestCase):
         config.write_bytes(b"[plan]\ntasks = \xff\n")
         self.assertEqual(log_path_for_argv(["run", "--config", str(config)]),
                          expected)
+
+    def test_log_stays_in_the_project_when_only_the_user_config_exists(self):
+        # Settings may come entirely from ~/.assent, but a run's log is project
+        # evidence: it belongs beside the task folder it was produced for.
+        user_home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, user_home, ignore_errors=True)
+        (user_home / "assent.toml").write_text(
+            '[adapter]\nname = "claude"\n', encoding="utf-8")
+        environment = mock.patch.dict(
+            os.environ, {ASSENT_HOME_ENV: str(user_home)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.write_task()  # a project task folder, but no project assent.toml
+        old_cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, old_cwd)
+
+        path = log_path_for_argv(["run"])
+        self.assertEqual(
+            path, self.root.resolve() / ".assent" / "plan01" / "_assent.log")
+        self.assertNotEqual(path.parent.parent, user_home)
+
+    def test_explicit_config_still_selects_another_projects_management_dir(self):
+        other = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        config = other / ".assent" / "assent.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("", encoding="utf-8")
+        (other / ".assent" / "plan09").mkdir()
+        (other / ".assent" / "plan09" / "t001_task.e.toml").write_text(
+            (self.write_task()).read_text(encoding="utf-8"), encoding="utf-8")
+        old_cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, old_cwd)
+
+        self.assertEqual(
+            log_path_for_argv(["run", "--config", str(config)]),
+            other.resolve() / ".assent" / "plan09" / "_assent.log")
 
     def test_stdout_stderr_are_flushed_incrementally_with_start_header(self):
         terminal_out = io.StringIO()

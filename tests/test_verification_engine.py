@@ -3,6 +3,10 @@
 These cover who refreshes a folder receipt and when, the lock order the
 scheduler entry point takes, and the shared full-verifier subprocess itself.
 ``assent verify --batch`` has its own module, ``tests.test_batch_verification``.
+
+The cases that drive ``engine.run`` share ``VerificationEngineCase``, which mixes in
+``GlobalContractsMixin`` so a run is gated by a temporary user home holding the current
+contracts rather than by whatever the operator has in ``~/.assent``.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ from assent.config import load_config
 from assent.folder_verification import (VerificationReceipt, _verify_locked,
                                         verify_folder_if_needed)
 from assent.verification_common import run_full_verifier
+from tests.test_contracts import GlobalContractsMixin
 
 
 def _task(status: str) -> str:
@@ -36,8 +41,9 @@ def _task(status: str) -> str:
     )
 
 
-class VerificationEngineCase(unittest.TestCase):
+class VerificationEngineCase(GlobalContractsMixin, unittest.TestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.root = Path(tempfile.mkdtemp(prefix="assent verification engine "))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         subprocess.run(["git", "init"], cwd=self.root, check=True,

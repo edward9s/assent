@@ -25,15 +25,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from assent import AssentError, gitops, verification
+from assent import AssentError, contracts, gitops, verification
 from assent.adapters import Adapter, get_adapter
-from assent.config import Config
+from assent.config import PROJECT_LAYER, Config
 from assent.folderdeps import parse_folder_dependencies
-from assent.plan import Plan, read_entries
-from assent.preflight import (GIT_REQUIRED_MESSAGE, capability_errors,
-                              has_git_marker, print_task_assignments,
-                              resolve_effort, resolve_requested_effort,
-                              resolve_stack_state, resolve_task_assignments,
+from assent.plan import Plan, Task, read_entries
+from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
+                              capability_errors, has_git_marker,
+                              print_task_assignments, resolve_effort,
+                              resolve_requested_effort, resolve_stack_state,
+                              resolve_task_assignments,
                               worktree_configuration_errors)
 
 
@@ -215,14 +216,81 @@ def status(cfg: Config) -> int:
 # --------------------------------------------------------------------------- #
 # check: zero-token environment and format validation (the meeting's adjourn condition)
 # --------------------------------------------------------------------------- #
+def _config_source_lines(cfg: Config) -> list[str]:
+    """State the layers behind the effective settings, lowest priority first.
+
+    The project file is an optional override and a project locator, so a setup that
+    states everything user-wide is complete: naming the absent file as optional keeps
+    that ordinary case from reading like a failure.
+    """
+    parts = [source.layer if source.path is None
+             else f"{source.layer} ({source.path})" for source in cfg.sources]
+    lines = [f"Config: OK (task folder = {cfg.tasks_name})",
+             "Config sources (lowest priority first): " + ", ".join(parts)]
+    if not any(source.layer == PROJECT_LAYER for source in cfg.sources):
+        lines.append(f"  project override {cfg.assent_dir / 'assent.toml'}: "
+                     "absent (optional)")
+    return lines
+
+
+def _contract_lines() -> tuple[bool, list[str]]:
+    """Validate both global contracts, reporting each problem on its own line."""
+    try:
+        errors = contracts.contract_errors()
+    except AssentError as e:
+        return False, [f"Global contracts: FAIL ({e})"]
+    if not errors:
+        return True, [f"Global contracts: OK ({contracts.contract_dir()}: "
+                      f"{', '.join(contracts.CONTRACT_NAMES)} current)"]
+    return False, ["Global contracts: FAIL",
+                   *(f"  - {message}" for message in errors),
+                   f"  {contracts.CONTRACT_REMEDY}"]
+
+
+def _assignment_source_lines(
+        cfg: Config,
+        blocks: list[tuple[str, list[tuple[Task, SessionIdentity]]]]
+        ) -> list[str]:
+    """Name the layer behind every setting the printed assignments actually used.
+
+    Only the keys the resolution consumed are shown -- the adapter selection, and per
+    adapter the model, default-effort and effort translation of each tier in the plan --
+    so the provenance answers "why this invocation" without dumping the whole config.
+    """
+    lines = [f"Setting sources: adapter.name = {cfg.source_of('adapter.name')}"
+             f" (active: {', '.join(cfg.adapter_names)})"]
+    for adapter_name, assignments in blocks:
+        settings = cfg.adapter_settings(adapter_name)
+        keys: list[str] = []
+        for task, session in assignments:
+            keys.append(f"models.{task.model}")
+            if session.effort is None:
+                continue
+            if task.effort is None:
+                keys.append(f"default_effort.{task.model}")
+            keys.append(
+                f"efforts.{task.model}.{session.effort}"
+                if session.effort in settings.tier_efforts.get(task.model, {})
+                else f"efforts.{session.effort}")
+        used = ", ".join(
+            f"{key} = {cfg.source_of(f'adapter.{adapter_name}.{key}')}"
+            for key in dict.fromkeys(keys))
+        lines.append(f"  {adapter_name}: {used}")
+    return lines
+
+
 def check(cfg: Config) -> int:
     if not has_git_marker(cfg.root):
         print(GIT_REQUIRED_MESSAGE)
         return 1
 
-    ok = True
-    print(f"Config: OK ({cfg.assent_dir / 'assent.toml'} loaded, "
-          f"task folder = {cfg.tasks_name})")
+    for line in _config_source_lines(cfg):
+        print(line)
+
+    # The same contracts `run` refuses to start a session without.
+    ok, contract_lines = _contract_lines()
+    for line in contract_lines:
+        print(line)
 
     # Task folder and task-file format (parsing is the full check: required fields, tiers,
     # non-empty scope, deps exist without cycles, no duplicate ids)
@@ -231,7 +299,10 @@ def check(cfg: Config) -> int:
         plan = Plan.parse(cfg.tasks_dir)
         print(f"Task-file format: OK ({len(plan.tasks)} tasks, dependencies acyclic)")
         try:
-            print_task_assignments(resolve_task_assignments(cfg, plan))
+            blocks = resolve_task_assignments(cfg, plan)
+            print_task_assignments(blocks)
+            for line in _assignment_source_lines(cfg, blocks):
+                print(line)
         except AssentError as e:
             ok = False
             print(f"Task assignment: FAIL ({e})")

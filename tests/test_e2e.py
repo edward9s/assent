@@ -1,8 +1,10 @@
 """End-to-end walkthrough: temporary repo + task folder + scriptable fake adapter, a set of
 scenario integration tests.
 
-Stands on its own test scaffolding (does not import other test_*.py across files), matching
-the convention of the other test files.
+Stands on its own repo/adapter scaffolding rather than sharing tests.engine_support; the one
+fixture it does borrow is ``install_global_contracts``, because a temporary user home with
+current contracts is exactly what every module driving ``run`` needs and duplicating the
+contract installation would let the two copies drift apart.
 
 Chinese literals that remain are deliberate user/upstream passthrough data (task titles,
 goals, journal summaries, AGENTS.md/instructions/format content) used to prove that
@@ -26,6 +28,7 @@ from assent.config import load_config
 from assent.lockfile import hold_lock
 from assent.plan import (append_entry, journal_path_for, parse_task_file,
                          set_status)
+from tests.test_contracts import install_global_contracts
 
 _OK = 'python -c "raise SystemExit(0)"'
 _WORKTREE_GITIGNORE = ".assent/\n"
@@ -64,6 +67,9 @@ class ScriptedAdapter(Adapter):
 
 class E2ETestCase(unittest.TestCase):
     def setUp(self):
+        # run/check fail closed without current global contracts, so every scenario
+        # gets its own temporary user home before any repo or config is built.
+        self.user_home = install_global_contracts(self)
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.worktrees_root = self.root.parent / f"{self.root.name}.worktrees"
@@ -79,6 +85,8 @@ class E2ETestCase(unittest.TestCase):
             '[run]\nretry_per_task = 1\n',
             encoding="utf-8")
         (self.root / "AGENTS.md").write_text("專案規則\n", encoding="utf-8")
+        # A legacy project-local copy of the contracts, kept only so the prompt
+        # assertions below can prove the runtime reads the global home instead.
         (self.root / ".assent" / "instructions.md").write_text(
             "assent 工作指示\n", encoding="utf-8")
         (self.root / ".assent" / "format.md").write_text(
@@ -349,8 +357,9 @@ class TestWorktreeScenarios(E2ETestCase):
         worktree = gitops.worktree_path(self.root, "plan01")
         self.assertEqual(adapter.cwds, [worktree.resolve()])
         self.assertIn(str(task.resolve()), adapter.calls[0])
-        self.assertIn(str((self.root / ".assent" / "instructions.md").resolve()),
-                      adapter.calls[0])
+        self.assertIn(str(self.user_home / "instructions.md"), adapter.calls[0])
+        self.assertNotIn(str((self.root / ".assent" / "instructions.md").resolve()),
+                         adapter.calls[0])
         self.assertIn("project rules AGENTS.md", adapter.calls[0])
         self.assertNotIn(str((self.root / "AGENTS.md").resolve()),
                          adapter.calls[0])

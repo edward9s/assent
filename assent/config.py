@@ -1,11 +1,19 @@
 """Loading assent.toml, and enumerating and validating task folders.
 
-- assent.toml lives inside the project's .assent/; the project root is the
-  parent directory of .assent.
+- Settings are layered: built-in defaults, then the user-wide
+  ~/.assent/assent.toml, then the optional project .assent/assent.toml
+  override.  Tables merge by key; scalars and arrays are replaced whole.
+- The config path the caller supplies stays the project locator: the project
+  root is the parent of the .assent directory that path lives in, whether or
+  not the project file itself exists.
 - The task folder name is supplied by the caller; the git branch prefix is
   that name plus "/".
 - Fields not supplied fall back to defaults; an unknown top-level key is
   always an error (so a typo cannot fail silently).
+- Absence is the only way to inherit.  TOML has no null, so a blank string is
+  an explicit value, not a request to fall back: for settings that need useful
+  text it is refused at load time, naming the dotted key and the file that
+  stated it, rather than quietly reinstating a lower layer or a built-in.
 """
 from __future__ import annotations
 
@@ -16,8 +24,18 @@ from pathlib import Path
 
 from assent import AssentError
 from assent.lockfile import LOCK_NAME
+from assent.user_home import user_config_path
 
 _TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt", "verification"}
+
+# The ordered settings layers, lowest priority first.  The built-in layer contributes no
+# document of its own: several tables (models, efforts) are replaced whole rather than merged
+# by key, so folding the built-in values into the merged document would resurrect defaults that
+# a stated table means to drop.  The typed parsers below keep applying the built-in defaults,
+# and BUILTIN_LAYER stays the provenance answer for every leaf no config file states.
+BUILTIN_LAYER = "builtin"
+USER_LAYER = "user"
+PROJECT_LAYER = "project"
 _MODEL_TIERS = {"prime", "core", "lite"}
 _EFFORT_LEVELS = {"heavy", "normal", "slight"}
 _ADAPTER_NAMES = {"claude", "codex", "antigravity"}
@@ -135,6 +153,14 @@ class AdapterSettings:
             effort, self.efforts.get(effort, _EFFORT_BASELINE.get(effort, effort)))
 
 
+@dataclass(frozen=True)
+class ConfigSource:
+    """One layer that contributed to the effective settings."""
+
+    layer: str          # BUILTIN_LAYER / USER_LAYER / PROJECT_LAYER
+    path: Path | None   # None for the built-in defaults, which have no file
+
+
 @dataclass
 class Config:
     root: Path                     # Project root = parent of .assent
@@ -182,6 +208,10 @@ class Config:
     prompt_template: str | None = None
     receipt_refresh: str = "manual"  # "manual" = explicit verify only, "auto" = also at run closeout
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
+    # Where the effective settings came from: the layers that were present, lowest priority
+    # first, and each stated leaf setting's dotted key mapped to the layer that stated it.
+    sources: tuple[ConfigSource, ...] = ()
+    provenance: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Keep the legacy adapter name and the normalized rotation list aligned."""
@@ -190,6 +220,16 @@ class Config:
         else:
             self.adapter_names = tuple(self.adapter_names)
             self.adapter_name = self.adapter_names[0]
+        if not self.sources:
+            self.sources = (ConfigSource(BUILTIN_LAYER, None),)
+
+    def source_of(self, key: str) -> str:
+        """Name the layer a leaf setting came from, by its dotted key.
+
+        BUILTIN_LAYER is the answer for any key no config file states, which is exactly
+        when the built-in default is the value in effect.
+        """
+        return self.provenance.get(key, BUILTIN_LAYER)
 
     @property
     def branch_prefix(self) -> str:
@@ -338,7 +378,40 @@ def _default_effort_map(section: dict, owner: str,
     return merged
 
 
-def _parse_adapter_names(section: dict) -> tuple[str, ...]:
+class _BlankGuard:
+    """Refuse blank operational strings, naming the dotted key and the offending file.
+
+    A higher layer that states ``key = ""`` must never look like an omission: it would
+    otherwise hide a valid user value or silently select a built-in fallback, and the
+    breakage would surface much later as an unusable adapter command line.  Enumerated
+    settings keep their own domain checks; this guard only covers settings whose contract
+    is "some useful text".
+    """
+
+    def __init__(self, provenance: dict[str, str],
+                 sources: tuple[ConfigSource, ...]) -> None:
+        self._provenance = provenance
+        self._paths = {source.layer: source.path for source in sources}
+
+    def text(self, value, dotted: str):
+        if isinstance(value, str) and not value.strip():
+            layer = self._provenance.get(dotted, BUILTIN_LAYER)
+            path = self._paths.get(layer)
+            where = f"the {layer} config file ({path})" if path else f"the {layer} defaults"
+            raise AssentError(
+                f"Config {dotted} is blank in {where}: a blank value is an explicit"
+                " value, not a request to inherit; delete the key to fall back to the"
+                " lower layer")
+        return value
+
+    def values(self, mapping: dict[str, str], prefix: str) -> dict[str, str]:
+        """Apply the same rule to every value of a stated table."""
+        for key, value in mapping.items():
+            self.text(value, f"{prefix}.{key}")
+        return mapping
+
+
+def _parse_adapter_names(section: dict, guard: "_BlankGuard") -> tuple[str, ...]:
     """Parse the configured adapter name or ordered rotation list."""
     if "name" not in section:
         raw = "claude"
@@ -348,7 +421,7 @@ def _parse_adapter_names(section: dict) -> tuple[str, ...]:
         if isinstance(raw, str):
             # Preserve the legacy scalar path; adapter_settings() remains the
             # fail-closed validator for an unknown single adapter name.
-            names = (raw,)
+            names = (guard.text(raw, "adapter.name"),)
         elif isinstance(raw, list):
             if not raw:
                 raise AssentError(
@@ -357,6 +430,7 @@ def _parse_adapter_names(section: dict) -> tuple[str, ...]:
                 if not isinstance(name, str):
                     raise AssentError(
                         f"Config [adapter].name[{index}] must be a string")
+                guard.text(name, "adapter.name")
             names = tuple(raw)
         else:
             raise AssentError(
@@ -385,7 +459,7 @@ def _parse_adapter_names(section: dict) -> tuple[str, ...]:
     return names
 
 
-def _effort_maps(section: dict, owner: str,
+def _effort_maps(section: dict, owner: str, guard: "_BlankGuard",
                  default_flat: dict[str, str] | None = None,
                  default_tier: dict[str, dict[str, str]] | None = None
                  ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
@@ -415,9 +489,10 @@ def _effort_maps(section: dict, owner: str,
                     raise AssentError(
                         f"Config {block} key {effort!r} is not a valid effort"
                         f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
-                if not isinstance(requested, str) or not requested.strip():
+                if not isinstance(requested, str):
                     raise AssentError(
                         f"Config {block} {effort} must be a non-empty string")
+                guard.text(requested, f"{owner}.efforts.{key}.{effort}")
                 tier_values[effort] = requested
             by_tier[key] = tier_values
             continue
@@ -427,8 +502,9 @@ def _effort_maps(section: dict, owner: str,
             raise AssentError(
                 f"Config {block} key {key!r} is not a valid effort"
                 f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str):
             raise AssentError(f"Config {block} {key} must be a non-empty string")
+        guard.text(value, f"{owner}.efforts.{key}")
         flat[key] = value
     return flat, by_tier
 
@@ -460,32 +536,123 @@ def validate_tasks_name(tasks_name: str, owner: str) -> None:
             f" ({_FOLDER_NAME_RULE})")
 
 
-def _load_data(path: str | Path) -> tuple[Path, dict]:
-    """Read and validate the config content that does not depend on a task folder."""
-    path = Path(path).resolve()
-    if not path.is_file():
-        raise AssentError(
-            f"Config file not found: {path}"
-            " (not initialized yet? run assent init in the project root)")
+def _read_layer(path: Path, label: str) -> dict:
+    """Parse and shallow-validate one config file, naming it in every refusal.
+
+    Each layer is checked on its own so a broken file is reported with its own path
+    instead of the other layer masking or inheriting the blame.
+    """
     with open(path, "rb") as f:
         try:
             data = tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
-            raise AssentError(f"Config file is not valid TOML ({path}): {e}") from e
+            raise AssentError(
+                f"{label} config file is not valid TOML ({path}): {e}") from e
 
     unknown = sorted(set(data) - _TOP_LEVEL_KEYS)
     if unknown:
         raise AssentError(
-            f"Config file has unknown top-level keys: {', '.join(unknown)}"
+            f"{label} config file ({path}) has unknown top-level keys:"
+            f" {', '.join(unknown)}"
             f" (valid keys: {', '.join(sorted(_TOP_LEVEL_KEYS))})")
+    return data
 
-    return path.resolve(), data
+
+def _shape(value: object) -> str:
+    return "a table" if isinstance(value, dict) else "a value"
+
+
+def _merge_layer(base: dict, overlay: dict, base_path: Path | None,
+                 overlay_path: Path, prefix: str = "") -> dict:
+    """Merge one higher layer over a lower one: tables by key, everything else replaced.
+
+    A scalar or array is a leaf, so the higher layer replaces it whole rather than
+    extending it.  A key that is a table in one file and a leaf in the other is refused
+    with both file names, because no merge of the two can be the author's intent.
+    ``base_path`` is only None while ``base`` is still empty, where no clash is possible.
+    """
+    merged = dict(base)
+    for key, value in overlay.items():
+        dotted = f"{prefix}{key}"
+        if key in merged and isinstance(merged[key], dict) != isinstance(value, dict):
+            raise AssentError(
+                f"Config {dotted} has incompatible structures across config layers:"
+                f" {_shape(merged[key])} in {base_path} but {_shape(value)} in"
+                f" {overlay_path}")
+        if isinstance(value, dict):
+            merged[key] = _merge_layer(merged.get(key, {}), value, base_path,
+                                       overlay_path, f"{dotted}.")
+        else:
+            merged[key] = value
+    return merged
+
+
+def _flatten(data: dict, prefix: str = "") -> dict[str, object]:
+    """Map every leaf setting to its dotted key; scalars and arrays are leaves."""
+    flat: dict[str, object] = {}
+    for key, value in data.items():
+        dotted = f"{prefix}{key}"
+        if isinstance(value, dict):
+            flat.update(_flatten(value, f"{dotted}."))
+        else:
+            flat[dotted] = value
+    return flat
+
+
+def _provenance(merged: dict,
+                layers: list[tuple[str, Path, dict]]) -> dict[str, str]:
+    """Record, per effective leaf, the highest-priority layer that states it."""
+    stated = [(layer, _flatten(data)) for layer, _path, data in layers]
+    provenance: dict[str, str] = {}
+    for key in _flatten(merged):
+        for layer, flat in reversed(stated):
+            if key in flat:
+                provenance[key] = layer
+                break
+    return provenance
+
+
+def _load_layers(path: str | Path
+                 ) -> tuple[Path, dict, tuple[ConfigSource, ...], dict[str, str]]:
+    """Assemble the effective config document from the layers that are present.
+
+    The supplied path stays the project locator even when the project file is absent:
+    an absent project file means "no project override", not "the project is
+    uninitialized", so only an absent user config as well is a refusal.
+    """
+    project_path = Path(path).resolve()
+    user_path = user_config_path().resolve()
+
+    layers: list[tuple[str, Path, dict]] = []
+    # The same file cannot be two layers; a user home pointed at this project keeps
+    # its higher-priority project role.
+    if user_path.is_file() and user_path != project_path:
+        layers.append((USER_LAYER, user_path, _read_layer(user_path, "User")))
+    if project_path.is_file():
+        layers.append((PROJECT_LAYER, project_path,
+                       _read_layer(project_path, "Project")))
+    if not layers:
+        raise AssentError(
+            f"Config file not found: neither the user config {user_path} nor the"
+            f" project config {project_path} exists"
+            " (not initialized yet? run assent init in the project root)")
+
+    merged: dict = {}
+    lower: Path | None = None
+    for _layer, layer_path, data in layers:
+        merged = _merge_layer(merged, data, lower, layer_path)
+        lower = layer_path
+
+    sources = (ConfigSource(BUILTIN_LAYER, None),
+               *(ConfigSource(layer, layer_path)
+                 for layer, layer_path, _data in layers))
+    return project_path, merged, sources, _provenance(merged, layers)
 
 
 def validate_config(path: str | Path) -> Path:
-    """Validate the config file and return the ``.assent`` directory it lives in."""
-    resolved, _ = _load_data(path)
-    return resolved.parent
+    """Validate the layered config and return the project ``.assent`` directory."""
+    project_path, _data, _sources, _provenance_map = _load_layers(path)
+    return project_path.parent
 
 
 def list_task_folders(assent_dir: str | Path) -> list[str]:
@@ -507,10 +674,10 @@ def list_task_folders(assent_dir: str | Path) -> list[str]:
 
 def load_config(path: str | Path, folder: str) -> Config:
     """Load the config and build derived paths from the caller-supplied task folder name."""
-    resolved, data = _load_data(path)
+    project_path, data, sources, provenance = _load_layers(path)
     validate_tasks_name(folder, "Command-line task folder")
 
-    assent_dir = resolved.parent
+    assent_dir = project_path.parent
     root = assent_dir.parent
 
     tasks_name = folder
@@ -524,13 +691,14 @@ def load_config(path: str | Path, folder: str) -> Config:
                    if "antigravity" in adapter else {})
     prompt = _section(data, "prompt")
     verification_section = _section(data, "verification")
-    adapter_names = _parse_adapter_names(adapter)
+    guard = _BlankGuard(provenance, sources)
+    adapter_names = _parse_adapter_names(adapter, guard)
     claude_efforts, claude_tier_efforts = _effort_maps(
-        claude, "adapter.claude")
+        claude, "adapter.claude", guard)
     codex_efforts, codex_tier_efforts = _effort_maps(
-        codex, "adapter.codex")
+        codex, "adapter.codex", guard)
     antigravity_efforts, antigravity_tier_efforts = _effort_maps(
-        antigravity, "adapter.antigravity",
+        antigravity, "adapter.antigravity", guard,
         default_tier=_DEFAULT_ANTIGRAVITY_TIER_EFFORTS)
 
     cfg = Config(
@@ -544,30 +712,40 @@ def load_config(path: str | Path, folder: str) -> Config:
         rotation_poll_minutes=_typed(run, "[run]", "rotation_poll_minutes", int, 1),
         adapter_name=adapter_names[0],
         adapter_names=adapter_names,
-        claude_command=_typed(claude, "[adapter.claude]", "command", str, "claude"),
+        claude_command=guard.text(
+            _typed(claude, "[adapter.claude]", "command", str, "claude"),
+            "adapter.claude.command"),
         claude_extra_args=_str_list(claude, "[adapter.claude]", "extra_args",
                                     _DEFAULT_EXTRA_ARGS),
-        claude_models=_str_map(claude, "adapter.claude", "models", _DEFAULT_MODELS),
+        claude_models=guard.values(
+            _str_map(claude, "adapter.claude", "models", _DEFAULT_MODELS),
+            "adapter.claude.models"),
         claude_default_effort=_default_effort_map(claude, "adapter.claude",
                                                   _DEFAULT_EFFORT),
         claude_efforts=claude_efforts,
         claude_tier_efforts=claude_tier_efforts,
-        codex_command=_typed(codex, "[adapter.codex]", "command", str, "codex"),
+        codex_command=guard.text(
+            _typed(codex, "[adapter.codex]", "command", str, "codex"),
+            "adapter.codex.command"),
         codex_extra_args=_str_list(codex, "[adapter.codex]", "extra_args",
                                    _DEFAULT_CODEX_EXTRA_ARGS),
-        codex_models=_str_map(codex, "adapter.codex", "models",
-                              _DEFAULT_CODEX_MODELS),
+        codex_models=guard.values(
+            _str_map(codex, "adapter.codex", "models", _DEFAULT_CODEX_MODELS),
+            "adapter.codex.models"),
         codex_default_effort=_default_effort_map(codex, "adapter.codex",
                                                  _DEFAULT_CODEX_EFFORT),
         codex_efforts=codex_efforts,
         codex_tier_efforts=codex_tier_efforts,
-        antigravity_command=_typed(antigravity, "[adapter.antigravity]",
-                                   "command", str, "agy"),
+        antigravity_command=guard.text(
+            _typed(antigravity, "[adapter.antigravity]", "command", str, "agy"),
+            "adapter.antigravity.command"),
         antigravity_extra_args=_str_list(antigravity, "[adapter.antigravity]",
                                          "extra_args",
                                          _DEFAULT_ANTIGRAVITY_EXTRA_ARGS),
-        antigravity_models=_str_map(antigravity, "adapter.antigravity", "models",
-                                    _DEFAULT_ANTIGRAVITY_MODELS),
+        antigravity_models=guard.values(
+            _str_map(antigravity, "adapter.antigravity", "models",
+                     _DEFAULT_ANTIGRAVITY_MODELS),
+            "adapter.antigravity.models"),
         antigravity_default_effort=_default_effort_map(
             antigravity, "adapter.antigravity", _DEFAULT_ANTIGRAVITY_EFFORT),
         antigravity_efforts=antigravity_efforts,
@@ -575,9 +753,12 @@ def load_config(path: str | Path, folder: str) -> Config:
         antigravity_print_timeout_minutes=_typed(
             antigravity, "[adapter.antigravity]", "print_timeout_minutes", int,
             _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES),
-        prompt_template=_typed(prompt, "[prompt]", "template", str, None),
+        prompt_template=guard.text(
+            _typed(prompt, "[prompt]", "template", str, None), "prompt.template"),
         receipt_refresh=_typed(verification_section, "[verification]",
                                "receipt_refresh", str, "manual"),
+        sources=sources,
+        provenance=provenance,
     )
 
     if cfg.stall_minutes < 0:

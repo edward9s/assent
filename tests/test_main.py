@@ -21,7 +21,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assent.__main__ import _start_stdin_stop_watcher, main
+from assent.adapters.process import clear_stop_wake
 from assent.init import init as run_init
+from tests.test_contracts import install_global_contracts
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _HAN_CHAR_RE = re.compile(r"[一-鿿]")
@@ -44,6 +46,10 @@ class MainTestCase(unittest.TestCase):
         os.chdir(self.root)
         self.addCleanup(os.chdir, self._old_cwd)
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        # `run` refuses without the global contracts, and every layered config
+        # read consults the user home, so both point at a temporary one here
+        # rather than at whatever the developer happens to have installed.
+        self.user_home = install_global_contracts(self)
 
     def run_main(self, argv) -> tuple[int, str]:
         out = io.StringIO()
@@ -118,6 +124,45 @@ class TestDispatch(MainTestCase):
         code, out = self.run_main(
             ["run", "--config", str(self.root / "nope" / "assent.toml")])
         self.assertEqual(code, 1)
+
+    def test_run_refuses_before_dispatch_when_a_global_contract_is_broken(self):
+        config = self.write_config()
+        self.write_task("plan01")
+        cases = {"missing": lambda p: p.unlink(),
+                 "stale": lambda p: p.write_text("older\n", encoding="utf-8")}
+        for state, break_contract in cases.items():
+            for argv in (["run"], ["run", "plan01"], ["run", "--all"]):
+                with self.subTest(state=state, argv=argv):
+                    home = install_global_contracts(self)
+                    break_contract(home / "instructions.md")
+                    with patch("assent.__main__.engine.run",
+                               side_effect=AssertionError("must not dispatch")), \
+                            patch("assent.__main__.run_all",
+                                  side_effect=AssertionError("must not dispatch")):
+                        code, out = self.run_main(
+                            [*argv, "--config", str(config)])
+                    self.assertEqual(code, 1)
+                    self.assertIn("Global contracts: FAIL", out)
+                    self.assertIn("assent init", out)
+
+    def test_an_absent_default_project_file_is_not_an_error(self):
+        # Everything stated user-wide is a complete, ordinary setup.
+        (self.user_home / "assent.toml").write_text(
+            '[adapter]\nname = "claude"\n', encoding="utf-8")
+        self.write_task("plan01")
+        self.assertFalse((self.root / ".assent" / "assent.toml").exists())
+
+        code, out = self.run_main(["status"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("Config error", out)
+
+    def test_config_help_presents_the_project_file_as_an_optional_override(self):
+        out = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(out):
+            main(["run", "--help"])
+        text = " ".join(out.getvalue().split())
+        self.assertIn("Optional project settings file", text)
+        self.assertIn("~/.assent/assent.toml", text)
 
     def test_run_all_accepts_an_explicit_prefix(self):
         config = self.write_config()
@@ -616,6 +661,32 @@ print(result.returncode, flush=True)
         self.assertFalse(thread.is_alive())
         interrupt.assert_called_once_with()
 
+    def test_stdin_eof_wakes_blocking_waits_after_marking_the_interrupt(self):
+        """interrupt_main() only makes the exception pending, so the watcher
+        must also release whatever wait the main thread is parked in -- and in
+        that order, so the wait is never woken before there is anything to
+        deliver."""
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        self.addCleanup(reader.close)
+        self.addCleanup(clear_stop_wake)
+
+        class FakeStdin:
+            buffer = reader
+
+        order: list[str] = []
+        with patch.dict(os.environ, {"ASSENT_STDIN_STOP": "1"}), patch.object(
+                sys, "stdin", FakeStdin()), patch(
+                "assent.__main__._thread.interrupt_main",
+                side_effect=lambda: order.append("interrupt")), patch(
+                "assent.__main__.wake_stop_waiters",
+                side_effect=lambda: order.append("wake")):
+            thread = _start_stdin_stop_watcher()
+            os.close(write_fd)
+            thread.join(timeout=10)
+
+        self.assertEqual(order, ["interrupt", "wake"])
+
     @unittest.skipUnless(os.name == "nt", "stdin pipe inheritance hang is Windows-only")
     def test_watcher_pipe_is_not_inherited_by_git_subprocess(self):
         environment = dict(os.environ)
@@ -657,10 +728,15 @@ class TestInit(MainTestCase):
     def test_creates_skeleton(self):
         code, out = self.run_main(["init", "--test", "unittest"])
         self.assertEqual(code, 0)
-        for rel in (".assent/assent.toml", ".assent/format.md",
-                    ".assent/instructions.md", ".assent/verify.py",
-                    "AGENTS.md", ".gitignore"):
+        for rel in (".assent/verify.py", "AGENTS.md", ".gitignore"):
             self.assertTrue((self.root / rel).is_file(), rel)
+        # Settings and contracts are the user home's; a fresh project carries
+        # no copy of either and works from the shared ones.
+        for rel in (".assent/assent.toml", ".assent/instructions.md",
+                    ".assent/format.md"):
+            self.assertFalse((self.root / rel).exists(), rel)
+        for name in ("assent.toml", "instructions.md", "format.md"):
+            self.assertTrue((self.user_home / name).is_file(), name)
         # Work folders are not pre-created: their name is decided by a
         # planning meeting based on the task, so pre-creating one would mislead.
         subdirs = [p for p in (self.root / ".assent").iterdir() if p.is_dir()]
@@ -671,8 +747,8 @@ class TestInit(MainTestCase):
         self.assertNotIn("AGENTS.md", lines)
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertEqual(agents_md.count("<!-- assent-instructions -->"), 1)
-        config = (self.root / ".assent" / "assent.toml").read_text(
-            encoding="utf-8")
+        self.assertIn("`~/.assent/instructions.md`", agents_md)
+        config = (self.user_home / "assent.toml").read_text(encoding="utf-8")
         self.assertNotIn("[git]", config)
         self.assertNotIn("[plan]", config)
         verifier = (self.root / ".assent" / "verify.py").read_text(
@@ -746,38 +822,34 @@ class TestInit(MainTestCase):
 
     def test_idempotent_no_overwrite_no_duplicates(self):
         run_init(self.root, test="unittest")
-        (self.root / ".assent" / "assent.toml").write_text(
+        user_config = self.user_home / "assent.toml"
+        user_config.write_text(
             '[run]\nretry_per_task = 7\ncustom_setting = "keep"\n',
             encoding="utf-8")
-        (self.root / ".assent" / "instructions.md").write_text(
-            "本機自訂指示\n", encoding="utf-8")
-        (self.root / ".assent" / "format.md").write_text(
+        (self.user_home / "instructions.md").write_text(
+            "an older assent's working instructions\n", encoding="utf-8")
+        (self.user_home / "format.md").write_text(
             "old format\n", encoding="utf-8")
         verifier_before = (self.root / ".assent" / "verify.py").read_bytes()
         out = io.StringIO()
         with patch("builtins.input", side_effect=AssertionError("prompted")), \
                 contextlib.redirect_stdout(out):
             self.assertEqual(run_init(self.root), 0)
-        config_text = (self.root / ".assent" / "assent.toml").read_text(
-            encoding="utf-8")
+        config_text = user_config.read_text(encoding="utf-8")
         config = tomllib.loads(config_text)
         self.assertEqual(config["run"]["retry_per_task"], 7)
         self.assertEqual(config["run"]["custom_setting"], "keep")
         self.assertIn("quota_poll_minutes", config["run"])
         self.assertIn("watchdog", config)
-        self.assertEqual(tomllib.loads(config_text), tomllib.loads(
-            (self.root / ".assent" / "assent.toml").read_text(encoding="utf-8")))
-        config_after_first_upgrade = (self.root / ".assent" / "assent.toml").read_bytes()
+        config_after_first_upgrade = user_config.read_bytes()
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run_init(self.root), 0)
+        self.assertEqual(user_config.read_bytes(), config_after_first_upgrade)
         self.assertEqual(
-            (self.root / ".assent" / "assent.toml").read_bytes(),
-            config_after_first_upgrade)
-        self.assertEqual(
-            (self.root / ".assent" / "format.md").read_text(encoding="utf-8"),
+            (self.user_home / "format.md").read_text(encoding="utf-8"),
             (_PROJECT_ROOT / "assent/templates/format.md").read_text(encoding="utf-8"))
         self.assertEqual(
-            (self.root / ".assent" / "instructions.md").read_text(encoding="utf-8"),
+            (self.user_home / "instructions.md").read_text(encoding="utf-8"),
             (_PROJECT_ROOT / "assent/templates/instructions.md").read_text(encoding="utf-8"))
         self.assertEqual(verifier_before,
                          (self.root / ".assent" / "verify.py").read_bytes())
@@ -803,9 +875,9 @@ class TestInit(MainTestCase):
         run_init(self.root, test="unittest")
         verifier = self.root / ".assent" / "verify.py"
         before = {path: path.read_bytes() for path in (
-            verifier, self.root / ".assent/format.md",
-            self.root / ".assent/instructions.md",
-            self.root / ".assent/assent.toml")}
+            verifier, self.user_home / "format.md",
+            self.user_home / "instructions.md",
+            self.user_home / "assent.toml")}
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(run_init(self.root, test="pytest"), 1)
@@ -815,23 +887,105 @@ class TestInit(MainTestCase):
 
     def test_invalid_existing_toml_does_not_partially_upgrade_managed_files(self):
         run_init(self.root, test="unittest")
+        # A stale contract would be refreshed by a successful init; here the
+        # unparsable user config must stop everything before the first write.
+        (self.user_home / "format.md").write_text("old format\n", encoding="utf-8")
+        (self.user_home / "assent.toml").write_text("[run\ninvalid", encoding="utf-8")
         managed = (
             self.root / ".assent/verify.py",
-            self.root / ".assent/format.md",
-            self.root / ".assent/instructions.md",
-            self.root / ".assent/assent.toml",
+            self.user_home / "format.md",
+            self.user_home / "instructions.md",
+            self.user_home / "assent.toml",
         )
         before = {path: path.read_bytes() for path in managed}
-        (self.root / ".assent/assent.toml").write_text(
-            "[run\ninvalid", encoding="utf-8")
-        before[self.root / ".assent/assent.toml"] = (
-            self.root / ".assent/assent.toml").read_bytes()
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(run_init(self.root), 1)
         self.assertIn("not valid TOML", output.getvalue())
         for path, content in before.items():
             self.assertEqual(path.read_bytes(), content)
+
+    def test_two_projects_share_one_config_and_contract_set(self):
+        second = self.root / "second-project"
+        second.mkdir()
+        subprocess.run(["git", "init"], cwd=second, check=True,
+                       capture_output=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root, test="unittest"), 0)
+        user_config = self.user_home / "assent.toml"
+        user_config.write_text(
+            user_config.read_text(encoding="utf-8").replace(
+                "retry_per_task = 1", "retry_per_task = 5"),
+            encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(second, test="unittest"), 0)
+        self.assertEqual(
+            tomllib.loads(user_config.read_text(encoding="utf-8"))
+            ["run"]["retry_per_task"], 5)
+        for root in (self.root, second):
+            for name in ("assent.toml", "instructions.md", "format.md"):
+                self.assertFalse((root / ".assent" / name).exists(),
+                                 f"{root}/{name}")
+            self.assertTrue((root / ".assent/verify.py").is_file())
+
+    def test_existing_project_config_is_preserved_byte_for_byte_with_a_warning(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_init(self.root, test="unittest")
+        project_config = self.root / ".assent" / "assent.toml"
+        project_config.write_text(
+            "[run]\nretry_per_task = 3   # local override\n", encoding="utf-8")
+        before = project_config.read_bytes()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root), 0)
+        self.assertEqual(project_config.read_bytes(), before)
+        text = output.getvalue()
+        self.assertIn(f"Warning: {project_config}", text)
+        self.assertIn(str(self.user_home / "assent.toml"), text)
+
+    def test_matching_local_contract_is_removed_and_a_differing_one_is_kept(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_init(self.root, test="unittest")
+        assent_dir = self.root / ".assent"
+        (assent_dir / "instructions.md").write_text(
+            (_PROJECT_ROOT / "assent/templates/instructions.md").read_text(
+                encoding="utf-8"), encoding="utf-8", newline="\n")
+        (assent_dir / "format.md").write_text(
+            "an older project's plan format\n", encoding="utf-8")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root), 0)
+        text = output.getvalue()
+        self.assertFalse((assent_dir / "instructions.md").exists())
+        self.assertIn(f"Removed: {assent_dir / 'instructions.md'}", text)
+        self.assertEqual(
+            (assent_dir / "format.md").read_text(encoding="utf-8"),
+            "an older project's plan format\n")
+        self.assertIn(f"Warning: {assent_dir / 'format.md'}", text)
+        self.assertIn(str(self.user_home / "format.md"), text)
+        # A rerun changes nothing further: the kept copy stays, the removed one
+        # is not recreated.
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root), 0)
+        self.assertFalse((assent_dir / "instructions.md").exists())
+        self.assertEqual(
+            (assent_dir / "format.md").read_text(encoding="utf-8"),
+            "an older project's plan format\n")
+
+    def test_an_older_bridge_line_is_replaced_in_place(self):
+        (self.root / "AGENTS.md").write_text(
+            "# 我的專案\n\n- 保留這行\n"
+            "- When using assent, first read `.assent/instructions.md` in the "
+            "project's main worktree. <!-- assent-instructions -->\n"
+            "- 也保留這行\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_init(self.root, test="unittest")
+        text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertEqual(text.count("<!-- assent-instructions -->"), 1)
+        self.assertIn("- 保留這行\n", text)
+        self.assertIn("- 也保留這行", text)
+        self.assertIn("`~/.assent/instructions.md`", text)
+        self.assertNotIn("`.assent/instructions.md`", text)
 
     def test_adds_one_bridge_line_to_existing_agents_md(self):
         (self.root / "AGENTS.md").write_text(

@@ -33,14 +33,15 @@ import re
 import shlex
 import subprocess
 import sys
-import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, TextIO
 
-from assent import AssentError, gitops, lockfile, verification
+from assent import AssentError, contracts, gitops, lockfile, verification
 from assent.adapters import Adapter, get_adapter
+from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
+                                     stop_wake_requested)
 from assent.config import Config
 from assent.folderdeps import find_unfinished_prerequisites
 from assent.inspection import try_write_report
@@ -180,8 +181,7 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
     template = cfg.prompt_template or _DEFAULT_PROMPT_TEMPLATE
     text = (template
             .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
-            .replace("{instructions_path}",
-                     cfg.rel(cfg.assent_dir / "instructions.md"))
+            .replace("{instructions_path}", str(contracts.instructions_path()))
             .replace("{task_path}", cfg.rel(task.path))
             .replace("{journal_path}", cfg.rel(task.journal_path))
             .replace("{verify_command}",
@@ -470,6 +470,16 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     anything in the working tree. status / check / report are read-only, take no lock, and can
     be used while a run is in progress.
     """
+    # The final global-contracts gate.  The CLI refuses earlier with the same
+    # message, but a library caller reaches the adapters only through here, so
+    # this check -- not that one -- is what guarantees no session can start
+    # against a missing or out-of-date ~/.assent contract.
+    try:
+        contracts.require_contracts()
+    except AssentError as e:
+        print(f"Global contracts: FAIL ({e})")
+        return 1
+
     try:
         unfinished = find_unfinished_prerequisites(cfg.tasks_dir)
     except AssentError as e:
@@ -486,7 +496,9 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         return 1
 
     if sleep is None:
-        sleep = time.sleep
+        # Not time.sleep: a stop request must end a quota segment at once rather
+        # than after up to _COUNTDOWN_SEGMENT seconds.
+        sleep = interruptible_sleep
     if now is None:
         now = lambda: datetime.now(timezone.utc)  # noqa: E731
 
@@ -1267,9 +1279,15 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
     lines; non-tty (redirected to a file/pipe) -> print one message, then sleep in segments of
     at most ``segment`` seconds so a stop request lands within one segment on every platform
     (see _COUNTDOWN_SEGMENT); the total wait is unchanged. The injected sleep lets tests avoid
-    really sleeping."""
+    really sleeping.
+
+    The segments remain the platform-independent backstop, but the production sleep is
+    ``interruptible_sleep``, so a stop request ends the current segment immediately; both
+    loops then stop counting down rather than sitting out the rest of a multi-hour wait
+    while a KeyboardInterrupt is already pending."""
     if seconds <= 0:
         return
+    clear_stop_wake()   # an earlier run's stop request must not shorten this wait
     stream = stream or sys.stdout
     interactive = hasattr(stream, "isatty") and stream.isatty()
     if not interactive:
@@ -1279,6 +1297,8 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
         while left > 0:
             step = segment if segment < left else left
             sleep(step)
+            if stop_wake_requested():
+                break   # the pending KeyboardInterrupt lands at the next bytecode
             left -= step
         return
     remaining = seconds
@@ -1300,6 +1320,8 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
         transient_write(f"\r  {label}: countdown {h:02d}:{m:02d}:{s:02d} before rerunning... ")
         step = tick if tick < remaining else remaining
         sleep(step)
+        if stop_wake_requested():
+            break
         remaining -= step
     transient_write("\r" + " " * 48 + "\r")  # clear the countdown line and return the cursor
 

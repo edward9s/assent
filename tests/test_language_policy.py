@@ -11,8 +11,10 @@ import tempfile
 import tokenize
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from assent.init import init as run_init
+from assent.user_home import ASSENT_HOME_ENV
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +30,10 @@ TRANSLATION_PAIRS = (
     (Path("README.md"), Path("README.zh-TW.md")),
     (Path("docs/CONSENSUS.md"), Path("docs/zh-TW/CONSENSUS.md")),
 )
+# The two contracts live in the user home, so a project-relative spelling of either
+# one is a stale claim in any language.  "~/.assent/format.md" ends in the same
+# characters, so only an occurrence the user-home prefix does not introduce counts.
+CONTRACT_PATH_TAILS = (".assent/instructions.md", ".assent/format.md")
 
 
 def _read(relative: Path) -> str:
@@ -64,6 +70,33 @@ def _markdown_targets(text: str) -> set[str]:
         match.group(1).split("#", 1)[0]
         for match in re.finditer(r"(?<!!)\[[^\]]+\]\(([^)]+)\)", text)
     }
+
+
+def _project_local_contract_claims(text: str) -> list[str]:
+    """Return every contract path written as a project path instead of a user-home one."""
+    found = []
+    for tail in CONTRACT_PATH_TAILS:
+        start = 0
+        while True:
+            index = text.find(tail, start)
+            if index < 0:
+                break
+            start = index + 1
+            if text[max(0, index - 2):index] == "~/":
+                continue
+            line = text.count("\n", 0, index) + 1
+            found.append(f"{line}: {tail}")
+    return found
+
+
+def _documentation_and_templates() -> list[Path]:
+    """Every tracked page and packaged template that states where files live."""
+    paths = [Path("AGENTS.md"), Path("README.md"), Path("README.zh-TW.md")]
+    paths.extend(path.relative_to(ROOT) for path in (ROOT / "docs").rglob("*.md"))
+    paths.extend(
+        path.relative_to(ROOT) for path in (ROOT / "assent/templates").glob("*.md")
+    )
+    return paths
 
 
 def _tracked_old_brand_matches() -> list[tuple[str, int, str]]:
@@ -210,27 +243,54 @@ class LanguagePolicyTests(unittest.TestCase):
         }
         self.assertIn("AGENTS.md", template_names)
         self.assertNotIn("agents.md", template_names)
-        documentation = [Path("AGENTS.md"), Path("README.md"), Path("README.zh-TW.md")]
-        documentation.extend(
-            path.relative_to(ROOT) for path in (ROOT / "docs").rglob("*.md")
-        )
-        documentation.extend(
-            path.relative_to(ROOT)
-            for path in (ROOT / "assent/templates").glob("*.md")
-        )
-        for path in documentation:
+        for path in _documentation_and_templates():
             with self.subTest(path=path):
                 self.assertNotIn(".assent/agents.md", _read(path))
 
+        # The session rules a fresh init installs land in the user home, so this
+        # redirects ASSENT_HOME and never reads or writes the operator's own one.
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory) / "project"
+            home = Path(directory) / "home"
+            root.mkdir()
             subprocess.run(
                 ["git", "init"], cwd=root, check=True, capture_output=True
             )
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(run_init(root), 0)
-            self.assertTrue((root / ".assent/instructions.md").is_file())
+            with mock.patch.dict(os.environ, {ASSENT_HOME_ENV: str(home)}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(run_init(root), 0)
+            self.assertTrue((home / "instructions.md").is_file())
+            self.assertFalse((home / "agents.md").exists())
+            self.assertFalse((root / ".assent/instructions.md").exists())
             self.assertFalse((root / ".assent/agents.md").exists())
+
+    def test_documentation_states_the_user_home_contract_paths(self):
+        """Every page must name the contracts where they actually are."""
+        stale = [
+            f"{path}:{claim}"
+            for path in _documentation_and_templates()
+            for claim in _project_local_contract_claims(_read(path))
+        ]
+        self.assertEqual(stale, [])
+
+    def test_fresh_init_creates_no_project_copy_of_the_shared_files(self):
+        """The three shared files belong to the user home, in fact and in the docs."""
+        # As above, ASSENT_HOME is redirected so the operator's own home is untouched.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "project"
+            home = Path(directory) / "home"
+            root.mkdir()
+            subprocess.run(
+                ["git", "init"], cwd=root, check=True, capture_output=True
+            )
+            with mock.patch.dict(os.environ, {ASSENT_HOME_ENV: str(home)}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(run_init(root), 0)
+            for name in ("assent.toml", "instructions.md", "format.md"):
+                with self.subTest(name=name):
+                    self.assertTrue((home / name).is_file())
+                    self.assertFalse((root / ".assent" / name).exists())
+            self.assertTrue((root / ".assent/verify.py").is_file())
 
 
 if __name__ == "__main__":

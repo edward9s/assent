@@ -1,5 +1,10 @@
-# assent scheduler configuration. The work folder is stated explicitly on the
-# command line or derived from current task-file state.
+# assent scheduler configuration. `assent init` installs this file once as
+# ~/.assent/assent.toml, where it applies to every project on this machine, and
+# later inits only add settings a new version brings; your own values and
+# comments are never rewritten. A project may still keep its own
+# .assent/assent.toml, which overrides this file for that project alone.
+# The work folder is stated explicitly on the command line or derived from
+# current task-file state.
 # All relative paths are based on the project root (= the parent of .assent).
 
 [watchdog]

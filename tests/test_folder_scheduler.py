@@ -15,16 +15,28 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from assent.folder_scheduler import (_interrupt_and_wait, _kill_tree,
+from assent import AssentError
+from assent.engine import _COUNTDOWN_SEGMENT
+from assent.folder_scheduler import (_INTERRUPT_GRACE_SECONDS,
+                                     _interrupt_and_wait, _kill_tree,
                                      _send_interrupt, _start_folder, run_all)
+from assent.folderdeps import parse_folder_dependency_graph
+from assent.lockfile import LockBusy, hold_lock
 from assent.plan import set_status
 from assent.terminal_log import terminal_logging
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# How long a stop request may take to end a real process tree before the test
+# calls it a hang. Well under both the countdown segment a pending
+# KeyboardInterrupt used to wait out and the parent's forced-kill grace period,
+# so either regression fails the assertion rather than merely slowing it down.
+_PROMPT_SECONDS = 30
+assert _PROMPT_SECONDS < min(_COUNTDOWN_SEGMENT, _INTERRUPT_GRACE_SECONDS)
 
 
 def task_text(status: str) -> str:
@@ -599,6 +611,42 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
             self.assertEqual(child.returncode, -9, folder)
             self.assertTrue(child.stdin.closed, folder)
 
+    def test_scheduling_error_does_not_return_while_a_child_still_runs(self):
+        """The parent owns every child it started on every exit path.
+
+        Returning from a mid-run refusal while a work folder is still going
+        would orphan it -- and the orphan keeps its task-folder lock, so the
+        next ``run --all`` is refused by a run nobody is watching any more.
+        """
+        alpha = self.make_folder("alpha")
+        self.make_folder("beta")
+        children = {"alpha": FinishedProcess(alpha),
+                    "beta": DeafChild(reads_stdin=True)}
+        graph_calls = 0
+
+        def graph_then_fail(assent_dir):
+            nonlocal graph_calls
+            graph_calls += 1
+            if graph_calls == 2:  # beta is still running by now
+                raise AssentError("a folder declaration went bad mid-run")
+            return parse_folder_dependency_graph(assent_dir)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch(
+                "assent.folder_scheduler._start_folder",
+                side_effect=lambda config_path, folder: children[folder]), patch(
+                "assent.folder_scheduler.parse_folder_dependency_graph",
+                side_effect=graph_then_fail), patch(
+                "assent.folder_scheduler._has_usable_git",
+                return_value=False), patch(
+                "assent.folder_scheduler.os.killpg", create=True):
+            code = run_all(str(self.config), self.assent_dir, jobs=2)
+
+        self.assertEqual(code, 1)
+        self.assertIn("Folder scheduling failed", out.getvalue())
+        self.assertTrue(children["beta"].stdin.closed)
+        self.assertEqual(children["beta"].returncode, 130)
+
     def test_second_interrupt_force_kills_everything_and_returns_130(self):
         self.make_folder("work")
         child = DeafChild(reads_stdin=False)
@@ -720,6 +768,223 @@ class TestStdinStopChannelChild(unittest.TestCase):
                 if stream is not None and not stream.closed:
                     stream.close()
         self.assertEqual(returncode, 130)
+
+
+class TestStopRequestEndsRealProcessTrees(unittest.TestCase):
+    """Real processes holding real task-folder locks, stopped the way
+    ``run --all`` stops them.
+
+    A work-folder child that is still alive legitimately still owns its folder
+    lock, so the next ``run --all`` is refused even though the previous command
+    looked finished. Every case here therefore proves the lock is free again --
+    the only portable evidence that a process really is gone -- instead of
+    trusting terminal output or the PID recorded in ``assent.lock``.
+    """
+
+    # A work-folder child in the exact state that used to hang: the stdin stop
+    # watcher armed, the real folder lock held, and the main thread parked in a
+    # long non-tty quota countdown. interrupt_main() alone leaves the exception
+    # pending until the current 60-second segment ends.
+    _QUOTA_CHILD = textwrap.dedent(
+        """
+        import sys
+        from pathlib import Path
+        from assent.__main__ import _start_stdin_stop_watcher
+        from assent.adapters.process import interruptible_sleep
+        from assent.engine import _countdown
+        from assent.lockfile import hold_lock
+
+        _start_stdin_stop_watcher()
+        with hold_lock(Path(sys.argv[1]), sys.argv[2]):
+            print("READY", flush=True)
+            try:
+                _countdown(float(sys.argv[3]), "Quota reset", interruptible_sleep)
+            except KeyboardInterrupt:
+                sys.exit(130)
+        sys.exit(1)
+        """
+    )
+
+    # An AI CLI that says nothing at all. With the watchdog disabled the child's
+    # output queue has no timeout, so before the wake existed this could keep the
+    # whole tree alive indefinitely.
+    _SILENT_ADAPTER = textwrap.dedent(
+        """
+        import sys, time
+        from pathlib import Path
+        from assent.lockfile import hold_lock
+
+        with hold_lock(Path(sys.argv[1]), "adapter01"):
+            Path(sys.argv[2]).write_text("started", encoding="utf-8")
+            time.sleep(600)
+        """
+    )
+
+    _ADAPTER_CHILD = textwrap.dedent(
+        """
+        import sys
+        from pathlib import Path
+        from assent.__main__ import _start_stdin_stop_watcher
+        from assent.adapters.process import run_subprocess
+        from assent.lockfile import hold_lock
+
+        _start_stdin_stop_watcher()
+        with hold_lock(Path(sys.argv[1]), "work01"):
+            print("READY", flush=True)
+            try:
+                run_subprocess([sys.executable, sys.argv[2], sys.argv[3],
+                                sys.argv[4]],
+                               Path.cwd(), stall_seconds=0)  # watchdog disabled
+            except KeyboardInterrupt:
+                sys.exit(130)
+        sys.exit(1)
+        """
+    )
+
+    # Stands in for the ``run --all`` parent itself dying: it holds the only
+    # write end of the child's stop pipe, so killing it is what closes the pipe.
+    _LAUNCHER = textwrap.dedent(
+        """
+        import os, subprocess, sys, time
+
+        env = dict(os.environ)
+        env["ASSENT_STDIN_STOP"] = "1"
+        child = subprocess.Popen(
+            [sys.executable, sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True)
+        print(child.stdout.readline().strip(), flush=True)
+        time.sleep(600)
+        """
+    )
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.environment = dict(os.environ)
+        self.environment["PYTHONPATH"] = str(_PROJECT_ROOT)
+        self.environment["ASSENT_STDIN_STOP"] = "1"
+
+    def script(self, name: str, source: str) -> str:
+        """Put one probe on disk so a child can be started by path, without
+        embedding a multi-line program in a command line."""
+        path = self.root / name
+        path.write_text(source, encoding="utf-8")
+        return str(path)
+
+    def tasks_dir(self, name: str) -> Path:
+        path = self.root / ".assent" / name
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def start(self, *command: str, environment: dict | None = None
+              ) -> subprocess.Popen:
+        process = subprocess.Popen(
+            [sys.executable, *command],
+            cwd=str(_PROJECT_ROOT),
+            env=self.environment if environment is None else environment,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+        self.addCleanup(self.discard, process)
+        self.assertEqual(process.stdout.readline().strip(), "READY")
+        return process
+
+    def discard(self, process: subprocess.Popen) -> None:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+        for stream in (process.stdin, process.stdout):
+            if stream is not None and not stream.closed:
+                stream.close()
+
+    def stop_and_collect(self, process: subprocess.Popen) -> tuple[int, float]:
+        """Close the stop pipe and return the child's exit code and how long it
+        took to produce it."""
+        started = time.monotonic()
+        process.stdin.close()
+        try:
+            returncode = process.wait(timeout=_PROMPT_SECONDS)
+        except subprocess.TimeoutExpired:
+            self.fail(f"the child did not exit within {_PROMPT_SECONDS} seconds "
+                      "of the stop request")
+        return returncode, time.monotonic() - started
+
+    def assert_lock_free(self, tasks_dir: Path, name: str) -> None:
+        """The lock holder is gone, so the same lock is available with no
+        cleanup step in between."""
+        try:
+            with hold_lock(tasks_dir, name):
+                pass
+        except LockBusy as e:
+            self.fail(f"{name} lock was still held after the stop request: {e}")
+
+    def wait_for_lock(self, tasks_dir: Path, name: str) -> float:
+        """For a child the test cannot wait() on: how long until its lock frees."""
+        started = time.monotonic()
+        while True:
+            try:
+                with hold_lock(tasks_dir, name):
+                    return time.monotonic() - started
+            except LockBusy:
+                if time.monotonic() - started >= _PROMPT_SECONDS:
+                    self.fail(f"{name} lock still held {_PROMPT_SECONDS} seconds "
+                              "after the parent disappeared")
+                time.sleep(0.1)
+
+    def test_stop_ends_a_long_quota_wait_and_frees_the_folder_lock(self):
+        tasks_dir = self.tasks_dir("quota01")
+        process = self.start(
+            self.script("quota_child.py", self._QUOTA_CHILD),
+            str(tasks_dir), "quota01", "600")
+
+        returncode, elapsed = self.stop_and_collect(process)
+
+        # 130 is the child's own cleanup exit, and it arrives long before the
+        # parent's grace period runs out: a cooperative child is never killed.
+        self.assertEqual(returncode, 130)
+        self.assertLess(elapsed, _PROMPT_SECONDS)
+        self.assert_lock_free(tasks_dir, "quota01")
+
+    def test_stop_ends_a_silent_adapter_with_the_watchdog_disabled(self):
+        work_dir = self.tasks_dir("work01")
+        adapter_dir = self.tasks_dir("adapter01")
+        started_flag = self.root / "adapter_started"
+        process = self.start(
+            self.script("adapter_child.py", self._ADAPTER_CHILD),
+            str(work_dir),
+            self.script("silent_adapter.py", self._SILENT_ADAPTER),
+            str(adapter_dir), str(started_flag))
+        deadline = time.monotonic() + _PROMPT_SECONDS
+        while not started_flag.exists():
+            self.assertLess(time.monotonic(), deadline,
+                            "the silent adapter never started")
+            time.sleep(0.05)
+
+        returncode, elapsed = self.stop_and_collect(process)
+
+        self.assertEqual(returncode, 130)
+        self.assertLess(elapsed, _PROMPT_SECONDS)
+        # Neither the work-folder child nor the AI CLI it started survives: each
+        # would still be holding the lock it took.
+        self.assert_lock_free(work_dir, "work01")
+        self.assert_lock_free(adapter_dir, "adapter01")
+
+    def test_parent_disappearing_stops_the_child_instead_of_orphaning_it(self):
+        tasks_dir = self.tasks_dir("orphan01")
+        launcher = subprocess.Popen(
+            [sys.executable, self.script("launcher.py", self._LAUNCHER),
+             self.script("quota_child.py", self._QUOTA_CHILD),
+             str(tasks_dir), "orphan01", "120"],
+            cwd=str(_PROJECT_ROOT), env=self.environment,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding="utf-8")
+        self.addCleanup(self.discard, launcher)
+        self.assertEqual(launcher.stdout.readline().strip(), "READY")
+
+        launcher.kill()   # the OS closes the stop pipe the dead parent held
+        launcher.wait(timeout=10)
+
+        self.assertLess(self.wait_for_lock(tasks_dir, "orphan01"),
+                        _PROMPT_SECONDS)
 
 
 @unittest.skipUnless(os.name == "nt", "CTRL_BREAK_EVENT cleanup is Windows-only")

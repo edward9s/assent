@@ -3,7 +3,9 @@
 Which abstract effort a task gets and which concrete CLI value that becomes, which adapter
 resolves at all, and whether that adapter would accept every invocation the plan could still
 issue. Both surfaces that consume those decisions are exercised, because `run` and `check`
-must answer them identically and neither may spend a token to find out.
+must answer them identically and neither may spend a token to find out.  Both surfaces also
+fail closed without current global contracts, so every case here mixes in
+GlobalContractsMixin for a temporary user home.
 
 Chinese literals that remain are deliberate user/upstream passthrough data."""
 import contextlib
@@ -16,9 +18,10 @@ from assent import engine, gitops, inspection, preflight
 from assent.config import load_config
 from assent.plan import journal_path_for, parse_task_file, set_status
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
+from tests.test_contracts import GlobalContractsMixin
 
 
-class TestInvocationResolution(EngineTestCase):
+class TestInvocationResolution(GlobalContractsMixin, EngineTestCase):
     def test_resolved_effort_is_consistent_across_prompt_call_label_journal(self):
         # One resolved abstract/concrete pair must appear identically in the prompt
         # placeholders, the adapter call, the terminal label, and the scheduler journal.
@@ -129,7 +132,7 @@ class TestInvocationResolution(EngineTestCase):
             tier_only, "core", "heavy"), "high")
 
 
-class TestAntigravityCapabilityPreflight(EngineTestCase):
+class TestAntigravityCapabilityPreflight(GlobalContractsMixin, EngineTestCase):
     """The active adapter proves every planned invocation before anything is spent.
 
     Antigravity is the adapter that actually publishes a capability catalog, so it is the one

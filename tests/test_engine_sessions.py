@@ -7,8 +7,11 @@ exit or watchdog stall, a quota round with its wait math, and an exhausted prepa
 The core run loop lives in tests.test_engine; shared fixtures in tests.engine_support.
 
 Chinese literals that remain are deliberate user/upstream passthrough data."""
+import _thread
 import contextlib
 import io
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,13 +19,16 @@ from unittest import mock
 
 from assent import AssentError, engine, gitops
 from assent.adapters import TaskResult
+from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
+                                     wake_stop_waiters)
 from assent.config import load_config
 from assent.plan import append_entry, journal_path_for, parse_task_file, set_status
 from tests.engine_support import (EngineTestCase, ScriptedAdapter, ok_result,
                                   task_text)
+from tests.test_contracts import GlobalContractsMixin
 
 
-class TestAntigravitySession(EngineTestCase):
+class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
     def setUp(self):
         super().setUp()
         from assent.adapters import antigravity
@@ -168,7 +174,7 @@ class TestAntigravitySession(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
 
 
-class TestAdapterProcessOutcomes(EngineTestCase):
+class TestAdapterProcessOutcomes(GlobalContractsMixin, EngineTestCase):
     def test_nonzero_done_retries_without_done_checkpoint_then_succeeds(self):
         path = self.write_task(1)
         cfg = self.build(retry=1)
@@ -314,7 +320,7 @@ class TestAdapterProcessOutcomes(EngineTestCase):
         self.assertNotIn("quota", [e["event"] for e in entries])
 
 
-class TestBillingAbort(EngineTestCase):
+class TestBillingAbort(GlobalContractsMixin, EngineTestCase):
     """A billing/insufficient-balance failure aborts the whole run without a retry.
 
     Dispatch is purely on failure_kind="billing" (never an adapter name), so this uses a
@@ -384,7 +390,7 @@ class TestBillingAbort(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
 
 
-class TestQuotaAndResume(EngineTestCase):
+class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
     def rotation_config(self):
         cfg = self.build()
         cfg.adapter_names = ("claude", "codex")
@@ -546,7 +552,7 @@ class TestQuotaAndResume(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
 
 
-class TestInterruptedTaskResume(EngineTestCase):
+class TestInterruptedTaskResume(GlobalContractsMixin, EngineTestCase):
     def test_keyboard_interrupt_marks_unverified_done_wip_then_resumes(self):
         path = self.write_task(1)
         cfg = self.build()
@@ -641,6 +647,49 @@ class TestInterruptedTaskResume(EngineTestCase):
         self.assertIn("quota", events)
         self.assertIn("interrupt", events)
 
+    def test_stop_wake_during_quota_wait_reaches_the_interrupt_cleanup(self):
+        """The wake is only a wake: it releases the sleeping main thread so the
+        stdin watcher's already-pending KeyboardInterrupt is delivered, and the
+        ordinary interrupt cleanup then runs unchanged."""
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+
+        quota = TaskResult(exit_code=1, output="", quota_exhausted=True,
+                           reset_at=None)
+        parked = threading.Event()
+
+        def stop_the_run() -> None:
+            """Exactly what the stdin stop watcher does on EOF, in that order:
+            mark the interrupt, then release the wait it is stuck behind."""
+            parked.wait(30)
+            _thread.interrupt_main()
+            wake_stop_waiters()
+
+        waker = threading.Thread(target=stop_the_run, daemon=True)
+        self.addCleanup(waker.join, 30)
+        self.addCleanup(clear_stop_wake)
+
+        def sleep(seconds):
+            # The production wait, entered on a segment of the full length: a
+            # pending KeyboardInterrupt alone would sit here for 60 seconds.
+            self.assertEqual(seconds, engine._COUNTDOWN_SEGMENT)
+            parked.set()
+            interruptible_sleep(seconds)
+
+        waker.start()
+        started = time.monotonic()
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([quota]),
+            sleep=sleep), 130)
+        self.assertLess(time.monotonic() - started, engine._COUNTDOWN_SEGMENT)
+
+        self.assertEqual(parse_task_file(path).status, "WIP")
+        from assent.plan import read_entries
+        events = [e["event"] for e in read_entries(journal_path_for(path))]
+        self.assertIn("quota", events)
+        self.assertIn("interrupt", events)
+
     def test_idle_interrupt_does_not_mark_any_task(self):
         path = self.write_task(1)
         cfg = self.build()
@@ -663,7 +712,7 @@ class TestInterruptedTaskResume(EngineTestCase):
         self.assertFalse(journal_path_for(path).exists())
 
 
-class TestQuotaMath(EngineTestCase):
+class TestQuotaMath(GlobalContractsMixin, EngineTestCase):
     def test_quota_wait_seconds(self):
         cfg = self.build()
         t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -704,6 +753,30 @@ class TestQuotaMath(EngineTestCase):
             engine._countdown(10405, "Quota reset", sleep, segment=0.5,
                               stream=stream)
         self.assertEqual(sleeps, [0.5])
+
+    def test_countdown_stops_counting_down_once_a_stop_is_requested(self):
+        """A woken segment must not be followed by the rest of a multi-hour
+        wait; the pending KeyboardInterrupt lands at the next bytecode."""
+        self.addCleanup(clear_stop_wake)
+        stream = io.StringIO()
+        sleeps: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            wake_stop_waiters()   # what the stdin watcher does mid-wait
+
+        engine._countdown(10405, "Quota reset", sleep, stream=stream)
+        self.assertEqual(sleeps, [engine._COUNTDOWN_SEGMENT])
+
+    def test_stale_stop_request_does_not_shorten_a_later_countdown(self):
+        """`run` is also a library and test entry point, so one stop request
+        must not make every later countdown return immediately."""
+        self.addCleanup(clear_stop_wake)
+        wake_stop_waiters()
+        stream = io.StringIO()
+        sleeps: list[float] = []
+        engine._countdown(150, "Quota reset", sleeps.append, stream=stream)
+        self.assertEqual(sum(sleeps), 150)
 
     def test_countdown_tty_updates_in_place(self):
         class Tty(io.StringIO):

@@ -110,4 +110,4 @@ while operating an assent-managed session live in
   protocol, media-capability inference, or a second review state; `verify`
   keeps the machine-checkable requirements and perceptual judgment stays part
   of the explicit `accept`.
-- When using assent, first read `.assent/instructions.md` in the project's main worktree; a worktree session uses the absolute path the scheduler provides. <!-- assent-instructions -->
+- When using assent, first read `~/.assent/instructions.md`, the global working instructions shared by every project; a scheduled worktree session uses the absolute path the scheduler provides. <!-- assent-instructions -->

@@ -66,9 +66,11 @@ it unattended.
   After a handled interruption records WIP, running `assent run` resumes that
   task. An abrupt process or host failure can instead leave a dirty worktree;
   the scheduler then refuses to guess until you review and checkpoint it.
-- **Format contract**: `.assent/format.md` (installed by `assent init`) is
-  what a planning AI reads to produce task files, and what the scheduler's
-  parser is aligned with byte-for-byte.
+- **Format contract**: `~/.assent/format.md` (installed by `assent init` into
+  the per-user assent home, once per machine) is what a planning AI reads to
+  produce task files, and what the scheduler's parser is aligned with
+  byte-for-byte. Its sibling `~/.assent/instructions.md` holds the session
+  rules. Neither is copied into a project.
 - **The session is visible live**: what the AI says (`AI|`), the tools it
   uses (`Tool|`), and token usage (`--|`) print to the terminal in real time
   and are kept in `.assent/<work folder>/_assent.log`.
@@ -87,21 +89,103 @@ Verify: run `assent --version` from any directory; it prints the installed
 distribution version. `assent --help` shows the top-level CLI help. Zero
 third-party dependencies — nothing else gets downloaded.
 
+## Where files live
+
+What describes assent itself lives once per machine; what describes your
+project lives in your project.
+
+```text
+~/.assent/                  # the per-user assent home, shared by every project
+├── assent.toml             # your settings: adapter, tier tables, watchdog, retries
+├── instructions.md         # session rules contract   (assent owns this file)
+└── format.md               # plan format contract     (assent owns this file)
+
+<project>/
+├── AGENTS.md               # your project rules + one assent bridge line
+└── .assent/                # git-ignored, main worktree only
+    ├── verify.py           # your project's verification script
+    ├── assent.toml         # optional: a legacy or deliberate project override
+    ├── <work folder>/      # task files, r files, _report.md, _assent.log,
+    │                       #   assent.lock, and that folder's verification receipt
+    ├── _batch_verification.toml   # the batch verification receipt (derived)
+    ├── _archived.toml      # roster of retired work folders
+    └── _archive/           # those folders, compressed one zip each
+```
+
+`instructions.md` and `format.md` describe the tool, so there is exactly one
+copy of each on the machine and a project never receives one. `AGENTS.md` and
+`.assent/verify.py` stay yours: `assent init` refreshes only the single bridge
+line in the first and never overwrites the second.
+
+### Settings precedence
+
+Lowest priority first:
+
+1. assent's built-in defaults
+2. your user settings in `~/.assent/assent.toml`
+3. the optional project override in `.assent/assent.toml`
+4. an explicit CLI selection where the command offers one (`--config PATH`
+   chooses which project-level file plays role 3; `--jobs` and similar flags
+   override that setting for one invocation)
+
+Tables merge by key; scalars and arrays are replaced whole. A project override
+therefore shadows later edits to your shared settings for exactly the keys it
+states, and `assent init` never migrates it into the user home or edits it —
+it is preserved byte for byte and reported as an override.
+
+Omitting a key is the only way to inherit the layer below:
+
+- `key =` is not "no value" — it is invalid TOML, and the file fails to load.
+- An empty table states no leaf override, so every key inside still resolves
+  from the layer below.
+- An empty array is an explicit replacement wherever that field permits one,
+  not a request to fall back.
+- An empty or whitespace-only string is refused for any setting that needs
+  useful text (a command, an adapter name, an effort value). The error names
+  the dotted key and the file that stated it instead of quietly reinstating a
+  lower layer.
+
+### What `assent init` does on a repeat run
+
+It refreshes both user-home contracts to this installation's packaged text and
+adds only the packaged settings keys your `assent.toml` does not already state,
+never replacing a value you wrote. In the project it preserves an existing
+`verify.py` (and refuses `--test` when one exists), keeps the bridge line in
+`AGENTS.md` current, and keeps `.assent/` in `.gitignore`. Every read, parse,
+and merge finishes before the first write, so invalid TOML or an invalid
+`--test` choice refuses without leaving anything half-upgraded.
+
+Migrating an older project prints warnings rather than making the decision for
+you. A project copy of `instructions.md` or `format.md` is removed only when it
+matches the packaged text exactly; one that differs is kept and reported, since
+sessions read the user-home contract either way — move anything you still want
+out of the local copy, then delete it. An existing `.assent/assent.toml` is
+kept and reported as a compatibility override that outranks your user settings.
+
+Before opening any session, assent fails closed unless both user-home contracts
+are present, readable, and byte-identical to this installation's packaged text.
+A missing, unreadable, or stale contract names the path and points at `assent
+init`; it is never patched or silently regenerated mid-run. The comparison
+reads text with universal newlines, so a file an editor rewrote with CRLF still
+counts as the same contract.
+
 ## Quick start
 
 ```
 # 0. cd into the target project root (must be a git repo)
 
-# 1. Generate the .assent skeleton and AGENTS.md, selecting the real project
-#    test interactively (or use --test in scripts, for example):
+# 1. Install the user home (~/.assent: shared settings + the two contracts)
+#    and the project's .assent skeleton and AGENTS.md, selecting the real
+#    project test interactively (or use --test in scripts, for example):
 assent init --test unittest
 #    Choices are parallel unittest, pytest, npm test, Flutter test, or a
 #    custom argv command such as: assent init --test "custom:python -m unittest"
-#    Repeat init does not prompt: it preserves verify.py, refreshes the shared
-#    format/instructions contracts, and upgrades missing config defaults.
+#    Repeat init does not prompt: it preserves the project's verify.py,
+#    refreshes the two user-home contracts, and adds only missing settings keys.
 
-# 2. Fill in AGENTS.md's project description/hard constraints and
-#    .assent/verify.py's actual check commands
+# 2. Review the shared settings in ~/.assent/assent.toml (every project on this
+#    machine reads them), then fill in AGENTS.md's project description/hard
+#    constraints and .assent/verify.py's actual check commands
 #    Whether AGENTS.md is committed is up to the project;
 #    the whole .assent/ stays in the main worktree and is not committed
 
@@ -425,14 +509,46 @@ allowed per folder; Git is always enabled, and every folder always gets its
 own worktree at `<project name>.worktrees/<folder>/` — this is the
 foundation of safe parallel processing.
 
+### The lock file is diagnostics, not the lock
+
+`assent.lock` stays on disk after a run, on purpose. It is a diagnostics
+record — the PID, the start time, and the folder name of the last run — and
+nothing decides anything from its contents or its existence.
+
+The actual ownership is an OS-level exclusive lock (msvcrt on Windows, fcntl
+on POSIX) tied to the open file handle for the process's lifetime. Normal
+exit, Ctrl+C, a crash, and a forced kill all release it automatically, because
+the OS closes the handle either way. There is therefore no such thing as a
+stale lock here, no PID-reuse hazard, and no cleanup procedure:
+
+- Do not read the file's presence as "a run is in progress" — it is present
+  after every run that has ever touched the folder.
+- Do not delete the file to recover from anything. Deleting it introduces a
+  race and fixes nothing; the next run reuses it, and `assent archive` even
+  creates it when it is missing, because a missing lock file proves nobody
+  holds the folder.
+- If a folder really is busy, the next `assent run` says so when it fails to
+  acquire the lock. That refusal, not the file, is the signal.
+
+The one thing the recorded PID does tell you is about a *living* process:
+`assent run --all` does not finish its own interrupt path until every work-
+folder child it owns has exited and been reaped, on every exit path including
+a refusal or a scheduling error. So if the recorded PID is still alive, that
+is a genuinely running process to wait for — never a stale-file situation to
+clean up by hand.
+
+The limitation worth knowing is unrelated to staleness: `flock` and
+`msvcrt.locking` semantics are unreliable on some network filesystems, so this
+lock only guarantees mutual exclusion on a local filesystem.
+
 The version-control boundary is deliberately simple: `AGENTS.md` is the
 project rules; when tracked, the worktree's branch version is used, and when
 not tracked, the prompt supplies the main-tree absolute path. The whole
 `.assent/` is the assent management plane, excluded via `.gitignore` and
-kept only in the main worktree. The scheduler likewise supplies
-instructions, t/r files, and the default verification script as absolute
-paths; the verification script is loaded from the main tree but its
-execution cwd is still the worktree. Whenever any `.assent/` file has
+kept only in the main worktree. The scheduler likewise supplies t/r files and
+the default verification script as main-tree absolute paths, and the two
+contracts as their `~/.assent` absolute paths; the verification script is
+loaded from the main tree but its execution cwd is still the worktree. Whenever any `.assent/` file has
 entered Git, the scheduler fails closed before opening a session, to prevent
 the worktree from ending up with a second source of truth.
 
@@ -449,8 +565,8 @@ branches back into the main line is a human responsibility.
 **Act 1: planning meeting** (interactive session)
 
 ```text
-Let's start planning. Please read AGENTS.md, .assent/instructions.md, and
-.assent/format.md, then discuss the following goal with me and progressively
+Let's start planning. Please read AGENTS.md, ~/.assent/instructions.md, and
+~/.assent/format.md, then discuss the following goal with me and progressively
 write the consensus into task files under .assent/<work folder>/:
 <your goal>
 ```
@@ -489,10 +605,10 @@ skeleton.
 
 On repeat initialization, `assent init` never overwrites an existing verifier
 and refuses `--test` when one is already present. It does replace
-`.assent/format.md` and `.assent/instructions.md` with the packaged contracts,
-and merges missing active settings from the packaged `assent.toml` without
-changing existing or custom values. Invalid TOML or input is refused before any
-of the four managed `.assent` files changes. A verifier digest change makes old
+`~/.assent/format.md` and `~/.assent/instructions.md` with the packaged
+contracts, and merges missing active settings into `~/.assent/assent.toml`
+without changing existing or custom values. Invalid TOML or input is refused
+before any managed file changes. A verifier digest change makes old
 receipts stale, so refresh them with `assent verify <FOLDER>` during unattended
 verification before asking a human to accept.
 
@@ -560,8 +676,14 @@ matching batch receipt. `assent accept --all` is the documented exception: a
 fresh batch receipt is replayed atomically, while absent or expired batch
 evidence invokes the sequential per-folder verification fallback. Remote
 synchronization remains a separate ordinary Git decision, and
-`assent clean <FOLDER>` is the final optional cleanup. A new round
-of planning = just open a new work folder; an old folder can keep taking
+`assent clean <FOLDER>` is the final optional cleanup. When review or
+verification of a live, not-yet-accepted folder turns up a correction or a
+missing piece of that folder's own objective, prefer appending it to that
+folder as a newly numbered task rather than opening a new one; earlier tasks
+are never rewritten or renumbered to carry it. Open a new work folder when the
+objective is genuinely distinct, when the relevant folder is already accepted,
+archived, or rejected, or when dependency or `base` isolation needs a separate
+source lineage; an old folder can keep taking
 part in dependency resolution via `_folder.toml`'s `after`. A folder's
 completion is derived from its task files — it is complete only once every
 task is DONE/SKIP.
@@ -573,9 +695,13 @@ The full form of `run`, `status`, `check`, and `report` is
 when omitted, `run` derives the single runnable folder from current task
 state and `_folder.toml`'s `after` upstreams, and refuses on ambiguity.
 `status`, `check`, and `report` act on all folders when `FOLDER` is omitted.
-`--config PATH` selects the config file, defaulting to
-`.assent/assent.toml`; the config file no longer maintains a work-folder
-pointer. The two are orthogonal — use either alone or together, e.g.
+`--config PATH` selects the project-level config file, defaulting to
+`.assent/assent.toml`. That file is the optional override layer on top of
+`~/.assent/assent.toml`, and it also locates the project (the project root is
+the parent of the `.assent` directory the path lives in), so the path is
+meaningful even when no such file exists. The config file no longer maintains
+a work-folder pointer. `--config` and `FOLDER` are orthogonal — use either
+alone or together, e.g.
 `assent status --config configs/night.toml parallel01`.
 
 Work-folder names are portable Windows/Git-ref names: non-empty, with no
@@ -658,7 +784,7 @@ derived from task-file facts, and Git is always enabled.
 | `assent clean [FOLDER]`<br>`assent clean parallel01` | Cleans up only worktrees and same-folder-prefix branches that are fully merged and clean; skips anything it cannot prove, never touches `.assent/`, and has no force option. Acts on all work folders when `FOLDER` is omitted. | **Zero** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | Human-adjudicated rejection: archives uncommitted changes, then force-deletes that folder's worktree and same-prefix branches (recording full tip hashes before deletion), and resets DONE/WIP/BLOCKED tasks to TODO with Git evidence kept in the r file. `FOLDER` is required; refuses while a run is in progress. | **Zero** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "review rejected"` | Non-destructively reopens a single task; keeps code by default, `--cascade` states downstream propagation explicitly. `--revert-code` creates a new reverse commit only when checkpoints form a contiguous tail. Updates the report on success, does not run automatically. Accepts `--config PATH`. | **Zero** |
-| `assent init --test CHOICE`<br>`assent init --path C:\work\my-project --test pytest` | Generates a fresh `.assent` skeleton after selecting exactly one real project test: parallel unittest, pytest, npm test, Flutter test, or custom argv. Without `--test`, fresh init shows a numbered menu. Repeat init does not prompt, preserves an existing verifier, refreshes `format.md` and `instructions.md`, and merges missing active config defaults. Invalid input/TOML refuses before managed `.assent` files change. | **Zero** |
+| `assent init --test CHOICE`<br>`assent init --path C:\work\my-project --test pytest` | Installs the user home `~/.assent` (shared settings plus the `instructions.md` and `format.md` contracts) and the project's `.assent/verify.py`, `AGENTS.md` bridge line, and `.gitignore` entry, after selecting exactly one real project test: parallel unittest, pytest, npm test, Flutter test, or custom argv. Without `--test`, fresh init shows a numbered menu. Repeat init does not prompt, preserves an existing verifier, refreshes both user-home contracts, and merges only missing active config defaults. An old project copy of a contract is removed only when it matches the packaged text exactly; a project `assent.toml` is preserved as an override and reported. Invalid input/TOML refuses before any managed file changes. | **Zero** |
 | `assent doctor`<br>`assent doctor` | Diagnoses the machine environment (Python version, git, adapter CLIs, temp directory writability); needs no `FOLDER` or `--config`, and runs without an existing `.assent/` project. | **Zero** |
 | `assent --version` | Prints `assent` followed by the installed distribution version and exits; works without a project or subcommand. | **Zero** |
 
@@ -822,7 +948,7 @@ before any session starts.
 
 ### Configuring model and effort translations
 
-The config template in `.assent/assent.toml` shows how to customize the
+The settings in `~/.assent/assent.toml` show how to customize the
 tier-to-model mapping and the abstract-to-CLI effort translations. The lookup
 order is always:
 
@@ -881,7 +1007,7 @@ The print timeout limits how long the CLI will wait for a single print
 invocation to complete; the watchdog limits how long Assent will wait for any
 output before killing the session.
 
-In `.assent/assent.toml`:
+In `~/.assent/assent.toml` (or a project override):
 
 ```toml
 [adapter.antigravity]
@@ -966,16 +1092,23 @@ needed; `assent check` will re-validate and `assent run` will retry.
 ## Plan format and config files
 
 - Full format contract: [assent/templates/format.md](assent/templates/format.md)
-  (copied into a new project and refreshed on successful repeat `assent init`).
+  — installed to `~/.assent/format.md` and refreshed there on every successful
+  `assent init`.
 - Working-instructions template: [assent/templates/instructions.md](assent/templates/instructions.md)
-  — assent session behavior and cross-project common rules; copied on fresh
-  init and refreshed on successful repeat init; project rules stay in
-  `AGENTS.md`.
+  — assent session behavior and cross-project common rules; installed to
+  `~/.assent/instructions.md` and refreshed there on every successful `assent
+  init`; project rules stay in `AGENTS.md`.
 - Config template: [assent/templates/assent.toml](assent/templates/assent.toml)
   — adapter selection, the abstract tier (prime/core/lite) mapping table,
   abstract effort (heavy/normal/slight) defaults and CLI-value translation,
-  watchdog, and retry parameters. Fresh init copies it; repeat init adds only
-  missing active table/key paths and preserves existing and custom values.
+  watchdog, and retry parameters. It seeds `~/.assent/assent.toml` on first
+  init; a later init adds only missing active table/key paths there and
+  preserves existing and custom values.
+
+These three are the tool's own files, so each exists once per machine. A
+project holds only its `AGENTS.md`, its `.assent/verify.py`, its work folders,
+and — only where an older layout or a deliberate decision put one there — a
+project `.assent/assent.toml` override.
 
 ### Tasks that use project media
 
@@ -1007,7 +1140,9 @@ Inspect the isolated worktree first. If the interruption was handled and the
 task was left at WIP, `assent run` resumes it with a "continue" prompt. An
 abrupt failure can leave uncommitted changes; in that case the scheduler
 refuses the dirty worktree instead of guessing, so review and checkpoint the
-changes before rerunning.
+changes before rerunning. The `assent.lock` file you find in the folder is not
+part of that recovery: the OS released the real lock when the process died,
+and the file is only the last run's diagnostics. Leave it alone.
 
 **Q: What if the executing AI edits its task file to loosen its own review?**
 Three layers of defense: the scope exemption covers only its own
