@@ -53,7 +53,13 @@ class TestHoldLock(unittest.TestCase):
     def _cleanup_holder(self, proc: subprocess.Popen) -> None:
         if proc.poll() is None:
             proc.kill()
+        try:
             proc.wait(timeout=10)
+        finally:
+            if proc.stdin is not None and not proc.stdin.closed:
+                proc.stdin.close()
+            if proc.stdout is not None and not proc.stdout.closed:
+                proc.stdout.close()
 
     def _release_holder(self, proc: subprocess.Popen) -> None:
         proc.stdin.close()  # 子進程 readline 收到 EOF -> 離開 with -> 釋放鎖

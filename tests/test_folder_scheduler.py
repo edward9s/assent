@@ -386,7 +386,6 @@ class TestBreakHandlerInterrupt(unittest.TestCase):
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             text=True,
         )
-        self.addCleanup(process.kill)
         try:
             self.assertEqual(process.stdout.readline().strip(), "READY")
             _send_interrupt(process)
@@ -394,6 +393,12 @@ class TestBreakHandlerInterrupt(unittest.TestCase):
         except subprocess.TimeoutExpired:  # pragma: no cover - 卡死才會走到
             process.kill()
             raise
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+            if process.stdout is not None:
+                process.stdout.close()
         self.assertEqual(returncode, 130)
 
 
