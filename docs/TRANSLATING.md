@@ -95,9 +95,9 @@ is current.
 ## Scope
 
 Traditional Chinese reader documentation is translated prose only. It never
-duplicates an executable contract: `agents/templates/format.md` and the
-rest of the packaged templates are English-only, and `agents init` never
+duplicates an executable contract: `assent/templates/format.md` and the
+rest of the packaged templates are English-only, and `assent init` never
 generates a second-language variant of a task-format or session-rules file.
-`.agents/instructions.md` is the one documented session-rules path in every
+`.assent/instructions.md` is the one documented session-rules path in every
 language; translated documentation refers to it by that same path rather
 than introducing a second name or a migration story.

@@ -5,13 +5,19 @@
 > Distilled from three rounds of discussion (Claude Fable × GPT-5.6), updated
 > as the architecture evolves. Goal: the most robust balance between
 > "trustworthy, reliable output" and "aggressive token savings". The single
-> contract for the current format is `.agents/format.md` (source lives at
-> `agents/templates/format.md`); this document records the design principles
+> contract for the current format is `.assent/format.md` (source lives at
+> `assent/templates/format.md`); this document records the design principles
 > behind the format. This document is normative design rationale for the
 > project, not the executable task-format contract itself — that contract is
-> `agents/templates/format.md` alone.
+> `assent/templates/format.md` alone.
 
 ## Core idea
+
+The product namespace is `assent`, and its management plane is `.assent/`.
+This replaces the former `agents`/`.agents` contract. The rename is breaking:
+`assent init` refuses a legacy `.agents` directory, including an ambiguous
+state where both `.agents/` and `.assent/` exist, so migration must be an
+explicit human decision. There is no compatibility alias or automatic merge.
 
 Rather than have an AI cleverly pick relevant content out of thousands of
 lines, layer the context so each task only needs to load "the minimal
@@ -20,16 +26,16 @@ context sufficient to start work unambiguously".
 ```text
 Project rules    → AGENTS.md (root; the entry point tools auto-load;
                     whether it is versioned is the project's call)
-Working instructions → .agents/instructions.md (agents session behavior and
+Working instructions → .assent/instructions.md (assent session behavior and
                     cross-project common rules)
-This task         → .agents/<work folder>/tNNN_name.toml (task file,
+This task         → .assent/<work folder>/tNNN_name.toml (task file,
                     self-contained for execution)
 Current state     → the task file's status + git (the task file is the
                     state; there is no separate state file)
 Historical evidence → rNNN_name.toml (one log file per task, append-only,
                     not read by default)
 Proof of correctness → the task file's verify command
-                    (defaults to .agents/verify.py)
+                    (defaults to .assent/verify.py)
 ```
 
 ## Four core principles
@@ -70,25 +76,25 @@ Proof of correctness → the task file's verify command
 
 - `AGENTS.md` must stay at the project root — agent tools automatically look
   for the instructions file at root, and the location itself is a feature.
-  It holds only project rules and one agents bridge line; when versioned,
+  It holds only project rules and one assent bridge line; when versioned,
   the worktree's branch version is used, and when not versioned, the
   scheduler's prompt supplies the main-tree absolute path.
-- agents session behavior and cross-project common rules live in
-  `.agents/instructions.md`, not mixed into the project's `AGENTS.md`. Every
-  other management file is likewise kept under `.agents/`, leaving root
+- assent session behavior and cross-project common rules live in
+  `.assent/instructions.md`, not mixed into the project's `AGENTS.md`. Every
+  other management file is likewise kept under `.assent/`, leaving root
   clean.
-- The entire `.agents/` is excluded by `.gitignore` and kept only in the
+- The entire `.assent/` is excluded by `.gitignore` and kept only in the
   main worktree; the scheduler hands instructions, t/r files, and the
   default verification script to a worktree session as absolute paths,
   never producing a second source of truth.
-- The verification script defaults to `.agents/verify.py` in the main tree,
+- The verification script defaults to `.assent/verify.py` in the main tree,
   holding the project's own check commands; it is loaded from the main tree
   but reviews the isolated result with the worktree as cwd.
 - Git is always enabled and every folder always uses a worktree; this is not
   to be replaced by a toggle or a git-less degraded mode — it is what makes
-  running multiple work folders in parallel safe. Any tracked `.agents/`
+  running multiple work folders in parallel safe. Any tracked `.assent/`
   file fails closed, to prevent a second source of truth.
-- A work folder's `agents.lock` guarantees one run per folder; a worktree
+- A work folder's `assent.lock` guarantees one run per folder; a worktree
   path is `<project name>.worktrees/<folder>/`, and the work folder can be
   stated via a positional argument.
 
@@ -128,7 +134,7 @@ already-translated actual value.
 task file, can a fresh AI with zero memory correctly state the goal, the
 changeable scope, the acceptance conditions, and the next step without
 asking questions? Yes → the plan is final; no → the task file lacks
-information. The machine-side equivalent: `agents check` passes — this is
+information. The machine-side equivalent: `assent check` passes — this is
 also the planning meeting's adjournment condition.
 
 What this architecture eliminates is the O(n) growth of "re-reading all
@@ -140,7 +146,7 @@ and verification output that each task session needs to check.
 
 - AI handoff most easily slips at the end of a session, when context is
   nearly full → the closeout protocol is fixed in
-  `.agents/instructions.md` and does not rely on self-discipline: the
+  `.assent/instructions.md` and does not rely on self-discipline: the
   scheduler's structural diff makes "relaxing your own review" an
   immediate failure, and the scope exemption covers only the task's own t
   file and r file.
@@ -153,13 +159,13 @@ and verification output that each task session needs to check.
   review is not reverted and is retried with the reason attached; once
   retries are exhausted, the results are committed into a BLOCKED
   checkpoint together, for human adjudication.
-- Merged-worktree and branch cleanup is performed mechanically by `agents
+- Merged-worktree and branch cleanup is performed mechanically by `assent
   clean`; the safety condition must be proven by the machine, and a human
   never runs Git cleanup by hand. Rejecting an entire folder's
-  implementation is likewise performed mechanically by `agents reject`
+  implementation is likewise performed mechanically by `assent reject`
   (archive, force-delete, reset tasks to TODO, leave a trace in the r
   file), again without manual Git operations.
-- Redoing a single task's review is performed mechanically by `agents
+- Redoing a single task's review is performed mechanically by `assent
   rework <FOLDER> <TASK>`. Code is kept by default, downstream propagation
   must be stated explicitly; reverting code only accepts checkpoints
   provably forming a contiguous branch tail, and creates a new commit
@@ -178,7 +184,7 @@ Do not pre-build a document bureaucracy for problems that may never appear.
 
 ## The one-sentence summary
 
-> AGENTS manages project rules, instructions manages agents behavior, task
+> AGENTS manages project rules, instructions manages assent behavior, task
 > files manage the here and now, r files manage history, and verify manages
 > truth; an execution session by default reads only AGENTS + instructions +
 > its own task file, objectively reviews at the end, writes back precisely,
