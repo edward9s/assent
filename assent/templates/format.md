@@ -111,15 +111,23 @@ rewrote with CRLF still counts as the same contract.
   `CON`, `PRN`, `AUX`, `NUL`, `COM1`, or `LPT1` (including the superscript
   device-name forms). The name is also the Git branch prefix, with branches
   shaped like `bootstrap01/<UTC timestamp>`.
-- **Rotating a plan = opening a new folder**: a new round of planning simply
-  opens a new folder; old folders keep taking part in dependency resolution as
-  `after` upstreams. When `run` omits the folder, it derives the single runnable
-  folder from current task state and upstream completion, and refuses on
-  ambiguity; when `status`, `check`, and `report` omit it, they act on all
+- **Where the next round of planning goes**: when review or verification of a
+  live, still-unaccepted folder turns up a correction, a missing piece, or a
+  validation of that folder's own objective, prefer appending it to that same
+  folder as a newly numbered task. Open a new folder when the objective is
+  genuinely distinct, when the relevant folder has already been accepted,
+  archived, or rejected, or when dependency or `base` isolation requires a
+  separate source lineage. Old folders keep taking part in dependency
+  resolution as `after` upstreams. This is planning guidance only: there is no
+  schema field, folder state, scheduler inference, automatic task movement, or
+  CLI behavior behind it. When `run` omits the folder, it derives the single
+  runnable folder from current task state and upstream completion, and refuses
+  on ambiguity; when `status`, `check`, and `report` omit it, they act on all
   folders.
 - Task numbers within a folder are **append-only, never renumbered**: insert a
   new task with a new number, do not renumber existing tasks, so that deps
-  references never break.
+  references never break. Follow-up work appended to a live folder obeys the
+  same rule: add the next number, never rewrite an earlier task to carry it.
 - **Parallel execution**: a single work folder allows only one `run` at a time,
   locked by the `assent.lock` inside that folder; different folders can run in
   parallel in different terminals. Git is always enabled and always uses a

@@ -540,7 +540,11 @@ batch receipt,不驗證。`assent accept --all` 是例外:fresh batch receipt �
 batch evidence 缺少/過期時才走逐資料夾驗證 fallback。沒有 task `review` 欄位。
 遠端同步仍是獨立的一般 Git 決定,最後可執行 `assent clean <FOLDER>`。循環到需要重做的任務
 都完成並由人類接受。
-新一輪計畫 = 開新工作資料夾即可;舊資料夾可由 `_folder.toml` 的 `after`
+審查或驗證某個仍存活、尚未被接受的資料夾時,若發現的是該資料夾本身目標的
+修正、補齊或驗證,優先以新編號的任務附加到同一個資料夾,不要另開資料夾;
+既有任務一律不改寫、不重新編號。目標確實不同、相關資料夾已被接受/封存/駁回,
+或依賴與 `base` 隔離需要獨立的 source lineage 時,才開新工作資料夾;
+舊資料夾可由 `_folder.toml` 的 `after`
 繼續作為前置參與依賴判定。資料夾完成由任務檔推導,全部任務為 DONE/SKIP
 才算完成。
 

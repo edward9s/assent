@@ -403,7 +403,7 @@ and verification output that each task session needs to check.
 
 | Pain point | Only then add |
 |---|---|
-| A new round of goals gets mixed with the current plan | Open a new work folder; the old folder continues participating in dependency resolution as an `after` upstream |
+| A genuinely distinct round of goals gets mixed with the current plan | Open a new work folder; the old folder continues participating in dependency resolution as an `after` upstream. A review or verification follow-up on a live, unaccepted folder's own objective instead becomes a newly numbered task appended to that folder |
 | The same decision keeps getting overturned, and an AI keeps re-adopting an already-rejected approach | Settle it into AGENTS.md's Permanent constraints |
 | Multiple tasks repeat a large amount of shared explanation | Extract it into a reference (a file or an anchor); the task file keeps only a pointer |
 

@@ -676,8 +676,14 @@ matching batch receipt. `assent accept --all` is the documented exception: a
 fresh batch receipt is replayed atomically, while absent or expired batch
 evidence invokes the sequential per-folder verification fallback. Remote
 synchronization remains a separate ordinary Git decision, and
-`assent clean <FOLDER>` is the final optional cleanup. A new round
-of planning = just open a new work folder; an old folder can keep taking
+`assent clean <FOLDER>` is the final optional cleanup. When review or
+verification of a live, not-yet-accepted folder turns up a correction or a
+missing piece of that folder's own objective, prefer appending it to that
+folder as a newly numbered task rather than opening a new one; earlier tasks
+are never rewritten or renumbered to carry it. Open a new work folder when the
+objective is genuinely distinct, when the relevant folder is already accepted,
+archived, or rejected, or when dependency or `base` isolation needs a separate
+source lineage; an old folder can keep taking
 part in dependency resolution via `_folder.toml`'s `after`. A folder's
 completion is derived from its task files — it is complete only once every
 task is DONE/SKIP.
