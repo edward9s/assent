@@ -465,6 +465,22 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertTrue(process.waited)
 
 
+class InterruptingStream(io.StringIO):
+    """Stand-in for the terminal-log sink, raising KeyboardInterrupt on chosen
+    writes so a second Ctrl+C can be aimed at an exact point of the cleanup."""
+
+    def __init__(self, interrupt_at: set[int]) -> None:
+        super().__init__()
+        self.interrupt_at = interrupt_at
+        self.writes = 0
+
+    def write(self, text: str) -> int:
+        self.writes += 1
+        if self.writes in self.interrupt_at:
+            raise KeyboardInterrupt
+        return super().write(text)
+
+
 class StubPipe:
     def __init__(self) -> None:
         self.closed = False
@@ -514,10 +530,10 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
     termination is the backstop when neither the channel nor a signal is
     honoured, so the parent never waits without a bound."""
 
-    def interrupt(self, active: dict) -> str:
+    def interrupt(self, active: dict, out: io.StringIO | None = None) -> str:
         """Run _interrupt_and_wait with both forced-kill syscalls stubbed to
         the death they would really cause."""
-        out = io.StringIO()
+        out = io.StringIO() if out is None else out
         with contextlib.redirect_stdout(out), patch(
                 "assent.folder_scheduler.subprocess.run",
                 side_effect=lambda *a, **k: [
@@ -557,6 +573,31 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
         self.assertIn("the stop request could not be delivered", out)
         self.assertNotIn("no exit within 60 seconds", out)
         self.assertEqual(child.returncode, -9)
+
+    def test_interrupt_while_the_cleanup_message_is_written_still_cleans_up(self):
+        """The announcement goes through the terminal-log sink, so a second
+        Ctrl+C can land there before any child has been notified."""
+        child = DeafChild(reads_stdin=False)
+
+        out = self.interrupt({"work": child}, InterruptingStream({1}))
+
+        self.assertIn("Second interrupt (Ctrl+C)", out)
+        self.assertTrue(child.killed)
+        self.assertEqual(child.returncode, -9)
+        self.assertTrue(child.stdin.closed)
+
+    def test_repeated_interrupts_during_forced_cleanup_kill_and_reap(self):
+        first = DeafChild(reads_stdin=False)
+        second = DeafChild(reads_stdin=False, pid=4243)
+
+        out = self.interrupt({"a": first, "b": second},
+                             InterruptingStream(set(range(1, 6))))
+
+        self.assertIn("Second interrupt (Ctrl+C)", out)
+        for folder, child in (("a", first), ("b", second)):
+            self.assertTrue(child.killed, folder)
+            self.assertEqual(child.returncode, -9, folder)
+            self.assertTrue(child.stdin.closed, folder)
 
     def test_second_interrupt_force_kills_everything_and_returns_130(self):
         self.make_folder("work")

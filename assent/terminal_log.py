@@ -163,13 +163,20 @@ def log_path_for_argv(argv: list[str]) -> Path:
 
 @contextmanager
 def terminal_logging(argv: list[str]) -> Iterator[Path]:
-    """Log run/verify terminal output; each invocation truncates the previous log."""
+    """Log run/verify terminal output; each invocation appends its own section.
+
+    Appending rather than truncating is what makes the log usable as evidence: a
+    run that was interrupted or force-terminated is diagnosed from the next
+    invocation, and that next invocation used to erase the very section
+    explaining what went wrong. Sections stay separable through the per-
+    invocation ``ASSENT START`` header.
+    """
     log_path = log_path_for_argv(argv)
     if not argv or argv[0] not in ("run", "verify"):
         yield log_path
         return
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_path, "w", encoding="utf-8", buffering=1, newline="\n") as log:
+    with open(log_path, "a", encoding="utf-8", buffering=1, newline="\n") as log:
         sink = _LogSink(log)
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout = TeeTextIO(old_stdout, sink)

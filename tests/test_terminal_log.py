@@ -109,7 +109,7 @@ class TestTerminalLogging(unittest.TestCase):
                 self.assertNotIn("retrying", path.read_text(encoding="utf-8"))
         self.assertIn("retrying in 00:00:03", terminal.getvalue())
 
-    def test_each_run_truncates_previous_log(self):
+    def test_each_run_appends_a_separately_headed_section(self):
         config = self.write_config()
         self.write_task()
         with terminal_logging(["run", "--config", str(config)]) as path:
@@ -117,8 +117,11 @@ class TestTerminalLogging(unittest.TestCase):
         with terminal_logging(["run", "--config", str(config)]):
             print("second session")
         logged = path.read_text(encoding="utf-8")
-        self.assertNotIn("first session", logged)
+        self.assertIn("first session", logged)
         self.assertIn("second session", logged)
+        self.assertEqual(logged.count("ASSENT START"), 2)
+        self.assertLess(logged.index("first session"),
+                        logged.index("second session"))
 
     def test_non_run_commands_do_not_create_or_change_log(self):
         config = self.write_config()
