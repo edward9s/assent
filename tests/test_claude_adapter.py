@@ -237,6 +237,7 @@ class TestRunTask(unittest.TestCase):
         self.assertIsInstance(result, TaskResult)
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(result.quota_exhausted)
+        self.assertFalse(result.stalled)
         # prime -> fable (built-in mapping); the command carries both the alias and the effort
         self.assertEqual(
             captured["cmd"][captured["cmd"].index("--model") + 1],
@@ -268,6 +269,7 @@ class TestRunTask(unittest.TestCase):
         result = adapter.run_task(
             "p", adapter.resolve_model("lite"), None, Path("."))
         self.assertFalse(result.quota_exhausted)
+        self.assertTrue(result.stalled)
         self.assertIsNone(result.reset_at)
         self.assertNotEqual(result.exit_code, 0)
 

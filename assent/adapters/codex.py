@@ -171,7 +171,8 @@ class CodexAdapter(Adapter):
             command, cwd, stall_seconds, echo=self._echo_line)
         exhausted = False if stalled else parse_output_for_quota(output)
         return TaskResult(exit_code=returncode, output=output,
-                          quota_exhausted=exhausted, reset_at=None)
+                          quota_exhausted=exhausted, reset_at=None,
+                          stalled=stalled)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

@@ -569,6 +569,148 @@ class TestAcceptanceGates(EngineTestCase):
             for s in self.subjects()))
 
 
+class TestAdapterProcessOutcomes(EngineTestCase):
+    def test_nonzero_done_retries_without_done_checkpoint_then_succeeds(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=1)
+        self.commit_all()
+
+        def failed_done(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "kept.py").write_text("work", encoding="utf-8")
+            set_status(path, "DONE")
+            output = ("transport failed token=TOPSECRET " + "x" * 400
+                      + " useful-tail")
+            return TaskResult(exit_code=7, output=output,
+                              quota_exhausted=False, reset_at=None)
+
+        def successful_retry(prompt):
+            self.assertFalse(any(
+                subject.startswith("auto(plan01/t001): ")
+                for subject in self.subjects()))
+            self.assertIn("exit code 7", prompt)
+            self.assertIn("useful-tail", prompt)
+            self.assertNotIn("TOPSECRET", prompt)
+            return ok_result()
+
+        adapter = ScriptedAdapter([failed_done, successful_retry])
+        with mock.patch.object(engine, "_run_verify", return_value=0) as verify:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=adapter), 0)
+        verify.assert_called_once()
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertIn("src/kept.py", self._git_execution("ls-files"))
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        failed = next(e for e in entries if e["event"] == "adapter_exit")
+        self.assertEqual(failed["exit_code"], 7)
+        self.assertFalse(failed["stalled"])
+        self.assertEqual(failed["agent"], "claude")
+        self.assertEqual(failed["requested_model"], "lite")
+        self.assertEqual(failed["requested_effort"], "medium")
+        self.assertNotIn("TOPSECRET", failed["summary"])
+        self.assertLess(len(failed["summary"]), 400)
+
+    def test_nonzero_todo_exhausts_retries_and_keeps_work(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=1)
+        self.commit_all()
+
+        def first(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text("kept", encoding="utf-8")
+            return TaskResult(exit_code=2, output="first transport failure",
+                              quota_exhausted=False, reset_at=None)
+
+        adapter = ScriptedAdapter([
+            first,
+            TaskResult(exit_code=4, output="second transport failure",
+                       quota_exhausted=False, reset_at=None),
+        ])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        self.assertIn("exit code 2", adapter.calls[1][0])
+        self.assertIn("src/partial.py", self._git_execution("ls-files"))
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        failures = [e for e in entries if e["event"] == "adapter_exit"]
+        self.assertEqual([e["exit_code"] for e in failures], [2, 4])
+        blocked = next(e for e in entries if e["event"] == "blocked")
+        self.assertIn("exit code 4", blocked["summary"])
+
+    def test_nonzero_self_blocked_is_handed_off_after_safety_inspection(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=1)
+        self.commit_all()
+
+        def blocked(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text(
+                "preserved", encoding="utf-8")
+            set_status(path, "BLOCKED")
+            return TaskResult(exit_code=9, output="dependency unavailable",
+                              quota_exhausted=False, reset_at=None)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = engine.run(cfg, once=True, adapter=ScriptedAdapter([blocked]))
+        self.assertEqual(rc, 0)
+        self.assertIn("exit code 9", out.getvalue())
+        self.assertTrue(any(
+            subject == "auto(plan01/t001): BLOCKED (execution AI self-marked)"
+            for subject in self.subjects()))
+
+        from assent.plan import read_entries
+        failure = next(e for e in read_entries(journal_path_for(path))
+                       if e["event"] == "adapter_exit")
+        self.assertEqual(failure["exit_code"], 9)
+
+    def test_nonzero_self_blocked_with_scope_violation_fails_closed(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0)
+        self.commit_all()
+
+        def unsafe_blocked(prompt):
+            (self.execution_root() / "rogue.py").write_text(
+                "unsafe", encoding="utf-8")
+            path.write_text(
+                task_text(status="BLOCKED", scope=("src/", "rogue.py"),
+                          verify="echo unsafe"),
+                encoding="utf-8", newline="\n")
+            return TaskResult(exit_code=8, output="adapter failed",
+                              quota_exhausted=False, reset_at=None)
+
+        self.run_quiet(cfg, once=True,
+                       adapter=ScriptedAdapter([unsafe_blocked]))
+        self.assertFalse(any(
+            subject == "auto(plan01/t001): BLOCKED (execution AI self-marked)"
+            for subject in self.subjects()))
+        from assent.plan import read_entries
+        blocked = next(e for e in read_entries(journal_path_for(path))
+                       if e["event"] == "blocked")
+        self.assertIn("exit code 8", blocked["summary"])
+        self.assertIn("fields other than status", blocked["summary"])
+        self.assertIn("outside scope", blocked["summary"])
+
+    def test_watchdog_stall_has_distinct_non_quota_event(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0)
+        self.commit_all()
+        stalled = TaskResult(exit_code=1, output="rate limit exceeded",
+                             quota_exhausted=False, reset_at=None, stalled=True)
+        self.run_quiet(cfg, once=True, adapter=ScriptedAdapter([stalled]))
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertIn("adapter_stall", [e["event"] for e in entries])
+        self.assertNotIn("quota", [e["event"] for e in entries])
+
+
 class TestQuotaAndResume(EngineTestCase):
     def test_quota_waits_then_resumes_same_task(self):
         path = self.write_task(1)
@@ -657,6 +799,22 @@ class TestInterruptedTaskResume(EngineTestCase):
         self.assertTrue(any(e["event"] == "interrupt"
                             and "infrastructure error" in e["summary"]
                             for e in entries))
+
+    def test_os_error_marks_current_task_wip_as_infrastructure_failure(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+
+        def failed(prompt):
+            raise OSError("adapter executable unavailable")
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([failed])), 1)
+        self.assertEqual(parse_task_file(path).status, "WIP")
+        from assent.plan import read_entries
+        interrupt = next(e for e in read_entries(journal_path_for(path))
+                         if e["event"] == "interrupt")
+        self.assertIn("infrastructure error", interrupt["summary"])
 
     def test_interrupted_self_blocked_task_is_not_overwritten(self):
         path = self.write_task(1)

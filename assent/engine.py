@@ -23,6 +23,8 @@ Acceptance defences added by assent (the format contract's "defence rules"):
 """
 from __future__ import annotations
 
+import json
+import re
 import shlex
 import subprocess
 import sys
@@ -77,6 +79,13 @@ _QUOTA_BUFFER = timedelta(minutes=2)  # reset time + buffer, to avoid being bloc
 _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
 _DEFAULT_VERIFY_COMMAND = "python .assent/verify.py"
 _GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
+_ADAPTER_DIAGNOSTIC_LIMIT = 240
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)([\"']?(?:api[_ -]?key|access[_ -]?token|token|password|secret|"
+    r"authorization)[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;]+)")
+_BEARER_RE = re.compile(r"(?i)(\bbearer\s+)[^\s,;]+")
+_KNOWN_TOKEN_RE = re.compile(
+    r"\b(?:sk(?:-ant)?|ghp|github_pat)-[A-Za-z0-9_-]{8,}\b")
 
 
 @dataclass(frozen=True)
@@ -139,6 +148,70 @@ def _resolve_session(cfg: Config, adapter: Adapter,
 def _short(text: str, limit: int = 60) -> str:
     """Squash to a single line and truncate, for use in a commit message."""
     return " ".join(text.split())[:limit]
+
+
+def _bounded_adapter_diagnostic(output: str,
+                                limit: int = _ADAPTER_DIAGNOSTIC_LIMIT) -> str:
+    """Return a one-line, bounded diagnostic suitable for prompts and journals.
+
+    Adapter output remains available live to the operator, but persisted scheduler evidence
+    must not contain an arbitrary-length transcript, prompt, or common credential forms.
+    Redaction happens before truncation so a token is not exposed merely because its label
+    fell outside the retained tail.
+    """
+    redacted = _SECRET_ASSIGNMENT_RE.sub(r"\1[REDACTED]", output)
+    redacted = _BEARER_RE.sub(r"\1[REDACTED]", redacted)
+    redacted = _KNOWN_TOKEN_RE.sub("[REDACTED]", redacted)
+    compact = " ".join(redacted.split())
+    if not compact:
+        return "no diagnostic output"
+    if len(compact) <= limit:
+        return compact
+    return "..." + compact[-(limit - 3):]
+
+
+def _adapter_failure_reason(exit_code: int, stalled: bool, output: str) -> str:
+    kind = "watchdog stalled" if stalled else "exited nonzero"
+    diagnostic = _bounded_adapter_diagnostic(output)
+    return (f"Adapter process {kind} (exit code {exit_code}); "
+            f"bounded diagnostic: {diagnostic}")
+
+
+def _append_adapter_failure_entry(task: Task, session: _SessionIdentity,
+                                  exit_code: int, stalled: bool, summary: str,
+                                  now: Callable[[], datetime]) -> None:
+    """Append the machine-readable scheduler evidence for one non-quota failure.
+
+    This event needs a numeric ``exit_code`` in addition to the shared journal fields.  It is
+    written here because the general journal helper deliberately exposes only the stable
+    common schema.  Re-reading validates the complete TOML document after the append.
+    """
+    fields = [
+        "[[entry]]",
+        f"time = {json.dumps(now().isoformat(timespec='seconds'))}",
+        'by = "scheduler"',
+        f"agent = {json.dumps(session.agent)}",
+        f"requested_model = {json.dumps(session.requested_model)}",
+    ]
+    if session.requested_effort is not None:
+        fields.append(
+            f"requested_effort = {json.dumps(session.requested_effort)}")
+    fields += [
+        f"event = {json.dumps('adapter_stall' if stalled else 'adapter_exit')}",
+        f"exit_code = {int(exit_code)}",
+        f"stalled = {'true' if stalled else 'false'}",
+        f"summary = {json.dumps(summary, ensure_ascii=False)}",
+    ]
+    block = "\n".join(fields) + "\n"
+    existing = (task.journal_path.read_text(encoding="utf-8")
+                if task.journal_path.is_file() else "")
+    with open(task.journal_path, "a", encoding="utf-8", newline="") as journal:
+        if existing and not existing.endswith("\n"):
+            journal.write("\n")
+        if existing:
+            journal.write("\n")
+        journal.write(block)
+    read_entries(task.journal_path)
 
 
 def _checkpoint_subject(cfg: Config, kind: str, task: Task, detail: str) -> str:
@@ -391,7 +464,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         _try_write_report(cfg)
         print("Interrupted.")
         return 130
-    except AssentError as e:
+    except (AssentError, OSError) as e:
         print(f"Run aborted (infrastructure error): {e}")
         if (current_task is not None and current_session is not None
                 and current_session.identity is not None):
@@ -493,7 +566,28 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
             resumed = True
             continue  # resume the same task, without counting a retry
 
-        outcome, reason = _evaluate(cfg, task, start_ref)
+        if result.exit_code != 0 or result.stalled:
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output)
+            _append_adapter_failure_entry(
+                task, session, result.exit_code, result.stalled, reason, now)
+            print(f"  Adapter failure: {reason}")
+
+            # A failed subprocess cannot authorize DONE or run verification, but safety
+            # inspection still runs against its preserved changes.  A clean self-BLOCKED
+            # result is the one terminal exception: it is handed to a human with the adapter
+            # exit evidence intact.
+            fresh, safety_reason = _inspect_task_safety(
+                cfg, task, start_ref)
+            if safety_reason:
+                reason = f"{reason}; safety inspection failed: {safety_reason}"
+            if (fresh is not None and fresh.status == "BLOCKED"
+                    and safety_reason is None):
+                outcome = "self_blocked"
+            else:
+                outcome = "fail"
+        else:
+            outcome, reason = _evaluate(cfg, task, start_ref)
         if outcome == "done":
             print("  Acceptance passed -> creating checkpoint")
             if not gitops.commit_if_dirty(
@@ -528,41 +622,54 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
         return
 
 
+def _inspect_task_safety(cfg: Config, task: Task,
+                         start_ref: str | None = None) -> tuple[Task | None, str | None]:
+    """Re-parse and inspect the non-model structural and scope safety floors.
+
+    The checks deliberately collect both task-file tampering and out-of-scope changes when
+    possible so an adapter failure does not hide independent safety evidence.
+    """
+    try:
+        fresh = parse_task_file(task.path)
+    except AssentError as e:
+        return None, ("Re-parsing the task file failed (the execution AI may have broken "
+                      f"it): {e}")
+
+    issues: list[str] = []
+    tampered = same_except_status(task, fresh)
+    if tampered:
+        issues.append(
+            f"Task file fields other than status were modified: {', '.join(tampered)}"
+            " (the execution AI may only change the status line)")
+
+    outside = gitops.changes_outside_scope(
+        cfg.root, task.scope, since_ref=start_ref,
+        excludes=_task_excludes(cfg, task))
+    if outside:
+        shown = ", ".join(outside[:5]) + (" ..." if len(outside) > 5 else "")
+        issues.append(f"Changes outside scope appeared: {shown}")
+    return fresh, "; ".join(issues) if issues else None
+
+
 def _evaluate(cfg: Config, task: Task,
               start_ref: str | None = None) -> tuple[str, str | None]:
-    """Acceptance: status -> structural comparison (tamper check) -> scope -> verify. Returns
+    """Acceptance: structural/scope safety -> status -> verify. Returns
     (outcome, reason).
 
     outcome in {"done", "self_blocked", "fail"}. scope/verify and all fields come from the
     trusted checkpoint version `task`; the on-disk version is only allowed to change the
     status line.
     """
-    try:
-        fresh = parse_task_file(task.path)
-    except AssentError as e:
-        return "fail", f"Re-parsing the task file failed (the execution AI may have broken it): {e}"
+    fresh, safety_reason = _inspect_task_safety(cfg, task, start_ref)
+    if safety_reason:
+        return "fail", safety_reason
+    assert fresh is not None
 
     # status check
     if fresh.status == "BLOCKED":
         return "self_blocked", None
     if fresh.status != "DONE":
         return "fail", f"Status not updated to DONE/BLOCKED (currently {fresh.status})"
-
-    # structural comparison: any field other than status changed = out of bounds (loosened
-    # scope, swapped verify, changed deps)
-    tampered = same_except_status(task, fresh)
-    if tampered:
-        return "fail", (f"Task file fields other than status were modified: {', '.join(tampered)}"
-                        " (the execution AI may only change the status line)")
-
-    # scope check (against the trusted checkpoint scope, covering changes inside wip
-    # checkpoints too; its own t file/r file and runtime artifacts are exempt)
-    outside = gitops.changes_outside_scope(
-        cfg.root, task.scope, since_ref=start_ref,
-        excludes=_task_excludes(cfg, task))
-    if outside:
-        shown = ", ".join(outside[:5]) + (" ..." if len(outside) > 5 else "")
-        return "fail", f"Changes outside scope appeared: {shown}"
 
     # verify command (against the trusted checkpoint verify)
     rc = _run_verify(cfg, task.verify)

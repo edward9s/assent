@@ -291,10 +291,12 @@ class ClaudeAdapter(Adapter):
             cmd, cwd, stall_seconds, echo=self._echo_line)
         if stalled:  # A stall is a task failure, never mistaken for quota exhaustion (2.5)
             return TaskResult(exit_code=returncode, output=output,
-                              quota_exhausted=False, reset_at=None)
+                              quota_exhausted=False, reset_at=None,
+                              stalled=True)
         exhausted, reset_at = parse_output_for_quota(output)
         return TaskResult(exit_code=returncode, output=output,
-                          quota_exhausted=exhausted, reset_at=reset_at)
+                          quota_exhausted=exhausted, reset_at=reset_at,
+                          stalled=False)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

@@ -22,6 +22,7 @@ class TaskResult:
     output: str                    # Full subprocess output (verbatim, line by line)
     quota_exhausted: bool          # True = quota exhausted; this round doesn't count as a failure
     reset_at: datetime | None      # Parsed reset time; None if it couldn't be parsed
+    stalled: bool = False          # True = watchdog terminated the subprocess; never quota
 
 
 class Adapter:                     # Base class for each vendor's adapter
