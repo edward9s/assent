@@ -5,7 +5,10 @@ source-versus-target merge conflict so a human can resolve it in a dedicated
 worktree.  It is deliberately not an integration engine: it handles exactly one
 folder against the current integration target, never combines speculative peer
 folders, never runs a verifier, a focused test, or an AI adapter, never edits a
-task status, and never merges anything into the integration target.
+task status, and never merges anything into the integration target.  Once the
+source really has advanced it deletes the derived receipts that were written
+against the old source identity; proving the new source is a later, explicitly
+human-started ``assent verify``, and approving it is a later ``assent accept``.
 
 There is no state file and no "current folder" pointer.  Everything a later run
 needs is a deterministic managed fact or a Git fact:
@@ -28,7 +31,7 @@ import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from assent import AssentError, gitops
+from assent import AssentError, gitops, verification
 from assent.accept import _COMPLETE_STATUSES, _source_snapshot
 from assent.config import Config
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
@@ -214,6 +217,67 @@ def _report_target_drift(managed: _Managed, captured: str,
           "current target, which stays authoritative.")
 
 
+def _batch_source_is_current(main: Path,
+                             source: verification.BatchSource) -> bool:
+    """True while the batch receipt's recorded identity for one folder holds."""
+    try:
+        branch = gitops.unique_folder_branch(main, source.folder)
+    except AssentError:
+        return False  # an ambiguous branch set is no longer a proven identity
+    return (branch is not None
+            and gitops.branch_tip(main, branch) == source.source_tip)
+
+
+def _invalidate_derived_receipts(cfg: Config, main: Path) -> None:
+    """Delete the evidence the just-advanced source has made obsolete.
+
+    A receipt is a derived artifact, so deleting it costs one ``assent verify``
+    and never destroys a source of truth -- while keeping it would let an
+    ``accept`` publish a tree that was proven before the conflict resolution
+    existed.  The batch receipt is all-or-nothing by construction, so any one
+    recorded source identity that is no longer current expires the whole file.
+    """
+    if verification.invalidate_folder_receipt(cfg):
+        print("  stale verification receipt deleted: "
+              f"{verification.receipt_path(cfg)}")
+
+    batch_path = verification.batch_receipt_path(cfg.assent_dir)
+    if not batch_path.exists():
+        return
+    try:
+        receipt = verification.read_batch_receipt(batch_path, main)
+    except AssentError as e:
+        # A malformed receipt is evidence of an unsafe state, not permission to
+        # erase it; every consumer already refuses it fail-closed.
+        print(f"  note: the batch verification receipt {batch_path} cannot be "
+              f"read ({e}); it was left in place for inspection")
+        return
+    drifted = [source.folder for source in receipt.sources
+               if not _batch_source_is_current(main, source)]
+    if drifted:
+        verification.invalidate_batch_receipt(cfg.assent_dir)
+        print(f"  stale batch verification receipt deleted: {batch_path} "
+              f"(recorded source identity for {', '.join(drifted)} is no "
+              "longer current)")
+
+
+def _finish(cfg: Config, managed: _Managed, source_branch: str,
+            merge_commit: str) -> None:
+    """Report the resolved source, drop stale receipts, and stop there."""
+    folder = managed.folder
+    print(f"reconcile continue {folder}: done. The resolved source is "
+          f"{source_branch} ({merge_commit}); the integration target was not "
+          "touched.")
+    _invalidate_derived_receipts(cfg, managed.main)
+    print(f"reconcile continue {folder}: no verification has run -- neither "
+          "the focused task tests nor the complete verification were executed "
+          "here.")
+    print(f"Run `assent verify {folder}` when you want the complete "
+          "verification of the resolved source against the current target (the "
+          f"expensive step), and `assent accept {folder}` afterwards as the "
+          "explicit approval that integrates it.")
+
+
 def _start(cfg: Config) -> int:
     """Prepare a reconciliation worktree holding the real conflict."""
     folder = cfg.tasks_name
@@ -313,15 +377,19 @@ def _continue_without_worktree(cfg: Config, managed: _Managed,
         print(f"{label}: only cleanup remained; the reconciliation merge is "
               f"already contained in {source_branch}.")
         _remove_managed(managed, tip)
+        _finish(cfg, managed, source_branch, tip)
         return 0
 
     parents = gitops.commit_parents(managed.main, tip)
     if (len(parents) == 2
             and gitops.commit_message(managed.main, tip).strip()
             == reconcile_commit_message(managed.folder).strip()):
-        return _fast_forward_source(
+        result = _fast_forward_source(
             cfg, managed, tip, parents[0], source_branch, source_tip,
             source_worktree)
+        if result == 0:
+            _finish(cfg, managed, source_branch, tip)
+        return result
 
     print(f"{label}: refused, {managed.branch} ({tip[:12]}) is not a "
           "recognizable reconciliation merge and its worktree is gone; nothing "
@@ -411,11 +479,8 @@ def _continue(cfg: Config) -> int:
         cfg, managed, merge_commit, source_parent, source_branch, source_tip,
         source_worktree)
     if result == 0:
-        print(f"{label}: done. The resolved source is {source_branch} "
-              f"({merge_commit}); the integration target was not touched.")
         _report_target_drift(managed, captured_target, target_tip, target_branch)
-        print(f"Run `assent verify {folder}` to prove the resolved source "
-              "against the current target.")
+        _finish(cfg, managed, source_branch, merge_commit)
     return result
 
 

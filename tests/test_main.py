@@ -27,6 +27,16 @@ _HAN_CHAR_RE = re.compile(r"[一-鿿]")
 
 class MainTestCase(unittest.TestCase):
     def setUp(self):
+        # A scheduler-spawned session exports ASSENT_STDIN_STOP to its child.
+        # Inheriting it here would make every main() call in these tests start
+        # the stop watcher on this process's own (non-interactive) stdin, whose
+        # immediate EOF then raises KeyboardInterrupt inside an unrelated later
+        # test.  The watcher's own behavior is covered by TestStdinStopWatcher,
+        # which sets the variable explicitly.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("ASSENT_STDIN_STOP", None)
         self.root = Path(tempfile.mkdtemp())
         self._old_cwd = os.getcwd()
         os.chdir(self.root)
@@ -70,7 +80,7 @@ class TestDispatch(MainTestCase):
 
     def test_help_output_is_english_for_top_level_and_every_subcommand(self):
         commands = ("run", "status", "check", "report", "verify", "clean", "accept",
-                    "reject", "rework", "init")
+                    "reconcile", "reject", "rework", "init")
         for argv in (["--help"],) + tuple(
                 [command, "--help"] for command in commands):
             with self.subTest(argv=argv):
@@ -235,6 +245,57 @@ class TestDispatch(MainTestCase):
             code, _ = self.run_main(["reject", "B", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "B")
+
+    def test_reconcile_routes_each_form_to_its_own_lifecycle(self):
+        config = self.write_config()
+        forms = (([], "reconcile_start"),
+                 (["--continue"], "reconcile_continue"),
+                 (["--abort"], "reconcile_abort"))
+        for flags, function in forms:
+            with self.subTest(flags=flags), patch(
+                    f"assent.__main__.{function}", side_effect=[0, 1]) as mocked:
+                codes = [self.run_main(
+                    ["reconcile", "stuck", *flags, "--config", str(config)])[0]
+                         for _ in range(2)]
+                self.assertEqual(codes, [0, 1])
+                self.assertEqual(mocked.call_args.args[0].tasks_name, "stuck")
+
+    def test_reconcile_refuses_contradictory_or_missing_arguments(self):
+        for argv in (["reconcile"],
+                     ["reconcile", "one", "two"],
+                     ["reconcile", "one", "--continue", "--abort"],
+                     ["reconcile", "--continue"],
+                     ["reconcile", "one", "--focus"],
+                     ["reconcile", "one", "--all"]):
+            with self.subTest(argv=argv), self.assertRaises(
+                    SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2)
+
+    def test_reconcile_help_states_the_verification_boundary(self):
+        output = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(output):
+            main(["reconcile", "-h"])
+        self.assertEqual(ctx.exception.code, 0)
+        text = output.getvalue()
+        self.assertIn("FOLDER", text)
+        for option in ("--continue", "--abort", "--config"):
+            self.assertIn(option, text)
+        # argparse wraps the description, so compare without its line breaks.
+        unwrapped = " ".join(text.split())
+        self.assertIn("never runs the focused or the complete verification",
+                      unwrapped)
+        self.assertIn("assent verify FOLDER", unwrapped)
+        self.assertIn("assent accept FOLDER", unwrapped)
+
+    def test_reconcile_configuration_error_returns_one_without_dispatch(self):
+        config = self.write_config()
+        with patch("assent.__main__.reconcile_start") as mocked:
+            code, out = self.run_main(
+                ["reconcile", "bad/name", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertIn("Config error", out)
+        mocked.assert_not_called()
 
     def test_rework_help_shows_only_formal_syntax_and_options(self):
         output = io.StringIO()

@@ -651,6 +651,11 @@ class TestAcceptTransactionalFailures(AcceptRepositoryCase):
         self.assertEqual(code, 1, output)
         self.assertIn("Conflicting file(s)", output)
         self.assertIn("README.md", output)
+        # The recovery path is reconciliation, not the invalid one-argument
+        # `assent rework FOLDER`, which needs a task id as well.
+        self.assertIn(f"assent reconcile {self.folder}", output)
+        self.assertIn(f"assent verify {self.folder}", output)
+        self.assertNotIn(f"assent rework {self.folder}", output)
         self._assert_preserved(before)
 
     def test_final_target_head_move_is_not_overwritten(self) -> None:

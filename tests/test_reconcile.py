@@ -7,11 +7,13 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import gitops, verification
+from assent import engine, gitops, verification
 from assent import accept as accept_mod
+from assent import plan as plan_mod
 from assent.config import load_config
 from assent.reconcile import (reconcile_abort, reconcile_commit_message,
                               reconcile_continue, reconcile_start)
@@ -526,6 +528,156 @@ class AbortTest(ReconcileRepositoryCase):
         self.assertTrue((self._managed_path() / "keep.txt").exists())
 
 
+class ReceiptInvalidationTest(ReconcileRepositoryCase):
+    """Advancing the source expires every receipt written against the old one."""
+
+    def _tree(self) -> str:
+        return gitops.tree_of(self.root, "HEAD")
+
+    def _now(self) -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def _write_folder_receipt(self) -> Path:
+        cfg = self._config()
+        path = verification.receipt_path(cfg)
+        verification.write_receipt(path, verification.VerificationReceipt(
+            version=verification.RECEIPT_VERSION, status="PASSED",
+            source_tip=self.source_tip, target_tip=self.target_tip,
+            integration_tree=self._tree(),
+            verify_script_sha256=verification.verifier_digest(cfg),
+            verify_command=verification.VERIFY_COMMAND, exit_code=0,
+            completed_at=self._now(), failure_summary=""), self.root)
+        return path
+
+    def _write_batch_receipt(self, *folders: tuple[str, str]) -> Path:
+        path = verification.batch_receipt_path(self.assent_dir)
+        tree = self._tree()
+        verification.write_batch_receipt(path, verification.BatchVerificationReceipt(
+            version=verification.BATCH_RECEIPT_VERSION, status="PASSED",
+            target_tip=self.target_tip,
+            sources=tuple(verification.BatchSource(folder, tip, tree)
+                          for folder, tip in folders),
+            final_tree=tree,
+            verify_script_sha256=verification.verifier_digest(self._config()),
+            verify_command=verification.VERIFY_COMMAND, exit_code=0,
+            completed_at=self._now(), failure_summary=""), self.root)
+        return path
+
+    def _make_peer_source(self, folder: str = "peer01") -> str:
+        """A second finished folder whose own source identity does not move."""
+        worktree = gitops.ensure_worktree(self.root, folder)
+        branch = gitops.ensure_branch(worktree, f"{folder}/")
+        (worktree / f"{folder}.txt").write_text("peer\n", encoding="utf-8")
+        gitops.commit_all(worktree, f"finish {folder}")
+        return gitops.branch_tip(self.root, branch)
+
+    def _resolved_continue(self) -> tuple[int, str]:
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        self._resolve()
+        return self._run(reconcile_continue)
+
+    def test_continue_deletes_the_stale_folder_receipt(self) -> None:
+        self._conflicting_repository()
+        receipt = self._write_folder_receipt()
+
+        code, output = self._resolved_continue()
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(receipt.exists())
+        self.assertIn("stale verification receipt deleted", output)
+
+        # The deleted evidence is exactly what accept refuses to do without.
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            accepted = accept_mod.accept_folder(self._config())
+        self.assertEqual(accepted, 1, buffer.getvalue())
+        self.assertIn("assent verify", buffer.getvalue())
+
+    def test_continue_invalidates_a_batch_receipt_that_records_this_folder(self
+                                                                          ) -> None:
+        self._conflicting_repository()
+        peer_tip = self._make_peer_source()
+        batch = self._write_batch_receipt(
+            (self.folder, self.source_tip), ("peer01", peer_tip))
+
+        code, output = self._resolved_continue()
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(batch.exists())
+        self.assertIn("stale batch verification receipt deleted", output)
+        self.assertIn(self.folder, output)
+
+    def test_continue_keeps_a_batch_receipt_whose_sources_are_all_current(self
+                                                                         ) -> None:
+        self._conflicting_repository()
+        peer_tip = self._make_peer_source()
+        batch = self._write_batch_receipt(("peer01", peer_tip))
+
+        code, output = self._resolved_continue()
+
+        self.assertEqual(code, 0, output)
+        self.assertTrue(batch.exists())
+        self.assertNotIn("batch verification receipt deleted", output)
+        self.assertEqual(
+            verification.read_batch_receipt(batch, self.root).folders, ("peer01",))
+
+    def test_start_and_abort_leave_every_receipt_in_place(self) -> None:
+        self._conflicting_repository()
+        receipt = self._write_folder_receipt()
+        batch = self._write_batch_receipt((self.folder, self.source_tip))
+
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        self.assertTrue(receipt.exists())
+        self.assertTrue(batch.exists())
+
+        self.assertEqual(self._run(reconcile_abort)[0], 0)
+        self.assertTrue(receipt.exists())
+        self.assertTrue(batch.exists())
+
+    def test_an_unreadable_batch_receipt_is_reported_and_kept(self) -> None:
+        self._conflicting_repository()
+        batch = verification.batch_receipt_path(self.assent_dir)
+        batch.write_text("not a batch receipt\n", encoding="utf-8")
+
+        code, output = self._resolved_continue()
+
+        self.assertEqual(code, 0, output)
+        self.assertTrue(batch.exists())
+        self.assertIn("cannot be read", output)
+
+    def test_continue_states_that_no_verification_ran_and_names_both_steps(self
+                                                                          ) -> None:
+        self._conflicting_repository()
+
+        code, output = self._resolved_continue()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("no verification has run", output)
+        self.assertIn("neither the focused task tests nor the complete "
+                      "verification", output)
+        self.assertIn(f"assent verify {self.folder}", output)
+        self.assertIn(f"assent accept {self.folder}", output)
+        # The invalid one-argument rework command is never suggested.
+        self.assertNotIn(f"assent rework {self.folder}", output)
+
+    def test_a_resumed_continue_reports_the_same_boundary_and_receipts(self) -> None:
+        self._conflicting_repository()
+        receipt = self._write_folder_receipt()
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        self._resolve()
+        merge = self._commit_reconcile_merge()
+        gitops.fast_forward(self.source_worktree, merge)
+        gitops.remove_worktree(self.root, self._managed_path())
+
+        code, output = self._run(reconcile_continue)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("only cleanup remained", output)
+        self.assertFalse(receipt.exists())
+        self.assertIn("no verification has run", output)
+        self.assertIn(f"assent accept {self.folder}", output)
+
+
 class LifecycleBoundaryTest(ReconcileRepositoryCase):
     def test_reconcile_never_verifies_accepts_or_edits_a_task_status(self) -> None:
         self._conflicting_repository()
@@ -539,7 +691,13 @@ class LifecycleBoundaryTest(ReconcileRepositoryCase):
         with patch.object(verification, "verify_folder", _forbidden), \
                 patch.object(verification, "verify_folder_if_needed", _forbidden), \
                 patch.object(verification, "_run_full_verifier", _forbidden), \
-                patch.object(accept_mod, "accept_folder", _forbidden):
+                patch.object(verification, "verify_batch", _forbidden), \
+                patch.object(accept_mod, "accept_folder", _forbidden), \
+                patch.object(accept_mod, "accept_all", _forbidden), \
+                patch.object(engine, "run", _forbidden), \
+                patch.object(engine, "_run_verify", _forbidden), \
+                patch.object(engine, "_run_verify_quiet", _forbidden), \
+                patch.object(plan_mod, "set_status", _forbidden):
             self.assertEqual(self._run(reconcile_start)[0], 0)
             self._resolve()
             self.assertEqual(self._run(reconcile_continue)[0], 0)
