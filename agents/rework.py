@@ -346,6 +346,20 @@ def _has_entry(entries: list[dict], summary: str, detail: str) -> bool:
     )
 
 
+def _management_complete(tasks_dir: Path, task_ids: list[str],
+                         log_values: dict[str, tuple[str, str]]) -> bool:
+    """重讀磁碟，確認反向提交的狀態與日誌均已完整落盤。"""
+    current = Plan.parse(tasks_dir)
+    for task_id in task_ids:
+        task = current.get(task_id)
+        if task is None or task.status != "TODO":
+            return False
+        if not _has_entry(read_entries(task.journal_path),
+                          *log_values[task_id]):
+            return False
+    return True
+
+
 def _rework_locked(cfg: Config, task_id: object, cascade: object,
                    reason: object, revert_code: object) -> int:
     """持鎖後完成所有預檢、保存 Git 現場，再寫入日誌與狀態。"""
@@ -424,12 +438,18 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                     task.id: read_entries(task.journal_path)
                     for task in record_changed
                 }
-                complete = all(
+                logs_complete = all(
                     _has_entry(record_entries[task.id],
                                *record_log_values[task.id])
                     for task in record_changed
                 )
-                if not complete:
+                statuses_complete = all(
+                    task.status == "TODO" for task in record_changed)
+                same_request = (
+                    record.cascade == cascade
+                    and record.reason == effective_reason
+                )
+                if not logs_complete:
                     if record.cascade != cascade or record.reason != effective_reason:
                         raise AgentsError(
                             "已有未完成的反向 checkpoint；請用完全相同參數重跑")
@@ -437,7 +457,11 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                         if task.status not in {original[task.id], "TODO"}:
                             raise AgentsError(
                                 f"反向 checkpoint 後任務狀態另有變動:{task.id}")
-                    _ensure_management_writable(record_changed)
+                if ((not logs_complete and same_request)
+                        or (logs_complete and statuses_complete
+                            and same_request)):
+                    if not logs_complete:
+                        _ensure_management_writable(record_changed)
                     changed = record_changed
                     journal_entries = record_entries
                     log_values = record_log_values
@@ -445,9 +469,14 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                     reverted = list(record.reverted)
                     revert_checkpoint = record.checkpoint
                     resuming = True
-                    print(
-                        f"{name}:{task_id} 續作未完成的反向 checkpoint:"
-                        f"{record.checkpoint}")
+                    if logs_complete:
+                        print(
+                            f"{name}:{task_id} 反向 checkpoint 的管理資料已落盤，"
+                            f"繼續更新報告:{record.checkpoint}")
+                    else:
+                        print(
+                            f"{name}:{task_id} 續作未完成的反向 checkpoint:"
+                            f"{record.checkpoint}")
         except (AgentsError, OSError, ValueError) as e:
             print(f"{name}:任務重開中止(Git 或續作預檢失敗:{e})，狀態未變更")
             return 1
@@ -533,8 +562,19 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                     set_status(task.path, "TODO")
                     print(f"  任務 {task.id}:{task.status} -> TODO")
         except (AgentsError, OSError) as e:
-            print(f"{name}:任務狀態寫入中斷({e})；請用相同參數重跑")
-            return 1
+            try:
+                complete = _management_complete(
+                    cfg.tasks_dir, [task.id for task in changed], log_values)
+            except (AgentsError, OSError, ValueError) as verify_error:
+                print(
+                    f"{name}:任務狀態寫入中斷({e})，且重讀磁碟失敗"
+                    f"({verify_error})；請用相同參數重跑")
+                return 1
+            if complete:
+                print(f"{name}:狀態寫入雖回報失敗，但管理資料已完整落盤")
+            else:
+                print(f"{name}:任務狀態寫入中斷({e})；請用相同參數重跑")
+                return 1
         try:
             for task in changed:
                 summary, detail = log_values[task.id]
@@ -544,8 +584,19 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                     task.journal_path, by="scheduler",
                     event="rework_requested", summary=summary, detail=detail)
         except (AgentsError, OSError) as e:
-            print(f"{name}:重開日誌寫入中斷({e})；請用相同參數重跑")
-            return 1
+            try:
+                complete = _management_complete(
+                    cfg.tasks_dir, [task.id for task in changed], log_values)
+            except (AgentsError, OSError, ValueError) as verify_error:
+                print(
+                    f"{name}:重開日誌寫入中斷({e})，且重讀磁碟失敗"
+                    f"({verify_error})；請用相同參數重跑")
+                return 1
+            if complete:
+                print(f"{name}:日誌寫入雖回報失敗，但管理資料已完整落盤")
+            else:
+                print(f"{name}:重開日誌寫入中斷({e})；請用相同參數重跑")
+                return 1
     else:
         try:
             # 預設路徑沿用 t001 的交易順序：日誌完成後才動狀態。

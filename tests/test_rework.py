@@ -659,6 +659,38 @@ class TestRework(unittest.TestCase):
         self.assertIn("TODO", report)
         self.assertIn("續作未完成的反向 checkpoint", second_output)
 
+    def test_revert_journal_persisted_before_error_finishes_report(self) -> None:
+        task = self._write_task(1, "DONE")
+        worktree, _ = self._worktree()
+        (worktree / "成果.txt").write_text("完成\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 完成成果")
+        from agents.plan import append_entry as real_append_entry
+
+        def persist_then_fail(*args, **kwargs):
+            real_append_entry(*args, **kwargs)
+            raise OSError("模擬寫入成功後驗證失敗")
+
+        with patch("agents.rework.append_entry", side_effect=persist_then_fail):
+            first_code, first_output = self._run(
+                revert_code=True, reason="重新設計")
+        revert_checkpoint = _git(worktree, "rev-parse", "HEAD")
+        second_code, second_output = self._run(
+            revert_code=True, reason="重新設計")
+
+        self.assertEqual(first_code, 0, first_output)
+        self.assertEqual(second_code, 0, second_output)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"),
+                         revert_checkpoint)
+        self.assertEqual(self._status(task), "TODO")
+        entries = read_entries(task.with_name("t001_task.r.toml"))
+        self.assertEqual(len(entries), 1)
+        self.assertIn(
+            f"反向 checkpoint: {revert_checkpoint}", entries[0]["detail"])
+        report = (self.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        self.assertIn("TODO", report)
+        self.assertIn("管理資料已完整落盤", first_output)
+        self.assertIn("繼續更新報告", second_output)
+
     def test_revert_status_interruption_resumes_cascade_without_second_revert(
             self) -> None:
         target = self._write_task(1, "DONE")
