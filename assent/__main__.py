@@ -1,5 +1,5 @@
 """CLI entry point: argparse subcommands run/status/check/report/verify/clean/
-accept/reject/rework/init."""
+accept/reject/rework/archive/init."""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,7 @@ from collections import Counter
 
 from assent import AssentError, engine
 from assent.accept import accept_all, accept_folder
+from assent.archive import archive_all, archive_folder, restore_folder
 from assent.clean import clean_folders
 from assent.config import list_task_folders, load_config, validate_config
 from assent.doctor import doctor as run_doctor
@@ -44,7 +45,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     "checks acceptance objectively, and auto-checkpoints git.",
     )
     sub = parser.add_subparsers(dest="command", required=True,
-                                metavar="{run,status,check,report,verify,clean,accept,reject,rework,init,doctor}")
+                                metavar="{run,status,check,report,verify,clean,accept,reject,rework,archive,init,doctor}")
 
     run_p = sub.add_parser(
         "run", help="Run the tasks in the given [FOLDER] until all are "
@@ -77,6 +78,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"Config file location (default: {_DEFAULT_CONFIG})")
     clean_p = sub.add_parser(
         "clean", help="Remove worktrees and merged branches that are provably redundant")
+
+    archive_p = sub.add_parser(
+        "archive", help="Retire a finished folder: clean it, then compress its plan "
+                        "into _archive/ and register it in the roster; --restore "
+                        "reverses one archive")
+    archive_p.add_argument(
+        "folder", nargs="?", metavar="FOLDER",
+        help="The finished work folder to archive or restore (omit only with --all)")
+    archive_p.add_argument(
+        "--all", action="store_true", dest="all_folders",
+        help="Archive every eligible finished folder in lexicographic order; "
+             "ineligible folders are skipped, not failed")
+    archive_p.add_argument(
+        "--restore", action="store_true",
+        help="Reverse one archive: extract the zip back to the live folder, "
+             "deregister it, and delete the zip (cannot be combined with --all)")
+    archive_p.add_argument(
+        "--config", default=_DEFAULT_CONFIG, metavar="PATH",
+        help=f"Config file location (default: {_DEFAULT_CONFIG})")
 
     accept_p = sub.add_parser(
         "accept", help="Transactionally integrate one reviewed, finished folder "
@@ -252,6 +272,17 @@ def _dispatch(argv: list[str]) -> int:
         if not args.all_folders and args.folder is None:
             parser.error("accept requires FOLDER or --all")
 
+    if args.command == "archive":
+        if args.restore:
+            if args.all_folders:
+                parser.error("archive's --restore and --all cannot be used together")
+            if args.folder is None:
+                parser.error("archive --restore requires FOLDER")
+        elif args.all_folders and args.folder is not None:
+            parser.error("archive's --all and FOLDER cannot be used together")
+        elif not args.all_folders and args.folder is None:
+            parser.error("archive requires FOLDER or --all")
+
     if args.command == "init":
         return run_init(args.path)
 
@@ -275,6 +306,15 @@ def _dispatch(argv: list[str]) -> int:
             print(f"Config error: {e}")
             return 1
         return accept_folder(cfg)
+    if args.command == "archive":
+        if args.all_folders:
+            return archive_all(args.config, assent_dir)
+        try:
+            cfg = load_config(args.config, args.folder)
+        except AssentError as e:
+            print(f"Config error: {e}")
+            return 1
+        return restore_folder(cfg) if args.restore else archive_folder(cfg)
     if args.command == "verify":
         try:
             cfg = load_config(args.config, args.folder)
