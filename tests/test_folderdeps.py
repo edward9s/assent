@@ -1,4 +1,4 @@
-"""工作資料夾層級依賴的解析、完成推導與循環檢查測試。"""
+"""Tests for folder-level dependency parsing, completion inference, and cycle checks."""
 import json
 import shutil
 import tempfile
@@ -15,19 +15,19 @@ _OK = 'python -c "raise SystemExit(0)"'
 
 
 def task_text(status: str = "TODO") -> str:
-    """產生足以供 ``Plan`` 解析的正式任務檔內容。"""
+    """Produce formal task file content that ``Plan`` can parse."""
     return "\n".join((
-        'title = "任務"',
+        'title = "Task"',
         "deps = []",
         'model = "lite"',
         f"status = {json.dumps(status)}",
         'scope = ["src/"]',
         f"verify = {json.dumps(_OK)}",
         'goal = """',
-        "完成工作。",
+        "Finish the work.",
         '"""',
         'acceptance = """',
-        "- 完成",
+        "- done",
         '"""',
         "",
     ))
@@ -75,7 +75,7 @@ class TestParseFolderDependencies(FolderDepsTestCase):
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
             'after = []\nbefore = ["other"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AgentsError, r"未知鍵.*有效鍵:after"):
+        with self.assertRaisesRegex(AgentsError, r"unknown keys.*valid keys: after"):
             parse_folder_dependencies(folder)
 
     def test_after_must_be_string_array(self):
@@ -83,28 +83,28 @@ class TestParseFolderDependencies(FolderDepsTestCase):
         for value in ('"first"', '["first", 2]'):
             (folder / "_folder.toml").write_text(
                 f"after = {value}\n", encoding="utf-8")
-            with self.assertRaisesRegex(AgentsError, "字串陣列"):
+            with self.assertRaisesRegex(AgentsError, "array of strings"):
                 parse_folder_dependencies(folder)
 
     def test_self_dependency_rejected(self):
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
             'after = ["work"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AgentsError, "不可依賴自己"):
+        with self.assertRaisesRegex(AgentsError, "must not depend on itself"):
             parse_folder_dependencies(folder)
 
     def test_invalid_dependency_name_rejected(self):
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
             'after = ["bad/name"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AgentsError, "工作資料夾名稱"):
+        with self.assertRaisesRegex(AgentsError, "not a valid task folder name"):
             parse_folder_dependencies(folder)
 
     def test_missing_folder_rejected(self):
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
             'after = ["missing"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AgentsError, "不存在"):
+        with self.assertRaisesRegex(AgentsError, "does not exist"):
             parse_folder_dependencies(folder)
 
     def test_folder_without_tasks_rejected(self):
@@ -113,7 +113,7 @@ class TestParseFolderDependencies(FolderDepsTestCase):
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
             'after = ["empty"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AgentsError, "沒有任務檔"):
+        with self.assertRaisesRegex(AgentsError, "no task files"):
             parse_folder_dependencies(folder)
 
     def test_folder_config_is_not_treated_as_task(self):
@@ -128,7 +128,7 @@ class TestInferFolderCompletion(FolderDepsTestCase):
         folder = self.make_folder("work", "DONE", "SKIP")
         result = infer_folder_completion(folder)
         self.assertTrue(result.complete)
-        self.assertIn("DONE 或 SKIP", result.reason)
+        self.assertIn("DONE or SKIP", result.reason)
 
     def test_todo_is_incomplete(self):
         result = infer_folder_completion(self.make_folder("work", "TODO"))
@@ -152,7 +152,7 @@ class TestInferFolderCompletion(FolderDepsTestCase):
         folder = self.make_folder("work")
         result = infer_folder_completion(folder)
         self.assertFalse(result.complete)
-        self.assertIn("沒有任務檔", result.reason)
+        self.assertIn("no task files", result.reason)
 
     def test_unfinished_prerequisites_include_status_counts(self):
         self.make_folder("base", "TODO", "WIP", "BLOCKED", "DONE", "SKIP")
@@ -166,7 +166,7 @@ class TestInferFolderCompletion(FolderDepsTestCase):
         self.assertEqual(result[0].total, 3)
         self.assertEqual(
             result[0].message(),
-            "前置資料夾 base 尚有 3 個未完成任務(TODO 1、WIP 1、BLOCKED 1)")
+            "Prerequisite folder base still has 3 unfinished task(s) (TODO 1, WIP 1, BLOCKED 1)")
 
 
 class TestFolderDependencyGraph(FolderDepsTestCase):

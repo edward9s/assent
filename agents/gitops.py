@@ -1,9 +1,10 @@
-"""git 操作:worktree、分支、乾淨/scope 檢查、commit、還原。
+"""Git operations: worktree, branches, clean/scope checks, commit, restore.
 
-全部以 cwd=專案根目錄執行 git,回傳前先檢查 returncode;git 缺席時給清楚錯誤訊息
-而非 traceback。`excludes` 為執行期產物的相對路徑清單(_agents.log、_report.md
-等):它們永遠不是輸入也不是檢查點內容,故不參與乾淨檢查、scope 檢查
-與 commit。
+All Git commands run with cwd=project root, and the return code is checked before use;
+a missing git binary gets a clear error message instead of a traceback. `excludes` is a
+list of relative paths for runtime artifacts (_agents.log, _report.md, etc.): they are
+never input or checkpoint content, so they never take part in clean checks, scope checks,
+or commits.
 """
 from __future__ import annotations
 
@@ -16,44 +17,45 @@ from agents import AgentsError
 
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    # core.quotepath=false:非 ASCII 檔名(中文等)git 預設會用八進位跳脫成純 ASCII
-    # (如 "\346\270\254\350\251\246.txt"),關掉後直接輸出原始 UTF-8 檔名。
+    # core.quotepath=false: by default Git octal-escapes non-ASCII filenames (Chinese, etc.)
+    # into pure ASCII (e.g. "\346\270\254\350\251\246.txt"); turning it off prints the raw
+    # UTF-8 filename instead.
     try:
         return subprocess.run(
             ["git", "-c", "core.quotepath=false", *args], cwd=root,
             capture_output=True, encoding="utf-8", errors="replace")
     except FileNotFoundError as e:
-        raise AgentsError("找不到 git 執行檔;請確認 git 已安裝並在 PATH 中") from e
+        raise AgentsError("git executable not found; confirm git is installed and on PATH") from e
 
 
 def _git(root: Path, *args: str) -> str:
     result = _run_git(root, *args)
     if result.returncode != 0:
         raise AgentsError(
-            f"git {' '.join(args)} 失敗(退出碼 {result.returncode}):"
+            f"git {' '.join(args)} failed (exit code {result.returncode}): "
             f"{result.stderr.strip() or result.stdout.strip()}")
     return result.stdout
 
 
 def _describe_change(line: str) -> str:
-    """把一行 git status --porcelain 翻成人看得懂的「狀態:路徑」。"""
+    """Translate one ``git status --porcelain`` line into a human-readable "status: path"."""
     code = line[:2]
     path = line[3:].strip().strip('"')
-    if " -> " in path:                       # rename:"old -> new",取 new
+    if " -> " in path:                       # rename: "old -> new", keep new
         path = path.split(" -> ", 1)[1].strip().strip('"')
     if code == "??":
-        label = "未追蹤(新檔)"
+        label = "untracked (new file)"
     elif "R" in code:
-        label = "已改名"
+        label = "renamed"
     elif "A" in code:
-        label = "已加入索引"
+        label = "staged"
     elif "D" in code:
-        label = "已刪除"
+        label = "deleted"
     elif "M" in code:
-        label = "已修改"
+        label = "modified"
     else:
-        label = f"變更({code.strip() or code})"
-    return f"{label}:{path}"
+        label = f"change ({code.strip() or code})"
+    return f"{label}: {path}"
 
 
 def _normalize(path_str: str) -> str:
@@ -74,18 +76,21 @@ def _meaningful_status_lines(output: str, excludes: Sequence[str]) -> list[str]:
 
 
 def ensure_clean(root: Path, excludes: Sequence[str] = ()) -> None:
-    """工作樹不乾淨(含未追蹤檔)-> raise AgentsError。"""
+    """Working tree is not clean (including untracked files) -> raise AgentsError."""
     out = _git(root, "status", "--porcelain")
     lines = _meaningful_status_lines(out, excludes)
     if lines:
         detail = "\n".join(f"  - {_describe_change(ln)}" for ln in lines)
         raise AgentsError(
-            "工作樹不乾淨,無法繼續(請先 commit 這些變更,或把不該進版控的檔加入 "
+            # clean.py matches the leading "Working tree is not clean" substring
+            # to recognise this as a cleanliness exception; keep that prefix intact.
+            "Working tree is not clean, cannot continue (please commit "
+            f"these changes first, or add files that should not be tracked to "
             f".gitignore):\n{detail}")
 
 
 def ensure_branch(root: Path, prefix: str) -> str:
-    """已在 <prefix> 分支上則沿用,否則從目前分支建 <prefix><UTC 時間戳>。"""
+    """Reuse the current branch if already on <prefix>; otherwise create <prefix><UTC timestamp>."""
     current = _git(root, "branch", "--show-current").strip()
     if current.startswith(prefix):
         return current
@@ -96,12 +101,12 @@ def ensure_branch(root: Path, prefix: str) -> str:
 
 
 def worktree_path(root: Path, folder: str) -> Path:
-    """回傳指定工作資料夾的固定 worktree 路徑。"""
+    """Return the fixed worktree path for the given task folder."""
     return root.parent / f"{root.name}.worktrees" / folder
 
 
 def _resolved_git_path(root: Path, value: str) -> Path:
-    """把 git 回傳的絕對或相對路徑正規化為可比較的絕對路徑。"""
+    """Normalize an absolute or relative path returned by git into a comparable absolute path."""
     path = Path(value.strip())
     if not path.is_absolute():
         path = root / path
@@ -109,7 +114,7 @@ def _resolved_git_path(root: Path, value: str) -> Path:
 
 
 def _is_repo_worktree(root: Path, path: Path) -> bool:
-    """判斷 path 是否為 root 所屬 repo 的有效頂層 worktree。"""
+    """Determine whether path is a valid top-level worktree of the repo owning root."""
     top = _run_git(path, "rev-parse", "--show-toplevel")
     common = _run_git(path, "rev-parse", "--git-common-dir")
     if top.returncode != 0 or common.returncode != 0:
@@ -122,42 +127,42 @@ def _is_repo_worktree(root: Path, path: Path) -> bool:
 
 
 def ensure_worktree(root: Path, folder: str) -> Path:
-    """建立或重用固定路徑、detached HEAD 的 git worktree。"""
+    """Create or reuse a fixed-path, detached-HEAD git worktree."""
     root = root.resolve()
     path = worktree_path(root, folder)
     if path.exists():
         if path.is_dir() and _is_repo_worktree(root, path):
             return path
         raise AgentsError(
-            f"worktree 路徑已存在,但不是本 repo 的有效 worktree:{path}")
+            f"worktree path already exists but is not a valid worktree of this repo: {path}")
 
-    # 路徑曾被手動刪除時,先清除主 repo 仍保留的 worktree metadata。
+    # If the path was manually deleted, clear stale worktree metadata still held by the main repo.
     _git(root, "worktree", "prune")
     _git(root, "worktree", "add", "--detach", str(path))
     return path
 
 
 def is_repo_worktree(root: Path, path: Path) -> bool:
-    """公開查詢 ``path`` 是否為 ``root`` 所屬 repo 的有效頂層 worktree。"""
+    """Publicly query whether ``path`` is a valid top-level worktree of the ``root`` repo."""
     return path.is_dir() and _is_repo_worktree(root.resolve(), path.resolve())
 
 
 def branches_with_prefix(root: Path, prefix: str) -> list[str]:
-    """列出本機 ``refs/heads`` 下指定前綴的分支，依名稱排序。"""
-    # 不把 prefix 直接當 ref pattern 傳給 Git；工作資料夾名稱雖已擋路徑
-    # 分隔符，仍可能含 *、?、[，必須避免萬用字元擴大清理範圍。
+    """List local ``refs/heads`` branches with the given prefix, sorted by name."""
+    # Do not pass prefix straight to Git as a ref pattern: task folder names already forbid
+    # path separators but may still contain *, ?, [ — wildcards must not widen cleanup scope.
     out = _git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
     return sorted(branch for line in out.splitlines()
                   if (branch := line.strip()).startswith(prefix))
 
 
 def current_branch(root: Path) -> str:
-    """回傳目前分支；detached HEAD 回空字串。"""
+    """Return the current branch; detached HEAD returns an empty string."""
     return _git(root, "branch", "--show-current").strip()
 
 
 def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
-    """判斷 ``ancestor`` 是否為 ``descendant`` 的祖先；查詢錯誤會明確失敗。"""
+    """Determine whether ``ancestor`` is an ancestor of ``descendant``; query errors fail loudly."""
     result = _run_git(root, "merge-base", "--is-ancestor", ancestor, descendant)
     if result.returncode == 0:
         return True
@@ -165,50 +170,51 @@ def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
         return False
     raise AgentsError(
         "git merge-base --is-ancestor "
-        f"{ancestor} {descendant} 失敗(退出碼 {result.returncode}):"
+        f"{ancestor} {descendant} failed (exit code {result.returncode}): "
         f"{result.stderr.strip() or result.stdout.strip()}")
 
 
 def remove_worktree(root: Path, path: Path) -> None:
-    """以 Git 的一般保護移除 worktree；刻意不提供強制參數。"""
+    """Remove a worktree using Git's ordinary safeguards; deliberately no force option."""
     _git(root, "worktree", "remove", str(path))
 
 
 def delete_branch(root: Path, branch: str) -> None:
-    """以 ``git branch -d`` 刪除已併入分支，保留 Git 的第二道保護。"""
+    """Delete an already-merged branch with ``git branch -d``, keeping Git's second safeguard."""
     _git(root, "branch", "-d", branch)
 
 
 def delete_branch_force(root: Path, branch: str) -> None:
-    """以 ``git branch -D`` 強制刪除分支;僅供人工裁決駁回路徑使用。
+    """Force-delete a branch with ``git branch -D``; for manual reject decisions only.
 
-    呼叫端必須先以 :func:`commit_of` 取得完整 tip hash 並持久存證,刪除後
-    在 gc 期限內仍可用 hash 救回。常規清理一律走 :func:`delete_branch`。
+    Callers must first record the full tip hash via :func:`commit_of` for durable evidence;
+    after deletion the hash can still recover the branch within the gc grace period. Routine
+    cleanup always goes through :func:`delete_branch`.
     """
     _git(root, "branch", "-D", branch)
 
 
 def commit_of(root: Path, ref: str) -> str:
-    """回傳 ``ref`` 指向的完整 commit hash，供刪除前持久存證。"""
+    """Return the full commit hash that ``ref`` points to, for durable evidence before deletion."""
     return _git(root, "rev-parse", ref).strip()
 
 
 def commit_message(root: Path, ref: str = "HEAD") -> str:
-    """回傳指定 commit 的完整訊息，供辨識可續作的持久 checkpoint。"""
+    """Return the full message of the given commit, to identify a resumable, durable checkpoint."""
     return _git(root, "show", "-s", "--format=%B", ref).rstrip("\r\n")
 
 
 def commit_history(
         root: Path, ref: str = "HEAD",
 ) -> list[tuple[str, tuple[str, ...], str]]:
-    """沿第一親代列出 commit hash、親代與主旨，無法解析時保守失敗。"""
+    """List commit hash, parents, and subject along first-parent history; fail closed if unparseable."""
     out = _git(root, "log", "--first-parent", "-z",
                "--format=%H%x00%P%x00%s", ref)
     values = out.split("\0")
     if values and values[-1] == "":
         values.pop()
     if len(values) % 3:
-        raise AgentsError("Git 歷史格式無法解析")
+        raise AgentsError("unable to parse Git history format")
 
     history: list[tuple[str, tuple[str, ...], str]] = []
     for index in range(0, len(values), 3):
@@ -216,25 +222,25 @@ def commit_history(
         parents = tuple(values[index + 1].split())
         subject = values[index + 2]
         if not commit or "\n" in commit or "\r" in commit:
-            raise AgentsError("Git 歷史格式無法解析")
+            raise AgentsError("unable to parse Git history format")
         history.append((commit, parents, subject))
     return history
 
 
 def revert_no_commit(root: Path, commits: Sequence[str]) -> None:
-    """依輸入順序反向套用 commits，但先不建立 commit。"""
+    """Reverse-apply commits in input order, without creating a commit yet."""
     if not commits:
-        raise AgentsError("沒有可反向套用的 commit")
+        raise AgentsError("no commits to revert")
     _git(root, "revert", "--no-commit", *commits)
 
 
 def abort_revert(root: Path) -> None:
-    """中止進行中的 git revert，回到該次操作開始前。"""
+    """Abort an in-progress git revert, returning to the state before it started."""
     _git(root, "revert", "--abort")
 
 
 def tracked_paths(root: Path, path: str, ref: str | None = None) -> list[str]:
-    """列出指定路徑下的索引檔案;有 ref 時改查該 commit/ref。"""
+    """List indexed files under the given path; with a ref, query that commit/ref instead."""
     normalized = _normalize(path)
     if ref is None:
         out = _git(root, "ls-files", "--", normalized)
@@ -250,14 +256,15 @@ def tracked_paths(root: Path, path: str, ref: str | None = None) -> list[str]:
 def changes_outside_scope(root: Path, scope: list[str],
                           since_ref: str | None = None,
                           excludes: Sequence[str] = ()) -> list[str]:
-    """回傳落在 scope 之外的變更路徑清單(工作區現況 + 選擇性含已 commit 的變更)。
+    """Return paths changed outside scope (current working tree + optionally committed changes).
 
-    - since_ref 給定時,額外把 since_ref..HEAD 之間已 commit 的變更(額度中斷/重試
-      期間建立的 wip 檢查點)也納入檢查,確保「保留進度不還原」後 scope 檢查
-      仍涵蓋該任務自起點以來的全部改動。
-    - scope 為空清單 = fail-closed,任何變更皆視為越界。這是刻意設計:圍堵無人
-      看管的執行 AI 是 scope 存在的目的,「沒寫 = 不限制」會讓保護悄悄失效。
-      (任務檔解析已強制 scope 非空,這裡的 fail-closed 是最後防線。)
+    - When since_ref is given, committed changes between since_ref..HEAD (wip checkpoints
+      created during quota interruption/retry) are also checked, so that after "keep progress,
+      never restore" the scope check still covers every change made since the task's start.
+    - An empty scope list fails closed: every change counts as out of scope. This is deliberate —
+      scope exists to contain an unsupervised executing AI, and "unwritten = unrestricted" would
+      let that protection quietly disappear. (Task-file parsing already forces scope to be
+      non-empty; this fail-closed behavior here is the last line of defense.)
     """
     excluded = {_normalize(e) for e in excludes}
     paths: list[str] = []
@@ -288,12 +295,13 @@ def changes_outside_scope(root: Path, scope: list[str],
 
 
 def _pathspec_excludes(root: Path, excludes: Sequence[str]) -> list[str]:
-    """過濾排除清單,只留可安全寫進 :(exclude) pathspec 的項目。
+    """Filter the exclude list down to entries safe to write into a :(exclude) pathspec.
 
-    已被 .gitignore 覆蓋的項目(如整個 .agents/ 不進版控的專案)本來就不會被
-    add,而且 pathspec 點名 ignored 路徑會讓 git add 以退出碼 1 拒絕——
-    check-ignore 退出碼 0 = ignored -> 濾掉;1 = 未忽略、128 = 錯誤 -> 保留
-    (保留錯誤項是保守選擇:真有問題時 add 會 fail-loud,不靜默吞掉)。
+    Entries already covered by .gitignore (e.g. a project where the whole .agents/ is
+    untracked) would never be added anyway, and naming an ignored path in a pathspec makes
+    ``git add`` refuse with exit code 1 — check-ignore exit code 0 = ignored -> drop it;
+    1 = not ignored, 128 = error -> keep it (keeping error cases is the conservative choice:
+    if something is genuinely wrong, add fails loudly instead of silently swallowing it).
     """
     keep: list[str] = []
     for e in excludes:
@@ -304,7 +312,7 @@ def _pathspec_excludes(root: Path, excludes: Sequence[str]) -> list[str]:
 
 
 def _embedded_repo_paths(root: Path) -> list[str]:
-    """找出目前工作區變更中帶有 .git 標記的內嵌 repo。"""
+    """Find embedded repos (marked by a .git entry) among the current working tree changes."""
     out = _git(root, "status", "--porcelain", "--untracked-files=all")
     paths: list[str] = []
     seen: set[str] = set()
@@ -322,10 +330,10 @@ def _embedded_repo_paths(root: Path) -> list[str]:
 
 
 def commit_all(root: Path, message: str, excludes: Sequence[str] = ()) -> None:
-    """git add -A(排除執行期產物與內嵌 repo)&& git commit -m message。"""
+    """git add -A (excluding runtime artifacts and embedded repos) && git commit -m message."""
     embedded = _embedded_repo_paths(root)
     for path in embedded:
-        print(f"警告:跳過內嵌 repo:{path},請人工處理")
+        print(f"warning: skipped embedded repo: {path}, handle it manually")
     all_excludes = [*excludes, *embedded]
     spec = ["--", "."] + [f":(exclude){e}"
                           for e in _pathspec_excludes(root, all_excludes)]
@@ -334,10 +342,11 @@ def commit_all(root: Path, message: str, excludes: Sequence[str] = ()) -> None:
 
 
 def commit_if_dirty(root: Path, message: str, excludes: Sequence[str] = ()) -> bool:
-    """工作樹有任何變更(含未追蹤檔)才 commit;回傳是否真的建立了 commit。
+    """Commit only if the working tree has any changes (including untracked); return whether it did.
 
-    engine 用它保留進度(額度中斷/使用者中斷的 wip 檢查點):tokens 已經燒掉,
-    產出絕不能丟——這是「以降低 tokens 消耗為優先」的直接推論。
+    The engine uses this to preserve progress (wip checkpoints on quota interruption/user
+    interruption): tokens have already been spent, so the output must never be discarded —
+    a direct consequence of "minimizing token spend takes priority."
     """
     out = _git(root, "status", "--porcelain")
     if not _meaningful_status_lines(out, excludes):
@@ -347,7 +356,7 @@ def commit_if_dirty(root: Path, message: str, excludes: Sequence[str] = ()) -> b
 
 
 def head_ref(root: Path) -> str | None:
-    """目前 HEAD 的 commit hash;無法取得(如空 repo)回 None。"""
+    """The current HEAD commit hash; returns None if unavailable (e.g. an empty repo)."""
     result = _run_git(root, "rev-parse", "HEAD")
     if result.returncode != 0:
         return None
@@ -355,10 +364,10 @@ def head_ref(root: Path) -> str | None:
 
 
 def restore(root: Path) -> None:
-    """丟棄工作區全部未 commit 變更:checkout -- . && clean -fd。
+    """Discard all uncommitted working-tree changes: checkout -- . && clean -fd.
 
-    注意:這會刪掉執行 AI 已經燒 tokens 做出的產出,engine 的正常流程一律不呼叫;
-    保留給人工救援用。
+    Note: this deletes output the executing AI already spent tokens producing; the engine's
+    normal flow never calls it. Reserved for manual rescue use only.
     """
     _git(root, "checkout", "--", ".")
     _git(root, "clean", "-fd")

@@ -33,14 +33,14 @@ class TestTerminalLogging(unittest.TestCase):
         task = self.root / ".agents" / folder / "t001_task.e.toml"
         task.parent.mkdir(parents=True, exist_ok=True)
         task.write_text(
-            'title = "任務"\n'
+            'title = "task"\n'
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
             'scope = ["agents/"]\n'
             'verify = "python -m unittest"\n'
-            'goal = "完成"\n'
-            'acceptance = "通過"\n', encoding="utf-8")
+            'goal = "done"\n'
+            'acceptance = "passed"\n', encoding="utf-8")
         return task
 
     def test_unique_ongoing_folder_selects_log_path(self):
@@ -105,20 +105,20 @@ class TestTerminalLogging(unittest.TestCase):
         with contextlib.redirect_stdout(terminal):
             with terminal_logging(["run", "--config", str(config)]) as path:
                 __import__("sys").stdout.write_terminal_only(
-                    "\r  額度重置:倒數 00:00:03 後重跑...")
-                self.assertNotIn("倒數", path.read_text(encoding="utf-8"))
-        self.assertIn("倒數 00:00:03", terminal.getvalue())
+                    "\r  quota reset: retrying in 00:00:03...")
+                self.assertNotIn("retrying", path.read_text(encoding="utf-8"))
+        self.assertIn("retrying in 00:00:03", terminal.getvalue())
 
     def test_each_run_truncates_previous_log(self):
         config = self.write_config()
         self.write_task()
         with terminal_logging(["run", "--config", str(config)]) as path:
-            print("第一次現場")
+            print("first session")
         with terminal_logging(["run", "--config", str(config)]):
-            print("第二次現場")
+            print("second session")
         logged = path.read_text(encoding="utf-8")
-        self.assertNotIn("第一次現場", logged)
-        self.assertIn("第二次現場", logged)
+        self.assertNotIn("first session", logged)
+        self.assertIn("second session", logged)
 
     def test_non_run_commands_do_not_create_or_change_log(self):
         config = self.write_config()
@@ -126,15 +126,15 @@ class TestTerminalLogging(unittest.TestCase):
         log_path = self.root / ".agents" / "plan01" / "_agents.log"
         for command in ("status", "check", "report", "init"):
             with terminal_logging([command, "--config", str(config)]):
-                print(f"{command} 輸出")
+                print(f"{command} output")
             self.assertFalse(log_path.exists())
 
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text("既有 run 現場", encoding="utf-8")
+        log_path.write_text("existing run session", encoding="utf-8")
         for command in ("status", "check", "report"):
             with terminal_logging([command, "--config", str(config)]):
-                print(f"{command} 輸出")
-        self.assertEqual(log_path.read_text(encoding="utf-8"), "既有 run 現場")
+                print(f"{command} output")
+        self.assertEqual(log_path.read_text(encoding="utf-8"), "existing run session")
 
 
 if __name__ == "__main__":

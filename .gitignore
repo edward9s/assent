@@ -3,7 +3,7 @@
 CLAUDE.md
 .anthropic/
 
-# agents 管理面與執行期產物
+# agents management plane and runtime artifacts
 .agents/
 
 # Python

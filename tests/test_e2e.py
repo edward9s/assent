@@ -1,6 +1,12 @@
-"""端到端演練:臨時 repo + 工作資料夾 + 可編劇本的 fake adapter,四劇本整合測試。
+"""End-to-end walkthrough: temporary repo + task folder + scriptable fake adapter, a set of
+scenario integration tests.
 
-獨立成一份測試基建(不跨檔匯入其他 test_*.py),與其餘測試檔慣例一致。
+Stands on its own test scaffolding (does not import other test_*.py across files), matching
+the convention of the other test files.
+
+Chinese literals that remain are deliberate user/upstream passthrough data (task titles,
+goals, journal summaries, AGENTS.md/instructions/format content) used to prove that
+non-English data flows through verbatim.
 """
 import contextlib
 import io
@@ -147,7 +153,7 @@ class TestScenarios(E2ETestCase):
         self.assertIn("t001  DONE", report)
 
     def test_smooth_run_three_tasks(self):
-        """順利劇本:三任務依序 DONE,三個 checkpoint,樹乾淨。"""
+        """Smooth scenario: three tasks reach DONE in order, three checkpoints, clean tree."""
         p1 = self.add_task(1)
         p2 = self.add_task(2, deps=("t001",))
         p3 = self.add_task(3, deps=("t002",))
@@ -168,8 +174,10 @@ class TestScenarios(E2ETestCase):
         self.assertEqual(porcelain, [])
 
     def test_fail_retry_then_pass(self):
-        """失敗重試劇本:首輪留越界檔 -> 重試提示含原因 -> 次輪補救通過。
-        產出絕不丟棄:越界檔最終仍在檢查點裡(次輪把它移進 scope)。"""
+        """Fail-then-retry scenario: first round leaves an out-of-scope file -> the retry
+        prompt carries the reason -> the second round fixes it and passes. Output is never
+        discarded: the out-of-scope file ends up in the checkpoint (the second round moves
+        it into scope)."""
         p1 = self.add_task(1, scope=("src/", "outside.py"))
         self.start()
 
@@ -180,21 +188,22 @@ class TestScenarios(E2ETestCase):
             return ok_result()
 
         def second(prompt):
-            # 修正:把越界檔移到 scope 內名稱
+            # fix: rename the out-of-scope file to a name inside scope
             root = self.execution_root()
             (root / "outside_tmp.py").rename(root / "outside.py")
             return ok_result()
 
         adapter = ScriptedAdapter([first, second])
         self.assertEqual(self.run_engine(adapter, once=True), 0)
-        self.assertIn("原因", adapter.calls[1])
+        self.assertIn("Reason:", adapter.calls[1])
         self.assertEqual(parse_task_file(p1).status, "DONE")
         self.assertIn("outside.py", self.git_at(
             self.execution_root(), "ls-files"))
 
     def test_blocked_gates_downstream_others_proceed(self):
-        """BLOCKED 劇本:t001 重試用盡 -> 調度器標 BLOCKED + r 檔記錄;
-        依賴它的 t002 被擋,無依賴的 t003 照跑,全在同一次 run 內。"""
+        """BLOCKED scenario: t001 exhausts retries -> scheduler marks BLOCKED + records in the
+        r file; t002 depending on it is blocked, and t003 with no deps runs anyway, all within
+        the same run."""
         p1 = self.add_task(1)
         p2 = self.add_task(2, deps=("t001",))
         p3 = self.add_task(3)
@@ -217,8 +226,9 @@ class TestScenarios(E2ETestCase):
                             for e in read_entries(journal_path_for(p1))))
 
     def test_quota_interrupt_wip_then_resume(self):
-        """額度劇本:第一輪額度耗盡 -> wip 檢查點 + r 檔 quota 記錄 -> 假時鐘
-        等待 5+2 分鐘 -> 帶接續提示重跑同一任務成功。"""
+        """Quota scenario: first round exhausts quota -> wip checkpoint + r-file quota record
+        -> fake clock waits 5+2 minutes -> reruns the same task with a resume prompt and
+        succeeds."""
         p1 = self.add_task(1)
         self.start()
         t0 = datetime(2026, 3, 1, tzinfo=timezone.utc)
@@ -235,7 +245,7 @@ class TestScenarios(E2ETestCase):
         rc = self.run_engine(adapter, sleep=sleeps.append, now=lambda: t0)
         self.assertEqual(rc, 0)
         self.assertAlmostEqual(sum(sleeps), 420, delta=1)
-        self.assertIn("接續", adapter.calls[1])
+        self.assertIn("resume", adapter.calls[1])
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(plan01/t001): ")
                             for s in subjects))
@@ -285,7 +295,7 @@ class TestWorktreeScenarios(E2ETestCase):
         self.assertIn(str(task.resolve()), adapter.calls[0])
         self.assertIn(str((self.root / ".agents" / "instructions.md").resolve()),
                       adapter.calls[0])
-        self.assertIn("專案規則 AGENTS.md", adapter.calls[0])
+        self.assertIn("project rules AGENTS.md", adapter.calls[0])
         self.assertNotIn(str((self.root / "AGENTS.md").resolve()),
                          adapter.calls[0])
         self.assertEqual(parse_task_file(task).status, "DONE")
@@ -303,10 +313,10 @@ class TestWorktreeScenarios(E2ETestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.status(cfg), 0)
-        self.assertIn(f"目前分支:{worktree_branch}", out.getvalue())
+        self.assertIn(f"Current branch: {worktree_branch}", out.getvalue())
         self.assertIn("auto(plan01/t001)", out.getvalue())
         report = engine.render_report(cfg, engine.Plan.parse(cfg.tasks_dir))
-        self.assertIn(f"分支:{worktree_branch}", report)
+        self.assertIn(f"Branch: {worktree_branch}", report)
         self.assertIn("t001  DONE", report)
         self.assertIn("[", report)
 
@@ -360,7 +370,7 @@ class TestWorktreeScenarios(E2ETestCase):
 
         self.assertEqual(self.run_engine(adapter, once=True), 0)
         self.assertTrue(worktree.exists())
-        self.assertIn("不存在就略過", adapter.calls[0])
+        self.assertIn("skip if absent", adapter.calls[0])
 
     def test_two_folders_use_independent_worktrees_and_branches(self):
         self.configure_git_run()

@@ -1,4 +1,5 @@
-"""reject 子命令測試：驗證駁回流程與 clean 模組完全分流。"""
+"""Tests for the reject subcommand: verify the reject flow is fully split from the
+clean module."""
 import contextlib
 import io
 import shutil
@@ -24,7 +25,7 @@ def _git(root: Path, *args: str) -> str:
 
 
 class TestReject(unittest.TestCase):
-    """人工裁決駁回的預檢、封存、強制清除與任務狀態重置。"""
+    """Reject's precheck, archival, force-removal, and task-status reset."""
 
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp())
@@ -33,7 +34,7 @@ class TestReject(unittest.TestCase):
         _git(self.root, "config", "user.name", "Test")
         _git(self.root, "config", "user.email", "test@example.com")
         (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
-        (self.root / "README.md").write_text("起點\n", encoding="utf-8")
+        (self.root / "README.md").write_text("init\n", encoding="utf-8")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "init")
 
@@ -56,14 +57,14 @@ class TestReject(unittest.TestCase):
     def _write_task(self, number: int, status: str) -> Path:
         path = self.tasks_dir / f"t{number:03d}_task.e.toml"
         path.write_text(
-            'title = "任務"\n'
+            'title = "task"\n'
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
             'scope = ["agents/"]\n'
             'verify = "python -m unittest"\n'
-            'goal = "完成任務"\n'
-            'acceptance = "驗證通過"\n',
+            'goal = "finish task"\n'
+            'acceptance = "verification passes"\n',
             encoding="utf-8")
         return path
 
@@ -71,7 +72,7 @@ class TestReject(unittest.TestCase):
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.startswith("status"):
                 return line.split('"')[1]
-        raise AssertionError(f"{path} 沒有 status 行")
+        raise AssertionError(f"{path} has no status line")
 
     def _run_reject(self) -> tuple[int, str]:
         output = io.StringIO()
@@ -83,8 +84,8 @@ class TestReject(unittest.TestCase):
         worktree = gitops.ensure_worktree(self.root, self.folder)
         branch = gitops.ensure_branch(worktree, f"{self.folder}/")
         if commit:
-            (worktree / "成果.txt").write_text(branch, encoding="utf-8")
-            gitops.commit_all(worktree, "完成成果")
+            (worktree / "result.txt").write_text(branch, encoding="utf-8")
+            gitops.commit_all(worktree, "finish result")
         return worktree, branch
 
     def test_clean_module_does_not_expose_reject(self) -> None:
@@ -105,25 +106,26 @@ class TestReject(unittest.TestCase):
         self.assertFalse(self.container.exists())
         self.assertEqual(gitops.branches_with_prefix(
             self.root, f"{self.folder}/"), [])
-        # 非同前綴分支(主分支)不受影響。
+        # A branch without this prefix (the main branch) is unaffected.
         self.assertTrue(_git(self.root, "branch", "--show-current"))
         self.assertIn(tip, output)
-        self.assertIn(f"分支 {branch}(tip {tip}):已刪", output)
-        # DONE -> TODO 並在 r 檔留下可救援的完整 Git 存證；SKIP/TODO 不動。
+        self.assertIn(f"branch {branch} (tip {tip}): deleted", output)
+        # DONE -> TODO leaves recoverable full Git evidence in the r file; SKIP/TODO
+        # are untouched.
         self.assertEqual(self._task_status(done), "TODO")
         self.assertEqual(self._task_status(skipped), "SKIP")
         self.assertEqual(self._task_status(todo), "TODO")
         entries = read_entries(self.tasks_dir / "t001_task.r.toml")
         self.assertEqual(entries[-1]["event"], "rejected")
         self.assertEqual(entries[-1]["by"], "scheduler")
-        self.assertIn(f"分支 {branch} tip {tip}", entries[-1]["detail"])
+        self.assertIn(f"branch {branch} tip {tip}", entries[-1]["detail"])
         self.assertFalse((self.tasks_dir / "t002_task.r.toml").exists())
-        self.assertIn("駁回完成(重置 1 個任務為 TODO)", output)
+        self.assertIn("reject complete (1 task(s) reset to TODO)", output)
 
     def test_reject_archives_dirty_worktree_before_removal(self) -> None:
         self._write_task(1, "WIP")
         worktree, branch = self._worktree_branch(commit=True)
-        (worktree / "未提交.txt").write_text("殘留\n", encoding="utf-8")
+        (worktree / "uncommitted.txt").write_text("leftover\n", encoding="utf-8")
 
         code, output = self._run_reject()
 
@@ -131,12 +133,12 @@ class TestReject(unittest.TestCase):
         self.assertFalse(worktree.exists())
         self.assertEqual(gitops.branches_with_prefix(
             self.root, f"{self.folder}/"), [])
-        self.assertIn("未提交變更已封存為 wip commit", output)
+        self.assertIn("uncommitted changes archived as a wip commit", output)
 
     def test_reject_invalid_plan_preserves_git_state(self) -> None:
         done = self._write_task(1, "DONE")
         with open(done, "a", encoding="utf-8") as stream:
-            stream.write('unknown = "破壞格式"\n')
+            stream.write('unknown = "broken format"\n')
         worktree, branch = self._worktree_branch(commit=True)
 
         code, output = self._run_reject()
@@ -146,8 +148,8 @@ class TestReject(unittest.TestCase):
         self.assertIn(branch, gitops.branches_with_prefix(
             self.root, f"{self.folder}/"))
         self.assertEqual(self._task_status(done), "DONE")
-        self.assertIn("任務檔無法解析", output)
-        self.assertIn("Git 現場未變動", output)
+        self.assertIn("task files could not be parsed", output)
+        self.assertIn("Git scene unchanged", output)
 
     def test_reject_busy_lock_returns_one_and_touches_nothing(self) -> None:
         done = self._write_task(1, "DONE")
@@ -161,7 +163,7 @@ class TestReject(unittest.TestCase):
         self.assertIn(branch, gitops.branches_with_prefix(
             self.root, f"{self.folder}/"))
         self.assertEqual(self._task_status(done), "DONE")
-        self.assertIn("駁回中止(run 進行中)", output)
+        self.assertIn("reject aborted (a run is in progress)", output)
 
     def test_reject_missing_lock_returns_one(self) -> None:
         done = self._write_task(1, "DONE")
@@ -171,20 +173,20 @@ class TestReject(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertEqual(self._task_status(done), "DONE")
-        self.assertIn("駁回中止", output)
+        self.assertIn("reject aborted", output)
 
     def test_reject_git_failure_skips_task_reset(self) -> None:
         done = self._write_task(1, "DONE")
         self._worktree_branch(commit=True)
 
         with patch("agents.reject.gitops.delete_branch_force",
-                   side_effect=AgentsError("模擬刪除失敗")):
+                   side_effect=AgentsError("simulated deletion failure")):
             code, output = self._run_reject()
 
         self.assertEqual(code, 1)
         self.assertEqual(self._task_status(done), "DONE")
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
-        self.assertIn("任務檔未重置", output)
+        self.assertIn("task files not reset", output)
 
     def test_reject_is_idempotent_after_success(self) -> None:
         self._write_task(1, "DONE")
@@ -195,8 +197,8 @@ class TestReject(unittest.TestCase):
         code, output = self._run_reject()
 
         self.assertEqual(code, 0)
-        self.assertIn("worktree 不存在", output)
-        self.assertIn("重置 0 個任務", output)
+        self.assertIn("worktree does not exist", output)
+        self.assertIn("0 task(s) reset", output)
 
 
 if __name__ == "__main__":

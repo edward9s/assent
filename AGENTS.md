@@ -2,31 +2,53 @@
 
 ## Project
 
-agents — AI 計畫格式 + 自動調度器。純 Python 3.11+(僅標準庫,tomllib),
-Windows 優先、跨平台。CLI 子命令:run / status / check / report / clean /
-reject / rework / init。
-原始碼在 `agents/`,測試在 `tests/`(unittest,不用 pytest)。
+agents — an AI plan format plus an automatic scheduler. Pure Python 3.11+
+(standard library only, tomllib), Windows-first and cross-platform. CLI
+subcommands: run / status / check / report / clean / reject / rework / init.
+Source lives in `agents/`, tests in `tests/` (unittest, not pytest).
 
 ## Permanent constraints
 
-- 只用 Python 標準庫,不引入第三方相依。
-- Windows 相容優先:路徑用 pathlib、輸出強制 utf-8、鎖用 msvcrt(POSIX 用 fcntl)。
-- 測試命令:`python -m unittest discover -s tests`,改動必須讓全部測試通過。
-- 語言分層:識別字(函式、類別、變數名)與對外 API 一律英文;註解、docstring、
-  使用者訊息一律正體中文(台灣用語),風格比照現有模組(先讀再寫),不用未經解釋
-  的英語行話直譯。同一層不中英夾雜(例如同一批 docstring 不可有的中文有的英文)。
-- 註解不用只有作者當下懂的內部代號(如工作階段 `W1`/`W5`);改用「日期 + 做了什麼」
-  的自述句,讓半年後的自己與未來讀者不必查考。已完成的事就寫結論,不要留「待某階段
-  校正」這類指向消失脈絡的懸置註記。
-- 燒過 tokens 的產出絕不丟棄:任何流程改動不得引入「失敗即還原工作區」的行為。
-- scope 檢查 fail-closed 是安全底線,不得放寬其語意。
-- git 永遠必須,不得引入停用開關或無 git 的降級模式。
-- 不得引入手工維護的「目前資料夾」指標;工作資料夾由參數明示,或由任務檔
-  事實推導,歧義一律拒絕。
-- `build/lib/` 是舊建置產物,永遠不要改它。
-- `model` 與 `effort` 是正交的抽象檔位:`model` 使用 prime/core/lite;
-  選填的 `effort` 使用 low/medium/high,只在任務需偏離模型預設時明寫。
-  `high` 表示可攜的高推理投入,不等於廠牌原生最高檔;adapter 不得靜默忽略
-  或升降任務明寫的 effort。廠牌特有 effort 值屬設定檔對映(與 models
-  對照表同級),不得硬編於 adapter 程式碼。
-- 使用 agents 時,請先讀專案主工作樹的 `.agents/instructions.md`;worktree session 以調度器提示的絕對路徑為準。 <!-- agents-instructions -->
+- Standard library only; introduce no third-party dependencies.
+- Windows compatibility comes first: use pathlib for paths, force utf-8 output,
+  lock with msvcrt (fcntl on POSIX).
+- Test command: `python -m unittest discover -s tests`; every change must keep
+  the whole suite passing.
+- Language policy (English is canonical, Traditional Chinese is a reader
+  translation):
+  - English is canonical for identifiers and public APIs, tracked
+    project/technical documents, `AGENTS.md`, packaged templates, prompts,
+    configuration comments, source and test comments and docstrings, CLI help,
+    diagnostics, status/report headings, and scheduler-generated log text.
+  - Traditional Chinese (Taiwan usage) reader documentation lives only in
+    `README.zh-TW.md` and `docs/zh-TW/`; those pages are translations and
+    identify English as canonical.
+  - User-authored task titles, notes and reasons, existing task and history
+    logs, upstream CLI raw output, and intentional Unicode or external-protocol
+    fixtures stay verbatim and are not translated as data.
+  - Do not place English and Chinese canonical contracts side by side in a
+    generated `.agents/`; there is exactly one executable English contract.
+- Comments must not rely on internal codes only the author understands in the
+  moment (such as session labels `W1`/`W5`); use self-describing "date + what
+  was done" statements so that the author six months later, and future readers,
+  need not go digging. State the conclusion for finished work; do not leave
+  dangling notes like "correct this in some later phase" that point at vanished
+  context.
+- Token-burned output is never discarded: no process change may introduce
+  "revert the workspace on failure" behavior.
+- The fail-closed scope check is a safety floor; its meaning must not be
+  relaxed.
+- git is always required; no disable switch or git-less degraded mode may be
+  introduced.
+- Do not introduce a hand-maintained "current folder" pointer; the work folder
+  is stated explicitly by argument or derived from task-file facts, and any
+  ambiguity is refused.
+- `build/lib/` is an old build artifact; never modify it.
+- `model` and `effort` are orthogonal abstract tiers: `model` uses
+  prime/core/lite; the optional `effort` uses low/medium/high and is written
+  explicitly only when a task must deviate from the model default. `high` means
+  a portable high reasoning investment, not a vendor's native maximum tier; an
+  adapter must not silently ignore or up/down-shift an effort a task states
+  explicitly. Vendor-specific effort values belong to configuration mappings
+  (peers of the models table) and must not be hardcoded in adapter code.
+- When using agents, first read `.agents/instructions.md` in the project's main worktree; a worktree session uses the absolute path the scheduler provides. <!-- agents-instructions -->

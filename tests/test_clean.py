@@ -1,4 +1,5 @@
-"""clean 子命令測試：以真實 Git repo 驗證所有安全證明與動作順序。"""
+"""Tests for the clean subcommand: verify every safety proof and action order against
+a real Git repo."""
 import contextlib
 import io
 import shutil
@@ -29,7 +30,7 @@ class TestClean(unittest.TestCase):
         _git(self.root, "config", "user.name", "Test")
         _git(self.root, "config", "user.email", "test@example.com")
         (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
-        (self.root / "README.md").write_text("起點\n", encoding="utf-8")
+        (self.root / "README.md").write_text("init\n", encoding="utf-8")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "init")
 
@@ -71,14 +72,14 @@ class TestClean(unittest.TestCase):
         worktree = gitops.ensure_worktree(self.root, self.folder)
         branch = gitops.ensure_branch(worktree, f"{self.folder}/")
         if commit:
-            (worktree / "成果.txt").write_text(branch, encoding="utf-8")
-            gitops.commit_all(worktree, "完成成果")
+            (worktree / "result.txt").write_text(branch, encoding="utf-8")
+            gitops.commit_all(worktree, "finish result")
         return worktree, branch
 
     def test_clean_merged_worktree_and_all_prefixed_branches(self) -> None:
         worktree, branch = self._worktree_branch(commit=True)
         _git(self.root, "merge", "--ff-only", branch)
-        _git(self.root, "branch", f"{self.folder}/較早", "HEAD")
+        _git(self.root, "branch", f"{self.folder}/older", "HEAD")
 
         code, output = self._run_clean()
 
@@ -87,9 +88,9 @@ class TestClean(unittest.TestCase):
         self.assertFalse(self.container.exists())
         self.assertEqual(gitops.branches_with_prefix(
             self.root, f"{self.folder}/"), [])
-        self.assertIn("已清(worktree", output)
-        self.assertIn(f"分支 {branch}:已清", output)
-        self.assertIn(f"分支 {self.folder}/較早:已清", output)
+        self.assertIn("cleaned (worktree", output)
+        self.assertIn(f"branch {branch}: cleaned", output)
+        self.assertIn(f"branch {self.folder}/older: cleaned", output)
 
     def test_container_with_other_worktree_is_retained(self) -> None:
         worktree, branch = self._worktree_branch(commit=True)
@@ -102,21 +103,23 @@ class TestClean(unittest.TestCase):
         self.assertFalse(worktree.exists())
         self.assertTrue(other.exists())
         self.assertTrue(self.container.exists())
-        self.assertIn("已清(worktree", output)
+        self.assertIn("cleaned (worktree", output)
 
     def test_leftover_empty_container_is_removed(self) -> None:
-        """worktree 已由其他途徑移除、僅剩空容器時,入口補刪不受跳過影響。"""
+        """When the worktree has already been removed some other way and only an
+        empty container remains, the entry-point cleanup removes it regardless of
+        the skip outcome."""
         self.container.mkdir()
 
         code, output = self._run_clean()
 
         self.assertEqual(code, 0)
         self.assertFalse(self.container.exists())
-        self.assertIn("沒有可清理的 worktree 或分支", output)
+        self.assertIn("no worktree or branch to clean up", output)
 
     def test_dirty_worktree_is_retained(self) -> None:
         worktree, branch = self._worktree_branch()
-        (worktree / "未追蹤.txt").write_text("不可丟\n", encoding="utf-8")
+        (worktree / "untracked.txt").write_text("do not discard\n", encoding="utf-8")
 
         code, output = self._run_clean()
 
@@ -124,10 +127,10 @@ class TestClean(unittest.TestCase):
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
             self.root, f"{self.folder}/"))
-        self.assertIn("worktree 不乾淨,保留", output)
+        self.assertIn("worktree not clean, retained", output)
 
     def test_unmerged_branch_retains_worktree_and_every_branch(self) -> None:
-        merged = f"{self.folder}/已併入"
+        merged = f"{self.folder}/merged"
         _git(self.root, "branch", merged, "HEAD")
         worktree, unmerged = self._worktree_branch(commit=True)
 
@@ -137,8 +140,9 @@ class TestClean(unittest.TestCase):
         self.assertTrue(worktree.exists())
         branches = gitops.branches_with_prefix(self.root, f"{self.folder}/")
         self.assertEqual(branches, sorted([merged, unmerged]))
-        self.assertIn(f"分支 {unmerged}:跳過(尚未併入,保留)", output)
-        self.assertIn(f"分支 {merged}:跳過(同前綴仍有尚未併入分支,保留)", output)
+        self.assertIn(f"branch {unmerged}: skipped (not yet merged, retained)", output)
+        self.assertIn(f"branch {merged}: skipped (another same-prefix branch is "
+                      "not yet merged, retained)", output)
 
     def test_busy_lock_refuses_cleanup(self) -> None:
         worktree, branch = self._worktree_branch()
@@ -149,10 +153,10 @@ class TestClean(unittest.TestCase):
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
             self.root, f"{self.folder}/"))
-        self.assertIn("run 進行中,拒絕清理", output)
+        self.assertIn("a run is in progress, refusing cleanup", output)
 
     def test_merged_branch_without_worktree_is_deleted(self) -> None:
-        branch = f"{self.folder}/殘留"
+        branch = f"{self.folder}/leftover"
         _git(self.root, "branch", branch, "HEAD")
 
         code, output = self._run_clean()
@@ -160,20 +164,20 @@ class TestClean(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn(branch, gitops.branches_with_prefix(
             self.root, f"{self.folder}/"))
-        self.assertIn("worktree 不存在", output)
-        self.assertIn(f"分支 {branch}:已清", output)
+        self.assertIn("worktree does not exist", output)
+        self.assertIn(f"branch {branch}: cleaned", output)
 
     def test_git_remove_failure_is_reported_and_returns_one(self) -> None:
         worktree, branch = self._worktree_branch()
         with patch("agents.clean.gitops.remove_worktree",
-                   side_effect=AgentsError("模擬 Windows 檔案佔用")):
+                   side_effect=AgentsError("simulated Windows file lock")):
             code, output = self._run_clean()
 
         self.assertEqual(code, 1)
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
             self.root, f"{self.folder}/"))
-        self.assertIn("模擬 Windows 檔案佔用", output)
+        self.assertIn("simulated Windows file lock", output)
 
     def test_git_failure_does_not_stop_later_folder(self) -> None:
         worktree, _ = self._worktree_branch()
@@ -184,14 +188,14 @@ class TestClean(unittest.TestCase):
             'status = "DONE"\n', encoding="utf-8")
         (second_dir / "agents.lock").write_text(
             'folder = "plan02"\n', encoding="utf-8")
-        second_branch = f"{second}/殘留"
+        second_branch = f"{second}/leftover"
         _git(self.root, "branch", second_branch, "HEAD")
         second_cfg = load_config(self.config_path, second)
         before = self._agents_snapshot()
 
         output = io.StringIO()
         with patch("agents.clean.gitops.remove_worktree",
-                   side_effect=AgentsError("第一項失敗")), \
+                   side_effect=AgentsError("first item failed")), \
                 contextlib.redirect_stdout(output):
             code = clean_folders([self.cfg, second_cfg])
 
@@ -199,13 +203,13 @@ class TestClean(unittest.TestCase):
         self.assertTrue(worktree.exists())
         self.assertNotIn(second_branch, gitops.branches_with_prefix(
             self.root, f"{second}/"))
-        self.assertIn("第一項失敗", output.getvalue())
-        self.assertIn(f"分支 {second_branch}:已清", output.getvalue())
+        self.assertIn("first item failed", output.getvalue())
+        self.assertIn(f"branch {second_branch}: cleaned", output.getvalue())
         self.assertEqual(self._agents_snapshot(), before)
 
     def test_missing_lock_fails_closed_without_creating_one(self) -> None:
         (self.tasks_dir / "agents.lock").unlink()
-        branch = f"{self.folder}/殘留"
+        branch = f"{self.folder}/leftover"
         _git(self.root, "branch", branch, "HEAD")
 
         code, output = self._run_clean()
@@ -214,18 +218,18 @@ class TestClean(unittest.TestCase):
         self.assertFalse((self.tasks_dir / "agents.lock").exists())
         self.assertIn(branch, gitops.branches_with_prefix(
             self.root, f"{self.folder}/"))
-        self.assertIn("無法在不改動 .agents", output)
+        self.assertIn("without modifying .agents", output)
 
     def test_clean_detached_unmerged_head_is_retained(self) -> None:
         worktree = gitops.ensure_worktree(self.root, self.folder)
-        (worktree / "游離成果.txt").write_text("不可丟\n", encoding="utf-8")
-        gitops.commit_all(worktree, "游離成果")
+        (worktree / "detached_result.txt").write_text("do not discard\n", encoding="utf-8")
+        gitops.commit_all(worktree, "detached result")
 
         code, output = self._run_clean()
 
         self.assertEqual(code, 0)
         self.assertTrue(worktree.exists())
-        self.assertIn("worktree HEAD 尚未併入,保留", output)
+        self.assertIn("worktree HEAD not yet merged, retained", output)
 
 
 if __name__ == "__main__":

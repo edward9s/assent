@@ -1,6 +1,7 @@
-"""Adapter 介面與共用資料型別。
+"""Adapter interface and shared data types.
 
-額度訊息的偵測與解析封裝在各 adapter 內,主迴圈不感知廠牌差異。
+Quota message detection and parsing are encapsulated inside each adapter; the main loop
+stays unaware of vendor differences.
 """
 from __future__ import annotations
 
@@ -18,29 +19,29 @@ if TYPE_CHECKING:
 @dataclass
 class TaskResult:
     exit_code: int
-    output: str                    # 子程序輸出全文(逐行原文)
-    quota_exhausted: bool          # True = 額度耗盡,本輪不計失敗
-    reset_at: datetime | None      # 解析得到的重置時間;解析不到為 None
+    output: str                    # Full subprocess output (verbatim, line by line)
+    quota_exhausted: bool          # True = quota exhausted; this round doesn't count as a failure
+    reset_at: datetime | None      # Parsed reset time; None if it couldn't be parsed
 
 
-class Adapter:                     # 各廠牌 adapter 的基底
+class Adapter:                     # Base class for each vendor's adapter
     def resolve_model(self, model: str) -> str:
-        """把任務抽象檔位解析成這次傳給 CLI 的 ``--model`` 值。"""
+        """Resolve the task's abstract tier into the ``--model`` value passed to the CLI."""
         return model
 
     def run_task(self, prompt: str, requested_model: str,
                  requested_effort: str | None,
                  cwd: Path) -> TaskResult:
-        """使用 engine 已解析的 CLI 模型與 effort 實際值執行任務。"""
+        """Run the task using the concrete CLI model and effort already resolved by the engine."""
         raise NotImplementedError
 
 
 def get_adapter(name: str, cfg: "Config") -> Adapter:
-    """依名稱取得 adapter 實例;cfg 於此注入(含檔位->型號對照表)。"""
+    """Get an adapter instance by name; cfg is injected here (includes the tier -> model mapping)."""
     if name == "claude":
-        from agents.adapters.claude import ClaudeAdapter  # 延遲載入避免循環匯入
+        from agents.adapters.claude import ClaudeAdapter  # Deferred import to avoid a circular import
         return ClaudeAdapter(cfg)
     if name == "codex":
         from agents.adapters.codex import CodexAdapter
         return CodexAdapter(cfg)
-    raise AgentsError(f"未知的 adapter:{name!r}(目前內建 'claude' / 'codex')")
+    raise AgentsError(f"unknown adapter: {name!r} (built in: 'claude' / 'codex')")

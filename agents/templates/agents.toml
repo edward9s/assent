@@ -1,44 +1,49 @@
-# agents 調度器設定。工作資料夾由命令列明示或任務檔現況自動推導。
-# 所有相對路徑以專案根目錄(= .agents 的上層)為基準。
+# agents scheduler configuration. The work folder is stated explicitly on the
+# command line or derived from current task-file state.
+# All relative paths are based on the project root (= the parent of .agents).
 
 [watchdog]
-stall_minutes = 30                # session 連續無輸出幾分鐘判定卡死;0 = 關閉
+stall_minutes = 30                # minutes of no session output before it is judged stalled; 0 = off
 
 [run]
-retry_per_task = 1                # 驗收失敗後的重試次數
-quota_poll_minutes = 30           # 無法解析額度重置時間時的輪詢間隔
+retry_per_task = 1                # number of retries after a verification failure
+quota_poll_minutes = 30           # polling interval when the quota reset time cannot be parsed
 
 [adapter]
-name = "claude"                   # "claude" 或 "codex"
+name = "claude"                   # "claude" or "codex"
 
 [adapter.claude]
 command = "claude"
-# 傳給 Claude CLI 的額外參數;預設略過互動式權限確認,供無人值守執行。
-# 若改用 acceptEdits,須以 --allowedTools 放行驗收命令與任務收尾所需工具。
+# Extra arguments passed to the Claude CLI; the default skips the interactive
+# permission prompt for unattended execution.
+# If switching to acceptEdits, use --allowedTools to permit the verification
+# command and the tools needed for task closeout.
 extra_args = ["--permission-mode", "bypassPermissions"]
-# 抽象檔位 -> CLI --model 參數(任務檔只寫 prime/core/lite)
+# abstract tier -> CLI --model argument (task files write only prime/core/lite)
 [adapter.claude.models]
 prime = "fable"
 core  = "opus"
 lite  = "sonnet"
-# 任務檔未標 effort 時各檔位的預設值(low/medium/high)
+# default value per tier when a task file states no effort (low/medium/high)
 [adapter.claude.default_effort]
 prime = "high"
 core  = "high"
 lite  = "medium"
-# 抽象 effort -> CLI 實際值;查找順序:檔位分節 > 平面 > 等值。
-# 兩層與各鍵皆可省略;全部省略即維持 low/medium/high 等值直通。
+# abstract effort -> actual CLI value; lookup order: tier subsection > flat > identity.
+# both layers and every key are optional; omit everything for low/medium/high identity pass-through.
 # [adapter.claude.efforts]
 # low = "low"
 # medium = "medium"
 # high = "high"
 # [adapter.claude.efforts.lite]
-# high = "max"                  # 只覆寫 lite/high,其他格不受影響
+# high = "max"                  # overrides only lite/high, other tiers unaffected
 
 [adapter.codex]
 command = "codex"
-# 傳給 Codex CLI 的額外參數;預設允許寫入系統暫存目錄與主樹 `.agents/`。
-# 權限需求與收緊時的限制見 format.md「adapter 沙箱的硬需求」。
+# Extra arguments passed to the Codex CLI; the default permits writing to the
+# system temp directory and the main-tree `.agents/`.
+# See "Hard requirements for the adapter sandbox" in format.md for the permission
+# needs and the limits when tightening.
 extra_args = ["--sandbox", "danger-full-access"]
 [adapter.codex.models]
 prime = "gpt-5.6-sol"
@@ -53,12 +58,12 @@ lite  = "low"
 # medium = "medium"
 # high = "high"
 # [adapter.codex.efforts.prime]
-# high = "xhigh"                # 廠牌特有值只出現在設定翻譯層
+# high = "xhigh"                # vendor-specific values appear only in the config translation layer
 
 [prompt]
-# 可覆寫預設提示詞模板;可用變數:{agents_md_path} {instructions_path} {task_path}
+# Overrides the default prompt template; available variables: {agents_md_path} {instructions_path} {task_path}
 # {journal_path} {verify_command} {task_id} {task_title} {agent} {requested_model}
 # {effort} {requested_effort}
-# {agent} 是 codex 或 claude;{requested_model} 是本次傳給 AI CLI 的 --model 值。
-# {effort} 是抽象 low/medium/high;{requested_effort} 是實際 CLI 值,未傳時為空字串。
+# {agent} is codex or claude; {requested_model} is the --model value passed to the AI CLI this run.
+# {effort} is the abstract low/medium/high; {requested_effort} is the actual CLI value, empty string when not passed.
 # template = """..."""

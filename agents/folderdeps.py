@@ -1,8 +1,11 @@
-"""工作資料夾層級的依賴解析、完成推導與循環檢查。
+"""Folder-level dependency parsing, completion inference, and cycle checks.
 
-- ``_folder.toml`` 只宣告 ``after``；缺檔等同沒有資料夾前置。
-- 資料夾完成與否每次由正式任務檔現場推導，不另寫狀態檔。
-- 本模組只提供能力；執行與檢查命令的閘門整合由呼叫端負責。
+- ``_folder.toml`` only declares ``after``; a missing file means no folder
+  prerequisites.
+- Folder completion is always inferred on the spot from the formal task
+  files, with no separate state file.
+- This module only provides the capability; wiring it into the run/check
+  command gate is the caller's responsibility.
 """
 from __future__ import annotations
 
@@ -21,7 +24,7 @@ _KNOWN_KEYS = {"after"}
 
 @dataclass(frozen=True)
 class FolderDependencies:
-    """一個工作資料夾的前置資料夾宣告。"""
+    """A task folder's declared prerequisite folders."""
 
     name: str
     after: list[str]
@@ -30,7 +33,7 @@ class FolderDependencies:
 
 @dataclass(frozen=True)
 class FolderCompletion:
-    """從任務檔推導出的資料夾完成結果與原因。"""
+    """A folder completion result and its reason, inferred from task files."""
 
     complete: bool
     reason: str
@@ -38,35 +41,36 @@ class FolderCompletion:
 
 @dataclass(frozen=True)
 class UnfinishedPrerequisite:
-    """一個尚未完成的前置資料夾及其任務狀態統計。"""
+    """An unfinished prerequisite folder and its task status counts."""
 
     name: str
     counts: tuple[tuple[str, int], ...]
 
     @property
     def total(self) -> int:
-        """未完成任務總數。"""
+        """Total number of unfinished tasks."""
         return sum(count for _, count in self.counts)
 
     def message(self) -> str:
-        """產生供 run 拒跑時顯示的單行原因。"""
-        detail = "、".join(f"{status} {count}" for status, count in self.counts)
-        return (f"前置資料夾 {self.name} 尚有 {self.total} 個未完成任務"
-                f"({detail})")
+        """Build the single-line reason shown when run refuses to start."""
+        detail = ", ".join(f"{status} {count}" for status, count in self.counts)
+        return (f"Prerequisite folder {self.name} still has {self.total} unfinished task(s)"
+                f" ({detail})")
 
 
 def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
-    """解析並驗證工作資料夾的 ``_folder.toml``。
+    """Parse and validate a task folder's ``_folder.toml``.
 
-    被引用的工作資料夾必須是同一個 ``.agents`` 目錄下、含正式任務檔的
-    資料夾。缺少 ``_folder.toml`` 時回傳空的 ``after``。
+    A referenced task folder must be a folder with a formal task file under
+    the same ``.agents`` directory. A missing ``_folder.toml`` yields an
+    empty ``after``.
     """
     tasks_dir = Path(tasks_dir)
     if not tasks_dir.is_dir():
-        raise AgentsError(f"找不到工作資料夾:{tasks_dir}")
+        raise AgentsError(f"Task folder not found: {tasks_dir}")
 
     name = tasks_dir.name
-    _validate_tasks_name(name, "工作資料夾名稱")
+    _validate_tasks_name(name, "Task folder name")
     path = tasks_dir / _FOLDER_CONFIG_NAME
     if not path.is_file():
         return FolderDependencies(name=name, after=[], path=path.resolve())
@@ -75,45 +79,45 @@ def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
         with open(path, "rb") as f:
             data = tomllib.load(f)
     except OSError as e:
-        raise AgentsError(f"無法讀取資料夾依賴檔 {path}:{e}") from e
+        raise AgentsError(f"Cannot read folder dependency file {path}: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise AgentsError(
-            f"資料夾依賴檔 {path} 不是有效的 TOML:{e}") from e
+            f"Folder dependency file {path} is not valid TOML: {e}") from e
 
     unknown = sorted(set(data) - _KNOWN_KEYS)
     if unknown:
         raise AgentsError(
-            f"資料夾依賴檔 {path} 含未知鍵:{', '.join(unknown)}"
-            f"(有效鍵:{', '.join(sorted(_KNOWN_KEYS))})")
+            f"Folder dependency file {path} has unknown keys: {', '.join(unknown)}"
+            f" (valid keys: {', '.join(sorted(_KNOWN_KEYS))})")
     if "after" not in data:
         raise AgentsError(
-            f"資料夾依賴檔 {path} 缺少 after"
-            "(無前置資料夾也要明寫 after = [])")
+            f"Folder dependency file {path} is missing after"
+            " (write after = [] explicitly even with no prerequisite folders)")
 
     after = data["after"]
     if not isinstance(after, list) or not all(isinstance(item, str) for item in after):
-        raise AgentsError(f"資料夾依賴檔 {path} 的 after 應為字串陣列")
+        raise AgentsError(f"Folder dependency file {path} field after must be an array of strings")
 
     available = set(list_task_folders(tasks_dir.parent))
     for dependency in after:
-        _validate_tasks_name(dependency, f"資料夾 {name} 的 after 元素")
+        _validate_tasks_name(dependency, f"Folder {name}'s after element")
         if dependency == name:
-            raise AgentsError(f"資料夾 {name} 的 after 不可依賴自己")
+            raise AgentsError(f"Folder {name}'s after must not depend on itself")
         if dependency not in available:
             raise AgentsError(
-                f"資料夾 {name} 的 after 引用不存在或沒有任務檔的工作資料夾:"
-                f"{dependency}")
+                f"Folder {name}'s after references a task folder that does not exist"
+                f" or has no task files: {dependency}")
 
     return FolderDependencies(
         name=name, after=list(after), path=path.resolve())
 
 
 def infer_folder_completion(tasks_dir: str | Path) -> FolderCompletion:
-    """現場解析任務檔，推導資料夾是否全部為 ``DONE`` 或 ``SKIP``。"""
+    """Parse the task files on the spot and infer whether the folder is entirely ``DONE`` or ``SKIP``."""
     try:
         plan = Plan.parse(Path(tasks_dir))
     except AgentsError as e:
-        return FolderCompletion(False, f"無法推導資料夾完成狀態:{e}")
+        return FolderCompletion(False, f"Cannot infer folder completion: {e}")
 
     unfinished = [
         f"{task.id}={task.status}"
@@ -121,15 +125,16 @@ def infer_folder_completion(tasks_dir: str | Path) -> FolderCompletion:
         if task.status not in ("DONE", "SKIP")
     ]
     if unfinished:
-        return FolderCompletion(False, f"尚未完成的任務:{', '.join(unfinished)}")
-    return FolderCompletion(True, "全部任務皆為 DONE 或 SKIP")
+        return FolderCompletion(False, f"Unfinished tasks: {', '.join(unfinished)}")
+    return FolderCompletion(True, "All tasks are DONE or SKIP")
 
 
 def find_unfinished_prerequisites(
         tasks_dir: str | Path) -> list[UnfinishedPrerequisite]:
-    """檢查直接 ``after`` 前置，回傳尚未全部 ``DONE/SKIP`` 的項目。
+    """Check direct ``after`` prerequisites, returning any not entirely ``DONE/SKIP``.
 
-    任一依賴檔或前置任務檔無法解析時直接拋錯，讓呼叫端維持 fail-closed。
+    If any dependency file or prerequisite task file fails to parse, the error
+    propagates directly so the caller stays fail-closed.
     """
     tasks_dir = Path(tasks_dir)
     dependencies = parse_folder_dependencies(tasks_dir)
@@ -151,7 +156,7 @@ def find_unfinished_prerequisites(
 
 def parse_folder_dependency_graph(
         agents_dir: str | Path) -> dict[str, FolderDependencies]:
-    """解析全部工作資料夾的 ``after`` 圖並檢查循環。"""
+    """Parse the ``after`` graph for every task folder and check for cycles."""
     agents_dir = Path(agents_dir)
     dependencies = {
         name: parse_folder_dependencies(agents_dir / name)
@@ -162,15 +167,15 @@ def parse_folder_dependency_graph(
 
 
 def _ensure_acyclic(dependencies: dict[str, FolderDependencies]) -> None:
-    """檢查資料夾依賴圖，循環訊息包含首尾相接的完整路徑。"""
-    state: dict[str, int] = {}  # 0=未訪 1=訪問中 2=完成
+    """Check the folder dependency graph; a cycle message includes the full closed path."""
+    state: dict[str, int] = {}  # 0=unvisited 1=visiting 2=done
 
     def visit(node: str, chain: list[str]) -> None:
         if state.get(node) == 2:
             return
         if state.get(node) == 1:
             cycle = " -> ".join(chain[chain.index(node):] + [node])
-            raise AgentsError(f"資料夾依賴出現循環:{cycle}")
+            raise AgentsError(f"Folder dependencies form a cycle: {cycle}")
         state[node] = 1
         for dependency in dependencies[node].after:
             visit(dependency, chain + [node])

@@ -1,4 +1,10 @@
-"""全部工作資料夾調度的依賴順序、平行與卡住判定測試。"""
+"""Tests for the all-folders scheduler's dependency order, concurrency, and
+stuck-chain detection.
+
+Chinese literals that remain are deliberate user-authored data (task titles,
+goals, acceptance text, child output lines) used to prove that non-English
+data passes through the scheduler verbatim rather than being translated as
+output."""
 import contextlib
 import io
 import os
@@ -32,7 +38,8 @@ def task_text(status: str) -> str:
 
 
 class FinishedProcess:
-    """首次觀察時完成指定資料夾，取代真實 AI 子行程。"""
+    """Stand-in for a real AI child process: completes the given folder the
+    first time it is observed."""
 
     def __init__(self, task: Path, on_finish=None) -> None:
         self.task = task
@@ -49,7 +56,7 @@ class FinishedProcess:
 
 
 class OutputProcess(FinishedProcess):
-    """帶文字管線的完成子行程替身。"""
+    """A completed child process stand-in with a text pipe."""
 
     def __init__(self, task: Path, output: str | bytes) -> None:
         super().__init__(task)
@@ -123,7 +130,7 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(lines.count("[serial] 第一列"), 1)
         self.assertEqual(lines.count("[serial] 最後一列"), 1)
         self.assertLess(lines.index("[serial] 最後一列"),
-                        lines.index("完成工作資料夾:serial(退出碼 0)"))
+                        lines.index("Work folder complete: serial (exit code 0)"))
 
     def test_jobs_two_serializes_lines_with_correct_source(self):
         tasks = {
@@ -185,8 +192,8 @@ class TestRunAll(FolderSchedulerTestCase):
         root_text = root_log.read_text(encoding="utf-8")
         self.assertIn("[work] 子行程原始訊息", terminal_text)
         self.assertIn("AGENTS START", root_text)
-        self.assertIn("啟動工作資料夾:work", root_text)
-        self.assertIn("完成工作資料夾:work", root_text)
+        self.assertIn("Starting work folder: work", root_text)
+        self.assertIn("Work folder complete: work", root_text)
         self.assertNotIn("子行程原始訊息", root_text)
         self.assertEqual(child_log.read_text(encoding="utf-8"),
                          "子行程原始訊息\n")
@@ -203,7 +210,7 @@ class TestRunAll(FolderSchedulerTestCase):
             code = run_all(str(self.config), self.agents_dir)
 
         self.assertEqual(code, 1)
-        self.assertIn("本專案尚未初始化 git,請先執行 git init",
+        self.assertIn("This project has no git repository yet; run git init first",
                       out.getvalue())
         parse.assert_not_called()
         start.assert_not_called()
@@ -300,7 +307,7 @@ class TestRunAll(FolderSchedulerTestCase):
             code = run_all(str(self.config), self.agents_dir)
 
         self.assertEqual(code, 1)
-        self.assertIn("工作資料夾失敗:work(退出碼 7", out.getvalue())
+        self.assertIn("Work folder failed: work (exit code 7", out.getvalue())
         self.assertIn("_agents.log", out.getvalue())
 
     def test_status_control_c_exit_code_is_treated_as_interrupt(self):
@@ -317,9 +324,9 @@ class TestRunAll(FolderSchedulerTestCase):
             code = run_all(str(self.config), self.agents_dir)
 
         self.assertEqual(code, 130)
-        self.assertIn("工作資料夾已中斷:work(退出碼 3221225786)",
+        self.assertIn("Work folder interrupted: work (exit code 3221225786)",
                       out.getvalue())
-        self.assertNotIn("工作資料夾失敗", out.getvalue())
+        self.assertNotIn("Work folder failed", out.getvalue())
 
     def test_keyboard_interrupt_is_forwarded_and_waits_for_child(self):
         self.make_folder("work")
@@ -346,18 +353,23 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertTrue(process.waited)
 
 
-@unittest.skipUnless(os.name == "nt", "CTRL_BREAK_EVENT 收尾為 Windows 限定")
+@unittest.skipUnless(os.name == "nt", "CTRL_BREAK_EVENT cleanup is Windows-only")
 class TestBreakHandlerInterrupt(unittest.TestCase):
-    """實測:註冊處理器的子行程收到 CTRL_BREAK_EVENT 會走 KeyboardInterrupt。"""
+    """Real check: a child with the handler installed turns CTRL_BREAK_EVENT
+    into a KeyboardInterrupt."""
 
-    # 以「短睡迴圈」等訊號,不用單發 time.sleep 也不用忙等待:
-    #   * 單發 time.sleep 在 Windows 不會被 SIGBREAK 喚醒;
-    #   * 純忙等待會讓主執行緒霸佔 GIL,餓死 Windows 產生的主控台控制處理器
-    #     執行緒,導致 SIGBREAK 有時來不及轉呈、被 OS 預設處理器直接終止
-    #     (退出碼 3221225786)。
-    # 每輪短睡都釋放 GIL 讓處理器執行緒跑,睡醒的位元組碼檢查點再把待處理的
-    # SIGBREAK 轉成 KeyboardInterrupt——這也貼近真實 run 阻塞在會釋放 GIL 的
-    # 子行程 wait 上的情形。註冊後全部動作都包在 try 內,確保訊號落在任一處都接得住。
+    # Wait for the signal with a "short-sleep loop" instead of a single
+    # time.sleep or a busy loop:
+    #   * A single time.sleep is not woken by SIGBREAK on Windows;
+    #   * A pure busy loop lets the main thread hog the GIL, starving the
+    #     console control handler thread Windows spawns for the signal, so
+    #     SIGBREAK sometimes arrives too late and the OS's default handler
+    #     terminates the process directly (exit code 3221225786).
+    # Each short sleep releases the GIL so the handler thread can run; the
+    # bytecode check point on waking then turns a pending SIGBREAK into
+    # KeyboardInterrupt. This also mirrors a real run blocked on a child
+    # process wait(), which releases the GIL. Everything after the handler is
+    # registered runs inside try, so the signal is caught wherever it lands.
     _PROBE = textwrap.dedent(
         """
         import sys, time
@@ -390,7 +402,7 @@ class TestBreakHandlerInterrupt(unittest.TestCase):
             self.assertEqual(process.stdout.readline().strip(), "READY")
             _send_interrupt(process)
             returncode = process.wait(timeout=30)
-        except subprocess.TimeoutExpired:  # pragma: no cover - 卡死才會走到
+        except subprocess.TimeoutExpired:  # pragma: no cover - only hit on a hang
             process.kill()
             raise
         finally:
