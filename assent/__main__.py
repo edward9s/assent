@@ -1,4 +1,4 @@
-"""CLI entry point: argparse subcommands run/status/check/report/clean/
+"""CLI entry point: argparse subcommands run/status/check/report/verify/clean/
 accept/reject/rework/init."""
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from assent.plan import Plan
 from assent.reject import reject_folder
 from assent.rework import rework_task
 from assent.terminal_log import terminal_logging
+from assent.verification import verify_folder
 
 _DEFAULT_CONFIG = ".assent/assent.toml"
 
@@ -42,7 +43,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     "checks acceptance objectively, and auto-checkpoints git.",
     )
     sub = parser.add_subparsers(dest="command", required=True,
-                                metavar="{run,status,check,report,clean,accept,reject,rework,init}")
+                                metavar="{run,status,check,report,verify,clean,accept,reject,rework,init}")
 
     run_p = sub.add_parser(
         "run", help="Run the tasks in the given [FOLDER] until all are "
@@ -65,6 +66,14 @@ def _build_parser() -> argparse.ArgumentParser:
     report_p = sub.add_parser(
         "report", help="Generate the human-readable run report _report.md "
                        "(zero tokens)")
+    verify_p = sub.add_parser(
+        "verify", help="Refresh full integration verification for exactly one folder")
+    verify_p.add_argument(
+        "folder", metavar="FOLDER",
+        help="The completed work folder to verify (required; exactly one folder)")
+    verify_p.add_argument(
+        "--config", default=_DEFAULT_CONFIG, metavar="PATH",
+        help=f"Config file location (default: {_DEFAULT_CONFIG})")
     clean_p = sub.add_parser(
         "clean", help="Remove worktrees and merged branches that are provably redundant")
 
@@ -244,6 +253,17 @@ def _dispatch(argv: list[str]) -> int:
             print(f"Config error: {e}")
             return 1
         return accept_folder(cfg)
+    if args.command == "verify":
+        try:
+            cfg = load_config(args.config, args.folder)
+        except AssentError as e:
+            print(f"Config error: {e}")
+            return 1
+        try:
+            return verify_folder(cfg)
+        except KeyboardInterrupt:
+            print("\nverify interrupted; temporary resources were cleaned up.")
+            return 130
     if args.command == "reject":
         try:
             cfg = load_config(args.config, args.folder)

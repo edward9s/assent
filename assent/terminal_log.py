@@ -118,8 +118,8 @@ def _folder_from_tasks(assent_dir: Path) -> str | None:
 
 
 def _folder_from_argv(argv: list[str]) -> str | None:
-    """Find the task folder from run's positional arguments, skipping known options and their values."""
-    if not argv or argv[0] != "run":
+    """Find a run/verify folder argument, skipping known options and values."""
+    if not argv or argv[0] not in ("run", "verify"):
         return None
     if "--all" in argv:
         return None
@@ -163,9 +163,9 @@ def log_path_for_argv(argv: list[str]) -> Path:
 
 @contextmanager
 def terminal_logging(argv: list[str]) -> Iterator[Path]:
-    """Log the full terminal output only for run; each run truncates the previous session."""
+    """Log run/verify terminal output; each invocation truncates the previous log."""
     log_path = log_path_for_argv(argv)
-    if not argv or argv[0] != "run":
+    if not argv or argv[0] not in ("run", "verify"):
         yield log_path
         return
     log_path.parent.mkdir(parents=True, exist_ok=True)

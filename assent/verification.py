@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tomllib
 import uuid
 from dataclasses import dataclass
@@ -312,17 +313,31 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
                     "temporary integration did not produce the expected two-parent "
                     "candidate")
             candidate_tree = gitops.tree_of(candidate, "HEAD")
+            started = time.monotonic()
+            print(f"Full verification started: {VERIFY_COMMAND}", flush=True)
             try:
                 result = subprocess.run(
                     [sys.executable, str(script)], cwd=str(candidate),
                     capture_output=True, encoding="utf-8", errors="replace")
+            except KeyboardInterrupt:
+                elapsed = time.monotonic() - started
+                print("Full verification interrupted: "
+                      f"elapsed {elapsed:.1f}s, exit code 130", flush=True)
+                raise
             except OSError as e:
+                elapsed = time.monotonic() - started
+                print("Full verification finished: "
+                      f"elapsed {elapsed:.1f}s, exit code 1", flush=True)
                 receipt = _new_receipt(
                     status="FAILED", source_tip=source_tip,
                     target_tip=target_tip, integration_tree=candidate_tree,
                     digest=digest, exit_code=1,
                     failure_summary=f"Unable to start verification: {e}")
             else:
+                elapsed = time.monotonic() - started
+                print("Full verification finished: "
+                      f"elapsed {elapsed:.1f}s, exit code {result.returncode}",
+                      flush=True)
                 receipt = _new_receipt(
                     status="PASSED" if result.returncode == 0 else "FAILED",
                     source_tip=source_tip, target_tip=target_tip,
@@ -379,6 +394,27 @@ def verify_folder(cfg: Config) -> int:
     return 1
 
 
+def _receipt_matches_current_candidate_locked(cfg: Config) -> bool:
+    """Compare a PASSED receipt while the integration and folder locks are held."""
+    main = gitops.main_worktree(cfg.root)
+    receipt = read_receipt(receipt_path(cfg), main)
+    if receipt.status != "PASSED":
+        return False
+    script = (cfg.assent_dir / "verify.py").resolve()
+    if receipt.verify_script_sha256 != _sha256(script):
+        return False
+    target_branch = gitops.require_current_branch(main)
+    if not gitops.working_tree_status(main, cfg.git_excludes).is_clean:
+        return False
+    target_tip = gitops.commit_of(main, target_branch)
+    _source_branch, source_tip, _worktree = _source_snapshot(cfg, main)
+    if source_tip != receipt.source_tip:
+        return False
+    tree, outcome = _candidate_tree(
+        main, cfg.tasks_name, target_tip, source_tip)
+    return outcome.ok and tree == receipt.integration_tree
+
+
 def receipt_matches_current_candidate(cfg: Config) -> bool:
     """Rebuild the current candidate and compare its exact tree to a PASSED receipt.
 
@@ -388,21 +424,86 @@ def receipt_matches_current_candidate(cfg: Config) -> bool:
     """
     with hold_integration_lock(cfg.assent_dir):
         with hold_lock(cfg.tasks_dir, cfg.tasks_name):
-            main = gitops.main_worktree(cfg.root)
-            receipt = read_receipt(receipt_path(cfg), main)
-            if receipt.status != "PASSED":
-                return False
-            script = (cfg.assent_dir / "verify.py").resolve()
-            if receipt.verify_script_sha256 != _sha256(script):
-                return False
-            target_branch = gitops.require_current_branch(main)
-            if not gitops.working_tree_status(main, cfg.git_excludes).is_clean:
-                return False
-            target_tip = gitops.commit_of(main, target_branch)
-            _source_branch, source_tip, _worktree = _source_snapshot(cfg, main)
-            if source_tip != receipt.source_tip:
-                return False
-            tree, outcome = _candidate_tree(
-                main, cfg.tasks_name, target_tip, source_tip)
-            return outcome.ok and tree == receipt.integration_tree
+            return _receipt_matches_current_candidate_locked(cfg)
 
+
+def verify_folder_if_needed(cfg: Config) -> int:
+    """Run unattended verification unless an exact current PASSED receipt exists.
+
+    This is the post-task scheduler entry point.  It deliberately acquires the
+    repository integration lock before the folder lock, after the AI session has
+    released its folder lock.  A malformed existing receipt is refused rather
+    than silently replaced; explicit ``assent verify`` remains the refresh path.
+    """
+    folder = cfg.tasks_name
+    try:
+        with hold_integration_lock(cfg.assent_dir):
+            with hold_lock(cfg.tasks_dir, folder):
+                plan = Plan.parse(cfg.tasks_dir)
+                if any(task.status not in _COMPLETE_STATUSES for task in plan.tasks):
+                    return 0
+                path = receipt_path(cfg)
+                if path.exists():
+                    try:
+                        fresh = _receipt_matches_current_candidate_locked(cfg)
+                    except AssentError as e:
+                        print(f"verify {folder}: invalid existing receipt ({e})")
+                        return 1
+                    if fresh:
+                        receipt = read_receipt(path, gitops.main_worktree(cfg.root))
+                        print("verify " + folder + ": existing PASSED receipt is "
+                              f"fresh ({receipt.integration_tree}); full suite skipped")
+                        return 0
+                    print(f"verify {folder}: existing receipt is stale; refreshing")
+                receipt = _verify_locked(cfg)
+    except LockBusy as e:
+        print(f"verify {folder}: refused ({e})")
+        return 1
+    except AssentError as e:
+        print(f"verify {folder}: failed ({e})")
+        return 1
+    if receipt.status == "PASSED":
+        print(f"verify {folder}: passed ({receipt.integration_tree})")
+        return 0
+    print(f"verify {folder}: failed ({receipt.failure_summary})")
+    return 1
+
+
+def receipt_report_lines(cfg: Config) -> list[str]:
+    """Return read-only folder-verification facts for the human report.
+
+    Freshness here is intentionally conservative and side-effect free: exact
+    source, target, and verifier identities are fresh.  Acceptance remains
+    responsible for rebuilding and comparing the candidate tree.
+    """
+    path = receipt_path(cfg)
+    if not path.exists():
+        return ["Folder verification: NOT RUN (no receipt)"]
+    try:
+        main = gitops.main_worktree(cfg.root)
+        receipt = read_receipt(path, main)
+        reasons: list[str] = []
+        script = (cfg.assent_dir / "verify.py").resolve()
+        if receipt.verify_script_sha256 != _sha256(script):
+            reasons.append("verifier changed")
+        target_branch = gitops.require_current_branch(main)
+        if gitops.commit_of(main, target_branch) != receipt.target_tip:
+            reasons.append("target tip changed")
+        _branch, source_tip, _worktree = _source_snapshot(cfg, main)
+        if source_tip != receipt.source_tip:
+            reasons.append("source tip changed")
+        if receipt.status != "PASSED":
+            reasons.append(f"exit code {receipt.exit_code}")
+    except AssentError as e:
+        return [f"Folder verification: INVALID ({e})"]
+
+    freshness = "fresh" if not reasons else "stale: " + "; ".join(reasons)
+    lines = [
+        f"Folder verification: {receipt.status} ({freshness})",
+        f"  Source tip: {receipt.source_tip}",
+        f"  Candidate tree: {receipt.integration_tree}",
+        f"  Completed at: {receipt.completed_at}",
+    ]
+    if receipt.failure_summary:
+        lines.append("  Failure: " + receipt.failure_summary.splitlines()[0])
+    return lines
