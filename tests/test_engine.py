@@ -1644,13 +1644,35 @@ class TestQuotaMath(EngineTestCase):
         self.assertEqual(engine._quota_wait_seconds(cfg, None, lambda: t0),
                          cfg.quota_poll_minutes * 60)
 
-    def test_countdown_non_tty_single_line(self):
+    def test_countdown_non_tty_single_line_in_bounded_segments(self):
         stream = io.StringIO()  # isatty() False
         sleeps: list[float] = []
-        engine._countdown(90, "Quota reset", sleeps.append, stream=stream)
-        self.assertEqual(sleeps, [90])
+        engine._countdown(150, "Quota reset", sleeps.append, stream=stream)
+        # One message, but never one long sleep: the total is unchanged and no
+        # single segment exceeds the constant.
+        self.assertEqual(sum(sleeps), 150)
+        self.assertLessEqual(max(sleeps), engine._COUNTDOWN_SEGMENT)
         self.assertEqual(stream.getvalue().count("\n"), 1)
         self.assertNotIn("\r", stream.getvalue())
+
+    def test_countdown_non_tty_stop_lands_within_one_segment(self):
+        """A stop request reaches a multi-hour quota wait promptly.
+
+        The stdin stop channel calls _thread.interrupt_main(); on POSIX that
+        only makes the exception pending until bytecode next runs, which is
+        the end of a segment. The injected sleep stands in for that delivery.
+        """
+        stream = io.StringIO()
+        sleeps: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            engine._countdown(10405, "Quota reset", sleep, segment=0.5,
+                              stream=stream)
+        self.assertEqual(sleeps, [0.5])
 
     def test_countdown_tty_updates_in_place(self):
         class Tty(io.StringIO):

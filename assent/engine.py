@@ -99,6 +99,12 @@ _CLOSEOUT_RETRY_SUFFIX = (
 
 _QUOTA_BUFFER = timedelta(minutes=2)  # reset time + buffer, to avoid being blocked again right at the edge
 _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
+# Longest single sleep the non-tty countdown may take. A quota wait is often
+# hours long, and a lone multi-hour sleep is what made a stop request invisible:
+# on POSIX _thread.interrupt_main() only sets a pending exception that is
+# delivered when bytecode next runs, so the wait had to finish first. Splitting
+# it bounds that delivery delay without changing the total wait.
+_COUNTDOWN_SEGMENT = 60.0
 _DEFAULT_VERIFY_COMMAND = "python .assent/verify.py"
 _GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
 _ADAPTER_DIAGNOSTIC_LIMIT = 240
@@ -1229,10 +1235,13 @@ def _wait_for_quota(cfg: Config, reset_at: datetime | None,
 
 
 def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
-               tick: float = _QUOTA_TICK, stream: TextIO | None = None) -> None:
+               tick: float = _QUOTA_TICK, segment: float = _COUNTDOWN_SEGMENT,
+               stream: TextIO | None = None) -> None:
     """Countdown wait. Terminal (tty) -> update one line in place with \\r, without stacking
-    lines; non-tty (redirected to a file/pipe) -> print only one line to avoid flooding the
-    log. The injected sleep lets tests avoid really sleeping."""
+    lines; non-tty (redirected to a file/pipe) -> print one message, then sleep in segments of
+    at most ``segment`` seconds so a stop request lands within one segment on every platform
+    (see _COUNTDOWN_SEGMENT); the total wait is unchanged. The injected sleep lets tests avoid
+    really sleeping."""
     if seconds <= 0:
         return
     stream = stream or sys.stdout
@@ -1240,7 +1249,11 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
     if not interactive:
         stream.write(f"  {label}: waiting about {int(seconds)} seconds before rerunning.\n")
         stream.flush()
-        sleep(seconds)
+        left = seconds
+        while left > 0:
+            step = segment if segment < left else left
+            sleep(step)
+            left -= step
         return
     remaining = seconds
 

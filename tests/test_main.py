@@ -13,11 +13,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from assent.__main__ import main
+from assent.__main__ import _start_stdin_stop_watcher, main
 from assent.init import init as run_init
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -385,6 +386,38 @@ class TestDispatch(MainTestCase):
                         ["check", "--config", str(config)])
                 self.assertEqual(code, 1)
                 self.assertIn("Folder dependency graph: FAIL", out)
+
+
+class TestStdinStopWatcher(unittest.TestCase):
+    """The stdin stop channel is opt-in: only a scheduler-spawned child gets
+    ASSENT_STDIN_STOP, so a hand-typed `assent run` keeps its stdin."""
+
+    def test_no_watcher_thread_without_the_environment_variable(self):
+        environment = dict(os.environ)
+        environment.pop("ASSENT_STDIN_STOP", None)
+        before = threading.active_count()
+        with patch.dict(os.environ, environment, clear=True):
+            self.assertIsNone(_start_stdin_stop_watcher())
+        self.assertEqual(threading.active_count(), before)
+
+    def test_stdin_eof_calls_interrupt_main(self):
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        self.addCleanup(reader.close)
+
+        class FakeStdin:
+            buffer = reader
+
+        with patch.dict(os.environ, {"ASSENT_STDIN_STOP": "1"}), patch.object(
+                sys, "stdin", FakeStdin()), patch(
+                "assent.__main__._thread.interrupt_main") as interrupt:
+            thread = _start_stdin_stop_watcher()
+            self.assertIsNotNone(thread)
+            os.close(write_fd)  # what the parent closing the pipe looks like
+            thread.join(timeout=10)
+
+        self.assertFalse(thread.is_alive())
+        interrupt.assert_called_once_with()
 
 
 class TestInit(MainTestCase):
