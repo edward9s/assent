@@ -1,7 +1,7 @@
 """assent doctor: machine-environment diagnosis that needs no existing .assent/
 project.
 
-Distinct from ``engine.check()``: check validates one project's own config and
+Distinct from ``inspection.check()``: check validates one project's own config and
 task files; doctor validates the machine underneath any project (Python
 version, git, adapter CLIs, temp directory writability).
 """

@@ -128,6 +128,7 @@ class TestInvocationResolution(EngineTestCase):
         self.assertEqual(preflight.resolve_requested_effort(
             tier_only, "core", "heavy"), "high")
 
+
 class TestAntigravityCapabilityPreflight(EngineTestCase):
     """The active adapter proves every planned invocation before anything is spent.
 
