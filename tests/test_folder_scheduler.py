@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import assent
 from assent import AssentError
 from assent.engine import _COUNTDOWN_SEGMENT
 from assent.folder_scheduler import (_INTERRUPT_GRACE_SECONDS,
@@ -144,6 +145,57 @@ class TestRunAll(FolderSchedulerTestCase):
         else:
             self.assertIs(options["start_new_session"], True)
             self.assertNotIn("creationflags", options)
+
+    def test_child_runs_from_package_root_with_absolute_config(self):
+        package_root = Path(assent.__file__).resolve().parent.parent
+        with patch("assent.folder_scheduler.subprocess.Popen",
+                   return_value=object()) as popen:
+            _start_folder(str(self.config), "work")
+
+        command = popen.call_args.args[0]
+        options = popen.call_args.kwargs
+        # The child selects its ``assent`` module from the parent's own package
+        # root, not from whatever directory the managed project sits in.
+        self.assertEqual(options["cwd"], str(package_root))
+        self.assertNotEqual(Path(options["cwd"]), self.root)
+        # So the project is located solely by the absolute --config path.
+        config = Path(command[command.index("--config") + 1])
+        self.assertTrue(config.is_absolute())
+        self.assertEqual(config, self.config.resolve())
+
+    def test_child_ignores_shadowing_assent_package_in_project_dir(self):
+        """A managed project holding its own ``assent/`` must not decide which
+        Assent the child imports, in either direction."""
+        package_root = Path(assent.__file__).resolve().parent.parent
+        shadow = self.root / "assent"
+        shadow.mkdir()
+        (shadow / "__init__.py").write_text("", encoding="utf-8")
+
+        original = Path.cwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, str(original))
+        with patch("assent.folder_scheduler.subprocess.Popen",
+                   return_value=object()) as popen:
+            _start_folder(str(self.config), "work")
+        options = popen.call_args.kwargs
+
+        # ``-c`` and ``-m`` share the same rule: the working directory heads the
+        # module search path, so this probe resolves ``assent`` exactly as the
+        # real child does.
+        probe = ("import assent, pathlib;"
+                 " print(pathlib.Path(assent.__file__).resolve().parent)")
+
+        def resolved_from(cwd: str) -> Path:
+            done = subprocess.run(
+                [sys.executable, "-c", probe], cwd=cwd,
+                env=options["env"], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", check=True)
+            return Path(done.stdout.strip())
+
+        # Inheriting the project's directory is what used to pick the wrong one.
+        self.assertEqual(resolved_from(str(self.root)), shadow.resolve())
+        self.assertEqual(resolved_from(options["cwd"]),
+                         package_root / "assent")
 
     def test_jobs_one_forwards_each_line_with_folder_prefix(self):
         task = self.make_folder("serial")
