@@ -38,8 +38,8 @@ from assent import AssentError, gitops
 from assent.clean import _clean_locked, _has_cleanup_target
 from assent.config import Config, list_task_folders, load_config
 from assent.folderdeps import infer_folder_completion
-from assent.lockfile import (LockBusy, LockMissing, hold_integration_lock,
-                             probe_lock)
+from assent.lockfile import (LOCK_NAME, LockBusy, LockMissing, hold_lock,
+                             hold_integration_lock, probe_lock)
 
 _ARCHIVE_DIRNAME = "_archive"
 _ROSTER_NAME = "_archived.toml"
