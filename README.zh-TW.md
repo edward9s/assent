@@ -303,6 +303,7 @@ checkpoints 構成目前分支的連續尾段才會建立新的反向 commit,絕
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | 人工裁決駁回:封存未提交變更後強制刪除該資料夾的 worktree 與同前綴分支(刪除前以完整 tip hash 存證),並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔保存 Git 存證。`FOLDER` 必填;run 進行中拒絕。 | **零** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "驗收不符"` | 非破壞性重開單一任務;預設保留程式碼,`--cascade` 明示連動下游。`--revert-code` 僅在 checkpoints 是連續分支尾段時建立新反向 commit。成功後更新報告,不自動執行 run。接受 `--config PATH`。 | **零** |
 | `assent init`<br>`assent init --path C:\work\my-project` | 在目標專案生成 `.assent` 骨架與 `AGENTS.md`;`--path DIR` 預設為目前目錄。它不接受 `FOLDER` 或 `--config`。 | **零** |
+| `assent doctor`<br>`assent doctor` | 診斷機器環境(Python 版本、git、adapter CLIs、temp 目錄可寫性);不需要 `FOLDER` 或 `--config`,也不需要既有的 `.assent/` 專案就能執行。 | **零** |
 
 各子命令的 `-h`/`--help` 會顯示該層實際語法;頂層沒有可套用到所有子命令的
 `--config` 等全域選項。
