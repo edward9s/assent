@@ -120,14 +120,6 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 `rework` 成功後會立即更新 `_report.md`,但不印整份報告、也不啟動 AI;人確認
 TODO 與連動範圍正確後,再明示執行 `assent run <FOLDER>`。
 
-### 從原有的 `agents` 契約遷移
-
-套件、import 命名空間、CLI 與管理目錄已從 `agents`/`.agents` 改為
-`assent`/`.assent`。這是破壞性命名空間與路徑變更。`assent init` 遇到舊
-`.agents` 目錄時會 fail-closed,也拒絕 `.agents` 與 `.assent` 並存;請在
-檢查哪一份是權威來源後,由人明確遷移或移除舊管理狀態。不提供相容別名,也不會
-自動合併舊目錄。
-
 ## 平行執行
 
 可在 N 個終端各自指定不同的工作資料夾執行,例如 `assent run parallel01`、

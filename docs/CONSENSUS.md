@@ -14,10 +14,6 @@
 ## Core idea
 
 The product namespace is `assent`, and its management plane is `.assent/`.
-This replaces the former `agents`/`.agents` contract. The rename is breaking:
-`assent init` refuses a legacy `.agents` directory, including an ambiguous
-state where both `.agents/` and `.assent/` exist, so migration must be an
-explicit human decision. There is no compatibility alias or automatic merge.
 
 Rather than have an AI cleverly pick relevant content out of thousands of
 lines, layer the context so each task only needs to load "the minimal

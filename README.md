@@ -133,16 +133,6 @@ assent rework <FOLDER> <TASK> [--cascade] [--reason TEXT]
 assent reject <FOLDER>
 ```
 
-### Migration from the former `agents` contract
-
-The package, import namespace, CLI, and management directory changed from
-`agents`/`.agents` to `assent`/`.assent`. This is a breaking namespace and
-path change. `assent init` fails closed when it finds an old `.agents`
-directory, and also refuses when `.agents` and `.assent` coexist; migrate or
-remove the legacy management state explicitly after reviewing which source is
-authoritative. No compatibility alias is provided, and the old directory is
-never merged automatically.
-
 Human review after a run finishes:
 
 ```
