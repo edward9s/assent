@@ -71,6 +71,10 @@ class LockBusy(AgentsError):
     """工作資料夾已被另一個 run 持鎖;訊息已含先行者的 PID 與資料夾名。"""
 
 
+class LockMissing(AgentsError):
+    """鎖檔不存在；不建立檔案的呼叫端無法安全取得同一把鎖。"""
+
+
 def _write_diag(handle, tasks_name: str) -> None:
     """把 PID、啟動時間(ISO 8601)、資料夾名寫入鎖檔(truncate 重寫,僅供診斷)。"""
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -136,6 +140,37 @@ def hold_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
         if not _try_lock(handle):
             raise LockBusy(_busy_message(tasks_name, _read_diag(path)))
         _write_diag(handle, tasks_name)
+        try:
+            yield
+        finally:
+            _unlock(handle)
+    finally:
+        handle.close()
+
+
+@contextlib.contextmanager
+def probe_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
+    """取得既有工作資料夾鎖，但完全不建立或改寫 ``agents.lock``。
+
+    ``clean`` 必須與 ``run`` 使用同一把鎖，卻又不得碰觸 ``.agents/`` 的計畫
+    歸檔。鎖檔不存在時若先建立再刪除，會在釋鎖與刪檔之間留下競態；因此直接
+    保守拒絕，由呼叫端跳過清理。正常曾執行過 ``run`` 的資料夾已有鎖檔。
+    """
+    path = Path(tasks_dir) / LOCK_NAME
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(str(path), flags)
+    except FileNotFoundError as e:
+        raise LockMissing(
+            f"工作資料夾 {tasks_name} 沒有既有 {LOCK_NAME}，"
+            "無法在不改動 .agents 的前提下證明未被鎖") from e
+    except OSError as e:
+        raise AgentsError(f"無法開啟工作資料夾 {tasks_name} 的鎖檔:{e}") from e
+
+    handle = os.fdopen(descriptor, "r+b")
+    try:
+        if not _try_lock(handle):
+            raise LockBusy(_busy_message(tasks_name, _read_diag(path)))
         try:
             yield
         finally:

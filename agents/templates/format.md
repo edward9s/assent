@@ -213,6 +213,12 @@ summary = "額度耗盡,保留進度等待重置後接續"
 全部資料夾。`check` 額外驗證完整依賴圖與循環;唯讀命令遇任一資料夾錯誤都以
 失敗結束。
 
+`agents clean [FOLDER]` 清除固定位置中可證明冗餘的 worktree 與同資料夾前綴
+分支;省略 `FOLDER` 時作用於全部工作資料夾。每個資料夾都必須能取得既有
+`agents.lock`、worktree 完全乾淨,且所有同前綴分支與 detached HEAD 都已併入
+主樹目前 HEAD,才會先以一般保護移除 worktree,再以 `git branch -d` 刪除分支。
+任何證明不足都保留並明講原因;不提供強制刪除選項,也絕不改動 `.agents/`。
+
 任一資料夾內:有 `WIP` 任務 -> 優先選它,帶「接續」提示續作;否則取第一個
 `TODO` 且所有 `deps` 皆為 `DONE` / `SKIP` 的任務。`BLOCKED` 只擋以它為前置
 的任務,其他任務照常執行。全部任務皆 `DONE` / `BLOCKED` / `SKIP` 時結束,

@@ -103,6 +103,29 @@ class TestDispatch(MainTestCase):
                 self.assertEqual(cfg.tasks_name, "B")
                 self.assertEqual(cfg.tasks_dir, agents_dir.resolve() / "B")
 
+    def test_clean_accepts_folder_override_and_config_option(self):
+        config = self.write_config()
+        with patch("agents.__main__.clean_folders", return_value=0) as mocked:
+            code, _ = self.run_main(["clean", "B", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]], ["B"])
+
+    def test_clean_without_folder_uses_all_task_folders(self):
+        config = self.write_config()
+        self.write_task("beta")
+        self.write_task("alpha")
+        with patch("agents.__main__.clean_folders", return_value=0) as mocked:
+            code, _ = self.run_main(["clean", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]],
+                         ["alpha", "beta"])
+
+    def test_clean_has_no_force_option(self):
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
+                io.StringIO()):
+            main(["clean", "--force"])
+        self.assertEqual(ctx.exception.code, 2)
+
     def test_invalid_folder_override_reports_error(self):
         config = self.write_config()
         code, out = self.run_main(["status", "bad/name", "--config", str(config)])

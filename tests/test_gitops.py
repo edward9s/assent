@@ -9,7 +9,8 @@ from pathlib import Path
 
 from agents import AgentsError
 from agents.gitops import (
-    changes_outside_scope, commit_all, commit_if_dirty, ensure_branch,
+    branches_with_prefix, changes_outside_scope, commit_all, commit_if_dirty,
+    ensure_branch,
     ensure_clean, ensure_worktree, head_ref, restore, tracked_paths,
     worktree_path)
 
@@ -82,6 +83,13 @@ class TestEnsureBranch(GitTestCase):
         _run(self.root, "checkout", "master")
         branch2 = ensure_branch(self.root, "workflow/")
         self.assertNotEqual(branch1, branch2)
+
+    def test_branch_prefix_is_literal_not_git_pattern(self):
+        _run(self.root, "branch", "workflow/one", "HEAD")
+        _run(self.root, "branch", "worker/two", "HEAD")
+        self.assertEqual(branches_with_prefix(self.root, "work*"), [])
+        self.assertEqual(branches_with_prefix(self.root, "workflow/"),
+                         ["workflow/one"])
 
 
 class TestEnsureWorktree(GitTestCase):

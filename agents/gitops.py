@@ -137,6 +137,48 @@ def ensure_worktree(root: Path, folder: str) -> Path:
     return path
 
 
+def is_repo_worktree(root: Path, path: Path) -> bool:
+    """公開查詢 ``path`` 是否為 ``root`` 所屬 repo 的有效頂層 worktree。"""
+    return path.is_dir() and _is_repo_worktree(root.resolve(), path.resolve())
+
+
+def branches_with_prefix(root: Path, prefix: str) -> list[str]:
+    """列出本機 ``refs/heads`` 下指定前綴的分支，依名稱排序。"""
+    # 不把 prefix 直接當 ref pattern 傳給 Git；工作資料夾名稱雖已擋路徑
+    # 分隔符，仍可能含 *、?、[，必須避免萬用字元擴大清理範圍。
+    out = _git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+    return sorted(branch for line in out.splitlines()
+                  if (branch := line.strip()).startswith(prefix))
+
+
+def current_branch(root: Path) -> str:
+    """回傳目前分支；detached HEAD 回空字串。"""
+    return _git(root, "branch", "--show-current").strip()
+
+
+def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    """判斷 ``ancestor`` 是否為 ``descendant`` 的祖先；查詢錯誤會明確失敗。"""
+    result = _run_git(root, "merge-base", "--is-ancestor", ancestor, descendant)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise AgentsError(
+        "git merge-base --is-ancestor "
+        f"{ancestor} {descendant} 失敗(退出碼 {result.returncode}):"
+        f"{result.stderr.strip() or result.stdout.strip()}")
+
+
+def remove_worktree(root: Path, path: Path) -> None:
+    """以 Git 的一般保護移除 worktree；刻意不提供強制參數。"""
+    _git(root, "worktree", "remove", str(path))
+
+
+def delete_branch(root: Path, branch: str) -> None:
+    """以 ``git branch -d`` 刪除已併入分支，保留 Git 的第二道保護。"""
+    _git(root, "branch", "-d", branch)
+
+
 def tracked_paths(root: Path, path: str, ref: str | None = None) -> list[str]:
     """列出指定路徑下的索引檔案;有 ref 時改查該 commit/ref。"""
     normalized = _normalize(path)
