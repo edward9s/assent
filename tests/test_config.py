@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from assent import AssentError
-from assent.config import list_task_folders, load_config
+from assent.config import _ADAPTER_NAMES, list_task_folders, load_config
 
 _MINIMAL = ""
 
@@ -355,6 +355,14 @@ class TestListTaskFolders(ConfigTestCase):
 
     def test_missing_assent_directory_is_empty(self):
         self.assertEqual(list_task_folders(self.root / "missing"), [])
+
+
+class TestAdapterRegistry(unittest.TestCase):
+    def test_builtin_registry_holds_exactly_the_supported_adapters(self):
+        # Set comparison, so this stays independent of declaration order and
+        # fails both when a supported adapter drops out and when an unknown
+        # name creeps in.
+        self.assertEqual(_ADAPTER_NAMES, {"claude", "codex", "antigravity"})
 
 
 if __name__ == "__main__":

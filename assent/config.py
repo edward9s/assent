@@ -20,6 +20,7 @@ from assent.lockfile import LOCK_NAME
 _TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt", "verification"}
 _MODEL_TIERS = {"prime", "core", "lite"}
 _EFFORT_LEVELS = {"heavy", "normal", "slight"}
+_ADAPTER_NAMES = {"claude", "codex", "antigravity"}
 # Abstract effort names intentionally differ from vendor names.  A missing translation must
 # resolve through this settings-layer baseline rather than passing the abstract value through;
 # this table is not vendor knowledge embedded in adapter code.
