@@ -11,7 +11,7 @@ from typing import Sequence
 
 from assent import AssentError, gitops, verification
 from assent.config import Config
-from assent.folderdeps import parse_folder_dependencies
+from assent.folderdeps import infer_folder_completion, parse_folder_dependencies
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 
@@ -55,7 +55,8 @@ def _source_snapshot(main: Path, folder: str,
     return branch, gitops.branch_tip(main, branch), worktree
 
 
-def _dependency_tip(main: Path, folder: str) -> tuple[str | None, str | None]:
+def _dependency_tip(main: Path, folder: str,
+                    excludes: Sequence[str] = ()) -> tuple[str | None, str | None]:
     """Resolve a direct prerequisite's current tip without parsing its task plan."""
     worktree = gitops.folder_worktree(main, folder)
     if worktree is not None:
@@ -64,7 +65,13 @@ def _dependency_tip(main: Path, folder: str) -> tuple[str | None, str | None]:
             return None, f"its source worktree {worktree} is detached"
         if not branch.startswith(f"{folder}/") or branch == f"{folder}/":
             return None, f"its source worktree is on non-{folder} branch {branch}"
-        return gitops.branch_tip(main, branch), None
+        if not gitops.working_tree_status(worktree, excludes).is_clean:
+            return None, "its source worktree is dirty"
+        tip = gitops.branch_tip(main, branch)
+        if (gitops.commit_of(worktree, "HEAD") != tip
+                or gitops.branch_tip(main, branch) != tip):
+            return None, "its source changed while its tip was being resolved"
+        return tip, None
     branches = gitops.folder_branches(main, folder)
     if not branches:
         return None, "its source was cleaned before the dependent was accepted"
@@ -124,12 +131,19 @@ def _accept_locked(cfg: Config) -> int:
     target_before = gitops.commit_of(main, "HEAD")
 
     pending: list[str] = []
+    dependency_tips: list[tuple[str, str]] = []
     for dependency in dependencies.after:
-        tip, problem = _dependency_tip(main, dependency)
+        completion = infer_folder_completion(cfg.assent_dir / dependency)
+        if not completion.complete:
+            pending.append(f"{dependency} ({completion.reason})")
+            continue
+        tip, problem = _dependency_tip(main, dependency, cfg.git_excludes)
         if problem is not None:
             pending.append(f"{dependency} ({problem})")
         elif not gitops.is_ancestor(main, tip, target_before):
             pending.append(f"{dependency} (current tip {tip[:12]} is not in target)")
+        else:
+            dependency_tips.append((dependency, tip))
     if pending:
         print(f"accept {folder}: refused, prerequisite folder(s) cannot be proven "
               f"accepted into {target_branch}: {', '.join(pending)}. Do not clean "
@@ -141,6 +155,19 @@ def _accept_locked(cfg: Config) -> int:
             main, folder, cfg.git_excludes)
     except AssentError as e:
         print(f"accept {folder}: refused, {e}")
+        return 1
+
+    stale_dependencies = [
+        f"{dependency} ({tip[:12]})"
+        for dependency, tip in dependency_tips
+        if not gitops.is_ancestor(main, tip, source_tip)
+    ]
+    if stale_dependencies:
+        print(f"accept {folder}: refused, the downstream source does not contain "
+              f"the current accepted prerequisite tip(s): "
+              f"{', '.join(stale_dependencies)}. The target, source, and receipt "
+              f"were preserved; run `assent rework {folder}` or replan the "
+              "dependency")
         return 1
 
     try:
@@ -220,6 +247,18 @@ def _accept_locked(cfg: Config) -> int:
                                   source_worktree, cfg.git_excludes).is_clean))):
                         gate_problem = "the source changed during acceptance"
                     else:
+                        for dependency, dependency_tip in dependency_tips:
+                            current_tip, problem = _dependency_tip(
+                                main, dependency, cfg.git_excludes)
+                            if problem is not None or current_tip != dependency_tip:
+                                detail = problem or (
+                                    f"tip changed from {dependency_tip} to "
+                                    f"{current_tip}")
+                                gate_problem = (
+                                    f"prerequisite {dependency} changed during "
+                                    f"acceptance ({detail})")
+                                break
+                    if gate_problem is None:
                         try:
                             final_digest = verification.verifier_digest(cfg)
                         except AssentError as e:
