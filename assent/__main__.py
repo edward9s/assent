@@ -12,8 +12,9 @@ import threading
 from collections import Counter
 
 from assent import AssentError, engine
-from assent.accept import accept_all, accept_folder, accept_selected_batch
+from assent.accept import accept_folder
 from assent.archive import archive_all, archive_folder, restore_folder
+from assent.batch_accept import accept_all, accept_selected_batch
 from assent.clean import clean_folders
 from assent.config import list_task_folders, load_config, validate_config
 from assent.doctor import doctor as run_doctor

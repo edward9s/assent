@@ -33,6 +33,26 @@ def _is_private(name: str) -> bool:
         name.startswith("__") and name.endswith("__"))
 
 
+def _imported_assent_modules(name: str) -> set[str]:
+    """Every ``assent`` submodule the named module imports, by bare name."""
+    tree = ast.parse((PACKAGE / f"{name}.py").read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                continue
+            if module == "assent":
+                imported.update(alias.name for alias in node.names)
+            elif module.startswith("assent."):
+                imported.add(module.split(".", 1)[1])
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("assent."):
+                    imported.add(alias.name.split(".", 1)[1])
+    return imported
+
+
 def _module_aliases(tree: ast.Module) -> dict[str, str]:
     """Local names bound to another ``assent`` module by this file's imports."""
     aliases: dict[str, str] = {}
@@ -152,25 +172,6 @@ class VerificationModuleBoundaries(unittest.TestCase):
 
     LEAVES = ("folder_verification", "batch_receipt", "batch_verification")
 
-    def _imported_assent_modules(self, name: str) -> set[str]:
-        """Every ``assent`` submodule the named module imports, by bare name."""
-        tree = ast.parse((PACKAGE / f"{name}.py").read_text(encoding="utf-8"))
-        imported: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                if node.level:
-                    continue
-                if module == "assent":
-                    imported.update(alias.name for alias in node.names)
-                elif module.startswith("assent."):
-                    imported.add(module.split(".", 1)[1])
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name.startswith("assent."):
-                        imported.add(alias.name.split(".", 1)[1])
-        return imported
-
     def test_the_facade_defines_no_implementation_of_its_own(self) -> None:
         tree = ast.parse((PACKAGE / "verification.py").read_text(
             encoding="utf-8"))
@@ -180,7 +181,7 @@ class VerificationModuleBoundaries(unittest.TestCase):
         self.assertEqual(defined, [])
 
     def test_the_common_base_knows_none_of_the_modules_above_it(self) -> None:
-        imported = self._imported_assent_modules("verification_common")
+        imported = _imported_assent_modules("verification_common")
         self.assertEqual(imported & {*self.LEAVES, "verification"}, set())
 
     def test_the_leaves_form_no_import_cycle(self) -> None:
@@ -193,7 +194,7 @@ class VerificationModuleBoundaries(unittest.TestCase):
         }
         for leaf in self.LEAVES:
             with self.subTest(module=leaf):
-                imported = self._imported_assent_modules(leaf)
+                imported = _imported_assent_modules(leaf)
                 self.assertNotIn("verification", imported)
                 self.assertEqual(imported & set(self.LEAVES), allowed[leaf])
 
@@ -213,6 +214,48 @@ class VerificationModuleBoundaries(unittest.TestCase):
                      "BatchSource"):
             with self.subTest(name=name):
                 self.assertTrue(hasattr(verification, name))
+
+
+class AcceptanceModuleBoundaries(unittest.TestCase):
+    """Direct acceptance and batch acceptance are two modules, one direction.
+
+    ``assent.accept`` owns the single receipt-backed transaction;
+    ``assent.batch_accept`` owns the selected batch, the batch release, and
+    ``accept --all``, and reuses the direct transaction through its public
+    helpers.  Reading or changing either safety-sensitive path must never
+    require loading the other implementation, so the edge runs one way only.
+    """
+
+    def test_the_direct_module_does_not_import_the_batch_module(self) -> None:
+        self.assertNotIn("batch_accept", _imported_assent_modules("accept"))
+
+    def test_the_batch_module_reuses_the_direct_transaction(self) -> None:
+        self.assertIn("accept", _imported_assent_modules("batch_accept"))
+
+    def test_each_module_defines_only_its_own_entry_points(self) -> None:
+        from assent import accept, batch_accept
+        for owner, name in ((accept, "accept_folder"),
+                            (accept, "accept_merge_message"),
+                            (accept, "cleanup_warning"),
+                            (accept, "dependency_tip"),
+                            (batch_accept, "accept_all"),
+                            (batch_accept, "accept_selected_batch")):
+            with self.subTest(symbol=f"{owner.__name__}.{name}"):
+                function = getattr(owner, name)
+                self.assertTrue(callable(function))
+                self.assertEqual(function.__module__, owner.__name__)
+        for absent in ("accept_all", "accept_selected_batch"):
+            with self.subTest(absent=absent):
+                self.assertFalse(hasattr(accept, absent))
+
+    def test_the_cli_takes_each_path_from_its_owning_module(self) -> None:
+        """The command syntax is unchanged, so the dispatch targets must be too."""
+        from assent import __main__
+        self.assertEqual(__main__.accept_folder.__module__, "assent.accept")
+        for name in ("accept_all", "accept_selected_batch"):
+            with self.subTest(name=name):
+                self.assertEqual(getattr(__main__, name).__module__,
+                                 "assent.batch_accept")
 
 
 class VendorAdapterIndependence(unittest.TestCase):
