@@ -378,6 +378,19 @@ def _already_integrated(cfg: Config) -> bool:
     return gitops.is_ancestor(main, source_tip, target_tip)
 
 
+def _no_source_remains(main: Path, folder: str) -> bool:
+    """True when a folder's ``<folder>/*`` worktree and branches are both gone.
+
+    ``assent clean`` only deletes a folder's branch once it has proven the
+    branch is fully merged into the integration target, so the branch's
+    absence is itself the merge evidence -- ``accept --all`` does not need a
+    fresh proof to skip it.  A branch deleted by hand outside ``clean`` is not
+    covered by this contract, matching ``clean``'s own existing stance.
+    """
+    return (gitops.folder_worktree(main, folder) is None
+            and not gitops.folder_branches(main, folder))
+
+
 def accept_all(config_path: str, assent_dir: Path) -> int:
     """Verify-then-accept every finished work folder, serially, fail-closed.
 
@@ -387,8 +400,14 @@ def accept_all(config_path: str, assent_dir: Path) -> int:
     ``assent verify FOLDER``), then reuses ``accept_folder`` unchanged. A
     folder already published by a prior run skips straight to
     ``accept_folder``'s own idempotent path (see ``_already_integrated``).
-    The first failure stops the remaining chain; folders already published
-    stay published.
+    A finished folder whose source branch and worktree have both already
+    been cleaned away (``_no_source_remains``) is skipped instead of run
+    through verify/accept, since there is nothing left to verify; this
+    skip does not count as a chain failure. Only ``--all`` skips this way --
+    a directly named ``accept FOLDER`` still fails closed on a missing
+    source, since a directly named target must never be silently skipped.
+    The first real failure stops the remaining chain; folders already
+    published stay published.
     """
     assent_dir = Path(assent_dir)
     try:
@@ -418,13 +437,22 @@ def accept_all(config_path: str, assent_dir: Path) -> int:
         return 1
 
     accepted: list[str] = []
+    skipped: list[str] = []
     failure: tuple[str, str] | None = None
+    processed = 0
     for folder in order:
+        processed += 1
         try:
             cfg = load_config(config_path, folder)
         except AssentError as e:
             failure = (folder, f"config error: {e}")
             break
+        main = gitops.main_worktree(cfg.root)
+        if _no_source_remains(main, folder):
+            print(f"accept --all: skip {folder} (no source branch remains; "
+                  "already integrated and cleaned)")
+            skipped.append(folder)
+            continue
         if (not _already_integrated(cfg)
                 and verification.verify_folder_if_needed(cfg) != 0):
             failure = (folder, "verification refused or failed")
@@ -434,9 +462,12 @@ def accept_all(config_path: str, assent_dir: Path) -> int:
             break
         accepted.append(folder)
 
-    remaining = order[len(accepted) + (1 if failure else 0):]
+    remaining = order[processed:]
     print("accept --all: summary")
     print(f"  accepted:  {', '.join(accepted) if accepted else '(none)'}")
+    if skipped:
+        print(f"  skipped:   {', '.join(skipped)} "
+              "(no source remains; already integrated and cleaned)")
     if failure is not None:
         folder, reason = failure
         print(f"  failed:    {folder} ({reason})")

@@ -19,7 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from assent import gitops, verification
-from assent.accept import accept_all
+from assent.accept import accept_all, accept_folder
+from assent.clean import clean_folder
 from assent.config import load_config
 
 _VERIFY_OK = "raise SystemExit(0)\n"
@@ -255,6 +256,66 @@ class TestIdempotentRerun(AcceptAllRepositoryCase):
         self.assertEqual(self._head(), head_after_first)
         self.assertIn("already accepted", second_output)
         self.assertIn("accepted:  solo", second_output)
+
+
+class TestSkipCleanedFolder(AcceptAllRepositoryCase):
+    """Reproduces the crashresume01 incident: a finished folder that was
+
+    already accepted and then cleaned (branch and worktree both gone, only
+    a stale receipt left behind) must not stop the ``--all`` chain.
+    """
+
+    def _accept_and_clean(self, folder: str) -> None:
+        code, output = self._accept_all()
+        self.assertEqual(code, 0, output)
+        clean_code = clean_folder(self._config(folder))
+        self.assertEqual(clean_code, 0)
+        self.assertIsNone(gitops.folder_worktree(self.root, folder))
+        self.assertEqual(gitops.folder_branches(self.root, folder), [])
+
+    def test_cleaned_folder_is_skipped_and_chain_continues(self) -> None:
+        self._write_task("cleaned")
+        self._write_task("zzz-after")
+        self._make_source("cleaned")
+        self._make_source("zzz-after")
+        self._accept_and_clean("cleaned")
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn(
+            "skip cleaned (no source branch remains; "
+            "already integrated and cleaned)", output)
+        self.assertNotIn("failed:    cleaned", output)
+        self.assertIn("accepted:  zzz-after", output)
+        self.assertNotIn("remaining: zzz-after", output)
+
+    def test_folders_after_the_skipped_one_are_processed_normally(self) -> None:
+        self._write_task("cleaned")
+        self._write_task("zzz-fresh")
+        self._make_source("cleaned")
+        self._accept_and_clean("cleaned")
+        self._write_task("zzz-fresh", status="DONE")
+        self._make_source("zzz-fresh")
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("skip cleaned", output)
+        self.assertIn("accepted:  zzz-fresh", output)
+        self.assertIn("remaining: (none)", output)
+
+    def test_direct_accept_of_cleaned_folder_still_fails_closed(self) -> None:
+        self._write_task("cleaned")
+        self._make_source("cleaned")
+        self._accept_and_clean("cleaned")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = accept_folder(self._config("cleaned"))
+
+        self.assertEqual(code, 1)
+        self.assertIn("no source worktree", output.getvalue())
 
 
 if __name__ == "__main__":
