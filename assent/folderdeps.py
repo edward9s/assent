@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from assent import AssentError, gitops
-from assent.config import _validate_tasks_name, list_task_folders
+from assent.config import list_task_folders, validate_tasks_name
 from assent.plan import Plan
 
 _FOLDER_CONFIG_NAME = "_folder.toml"
@@ -100,7 +100,7 @@ def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
         raise AssentError(f"Task folder not found: {tasks_dir}")
 
     name = tasks_dir.name
-    _validate_tasks_name(name, "Task folder name")
+    validate_tasks_name(name, "Task folder name")
     path = tasks_dir / _FOLDER_CONFIG_NAME
     if not path.is_file():
         return FolderDependencies(name=name, after=[], path=path.resolve())
@@ -131,7 +131,7 @@ def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
     available = set(list_task_folders(tasks_dir.parent))
     archived = archived_folder_names(tasks_dir.parent)
     for dependency in after:
-        _validate_tasks_name(dependency, f"Folder {name}'s after element")
+        validate_tasks_name(dependency, f"Folder {name}'s after element")
         if dependency == name:
             raise AssentError(f"Folder {name}'s after must not depend on itself")
         in_live = dependency in available
@@ -268,6 +268,19 @@ def parse_folder_dependency_graph(
     }
     _ensure_acyclic(dependencies)
     return dependencies
+
+
+def direct_dependents(graph: Mapping[str, FolderDependencies],
+                      target: str) -> list[str]:
+    """Return folders that directly name ``target`` in their ``after`` list.
+
+    Clean and reject both have to lock and inspect exactly this set before they
+    remove a source, so the edge direction is read here rather than in either
+    command; a difference between the two would silently change which folders a
+    destructive step protects.
+    """
+    return sorted(name for name, dependencies in graph.items()
+                  if target in dependencies.after)
 
 
 def order_folders_by_dependency(

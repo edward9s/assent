@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from assent import AssentError, gitops
-from assent.config import Config, _validate_tasks_name, load_config
+from assent.config import Config, load_config, validate_tasks_name
 from assent.folderdeps import (infer_folder_completion, live_upstreams,
                                order_folders_by_dependency,
                                parse_folder_dependencies,
@@ -781,7 +781,7 @@ def _validate_batch_receipt(receipt: BatchVerificationReceipt,
         if not isinstance(source.folder, str):
             raise AssentError(
                 f"Batch verification receipt sources[{index}] folder must be a string")
-        _validate_tasks_name(source.folder, "Batch verification receipt folder")
+        validate_tasks_name(source.folder, "Batch verification receipt folder")
         if source.folder in seen:
             raise AssentError(
                 "Batch verification receipt lists folder "

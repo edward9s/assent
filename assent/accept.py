@@ -34,14 +34,13 @@ from typing import Sequence
 
 from assent import AssentError, gitops, verification
 from assent.config import Config, load_config
+from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
 from assent.folderdeps import (infer_folder_completion, live_upstreams,
                                order_folders_by_dependency,
                                parse_folder_dependencies,
                                parse_folder_dependency_graph)
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
-
-_COMPLETE_STATUSES = ("DONE", "SKIP")
 
 # Both --all paths announce themselves before doing any work, so which one a run
 # took is always readable from its output instead of having to be inferred.
@@ -51,43 +50,6 @@ _BATCH_BANNER = (
 _PER_FOLDER_BANNER = (
     "accept --all: per-folder verify+accept; on failure the chain stops and "
     "the folders already published stay published.")
-
-
-def _source_snapshot(main: Path, folder: str,
-                     excludes: Sequence[str], *,
-                     operation: str = "accept") -> tuple[str, str, Path | None]:
-    """Resolve the only current source branch and require a clean attachment."""
-    worktree = gitops.folder_worktree(main, folder)
-    if worktree is not None:
-        branch = gitops.current_branch(worktree)
-        if not branch:
-            raise AssentError(
-                f"source worktree {worktree} is in detached HEAD state, so there "
-                f"is no current source branch for {operation}")
-        if not branch.startswith(f"{folder}/") or branch == f"{folder}/":
-            raise AssentError(
-                f"source worktree {worktree} is on branch {branch}, which is not "
-                f"a {folder}/* branch")
-        if not gitops.working_tree_status(worktree, excludes).is_clean:
-            raise AssentError(f"source worktree {worktree} is not clean")
-    else:
-        branches = gitops.folder_branches(main, folder)
-        if len(branches) > 1:
-            if operation != "accept":
-                raise AssentError(
-                    f"current source is ambiguous ({', '.join(branches)})")
-            raise AssentError(
-                "multiple candidate source branches exist "
-                f"({', '.join(branches)}); accept does not guess which one is current")
-        if not branches:
-            if operation != "accept":
-                raise AssentError(
-                    f"no source worktree or {folder}/* branch exists")
-            raise AssentError(
-                f"no source worktree or {folder}/* branch exists; accept does not "
-                "infer authorization from old commit messages")
-        branch = branches[0]
-    return branch, gitops.branch_tip(main, branch), worktree
 
 
 def _dependency_tip(main: Path, folder: str,
@@ -166,7 +128,7 @@ def _accept_locked(cfg: Config) -> int:
 
     plan = Plan.parse(cfg.tasks_dir)
     unfinished = [f"{task.id}={task.status}" for task in plan.tasks
-                  if task.status not in _COMPLETE_STATUSES]
+                  if task.status not in COMPLETE_STATUSES]
     if unfinished:
         print(f"accept {folder}: refused, the folder is not finished "
               f"({', '.join(unfinished)}); every task must be DONE or SKIP")
@@ -205,7 +167,7 @@ def _accept_locked(cfg: Config) -> int:
         return 1
 
     try:
-        source_branch, source_tip, source_worktree = _source_snapshot(
+        source_branch, source_tip, source_worktree = resolve_source_snapshot(
             main, folder, cfg.git_excludes)
     except AssentError as e:
         print(f"accept {folder}: refused, {e}")
@@ -391,7 +353,7 @@ def _already_integrated(cfg: Config) -> bool:
     try:
         main = gitops.main_worktree(cfg.root)
         target_tip = gitops.commit_of(main, gitops.require_current_branch(main))
-        _branch, source_tip, _worktree = _source_snapshot(
+        _branch, source_tip, _worktree = resolve_source_snapshot(
             main, cfg.tasks_name, cfg.git_excludes)
     except AssentError:
         return False
@@ -470,14 +432,14 @@ def _batch_source_identities(
         configs: dict[str, Config]) -> tuple[list[_BatchSource], str | None]:
     """Resolve every batched folder's current source, refusing on any drift.
 
-    ``_source_snapshot`` is the same resolution a single-folder accept performs,
-    so a detached, foreign, ambiguous, or dirty source refuses the batch for
-    exactly the reasons it would refuse one folder.
+    ``resolve_source_snapshot`` is the same resolution a single-folder accept
+    performs, so a detached, foreign, ambiguous, or dirty source refuses the
+    batch for exactly the reasons it would refuse one folder.
     """
     sources: list[_BatchSource] = []
     for entry in receipt.sources:
         try:
-            branch, tip, worktree = _source_snapshot(
+            branch, tip, worktree = resolve_source_snapshot(
                 main, entry.folder, configs[entry.folder].git_excludes)
         except AssentError as e:
             return [], f"{entry.folder}: {e}"
@@ -634,7 +596,7 @@ def _unbatched_finished_folders(config_path: str, assent_dir: Path, main: Path,
             continue
         try:
             cfg = load_config(config_path, folder)
-            _branch, tip, _worktree = _source_snapshot(
+            _branch, tip, _worktree = resolve_source_snapshot(
                 main, folder, cfg.git_excludes)
         except AssentError:
             outstanding.append(folder)

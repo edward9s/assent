@@ -6,10 +6,9 @@ from pathlib import Path
 from typing import Callable
 
 from assent import AssentError, gitops, verification
-from assent.accept import _source_snapshot
-from assent.clean import _direct_dependents
 from assent.config import Config
-from assent.folderdeps import parse_folder_dependency_graph
+from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
+from assent.folderdeps import direct_dependents, parse_folder_dependency_graph
 from assent.lockfile import LockBusy, LockMissing, probe_lock
 from assent.plan import Plan, append_entry, set_status
 
@@ -86,10 +85,11 @@ def _check_dependents(cfg: Config, stack: ExitStack
                       ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """Lock direct dependent folders and classify each as busy or unaccepted.
 
-    Reuses ``clean.py``'s dependency graph and dependent-lock proof instead of
-    a second implementation. Every direct dependent's ``assent.lock`` is held
-    via ``stack`` for the rest of this reject, the same way ``clean.py``
-    ``_lock_and_check_dependents`` holds them for the rest of a cleanup. A
+    Reads the dependent set from ``folderdeps.direct_dependents``, the same
+    shared edge lookup ``clean`` uses, instead of a second implementation. Every
+    direct dependent's ``assent.lock`` is held via ``stack`` for the rest of this
+    reject, the same way ``clean.py`` ``_lock_and_check_dependents`` holds them
+    for the rest of a cleanup. A
     dependent whose source tip is already an ancestor of the main worktree
     HEAD is accepted and never reported. Returns ``(busy, unaccepted)``:
     ``busy`` is non-empty only when some dependent's own run lock could not be
@@ -99,7 +99,7 @@ def _check_dependents(cfg: Config, stack: ExitStack
     """
     name = cfg.tasks_name
     graph = parse_folder_dependency_graph(cfg.assent_dir)
-    dependents = _direct_dependents(graph, name)
+    dependents = direct_dependents(graph, name)
     if not dependents:
         return [], []
 
@@ -116,7 +116,7 @@ def _check_dependents(cfg: Config, stack: ExitStack
             unaccepted.append((dependent, f"its task-folder lock is unavailable: {e}"))
 
     locked_graph = parse_folder_dependency_graph(cfg.assent_dir)
-    locked_dependents = _direct_dependents(locked_graph, name)
+    locked_dependents = direct_dependents(locked_graph, name)
     if locked_dependents != dependents:
         raise AssentError(
             "direct dependents changed while reject was acquiring locks "
@@ -137,12 +137,12 @@ def _check_dependents(cfg: Config, stack: ExitStack
             continue
         plan = Plan.parse(cfg.assent_dir / dependent)
         unfinished = [f"{task.id}={task.status}" for task in plan.tasks
-                      if task.status not in ("DONE", "SKIP")]
+                      if task.status not in COMPLETE_STATUSES]
         if unfinished:
             unaccepted.append((dependent, f"unfinished tasks: {', '.join(unfinished)}"))
             continue
         try:
-            _branch, source_tip, _worktree = _source_snapshot(
+            _branch, source_tip, _worktree = resolve_source_snapshot(
                 main, dependent, cfg.git_excludes, operation="reject dependency proof")
         except AssentError as e:
             unaccepted.append((dependent, str(e)))

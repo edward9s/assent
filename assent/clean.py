@@ -5,16 +5,21 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from assent import AssentError, gitops
-from assent.accept import _source_snapshot
 from assent.config import Config
-from assent.folderdeps import parse_folder_dependency_graph
+from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
+from assent.folderdeps import direct_dependents, parse_folder_dependency_graph
 from assent.lockfile import (LockBusy, LockMissing, hold_integration_lock,
                              probe_lock)
 from assent.plan import Plan
 
 
-def _has_cleanup_target(cfg: Config) -> bool:
-    """Quickly check whether a fixed worktree path or same-prefix branches exist."""
+def has_cleanup_target(cfg: Config) -> bool:
+    """Quickly check whether a fixed worktree path or same-prefix branches exist.
+
+    Public because ``archive`` asks the same question before and after it reuses
+    ``clean_locked``: a source that clean deliberately retained must stop the
+    archive rather than be compressed away.
+    """
     return (gitops.worktree_path(cfg.root, cfg.tasks_name).exists()
             or bool(gitops.branches_with_prefix(cfg.root, cfg.branch_prefix)))
 
@@ -61,7 +66,7 @@ def clean_folder(cfg: Config) -> int:
         with hold_integration_lock(cfg.assent_dir):
             try:
                 with probe_lock(cfg.tasks_dir, name):
-                    return _clean_locked(cfg, path)
+                    return clean_locked(cfg, path)
             except LockBusy:
                 print(f"{name}: skipped (a run is in progress, refusing cleanup)")
                 return 0
@@ -77,12 +82,6 @@ def clean_folder(cfg: Config) -> int:
     except AssentError as e:
         print(f"{name}: failed (integration lock could not be safely acquired: {e})")
         return 1
-
-
-def _direct_dependents(graph, target: str) -> list[str]:
-    """Return folders that directly name ``target`` in their ``after`` list."""
-    return sorted(name for name, dependencies in graph.items()
-                  if target in dependencies.after)
 
 
 def _print_dependency_retention(name: str, problems: list[tuple[str, str]]) -> None:
@@ -109,7 +108,7 @@ def _lock_and_check_dependents(cfg: Config, target_head: str,
         print(f"{name}: failed (folder dependency graph is invalid: {e})")
         return False, 1
 
-    dependents = _direct_dependents(graph, name)
+    dependents = direct_dependents(graph, name)
     lock_problems: dict[str, str] = {}
     for dependent in dependents:
         try:
@@ -125,7 +124,7 @@ def _lock_and_check_dependents(cfg: Config, target_head: str,
 
     try:
         locked_graph = parse_folder_dependency_graph(cfg.assent_dir)
-        locked_dependents = _direct_dependents(locked_graph, name)
+        locked_dependents = direct_dependents(locked_graph, name)
         if locked_dependents != dependents:
             raise AssentError(
                 "direct dependents changed while cleanup was acquiring locks "
@@ -146,14 +145,14 @@ def _lock_and_check_dependents(cfg: Config, target_head: str,
             continue
         unfinished = [
             f"{task.id}={task.status}" for task in plans[dependent].tasks
-            if task.status not in ("DONE", "SKIP")
+            if task.status not in COMPLETE_STATUSES
         ]
         if unfinished:
             problems.append((
                 dependent, f"unfinished tasks: {', '.join(unfinished)}"))
             continue
         try:
-            _branch, source_tip, _worktree = _source_snapshot(
+            _branch, source_tip, _worktree = resolve_source_snapshot(
                 gitops.main_worktree(cfg.root), dependent, cfg.git_excludes,
                 operation="cleanup dependency proof")
         except AssentError as e:
@@ -171,8 +170,13 @@ def _lock_and_check_dependents(cfg: Config, target_head: str,
     return True, 0
 
 
-def _clean_locked(cfg: Config, path: Path) -> int:
-    """With the task-folder lock already held, re-gather evidence and perform cleanup."""
+def clean_locked(cfg: Config, path: Path) -> int:
+    """With the task-folder lock already held, re-gather evidence and perform cleanup.
+
+    Public because ``archive`` runs exactly this proof-and-removal step under its
+    own locks instead of reimplementing a second cleanup; ``clean_folder`` is the
+    entry point that acquires the locks first.
+    """
     root = cfg.root
     name = cfg.tasks_name
     try:
@@ -189,7 +193,7 @@ def _clean_locked(cfg: Config, path: Path) -> int:
             # Even removing a leftover empty container waits until the complete
             # dependency proof above has succeeded.
             _remove_empty_container(path)
-            if not _has_cleanup_target(cfg):
+            if not has_cleanup_target(cfg):
                 print(f"{name}: skipped (no worktree or branch to clean up)")
                 return 0
 
