@@ -518,7 +518,12 @@ For each task: open a headless session -> after the session ends the scheduler
 checks in order, and commits only when all pass:
 
 1. **Status check**: the task's status has been updated by the executing AI to
-   `DONE` or `BLOCKED`.
+   `DONE` or `BLOCKED`. When only this check fails and the structural
+   comparison and scope checks both pass, the scheduler probes the task's
+   focused verify once before retrying; a pass attaches a dedicated
+   closeout-only retry prompt (close out the task without touching code or
+   tests), and a retries-exhausted BLOCKED record notes that verify already
+   passed and only closeout was missing.
 2. **Structural comparison**: any field of the task file other than status
    differing from the checkpoint version = a review failure (to stop the
    executing AI from relaxing its own scope/verify/deps).
