@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Sequence
 
 from assent import AssentError
 from assent.adapters import Adapter, InvocationRequest, TaskResult
-from assent.adapters.claude import run_subprocess
+from assent.adapters.process import run_subprocess
 
 if TYPE_CHECKING:
     from assent.config import Config

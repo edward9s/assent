@@ -141,5 +141,53 @@ class NeutralFolderServices(unittest.TestCase):
         self.assertEqual(imported & commands, set())
 
 
+class VendorAdapterIndependence(unittest.TestCase):
+    """One vendor's adapter never depends on another vendor's adapter module.
+
+    Shared execution machinery belongs to a neutral module such as
+    ``assent.adapters.process``; reaching into a sibling vendor module instead
+    makes that vendor's file impossible to change without breaking the others.
+    """
+
+    ADAPTERS = PACKAGE / "adapters"
+    NEUTRAL = {"__init__", "process"}
+
+    def _vendor_modules(self) -> list[Path]:
+        return sorted(path for path in self.ADAPTERS.glob("*.py")
+                      if path.stem not in self.NEUTRAL)
+
+    def test_the_vendor_modules_under_check_are_the_expected_ones(self) -> None:
+        self.assertEqual([path.stem for path in self._vendor_modules()],
+                         ["antigravity", "claude", "codex"])
+
+    def test_no_vendor_adapter_imports_another_vendor_adapter(self) -> None:
+        vendors = {path.stem for path in self._vendor_modules()}
+        offenders: list[str] = []
+        for path in self._vendor_modules():
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    names = [f"{node.module or ''}.{alias.name}"
+                             for alias in node.names]
+                elif isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                else:
+                    continue
+                for name in names:
+                    parts = name.split(".")
+                    if parts[:2] != ["assent", "adapters"] or len(parts) < 3:
+                        continue
+                    if parts[2] in vendors and parts[2] != path.stem:
+                        offenders.append(
+                            f"{path.relative_to(ROOT).as_posix()}:"
+                            f"{node.lineno}: {name}")
+        self.assertEqual(offenders, [], "\n".join(
+            ["vendor adapters importing another vendor adapter:", *offenders]))
+
+    def test_the_shared_runner_lives_in_the_neutral_process_module(self) -> None:
+        from assent.adapters import process
+        self.assertTrue(callable(process.run_subprocess))
+
+
 if __name__ == "__main__":
     unittest.main()
