@@ -258,7 +258,7 @@ class TestDependencyGate(AcceptReceiptCase):
         (self.tasks_dir / "_folder.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
 
-        bad = self.assent_dir / "unrelated" 
+        bad = self.assent_dir / "unrelated"
         bad.mkdir()
         (bad / "t001_bad.e.toml").write_text("not valid = [\n", encoding="utf-8")
         self._verify_passes()
