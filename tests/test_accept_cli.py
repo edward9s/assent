@@ -452,12 +452,13 @@ class TestAcceptAllCli(AcceptCliCase):
                          folder_only.stdout + folder_only.stderr)
         self.assertIn("no source worktree", folder_only.stdout)
 
-        # self.folder is already DONE (setUp) but has no source yet, so --all
-        # dispatches and fails closed on that same folder instead of being
-        # rejected by argument parsing.
+        # self.folder is already DONE (setUp) but has no source branch or
+        # worktree, so --all dispatches to the same folder instead of being
+        # rejected by argument parsing, then skips it (no source remains) --
+        # unlike a directly named FOLDER, --all never fails closed on this.
         all_only = self._cli_all()
-        self.assertEqual(all_only.returncode, 1, all_only.stdout + all_only.stderr)
-        self.assertIn(f"failed:    {self.folder}", all_only.stdout)
+        self.assertEqual(all_only.returncode, 0, all_only.stdout + all_only.stderr)
+        self.assertIn(f"skip {self.folder} (no source branch remains", all_only.stdout)
 
     def test_accept_all_publishes_every_finished_folder_via_real_cli(self) -> None:
         second = "second"
