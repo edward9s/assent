@@ -160,19 +160,19 @@ class TestTrackedPaths(GitTestCase):
     def test_exact_file_and_directory_queries(self):
         folder = self.root / ".agents" / "plan01"
         folder.mkdir(parents=True)
-        task = folder / "t001_task.toml"
+        task = folder / "t001_task.e.toml"
         task.write_text("status = \"TODO\"\n", encoding="utf-8")
         _run(self.root, "add", str(task.relative_to(self.root)))
 
         self.assertEqual(tracked_paths(self.root, ".agents/plan01"),
-                         [".agents/plan01/t001_task.toml"])
+                         [".agents/plan01/t001_task.e.toml"])
         self.assertEqual(tracked_paths(
             self.root, ".agents/plan01", ref="HEAD"), [])
 
         _run(self.root, "commit", "-m", "track task")
         self.assertEqual(tracked_paths(
             self.root, ".agents/plan01", ref="HEAD"),
-            [".agents/plan01/t001_task.toml"])
+            [".agents/plan01/t001_task.e.toml"])
 
 
 class TestChangesOutsideScope(GitTestCase):

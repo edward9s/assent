@@ -90,9 +90,8 @@ class E2ETestCase(unittest.TestCase):
     def cfg(self):
         return load_config(self.root / ".agents" / "agents.toml")
 
-    def add_task(self, num, *, formal=False, **kw) -> Path:
-        suffix = ".e.toml" if formal else ".toml"
-        path = self.plan_dir / f"t{num:03d}_task{suffix}"
+    def add_task(self, num, **kw) -> Path:
+        path = self.plan_dir / f"t{num:03d}_task.e.toml"
         path.write_text(task_text(**kw), encoding="utf-8", newline="\n")
         return path
 
@@ -129,8 +128,8 @@ class E2ETestCase(unittest.TestCase):
 
 
 class TestScenarios(E2ETestCase):
-    def test_formal_task_runs_end_to_end_with_matching_journal(self):
-        task = self.add_task(1, formal=True)
+    def test_task_runs_end_to_end_with_matching_journal(self):
+        task = self.add_task(1)
         self.start()
         adapter = ScriptedAdapter([
             self.done_step(task, {"src/formal.py": "ok"})])
@@ -366,7 +365,7 @@ class TestWorktreeScenarios(E2ETestCase):
         task1 = self.add_task(1)
         plan2 = self.root / ".agents" / "plan02"
         plan2.mkdir()
-        task2 = plan2 / "t001_task.toml"
+        task2 = plan2 / "t001_task.e.toml"
         task2.write_text(task_text(), encoding="utf-8", newline="\n")
         self.start()
 

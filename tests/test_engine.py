@@ -108,9 +108,8 @@ class EngineTestCase(unittest.TestCase):
             encoding="utf-8")
         return load_config(self.root / ".agents" / "agents.toml")
 
-    def write_task(self, num, slug="task", *, formal=False, **kw) -> Path:
-        suffix = ".e.toml" if formal else ".toml"
-        path = self.plan_dir / f"t{num:03d}_{slug}{suffix}"
+    def write_task(self, num, slug="task", **kw) -> Path:
+        path = self.plan_dir / f"t{num:03d}_{slug}.e.toml"
         path.write_text(task_text(**kw), encoding="utf-8", newline="\n")
         return path
 
@@ -142,8 +141,8 @@ class EngineTestCase(unittest.TestCase):
 
 
 class TestRunSuccess(EngineTestCase):
-    def test_formal_task_runs_with_prompt_scope_and_journal_paths(self):
-        path = self.write_task(1, formal=True)
+    def test_task_runs_with_prompt_scope_and_journal_paths(self):
+        path = self.write_task(1)
         cfg = self.build()
         self.commit_all()
         adapter = ScriptedAdapter([
@@ -599,11 +598,31 @@ class TestSchedulingAndRefusals(EngineTestCase):
         self.assertEqual(self.run_quiet(cfg, adapter=ScriptedAdapter([])), 1)
 
     def test_bad_task_file_refused_before_any_session(self):
-        (self.plan_dir / "t001_bad.toml").write_text("status = [", encoding="utf-8")
+        (self.plan_dir / "t001_bad.e.toml").write_text(
+            "status = [", encoding="utf-8")
         cfg = self.build()
         self.commit_all()
         adapter = ScriptedAdapter([])
         self.assertEqual(self.run_quiet(cfg, adapter=adapter), 1)
+        self.assertEqual(adapter.calls, [])
+
+    def test_retired_task_file_makes_check_and_run_fail_closed(self):
+        (self.plan_dir / "t001_old.toml").write_text(
+            task_text(), encoding="utf-8", newline="\n")
+        cfg = self.build(git_enabled=False)
+        adapter = ScriptedAdapter([])
+
+        check_out = io.StringIO()
+        with contextlib.redirect_stdout(check_out):
+            self.assertEqual(engine.check(cfg), 1)
+        self.assertIn("舊任務檔", check_out.getvalue())
+        self.assertIn("搬移", check_out.getvalue())
+
+        run_out = io.StringIO()
+        with contextlib.redirect_stdout(run_out):
+            self.assertEqual(engine.run(cfg, adapter=adapter), 1)
+        self.assertIn("舊任務檔", run_out.getvalue())
+        self.assertIn("搬移", run_out.getvalue())
         self.assertEqual(adapter.calls, [])
 
 

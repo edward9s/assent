@@ -62,7 +62,7 @@ class TestParseTaskFile(PlanTestCase):
         self.assertEqual(task.journal_path.name, "t001_demo.r.toml")
 
     def test_valid_task_parsed(self):
-        path = self.write("t001_demo.toml", task_text(
+        path = self.write("t001_demo.e.toml", task_text(
             title="骨架", deps=(), model="prime", effort="high",
             scope=("src/", "tests/"), notes="附註"))
         task = parse_task_file(path)
@@ -77,14 +77,20 @@ class TestParseTaskFile(PlanTestCase):
         self.assertIn("附註", task.notes)
 
     def test_id_comes_from_filename_only(self):
-        path = self.write("t042_x.toml", task_text())
+        path = self.write("t042_x.e.toml", task_text())
         self.assertEqual(parse_task_file(path).id, "t042")
 
     def test_bad_filename_rejected(self):
-        for name in ("t42_x.toml", "task001_x.toml", "t001.toml", "t001_x.md"):
+        for name in ("t42_x.e.toml", "task001_x.e.toml", "t001.e.toml",
+                     "t001_x.md"):
             path = self.write(name, task_text())
             with self.assertRaises(AgentsError):
                 parse_task_file(path)
+
+    def test_retired_task_file_rejected_with_migration_error(self):
+        path = self.write("t001_demo.toml", task_text())
+        with self.assertRaisesRegex(AgentsError, "舊任務檔.*已停用.*搬移"):
+            parse_task_file(path)
 
     def test_journal_file_rejected_before_parsing_fields(self):
         path = self.write("t001_demo.r.toml", "[[entry]]\n")
@@ -94,71 +100,71 @@ class TestParseTaskFile(PlanTestCase):
     def test_missing_required_fields_rejected(self):
         for key in ("title", "deps", "model", "status", "scope", "verify",
                     "goal", "acceptance"):
-            path = self.write("t001_x.toml", task_text(drop=(key,)))
+            path = self.write("t001_x.e.toml", task_text(drop=(key,)))
             with self.assertRaisesRegex(AgentsError, key):
                 parse_task_file(path)
 
     def test_unknown_key_rejected(self):
-        path = self.write("t001_x.toml", task_text(extra_line='oops = "x"'))
+        path = self.write("t001_x.e.toml", task_text(extra_line='oops = "x"'))
         with self.assertRaisesRegex(AgentsError, "未定義的欄位"):
             parse_task_file(path)
 
     def test_invalid_toml_rejected(self):
-        path = self.write("t001_x.toml", "title = [unclosed\n")
+        path = self.write("t001_x.e.toml", "title = [unclosed\n")
         with self.assertRaisesRegex(AgentsError, "TOML"):
             parse_task_file(path)
 
     def test_brand_model_name_rejected(self):
         # 檔位嚴格制:任務檔絕不寫廠牌型號
-        path = self.write("t001_x.toml", task_text(model="fable"))
+        path = self.write("t001_x.e.toml", task_text(model="fable"))
         with self.assertRaisesRegex(AgentsError, "檔位"):
             parse_task_file(path)
 
     def test_bad_status_rejected(self):
-        path = self.write("t001_x.toml", task_text(status="DOING"))
+        path = self.write("t001_x.e.toml", task_text(status="DOING"))
         with self.assertRaises(AgentsError):
             parse_task_file(path)
 
     def test_bad_effort_rejected(self):
-        path = self.write("t001_x.toml", task_text(effort="max"))
+        path = self.write("t001_x.e.toml", task_text(effort="max"))
         with self.assertRaises(AgentsError):
             parse_task_file(path)
 
     def test_empty_scope_fail_closed(self):
-        path = self.write("t001_x.toml", task_text(scope=()))
+        path = self.write("t001_x.e.toml", task_text(scope=()))
         with self.assertRaisesRegex(AgentsError, "fail-closed"):
             parse_task_file(path)
 
     def test_bad_dep_id_rejected(self):
-        path = self.write("t002_x.toml", task_text(deps=("W1",)))
+        path = self.write("t002_x.e.toml", task_text(deps=("W1",)))
         with self.assertRaisesRegex(AgentsError, "tNNN"):
             parse_task_file(path)
 
     def test_self_dependency_rejected(self):
-        path = self.write("t001_x.toml", task_text(deps=("t001",)))
+        path = self.write("t001_x.e.toml", task_text(deps=("t001",)))
         with self.assertRaisesRegex(AgentsError, "依賴自己"):
             parse_task_file(path)
 
 
 class TestPlanParse(PlanTestCase):
-    def test_mixed_formats_share_dependency_graph_and_selection(self):
-        formal = self.write("t002_b.e.toml", task_text(deps=("t001",)))
-        legacy = self.write("t001_a.toml", task_text(status="DONE"))
+    def test_formal_tasks_share_dependency_graph_and_selection(self):
+        second = self.write("t002_b.e.toml", task_text(deps=("t001",)))
+        first = self.write("t001_a.e.toml", task_text(status="DONE"))
         plan = Plan.parse(self.dir)
         self.assertEqual([task.path for task in plan.tasks],
-                         [legacy.resolve(), formal.resolve()])
+                         [first.resolve(), second.resolve()])
         task, resumed = plan.next_task()
-        self.assertEqual(task.path, formal.resolve())
+        self.assertEqual(task.path, second.resolve())
         self.assertFalse(resumed)
 
     def test_tasks_sorted_by_filename(self):
-        self.write("t002_b.toml", task_text(deps=("t001",)))
-        self.write("t001_a.toml", task_text())
+        self.write("t002_b.e.toml", task_text(deps=("t001",)))
+        self.write("t001_a.e.toml", task_text())
         plan = Plan.parse(self.dir)
         self.assertEqual([t.id for t in plan.tasks], ["t001", "t002"])
 
     def test_non_task_files_ignored(self):
-        self.write("t001_a.toml", task_text())
+        self.write("t001_a.e.toml", task_text())
         self.write("t001_a.r.toml", "[[entry]]\ntime = \"x\"\nby = \"ai\"\n"
                                     "event = \"note\"\nsummary = \"s\"\n")
         self.write("_report.md", "報告")
@@ -166,9 +172,9 @@ class TestPlanParse(PlanTestCase):
         self.assertEqual(len(plan.tasks), 1)
 
     def test_multiple_task_journal_pairs_do_not_affect_plan(self):
-        self.write("t001_a.toml", task_text(status="DONE"))
+        self.write("t001_a.e.toml", task_text(status="DONE"))
         self.write("t001_a.r.toml", task_text(deps=("t999",)))
-        self.write("t002_b.toml", task_text(deps=("t001",)))
+        self.write("t002_b.e.toml", task_text(deps=("t001",)))
         self.write("t002_b.r.toml", task_text(deps=("t002",)))
 
         plan = Plan.parse(self.dir)
@@ -179,9 +185,9 @@ class TestPlanParse(PlanTestCase):
         self.assertFalse(resumed)
 
     def test_journals_do_not_hide_real_dependency_cycle(self):
-        self.write("t001_a.toml", task_text(deps=("t002",)))
+        self.write("t001_a.e.toml", task_text(deps=("t002",)))
         self.write("t001_a.r.toml", task_text())
-        self.write("t002_b.toml", task_text(deps=("t001",)))
+        self.write("t002_b.e.toml", task_text(deps=("t001",)))
         self.write("t002_b.r.toml", task_text())
         with self.assertRaisesRegex(AgentsError, "循環"):
             Plan.parse(self.dir)
@@ -195,60 +201,65 @@ class TestPlanParse(PlanTestCase):
             Plan.parse(self.dir / "nope")
 
     def test_duplicate_id_rejected(self):
-        self.write("t001_a.toml", task_text())
-        self.write("t001_b.toml", task_text())
+        self.write("t001_a.e.toml", task_text())
+        self.write("t001_b.e.toml", task_text())
         with self.assertRaisesRegex(AgentsError, "重複"):
             Plan.parse(self.dir)
 
-    def test_same_id_in_formal_and_legacy_formats_rejected(self):
+    def test_retired_task_residue_rejected_even_with_formal_task(self):
         self.write("t001_a.e.toml", task_text())
         self.write("t001_a.toml", task_text())
-        with self.assertRaisesRegex(AgentsError, "任務 id 重複:t001"):
+        with self.assertRaisesRegex(AgentsError, "舊任務檔.*搬移"):
+            Plan.parse(self.dir)
+
+    def test_only_retired_task_residue_rejected_instead_of_ignored(self):
+        self.write("t001_a.toml", task_text())
+        with self.assertRaisesRegex(AgentsError, "舊任務檔.*搬移"):
             Plan.parse(self.dir)
 
     def test_unknown_dep_rejected(self):
-        self.write("t001_a.toml", task_text(deps=("t009",)))
+        self.write("t001_a.e.toml", task_text(deps=("t009",)))
         with self.assertRaisesRegex(AgentsError, "不存在的任務"):
             Plan.parse(self.dir)
 
     def test_dependency_cycle_rejected(self):
-        self.write("t001_a.toml", task_text(deps=("t002",)))
-        self.write("t002_b.toml", task_text(deps=("t001",)))
+        self.write("t001_a.e.toml", task_text(deps=("t002",)))
+        self.write("t002_b.e.toml", task_text(deps=("t001",)))
         with self.assertRaisesRegex(AgentsError, "循環"):
             Plan.parse(self.dir)
 
 
 class TestNextTask(PlanTestCase):
     def test_first_todo_with_met_deps(self):
-        self.write("t001_a.toml", task_text(status="DONE"))
-        self.write("t002_b.toml", task_text(deps=("t001",)))
+        self.write("t001_a.e.toml", task_text(status="DONE"))
+        self.write("t002_b.e.toml", task_text(deps=("t001",)))
         task, resumed = Plan.parse(self.dir).next_task()
         self.assertEqual(task.id, "t002")
         self.assertFalse(resumed)
 
     def test_wip_takes_priority_as_resume(self):
-        self.write("t001_a.toml", task_text())
-        self.write("t002_b.toml", task_text(status="WIP"))
+        self.write("t001_a.e.toml", task_text())
+        self.write("t002_b.e.toml", task_text(status="WIP"))
         task, resumed = Plan.parse(self.dir).next_task()
         self.assertEqual(task.id, "t002")
         self.assertTrue(resumed)
 
     def test_blocked_dep_gates_downstream_but_not_others(self):
-        self.write("t001_a.toml", task_text(status="BLOCKED"))
-        self.write("t002_b.toml", task_text(deps=("t001",)))
-        self.write("t003_c.toml", task_text())
+        self.write("t001_a.e.toml", task_text(status="BLOCKED"))
+        self.write("t002_b.e.toml", task_text(deps=("t001",)))
+        self.write("t003_c.e.toml", task_text())
         task, resumed = Plan.parse(self.dir).next_task()
         self.assertEqual(task.id, "t003")
 
     def test_skip_satisfies_dependency(self):
-        self.write("t001_a.toml", task_text(status="SKIP"))
-        self.write("t002_b.toml", task_text(deps=("t001",)))
+        self.write("t001_a.e.toml", task_text(status="SKIP"))
+        self.write("t002_b.e.toml", task_text(deps=("t001",)))
         task, _ = Plan.parse(self.dir).next_task()
         self.assertEqual(task.id, "t002")
 
     def test_all_settled_returns_none(self):
-        self.write("t001_a.toml", task_text(status="DONE"))
-        self.write("t002_b.toml", task_text(status="BLOCKED"))
+        self.write("t001_a.e.toml", task_text(status="DONE"))
+        self.write("t002_b.e.toml", task_text(status="BLOCKED"))
         self.assertIsNone(Plan.parse(self.dir).next_task())
 
 
@@ -259,7 +270,7 @@ class TestSetStatus(PlanTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
 
     def test_only_status_line_changes(self):
-        path = self.write("t001_x.toml", task_text(notes="內文提到 status 一詞"))
+        path = self.write("t001_x.e.toml", task_text(notes="內文提到 status 一詞"))
         before = path.read_text(encoding="utf-8")
         set_status(path, "BLOCKED")
         after = path.read_text(encoding="utf-8")
@@ -272,7 +283,7 @@ class TestSetStatus(PlanTestCase):
         self.assertIn('status = "BLOCKED"', a_lines[diff[0]])
 
     def test_crlf_preserved(self):
-        path = self.dir / "t001_x.toml"
+        path = self.dir / "t001_x.e.toml"
         path.write_bytes(task_text().replace("\n", "\r\n").encode("utf-8"))
         set_status(path, "DONE")
         raw = path.read_bytes()
@@ -280,7 +291,7 @@ class TestSetStatus(PlanTestCase):
         self.assertNotIn(b"\n\n\n", raw)
 
     def test_fake_status_line_in_prose_after_real_one_is_ignored(self):
-        path = self.write("t001_x.toml", task_text(
+        path = self.write("t001_x.e.toml", task_text(
             notes='status = "TODO"'))  # 多行字串裡的假 status 行(在真行之後)
         set_status(path, "DONE")
         self.assertEqual(parse_task_file(path).status, "DONE")
@@ -293,28 +304,28 @@ class TestSetStatus(PlanTestCase):
                 'status = "TODO"\nscope = ["src/"]\n'
                 f'verify = {json.dumps(_OK)}\n'
                 'acceptance = """\n- ok\n"""\n')
-        path = self.write("t001_x.toml", text)
+        path = self.write("t001_x.e.toml", text)
         with self.assertRaises(AgentsError):
             set_status(path, "DONE")
 
     def test_invalid_status_value_rejected(self):
-        path = self.write("t001_x.toml", task_text())
+        path = self.write("t001_x.e.toml", task_text())
         with self.assertRaises(AgentsError):
             set_status(path, "DOING")
 
 
 class TestStructuralCompare(PlanTestCase):
     def test_identical_except_status_ok(self):
-        path = self.write("t001_x.toml", task_text())
+        path = self.write("t001_x.e.toml", task_text())
         a = parse_task_file(path)
         set_status(path, "DONE")
         b = parse_task_file(path)
         self.assertEqual(same_except_status(a, b), [])
 
     def test_tampered_fields_reported(self):
-        path = self.write("t001_x.toml", task_text())
+        path = self.write("t001_x.e.toml", task_text())
         a = parse_task_file(path)
-        self.write("t001_x.toml", task_text(
+        self.write("t001_x.e.toml", task_text(
             status="DONE", scope=("src/", "secret/"), verify='echo ok'))
         b = parse_task_file(path)
         diff = same_except_status(a, b)
@@ -384,9 +395,13 @@ class TestJournal(PlanTestCase):
     def test_read_entries_missing_file_empty(self):
         self.assertEqual(read_entries(self.dir / "t009_x.r.toml"), [])
 
-    def test_journal_path_for(self):
-        self.assertEqual(journal_path_for(Path("a/t001_x.toml")).name,
-                         "t001_x.r.toml")
+    def test_journal_path_for_rejects_retired_task_file(self):
+        with self.assertRaisesRegex(AgentsError, "需為 tNNN_名稱.e.toml"):
+            journal_path_for(Path("a/t001_x.toml"))
+
+    def test_journal_path_for_rejects_journal_file(self):
+        with self.assertRaisesRegex(AgentsError, "需為 tNNN_名稱.e.toml"):
+            journal_path_for(Path("a/t001_x.r.toml"))
 
     def test_formal_journal_path_for_removes_execution_marker(self):
         journal = journal_path_for(Path("a/t001_x.e.toml"))
@@ -406,7 +421,7 @@ class TestJournal(PlanTestCase):
         ])
 
     def test_old_journal_name_is_not_adopted(self):
-        task = self.write("t001_x.toml", task_text())
+        task = self.write("t001_x.e.toml", task_text())
         old_journal = self.write("r001_x.toml", "[[entry]]\n")
         self.assertNotEqual(journal_path_for(task), old_journal)
         self.assertEqual(journal_path_for(task).name, "t001_x.r.toml")
