@@ -13,7 +13,7 @@ import tomllib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from assent import AssentError, gitops
 from assent.config import _validate_tasks_name, list_task_folders
@@ -160,6 +160,32 @@ def infer_folder_completion(tasks_dir: str | Path) -> FolderCompletion:
     if unfinished:
         return FolderCompletion(False, f"Unfinished tasks: {', '.join(unfinished)}")
     return FolderCompletion(True, "All tasks are DONE or SKIP")
+
+
+def is_upstream_complete(
+        name: str, plans: Mapping[str, Plan], archived: set[str]) -> bool:
+    """Whether an upstream folder counts as complete for unlocking a downstream.
+
+    ``plans`` holds the freshly reparsed *live* task folders and ``archived`` is
+    the roster set for the same ``.assent`` directory (from
+    ``_archived_folder_names``).  A live folder is judged on the spot from its
+    task files (all DONE/SKIP); an archived folder is proven complete by roster
+    membership alone (never by any stored hash); a name in neither fails closed
+    as an unresolved reference.  ``parse_folder_dependency_graph`` already
+    rejects such a name, so this last branch is a defensive guard -- callers
+    must not silently skip it -- rather than an expected path.
+
+    This is the single ``after``-completion predicate shared by every scheduler
+    call site, so none of them grows its own roster-reading logic.
+    """
+    plan = plans.get(name)
+    if plan is not None:
+        return all(task.status in ("DONE", "SKIP") for task in plan.tasks)
+    if name in archived:
+        return True
+    raise AssentError(
+        f"upstream folder {name} is neither a live task folder nor in the "
+        f"archive roster")
 
 
 def find_unfinished_prerequisites(
