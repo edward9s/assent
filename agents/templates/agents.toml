@@ -1,15 +1,14 @@
-# wflow 設定範本：複製到專案根目錄、改名 workflow.toml、填掉 TODO。
-# 所有相對路徑以專案根目錄（= 本檔所在目錄 = git repo 根目錄）為基準。
+# agents 調度器設定。所有相對路徑以專案根目錄(= .agents 的上層)為基準。
 
 [plan]
-path = ".agents/tasks"            # 任務目錄，格式見 .agents/FORMAT.md
+tasks = "plan01"                  # 工作資料夾名稱(位於 .agents/ 內);
+                                  # 同時是 git 分支前綴,計畫輪替時開新資料夾並改這裡
 
 [git]
-enabled = true                    # false 則不建分支、不 commit（不建議）
-branch_prefix = "workflow/"
+enabled = true                    # false 則不建分支、不 commit(不建議)
 
 [watchdog]
-stall_minutes = 30                # session 連續無輸出幾分鐘判定卡死；0 = 關閉
+stall_minutes = 30                # session 連續無輸出幾分鐘判定卡死;0 = 關閉
 
 [run]
 retry_per_task = 1                # 驗收失敗後的重試次數
@@ -21,12 +20,12 @@ name = "claude"                   # "claude" 或 "codex"
 [adapter.claude]
 command = "claude"
 extra_args = ["--permission-mode", "acceptEdits"]
-# 抽象檔位 → CLI --model 參數（任務檔只寫 prime/core/lite）
+# 抽象檔位 -> CLI --model 參數(任務檔只寫 prime/core/lite)
 [adapter.claude.models]
 prime = "fable"
 core  = "opus"
 lite  = "sonnet"
-# 任務檔未標 effort 時各檔位的預設值（low/medium/high）
+# 任務檔未標 effort 時各檔位的預設值(low/medium/high)
 [adapter.claude.default_effort]
 prime = "high"
 core  = "high"
@@ -43,3 +42,7 @@ lite  = "gpt-5.6-luna"
 prime = "high"
 core  = "medium"
 lite  = "low"
+
+[prompt]
+# 可覆寫預設提示詞模板;可用變數:{task_path} {journal_path} {task_id} {task_title}
+# template = """..."""

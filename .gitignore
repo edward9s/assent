@@ -3,8 +3,14 @@
 CLAUDE.md
 .anthropic/
 
-# wflow 執行期產物
-workflow.log
+# agents 執行期產物
+.agents/agents.log
+.agents/*/report.md
+
+# Python
+__pycache__/
+*.egg-info/
+build/
 
 # OS / editor
 .DS_Store

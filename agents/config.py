@@ -1,0 +1,194 @@
+"""agents.toml 讀取與驗證。
+
+- agents.toml 位於專案的 .agents/ 內;專案根目錄 = .agents 的上層目錄。
+- [plan] tasks = 工作資料夾名稱(位於 .agents/ 內);git 分支前綴 = 該名稱 + "/"。
+- 未提供的欄位套預設值;未知的頂層鍵一律報錯(防打錯字靜默失效)。
+"""
+from __future__ import annotations
+
+import re
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from agents import AgentsError
+
+_TOP_LEVEL_KEYS = {"plan", "git", "watchdog", "run", "adapter", "prompt"}
+_EFFORT_LEVELS = {"low", "medium", "high"}
+
+# 工作資料夾名稱:不含空白與路徑分隔符,不以 - 或 . 開頭(它會成為 git 分支前綴)
+_FOLDER_RE = re.compile(r"^[^\s/\\]+$")
+
+_DEFAULT_EXTRA_ARGS = ["--permission-mode", "acceptEdits"]
+# 抽象檔位 -> claude CLI --model 參數
+_DEFAULT_MODELS = {"prime": "fable", "core": "opus", "lite": "sonnet"}
+_DEFAULT_EFFORT = {"prime": "high", "core": "high", "lite": "medium"}
+
+_DEFAULT_CODEX_EXTRA_ARGS = ["--sandbox", "workspace-write"]
+_DEFAULT_CODEX_MODELS = {
+    "prime": "gpt-5.6-sol", "core": "gpt-5.6-terra", "lite": "gpt-5.6-luna",
+}
+_DEFAULT_CODEX_EFFORT = {"prime": "high", "core": "medium", "lite": "low"}
+
+
+@dataclass
+class Config:
+    root: Path                     # 專案根目錄 = .agents 的上層
+    agents_dir: Path               # .agents 目錄(= 設定檔所在目錄)
+    tasks_dir: Path                # 工作資料夾(.agents/<tasks>)
+    tasks_name: str                # 工作資料夾名稱(= git 分支前綴的字首)
+    git_enabled: bool = True
+    stall_minutes: int = 30        # 0 = 關閉 watchdog
+    retry_per_task: int = 1
+    quota_poll_minutes: int = 30
+    adapter_name: str = "claude"
+    claude_command: str = "claude"
+    claude_extra_args: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_EXTRA_ARGS))
+    claude_models: dict[str, str] = field(
+        default_factory=lambda: dict(_DEFAULT_MODELS))
+    claude_default_effort: dict[str, str] = field(
+        default_factory=lambda: dict(_DEFAULT_EFFORT))
+    codex_command: str = "codex"
+    codex_extra_args: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_CODEX_EXTRA_ARGS))
+    codex_models: dict[str, str] = field(
+        default_factory=lambda: dict(_DEFAULT_CODEX_MODELS))
+    codex_default_effort: dict[str, str] = field(
+        default_factory=lambda: dict(_DEFAULT_CODEX_EFFORT))
+    prompt_template: str | None = None
+
+    @property
+    def branch_prefix(self) -> str:
+        return f"{self.tasks_name}/"
+
+    def rel(self, path: Path) -> str:
+        """以專案根目錄為基準的相對路徑(/ 分隔),供 scope/排除清單用。"""
+        return path.resolve().relative_to(self.root.resolve()).as_posix()
+
+    @property
+    def runtime_log_rel(self) -> str:
+        return self.rel(self.agents_dir / "agents.log")
+
+    @property
+    def report_rel(self) -> str:
+        return self.rel(self.tasks_dir / "report.md")
+
+    @property
+    def git_excludes(self) -> tuple[str, ...]:
+        """執行期產物:不參與乾淨檢查、scope 檢查與 checkpoint commit。"""
+        return (self.runtime_log_rel, self.report_rel)
+
+
+def _section(data: dict, name: str) -> dict:
+    val = data.get(name, {})
+    if not isinstance(val, dict):
+        raise AgentsError(f"設定檔 [{name}] 應為表(table),不是純值")
+    return val
+
+
+def _typed(section: dict, owner: str, key: str, typ: type, default):
+    if key not in section:
+        return default
+    val = section[key]
+    if not isinstance(val, typ) or (typ is not bool and isinstance(val, bool)):
+        raise AgentsError(f"設定檔 {owner} 的 {key} 型別錯誤:應為 {typ.__name__}")
+    return val
+
+
+def _str_list(section: dict, owner: str, key: str, default: list[str]) -> list[str]:
+    val = _typed(section, owner, key, list, None)
+    if val is None:
+        return list(default)
+    if not all(isinstance(x, str) for x in val):
+        raise AgentsError(f"設定檔 {owner} 的 {key} 每個元素都應為字串")
+    return list(val)
+
+
+def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> dict[str, str]:
+    val = _typed(section, owner, key, dict, None)
+    if val is None:
+        return dict(default)
+    if not all(isinstance(v, str) for v in val.values()):
+        raise AgentsError(f"設定檔 [{owner}.{key}] 每個值都應為字串")
+    return dict(val)
+
+
+def load_config(path: str | Path) -> Config:
+    path = Path(path)
+    if not path.is_file():
+        raise AgentsError(
+            f"找不到設定檔:{path}(還沒初始化?請在專案根目錄執行 agents init)")
+    with open(path, "rb") as f:
+        try:
+            data = tomllib.load(f)
+        except tomllib.TOMLDecodeError as e:
+            raise AgentsError(f"設定檔不是有效的 TOML({path}):{e}") from e
+
+    unknown = sorted(set(data) - _TOP_LEVEL_KEYS)
+    if unknown:
+        raise AgentsError(
+            f"設定檔含未知的頂層鍵:{', '.join(unknown)}"
+            f"(有效鍵:{', '.join(sorted(_TOP_LEVEL_KEYS))})")
+
+    agents_dir = path.resolve().parent
+    root = agents_dir.parent
+
+    plan = _section(data, "plan")
+    tasks_name = _typed(plan, "[plan]", "tasks", str, None)
+    if tasks_name is None:
+        raise AgentsError("設定檔缺少必要欄位:[plan] tasks(工作資料夾名稱)")
+    if not _FOLDER_RE.match(tasks_name) or tasks_name[0] in "-.":
+        raise AgentsError(
+            f"[plan] tasks = {tasks_name!r} 不是合法的工作資料夾名稱"
+            "(不可含空白或路徑分隔符,不可以 - 或 . 開頭;它同時是 git 分支前綴)")
+
+    git = _section(data, "git")
+    watchdog = _section(data, "watchdog")
+    run = _section(data, "run")
+    adapter = _section(data, "adapter")
+    claude = _section(adapter, "claude") if "claude" in adapter else {}
+    codex = _section(adapter, "codex") if "codex" in adapter else {}
+    prompt = _section(data, "prompt")
+
+    cfg = Config(
+        root=root,
+        agents_dir=agents_dir,
+        tasks_dir=agents_dir / tasks_name,
+        tasks_name=tasks_name,
+        git_enabled=_typed(git, "[git]", "enabled", bool, True),
+        stall_minutes=_typed(watchdog, "[watchdog]", "stall_minutes", int, 30),
+        retry_per_task=_typed(run, "[run]", "retry_per_task", int, 1),
+        quota_poll_minutes=_typed(run, "[run]", "quota_poll_minutes", int, 30),
+        adapter_name=_typed(adapter, "[adapter]", "name", str, "claude"),
+        claude_command=_typed(claude, "[adapter.claude]", "command", str, "claude"),
+        claude_extra_args=_str_list(claude, "[adapter.claude]", "extra_args",
+                                    _DEFAULT_EXTRA_ARGS),
+        claude_models=_str_map(claude, "adapter.claude", "models", _DEFAULT_MODELS),
+        claude_default_effort=_str_map(claude, "adapter.claude", "default_effort",
+                                       _DEFAULT_EFFORT),
+        codex_command=_typed(codex, "[adapter.codex]", "command", str, "codex"),
+        codex_extra_args=_str_list(codex, "[adapter.codex]", "extra_args",
+                                   _DEFAULT_CODEX_EXTRA_ARGS),
+        codex_models=_str_map(codex, "adapter.codex", "models",
+                              _DEFAULT_CODEX_MODELS),
+        codex_default_effort=_str_map(codex, "adapter.codex", "default_effort",
+                                      _DEFAULT_CODEX_EFFORT),
+        prompt_template=_typed(prompt, "[prompt]", "template", str, None),
+    )
+
+    if cfg.stall_minutes < 0:
+        raise AgentsError("[watchdog] stall_minutes 不可為負(0 = 關閉)")
+    if cfg.retry_per_task < 0:
+        raise AgentsError("[run] retry_per_task 不可為負")
+    if cfg.quota_poll_minutes < 1:
+        raise AgentsError("[run] quota_poll_minutes 至少為 1")
+    for owner, efforts in (
+            ("adapter.claude", cfg.claude_default_effort),
+            ("adapter.codex", cfg.codex_default_effort)):
+        for model, eff in efforts.items():
+            if eff not in _EFFORT_LEVELS:
+                raise AgentsError(
+                    f"[{owner}.default_effort] {model} = {eff!r} 不是有效 effort"
+                    f"({'/'.join(sorted(_EFFORT_LEVELS))})")
+    return cfg
