@@ -94,6 +94,9 @@ agents status
 agents report
 agents clean [FOLDER]
 
+# 驗收會議要求單一任務重做(預設保留程式碼;不自動 run)
+agents rework <FOLDER> <TASK> [--cascade] [--reason TEXT]
+
 # 驗收會議裁決駁回整個資料夾的實作時(封存、強刪、任務改回 TODO)
 agents reject <FOLDER>
 ```
@@ -103,9 +106,13 @@ agents reject <FOLDER>
 ```
 git log --oneline <資料夾名>/<run-id>   # 一任務一 commit,逐一查看
 git diff main...<資料夾名>/<run-id>     # 或看整體差異
-# 接受 → merge;不接受 → 對著 _report.md 逐項裁決,叫 AI 改任務檔後續跑
+# 接受 → merge;單一任務不接受 → agents rework <資料夾> <任務>
+# 有已開始的下游 → 加 --cascade;確認要反向程式碼 → 加 --revert-code
 # 整個資料夾的實作都不要 → agents reject <資料夾>
 ```
+
+`rework` 成功後會立即更新 `_report.md`,但不印整份報告、也不啟動 AI；人確認
+TODO 與連動範圍正確後，再明示執行 `agents run <FOLDER>`。
 
 ## 平行執行
 
@@ -184,6 +191,12 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 WIP/BLOCKED 任務改回 TODO 並在 r 檔留下含完整 Git 存證的 `rejected`
 記錄(SKIP 不推翻)。`FOLDER` 必填,不可作用於全部資料夾;run 進行中拒絕執行。
 
+`agents rework <FOLDER> <TASK>` 是單一任務的非破壞性重開。預設保留所有程式碼，
+只把目標狀態改回 TODO；有已開始或已完成的下游時必須明示 `--cascade` 才連動。
+`--reason TEXT` 保存裁決理由。`--revert-code` 採 fail-closed：只有目標範圍的
+checkpoints 構成目前分支的連續尾段才會建立新的反向 commit，絕不改寫 Git 歷史。
+命令成功後重生報告，但不自動執行 `run`；預檢、狀態或報告更新失敗皆回傳失敗。
+
 兩項舊設定已廢除:工作資料夾不再由設定檔中的手工指標維護,Git 也沒有停用
 開關或無 Git 降級模式;工作資料夾由命令列明示或依任務事實推導,Git 永遠啟用。
 
@@ -196,6 +209,7 @@ WIP/BLOCKED 任務改回 TODO 並在 r 檔留下含完整 Git 存證的 `rejecte
 | `agents report [FOLDER]`<br>`agents report parallel01` | 生成並顯示工作資料夾內的人讀報告 `_report.md`。接受 `--config PATH`。 | **零** |
 | `agents clean [FOLDER]`<br>`agents clean parallel01` | 只清理已完全併入且乾淨的 worktree 與同資料夾前綴分支；任何證明不足就跳過，不碰 `.agents/`，且沒有強制選項。省略 `FOLDER` 時作用於全部工作資料夾。 | **零** |
 | `agents reject <FOLDER>`<br>`agents reject parallel01` | 人工裁決駁回:封存未提交變更後強制刪除該資料夾的 worktree 與同前綴分支(刪除前以完整 tip hash 存證)，並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔保存 Git 存證。`FOLDER` 必填；run 進行中拒絕。 | **零** |
+| `agents rework <FOLDER> <TASK>`<br>`agents rework parallel01 t003 --cascade --reason "驗收不符"` | 非破壞性重開單一任務；預設保留程式碼，`--cascade` 明示連動下游。`--revert-code` 僅在 checkpoints 是連續分支尾段時建立新反向 commit。成功後更新報告，不自動執行 run。接受 `--config PATH`。 | **零** |
 | `agents init`<br>`agents init --path C:\\work\\my-project` | 在目標專案生成 `.agents` 骨架與 `AGENTS.md`；`--path DIR` 預設為目前目錄。它不接受 `FOLDER` 或 `--config`。 | **零** |
 
 各子命令的 `-h`／`--help` 會顯示該層實際語法；頂層沒有可套用到所有子命令的
@@ -240,6 +254,6 @@ engine 依設定檔把抽象 effort 翻成 `requested_effort`,再呼叫既有的
 
 ## 專案狀態
 
-核心完成:TOML 任務/日誌格式、五個子命令、claude 與 codex adapter、
+核心完成:TOML 任務/日誌格式、八個子命令、claude 與 codex adapter、
 完整 unittest 測試套件(無網路、無真實 CLI 也能跑)。設計共識見
 [docs/CONSENSUS.md](docs/CONSENSUS.md)。

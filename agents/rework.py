@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agents import AgentsError, gitops
 from agents.config import Config
+from agents.engine import write_report
 from agents.lockfile import LockBusy, LockMissing, probe_lock
 from agents.plan import Plan, Task, append_entry, read_entries, set_status
 
@@ -28,8 +29,16 @@ def rework_task(cfg: Config, task_id: str, cascade: bool = False,
     name = cfg.tasks_name
     try:
         with probe_lock(cfg.tasks_dir, name):
-            return _rework_locked(
+            result = _rework_locked(
                 cfg, task_id, cascade, reason, revert_code)
+            if result != 0:
+                return result
+            try:
+                write_report(cfg, Plan.parse(cfg.tasks_dir))
+            except (AgentsError, OSError, ValueError) as e:
+                print(f"{name}:任務已重開，但報告更新失敗({e})")
+                return 1
+            return 0
     except LockBusy as e:
         print(f"{name}:任務重開中止(run 進行中):{e}")
     except (LockMissing, AgentsError, OSError, ValueError) as e:

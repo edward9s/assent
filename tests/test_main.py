@@ -139,6 +139,55 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "B")
 
+    def test_rework_help_shows_only_formal_syntax_and_options(self):
+        output = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(output):
+            main(["rework", "-h"])
+        self.assertEqual(ctx.exception.code, 0)
+        text = output.getvalue()
+        self.assertIn("agents rework", text)
+        self.assertIn("FOLDER TASK", text)
+        for option in ("--cascade", "--revert-code", "--reason", "--config"):
+            self.assertIn(option, text)
+        for forbidden in ("--all", "--once"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn("預設保留程式碼", text)
+        self.assertIn("連續分支尾段", text)
+
+    def test_rework_requires_folder_and_task_and_rejects_unknown_options(self):
+        for argv in (["rework"], ["rework", "B"],
+                     ["rework", "B", "t001", "--all"]):
+            with self.subTest(argv=argv), self.assertRaises(
+                    SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2)
+
+    def test_rework_dispatches_all_values_without_rewriting_exit_code(self):
+        config = self.write_config()
+        with patch("agents.__main__.rework_task", side_effect=[0, 1]) as mocked:
+            codes = [self.run_main([
+                "rework", "B", "t003", "--cascade", "--revert-code",
+                "--reason", "驗收不符", "--config", str(config)])[0]
+                     for _ in range(2)]
+        self.assertEqual(codes, [0, 1])
+        cfg, task = mocked.call_args.args
+        self.assertEqual(cfg.tasks_name, "B")
+        self.assertEqual(task, "t003")
+        self.assertEqual(mocked.call_args.kwargs, {
+            "cascade": True,
+            "reason": "驗收不符",
+            "revert_code": True,
+        })
+
+    def test_rework_configuration_error_returns_one_without_dispatch(self):
+        config = self.write_config()
+        with patch("agents.__main__.rework_task") as mocked:
+            code, out = self.run_main([
+                "rework", "bad/name", "t001", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertIn("設定檔錯誤", out)
+        mocked.assert_not_called()
+
     def test_invalid_folder_override_reports_error(self):
         config = self.write_config()
         code, out = self.run_main(["status", "bad/name", "--config", str(config)])

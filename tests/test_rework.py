@@ -86,6 +86,17 @@ class TestRework(unittest.TestCase):
         branch = gitops.ensure_branch(path, prefix or self.cfg.branch_prefix)
         return path, branch
 
+    def test_clean_reject_and_rework_modules_remain_separate(self) -> None:
+        import agents.clean as clean_module
+        import agents.reject as reject_module
+        import agents.rework as rework_module
+
+        self.assertFalse(hasattr(clean_module, "reject_folder"))
+        self.assertFalse(hasattr(clean_module, "rework_task"))
+        self.assertFalse(hasattr(reject_module, "rework_task"))
+        self.assertFalse(hasattr(rework_module, "clean_folders"))
+        self.assertFalse(hasattr(rework_module, "reject_folder"))
+
     def test_all_non_todo_target_statuses_can_reopen(self) -> None:
         task = self._write_task(1, "DONE")
         head = _git(self.root, "rev-parse", "HEAD")
@@ -115,6 +126,43 @@ class TestRework(unittest.TestCase):
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
         self.assertIn("找不到精確任務 id:T001", missing_output)
         self.assertIn("無須重開", todo_output)
+
+    def test_success_refreshes_report_with_target_and_cascade_statuses(self) -> None:
+        target = self._write_task(1, "DONE")
+        downstream = self._write_task(2, "BLOCKED", (1,))
+
+        code, output = self._run(cascade=True)
+
+        self.assertEqual(code, 0, output)
+        report = (self.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        self.assertIn("t001", report)
+        self.assertIn("t002", report)
+        self.assertEqual(self._status(target), "TODO")
+        self.assertEqual(self._status(downstream), "TODO")
+        self.assertGreaterEqual(report.count("TODO"), 2)
+
+    def test_report_write_failure_returns_one_after_rework(self) -> None:
+        task = self._write_task(1, "DONE")
+        report = self.tasks_dir / "_report.md"
+        report.write_text("舊報告\n", encoding="utf-8")
+
+        with patch("agents.rework.write_report",
+                   side_effect=PermissionError("報告檔被鎖定")):
+            code, output = self._run()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self._status(task), "TODO")
+        self.assertEqual(report.read_text(encoding="utf-8"), "舊報告\n")
+        self.assertIn("任務已重開，但報告更新失敗", output)
+
+    def test_failed_rework_does_not_generate_new_report(self) -> None:
+        self._write_task(1, "TODO")
+
+        with patch("agents.rework.write_report") as mocked:
+            code, _ = self._run()
+
+        self.assertEqual(code, 1)
+        mocked.assert_not_called()
 
     def test_downstream_blockers_are_complete_and_in_plan_order(self) -> None:
         target = self._write_task(1, "DONE")

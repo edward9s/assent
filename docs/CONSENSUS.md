@@ -108,6 +108,9 @@ effort 分成選擇與翻譯兩步:任務明寫值優先於 `default_effort[mode
 - 合併後的 worktree 與分支清理由 `agents clean` 機械執行；安全條件必須由機器
   證明，人不手動執行 Git 清理。駁回整個資料夾的實作亦由 `agents reject`
   機械執行(封存、強刪、任務改回 TODO、r 檔留痕),同樣不手動操作 Git。
+- 單一任務的驗收重做由 `agents rework <FOLDER> <TASK>` 機械執行。預設保留
+  程式碼，下游連動必須明示；反向程式碼只接受可證明為連續分支尾段的 checkpoints，
+  並建立新 commit 而不改寫歷史。操作只更新狀態與報告，不自動啟動 AI。
 
 ## 升級路徑(先有痛點,再加結構)
 
