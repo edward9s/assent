@@ -168,6 +168,33 @@ requested effort,assent 絕不省略該旗標去沿用廠商 CLI 自己的預設
 廠牌特有 effort 是與 models 對照表同級的設定資料,不得進入任務格式、
 `default_effort` 或 Adapter 程式碼;Adapter 介面只接收翻譯後的實際值。
 
+由於身分在 session 開啟前就已完整解析,`run` 會用一行精簡訊息表示:
+
+```
+  Session: codex | core->gpt-5.6-terra | heavy->high
+```
+
+讀法是先看 adapter,再看兩組對應。每個箭頭都把左側任務檔寫的可攜抽象值,
+對應到右側實際傳給該 adapter CLI 的引數;因此 `core->gpt-5.6-terra` 是這次的
+`--model` 值,`heavy->high` 是這次的 `--effort` 值。adapter、檔位、模型、effort
+四項稽核事實都保留在單行,不再展開成冗長標籤。
+
+## 媒體是一般的專案脈絡
+
+任務使用的媒體——圖片、PDF、音訊檔、影片——是由文字任務契約引用的一般專案
+脈絡,不是 schema 功能。固定任務欄位因此不變:assent 不新增 `inputs`、image、
+audio 或 video 欄位,不提供 adapter 附件協定,不推測模型的媒體能力,也不新增第二個
+審查狀態。
+
+任務若使用專案中已存在的媒體檔,必須在 `behavior` 或 `notes` 以專案相對路徑寫明
+檔案與用途。只讀取的參考路徑不必放進 `scope`;任務可能建立或修改的每個媒體檔都
+必須由 `scope` 涵蓋,與原始碼相同。媒體應放在已納入版控的工作樹檔案中以確保可重現,
+不要把來源媒體放進產生的 `.assent/` 管理面。`verify` 仍承載可由機器檢查的要求,
+視覺或感知判斷仍是人類明確執行 `accept` 的一部分,不會成為第二個審查狀態。
+
+在具體的 adapter 附件需求證明 schema 變更確有必要以前,文字契約在足夠時就是較簡單
+的做法。
+
 ## 品質標準(取代 token 數字 KPI)
 
 **冷啟動測試**:一個零記憶的新 AI 只讀 AGENTS.md + instructions.md +

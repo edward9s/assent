@@ -652,7 +652,7 @@ order is always:
 
 A stated `[adapter.<name>.default_effort]` table overrides per tier; it does
 not replace the built-in table. An absent, empty, or partial table therefore
-still leaves every tier with a value — name only `lite` and `prime`/`core` keep
+still leaves every tier with a value — write only `lite`, and `prime`/`core` keep
 their built-in defaults. The result is that every supported invocation passes a
 concrete effort to the CLI; assent never omits the flag and inherits the
 vendor's own default.

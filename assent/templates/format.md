@@ -344,6 +344,17 @@ words are deliberately different, so abstract words are never sent as CLI
 values. Vendor-specific values live only in the translation table, and may not
 be written into a task file or `default_effort`.
 
+When `run` opens a session, it prints the resolved identity in one compact line:
+
+```
+  Session: codex | core->gpt-5.6-terra | heavy->high
+```
+
+The adapter comes first. Each arrow maps the portable abstract value on its
+left to the actual argument sent to that adapter's CLI on its right, so the
+line retains the adapter, tier, model, and effort audit facts without expanding
+back into verbose labels.
+
 ### Planning for session cost
 
 A task-file author already knows things a zero-memory executing AI must
