@@ -223,7 +223,9 @@ def _build_parser() -> argparse.ArgumentParser:
                           help=_CONFIG_HELP)
 
     init_p = sub.add_parser(
-        "init", help="Generate or upgrade the .assent skeleton and managed project files")
+        "init", help="Install or refresh the shared ~/.assent settings and "
+                     "contracts, and generate or upgrade this project's "
+                     ".assent skeleton")
     init_p.add_argument("--path", default=".", metavar="DIR",
                         help="Target project root directory (default: current directory)")
     init_p.add_argument(

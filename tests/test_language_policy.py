@@ -11,8 +11,10 @@ import tempfile
 import tokenize
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from assent.init import init as run_init
+from assent.user_home import ASSENT_HOME_ENV
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -222,14 +224,21 @@ class LanguagePolicyTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotIn(".assent/agents.md", _read(path))
 
+        # The session rules a fresh init installs land in the user home, so this
+        # redirects ASSENT_HOME and never reads or writes the operator's own one.
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory) / "project"
+            home = Path(directory) / "home"
+            root.mkdir()
             subprocess.run(
                 ["git", "init"], cwd=root, check=True, capture_output=True
             )
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(run_init(root), 0)
-            self.assertTrue((root / ".assent/instructions.md").is_file())
+            with mock.patch.dict(os.environ, {ASSENT_HOME_ENV: str(home)}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(run_init(root), 0)
+            self.assertTrue((home / "instructions.md").is_file())
+            self.assertFalse((home / "agents.md").exists())
+            self.assertFalse((root / ".assent/instructions.md").exists())
             self.assertFalse((root / ".assent/agents.md").exists())
 
 

@@ -14,6 +14,7 @@ rewrites what it finds: it reports, and ``assent init`` installs.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from assent import AssentError
@@ -55,6 +56,28 @@ def installed_contract_text(name: str) -> str:
         raise AssentError(
             f"Cannot read the built-in {name} contract template: {e}"
             " (broken install?)") from e
+
+
+def install_contract(name: str) -> None:
+    """Replace one global contract with this installation's packaged text.
+
+    The write goes to a sibling temporary file and is moved into place, so a
+    reader never sees a half-written contract and a failure leaves the previous
+    file intact.  ``assent init`` is the only caller; every other module reads.
+    """
+    target = contract_path(name)
+    text = installed_contract_text(name)
+    temporary = target.with_name(f"{target.name}.assent-new-{os.getpid()}")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(text, encoding="utf-8", newline="\n")
+        os.replace(temporary, target)
+    except OSError as e:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise AssentError(f"Cannot write the global contract {target}: {e}") from e
 
 
 def contract_errors() -> list[str]:

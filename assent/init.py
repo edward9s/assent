@@ -1,14 +1,19 @@
-"""Generate and safely upgrade the managed files in a project ``.assent``.
+"""Generate and safely upgrade the user home and a project's ``.assent``.
 
-Fresh projects choose one real project test before the skeleton is written.
-Repeat initialization preserves the project-specific verifier, refreshes the
-shared contracts, and adds only missing active settings from the packaged
-configuration template.
+The two contracts and the shared settings belong to the machine's ``~/.assent``:
+initialization refreshes the contracts to this installation's packaged text and
+adds only missing active settings to the operator's configuration, never
+replacing a stated value.  A project keeps only what is genuinely its own -- the
+verifier, whose test is chosen once before a fresh skeleton is written, plus the
+AGENTS bridge and the ignore entry.  An older project copy of a contract is
+removed only when it matches the packaged text exactly, and an existing project
+``assent.toml`` is preserved untouched as a higher-priority override.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -16,14 +21,15 @@ import tomllib
 from collections import defaultdict
 from collections.abc import Sequence
 
-from assent import AssentError
+from assent import AssentError, contracts
+from assent.user_home import user_assent_dir, user_config_path
 
 _TEMPLATES = Path(__file__).resolve().parent / "templates"
 _BRIDGE_MARKER = "<!-- assent-instructions -->"
 _BRIDGE_LINE = (
-    "- When using assent, first read `.assent/instructions.md` in the "
-    "project's main worktree; a worktree session uses the absolute path the "
-    f"scheduler provides. {_BRIDGE_MARKER}"
+    "- When using assent, first read `~/.assent/instructions.md`, the global "
+    "working instructions shared by every project; a scheduled worktree "
+    f"session uses the absolute path the scheduler provides. {_BRIDGE_MARKER}"
 )
 _GITIGNORE_LINES = [".assent/"]
 _DIRECT_API_DEFAULT = object()
@@ -351,12 +357,13 @@ def _format_toml_key(key: str) -> str:
     return json.dumps(key, ensure_ascii=False)
 
 
-def _merge_config(existing: str, template: str) -> tuple[str, int]:
+def _merge_config(existing: str, template: str, description: str
+                  ) -> tuple[str, int]:
     """Add missing active template settings while retaining existing TOML text."""
     try:
         existing_data = tomllib.loads(existing)
     except tomllib.TOMLDecodeError as e:
-        raise AssentError(f"existing assent.toml is not valid TOML: {e}") from e
+        raise AssentError(f"{description} is not valid TOML: {e}") from e
     try:
         tomllib.loads(template)
     except tomllib.TOMLDecodeError as e:
@@ -420,34 +427,36 @@ def _merge_config(existing: str, template: str) -> tuple[str, int]:
     try:
         tomllib.loads(merged)
     except tomllib.TOMLDecodeError as e:
-        raise AssentError(f"the merged assent.toml is not valid TOML: {e}") from e
+        raise AssentError(
+            f"the merged {description} is not valid TOML: {e}") from e
     return merged, sum(len(values) for values in missing.values())
 
 
-def _plan_agents(root: Path) -> tuple[str, str]:
+def _agents_plan(root: Path) -> tuple[str, tuple[str, str]]:
+    """Return the AGENTS.md content and outcome, bridge line included once."""
     target = root / "AGENTS.md"
     if not target.exists():
-        return "created", str(target)
-    existing = _read_file(target, "AGENTS.md")
-    updated = existing
-    if _BRIDGE_MARKER not in updated:
-        updated = updated.rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
-    if updated == existing:
-        return "preserved", f"{target} (instructions bridge already present)"
-    return "updated", str(target)
-
-
-def _agents_content(root: Path) -> str:
-    target = root / "AGENTS.md"
-    if not target.exists():
-        return _template("AGENTS.md")
+        return _template("AGENTS.md"), ("created", str(target))
     existing = _read_file(target, "AGENTS.md")
     if _BRIDGE_MARKER in existing:
-        return existing
-    return existing.rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
+        # An older init wrote a bridge pointing at the project copy of the
+        # instructions; replace that one line in place and leave every other
+        # line of the project's own AGENTS.md exactly as its author wrote it.
+        updated = "\n".join(
+            _BRIDGE_LINE if _BRIDGE_MARKER in line else line
+            for line in existing.splitlines())
+        if existing.endswith("\n"):
+            updated += "\n"
+    else:
+        updated = existing.rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
+    if updated == existing:
+        return existing, ("preserved",
+                          f"{target} (instructions bridge already current)")
+    return updated, ("updated", str(target))
 
 
-def _plan_gitignore(root: Path) -> tuple[str, str]:
+def _gitignore_plan(root: Path) -> tuple[str, tuple[str, str]]:
+    """Return the .gitignore content and outcome, assent entry included once."""
     target = root / ".gitignore"
     if target.exists() and not target.is_file():
         raise AssentError(f".gitignore is not a file: {target}")
@@ -456,43 +465,48 @@ def _plan_gitignore(root: Path) -> tuple[str, str]:
     have = {line.strip() for line in lines}
     missing = [line for line in _GITIGNORE_LINES if line not in have]
     if not missing:
-        return "preserved", f"{target} (assent entry already present)"
-    updated = list(lines)
-    if updated and updated[-1]:
-        updated.append("")
-    if updated:
-        updated.append("# assent management surface and runtime output")
-    updated.extend(missing)
-    return "updated" if target.exists() else "created", str(target)
-
-
-def _gitignore_content(root: Path) -> str:
-    target = root / ".gitignore"
-    existing = _read_file(target, ".gitignore") if target.exists() else ""
-    lines = existing.splitlines()
-    have = {line.strip() for line in lines}
-    missing = [line for line in _GITIGNORE_LINES if line not in have]
-    if not missing:
-        return existing
+        return existing, ("preserved", f"{target} (assent entry already present)")
     if lines and lines[-1]:
         lines.append("")
     if lines:
         lines.append("# assent management surface and runtime output")
     lines.extend(missing)
-    return "\n".join(lines) + "\n"
+    content = "\n".join(lines) + "\n"
+    return content, ("updated" if target.exists() else "created", str(target))
 
 
 def _write(path: Path, content: str) -> None:
+    """Write one managed file atomically, so no reader sees a partial file."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.assent-new-{os.getpid()}")
     try:
-        path.write_text(content, encoding="utf-8", newline="\n")
+        temporary.write_text(content, encoding="utf-8", newline="\n")
+        os.replace(temporary, path)
     except OSError as e:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise AssentError(f"Cannot write {path}: {e}") from e
+
+
+def _apply(target: Path, content: str, plan: tuple[str, str]) -> None:
+    """Carry out one planned file outcome and report it under its section."""
+    state, description = plan
+    if state == "preserved":
+        print(f"  Preserved: {description}")
+        return
+    _write(target, content)
+    print(f"  {state.title()}: {description}")
 
 
 def init(path: str | Path = ".",
          test: str | Sequence[str] | None | object = _DIRECT_API_DEFAULT) -> int:
-    """Initialize or upgrade a Git project, returning a CLI-style exit code."""
+    """Initialize or upgrade the user home and a Git project.
+
+    Returns a CLI-style exit code.  The shared settings and the two contracts
+    live in ``~/.assent``; the project keeps only what is genuinely its own.
+    """
     # The command-line dispatcher passes ``None`` when --test is omitted and
     # therefore gets the required interactive menu.  Keep direct library calls
     # made by older integrations deterministic instead of unexpectedly reading
@@ -527,61 +541,110 @@ def init(path: str | Path = ".",
             verifier_plan = ("created", f"{verifier} ({selection.label} selected)")
             verifier_content = _render_verifier(verify_template, selection)
 
-        format_path = assent_dir / "format.md"
-        instructions_path = assent_dir / "instructions.md"
-        config_path = assent_dir / "assent.toml"
-        format_template = _template("format.md")
-        instructions_template = _template("instructions.md")
+        # The user home: settings the operator owns, contracts assent owns.
+        user_dir = user_assent_dir()
+        user_config = user_config_path()
         config_template = _template("assent.toml")
-
-        format_content = format_template
-        format_state = _plan_file(format_path, format_content, ".assent/format.md")
-        instructions_content = instructions_template
-        instructions_state = _plan_file(
-            instructions_path, instructions_content, ".assent/instructions.md")
-
-        if config_path.exists():
-            config_existing = _read_file(config_path, ".assent/assent.toml")
-            config_content, added = _merge_config(config_existing, config_template)
-            config_state = (
-                "updated", f"{config_path} (added {added} packaged setting(s))"
-            ) if added else ("preserved", f"{config_path} (settings preserved)")
+        if user_config.exists():
+            user_config_content, added = _merge_config(
+                _read_file(user_config, "the user assent.toml"),
+                config_template, str(user_config))
+            user_config_plan = (
+                "updated", f"{user_config} (added {added} packaged setting(s))"
+            ) if added else (
+                "preserved", f"{user_config} (your settings preserved)")
         else:
-            config_content = config_template
-            config_state = ("created", str(config_path))
+            user_config_content = config_template
+            user_config_plan = ("created", str(user_config))
 
-        agents_state = _plan_agents(root)
-        agents_content = _agents_content(root)
-        gitignore_state = _plan_gitignore(root)
-        gitignore_content = _gitignore_content(root)
+        contract_plans = []
+        for name in contracts.CONTRACT_NAMES:
+            target = contracts.contract_path(name)
+            contract_plans.append((
+                name, _plan_file(target, contracts.installed_contract_text(name),
+                                 f"the global {name}")))
 
-        # Every validation and merge above happens before the first write.  In
-        # particular, a bad selection or TOML file cannot leave half a
-        # skeleton behind.
-        plans = [
-            (verifier, verifier_content, verifier_plan),
-            (format_path, format_content, format_state),
-            (instructions_path, instructions_content, instructions_state),
-            (config_path, config_content, config_state),
-            (root / "AGENTS.md", agents_content, agents_state),
-            (root / ".gitignore", gitignore_content, gitignore_state),
-        ]
-        for target, content, (state, description) in plans:
-            if state == "preserved":
-                print(f"Preserved: {description}")
+        # The project: its own verifier, plus whatever an older layout left in
+        # .assent that now belongs to the user home.
+        warnings: list[str] = []
+        legacy_plans: list[tuple[Path, bool, str]] = []
+        for name in contracts.CONTRACT_NAMES:
+            legacy = assent_dir / name
+            if not legacy.exists():
                 continue
-            _write(target, content)
-            print(f"{state.title()}: {description}")
+            existing = _read_file(legacy, f".assent/{name}")
+            global_path = contracts.contract_path(name)
+            if existing == contracts.installed_contract_text(name):
+                legacy_plans.append((
+                    legacy, True,
+                    f"{legacy} (an exact managed copy; {global_path} now applies)"))
+            else:
+                legacy_plans.append((
+                    legacy, False,
+                    f"{legacy} (differs from the packaged {name}, so it is kept)"))
+                warnings.append(
+                    f"{legacy} differs from this installation's {name} and was "
+                    f"not removed; sessions read {global_path}, so delete the "
+                    "local copy once you have moved anything you still want")
+
+        project_config = assent_dir / "assent.toml"
+        if project_config.exists():
+            if not project_config.is_file():
+                raise AssentError(
+                    f".assent/assent.toml is not a file: {project_config}")
+            warnings.append(
+                f"{project_config} is kept byte-for-byte as a compatibility "
+                f"override; it outranks {user_config} and can shadow later "
+                "edits there")
+
+        agents_content, agents_plan = _agents_plan(root)
+        gitignore_content, gitignore_plan = _gitignore_plan(root)
+
+        # Every validation, merge, and read above happens before the first
+        # write, so a bad selection or an unparsable TOML file leaves neither
+        # the user home nor the project half-upgraded.
+        try:
+            user_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise AssentError(f"Cannot create the user assent home {user_dir}: {e}") from e
+        print(f"User home {user_dir}:")
+        for name, (state, description) in contract_plans:
+            if state == "preserved":
+                print(f"  Preserved: {description}")
+                continue
+            contracts.install_contract(name)
+            print(f"  {state.title()}: {description}")
+        _apply(user_config, user_config_content, user_config_plan)
+
+        print(f"Project {root}:")
+        _apply(verifier, verifier_content, verifier_plan)
+        _apply(root / "AGENTS.md", agents_content, agents_plan)
+        _apply(root / ".gitignore", gitignore_content, gitignore_plan)
+        if project_config.exists():
+            print(f"  Preserved: {project_config} (local override, unchanged)")
+        for legacy, removable, description in legacy_plans:
+            if not removable:
+                print(f"  Preserved: {description}")
+                continue
+            try:
+                legacy.unlink()
+            except OSError as e:
+                raise AssentError(f"Cannot remove {legacy}: {e}") from e
+            print(f"  Removed: {description}")
     except (AssentError, OSError) as e:
         print(f"Refused: {e}")
         return 1
 
+    for warning in warnings:
+        print(f"Warning: {warning}")
     print()
     print("Next steps:")
-    print("  1. Add the selected project's tests and keep the generated "
+    print(f"  1. Review the shared settings in {user_config}; every project on "
+          "this machine reads them")
+    print("  2. Add the selected project's tests and keep the generated "
           ".assent/verify.py check enabled")
-    print("  2. Fill in AGENTS.md's project description and hard constraints")
-    print("  3. Start an AI meeting: read .assent/instructions.md and begin an "
-          "assent planning meeting")
-    print("  4. Once assent check passes, run assent run")
+    print("  3. Fill in AGENTS.md's project description and hard constraints")
+    print(f"  4. Start an AI meeting: read {contracts.instructions_path()} and "
+          "begin an assent planning meeting")
+    print("  5. Once assent check passes, run assent run")
     return 0
