@@ -1,10 +1,17 @@
-"""CLI 進入點與 init 測試。run 會 tee 到工作資料夾的 _agents.log,
-故一律 chdir 到臨時目錄執行,避免弄髒測試程序的工作目錄。"""
+"""CLI entry point and init tests. ``run`` tees to the work folder's
+_agents.log, so tests always chdir into a temporary directory to avoid
+dirtying the test process's own working directory.
+
+Chinese literals that remain are deliberate user-authored data (task titles,
+goals, acceptance text, rework reasons) used to prove that non-English data
+passes through the CLI verbatim rather than being translated as output."""
 import contextlib
 import io
 import os
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +19,9 @@ from unittest.mock import patch
 
 from agents.__main__ import main
 from agents.init import init as run_init
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_HAN_CHAR_RE = re.compile(r"[一-鿿]")
 
 
 class MainTestCase(unittest.TestCase):
@@ -57,10 +67,25 @@ class TestDispatch(MainTestCase):
                 main(["--help"])
         self.assertEqual(ctx.exception.code, 0)
 
+    def test_help_output_is_english_for_top_level_and_every_subcommand(self):
+        commands = ("run", "status", "check", "report", "clean",
+                    "reject", "rework", "init")
+        for argv in (["--help"],) + tuple(
+                [command, "--help"] for command in commands):
+            with self.subTest(argv=argv):
+                env = dict(os.environ)
+                env["PYTHONPATH"] = str(_PROJECT_ROOT)
+                result = subprocess.run(
+                    [sys.executable, "-m", "agents", *argv],
+                    cwd=self.root, capture_output=True, text=True,
+                    encoding="utf-8", env=env)
+                self.assertEqual(result.returncode, 0)
+                self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
+
     def test_missing_config_reports_error(self):
         code, out = self.run_main(["status"])
         self.assertEqual(code, 1)
-        self.assertIn("設定檔錯誤", out)
+        self.assertIn("Config error", out)
         self.assertIn("agents init", out)
 
     def test_run_missing_config_reports_error(self):
@@ -151,8 +176,8 @@ class TestDispatch(MainTestCase):
             self.assertIn(option, text)
         for forbidden in ("--all", "--once"):
             self.assertNotIn(forbidden, text)
-        self.assertIn("預設保留程式碼", text)
-        self.assertIn("連續分支尾段", text)
+        self.assertIn("Keeps code by default", text)
+        self.assertIn("contiguous branch tail", text)
 
     def test_rework_requires_folder_and_task_and_rejects_unknown_options(self):
         for argv in (["rework"], ["rework", "B"],
@@ -185,7 +210,7 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main([
                 "rework", "bad/name", "t001", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("設定檔錯誤", out)
+        self.assertIn("Config error", out)
         mocked.assert_not_called()
 
     def test_invalid_folder_override_reports_error(self):
@@ -207,7 +232,9 @@ class TestDispatch(MainTestCase):
         with patch("agents.__main__.engine.run", return_value=0) as mocked:
             code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 0)
-        self.assertIn("工作資料夾:active(唯一進行中且可跑,自動選定)", out)
+        self.assertIn(
+            "Work folder: active (the only ongoing and runnable one, "
+            "selected automatically)", out)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "active")
 
     def test_run_without_folder_excludes_waiting_folder(self):
@@ -222,7 +249,7 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main(["run", "--config", str(config)])
 
         self.assertEqual(code, 0)
-        self.assertIn("工作資料夾:ready", out)
+        self.assertIn("Work folder: ready", out)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "ready")
 
     def test_run_without_folder_lists_waiting_reason(self):
@@ -236,9 +263,9 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main(["run", "--config", str(config)])
 
         self.assertEqual(code, 1)
-        self.assertIn("進行中且可跑資料夾共 0 個", out)
+        self.assertIn("0 ongoing and runnable folder(s) found", out)
         self.assertIn("waiting:", out)
-        self.assertIn("(等待 base)", out)
+        self.assertIn("(waiting on base)", out)
         mocked.assert_not_called()
 
     def test_run_without_folder_refuses_zero_or_multiple_ongoing(self):
@@ -254,7 +281,7 @@ class TestDispatch(MainTestCase):
                     code, out = self.run_main(
                         ["run", "--config", str(config)])
                 self.assertEqual(code, 1)
-                self.assertIn("請明寫工作資料夾參數", out)
+                self.assertIn("State the work folder explicitly", out)
                 for folder, _ in statuses:
                     self.assertIn(folder, out)
                 mocked.assert_not_called()
@@ -263,7 +290,7 @@ class TestDispatch(MainTestCase):
         config = self.write_config()
         code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("未找到含任務檔", out)
+        self.assertIn("no work folder with a task file found", out)
 
     def test_read_only_commands_without_folder_run_all_folders(self):
         config = self.write_config()
@@ -289,9 +316,9 @@ class TestDispatch(MainTestCase):
 
     def test_check_without_folder_rejects_bad_folder_graph(self):
         cases = {
-            "壞格式": ('after = [\n',),
-            "引用不存在": ('after = ["missing"]\n',),
-            "循環": ('after = ["beta"]\n', 'after = ["alpha"]\n'),
+            "bad-format": ('after = [\n',),
+            "missing-reference": ('after = ["missing"]\n',),
+            "cycle": ('after = ["beta"]\n', 'after = ["alpha"]\n'),
         }
         for name, declarations in cases.items():
             with self.subTest(name=name):
@@ -308,7 +335,7 @@ class TestDispatch(MainTestCase):
                     code, out = self.run_main(
                         ["check", "--config", str(config)])
                 self.assertEqual(code, 1)
-                self.assertIn("資料夾依賴圖:FAIL", out)
+                self.assertIn("Folder dependency graph: FAIL", out)
 
 
 class TestInit(MainTestCase):
@@ -324,7 +351,8 @@ class TestInit(MainTestCase):
                     ".agents/instructions.md", ".agents/verify.py",
                     "AGENTS.md", ".gitignore"):
             self.assertTrue((self.root / rel).is_file(), rel)
-        # 不預建工作資料夾:名稱依任務性質由會議決定,預建反而誤導
+        # Work folders are not pre-created: their name is decided by a
+        # planning meeting based on the task, so pre-creating one would mislead.
         subdirs = [p for p in (self.root / ".agents").iterdir() if p.is_dir()]
         self.assertEqual(subdirs, [])
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
@@ -348,13 +376,13 @@ class TestInit(MainTestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(run_init(self.root), 0)
-        # 不覆蓋既有設定
+        # Does not overwrite the existing config.
         self.assertIn("custom", (self.root / ".agents" / "agents.toml")
                       .read_text(encoding="utf-8"))
-        # gitignore 不重複累加
+        # gitignore entries are not duplicated on re-run.
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
         self.assertEqual(gitignore.splitlines().count(".agents/"), 1)
-        # 已有檔案不覆蓋,AGENTS.md 橋接不重複
+        # An existing file is not overwritten, and the AGENTS.md bridge is not duplicated.
         self.assertEqual((self.root / ".agents" / "instructions.md")
                          .read_text(encoding="utf-8"), "本機自訂指示\n")
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
@@ -402,7 +430,8 @@ class TestInit(MainTestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(run_init(target), 1)
-        self.assertIn("本專案尚未初始化 git,請先執行 git init", out.getvalue())
+        self.assertIn("This project has no git repository yet; run git init first",
+                      out.getvalue())
         self.assertFalse((target / ".agents").exists())
 
 

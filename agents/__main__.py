@@ -1,4 +1,5 @@
-"""CLI 進入點:argparse 子命令 run/status/check/report/clean/reject/rework/init。"""
+"""CLI entry point: argparse subcommands run/status/check/report/clean/
+reject/rework/init."""
 from __future__ import annotations
 
 import argparse
@@ -22,76 +23,98 @@ _DEFAULT_CONFIG = ".agents/agents.toml"
 
 
 def _positive_int(value: str) -> int:
-    """解析大於零的命令列整數。"""
+    """Parse a command-line integer that must be greater than zero."""
     try:
         number = int(value)
     except ValueError as e:
-        raise argparse.ArgumentTypeError("必須是整數") from e
+        raise argparse.ArgumentTypeError("must be an integer") from e
     if number < 1:
-        raise argparse.ArgumentTypeError("必須大於 0")
+        raise argparse.ArgumentTypeError("must be greater than 0")
     return number
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agents",
-        description="AI 計畫格式 + 自動調度器:讀 .agents 工作資料夾、"
-                    "逐任務開 AI session、客觀驗收、自動 git 檢查點。",
+        description="An AI plan format plus an automatic scheduler: reads "
+                    ".agents work folders, opens an AI session per task, "
+                    "checks acceptance objectively, and auto-checkpoints git.",
     )
     sub = parser.add_subparsers(dest="command", required=True,
                                 metavar="{run,status,check,report,clean,reject,rework,init}")
 
-    run_p = sub.add_parser("run", help="執行指定[工作資料夾]的任務直到全部 DONE/BLOCKED/SKIP")
-    run_p.add_argument("--once", action="store_true", help="只執行下一個任務後停止")
-    run_p.add_argument("--task", metavar="ID", help="指定執行單一任務(仍檢查前置)")
+    run_p = sub.add_parser(
+        "run", help="Run the tasks in the given [FOLDER] until all are "
+                    "DONE/BLOCKED/SKIP")
+    run_p.add_argument("--once", action="store_true",
+                       help="Run only the next task, then stop")
+    run_p.add_argument("--task", metavar="ID",
+                       help="Run one specific task (prerequisites still checked)")
     run_p.add_argument("--all", action="store_true", dest="all_folders",
-                       help="依資料夾依賴順序執行全部未完成工作資料夾")
+                       help="Run all unfinished work folders in folder-dependency order")
     run_p.add_argument("--jobs", type=_positive_int, metavar="N",
-                       help="--all 同時執行的資料夾數上限(預設:1)")
+                       help="Max folders to run concurrently with --all (default: 1)")
 
-    status_p = sub.add_parser("status", help="顯示指定[工作資料夾]的進度統計與下一個任務(零 token)")
-    check_p = sub.add_parser("check", help="驗證指定[工作資料夾]的任務檔格式、設定檔與環境(零 token;"
-                                           "會議的散會條件)")
-    report_p = sub.add_parser("report", help="生成人讀的執行報告 _report.md(零 token)")
-    clean_p = sub.add_parser("clean", help="清除可證明冗餘的 worktree 與已併入分支")
+    status_p = sub.add_parser(
+        "status", help="Show progress counts and the next task for the given "
+                       "[FOLDER] (zero tokens)")
+    check_p = sub.add_parser(
+        "check", help="Validate the given [FOLDER]'s task-file format, config, "
+                      "and environment (zero tokens; the meeting's exit gate)")
+    report_p = sub.add_parser(
+        "report", help="Generate the human-readable run report _report.md "
+                       "(zero tokens)")
+    clean_p = sub.add_parser(
+        "clean", help="Remove worktrees and merged branches that are provably redundant")
 
-    reject_p = sub.add_parser("reject", help="人工裁決駁回:封存後強制清除該資料夾的 "
-                                             "worktree 與分支,任務改回 TODO")
+    reject_p = sub.add_parser(
+        "reject", help="Human ruling: reject a folder by archiving it, force-"
+                       "removing its worktree and branch, and resetting its "
+                       "tasks to TODO")
     reject_p.add_argument("folder", metavar="FOLDER",
-                          help="要駁回的工作資料夾(必填,不可作用於全部資料夾)")
+                          help="The work folder to reject (required; cannot "
+                               "target all folders)")
     reject_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
-                          help=f"設定檔位置(預設:{_DEFAULT_CONFIG})")
+                          help=f"Config file location (default: {_DEFAULT_CONFIG})")
 
     rework_p = sub.add_parser(
-        "rework", help="人工裁決重開單一任務，預設保留程式碼且不自動執行",
+        "rework", help="Human ruling: reopen a single task, keeping its code "
+                       "by default and not auto-running",
         description=(
-            "預設保留程式碼，只把指定任務改回 TODO；--cascade 明示連動下游。"
-            "--revert-code 僅在 checkpoints 是連續分支尾段時，以新 commit "
-            "反向程式碼。命令只更新狀態與報告，不會自動執行 run。"))
+            "Keeps code by default and only resets the given task to TODO; "
+            "--cascade explicitly cascades to downstream tasks. --revert-code "
+            "reverts code with a new commit, but only when the checkpoints "
+            "form a contiguous branch tail. The command only updates status "
+            "and reports; it does not auto-run."))
     rework_p.add_argument("folder", metavar="FOLDER",
-                          help="包含目標任務的工作資料夾(必填)")
+                          help="The work folder containing the target task (required)")
     rework_p.add_argument("task", metavar="TASK",
-                          help="要重開的精確任務 id，例如 t003(必填)")
+                          help="The exact task id to reopen, e.g. t003 (required)")
     rework_p.add_argument(
         "--cascade", action="store_true",
-        help="明示一併把已開始或已完成的下游任務改回 TODO")
+        help="Explicitly also reset already-started or already-finished "
+             "downstream tasks to TODO")
     rework_p.add_argument(
         "--revert-code", action="store_true",
-        help="僅在 checkpoints 是連續分支尾段時，以新 commit 反向程式碼")
+        help="Revert code with a new commit, but only when the checkpoints "
+             "form a contiguous branch tail")
     rework_p.add_argument("--reason", default="", metavar="TEXT",
-                          help="寫入重開日誌的人工裁決理由")
+                          help="The human ruling's reason, written to the rework log")
     rework_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
-                          help=f"設定檔位置(預設:{_DEFAULT_CONFIG})")
+                          help=f"Config file location (default: {_DEFAULT_CONFIG})")
 
-    init_p = sub.add_parser("init", help="在專案生成 .agents 骨架與 AGENTS.md")
+    init_p = sub.add_parser(
+        "init", help="Generate the .agents skeleton and AGENTS.md in a project")
     init_p.add_argument("--path", default=".", metavar="DIR",
-                        help="目標專案根目錄(預設:目前目錄)")
+                        help="Target project root directory (default: current directory)")
 
     for p in (run_p, status_p, check_p, report_p, clean_p):
-        p.add_argument("folder", nargs="?", metavar="FOLDER",
-                       help="指定工作資料夾;省略時 run 自動推導,其餘命令作用於全部資料夾")
+        p.add_argument(
+            "folder", nargs="?", metavar="FOLDER",
+            help="The work folder; run derives it automatically if omitted, "
+                 "other commands act on all folders")
         p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
-                       help=f"設定檔位置(預設:{_DEFAULT_CONFIG})")
+                       help=f"Config file location (default: {_DEFAULT_CONFIG})")
     return parser
 
 
@@ -101,11 +124,12 @@ def _status_summary(plan: Plan) -> str:
             f"BLOCKED {counts.get('BLOCKED', 0)} / "
             f"SKIP {counts.get('SKIP', 0)} / "
             f"WIP {counts.get('WIP', 0)} / "
-            f"TODO {counts.get('TODO', 0)}(共 {len(plan.tasks)})")
+            f"TODO {counts.get('TODO', 0)} ({len(plan.tasks)} total)")
 
 
 def _select_run_folder(config_path: str, folders: list[str]) -> str | None:
-    """依任務與前置現況選唯一可跑資料夾；歧義或壞檔皆拒絕猜測。"""
+    """Pick the one runnable folder from task and prerequisite status; any
+    ambiguity or bad file is refused rather than guessed."""
     plans: list[tuple[str, Plan, list[str]]] = []
     errors: list[tuple[str, str]] = []
     for folder in folders:
@@ -123,27 +147,30 @@ def _select_run_folder(config_path: str, folders: list[str]) -> str | None:
                     and not waiting)]
     if len(runnable) == 1 and not errors:
         selected = runnable[0]
-        print(f"工作資料夾:{selected}(唯一進行中且可跑,自動選定)")
+        print(f"Work folder: {selected} (the only ongoing and runnable one, "
+              f"selected automatically)")
         return selected
 
-    print(f"無法自動選定工作資料夾:進行中且可跑資料夾共 {len(runnable)} 個。")
-    print("工作資料夾狀態:")
+    print(f"Cannot auto-select a work folder: {len(runnable)} ongoing and "
+          f"runnable folder(s) found.")
+    print("Work folder status:")
     if not plans and not errors:
-        print("  (未找到含任務檔的工作資料夾)")
+        print("  (no work folder with a task file found)")
     for folder, plan, waiting in plans:
-        reason = f"(等待 {'、'.join(waiting)})" if waiting and any(
+        reason = f" (waiting on {', '.join(waiting)})" if waiting and any(
             task.status in ("TODO", "WIP") for task in plan.tasks) else ""
         print(f"  {folder}: {_status_summary(plan)}{reason}")
     for folder, error in errors:
-        print(f"  {folder}: 無法解析({error})")
-    print("請明寫工作資料夾參數:agents run <folder>")
+        print(f"  {folder}: cannot be parsed ({error})")
+    print("State the work folder explicitly: agents run <folder>")
     return None
 
 
 def _dispatch_all(command: str, config_path: str, folders: list[str]) -> int:
-    """依序對全部工作資料夾執行唯讀命令,彙總退出碼。"""
+    """Run a read-only command against every work folder in turn, aggregating
+    the exit code."""
     if not folders:
-        print("找不到含任務檔的工作資料夾。")
+        print("No work folder with a task file found.")
         return 1
     operation = getattr(engine, command)
     result = 0
@@ -153,7 +180,7 @@ def _dispatch_all(command: str, config_path: str, folders: list[str]) -> int:
         try:
             cfg = load_config(config_path, folder)
         except AgentsError as e:
-            print(f"設定檔錯誤:{e}")
+            print(f"Config error: {e}")
             result = 1
             continue
         if operation(cfg) != 0:
@@ -162,14 +189,16 @@ def _dispatch_all(command: str, config_path: str, folders: list[str]) -> int:
 
 
 def _dispatch_check_all(config_path: str, agents_dir, folders: list[str]) -> int:
-    """驗證全部資料夾本身，並額外驗證完整依賴圖與循環。"""
+    """Validate every folder itself, plus the complete dependency graph and
+    check for cycles."""
     graph_ok = True
     try:
         graph = parse_folder_dependency_graph(agents_dir)
-        print(f"資料夾依賴圖:OK({len(graph)} 個工作資料夾,引用完整且無循環)")
+        print(f"Folder dependency graph: OK ({len(graph)} work folder(s), "
+              f"references complete and acyclic)")
     except AgentsError as e:
         graph_ok = False
-        print(f"資料夾依賴圖:FAIL({e})")
+        print(f"Folder dependency graph: FAIL ({e})")
     checks_ok = _dispatch_all("check", config_path, folders) == 0
     return 0 if graph_ok and checks_ok else 1
 
@@ -180,11 +209,11 @@ def _dispatch(argv: list[str]) -> int:
 
     if args.command == "run":
         if args.all_folders and args.folder is not None:
-            parser.error("run 的 --all 與 FOLDER 不可同時使用")
+            parser.error("run's --all and FOLDER cannot be used together")
         if args.all_folders and (args.once or args.task is not None):
-            parser.error("run 的 --all 不可與 --once 或 --task 同時使用")
+            parser.error("run's --all cannot be used with --once or --task")
         if not args.all_folders and args.jobs is not None:
-            parser.error("run 的 --jobs 只能與 --all 同時使用")
+            parser.error("run's --jobs can only be used with --all")
 
     if args.command == "init":
         return run_init(args.path)
@@ -192,7 +221,7 @@ def _dispatch(argv: list[str]) -> int:
     try:
         agents_dir = validate_config(args.config)
     except AgentsError as e:
-        print(f"設定檔錯誤:{e}")
+        print(f"Config error: {e}")
         return 1
 
     if args.command == "run" and args.all_folders:
@@ -201,14 +230,14 @@ def _dispatch(argv: list[str]) -> int:
         try:
             cfg = load_config(args.config, args.folder)
         except AgentsError as e:
-            print(f"設定檔錯誤:{e}")
+            print(f"Config error: {e}")
             return 1
         return reject_folder(cfg)
     if args.command == "rework":
         try:
             cfg = load_config(args.config, args.folder)
         except AgentsError as e:
-            print(f"設定檔錯誤:{e}")
+            print(f"Config error: {e}")
             return 1
         return rework_task(
             cfg, args.task, cascade=args.cascade,
@@ -217,14 +246,14 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "clean":
         selected = folders if args.folder is None else [args.folder]
         if not selected:
-            print("找不到含任務檔的工作資料夾。")
+            print("No work folder with a task file found.")
             return 1
         configs = []
         for selected_folder in selected:
             try:
                 configs.append(load_config(args.config, selected_folder))
             except AgentsError as e:
-                print(f"設定檔錯誤:{e}")
+                print(f"Config error: {e}")
                 return 1
         return clean_folders(configs)
     if args.folder is None:
@@ -242,7 +271,7 @@ def _dispatch(argv: list[str]) -> int:
     try:
         cfg = load_config(args.config, folder)
     except AgentsError as e:
-        print(f"設定檔錯誤:{e}")
+        print(f"Config error: {e}")
         return 1
 
     if args.command == "run":
@@ -253,18 +282,21 @@ def _dispatch(argv: list[str]) -> int:
         return engine.check(cfg)
     if args.command == "report":
         return engine.report(cfg)
-    return 2  # argparse required=True 已擋住,防禦性保底
+    return 2  # argparse required=True already guards this; defensive fallback
 
 
 def _install_break_handler() -> None:
-    """Windows 限定:讓 CTRL_BREAK_EVENT 轉為 KeyboardInterrupt。
+    """Windows-only: turn CTRL_BREAK_EVENT into KeyboardInterrupt.
 
-    ``run --all`` 以 CREATE_NEW_PROCESS_GROUP 啟動子行程,中斷時只能送
-    CTRL_BREAK_EVENT(對應 SIGBREAK)。子行程若未註冊處理器,收到訊號會被 OS
-    直接終止(退出碼 3221225786),engine 的中斷收尾(WIP 標記、r 檔 interrupt
-    條目、wip 檢查點)完全不會執行,違反「燒過 tokens 的產出絕不丟棄」。改綁
-    default_int_handler 後,SIGBREAK 會走與 Ctrl+C 相同的 KeyboardInterrupt 路徑。
-    POSIX 無 SIGBREAK,行為不變。
+    ``run --all`` starts its child process with CREATE_NEW_PROCESS_GROUP, so an
+    interrupt can only be sent as CTRL_BREAK_EVENT (mapped to SIGBREAK). If the
+    child has not registered a handler, the OS terminates it directly on
+    receiving the signal (exit code 3221225786), and engine's interrupt
+    cleanup (WIP marking, the r-file interrupt entry, the wip checkpoint)
+    never runs at all -- violating "token-burned output is never discarded".
+    Rebinding to default_int_handler makes SIGBREAK take the same
+    KeyboardInterrupt path as Ctrl+C. POSIX has no SIGBREAK, so behavior there
+    is unchanged.
     """
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, signal.default_int_handler)
@@ -272,7 +304,8 @@ def _install_break_handler() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _install_break_handler()
-    # Windows 下 stdout/stderr 導向管線/檔案時預設用系統 code page,中文會變亂碼
+    # On Windows, stdout/stderr default to the system code page when
+    # redirected to a pipe/file, which mangles non-ASCII output.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")

@@ -1,10 +1,15 @@
-"""agents init:在目標專案生成 .agents 骨架與 AGENTS.md 橋接指示。
+"""agents init: generate the .agents skeleton and the AGENTS.md bridge notice
+in a target project.
 
-- .agents/agents.toml、instructions.md、format.md、verify.py。
-  工作資料夾不預建:名稱依任務性質由規劃會議決定。
-- AGENTS.md:不存在 -> 建立專案範本;已存在 -> 只補一行 instructions 橋接。
-  舊版「AI 工作體系」區塊會移除,其他專案內容不動。
-- .gitignore:排除整個 .agents/;既有的 AGENTS.md 版控選擇不干涉。
+- .agents/agents.toml, instructions.md, format.md, verify.py. Work folders are
+  not pre-created: their names are decided by a planning meeting based on the
+  task at hand.
+- AGENTS.md: create the project template if it does not exist; if it already
+  exists, only append the one-line instructions bridge. The legacy
+  "AI working system" section is removed; the rest of the project's content is
+  left untouched.
+- .gitignore: excludes the whole .agents/; does not interfere with an existing
+  AGENTS.md version-control choice.
 """
 from __future__ import annotations
 
@@ -17,9 +22,9 @@ _TEMPLATES = Path(__file__).resolve().parent / "templates"
 _LEGACY_SECTION_MARKER = "## AI 工作體系(.agents)"
 _BRIDGE_MARKER = "<!-- agents-instructions -->"
 _BRIDGE_LINE = (
-    "- 使用 agents 時,請先讀專案主工作樹的 `.agents/instructions.md`;"
-    "worktree session 以調度器提示的絕對路徑為準。 "
-    f"{_BRIDGE_MARKER}"
+    "- When using agents, first read `.agents/instructions.md` in the "
+    "project's main worktree; a worktree session uses the absolute path the "
+    f"scheduler provides. {_BRIDGE_MARKER}"
 )
 _GITIGNORE_LINES = [".agents/"]
 
@@ -29,7 +34,8 @@ def _template(name: str) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except OSError as e:
-        raise AgentsError(f"讀不到內建範本 {name}:{e}(安裝損壞?)") from e
+        raise AgentsError(
+            f"Cannot read built-in template {name}: {e} (broken install?)") from e
 
 
 def _create(path: Path, content: str, made: list[str], skipped: list[str]) -> None:
@@ -42,7 +48,8 @@ def _create(path: Path, content: str, made: list[str], skipped: list[str]) -> No
 
 
 def _remove_legacy_section(text: str) -> str:
-    """移除舊版由 agents 產生的二級節,保留後續專案自有的二級節。"""
+    """Remove the legacy agents-generated level-2 section, keeping any
+    project-owned level-2 section that follows it."""
     start = text.find(_LEGACY_SECTION_MARKER)
     if start < 0:
         return text
@@ -70,10 +77,10 @@ def _merge_agents_md(root: Path, made: list[str], skipped: list[str]) -> None:
     if _BRIDGE_MARKER not in updated:
         updated = updated.rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
     if updated == existing:
-        skipped.append(f"{target}(已含 instructions 橋接)")
+        skipped.append(f"{target} (already has the instructions bridge)")
         return
     target.write_text(updated, encoding="utf-8", newline="\n")
-    made.append(f"{target}(更新 instructions 橋接)")
+    made.append(f"{target} (updated the instructions bridge)")
 
 
 def _merge_gitignore(root: Path, made: list[str]) -> None:
@@ -88,20 +95,20 @@ def _merge_gitignore(root: Path, made: list[str]) -> None:
         if lines and lines[-1]:
             lines.append("")
         if lines:
-            lines.append("# agents 管理面與執行期產物")
+            lines.append("# agents management surface and runtime output")
         lines.extend(missing)
     target.write_text("\n".join(lines) + ("\n" if lines else ""),
                       encoding="utf-8", newline="\n")
-    made.append(f"{target}(補 {len(missing)} 行)")
+    made.append(f"{target} ({len(missing)} line(s) added)")
 
 
 def init(path: str | Path = ".") -> int:
     root = Path(path).resolve()
     if not root.is_dir():
-        print(f"錯誤:目錄不存在:{root}")
+        print(f"Error: directory does not exist: {root}")
         return 1
     if not (root / ".git").exists():
-        print("本專案尚未初始化 git,請先執行 git init")
+        print("This project has no git repository yet; run git init first")
         return 1
 
     agents_dir = root / ".agents"
@@ -116,15 +123,18 @@ def init(path: str | Path = ".") -> int:
     _merge_gitignore(root, made)
 
     for item in made:
-        print(f"已建立:{item}")
+        print(f"Created: {item}")
     for item in skipped:
-        print(f"略過(已存在):{item}")
+        print(f"Skipped (already exists): {item}")
 
     print()
-    print("接下來:")
-    print("  1. 填寫 AGENTS.md 的專案描述與硬限制、.agents/verify.py 的實際檢查命令")
-    print("  2. 開 AI 會議:請讀 .agents/instructions.md,開始 agents 規劃會議")
-    print("  3. 會議依任務性質命名工作資料夾(如 .agents/loginfix01/),"
-          "產出任務檔於其中(格式見 .agents/format.md)")
-    print("  4. agents check 通過後,agents run")
+    print("Next steps:")
+    print("  1. Fill in AGENTS.md's project description and hard constraints, "
+          "and the real check commands in .agents/verify.py")
+    print("  2. Start an AI meeting: read .agents/instructions.md and begin an "
+          "agents planning meeting")
+    print("  3. The meeting names a work folder for the task at hand (e.g. "
+          ".agents/loginfix01/) and produces task files inside it "
+          "(format in .agents/format.md)")
+    print("  4. Once agents check passes, run agents run")
     return 0
