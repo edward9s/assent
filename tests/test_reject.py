@@ -74,10 +74,10 @@ class TestReject(unittest.TestCase):
                 return line.split('"')[1]
         raise AssertionError(f"{path} has no status line")
 
-    def _run_reject(self) -> tuple[int, str]:
+    def _run_reject(self, confirm=lambda prompt: "y") -> tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = reject_folder(self.cfg)
+            code = reject_folder(self.cfg, confirm=confirm)
         return code, output.getvalue()
 
     def _worktree_branch(self, commit: bool = False) -> tuple[Path, str]:
@@ -199,6 +199,37 @@ class TestReject(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("worktree does not exist", output)
         self.assertIn("0 task(s) reset", output)
+
+    def test_reject_declined_confirmation_touches_nothing(self) -> None:
+        done = self._write_task(1, "DONE")
+        worktree, branch = self._worktree_branch(commit=True)
+
+        code, output = self._run_reject(confirm=lambda prompt: "n")
+
+        self.assertEqual(code, 1)
+        self.assertTrue(worktree.exists())
+        self.assertIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"))
+        self.assertEqual(self._task_status(done), "DONE")
+        self.assertIn("cancelled", output)
+        self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
+
+    def test_reject_eof_on_confirmation_touches_nothing(self) -> None:
+        done = self._write_task(1, "DONE")
+        worktree, branch = self._worktree_branch(commit=True)
+
+        def _raise_eof(prompt: str) -> str:
+            raise EOFError()
+
+        code, output = self._run_reject(confirm=_raise_eof)
+
+        self.assertEqual(code, 1)
+        self.assertTrue(worktree.exists())
+        self.assertIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"))
+        self.assertEqual(self._task_status(done), "DONE")
+        self.assertIn("cancelled", output)
+        self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
 
 
 if __name__ == "__main__":
