@@ -636,7 +636,7 @@ There is no `review` task-file field. `DONE` is the executing AI's completion
 claim, the receipt is the scheduler's complete-verification evidence, and
 calling `accept` is the human approval. The lifecycle is:
 
-`run` -> full unattended verification receipt -> human review -> `accept` ->
+`run` -> explicit `verify [--batch]` -> human review -> `accept` ->
 ordinary Git synchronization, if desired -> `clean`.
 
 For each task: open a headless session -> after the session ends the scheduler

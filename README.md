@@ -120,18 +120,30 @@ assent run <FOLDER>
 # Run every incomplete folder in dependency order, at most 2 folders at once
 assent run --all --jobs 2
 
-# 6. Refresh the complete verification receipt while away (zero tokens)
+# 6. Under the default [verification] receipt_refresh = "manual", run closeout
+#    leaves no receipt behind, and accepting directly is refused with a
+#    prompt to verify first. Refresh it explicitly while away (zero tokens):
+#    verifying several finished folders as one candidate costs one full
+#    verification instead of one per folder
+assent verify --batch
+# Or refresh just one folder's receipt
 assent verify <FOLDER>
+# Set receipt_refresh = "auto" instead if you want run closeout to refresh
+# the receipt itself
 
 # 7. Check in any time (a separate terminal, zero tokens), then review
 assent status
 assent report
-# After human review, accept one completed folder into the current target branch
+# After human review, accept every finished folder in dependency order
+assent accept --all
+# Or accept just one completed folder into the current target branch
 assent accept <FOLDER>
 # After acceptance, optionally sync with ordinary Git (or your own AI workflow)
 git push
 # Once acceptance and any desired sync are complete, remove redundant artifacts
 assent clean <FOLDER>
+# Once a folder is no longer needed, retire its plan into _archive/
+assent archive --all
 
 # When a review meeting orders a single task redone (keeps code by default;
 # does not run automatically)
@@ -269,13 +281,19 @@ file; before adjourning, run `assent check` — not passing means the meeting
 isn't done.
 
 **Act 2: unattended execution**: `assent run`, then go to sleep. Each task
-session runs only its focused `verify`; after the folder completes, the
-scheduler builds a temporary integration candidate and runs the full
-`.assent/verify.py` outside the AI session.
+session runs only its focused `verify`. Whether folder completion also builds
+a temporary integration candidate and runs the full `.assent/verify.py`
+outside the AI session depends on `assent.toml`'s `[verification]`
+`receipt_refresh`: the default `"manual"` leaves that to an explicit
+`assent verify [--batch]` afterward; `"auto"` runs it at closeout as soon as
+every task in the folder is done.
 
 `assent verify <FOLDER>` refreshes that complete verification receipt with zero
-tokens and no AI session. Its `PASSED`/`FAILED` and `fresh`/`stale` state is
-shown in the report, so a stale receipt can be refreshed unattended.
+tokens and no AI session; `assent verify --batch` does the same for every
+finished, not-yet-integrated folder as one candidate. Either command's
+`PASSED`/`FAILED` and `fresh`/`stale` state is shown in the report, so a stale
+receipt can be refreshed unattended, and `assent accept` refuses without a
+fresh `PASSED` receipt -- prompting you to verify first.
 
 The packaged `.assent/verify.py` checks both the candidate working tree and the
 committed delta from `HEAD` to its first parent. This catches committed
