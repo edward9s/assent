@@ -39,7 +39,7 @@ from assent import AssentError, gitops, lockfile, verification
 from assent.adapters import Adapter, InvocationRequest, get_adapter
 from assent.config import Config
 from assent.folderdeps import (FolderBaseResolution,
-                               find_unfinished_prerequisites,
+                               find_unfinished_prerequisites, live_upstreams,
                                parse_folder_dependencies,
                                resolve_folder_base)
 from assent.plan import (Plan, Task, append_entry, parse_task_file,
@@ -419,13 +419,18 @@ class _StackState:
 
 
 def _resolve_stack_state(cfg: Config) -> _StackState:
-    """Resolve a reproducible base and snapshot all direct upstream tips."""
+    """Resolve a reproducible base and snapshot all live direct upstream tips.
+
+    An archived upstream has no branch left to snapshot and no race to lose: its
+    content is already in the target, so it is filtered out before any source is
+    resolved (see ``live_upstreams``).
+    """
     base = resolve_folder_base(
         cfg.root, cfg.tasks_dir, excludes=cfg.git_excludes)
     dependencies = parse_folder_dependencies(cfg.tasks_dir)
     sources = tuple(
         gitops.resolve_folder_source(cfg.root, folder, cfg.git_excludes)
-        for folder in dependencies.after
+        for folder in live_upstreams(cfg.assent_dir, dependencies)
     )
     if base.speculative_upstream is not None:
         matching = next(

@@ -494,6 +494,33 @@ class TestDependencyGate(AcceptRepositoryCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(gitops.tree_of(self.root, "HEAD"), receipt.integration_tree)
 
+    def test_archived_upstream_authorizes_accept_without_a_live_tip(self) -> None:
+        base = "base"
+        self._write_task(folder=base)
+        base_worktree, base_branch, base_tip = self._make_source(base)
+        _git(self.root, "merge", "--no-ff", "-m", "accept base manually", base_branch)
+        self.assertTrue(gitops.is_ancestor(self.root, base_tip, self._head()))
+        self._dependent(self.folder, base)
+
+        # clean removed the accepted upstream's source, then archive retired the
+        # folder itself: no live directory and no branch remain, so demanding a
+        # prerequisite tip would refuse a legitimate accept.  The roster entry is
+        # the whole proof; no recorded hash is consulted.
+        gitops.remove_worktree(self.root, base_worktree)
+        gitops.delete_branch_force(self.root, base_branch)
+        shutil.rmtree(self.assent_dir / base)
+        (self.assent_dir / "_archived.toml").write_text(
+            "[[archived]]\n"
+            f'folder = "{base}"\n'
+            'archived_at = "2026-01-01T00:00:00+00:00"\n',
+            encoding="utf-8")
+        receipt = self._write_receipt()
+
+        code, output = self._accept()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(gitops.tree_of(self.root, "HEAD"), receipt.integration_tree)
+
     def test_upstream_advance_missing_and_ambiguity_all_fail_closed(self) -> None:
         base = "base"
         self._write_task(folder=base)

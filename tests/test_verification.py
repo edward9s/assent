@@ -1,6 +1,8 @@
 """Unattended integration verification and derived receipt tests."""
 from __future__ import annotations
 
+import contextlib
+import io
 import shutil
 import subprocess
 import sys
@@ -269,6 +271,57 @@ class TestVerificationRun(VerificationRepositoryCase):
         (self.tasks_dir / RECEIPT_NAME).unlink()
         self.assertEqual(verify_folder(self.cfg), 0)
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "2")
+
+
+class TestArchivedUpstreamStack(VerificationRepositoryCase):
+    """An archived upstream is proven by the roster, never by a live source."""
+
+    def _commit_assent(self, message: str) -> None:
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", message)
+
+    def _verify(self) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = verify_folder(self.cfg)
+        return code, output.getvalue()
+
+    def test_archived_upstream_needs_no_source_and_keeps_the_receipt_fresh(self):
+        upstream = self.assent_dir / "base"
+        upstream.mkdir()
+        (upstream / "t001_base.e.toml").write_text(
+            'title = "Base"\n'
+            'deps = []\nmodel = "core"\nstatus = "DONE"\n'
+            'scope = ["result.txt"]\nverify = "python .assent/verify.py"\n'
+            'goal = "done"\nacceptance = "verified"\n',
+            encoding="utf-8")
+        (self.tasks_dir / "_folder.toml").write_text(
+            'after = ["base"]\n', encoding="utf-8")
+        self._commit_assent("declare a live upstream")
+
+        # A live upstream must still retain one clean, attached source identity.
+        code, output = self._verify()
+        self.assertEqual(code, 1)
+        self.assertIn("has no base/* source branch", output)
+        self.assertFalse((self.tasks_dir / RECEIPT_NAME).exists())
+
+        # Archiving it deletes the live directory and the branch; the roster
+        # entry then proves it complete and already merged into the target, so
+        # no source resolution and neither ancestry check applies to it.
+        shutil.rmtree(upstream)
+        (self.assent_dir / "_archived.toml").write_text(
+            "[[archived]]\n"
+            'folder = "base"\n'
+            'archived_at = "2026-01-01T00:00:00+00:00"\n',
+            encoding="utf-8")
+        self._commit_assent("archive the upstream")
+
+        code, output = self._verify()
+
+        self.assertEqual(code, 0, output)
+        receipt = read_receipt(self.tasks_dir / RECEIPT_NAME, self.root)
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertTrue(receipt_matches_current_candidate(self.cfg))
 
 
 class TestReceiptMatching(VerificationRepositoryCase):

@@ -16,7 +16,7 @@ from typing import Sequence
 from assent import AssentError, gitops, verification
 from assent.config import Config, load_config
 from assent.folderdeps import (FolderDependencies, infer_folder_completion,
-                               parse_folder_dependencies,
+                               live_upstreams, parse_folder_dependencies,
                                parse_folder_dependency_graph)
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
@@ -138,7 +138,10 @@ def _accept_locked(cfg: Config) -> int:
 
     pending: list[str] = []
     dependency_tips: list[tuple[str, str]] = []
-    for dependency in dependencies.after:
+    # An archived upstream is already integrated into the target and its source
+    # is gone by design, so requiring a live tip for it would refuse a
+    # legitimate accept (see live_upstreams).
+    for dependency in live_upstreams(cfg.assent_dir, dependencies):
         completion = infer_folder_completion(cfg.assent_dir / dependency)
         if not completion.complete:
             pending.append(f"{dependency} ({completion.reason})")

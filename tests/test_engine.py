@@ -203,6 +203,34 @@ class TestRunSuccess(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertEqual(len(adapter.calls), 1)
 
+    def test_archived_folder_prerequisite_creates_worktree_without_a_source(self):
+        # Incident regression: the downstream's after named an upstream that had
+        # already been accepted, cleaned and archived, so no base/* branch was
+        # left to snapshot and worktree creation died on "has no base/* source
+        # branch".  Roster membership alone must resolve it.
+        path = self.write_task(1)
+        (self.plan_dir / "_folder.toml").write_text(
+            'after = ["base"]\n', encoding="utf-8")
+        (self.root / ".assent" / "_archived.toml").write_text(
+            "[[archived]]\n"
+            'folder = "base"\n'
+            'archived_at = "2026-01-01T00:00:00+00:00"\n',
+            encoding="utf-8")
+        cfg = self.build()
+        self.commit_all()
+        adapter = ScriptedAdapter([self.ai_done(path, {"src/result.py": "ok"})])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = engine.run(cfg, once=True, adapter=adapter)
+
+        self.assertEqual(result, 0, out.getvalue())
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertTrue(gitops.worktree_path(self.root, "plan01").is_dir())
+        # An archived upstream is already in the target, so it is no unaccepted
+        # upstream and contributes no speculative base.
+        self.assertIn("Stacked upstream: none", out.getvalue())
+
     def test_task_runs_with_prompt_scope_and_journal_paths(self):
         path = self.write_task(1)
         cfg = self.build()
