@@ -3,9 +3,11 @@
 Only what more than one verification module genuinely needs lives here: the
 receipt-field vocabulary both receipt schemas validate against, the atomic
 write and digest helpers both of them use, the source-identity snapshot the
-folder and batch paths both take, and the two candidate builders (one folder
+folder and batch paths both take, the two candidate builders (one folder
 merged into the target, and an ordered chain of folders) that both the batch
-freshness rules and the batch execution path rebuild.
+freshness rules and the batch execution path rebuild, and the provisioned
+root-level directory links the folder and batch runs both mirror into a
+candidate before starting the full verifier.
 
 This module deliberately imports none of ``folder_verification``,
 ``batch_receipt``, or ``batch_verification``, so those three stay independent
@@ -13,15 +15,17 @@ leaves above it.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -181,6 +185,191 @@ def run_full_verifier(script: Path,
           f"elapsed {elapsed:.1f}s, exit code {result.returncode}",
           flush=True)
     return result
+
+
+@dataclass(frozen=True)
+class ProvisionedLink:
+    """One root-level directory link a source worktree provisions explicitly.
+
+    ``name`` is the immediate-child name inside the worktree and ``target`` is
+    the already-resolved directory it points at, so two worktrees offering the
+    same name can be compared by target without touching the filesystem again.
+    """
+
+    name: str
+    target: Path
+
+
+def _is_directory_link(path: Path) -> bool:
+    """True for a POSIX symlink, a Windows directory symlink, or a junction.
+
+    ``os.path.islink`` is False for a Windows junction, so the reparse tag is
+    checked as well.  ``st_reparse_tag`` exists only on Windows, and
+    ``IO_REPARSE_TAG_MOUNT_POINT`` only there too, hence the guarded lookups
+    rather than a platform test.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    mount_point = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
+    return (mount_point is not None
+            and getattr(info, "st_reparse_tag", None) == mount_point)
+
+
+def discover_worktree_links(worktree: Path) -> tuple[ProvisionedLink, ...]:
+    """List the immediate-child directory links a source worktree provisions.
+
+    Only the root level is scanned, and only links: an ordinary ignored
+    directory, an ignored file, a link to a file, a dangling link, and anything
+    nested inside a linked target are all left alone.  A directory link whose
+    target cannot be resolved is a refusal rather than a silent omission,
+    because verification would otherwise run against a candidate the human
+    believes was provisioned.
+    """
+    worktree = Path(worktree)
+    try:
+        with os.scandir(worktree) as entries:
+            names = sorted(entry.name for entry in entries)
+    except OSError as e:
+        raise AssentError(
+            f"Unable to inspect source worktree {worktree} for provisioned "
+            f"directory links: {e}") from e
+    links: list[ProvisionedLink] = []
+    for name in names:
+        path = worktree / name
+        if name == ".git" or not _is_directory_link(path):
+            continue
+        if not path.is_dir():           # a file link or a dangling link
+            continue
+        try:
+            target = Path(os.path.realpath(path, strict=True))
+        except OSError as e:
+            raise AssentError(
+                f"source worktree link {worktree / name} cannot be resolved to "
+                f"a directory target: {e}") from e
+        if not target.is_dir():
+            raise AssentError(
+                f"source worktree link {worktree / name} resolves to {target}, "
+                "which is not a directory")
+        links.append(ProvisionedLink(name, target))
+    return tuple(links)
+
+
+def union_worktree_links(
+        worktrees: Iterable[Path | None]) -> tuple[ProvisionedLink, ...]:
+    """Union the provisioned links of every source worktree entering a candidate.
+
+    The same relative name resolving to the same target in two worktrees is one
+    link, not a conflict.  The same name resolving to different targets has no
+    correct answer, so it fails closed before anything is created.
+    """
+    merged: dict[str, ProvisionedLink] = {}
+    for worktree in worktrees:
+        if worktree is None:
+            continue
+        for link in discover_worktree_links(worktree):
+            existing = merged.get(link.name)
+            if existing is None:
+                merged[link.name] = link
+            elif existing.target != link.target:
+                raise AssentError(
+                    "source worktrees provision conflicting targets for the "
+                    f"root-level link {link.name}: {existing.target} and "
+                    f"{link.target}")
+    return tuple(merged[name] for name in sorted(merged))
+
+
+def _create_directory_link(destination: Path, target: Path) -> None:
+    """Create one directory link, preferring a junction on Windows.
+
+    A Windows directory symlink needs a privilege an unattended run cannot
+    assume, while a junction needs none, so Windows always gets a junction
+    regardless of which kind the source worktree used.
+    """
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(destination))
+    else:
+        os.symlink(target, destination, target_is_directory=True)
+
+
+def _remove_directory_link(destination: Path) -> None:
+    """Remove one mirrored link only; the target it points at is never touched.
+
+    Both a Windows junction and a Windows directory symlink are removed with
+    ``rmdir`` on the reparse point itself, and a POSIX symlink with ``unlink``.
+    Neither call descends into the target.
+    """
+    if os.name == "nt":
+        os.rmdir(destination)
+    else:
+        os.unlink(destination)
+
+
+@contextlib.contextmanager
+def provisioned_candidate_links(
+        candidate: Path,
+        links: Sequence[ProvisionedLink]) -> Iterator[tuple[ProvisionedLink, ...]]:
+    """Mirror provisioned source links into a candidate for the verifier run only.
+
+    The links exist only while the full verifier runs: they are created after
+    the candidate's merge commits are already made and removed before the
+    temporary worktree is, so the committed candidate tree never changes and
+    ``git worktree remove`` never sees a reparse point to walk into.  Removal
+    unlinks the mirror alone, so an interrupted or failed run leaves both the
+    external target and the persistent source-worktree link untouched.
+
+    A destination that already exists in the candidate is a refusal: a
+    provisioned link may add an ignored path, never replace candidate content.
+    A destination Git does not ignore there is skipped rather than mirrored.
+    """
+    created: list[Path] = []
+    mirrored: list[ProvisionedLink] = []
+    primary_error: BaseException | None = None
+    try:
+        for link in links:
+            destination = candidate / link.name
+            if os.path.lexists(destination):
+                raise AssentError(
+                    f"the integration candidate already contains {link.name}; a "
+                    "provisioned source link must never replace candidate "
+                    "content")
+            if not gitops.is_path_ignored(candidate, link.name, directory=True):
+                continue
+            try:
+                _create_directory_link(destination, link.target)
+            except OSError as e:
+                raise AssentError(
+                    f"unable to mirror the provisioned source link {link.name} "
+                    f"-> {link.target} into the integration candidate: "
+                    f"{e}") from e
+            created.append(destination)
+            mirrored.append(link)
+        if mirrored:
+            print("Provisioned candidate link(s): "
+                  + ", ".join(f"{link.name} -> {link.target}"
+                              for link in mirrored), flush=True)
+        yield tuple(mirrored)
+    except BaseException as e:
+        primary_error = e
+        raise
+    finally:
+        problems: list[str] = []
+        for destination in reversed(created):
+            try:
+                _remove_directory_link(destination)
+            except OSError as e:
+                problems.append(f"unable to remove mirrored link {destination}: {e}")
+        if problems:
+            cleanup_error = AssentError(
+                "Provisioned candidate link cleanup was incomplete: "
+                + "; ".join(problems))
+            if primary_error is None:
+                raise cleanup_error
+            primary_error.add_note(str(cleanup_error))
 
 
 @dataclass(frozen=True)

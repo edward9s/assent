@@ -72,6 +72,20 @@ class TestContractPaths(unittest.TestCase):
                     (packaged / name).read_text(encoding="utf-8"))
 
 
+class TestContractContent(unittest.TestCase):
+    """Durable rules a reader must be able to find in the shipped contract."""
+
+    def test_format_states_the_provisioned_candidate_link_rule(self):
+        install_global_contracts(self)
+        text = contracts.installed_contract_text("format.md")
+        for phrase in (
+                "explicitly provisioned ignored root-level directory links",
+                "Arbitrary ignored content is never exposed",
+                "removed before the temporary worktree"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+
 class TestContractValidation(unittest.TestCase):
     def test_current_contracts_report_no_error(self):
         install_global_contracts(self)

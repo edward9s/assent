@@ -113,6 +113,23 @@ while operating an assent-managed session live in
 - A verification receipt is a deletable derived artifact, never an independent
   source of truth: source commits, the reconstructed integration tree, and the
   verification-script digest must reproduce it before it can authorize accept.
+- Complete verification mirrors only explicitly provisioned ignored root-level
+  directory links from the source worktrees that enter the candidate, never
+  arbitrary ignored content. Discovery is immediate children only -- Windows
+  junctions and directory symlinks, POSIX directory symlinks -- and a link is
+  mirrored at the same relative name and resolved target only when that
+  destination is absent from the candidate and Git-ignored there. Ordinary
+  ignored directories, files, nested links, `.assent`, build output, caches,
+  credentials, and editor state stay out. Several sources contribute their
+  union: one name resolving to one target is deduplicated, while conflicting
+  targets, an occupied destination, or a link that cannot be created refuse
+  before the verifier runs or any PASSED evidence is written. The mirror exists
+  for the verifier run alone; it is removed before the temporary worktree is,
+  so neither creating nor cleaning a candidate ever traverses, modifies, or
+  deletes a linked target, and the source worktree's own link and its target
+  survive success, failure, and interruption alike. Do not add `--force`, a
+  project `local_inputs` setting, a blanket `.gitignore` overlay, or copies of
+  ignored directory contents into Git.
 - Cross-folder speculative execution stacks only on an explicitly declared
   `base`, so at most one not-yet-accepted upstream tip is ever in a stack. A
   folder that declares no `base` is cut from the integration target; the

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,8 +26,10 @@ from assent.folderdeps import (infer_folder_completion, live_upstreams,
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.verification_common import (VERIFY_COMMAND, candidate_tree,
                                         invalidate_receipt, merge_chain,
+                                        provisioned_candidate_links,
                                         run_full_verifier, sha256_file,
-                                        source_snapshot, summary)
+                                        source_snapshot, summary,
+                                        union_worktree_links)
 
 
 @dataclass(frozen=True)
@@ -259,15 +261,25 @@ def _bisect_steps(count: int) -> int:
     return steps
 
 
+def _prefix_links(worktrees: Mapping[str, Path],
+                  sources: Sequence[tuple[str, str]]):
+    """Union the provisioned links of exactly the folders in one merge chain."""
+    return union_worktree_links(
+        [worktrees.get(folder) for folder, _tip in sources])
+
+
 def _verify_prefix(main: Path, target_tip: str,
-                   sources: Sequence[tuple[str, str]],
-                   script: Path) -> _PrefixRun:
+                   sources: Sequence[tuple[str, str]], script: Path,
+                   worktrees: Mapping[str, Path]) -> _PrefixRun:
     """Build and fully verify one prefix of an already-mergeable batch chain.
 
     The whole chain merged cleanly before localization started, so truncating it
     repeats a subset of the same merges and cannot conflict.  A conflict here
     would mean the repository changed underneath the search, which fails closed
     rather than being recorded as a test failure.
+
+    Each prefix gets the provisioned links of its own folders, not the whole
+    batch's, so localization verifies exactly the candidate it is judging.
     """
     with gitops.temporary_integration_worktree(
             main, "batch", target_tip) as (candidate, _branch):
@@ -277,11 +289,13 @@ def _verify_prefix(main: Path, target_tip: str,
                 f"merging {chain.conflict_folder} conflicts while localizing a "
                 "batch failure, although the full chain merged cleanly; the "
                 "repository changed during verification")
-        try:
-            result = run_full_verifier(script, candidate)
-        except OSError as e:
-            return _PrefixRun(False, chain.step_trees, 1,
-                              f"Unable to start verification: {e}")
+        with provisioned_candidate_links(
+                candidate, _prefix_links(worktrees, sources)):
+            try:
+                result = run_full_verifier(script, candidate)
+            except OSError as e:
+                return _PrefixRun(False, chain.step_trees, 1,
+                                  f"Unable to start verification: {e}")
     if result.returncode == 0:
         return _PrefixRun(True, chain.step_trees, 0, "")
     return _PrefixRun(
@@ -293,7 +307,9 @@ def _verify_prefix(main: Path, target_tip: str,
 
 def bisect_batch_failure(main: Path, target_tip: str,
                          sources: Sequence[tuple[str, str]], script: Path,
-                         failure_summary: str) -> BatchBisectResult:
+                         failure_summary: str,
+                         worktrees: Mapping[str, Path] | None = None
+                         ) -> BatchBisectResult:
     """Localize a failed batch to the first folder whose merge turns it red.
 
     The caller has already proven that the full chain merges cleanly and that
@@ -301,7 +317,11 @@ def bisect_batch_failure(main: Path, target_tip: str,
     prefix by bisection: at most ``ceil(log2(N))`` full verifications instead of
     the ``N`` a folder-by-folder walk would cost.  Batching exists to spend fewer
     full runs, so localizing it must be cheap too.
+
+    ``worktrees`` maps each folder to its source worktree so every prefix run
+    receives the provisioned links of the folders it actually merges.
     """
+    worktrees = {} if worktrees is None else worktrees
     total = len(sources)
     steps = _bisect_steps(total)
     if steps:
@@ -318,7 +338,7 @@ def bisect_batch_failure(main: Path, target_tip: str,
         print(f"verify --batch: localizing step {step}/{steps}: verifying "
               f"{middle} of {total} folders ("
               + ", ".join(folder for folder, _tip in prefix) + ")")
-        run = _verify_prefix(main, target_tip, prefix, script)
+        run = _verify_prefix(main, target_tip, prefix, script, worktrees)
         if run.passed:
             last_pass = run
             low = middle + 1
@@ -581,17 +601,23 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
         excludes = configs[selection.folders[0]].git_excludes
         if not gitops.working_tree_status(main, excludes).is_clean:
             raise AssentError(f"target worktree {main} is not clean")
+        # The source worktrees are kept, not discarded: each one may provision
+        # ignored root-level directory links the full verifier needs, and only
+        # the folders that actually enter the candidate contribute theirs.
+        source_worktrees: dict[str, Path] = {}
         for folder, source_tip in selection.sources:
             if exact:
-                _branch, current, _worktree = _explicit_source_snapshot(
+                _branch, current, worktree = _explicit_source_snapshot(
                     configs[folder], main)
             else:
-                _branch, current, _worktree = source_snapshot(
+                _branch, current, worktree = source_snapshot(
                     configs[folder], main)
             if current != source_tip:
                 raise AssentError(
                     f"source tip for {folder} changed while the batch locks "
                     "were being acquired")
+            if worktree is not None:
+                source_worktrees[folder] = worktree
         script = (assent_dir / "verify.py").resolve()
         if not script.is_file():
             raise AssentError(f"Verification script not found: {script}")
@@ -629,10 +655,13 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                 batch_sources = tuple(selection.sources)
                 batch_step_trees = chain.step_trees
                 batch_folders = selection.folders
-                try:
-                    result = run_full_verifier(script, candidate)
-                except OSError as e:
-                    start_failure = f"Unable to start verification: {e}"
+                with provisioned_candidate_links(
+                        candidate,
+                        _prefix_links(source_worktrees, batch_sources)):
+                    try:
+                        result = run_full_verifier(script, candidate)
+                    except OSError as e:
+                        start_failure = f"Unable to start verification: {e}"
             else:
                 filtered = _merge_chain_skipping_conflicts(
                     candidate, selection.sources, graph)
@@ -645,10 +674,13 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                 elif filtered.conflicts and not confirm(_skip_question(filtered)):
                     refusal = "the skip was declined, so nothing was verified"
                 else:
-                    try:
-                        result = run_full_verifier(script, candidate)
-                    except OSError as e:
-                        start_failure = f"Unable to start verification: {e}"
+                    with provisioned_candidate_links(
+                            candidate,
+                            _prefix_links(source_worktrees, filtered.sources)):
+                        try:
+                            result = run_full_verifier(script, candidate)
+                        except OSError as e:
+                            start_failure = f"Unable to start verification: {e}"
                 if refusal:
                     print(f"verify --batch: refused, {refusal}. The target and "
                           "every source were left unchanged and no receipt was "
@@ -676,7 +708,8 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                 f"(exit code {result.returncode})")
             if status == "FAILED" and bisect:
                 bisected = bisect_batch_failure(
-                    main, target_tip, batch_sources, script, failure_summary)
+                    main, target_tip, batch_sources, script, failure_summary,
+                    source_worktrees)
                 failure_summary = _report_localization(
                     assent_dir, batch_folders, bisected,
                     batch_folders if exact else None)

@@ -26,6 +26,8 @@ from assent.gitops import (
     unique_folder_branch,
     working_tree_status,
 )
+from assent.verification_common import (ProvisionedLink,
+                                        provisioned_candidate_links)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -126,6 +128,22 @@ class TestRepositoryFacts(GitRepositoryCase):
         self.assertEqual(branch_tip(self.root, "plan01/run"), tip)
         self.assertTrue(is_ancestor(self.root, self.initial, tip))
         self.assertFalse(is_ancestor(self.root, tip, self.initial))
+
+    def test_is_path_ignored_answers_for_absent_directory_and_tracked_paths(
+            self) -> None:
+        (self.root / ".gitignore").write_text(
+            "pkg/\ncache\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "ignore rules")
+        # A directory-only rule needs the directory form to match a name that
+        # does not exist yet, which is exactly the provisioning question.
+        self.assertFalse(gitops.is_path_ignored(self.root, "pkg"))
+        self.assertTrue(gitops.is_path_ignored(self.root, "pkg", directory=True))
+        self.assertTrue(gitops.is_path_ignored(self.root, "cache", directory=True))
+        self.assertFalse(gitops.is_path_ignored(self.root, "src", directory=True))
+        # A tracked path is never reported as ignored.
+        self.assertFalse(
+            gitops.is_path_ignored(self.root, "README.md", directory=True))
 
     def test_git_errors_keep_exit_code_and_summary(self) -> None:
         with self.assertRaises(AssentError) as caught:
@@ -232,6 +250,56 @@ class TestTemporaryWorktrees(GitRepositoryCase):
             self.root, "for-each-ref", "--format=%(refname:short)",
             "refs/heads/").splitlines())
         self.assertEqual(self._metadata_paths(), [self.root.resolve()])
+
+    def test_a_mirrored_link_is_removed_before_the_candidate_worktree(self) -> None:
+        """Candidate cleanup must never reach an external linked target.
+
+        ``git worktree remove --force`` walks into a junction and deletes what
+        it finds, so the mirror has to be gone before cleanup starts.  Nesting
+        the link context inside the worktree context is what guarantees that,
+        and this proves the external target survives the whole sequence.
+        """
+        (self.root / ".gitignore").write_text("pkg/\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "ignore pkg")
+        snapshot = commit_of(self.root, "HEAD")
+        target = self.parent / "external pkg"
+        target.mkdir()
+        (target / "marker.txt").write_text("keep\n", encoding="utf-8")
+
+        with temporary_integration_worktree(
+                self.root, "plan01", snapshot) as (path, _branch):
+            with provisioned_candidate_links(
+                    path, (ProvisionedLink("pkg", target),)) as mirrored:
+                self.assertEqual([link.name for link in mirrored], ["pkg"])
+                self.assertTrue((path / "pkg" / "marker.txt").is_file())
+            self.assertFalse((path / "pkg").exists())
+
+        self.assertFalse(path.exists())
+        self.assertTrue((target / "marker.txt").is_file())
+        self.assertEqual(self._temporary_entries(), [])
+
+    def test_a_mirrored_link_survives_neither_a_failure_nor_an_interruption(
+            self) -> None:
+        (self.root / ".gitignore").write_text("pkg/\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "ignore pkg")
+        snapshot = commit_of(self.root, "HEAD")
+        target = self.parent / "external pkg"
+        target.mkdir()
+        (target / "marker.txt").write_text("keep\n", encoding="utf-8")
+
+        for failure in (RuntimeError("verifier blew up"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                with self.assertRaises(type(failure)):
+                    with temporary_integration_worktree(
+                            self.root, "plan01", snapshot) as (path, _branch):
+                        with provisioned_candidate_links(
+                                path, (ProvisionedLink("pkg", target),)):
+                            raise failure
+                self.assertFalse(path.exists())
+                self.assertTrue((target / "marker.txt").is_file())
+                self.assertEqual(self._temporary_entries(), [])
 
     def test_cleanup_diagnostic_does_not_replace_primary_exception(self) -> None:
         original_cleanup = gitops._cleanup_temporary_worktree

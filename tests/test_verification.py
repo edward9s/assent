@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
@@ -20,7 +22,9 @@ from assent.folder_verification import (RECEIPT_NAME, VerificationReceipt,
                                         write_receipt)
 from assent.gitops import (branch_tip, commit_of, folder_branches, tree_of,
                            working_tree_status)
-from assent.verification_common import summary
+from assent.verification_common import (ProvisionedLink,
+                                        provisioned_candidate_links, summary,
+                                        union_worktree_links)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -30,6 +34,22 @@ def _git(root: Path, *args: str) -> str:
     if result.returncode:
         raise AssertionError(result.stderr or result.stdout)
     return result.stdout.strip()
+
+
+def make_directory_link(link: Path, target: Path) -> None:
+    """Create a real directory link the way a human provisions one.
+
+    Windows gets a genuine junction, which is what the observed source
+    worktrees actually use and what an unattended run can create without an
+    extra privilege; every other platform gets a directory symlink.  Nothing
+    here is mocked, so the tests exercise the same path metadata production
+    does.  Shared with ``tests.test_batch_verification``.
+    """
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
 
 
 class VerificationRepositoryCase(unittest.TestCase):
@@ -55,6 +75,10 @@ class VerificationRepositoryCase(unittest.TestCase):
             'goal = "done"\nacceptance = "verified"\n',
             encoding="utf-8")
         (self.root / "README.md").write_text("initial\n", encoding="utf-8")
+        # Shared by trunk and every source branch, so a provisioned root-level
+        # link stays ignored in the source worktree and in the candidate alike.
+        (self.root / ".gitignore").write_text(
+            "pkg/\nassets/\nignored/\n", encoding="utf-8")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "initial")
         self.target_tip = commit_of(self.root, "HEAD")
@@ -73,8 +97,30 @@ class VerificationRepositoryCase(unittest.TestCase):
         self.cfg = load_config(self.assent_dir / "assent.toml", "plan測試")
         self.addCleanup(self._cleanup)
 
+    def _link_target(self, name: str) -> Path:
+        """Create an external directory holding one readable marker file."""
+        target = self.parent / f"external {name}"
+        target.mkdir(exist_ok=True)
+        (target / "marker.txt").write_text(f"{name} marker\n", encoding="utf-8")
+        return target
+
+    def _provision_link(self, worktree: Path, name: str) -> Path:
+        """Link ``worktree/name`` at a fresh external target and return it."""
+        target = self._link_target(name)
+        make_directory_link(worktree / name, target)
+        return target
+
     def _write_verifier(self, exit_code: int, output_size: int = 0,
-                        stderr: str = "") -> None:
+                        stderr: str = "", probe: Sequence[str] = (),
+                        absent: Sequence[str] = ()) -> None:
+        """Write the stand-in full verifier.
+
+        ``probe`` names root-level paths whose ``marker.txt`` the verifier must
+        be able to read from inside the candidate, and ``absent`` names paths
+        that must not exist there; either expectation failing makes the run
+        exit nonzero, which is exactly how a missing or unwanted candidate link
+        should surface.
+        """
         script = (
             "from pathlib import Path\n"
             "import subprocess\n"
@@ -85,6 +131,11 @@ class VerificationRepositoryCase(unittest.TestCase):
             "parents = subprocess.run(['git', 'rev-list', '--parents', '-n', '1', "
             "'HEAD'], capture_output=True, text=True, check=True).stdout.strip()\n"
             "observed.write_text(str(Path.cwd()) + '\\n' + parents, encoding='utf-8')\n"
+            f"for name in {list(probe)!r}:\n"
+            "    print('probe', name, (Path(name) / 'marker.txt')"
+            ".read_text(encoding='utf-8').strip())\n"
+            f"for name in {list(absent)!r}:\n"
+            "    assert not Path(name).exists(), 'unexpected candidate path: ' + name\n"
             "print('successful test noise begins')\n"
             f"print('x' * {output_size})\n"
             f"print({stderr!r}, file=__import__('sys').stderr)\n"
@@ -107,8 +158,9 @@ class VerificationRepositoryCase(unittest.TestCase):
         shutil.rmtree(self.parent, ignore_errors=True)
 
     def _commit_target_verifier(self, exit_code: int, output_size: int = 0,
-                                stderr: str = "") -> None:
-        self._write_verifier(exit_code, output_size, stderr)
+                                stderr: str = "", probe: Sequence[str] = (),
+                                absent: Sequence[str] = ()) -> None:
+        self._write_verifier(exit_code, output_size, stderr, probe, absent)
         _git(self.root, "add", ".assent/verify.py")
         _git(self.root, "commit", "-m", "change full verifier")
 
@@ -492,6 +544,122 @@ class TestFolderConflictDiagnostic(VerificationRepositoryCase):
         self.assertNotIn("assent rework plan測試", text)
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "FAILED")
+
+
+class TestProvisionedCandidateLinks(VerificationRepositoryCase):
+    """Ignored root-level directory links follow the source into the candidate.
+
+    A real junction on Windows and a real directory symlink elsewhere; nothing
+    about the path metadata is mocked, because whether Git and the filesystem
+    treat a junction as ignorable content is the fact under test.
+    """
+
+    def test_both_provisioned_links_are_readable_through_the_candidate(self):
+        pkg = self._provision_link(self.source_worktree, "pkg")
+        assets = self._provision_link(self.source_worktree, "assets")
+        self._commit_target_verifier(exit_code=0, probe=("pkg", "assets"))
+
+        self.assertEqual(verify_folder(self.cfg), 0)
+
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertEqual(receipt.status, "PASSED")
+        # The source worktree keeps its links, and both targets are untouched.
+        self.assertTrue((pkg / "marker.txt").is_file())
+        self.assertTrue((assets / "marker.txt").is_file())
+        self.assertTrue((self.source_worktree / "pkg" / "marker.txt").is_file())
+        self.assertTrue((self.source_worktree / "assets" / "marker.txt").is_file())
+        branches, paths = self._temporary_resources()
+        self.assertEqual((branches, paths), ([], []))
+
+    def test_an_ordinary_ignored_directory_is_not_mirrored(self):
+        self._provision_link(self.source_worktree, "pkg")
+        ordinary = self.source_worktree / "ignored"
+        ordinary.mkdir()
+        (ordinary / "marker.txt").write_text("local only\n", encoding="utf-8")
+        self._commit_target_verifier(
+            exit_code=0, probe=("pkg",), absent=("ignored",))
+
+        self.assertEqual(verify_folder(self.cfg), 0)
+
+        self.assertEqual(
+            read_receipt(receipt_path(self.cfg), self.root).status, "PASSED")
+        self.assertTrue((ordinary / "marker.txt").is_file())
+
+    def test_a_destination_git_does_not_ignore_is_skipped(self):
+        # "local" is outside .gitignore, so mirroring it would change what the
+        # candidate contains rather than restore what the source provisions.
+        target = self._link_target("local")
+        with provisioned_candidate_links(
+                self.root, (ProvisionedLink("local", target),)) as mirrored:
+            self.assertEqual(mirrored, ())
+            self.assertFalse((self.root / "local").exists())
+
+    def test_the_primitive_creates_and_then_removes_only_the_mirror(self):
+        target = self._link_target("pkg")
+        with provisioned_candidate_links(
+                self.root, (ProvisionedLink("pkg", target),)) as mirrored:
+            self.assertEqual([link.name for link in mirrored], ["pkg"])
+            self.assertTrue((self.root / "pkg" / "marker.txt").is_file())
+        self.assertFalse((self.root / "pkg").exists())
+        self.assertTrue((target / "marker.txt").is_file())
+
+    def test_two_worktrees_disagreeing_about_one_name_refuse(self):
+        peer = self.parent / "peer worktree"
+        peer.mkdir()
+        self._provision_link(self.source_worktree, "pkg")
+        make_directory_link(peer / "pkg", self._link_target("other pkg"))
+
+        self.assertEqual(
+            union_worktree_links([self.source_worktree, self.source_worktree]),
+            union_worktree_links([self.source_worktree]))
+        with self.assertRaises(AssentError) as ctx:
+            union_worktree_links([self.source_worktree, peer])
+        self.assertIn("conflicting targets", str(ctx.exception))
+
+    def test_an_occupied_destination_refuses_without_writing_evidence(self):
+        # The candidate tracks "pkg" as a real directory; a link may add an
+        # ignored path, never replace committed content.
+        tracked = self.root / "pkg"
+        tracked.mkdir()
+        (tracked / "keep.txt").write_text("tracked\n", encoding="utf-8")
+        _git(self.root, "add", "-f", "pkg/keep.txt")
+        _git(self.root, "commit", "-m", "track a real pkg directory")
+        self._provision_link(self.source_worktree, "pkg")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = verify_folder(self.cfg)
+
+        self.assertEqual(code, 1, output.getvalue())
+        self.assertIn("already contains pkg", output.getvalue())
+        self.assertFalse(receipt_path(self.cfg).exists())
+        self.assertEqual(self.counter.exists(), False)
+
+    def test_a_failing_verifier_preserves_the_target_and_the_source_link(self):
+        pkg = self._provision_link(self.source_worktree, "pkg")
+        self._commit_target_verifier(exit_code=3, probe=("pkg",))
+
+        self.assertEqual(verify_folder(self.cfg), 1)
+
+        self.assertEqual(
+            read_receipt(receipt_path(self.cfg), self.root).status, "FAILED")
+        self.assertTrue((pkg / "marker.txt").is_file())
+        self.assertTrue((self.source_worktree / "pkg" / "marker.txt").is_file())
+        branches, paths = self._temporary_resources()
+        self.assertEqual((branches, paths), ([], []))
+
+    def test_a_dangling_link_is_not_provisioned(self):
+        target = self._provision_link(self.source_worktree, "pkg")
+        shutil.rmtree(target)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = verify_folder(self.cfg)
+
+        # A dangling link is not a directory link, so it is simply not
+        # provisioned; the run proceeds and the verifier decides.
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertFalse((self.source_worktree / "pkg").is_dir())
 
 
 if __name__ == "__main__":

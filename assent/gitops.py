@@ -335,6 +335,31 @@ def tracked_paths(root: Path, path: str, ref: str | None = None) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def is_path_ignored(root: Path, relative: str,
+                    directory: bool = False) -> bool:
+    """Report whether Git ignores ``relative`` inside ``root``.
+
+    The path need not exist: ``git check-ignore`` matches the exclude rules
+    against the name, which is exactly what a caller asking "may I create this
+    without changing what the tree contains" needs.  ``directory=True`` appends
+    the trailing slash that tells Git the name denotes a directory, so a
+    directory-only rule such as ``pkg/`` matches a path that is not there yet.
+    The index is deliberately consulted (no ``--no-index``), so a tracked path
+    is never called ignored.  Exit code 0 = ignored, 1 = not ignored; anything
+    else is a real Git error.
+    """
+    spec = _normalize(relative).rstrip("/") + ("/" if directory else "")
+    result = _run_git(root, "check-ignore", "-q", "--", spec)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise AssentError(
+        f"git check-ignore failed for {relative} in {root} (exit code "
+        f"{result.returncode}): "
+        f"{result.stderr.strip() or result.stdout.strip() or 'unknown error'}")
+
+
 def changes_outside_scope(root: Path, scope: list[str],
                           since_ref: str | None = None,
                           excludes: Sequence[str] = ()) -> list[str]:

@@ -28,6 +28,7 @@ from assent.config import load_config
 from assent.folder_verification import receipt_path
 from assent.lockfile import hold_integration_lock, hold_lock
 from assent.verification_common import build_batch_candidate
+from tests.test_verification import make_directory_link
 
 _VERIFY_OK = "raise SystemExit(0)\n"
 _VERIFY_FAILS = "print('two tests failed')\nraise SystemExit(3)\n"
@@ -53,7 +54,10 @@ class BatchVerifyRepositoryCase(unittest.TestCase):
         _git(self.root, "config", "user.name", "Assent Test")
         _git(self.root, "config", "user.email", "assent@example.invalid")
         _git(self.root, "checkout", "-b", "trunk")
-        (self.root / ".gitignore").write_text(".assent/\n", encoding="utf-8")
+        # pkg/ and assets/ let a test provision a real root-level directory
+        # link that stays ignored in the source worktree and the candidate.
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\nassets/\nignored/\n", encoding="utf-8")
         (self.root / "README.md").write_text("initial\n", encoding="utf-8")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "initial")
@@ -885,6 +889,118 @@ class TestBatchLocking(BatchVerifyRepositoryCase):
 
         self.assertEqual(code, 1)
         self.assertIn("verify --batch: refused", output)
+        self.assertFalse(self.receipt_path().exists())
+
+
+class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
+    """A batch candidate gets the links of the worktrees it actually merges."""
+
+    def link_target(self, name: str) -> Path:
+        target = self.parent / f"external {name}"
+        target.mkdir(exist_ok=True)
+        (target / "marker.txt").write_text(f"{name} marker\n", encoding="utf-8")
+        return target
+
+    def provision(self, folder: str, name: str,
+                  target: Path | None = None) -> Path:
+        """Give ``folder``'s source worktree a real root-level directory link."""
+        target = self.link_target(name) if target is None else target
+        make_directory_link(gitops.worktree_path(self.root, folder) / name,
+                            target)
+        return target
+
+    def write_probe_verify(self, *probe: str, absent: tuple[str, ...] = (),
+                           red_on: str = "") -> None:
+        self.write_verify(
+            "import sys\n"
+            "from pathlib import Path\n"
+            f"for name in {list(probe)!r}:\n"
+            "    print('probe', name, (Path(name) / 'marker.txt')"
+            ".read_text(encoding='utf-8').strip())\n"
+            f"for name in {list(absent)!r}:\n"
+            "    assert not Path(name).exists(), 'unexpected: ' + name\n"
+            f"if {red_on!r} and Path({red_on!r}).exists():\n"
+            f"    print('regression introduced by ' + {red_on!r})\n"
+            "    sys.exit(3)\n"
+            "sys.exit(0)\n")
+
+    def test_dynamic_batch_mirrors_the_union_of_the_merged_worktrees(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        pkg = self.provision("aa", "pkg")
+        assets = self.provision("bb", "assets")
+        ordinary = gitops.worktree_path(self.root, "aa") / "ignored"
+        ordinary.mkdir()
+        self.write_probe_verify("pkg", "assets", absent=("ignored",))
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.read_batch_receipt().status, "PASSED")
+        self.assertIn("Provisioned candidate link(s)", output)
+        for folder, name, target in (("aa", "pkg", pkg),
+                                     ("bb", "assets", assets)):
+            source_link = gitops.worktree_path(self.root, folder) / name
+            self.assertTrue((source_link / "marker.txt").is_file())
+            self.assertTrue((target / "marker.txt").is_file())
+        self.assertTrue(ordinary.is_dir())
+
+    def test_selected_batch_mirrors_the_links_of_the_named_folders(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        self.provision("aa", "pkg")
+        self.write_probe_verify("pkg")
+
+        code, output = self.run_selected("aa", "bb")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.read_batch_receipt().folders, ("aa", "bb"))
+
+    def test_localizing_a_failure_keeps_the_links_of_each_prefix(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        self.make_source("cc")
+        self.provision("aa", "pkg")
+        # Every prefix contains aa, so every localizing run must still be able
+        # to read through the link, and cc is what turns the batch red.
+        self.write_probe_verify("pkg", red_on="cc.txt")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("localized the failure to cc", output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertEqual(receipt.folders, ("aa", "bb"))
+
+    def test_conflicting_link_targets_refuse_the_whole_batch(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        self.provision("aa", "pkg")
+        self.provision("bb", "pkg", self.link_target("other pkg"))
+        self.write_probe_verify("pkg")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("conflicting targets", output)
+        self.assertIn("pkg", output)
+        self.assertFalse(self.receipt_path().exists())
+
+    def test_an_occupied_candidate_destination_refuses_the_batch(self) -> None:
+        self.make_source("aa")
+        self.provision("aa", "pkg")
+        # The target now tracks a real pkg/ directory, so the candidate owns
+        # that name and a provisioned link may not take it over.
+        (self.root / "pkg").mkdir()
+        (self.root / "pkg" / "keep.txt").write_text("tracked\n", encoding="utf-8")
+        _git(self.root, "add", "-f", "pkg/keep.txt")
+        _git(self.root, "commit", "-m", "track a real pkg directory")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("already contains pkg", output)
         self.assertFalse(self.receipt_path().exists())
 
 
