@@ -290,8 +290,8 @@ not exist.
 ```toml
 [[entry]]
 time = "2026-07-17T02:03:04+00:00"
-by = "codex"                     # executor: codex | claude
-requested_model = "gpt-5.6-sol" # the --model value passed to the AI CLI this run
+by = "claude"                    # executor: claude | codex | antigravity
+requested_model = "fable"       # the --model value passed to the AI CLI this run
 requested_effort = "high"       # written only when an effort was passed; the actual value sent to the CLI this run
 event = "done"                   # suggested values: done | blocked | quota | interrupt | note
 summary = "skeleton done, 37 tests all green"
@@ -300,10 +300,10 @@ Longer process notes, blockers, a summary of verification output.
 '''                              # optional
 ```
 
-- The executing AI uses `by = "codex"` or `by = "claude"` at each session
-  closeout and writes `requested_model`; when an effort was passed that run it
-  also writes `requested_effort`. Its summary is quoted directly by report, so
-  write verifiable facts, not self-narration.
+- The executing AI uses `by = "claude"`, `by = "codex"`, or `by = "antigravity"`
+  at each session closeout and writes `requested_model`; when an effort was
+  passed that run it also writes `requested_effort`. Its summary is quoted
+  directly by report, so write verifiable facts, not self-narration.
 - `requested_model` precisely represents the `--model` value passed to the AI
   CLI this run after the assent.toml mapping; it does not guarantee the model
   the service ultimately adopts or reports. A task file's `model` still only
@@ -313,10 +313,10 @@ Longer process notes, blockers, a summary of verification output.
   was selected. Task files and `default_effort` still accept only the three
   abstract values.
 - The scheduler's machine events use `by = "scheduler"`, additionally writing
-  `agent = "codex"` or `agent = "claude"` and the same run's `requested_model`.
-  Existing events include a quota interruption `quota`, a user or infrastructure
-  interruption `interrupt`, and a `blocked` mark; no separate session-start
-  event is written.
+  `agent = "claude"`, `agent = "codex"`, or `agent = "antigravity"` and the
+  same run's `requested_model`. Existing events include a quota interruption
+  `quota`, a user or infrastructure interruption `interrupt`, and a `blocked`
+  mark; no separate session-start event is written.
 - Old logs' `by = "ai"` and entries missing the new fields stay readable, not
   migrated and not overwritten.
 
@@ -331,6 +331,18 @@ requested_model = "fable"
 requested_effort = "high"
 event = "quota"
 summary = "quota exhausted; progress kept, waiting for reset to continue"
+```
+
+Antigravity adapter example:
+
+```toml
+[[entry]]
+time = "2026-07-23T09:30:15+00:00"
+by = "antigravity"
+requested_model = "gemini-3.1-pro"
+requested_effort = "high"
+event = "done"
+summary = "analysis complete using Gemini 3.1 Pro (high)"
 ```
 
 ## CLI and task-selection rules (scheduler execution semantics)

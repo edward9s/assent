@@ -90,10 +90,10 @@ and account environments; Assent does not create a container or VM sandbox.
    one line of the whole task file may be changed, and no other task file is
    touched.
 3. Append one `[[entry]]` to the end of the r file at the absolute path the
-   scheduler provides: time, the prompt-specified `by = "codex"` or
-   `by = "claude"`, requested_model, event, summary (a verifiable fact, one
-   sentence), detail (process notes); when the prompt's requested_effort has a
-   value, it must be written too. requested_model and requested_effort are the
+   scheduler provides: time, the prompt-specified `by = "claude"`, `by = "codex"`,
+   or `by = "antigravity"`, requested_model, event, summary (a verifiable fact,
+   one sentence), detail (process notes); when the prompt's requested_effort has
+   a value, it must be written too. requested_model and requested_effort are the
    values actually passed to the AI CLI this run, not the model or reasoning
    investment the service ultimately adopts or reports.
 4. Do not run git commit — the checkpoint is the scheduler's job.

@@ -1,0 +1,94 @@
+# Recorded on 2026-07-23 from the installed Antigravity CLI (`agy --version` = 1.1.5),
+# Windows 10, non-TTY shell.  Every probe used `agy --print x --model ... [--effort ...]`
+# and every one of them stopped inside argument validation or at the transport, so no model
+# prompt was ever answered and no tokens were spent.
+#
+# `accepted` entries passed the --model/--effort selection contract: the CLI moved past
+# validation and failed later at the recording account's own platform-enablement error, which
+# is not reproduced here because it carries an account identifier and is not part of the
+# selection contract.  `rejected` entries carry the CLI's verbatim selection message.
+version = "1.1.5"
+
+[[accepted]]
+model = "gemini-3.1-pro"
+effort = "high"
+
+[[accepted]]
+model = "gemini-3.1-pro"
+effort = "low"
+
+[[accepted]]
+model = "gemini-3.6-flash"
+effort = "low"
+
+[[accepted]]
+model = "gemini-3.6-flash"
+effort = "medium"
+
+[[accepted]]
+model = "gemini-3.6-flash"
+effort = "high"
+
+[[accepted]]
+model = "gemini-3.5-flash"
+effort = "medium"
+
+# An expanded slug already carries its effort; passing the matching one is still accepted.
+[[accepted]]
+model = "gemini-3.1-pro-high"
+
+[[accepted]]
+model = "gemini-3.1-pro-high"
+effort = "high"
+
+# The one catalog entry that exposes no effort variants at all.
+[[accepted]]
+model = "gemini-3-flash"
+
+# Gemini 3.1 Pro ships low and high only, so an explicit prime/medium cannot be sent as-is.
+[[rejected]]
+model = "gemini-3.1-pro"
+effort = "medium"
+message = 'invalid model selection (--model "gemini-3.1-pro" --effort "medium"): gemini-3.1-pro has no "medium" effort (available: low, high)'
+
+# Gemini 3.5 Flash ships low and medium only; its "(High)" catalog entry is not reachable
+# through --effort, which is why the lite tier's high maps down to that family's ceiling.
+[[rejected]]
+model = "gemini-3.5-flash"
+effort = "high"
+message = 'invalid model selection (--model "gemini-3.5-flash" --effort "high"): gemini-3.5-flash has no "high" effort (available: low, medium)'
+
+# A family base slug is not usable without an effort.
+[[rejected]]
+model = "gemini-3.6-flash"
+message = 'invalid model selection (--model "gemini-3.6-flash" --effort ""): --model gemini-3.6-flash requires --effort (available: low, medium, high)'
+
+[[rejected]]
+model = "gemini-3.5-flash"
+message = 'invalid model selection (--model "gemini-3.5-flash" --effort ""): --model gemini-3.5-flash requires --effort (available: low, medium)'
+
+# An expanded slug conflicts with a different effort instead of silently winning.
+[[rejected]]
+model = "gemini-3.1-pro-high"
+effort = "low"
+message = 'invalid model selection (--model "gemini-3.1-pro-high" --effort "low"): --model gemini-3.1-pro-high conflicts with --effort=low'
+
+# A model without effort variants rejects --effort outright.
+[[rejected]]
+model = "gemini-3-flash"
+effort = "low"
+message = 'invalid model selection (--model "gemini-3-flash" --effort "low"): --effort is not supported for model "gemini-3-flash"'
+
+# AI Studio names that look plausible are refused, never downgraded to a neighbour.
+[[rejected]]
+model = "gemini-3.5-flash-lite"
+message = 'invalid model selection (--model "gemini-3.5-flash-lite" --effort ""): model gemini-3.5-flash-lite is not recognized as a known model or custom model in settings'
+
+[[rejected]]
+model = "gemini-3.1-pro-preview"
+effort = "high"
+message = 'invalid model selection (--model "gemini-3.1-pro-preview" --effort "high"): --effort is not supported for model "gemini-3.1-pro-preview"'
+
+[[rejected]]
+model = "definitely-not-a-real-model"
+message = 'invalid model selection (--model "definitely-not-a-real-model" --effort ""): model definitely-not-a-real-model is not recognized as a known model or custom model in settings'

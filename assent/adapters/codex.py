@@ -6,12 +6,11 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from assent import AssentError
 from assent.adapters import Adapter, TaskResult
 from assent.adapters.claude import run_subprocess
 
 if TYPE_CHECKING:
-    from workflow.config import Config
+    from assent.config import Config
 
 _QUOTA_TEXT_RE = re.compile(
     r"usage\s+limit|rate\s+limit|session\s+limit|limit\s+reached"
@@ -151,15 +150,9 @@ def parse_output_for_quota(output: str) -> bool:
 class CodexAdapter(Adapter):
     def __init__(self, cfg: "Config") -> None:
         self.cfg = cfg
-
-    def resolve_model(self, model: str) -> str:
-        """Resolve the abstract tier into the model argument accepted by the Codex CLI."""
-        alias = self.cfg.codex_models.get(model)
-        if alias is None:
-            raise AssentError(
-                f"model tier {model!r} is not in [adapter.codex.models]; "
-                f"check the plan file's suggested model or the config mapping")
-        return alias
+        # Model resolution and the effort contract come from the shared typed settings so this
+        # adapter and the engine resolve invocations identically (base Adapter.resolve_model).
+        self.settings = cfg.adapter_settings("codex")
 
     def run_task(self, prompt: str, requested_model: str,
                  requested_effort: str | None,

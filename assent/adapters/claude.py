@@ -33,11 +33,11 @@ import queue
 import re
 import subprocess
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from assent import AssentError
 from assent.adapters import Adapter, TaskResult
 
 if TYPE_CHECKING:
@@ -141,13 +141,18 @@ def format_stream_event(raw_line: str) -> str | None:
 
 
 def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
-                   echo=None) -> tuple[int, str, bool]:
+                   echo=None, heartbeat_path: Path | None = None) -> tuple[int, str, bool]:
     """Run the subprocess, collecting output line by line; a reader thread + queue implements
     the watchdog (the standard approach from 2.4).
 
     stall_seconds <= 0 -> watchdog disabled (blocking read to EOF).
     echo: callback invoked for each line received (for live display); its own failures never
     affect collection or the verdict.
+    heartbeat_path: an optional file whose mtime counts as activity in addition to a stdout
+    line arriving.  A CLI that only prints at the end of a print-mode session (never mid-run)
+    would otherwise be killed as stalled well before it finishes; this lets a caller that keeps
+    its own log file (never read here, only stat'd) prove it is still alive.  None reproduces
+    the exact single-timeout-then-kill behaviour used before this parameter existed.
     Returns (returncode, full output text, stalled). stalled=True means it was killed on timeout.
     stderr is merged into stdout so quota/error messages are never missed.
     """
@@ -170,36 +175,54 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
 
     lines: list[str] = []
     stalled = False
+    last_activity = time.time()
     try:
-        while True:
-            try:
-                if stall_seconds and stall_seconds > 0:
-                    item = q.get(timeout=stall_seconds)
-                else:
-                    item = q.get()
-            except queue.Empty:
-                stalled = True
-                proc.kill()
-                break
-            if item is _SENTINEL:
-                break
-            lines.append(item)
-            if echo is not None:
-                try:
-                    echo(item)
-                except Exception:   # Display-layer failures must never affect output
-                    pass            # collection or quota detection
-
-        proc.wait()
-        if stalled:  # Best-effort drain of whatever is still queued (don't join the daemon
-                     # thread, to avoid hanging)
+        try:
             while True:
                 try:
-                    item = q.get_nowait()
+                    if stall_seconds and stall_seconds > 0:
+                        item = q.get(timeout=stall_seconds)
+                    else:
+                        item = q.get()
                 except queue.Empty:
+                    if heartbeat_path is not None:
+                        try:
+                            mtime = heartbeat_path.stat().st_mtime
+                        except OSError:
+                            mtime = None
+                        if mtime is not None and mtime > last_activity:
+                            last_activity = mtime
+                            continue    # the log file proves the process is still alive
+                    stalled = True
+                    proc.kill()
                     break
-                if item is not _SENTINEL:
-                    lines.append(item)
+                if item is _SENTINEL:
+                    break
+                lines.append(item)
+                last_activity = time.time()
+                if echo is not None:
+                    try:
+                        echo(item)
+                    except Exception:   # Display-layer failures must never affect output
+                        pass            # collection or quota detection
+
+            proc.wait()
+            if stalled:  # Best-effort drain of whatever is still queued (don't join the
+                         # daemon thread, to avoid hanging)
+                while True:
+                    try:
+                        item = q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if item is not _SENTINEL:
+                        lines.append(item)
+        except KeyboardInterrupt:
+            # Never rely solely on the console's own signal propagation to the child: kill it
+            # here too, so an interrupt always leaves no orphaned process behind, and reap it
+            # so it is not left as a zombie once this function returns.
+            proc.kill()
+            proc.wait()
+            raise
     finally:
         if proc.stdout is not None:
             proc.stdout.close()
@@ -271,15 +294,9 @@ class ClaudeAdapter(Adapter):
 
     def __init__(self, cfg: "Config") -> None:
         self.cfg = cfg
-
-    def resolve_model(self, model: str) -> str:
-        """Resolve the abstract tier into the model argument accepted by the Claude CLI."""
-        alias = self.cfg.claude_models.get(model)
-        if alias is None:
-            raise AssentError(
-                f"model tier {model!r} is not in [adapter.claude.models]; "
-                f"check the plan file's suggested model or the config mapping")
-        return alias
+        # Model resolution and the effort contract come from the shared typed settings so this
+        # adapter and the engine resolve invocations identically (base Adapter.resolve_model).
+        self.settings = cfg.adapter_settings("claude")
 
     def run_task(self, prompt: str, requested_model: str,
                  requested_effort: str | None,

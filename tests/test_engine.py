@@ -444,6 +444,321 @@ class TestRunSuccess(EngineTestCase):
         self.assertFalse((self.root / "verified.txt").exists())
 
 
+class TestInvocationResolution(EngineTestCase):
+    def test_resolved_effort_is_consistent_across_prompt_call_label_journal(self):
+        # One resolved abstract/concrete pair must appear identically in the prompt
+        # placeholders, the adapter call, the terminal label, and the scheduler journal.
+        p1 = self.write_task(1, model="lite", effort="high")
+        cfg = self.build(extra_config=
+            '[adapter.claude.efforts.lite]\nhigh = "max"\n')
+        self.commit_all()
+        adapter = ScriptedAdapter([self.ai_done(p1)])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            engine.run(cfg, once=True, adapter=adapter)
+
+        prompt, requested_model, requested_effort = adapter.calls[0]
+        self.assertEqual(requested_model, "lite")
+        self.assertEqual(requested_effort, "max")            # concrete CLI value
+        self.assertIn('abstract effort = "high"', prompt)    # abstract kept distinct
+        self.assertIn('requested_effort = "max"', prompt)
+        self.assertIn("effort(abstract)=high", out.getvalue())
+        self.assertIn("requested_effort(actual)=max", out.getvalue())
+
+        from assent.plan import read_entries
+        done = next(e for e in read_entries(journal_path_for(p1))
+                    if e["by"] == "claude")
+        self.assertEqual(done["requested_model"], "lite")
+
+    def test_unknown_adapter_run_is_rejected_without_claude_fallback(self):
+        self.write_task(1)
+        cfg = self.build(adapter_name="nowhere")
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = engine.run(cfg)   # no injected adapter -> get_adapter must refuse
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown adapter: 'nowhere'", out.getvalue())
+        self.assertFalse(gitops.worktree_path(self.root, "plan01").exists())
+
+    def test_unknown_adapter_check_reports_fail_and_skips_cli_probe(self):
+        self.write_task(1)
+        cfg = self.build(adapter_name="nowhere")
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = engine.check(cfg)
+        self.assertEqual(rc, 1)
+        self.assertIn("adapter: FAIL", out.getvalue())
+        self.assertIn("unknown adapter: 'nowhere'", out.getvalue())
+        # the CLI probe is adapter-provided, so an unresolved adapter emits no CLI line
+        self.assertNotIn("CLI:", out.getvalue())
+        self.assertNotIn("capability preflight", out.getvalue())
+
+    def test_check_cli_probe_uses_current_adapter_command(self):
+        # codex adapter with a runnable command (python) must be probed as codex, not claude
+        self.write_task(1)
+        cfg = self.build(adapter_name="codex", extra_config=
+            '[adapter.codex]\ncommand = "python"\n')
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 0)
+        self.assertIn("codex CLI: OK", out.getvalue())
+
+    def test_check_cli_probe_reports_missing_executable(self):
+        self.write_task(1)
+        cfg = self.build(adapter_name="codex", extra_config=
+            '[adapter.codex]\ncommand = "definitely-not-a-real-cli-xyz"\n')
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 1)
+        self.assertIn("codex CLI: FAIL (executable not found", out.getvalue())
+
+
+class TestAntigravityCapabilityPreflight(EngineTestCase):
+    """The active adapter proves every planned invocation before anything is spent.
+
+    Antigravity is the adapter that actually publishes a capability catalog, so it is the one
+    that exercises the shared gate; the adapters without one keep passing it trivially.
+    """
+
+    BAD_PRO_MEDIUM = ('[adapter]\nname = "antigravity"\n'
+                      '[adapter.antigravity.efforts.prime]\nmedium = "medium"\n')
+
+    def setUp(self):
+        super().setUp()
+        from assent.adapters import antigravity
+        self.catalog = antigravity.parse_models_catalog(
+            (Path(__file__).resolve().parent / "fixtures"
+             / "agy_models_1.1.5.txt").read_text(encoding="utf-8"))
+        # Listing models costs nothing, but no test may reach a real installation.
+        catalog_patch = mock.patch.object(
+            antigravity, "load_catalog", return_value=self.catalog)
+        catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
+        # Any attempt to open an actual AGY session is a test failure.
+        session_patch = mock.patch.object(
+            antigravity, "run_subprocess",
+            side_effect=AssertionError("no AGY session may be started"))
+        self.session = session_patch.start()
+        self.addCleanup(session_patch.stop)
+
+    def antigravity_cfg(self, extra_config=BAD_PRO_MEDIUM):
+        (self.root / ".assent" / "assent.toml").write_text(
+            extra_config, encoding="utf-8")
+        return load_config(self.root / ".assent" / "assent.toml", "plan01")
+
+    def test_run_refuses_pro_medium_before_session_status_or_git_change(self):
+        path = self.write_task(1, model="prime", effort="medium")
+        cfg = self.antigravity_cfg()
+        self.commit_all()
+        commits_before = self._git("log", "--pretty=%H")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(cfg, once=True), 1)
+
+        text = out.getvalue()
+        self.assertIn("antigravity capability preflight: FAIL", text)
+        self.assertIn("--model gemini-3.1-pro --effort medium", text)
+        self.assertIn("available: low, high", text)
+        self.assertIn('[adapter.antigravity.efforts.prime] medium = "high"', text)
+        # nothing was started, marked, journalled or committed
+        self.session.assert_not_called()
+        self.assertEqual(parse_task_file(path).status, "TODO")
+        self.assertFalse(journal_path_for(path).exists())
+        self.assertEqual(self._git("log", "--pretty=%H"), commits_before)
+        self.assertFalse(gitops.worktree_path(self.root, "plan01").exists())
+        self.assertEqual(gitops.branches_with_prefix(self.root, "plan01/"), [])
+
+    def test_check_refuses_the_same_mapping_with_the_same_diagnostic(self):
+        self.write_task(1, model="prime", effort="medium")
+        cfg = self.antigravity_cfg()
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 1)
+
+        text = out.getvalue()
+        self.assertIn("antigravity capability preflight: FAIL", text)
+        self.assertIn('[adapter.antigravity.efforts.prime] medium = "high"', text)
+        self.session.assert_not_called()
+
+    def test_shipped_mapping_passes_the_preflight_for_every_tier(self):
+        for num, tier in enumerate(("prime", "core", "lite"), start=1):
+            self.write_task(num, model=tier)
+        cfg = self.antigravity_cfg('[adapter]\nname = "antigravity"\n')
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            engine.check(cfg)
+        self.assertIn("antigravity capability preflight: OK", out.getvalue())
+
+    def test_settled_tasks_do_not_gate_a_run_they_cannot_join(self):
+        self.write_task(1, model="prime", effort="medium", status="DONE")
+        path = self.write_task(2, model="core")
+        cfg = self.antigravity_cfg()
+        self.commit_all()
+
+        from assent.adapters.antigravity import AntigravityAdapter
+        adapter = AntigravityAdapter(cfg, catalog=self.catalog)
+        adapter.run_task = lambda prompt, model, effort, cwd: (
+            set_status(path, "DONE") or ok_result())
+
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+
+class TestAntigravitySession(EngineTestCase):
+    def setUp(self):
+        super().setUp()
+        from assent.adapters import antigravity
+        self.antigravity = antigravity
+        self.catalog = antigravity.parse_models_catalog(
+            (Path(__file__).resolve().parent / "fixtures"
+             / "agy_models_1.1.5.txt").read_text(encoding="utf-8"))
+
+    def adapter(self, cfg):
+        from assent.adapters.antigravity import AntigravityAdapter
+        return AntigravityAdapter(cfg, catalog=self.catalog)
+
+    def patch_session(self, fake):
+        patch = mock.patch.object(self.antigravity, "run_subprocess", fake)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_legacy_instructions_example_does_not_break_the_resolved_identity(self):
+        # The instructions file of an older project still shows only codex/claude. The
+        # run-specific prompt, the closeout the agent writes, and the journal validator must
+        # all still agree on antigravity, so the task passes on the first attempt.
+        path = self.write_task(1, model="lite")
+        (self.root / ".assent" / "instructions.md").write_text(
+            "工作指示\n\n日誌 by 欄位範例:by = \"codex\" 或 \"claude\"\n",
+            encoding="utf-8")
+        (self.root / ".assent" / "assent.toml").write_text(
+            '[adapter]\nname = "antigravity"\n', encoding="utf-8")
+        cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
+        self.commit_all()
+        commands: list[list[str]] = []
+
+        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None):
+            commands.append(command)
+            (Path(cwd) / "src").mkdir(exist_ok=True)
+            (Path(cwd) / "src" / "done.py").write_text("ok", encoding="utf-8")
+            set_status(path, "DONE")
+            append_entry(journal_path_for(path), by="antigravity",
+                         requested_model=command[command.index("--model") + 1],
+                         requested_effort=command[command.index("--effort") + 1],
+                         event="done", summary="完成")
+            return 0, "done\n", False
+
+        self.patch_session(fake)
+        adapter = self.adapter(cfg)
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(len(commands), 1)      # first attempt accepted, no retry loop
+        prompt = commands[0][commands[0].index("--print") + 1]
+        self.assertIn('by = "antigravity"', prompt)
+        self.assertIn('requested_model = "gemini-3.5-flash"', prompt)
+        self.assertIn('requested_effort = "medium"', prompt)
+        self.assertIn("authoritative for this run's journal entry", prompt)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+        from assent.plan import read_entries
+        done = next(e for e in read_entries(journal_path_for(path))
+                    if e["by"] == "antigravity")
+        # the journal identity is the actual flag pair, not the abstract tier
+        self.assertEqual(done["requested_model"], "gemini-3.5-flash")
+        self.assertEqual(done["requested_effort"], "medium")
+        self.assertTrue(any(s.startswith("auto(plan01/t001): ")
+                            for s in self.subjects()))
+
+    def test_adapter_classification_reaches_the_reason_and_the_journal(self):
+        path = self.write_task(1, model="lite")
+        (self.root / ".assent" / "assent.toml").write_text(
+            '[run]\nretry_per_task = 0\n[adapter]\nname = "antigravity"\n',
+            encoding="utf-8")
+        cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
+        self.commit_all()
+        self.patch_session(lambda *args, **kwargs: (
+            1, "Error: permission denied for tool write_to_file", False))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(cfg, once=True,
+                                        adapter=self.adapter(cfg)), 0)
+
+        self.assertIn("classified by the adapter as permission", out.getvalue())
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        failure = next(e for e in entries if e["event"] == "adapter_exit")
+        self.assertEqual(failure["failure_kind"], "permission")
+        self.assertEqual(failure["exit_code"], 1)
+        self.assertEqual(failure["agent"], "antigravity")
+        # a classification never turns a non-zero exit into an accepted task
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+
+    def test_quota_interrupt_then_resume_keeps_identity_everywhere(self):
+        """A quota round and its resume must resolve to the exact same requested_model /
+        requested_effort in the prompt, the CLI command, the terminal output, and both the
+        scheduler's quota journal entry and the execution AI's own done entry."""
+        path = self.write_task(1, model="prime", effort="low")
+        (self.root / ".assent" / "assent.toml").write_text(
+            '[adapter]\nname = "antigravity"\n', encoding="utf-8")
+        cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
+        self.commit_all()
+        t0 = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        sleeps: list[float] = []
+        calls: list[list[str]] = []
+
+        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None):
+            calls.append(command)
+            if len(calls) == 1:
+                return (1, "Error: Resource has been exhausted (e.g. check quota).", False)
+            (Path(cwd) / "src").mkdir(exist_ok=True)
+            (Path(cwd) / "src" / "done.py").write_text("ok", encoding="utf-8")
+            set_status(path, "DONE")
+            append_entry(journal_path_for(path), by="antigravity",
+                         requested_model=command[command.index("--model") + 1],
+                         requested_effort=command[command.index("--effort") + 1],
+                         event="done", summary="完成 (resumed)")
+            return (0, "done\n", False)
+
+        self.patch_session(fake)
+        adapter = self.adapter(cfg)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, once=True, adapter=adapter,
+                sleep=sleeps.append, now=lambda: t0), 0)
+
+        self.assertEqual(len(calls), 2)     # quota round, then one resumed round
+        terminal = out.getvalue()
+        for command in calls:
+            self.assertEqual(command[command.index("--model") + 1], "gemini-3.1-pro")
+            self.assertEqual(command[command.index("--effort") + 1], "low")
+        self.assertIn("gemini-3.1-pro", terminal)
+
+        resume_prompt = calls[1][calls[1].index("--print") + 1]
+        self.assertIn("resume", resume_prompt.lower())
+        self.assertIn('requested_model = "gemini-3.1-pro"', resume_prompt)
+        self.assertIn('requested_effort = "low"', resume_prompt)
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        quota_entry = next(e for e in entries if e["event"] == "quota")
+        done_entry = next(e for e in entries if e["event"] == "done")
+        self.assertEqual(quota_entry["requested_model"], "gemini-3.1-pro")
+        self.assertEqual(quota_entry["requested_effort"], "low")
+        self.assertEqual(done_entry["requested_model"], "gemini-3.1-pro")
+        self.assertEqual(done_entry["requested_effort"], "low")
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+
 class TestAcceptanceGates(EngineTestCase):
     def test_self_blocked_committed_without_verify(self):
         # verify is an always-failing command: self-marked BLOCKED skips verify so it passes
@@ -800,7 +1115,8 @@ class TestQuotaAndResume(EngineTestCase):
         self.assertEqual(rc, 0)
         self.assertAlmostEqual(sum(sleeps), (5 + 2) * 60, delta=1)  # +2 minute buffer
         self.assertIn("resume", adapter.calls[1][0])
-        self.assertEqual(adapter.resolve_calls, ["lite", "lite"])
+        # one zero-token capability preflight before the run, then one per attempt
+        self.assertEqual(adapter.resolve_calls, ["lite", "lite", "lite"])
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(plan01/t001): ")
                             for s in subjects))
