@@ -416,9 +416,15 @@ def _prepare_worktree(cfg: Config) -> Config:
         root = gitops.ensure_worktree(
             cfg.root, cfg.tasks_name, state_before.base.resolved_base)
         worktree_cfg = cfg.for_worktree(root)
-        gitops.ensure_clean(worktree_cfg.root, worktree_cfg.git_excludes)
 
         if existed_before:
+            # A reused worktree may still hold uncommitted work from a prior run
+            # that exited uncleanly (hard power loss / kill) without ever reaching
+            # an interrupt handler.  Whether that dirty state is clean, provably
+            # attributable and recoverable, or a fail-closed refusal is decided by
+            # the single run-startup gate in _run_locked below -- never discarded
+            # here.  The branch/ancestry checks that follow read only committed
+            # HEAD state, so they are unaffected by an uncommitted working tree.
             branch = gitops.current_branch(worktree_cfg.root)
             if not branch:
                 raise AssentError(
@@ -429,6 +435,9 @@ def _prepare_worktree(cfg: Config) -> Config:
                     f"existing worktree {root} is on foreign branch {branch}; "
                     f"expected prefix {worktree_cfg.branch_prefix}")
         else:
+            # A freshly created worktree is a clean checkout of the base commit; any
+            # dirt here is a genuine setup fault, so keep failing closed immediately.
+            gitops.ensure_clean(worktree_cfg.root, worktree_cfg.git_excludes)
             branch = gitops.ensure_branch(
                 worktree_cfg.root, worktree_cfg.branch_prefix)
 
@@ -584,7 +593,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             return 1
 
     try:
-        gitops.ensure_clean(cfg.root, cfg.git_excludes)
+        _recover_or_ensure_clean(cfg, now)
     except AssentError as e:
         print(f"git setup failed: {e}")
         return 1
@@ -692,6 +701,88 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     _print_summary(Plan.parse(cfg.tasks_dir))
     _try_write_report(cfg)
     return 0
+
+
+def _recover_or_ensure_clean(cfg: Config, now: Callable[[], datetime]) -> None:
+    """Run-startup cleanliness gate, extended with a provably-attributable recovery path.
+
+    A hard power loss or a forced kill never reaches the Ctrl+C / quota / infrastructure
+    interrupt handlers, so it leaves the worktree dirty with the task status and the wip
+    checkpoint unwritten.  On the next run, if every uncommitted change is provably inside the
+    scope of the task ``next_task()`` would resume, that progress is gathered into a ``wip``
+    checkpoint and the run continues -- no AI session, zero tokens.  Every other dirty state
+    (a change outside that scope, or no resumable candidate at all) keeps today's fail-closed
+    behaviour: ``ensure_clean`` raises and the caller refuses to run rather than guessing
+    attribution.
+    """
+    if _try_recover_attributable_worktree(cfg, now):
+        return
+    gitops.ensure_clean(cfg.root, cfg.git_excludes)
+
+
+def _try_recover_attributable_worktree(cfg: Config,
+                                       now: Callable[[], datetime]) -> bool:
+    """Return True only when the worktree was dirty and every change was provably attributable
+    to the resumable candidate task, having just committed that progress into a wip checkpoint.
+
+    A clean worktree, an unparsable plan, no resumable candidate, or any change outside the
+    candidate's scope all return False, leaving the caller's fail-closed ``ensure_clean`` to
+    decide.  Attribution reuses the same scope machinery that contains a running task's output
+    (``changes_outside_scope`` with an empty ``since_ref`` -> only the current uncommitted
+    changes), so the recovery can never claim work a task's scope would not have permitted.
+    """
+    if gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
+        return False
+    try:
+        selection = Plan.parse(cfg.tasks_dir).next_task()
+    except AssentError:
+        return False
+    if selection is None:
+        return False
+    candidate, _ = selection
+    outside = gitops.changes_outside_scope(
+        cfg.root, candidate.scope, excludes=_task_excludes(cfg, candidate))
+    if outside:
+        return False
+
+    _mark_recovered_task(candidate, now)
+    subject = _checkpoint_subject(
+        cfg, "wip", candidate,
+        "recovered dirty worktree from an unclean exit, scope-verified")
+    gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes)
+    print(f"Recovered a dirty worktree from an unclean process exit; scope-verified "
+          f"against {candidate.id}, progress kept in a wip checkpoint.")
+    return True
+
+
+def _mark_recovered_task(task: Task, now: Callable[[], datetime]) -> None:
+    """Persist a crash-recovered candidate as WIP and journal the scope-verified recovery.
+
+    Unlike ``_mark_interrupted_task`` there is no AI session at this point, so no
+    ``agent`` / ``requested_model`` / ``requested_effort`` identity exists -- a hard crash
+    leaves those genuinely unknown, and no fake session identity is fabricated to fill them
+    (``append_entry`` accepts a ``scheduler`` entry with those fields omitted).  BLOCKED is
+    preserved as a legal terminal state (though ``next_task()`` never yields a BLOCKED
+    candidate); a secondary write error is only warned about so it never masks the recovery.
+    """
+    summary = ("Recovered a dirty worktree from an unclean process exit; "
+               f"scope-verified against {task.id}, progress kept")
+    try:
+        fresh = parse_task_file(task.path)
+        if fresh.status != "BLOCKED":
+            set_status(task.path, "WIP")
+    except Exception as e:  # recovery must not mask itself with a secondary status-write error
+        print(f"Writing back the recovered task status failed: {e} (working tree left as is, nothing discarded)")
+
+    try:
+        append_entry(
+            task.journal_path, by="scheduler", event="interrupt",
+            summary=summary,
+            detail=("run startup detected a dirty worktree from an unclean process "
+                    "exit and scope-verified it against the resumable candidate"),
+            time_str=now().isoformat(timespec="seconds"))
+    except Exception as e:  # status and journal are attempted independently; one failing does not block the other
+        print(f"Writing the recovery journal failed: {e} (working tree left as is, nothing discarded)")
 
 
 def _mark_interrupted_task(task: Task, session: _SessionIdentity, summary: str,
