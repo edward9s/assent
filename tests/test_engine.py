@@ -790,6 +790,74 @@ class TestAcceptanceGates(EngineTestCase):
         self.run_quiet(cfg, once=True, adapter=adapter)
         self.assertEqual(parse_task_file(path).status, "BLOCKED")  # marked by scheduler
 
+    def test_status_not_updated_but_verify_green_gets_closeout_suffix(self):
+        path = self.write_task(1, verify=_OK)
+        cfg = self.build(retry=1)
+        self.commit_all()
+
+        def leave_todo(prompt):
+            return ok_result()
+
+        def finish(prompt):
+            self.assertIn(
+                "This session must only close out the task", prompt)
+            self.assertIn(_OK, prompt)
+            self.assertNotIn(
+                "review and fix it on top of what is there", prompt)
+            set_status(path, "DONE")
+            return ok_result()
+
+        adapter = ScriptedAdapter([leave_todo, finish])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+    def test_status_not_updated_with_failing_verify_keeps_existing_prompt(self):
+        path = self.write_task(1, verify=_FAILV)
+        cfg = self.build(retry=1)
+        self.commit_all()
+
+        def leave_todo(prompt):
+            return ok_result()
+
+        def finish(prompt):
+            self.assertIn(
+                "Reason: Status not updated to DONE/BLOCKED (currently TODO).",
+                prompt)
+            self.assertIn(
+                "review and fix it on top of what is there, do not redo it.",
+                prompt)
+            self.assertNotIn("only closeout missing", prompt)
+            self.assertNotIn("focused verify already passed", prompt)
+            set_status(path, "DONE")
+            return ok_result()
+
+        adapter = ScriptedAdapter([leave_todo, finish])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+    def test_closeout_only_blocked_record_notes_only_closeout_missing(self):
+        path = self.write_task(1, verify=_OK)
+        cfg = self.build(retry=0)
+        self.commit_all()
+
+        def implemented_but_forgot_status(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "impl.py").write_text("done", encoding="utf-8")
+            return ok_result()
+
+        adapter = ScriptedAdapter([implemented_but_forgot_status])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        self.assertIn("src/impl.py", self._git_execution("ls-files"))
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        blocked = next(e for e in entries
+                       if e["by"] == "scheduler" and e["event"] == "blocked")
+        self.assertIn("only closeout missing", blocked["summary"])
+        self.assertTrue(any(
+            "only closeout missing" in s for s in self.subjects()))
+
     def test_scope_violation_retry_then_blocked_keeps_output(self):
         path = self.write_task(1)
         cfg = self.build(retry=1)

@@ -85,6 +85,17 @@ _REWORK_SUFFIX = ("\nThe previous implementation of this task was rejected by a 
                   "correct as-is, re-evaluate their correctness from scratch. If the task "
                   "file has since been amended with new clauses, the task file is "
                   "authoritative.")
+_CLOSEOUT_ONLY_MARKER = "verify passed; only closeout missing"
+_CLOSEOUT_ONLY_REASON_TEMPLATE = (
+    _CLOSEOUT_ONLY_MARKER + " -- status not updated to DONE/BLOCKED (currently "
+    "{status}); focused verify already passed: {verify_command}")
+_CLOSEOUT_RETRY_SUFFIX = (
+    "\nThe previous attempt failed acceptance only because the task status was not "
+    "updated. The implementation in the working tree is already complete, and this "
+    "task's focused verify command has already passed: {verify_command}\n"
+    "This session must only close out the task: change the status line in the task "
+    "file to DONE, and append one [[entry]] journal record to the journal file. "
+    "Do not modify any code or tests.")
 
 _QUOTA_BUFFER = timedelta(minutes=2)  # reset time + buffer, to avoid being blocked again right at the edge
 _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
@@ -154,7 +165,9 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
         text += _RESUME_SUFFIX
     else:
         text += _rework_prompt_suffix(task)
-    if failure_reason:
+    if failure_reason and failure_reason.startswith(_CLOSEOUT_ONLY_MARKER):
+        text += _CLOSEOUT_RETRY_SUFFIX.replace("{verify_command}", task.verify)
+    elif failure_reason:
         text += _RETRY_SUFFIX.replace("{failure_reason}", failure_reason)
     return text
 
@@ -1038,6 +1051,13 @@ def _evaluate(cfg: Config, task: Task,
     if fresh.status == "BLOCKED":
         return "self_blocked", None
     if fresh.status != "DONE":
+        # Structure and scope are already clean here; the only remaining acceptance gap is
+        # the status line. Probe the focused verify once (quietly, so a still-failing verify
+        # leaves this path's output byte-for-byte identical to before) to tell a genuine
+        # implementation gap apart from a session that simply dropped off before closeout.
+        if _run_verify_quiet(cfg, task.verify) == 0:
+            return "fail", _CLOSEOUT_ONLY_REASON_TEMPLATE.format(
+                status=fresh.status, verify_command=task.verify)
         return "fail", f"Status not updated to DONE/BLOCKED (currently {fresh.status})"
 
     # verify command (against the trusted checkpoint verify)
@@ -1048,23 +1068,28 @@ def _evaluate(cfg: Config, task: Task,
     return "done", None
 
 
-def _run_verify(cfg: Config, command: str) -> int:
-    """Run verify in the target working tree; exit code 0 = pass.
+def _verify_subprocess(cfg: Config, command: str) -> subprocess.CompletedProcess:
+    """Run verify in the target working tree and return the completed process (no output).
 
     For isolated runs the default script is loaded from the main tree by absolute path; other
     commands keep their original shell semantics; the cwd for both is the current target
     working tree.
     """
-    print(f"  verify: {command}")
     if cfg.source_root is not None and command.strip() == _DEFAULT_VERIFY_COMMAND:
-        result = subprocess.run(
+        return subprocess.run(
             [sys.executable, str((cfg.assent_dir / "verify.py").resolve())],
             cwd=str(cfg.root), capture_output=True, encoding="utf-8",
             errors="replace")
-    else:
-        result = subprocess.run(
-            command, shell=True, cwd=str(cfg.root),
-            capture_output=True, encoding="utf-8", errors="replace")
+    return subprocess.run(
+        command, shell=True, cwd=str(cfg.root),
+        capture_output=True, encoding="utf-8", errors="replace")
+
+
+def _run_verify(cfg: Config, command: str) -> int:
+    """Run verify in the target working tree; exit code 0 = pass. Echoes the command and
+    result (with a failure tail) to stdout."""
+    print(f"  verify: {command}")
+    result = _verify_subprocess(cfg, command)
     if result.returncode != 0:
         print(f"  verify failed (exit {result.returncode})")
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-8:]
@@ -1075,6 +1100,15 @@ def _run_verify(cfg: Config, command: str) -> int:
     else:
         print("  verify passed (exit 0)")
     return result.returncode
+
+
+def _run_verify_quiet(cfg: Config, command: str) -> int:
+    """Run verify without printing anything; exit code 0 = pass.
+
+    Used for the closeout-only probe in ``_evaluate`` so that a still-failing verify leaves
+    the caller's console output unchanged from before this probe existed.
+    """
+    return _verify_subprocess(cfg, command).returncode
 
 
 def _mark_blocked(cfg: Config, task: Task, session: _SessionIdentity, reason: str,
