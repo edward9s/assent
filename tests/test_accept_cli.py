@@ -165,6 +165,9 @@ class AcceptCliLineEndingTests:
         accepted = self._cli("accept", self.folder)
 
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        self.assertIn("retain it while a dependent may still need its source evidence",
+                      accepted.stdout)
+        self.assertIn(f"clean {self.folder}", accepted.stdout)
         after = self._head()
         parents = self._git("rev-list", "--parents", "-n", "1", after).split()
         self.assertEqual(parents[1:], [before, tip])
@@ -206,6 +209,48 @@ class TestAcceptCliCrlf(AcceptCliLineEndingTests, AcceptCliCase):
 
 
 class TestAcceptCliFailures(AcceptCliCase):
+    def test_clean_preserves_upstream_until_dependent_is_accepted(self) -> None:
+        upstream = "base"
+        self._write_task(folder=upstream)
+        upstream_source, upstream_branch, _ = self._make_source(
+            folder=upstream, filename="base.txt")
+        self._git("merge", "--no-ff", "-m", "accept base", upstream_branch)
+
+        dependent = "dependent"
+        self._write_task(folder=dependent)
+        (self.assent_dir / dependent / "_folder.toml").write_text(
+            f'after = ["{upstream}"]\n', encoding="utf-8", newline="\n")
+        dependent_source, _dependent_branch, _ = self._make_source(
+            folder=dependent, filename="dependent.txt")
+        with hold_lock(self.assent_dir / upstream, upstream):
+            pass
+        with hold_lock(self.assent_dir / dependent, dependent):
+            pass
+
+        premature = self._cli("clean", upstream)
+        self.assertEqual(premature.returncode, 0,
+                         premature.stdout + premature.stderr)
+        self.assertTrue(upstream_source.exists())
+        self.assertIn("dependent source evidence is still required",
+                      premature.stdout)
+        self.assertIn("dependent dependent: current source tip", premature.stdout)
+
+        verified = self._cli("verify", dependent)
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        accepted = self._cli("accept", dependent)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        self.assertTrue(dependent_source.exists())
+
+        upstream_clean = self._cli("clean", upstream)
+        self.assertEqual(upstream_clean.returncode, 0,
+                         upstream_clean.stdout + upstream_clean.stderr)
+        self.assertFalse(upstream_source.exists())
+
+        dependent_clean = self._cli("clean", dependent)
+        self.assertEqual(dependent_clean.returncode, 0,
+                         dependent_clean.stdout + dependent_clean.stderr)
+        self.assertFalse(dependent_source.exists())
+
     def test_locks_and_source_states_refuse_without_mutating_target(self) -> None:
         source, branch, tip = self._make_source()
         before = self._head()

@@ -436,6 +436,14 @@ class TestInit(MainTestCase):
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertEqual(agents_md.count("<!-- assent-instructions -->"), 1)
 
+    def test_init_does_not_overwrite_existing_verifier(self):
+        run_init(self.root)
+        verifier = self.root / ".assent" / "verify.py"
+        custom = "# project-specific verifier\n"
+        verifier.write_text(custom, encoding="utf-8")
+        self.assertEqual(run_init(self.root), 0)
+        self.assertEqual(verifier.read_text(encoding="utf-8"), custom)
+
     def test_adds_one_bridge_line_to_existing_agents_md(self):
         (self.root / "AGENTS.md").write_text(
             "# 我的專案\n\n既有規則。\n", encoding="utf-8")

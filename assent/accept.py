@@ -19,7 +19,8 @@ _COMPLETE_STATUSES = ("DONE", "SKIP")
 
 
 def _source_snapshot(main: Path, folder: str,
-                     excludes: Sequence[str]) -> tuple[str, str, Path | None]:
+                     excludes: Sequence[str], *,
+                     operation: str = "accept") -> tuple[str, str, Path | None]:
     """Resolve the only current source branch and require a clean attachment."""
     worktree = gitops.folder_worktree(main, folder)
     if worktree is not None:
@@ -27,7 +28,7 @@ def _source_snapshot(main: Path, folder: str,
         if not branch:
             raise AssentError(
                 f"source worktree {worktree} is in detached HEAD state, so there "
-                "is no source branch to accept")
+                f"is no current source branch for {operation}")
         if not branch.startswith(f"{folder}/") or branch == f"{folder}/":
             raise AssentError(
                 f"source worktree {worktree} is on branch {branch}, which is not "
@@ -37,10 +38,16 @@ def _source_snapshot(main: Path, folder: str,
     else:
         branches = gitops.folder_branches(main, folder)
         if len(branches) > 1:
+            if operation != "accept":
+                raise AssentError(
+                    f"current source is ambiguous ({', '.join(branches)})")
             raise AssentError(
                 "multiple candidate source branches exist "
                 f"({', '.join(branches)}); accept does not guess which one is current")
         if not branches:
+            if operation != "accept":
+                raise AssentError(
+                    f"no source worktree or {folder}/* branch exists")
             raise AssentError(
                 f"no source worktree or {folder}/* branch exists; accept does not "
                 "infer authorization from old commit messages")
@@ -268,7 +275,8 @@ def _accept_locked(cfg: Config) -> int:
     print(f"  target before:   {target_before}")
     print(f"  target after:    {target_after}")
     print(f"  audit merge:     {integration_commit}")
-    print("  source branch/worktree kept; `assent clean` can remove them once merged.")
+    print("  source branch/worktree kept; retain it while a dependent may still need "
+          f"its source evidence. `assent clean {folder}` makes the final safety decision.")
     print("  The integration lock coordinates Assent commands only; do not run "
           "concurrent external Git writes during acceptance.")
     return 0

@@ -116,6 +116,7 @@ class TestRunTask(unittest.TestCase):
                          requested_model)
         self.assertEqual(captured["cwd"], Path("/p"))
         self.assertFalse(result.quota_exhausted)
+        self.assertFalse(result.stalled)
 
     def test_quota_and_stall_behavior(self):
         quota = json.dumps({"type": "error", "message": "usage limit reached"})
@@ -123,6 +124,12 @@ class TestRunTask(unittest.TestCase):
         adapter = CodexAdapter(make_cfg())
         self.assertTrue(adapter.run_task(
             "p", adapter.resolve_model("lite"), None, Path(".")).quota_exhausted)
+
+        self.patch_run(lambda *args, **kwargs: (1, quota, True))
+        stalled = adapter.run_task(
+            "p", adapter.resolve_model("lite"), None, Path("."))
+        self.assertTrue(stalled.stalled)
+        self.assertFalse(stalled.quota_exhausted)
 
     def test_unknown_tier_raises(self):
         with self.assertRaises(AssentError):

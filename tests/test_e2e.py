@@ -206,6 +206,35 @@ class TestScenarios(E2ETestCase):
         self.assertIn("outside.py", self.git_at(
             self.execution_root(), "ls-files"))
 
+    def test_nonzero_done_keeps_work_and_retries_before_checkpoint(self):
+        """A DONE status from a failed adapter process is not accepted until a clean retry."""
+        p1 = self.add_task(1)
+        self.start()
+
+        def nonzero_done(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "kept.py").write_text("kept", encoding="utf-8")
+            set_status(p1, "DONE")
+            return TaskResult(exit_code=6, output="transport ended early",
+                              quota_exhausted=False, reset_at=None)
+
+        def clean_retry(prompt):
+            self.assertIn("exit code 6", prompt)
+            self.assertFalse(any(
+                s.startswith("auto(plan01/t001): ") for s in self.subjects()))
+            return ok_result()
+
+        adapter = ScriptedAdapter([nonzero_done, clean_retry])
+        self.assertEqual(self.run_engine(adapter, once=True), 0)
+        self.assertEqual(parse_task_file(p1).status, "DONE")
+        self.assertIn("src/kept.py", self.git_at(
+            self.execution_root(), "ls-files"))
+        from assent.plan import read_entries
+        failure = next(e for e in read_entries(journal_path_for(p1))
+                       if e["event"] == "adapter_exit")
+        self.assertEqual(failure["exit_code"], 6)
+
     def test_blocked_gates_downstream_others_proceed(self):
         """BLOCKED scenario: t001 exhausts retries -> scheduler marks BLOCKED + records in the
         r file; t002 depending on it is blocked, and t003 with no deps runs anyway, all within

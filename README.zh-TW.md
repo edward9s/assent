@@ -198,6 +198,17 @@ candidate 並執行完整 `.assent/verify.py`。
 target、不開 AI session。報告會顯示 `PASSED`/`FAILED` 與 `fresh`/`stale`,stale
 時可在無人值守階段重新 refresh。
 
+打包的 `.assent/verify.py` 同時檢查 candidate working tree 與 candidate `HEAD` 相對
+第一父提交的 committed delta,因此能抓到單純 `git diff --check` 看不到的已提交尾端
+空白。`assent init` 不會覆寫既有 verifier;要同步時請人工把 template 的檢查移植到
+既有檔案。verifier digest 改變會使舊 receipt stale,應在無人值守驗證時執行
+`assent verify <FOLDER>` 後再請人接受。
+
+worktree 是變更隔離、衝突管理、稽核與復原邊界,不是安全 sandbox。`danger-full-access`
+或 `bypassPermissions` 下,AI 仍可使用其 OS 身分可存取的 network、credential、外部
+Git 寫入者與 worktree 外檔案。只有在可信任的專案與帳號環境才應啟用無人值守執行;
+Assent 不提供 container/VM sandbox,也不攔截這些外部效果。
+
 **第 3 幕:驗收小會議**(互動 session)
 
 先自己讀 `_report.md`(它就是議程表:進度、BLOCKED 卡點、檢查點 hash),

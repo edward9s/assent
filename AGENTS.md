@@ -4,7 +4,8 @@
 
 assent — an AI plan format plus an automatic scheduler. Pure Python 3.11+
 (standard library only, tomllib), Windows-first and cross-platform. CLI
-subcommands: run / status / check / report / clean / reject / rework / init.
+subcommands: run / status / check / report / verify / clean / accept / reject /
+rework / init.
 Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
 
 ## Permanent constraints

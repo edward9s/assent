@@ -98,6 +98,21 @@ The lifecycle is `run` -> full unattended verification receipt -> human review
 is local-only and single-folder: no `--all`, `--push`, remote or PR operation,
 pull, rebase, force, automatic conflict resolution, or source deletion.
 
+The packaged verifier checks the working tree and the candidate's committed
+delta against its first parent, safely skipping that second check for a root
+commit. This catches committed trailing whitespace without reading a project's
+private verifier or invoking a shell. `assent init` never replaces an existing
+`.assent/verify.py`; projects synchronize it manually. Changing the verifier
+digest makes prior receipts stale, so unattended `assent verify <FOLDER>` must
+refresh the evidence before acceptance.
+
+A worktree is the boundary for change isolation, conflict management, audit,
+and Git recovery, not a security sandbox. Full-permission modes such as
+`danger-full-access` and `bypassPermissions` still expose resources available
+to the AI's OS identity, including network, credentials, external Git writers,
+and files outside the worktree. Users must choose trusted project and account
+environments; the product does not add a container or VM sandbox.
+
 ## Location conventions
 
 - `AGENTS.md` must stay at the project root — agent tools automatically look
