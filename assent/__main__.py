@@ -11,6 +11,7 @@ from assent import AssentError, engine
 from assent.accept import accept_folder
 from assent.clean import clean_folders
 from assent.config import list_task_folders, load_config, validate_config
+from assent.doctor import doctor as run_doctor
 from assent.folderdeps import (find_unfinished_prerequisites,
                                parse_folder_dependency_graph)
 from assent.folder_scheduler import run_all
@@ -43,7 +44,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     "checks acceptance objectively, and auto-checkpoints git.",
     )
     sub = parser.add_subparsers(dest="command", required=True,
-                                metavar="{run,status,check,report,verify,clean,accept,reject,rework,init}")
+                                metavar="{run,status,check,report,verify,clean,accept,reject,rework,init,doctor}")
 
     run_p = sub.add_parser(
         "run", help="Run the tasks in the given [FOLDER] until all are "
@@ -127,6 +128,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "init", help="Generate the .assent skeleton and AGENTS.md in a project")
     init_p.add_argument("--path", default=".", metavar="DIR",
                         help="Target project root directory (default: current directory)")
+
+    sub.add_parser(
+        "doctor", help="Diagnose the machine environment (Python, git, "
+                       "adapter CLIs, temp directory); needs no existing "
+                       ".assent/ project")
 
     for p in (run_p, status_p, check_p, report_p, clean_p):
         p.add_argument(
@@ -237,6 +243,9 @@ def _dispatch(argv: list[str]) -> int:
 
     if args.command == "init":
         return run_init(args.path)
+
+    if args.command == "doctor":
+        return run_doctor()
 
     try:
         assent_dir = validate_config(args.config)
