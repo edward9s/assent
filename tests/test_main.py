@@ -28,6 +28,27 @@ class MainTestCase(unittest.TestCase):
             code = main(argv)
         return code, out.getvalue()
 
+    def write_config(self, text="") -> Path:
+        config = self.root / ".agents" / "agents.toml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(text, encoding="utf-8")
+        return config
+
+    def write_task(self, folder: str, status: str = "TODO") -> Path:
+        path = self.root / ".agents" / folder / "t001_task.e.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            'title = "任務"\n'
+            'deps = []\n'
+            'model = "lite"\n'
+            f'status = "{status}"\n'
+            'scope = ["agents/"]\n'
+            'verify = "python -m unittest"\n'
+            'goal = "完成任務"\n'
+            'acceptance = "驗證通過"\n',
+            encoding="utf-8")
+        return path
+
 
 class TestDispatch(MainTestCase):
     def test_help_exits_zero(self):
@@ -48,10 +69,8 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 1)
 
     def test_all_plan_commands_accept_folder_override(self):
-        agents_dir = self.root / ".agents"
-        agents_dir.mkdir()
-        config = agents_dir / "agents.toml"
-        config.write_text('[plan]\ntasks = "A"\n', encoding="utf-8")
+        config = self.write_config()
+        agents_dir = config.parent
         commands = (("run", "run"), ("status", "status"),
                     ("check", "check"), ("report", "report"))
         for command, engine_name in commands:
@@ -64,13 +83,72 @@ class TestDispatch(MainTestCase):
                 self.assertEqual(cfg.tasks_dir, agents_dir.resolve() / "B")
 
     def test_invalid_folder_override_reports_error(self):
-        agents_dir = self.root / ".agents"
-        agents_dir.mkdir()
-        config = agents_dir / "agents.toml"
-        config.write_text('[plan]\ntasks = "A"\n', encoding="utf-8")
+        config = self.write_config()
         code, out = self.run_main(["status", "bad/name", "--config", str(config)])
         self.assertEqual(code, 1)
         self.assertIn("命令列工作資料夾", out)
+
+    def test_plan_section_reports_dedicated_removal_error(self):
+        config = self.write_config('[plan]\ntasks = "A"\n')
+        code, out = self.run_main(["status", "A", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertIn("[plan] 區塊已廢除", out)
+
+    def test_run_without_folder_selects_unique_ongoing_folder(self):
+        config = self.write_config()
+        self.write_task("active", "TODO")
+        self.write_task("archive", "DONE")
+        with patch("agents.__main__.engine.run", return_value=0) as mocked:
+            code, out = self.run_main(["run", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertIn("工作資料夾:active(唯一進行中,自動選定)", out)
+        self.assertEqual(mocked.call_args.args[0].tasks_name, "active")
+
+    def test_run_without_folder_refuses_zero_or_multiple_ongoing(self):
+        for case, statuses in (("zero", [("archive", "DONE")]),
+                               ("multiple", [("one", "TODO"),
+                                             ("two", "WIP")])):
+            with self.subTest(case=case):
+                shutil.rmtree(self.root / ".agents", ignore_errors=True)
+                config = self.write_config()
+                for folder, status in statuses:
+                    self.write_task(folder, status)
+                with patch("agents.__main__.engine.run") as mocked:
+                    code, out = self.run_main(
+                        ["run", "--config", str(config)])
+                self.assertEqual(code, 1)
+                self.assertIn("請明寫工作資料夾參數", out)
+                for folder, _ in statuses:
+                    self.assertIn(folder, out)
+                mocked.assert_not_called()
+
+    def test_run_without_folder_refuses_when_no_task_folder_exists(self):
+        config = self.write_config()
+        code, out = self.run_main(["run", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertIn("未找到含任務檔", out)
+
+    def test_read_only_commands_without_folder_run_all_folders(self):
+        config = self.write_config()
+        self.write_task("beta")
+        self.write_task("alpha")
+        for command in ("status", "check", "report"):
+            with self.subTest(command=command), patch(
+                    f"agents.__main__.engine.{command}", return_value=0) as mocked:
+                code, _ = self.run_main([command, "--config", str(config)])
+                self.assertEqual(code, 0)
+                self.assertEqual(
+                    [call.args[0].tasks_name for call in mocked.call_args_list],
+                    ["alpha", "beta"])
+
+    def test_check_without_folder_fails_if_any_folder_fails(self):
+        config = self.write_config()
+        self.write_task("alpha")
+        self.write_task("beta")
+        with patch("agents.__main__.engine.check", side_effect=[0, 1]) as mocked:
+            code, _ = self.run_main(["check", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertEqual(mocked.call_count, 2)
 
 
 class TestInit(MainTestCase):
@@ -97,11 +175,12 @@ class TestInit(MainTestCase):
         config = (self.root / ".agents" / "agents.toml").read_text(
             encoding="utf-8")
         self.assertNotIn("[git]", config)
+        self.assertNotIn("[plan]", config)
 
     def test_idempotent_no_overwrite_no_duplicates(self):
         run_init(self.root)
         (self.root / ".agents" / "agents.toml").write_text(
-            '[plan]\ntasks = "custom"\n', encoding="utf-8")
+            '[run]\nretry_per_task = 7\n# custom\n', encoding="utf-8")
         (self.root / ".agents" / "instructions.md").write_text(
             "本機自訂指示\n", encoding="utf-8")
         out = io.StringIO()

@@ -9,11 +9,13 @@ from __future__ import annotations
 import re
 import sys
 import threading
-import tomllib
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, TextIO
+
+from agents.config import list_task_folders
+from agents.plan import Plan
 
 _ANSI_RE = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])")
@@ -99,15 +101,15 @@ def _valid_folder(value: object) -> str | None:
     return value
 
 
-def _folder_from_config(path: Path) -> str | None:
-    """Best-effort 讀取 [plan] tasks;任何讀取或 TOML 錯誤皆視為未知。"""
+def _folder_from_tasks(agents_dir: Path) -> str | None:
+    """Best-effort 推導唯一進行中的工作資料夾;任何錯誤皆視為未知。"""
     try:
-        with open(path, "rb") as stream:
-            data = tomllib.load(stream)
-        plan = data.get("plan")
-        if not isinstance(plan, dict):
-            return None
-        return _valid_folder(plan.get("tasks"))
+        ongoing = []
+        for folder in list_task_folders(agents_dir):
+            plan = Plan.parse(agents_dir / folder)
+            if any(task.status in ("TODO", "WIP") for task in plan.tasks):
+                ongoing.append(folder)
+        return ongoing[0] if len(ongoing) == 1 else None
     # logging 早於正式設定載入;連編碼錯誤等非預期壞檔也不可阻斷原命令。
     except Exception:
         return None
@@ -144,7 +146,7 @@ def log_path_for_argv(argv: list[str]) -> Path:
     if not path.is_absolute():
         path = Path.cwd() / path
     path = path.resolve()
-    folder = _folder_from_argv(argv) or _folder_from_config(path)
+    folder = _folder_from_argv(argv) or _folder_from_tasks(path.parent)
     parent = path.parent / folder if folder is not None else path.parent
     return parent / "_agents.log"
 

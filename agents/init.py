@@ -126,6 +126,6 @@ def init(path: str | Path = ".") -> int:
     print("  1. 填寫 AGENTS.md 的專案描述與硬限制、.agents/verify.py 的實際檢查命令")
     print("  2. 開 AI 會議:請讀 .agents/instructions.md,開始 agents 規劃會議")
     print(f"  3. 會議產出任務檔到 .agents/{_DEFAULT_FOLDER}/"
-          "(格式見 .agents/format.md;資料夾名可改,同步改 agents.toml)")
+          "(格式見 .agents/format.md;資料夾名可自行決定)")
     print("  4. agents check 通過後,agents run")
     return 0

@@ -23,14 +23,29 @@ class TestTerminalLogging(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
-    def write_config(self, text='[plan]\ntasks = "plan01"\n'):
+    def write_config(self, text=""):
         config = self.root / ".agents" / "agents.toml"
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(text, encoding="utf-8")
         return config
 
-    def test_config_tasks_selects_log_path(self):
+    def write_task(self, folder="plan01", status="TODO"):
+        task = self.root / ".agents" / folder / "t001_task.e.toml"
+        task.parent.mkdir(parents=True, exist_ok=True)
+        task.write_text(
+            'title = "任務"\n'
+            'deps = []\n'
+            'model = "lite"\n'
+            f'status = "{status}"\n'
+            'scope = ["agents/"]\n'
+            'verify = "python -m unittest"\n'
+            'goal = "完成"\n'
+            'acceptance = "通過"\n', encoding="utf-8")
+        return task
+
+    def test_unique_ongoing_folder_selects_log_path(self):
         config = self.write_config()
+        self.write_task()
         expected = self.root.resolve() / ".agents" / "plan01" / "_agents.log"
         self.assertEqual(log_path_for_argv(
             ["run", "--config", str(config)]),
@@ -59,6 +74,7 @@ class TestTerminalLogging(unittest.TestCase):
         terminal_out = io.StringIO()
         terminal_err = io.StringIO()
         config = self.write_config()
+        self.write_task()
         with contextlib.redirect_stdout(terminal_out), contextlib.redirect_stderr(terminal_err):
             with terminal_logging(["run", "--config", str(config)]) as path:
                 print("\x1b[32mAI| hello " + chr(0x1F680) + "\x1b[0m", end="")
@@ -77,6 +93,7 @@ class TestTerminalLogging(unittest.TestCase):
     def test_terminal_only_output_is_not_logged(self):
         terminal = io.StringIO()
         config = self.write_config()
+        self.write_task()
         with contextlib.redirect_stdout(terminal):
             with terminal_logging(["run", "--config", str(config)]) as path:
                 __import__("sys").stdout.write_terminal_only(
@@ -86,6 +103,7 @@ class TestTerminalLogging(unittest.TestCase):
 
     def test_each_run_truncates_previous_log(self):
         config = self.write_config()
+        self.write_task()
         with terminal_logging(["run", "--config", str(config)]) as path:
             print("第一次現場")
         with terminal_logging(["run", "--config", str(config)]):
@@ -96,6 +114,7 @@ class TestTerminalLogging(unittest.TestCase):
 
     def test_non_run_commands_do_not_create_or_change_log(self):
         config = self.write_config()
+        self.write_task()
         log_path = self.root / ".agents" / "plan01" / "_agents.log"
         for command in ("status", "check", "report", "init"):
             with terminal_logging([command, "--config", str(config)]):

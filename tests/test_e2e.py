@@ -69,7 +69,7 @@ class E2ETestCase(unittest.TestCase):
         self.plan_dir = self.root / ".agents" / "plan01"
         self.plan_dir.mkdir(parents=True)
         (self.root / ".agents" / "agents.toml").write_text(
-            '[plan]\ntasks = "plan01"\n[run]\nretry_per_task = 1\n',
+            '[run]\nretry_per_task = 1\n',
             encoding="utf-8")
         (self.root / "AGENTS.md").write_text("專案規則\n", encoding="utf-8")
         (self.root / ".agents" / "instructions.md").write_text(
@@ -88,7 +88,7 @@ class E2ETestCase(unittest.TestCase):
                               encoding="utf-8", check=True).stdout
 
     def cfg(self):
-        return load_config(self.root / ".agents" / "agents.toml")
+        return load_config(self.root / ".agents" / "agents.toml", "plan01")
 
     def add_task(self, num, **kw) -> Path:
         path = self.plan_dir / f"t{num:03d}_task.e.toml"
@@ -250,7 +250,6 @@ class TestWorktreeScenarios(E2ETestCase):
         (self.root / ".gitignore").write_text(
             _WORKTREE_GITIGNORE, encoding="utf-8")
         (self.root / ".agents" / "agents.toml").write_text(
-            '[plan]\ntasks = "plan01"\n'
             '[run]\nretry_per_task = 1\n', encoding="utf-8")
 
     def isolated_done_step(self, adapter, path, files):

@@ -1,7 +1,7 @@
-"""agents.toml 讀取與驗證。
+"""agents.toml 讀取、工作資料夾列舉與驗證。
 
 - agents.toml 位於專案的 .agents/ 內;專案根目錄 = .agents 的上層目錄。
-- [plan] tasks = 工作資料夾名稱(位於 .agents/ 內);git 分支前綴 = 該名稱 + "/"。
+- 工作資料夾名稱由呼叫端提供;git 分支前綴 = 該名稱 + "/"。
 - 未提供的欄位套預設值;未知的頂層鍵一律報錯(防打錯字靜默失效)。
 """
 from __future__ import annotations
@@ -14,11 +14,12 @@ from pathlib import Path
 from agents import AgentsError
 from agents.lockfile import LOCK_NAME
 
-_TOP_LEVEL_KEYS = {"plan", "watchdog", "run", "adapter", "prompt"}
+_TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt"}
 _EFFORT_LEVELS = {"low", "medium", "high"}
 
 # 工作資料夾名稱:不含空白與路徑分隔符,不以 - 或 . 開頭(它會成為 git 分支前綴)
 _FOLDER_RE = re.compile(r"^[^\s/\\]+$")
+_TASK_FILE_RE = re.compile(r"^t\d{3}_.+\.e\.toml$")
 
 _DEFAULT_EXTRA_ARGS = ["--permission-mode", "acceptEdits"]
 # 抽象檔位 -> claude CLI --model 參數
@@ -149,7 +150,8 @@ def _validate_tasks_name(tasks_name: str, owner: str) -> None:
             "(不可含空白或路徑分隔符,不可以 - 或 . 開頭;它同時是 git 分支前綴)")
 
 
-def load_config(path: str | Path, folder: str | None = None) -> Config:
+def _load_data(path: str | Path) -> tuple[Path, dict]:
+    """讀取並驗證不依賴工作資料夾的設定內容。"""
     path = Path(path)
     if not path.is_file():
         raise AgentsError(
@@ -163,6 +165,10 @@ def load_config(path: str | Path, folder: str | None = None) -> Config:
     if "git" in data:
         raise AgentsError(
             "設定檔 [git] 區塊已廢除:git 永遠啟用,請刪除該區塊")
+    if "plan" in data:
+        raise AgentsError(
+            "設定檔 [plan] 區塊已廢除:"
+            "工作資料夾改由命令列指定或自動推導,請刪除該區塊")
 
     unknown = sorted(set(data) - _TOP_LEVEL_KEYS)
     if unknown:
@@ -170,17 +176,40 @@ def load_config(path: str | Path, folder: str | None = None) -> Config:
             f"設定檔含未知的頂層鍵:{', '.join(unknown)}"
             f"(有效鍵:{', '.join(sorted(_TOP_LEVEL_KEYS))})")
 
-    agents_dir = path.resolve().parent
+    return path.resolve(), data
+
+
+def validate_config(path: str | Path) -> Path:
+    """驗證設定檔並回傳其所在的 ``.agents`` 目錄。"""
+    resolved, _ = _load_data(path)
+    return resolved.parent
+
+
+def list_task_folders(agents_dir: str | Path) -> list[str]:
+    """列出含正式任務檔的工作資料夾,名稱依字典序排列。"""
+    agents_dir = Path(agents_dir)
+    if not agents_dir.is_dir():
+        return []
+    folders = []
+    for entry in agents_dir.iterdir():
+        if (not entry.is_dir() or entry.name == "__pycache__"
+                or entry.name.startswith("_")):
+            continue
+        if any(child.is_file() and _TASK_FILE_RE.match(child.name)
+               for child in entry.iterdir()):
+            folders.append(entry.name)
+    return sorted(folders)
+
+
+def load_config(path: str | Path, folder: str) -> Config:
+    """載入設定,並以呼叫端提供的工作資料夾名稱建構衍生路徑。"""
+    resolved, data = _load_data(path)
+    _validate_tasks_name(folder, "命令列工作資料夾")
+
+    agents_dir = resolved.parent
     root = agents_dir.parent
 
-    plan = _section(data, "plan")
-    tasks_name = _typed(plan, "[plan]", "tasks", str, None)
-    if tasks_name is None:
-        raise AgentsError("設定檔缺少必要欄位:[plan] tasks(工作資料夾名稱)")
-    _validate_tasks_name(tasks_name, "[plan] tasks")
-    if folder is not None:
-        _validate_tasks_name(folder, "命令列工作資料夾")
-        tasks_name = folder
+    tasks_name = folder
 
     watchdog = _section(data, "watchdog")
     run = _section(data, "run")

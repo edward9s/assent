@@ -191,7 +191,7 @@ class Plan:
         if not tasks_dir.is_dir():
             raise AgentsError(
                 f"找不到工作資料夾:{tasks_dir}"
-                "(命令列參數或 agents.toml 的 [plan] tasks 指錯了?)")
+                "(命令列參數指錯了,或自動推導後資料夾已變動?)")
         entries = [p for p in tasks_dir.iterdir() if p.is_file()]
         retired = sorted(p.name for p in entries
                          if _is_retired_task_filename(p.name))

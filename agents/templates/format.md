@@ -11,7 +11,7 @@
 project/
 ├── AGENTS.md                    # 專案規則(root;版控由專案決定;留一行 agents 橋接)
 └── .agents/
-    ├── agents.toml              # 調度器設定:工作資料夾、adapter、檔位對照表
+    ├── agents.toml              # 調度器設定:adapter、檔位對照表
     ├── instructions.md          # agents session 指示與跨專案共通規則
     ├── format.md                # 本檔
     ├── verify.py                # 共用驗收腳本(任務檔 verify 欄位的預設選擇)
@@ -26,17 +26,18 @@ project/
 
 ## 工作資料夾
 
-- 位於 `.agents/` 內,名稱寫在 agents.toml 的 `[plan] tasks`。
+- 位於 `.agents/` 內,含至少一個 `tNNN_名稱.e.toml` 正式任務檔。
 - 名稱規則:不含空白與路徑分隔符,不以 `-` 或 `.` 開頭(它同時是 git 分支前綴,
   分支形如 `plan01/<UTC 時間戳>`)。
-- **計畫輪替 = 開新資料夾**:新一輪計畫在會議中決定新資料夾名、改 agents.toml
-  指過去;舊資料夾原地保留即是歸檔,預設不讀。
+- **計畫輪替 = 開新資料夾**:新一輪計畫在會議中決定新資料夾名;舊資料夾
+  原地保留即是歸檔。`run` 省略資料夾時只在恰好一個資料夾含 TODO/WIP
+  任務時自動選定,有歧義就拒絕;`status`、`check`、`report` 省略時作用於全部。
 - 任務編號在資料夾內**只增不改**:插入新任務用新號碼,不重編既有任務,
   deps 引用才不會斷。
 - **平行執行**:一個工作資料夾同一時間只允許一個 `run`,由該資料夾內的
   `agents.lock` 鎖定；不同資料夾可在不同終端平行執行。Git 啟用時一律使用
-  `<專案名>.worktrees/<資料夾>/` 的專屬 worktree，位置參數可用
-  `agents run <資料夾>` 覆寫設定檔中的工作資料夾，並與 `--config` 正交。
+  `<專案名>.worktrees/<資料夾>/` 的專屬 worktree；位置參數可用
+  `agents run <資料夾>` 明示工作資料夾，並與 `--config` 正交。
 
 ### 專案規則與 agents 管理面
 

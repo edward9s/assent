@@ -93,8 +93,9 @@ class TestHoldLock(unittest.TestCase):
     def test_git_excludes_contains_lockfile(self):
         """Config.git_excludes 含鎖檔相對路徑(不進版控、不參與乾淨/scope 檢查)。"""
         (self.root / ".agents" / "agents.toml").write_text(
-            '[plan]\ntasks = "parallel01"\n', encoding="utf-8")
-        cfg = load_config(self.root / ".agents" / "agents.toml")
+            '', encoding="utf-8")
+        cfg = load_config(
+            self.root / ".agents" / "agents.toml", "parallel01")
         self.assertEqual(cfg.lockfile_rel, ".agents/parallel01/agents.lock")
         self.assertIn(".agents/parallel01/agents.lock", cfg.git_excludes)
 

@@ -98,13 +98,12 @@ class EngineTestCase(unittest.TestCase):
         prompt = (f'[prompt]\ntemplate = {json.dumps(prompt_template)}\n'
                   if prompt_template is not None else "")
         (self.root / ".agents" / "agents.toml").write_text(
-            '[plan]\ntasks = "plan01"\n'
             f"[run]\nretry_per_task = {retry}\n"
             f'[adapter]\nname = "{adapter_name}"\n'
             '[adapter.claude]\ncommand = "python"\n'
             + prompt,
             encoding="utf-8")
-        return load_config(self.root / ".agents" / "agents.toml")
+        return load_config(self.root / ".agents" / "agents.toml", "plan01")
 
     def write_task(self, num, slug="task", **kw) -> Path:
         path = self.plan_dir / f"t{num:03d}_{slug}.e.toml"
@@ -591,8 +590,8 @@ class TestSchedulingAndRefusals(EngineTestCase):
         nested_plan = nested_root / ".agents" / "plan01"
         nested_plan.mkdir(parents=True)
         config = nested_root / ".agents" / "agents.toml"
-        config.write_text('[plan]\ntasks = "plan01"\n', encoding="utf-8")
-        cfg = load_config(config)
+        config.write_text("", encoding="utf-8")
+        cfg = load_config(config, "plan01")
         adapter = ScriptedAdapter([])
 
         for name, operation in (
