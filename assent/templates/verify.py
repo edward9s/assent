@@ -9,6 +9,7 @@ the packaged template intentionally leaves every project test disabled.
 
 import concurrent.futures
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -28,7 +29,14 @@ def fail(message: str) -> None:
 
 
 def run(*cmd: str) -> None:
-    result = subprocess.run(cmd, cwd=ROOT)
+    # Resolve through PATH/PATHEXT first: on Windows a command installed as a
+    # .bat/.cmd wrapper (flutter.bat, npm.cmd) is invisible to a bare
+    # subprocess.run("flutter", ...) and would raise WinError 2. shell stays
+    # False and the remaining argv elements are passed through untouched.
+    program = shutil.which(cmd[0])
+    if program is None:
+        fail(f"command not found on PATH: {cmd[0]}")
+    result = subprocess.run((program,) + cmd[1:], cwd=ROOT)
     if result.returncode != 0:
         fail(f"command failed (exit code {result.returncode}): {' '.join(cmd)}")
 

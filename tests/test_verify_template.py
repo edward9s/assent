@@ -1,5 +1,5 @@
-"""Fixture tests for the packaged verify.py template: its git whitespace gates
-and its run_unittest_parallel() helper."""
+"""Fixture tests for the packaged verify.py template: its git whitespace gates,
+its run() command resolution, and its run_unittest_parallel() helper."""
 from __future__ import annotations
 
 import os
@@ -152,6 +152,48 @@ class RunUnittestParallelCase(VerifyTemplateFixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("test_a: pass (", result.stdout)
         self.assertIn("test_b: pass (", result.stdout)
+
+
+class ResolvedCommandCase(VerifyTemplateFixture):
+    """run() resolves its program through PATH/PATHEXT before spawning it."""
+
+    def _write_script_with_command(self, call: str) -> None:
+        """Rewrite the fixture script with one extra run() call before the OK line."""
+        template_text = TEMPLATE.read_text(encoding="utf-8")
+        marker = 'print("verify: OK")'
+        self.assertIn(marker, template_text)
+        self.script.write_text(
+            template_text.replace(marker, f"{call}\n{marker}"), encoding="utf-8")
+
+    def test_missing_command_fails_closed_without_traceback(self) -> None:
+        self._write_script_with_command(
+            'run("assent-no-such-command-fixture", "--version")')
+        self._commit("missing command fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("verify: FAIL", result.stdout)
+        self.assertIn("assent-no-such-command-fixture", result.stdout)
+        self.assertNotIn("verify: OK", result.stdout)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "PATHEXT .bat resolution is Windows-specific")
+    def test_path_provided_bat_command_runs(self) -> None:
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "assentfixture.bat").write_text(
+            "@echo off\r\necho fixture bat ran %1\r\n", encoding="ascii")
+        self._write_script_with_command('run("assentfixture", "alpha")')
+        self._commit("bat command fixture")
+
+        path = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        result = self._run(env_overrides={"PATH": path})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fixture bat ran alpha", result.stdout)
+        self.assertIn("verify: OK", result.stdout)
 
 
 class LineEndingWhitespaceCase(VerifyTemplateFixture):
