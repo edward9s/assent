@@ -132,10 +132,19 @@ publishes anything.
 The packaged verifier checks the working tree and the candidate's committed
 delta against its first parent, safely skipping that second check for a root
 commit. This catches committed trailing whitespace without reading a project's
-private verifier or invoking a shell. `assent init` never replaces an existing
-`.assent/verify.py`; projects synchronize it manually. Changing the verifier
-digest makes prior receipts stale, so unattended `assent verify <FOLDER>` must
-refresh the evidence before acceptance.
+private verifier or invoking a shell. Fresh `assent init` requires an explicit
+choice of parallel unittest, pytest, npm test, Flutter test, or a custom argv
+command. Every project-test example remains commented in the packaged template;
+the generated copy activates exactly one, so an empty project cannot report
+`verify: OK` without its selected test.
+
+Repeat `assent init` never replaces an existing `.assent/verify.py` and refuses
+`--test` when that verifier exists. It refreshes `format.md` and
+`instructions.md` from the packaged contracts and merges only missing active
+table/key paths from the packaged config, preserving existing and custom values.
+Input and TOML validation finish before any managed `.assent` file changes.
+Changing the verifier digest makes prior receipts stale, so unattended
+`assent verify <FOLDER>` must refresh the evidence before acceptance.
 
 A worktree is the boundary for change isolation, conflict management, audit,
 and Git recovery, not a security sandbox. Full-permission modes such as

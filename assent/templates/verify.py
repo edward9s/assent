@@ -3,7 +3,8 @@
 
 A task file's verify field points to this script by default (python .assent/verify.py);
 individual tasks may swap in a faster or stricter command.
-TODO: replace the "project checks" examples below with your project's actual check commands.
+assent init activates exactly one of the commented project-test examples below;
+the packaged template intentionally leaves every project test disabled.
 """
 
 import concurrent.futures
@@ -117,7 +118,7 @@ def run_unittest_parallel(start_dir: str = "tests", jobs: int | None = None) -> 
 run("git", "diff", "--check")
 check_committed_delta()
 
-# --- Project checks (TODO: pick one per your stack or replace as needed) ---
+# --- Project test choice (assent init activates exactly one line) ---
 
 # Flutter / Dart:
 # run("dart", "format", "--output=none", "--set-exit-if-changed", ".")

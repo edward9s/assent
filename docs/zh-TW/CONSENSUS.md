@@ -103,9 +103,16 @@ verification receipt 從不會發布任何東西。
 
 打包 verifier 會檢查 working tree,也會檢查 candidate 的 `HEAD` 相對第一父提交的
 committed delta; root commit 沒有父提交時安全略過第二項。這能抓到已提交的尾端空白,
-不讀專案私有 verifier,也不呼叫 shell。`assent init` 永不取代既有的
-`.assent/verify.py`,專案要自行人工同步。verifier digest 改變會使舊 receipt stale,
-因此接受前必須在無人值守階段以 `assent verify <FOLDER>` refresh 證據。
+不讀專案私有 verifier,也不呼叫 shell。新的 `assent init` 必須明示選擇平行
+unittest、pytest、npm test、Flutter test 或 custom argv 命令。打包 template 的每個
+專案測試範例都維持註解,產生的副本只啟用一個選項,因此空專案在選定測試不存在時
+不能回報 `verify: OK`。
+
+重跑 `assent init` 永不取代既有 `.assent/verify.py`,已有 verifier 時提供 `--test`
+會拒絕。它會從打包契約刷新 `format.md` 與 `instructions.md`,並從打包組態只補入
+遺漏的 active table/key path,保留既有及自訂值。輸入與 TOML 驗證都完成後才會改動
+受管 `.assent` 檔案。verifier digest 改變會使舊 receipt stale,因此接受前必須在
+無人值守階段以 `assent verify <FOLDER>` refresh 證據。
 
 worktree 是變更隔離、衝突管理、稽核與 Git 復原邊界,不是安全 sandbox。`danger-full-access`
 與 `bypassPermissions` 等完整權限模式仍讓 AI 接觸其 OS 身分可用的 network、credential、
