@@ -1,6 +1,6 @@
 """Folder-level scheduling for ``run --all``.
 
-A single work folder is still handled by a spawned ``agents run <folder>``
+A single work folder is still handled by a spawned ``assent run <folder>``
 child process; this module is only responsible for dependency unlocking, the
 concurrency cap, per-line output, and interrupt forwarding.
 """
@@ -16,9 +16,9 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from agents import AgentsError
-from agents.folderdeps import parse_folder_dependency_graph
-from agents.plan import Plan
+from assent import AssentError
+from assent.folderdeps import parse_folder_dependency_graph
+from assent.plan import Plan
 
 _POLL_SECONDS = 0.05
 _GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
@@ -31,9 +31,9 @@ _INTERRUPT_RETURNCODES = (130, 3221225786)
 
 
 def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
-    """Start an isolated child process equivalent to ``agents run <folder>``."""
+    """Start an isolated child process equivalent to ``assent run <folder>``."""
     command = [
-        sys.executable, "-m", "agents", "run", folder,
+        sys.executable, "-m", "assent", "run", folder,
         "--config", str(Path(config_path).resolve()),
     ]
     kwargs = {
@@ -76,7 +76,7 @@ def _start_output_reader(
     reader = threading.Thread(
         target=_read_folder_output,
         args=(folder, stream, output),
-        name=f"agents-output-{folder}",
+        name=f"assent-output-{folder}",
         daemon=True,
     )
     reader.start()
@@ -217,7 +217,7 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
                 # Another child process may be writing its own task file;
                 # only reparse folders that are not currently running.
                 plans = _folder_plans(agents_dir, inactive)
-            except AgentsError as e:
+            except AssentError as e:
                 print(f"Folder scheduling failed: {e}")
                 return 1
 

@@ -12,7 +12,7 @@ import tokenize
 import unittest
 from pathlib import Path
 
-from agents.init import init as run_init
+from assent.init import init as run_init
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,7 +76,7 @@ class LanguagePolicyTests(unittest.TestCase):
         )
         paths.extend(
             path.relative_to(ROOT)
-            for path in (ROOT / "agents/templates").glob("*.md")
+            for path in (ROOT / "assent/templates").glob("*.md")
         )
         for path in paths:
             with self.subTest(path=path):
@@ -85,10 +85,10 @@ class LanguagePolicyTests(unittest.TestCase):
     def test_runtime_product_files_contain_no_han_characters(self):
         paths = [
             path.relative_to(ROOT)
-            for path in (ROOT / "agents").rglob("*.py")
+            for path in (ROOT / "assent").rglob("*.py")
         ]
         paths.extend([
-            Path("agents/templates/agents.toml"),
+            Path("assent/templates/agents.toml"),
             Path("pyproject.toml"),
             Path(".gitignore"),
         ])
@@ -151,16 +151,16 @@ class LanguagePolicyTests(unittest.TestCase):
                 )
 
     def test_session_rules_have_one_packaged_name_and_fresh_init_path(self):
-        self.assertTrue((ROOT / "agents/templates/instructions.md").is_file())
+        self.assertTrue((ROOT / "assent/templates/instructions.md").is_file())
         instruction_templates = [
             path.relative_to(ROOT)
-            for path in (ROOT / "agents/templates").rglob("instructions.md")
+            for path in (ROOT / "assent/templates").rglob("instructions.md")
         ]
         self.assertEqual(
-            instruction_templates, [Path("agents/templates/instructions.md")]
+            instruction_templates, [Path("assent/templates/instructions.md")]
         )
         template_names = {
-            path.name for path in (ROOT / "agents/templates").iterdir()
+            path.name for path in (ROOT / "assent/templates").iterdir()
         }
         self.assertIn("AGENTS.md", template_names)
         self.assertNotIn("agents.md", template_names)
@@ -170,7 +170,7 @@ class LanguagePolicyTests(unittest.TestCase):
         )
         documentation.extend(
             path.relative_to(ROOT)
-            for path in (ROOT / "agents/templates").glob("*.md")
+            for path in (ROOT / "assent/templates").glob("*.md")
         )
         for path in documentation:
             with self.subTest(path=path):

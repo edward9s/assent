@@ -18,12 +18,12 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agents import engine
-from agents import gitops
-from agents.adapters import Adapter, TaskResult
-from agents.config import load_config
-from agents.lockfile import hold_lock
-from agents.plan import (append_entry, journal_path_for, parse_task_file,
+from assent import engine
+from assent import gitops
+from assent.adapters import Adapter, TaskResult
+from assent.config import load_config
+from assent.lockfile import hold_lock
+from assent.plan import (append_entry, journal_path_for, parse_task_file,
                          set_status)
 
 _OK = 'python -c "raise SystemExit(0)"'
@@ -221,7 +221,7 @@ class TestScenarios(E2ETestCase):
         self.assertEqual(parse_task_file(p1).status, "BLOCKED")
         self.assertEqual(parse_task_file(p2).status, "TODO")
         self.assertEqual(parse_task_file(p3).status, "DONE")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         self.assertTrue(any(e["event"] == "blocked"
                             for e in read_entries(journal_path_for(p1))))
 
@@ -250,7 +250,7 @@ class TestScenarios(E2ETestCase):
         self.assertTrue(any(s.startswith("wip(plan01/t001): ")
                             for s in subjects))
         self.assertEqual(parse_task_file(p1).status, "DONE")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         events = [e["event"] for e in read_entries(journal_path_for(p1))]
         self.assertNotIn("session", events)
 

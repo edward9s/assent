@@ -13,10 +13,10 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from agents.config import load_config
-from agents.lockfile import LOCK_NAME, LockBusy, hold_lock
+from assent.config import load_config
+from assent.lockfile import LOCK_NAME, LockBusy, hold_lock
 
-# Importing agents requires the repo root on the path; the subprocess uses it as cwd.
+# Importing assent requires the repo root on the path; the subprocess uses it as cwd.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Subprocess: after acquiring the lock, print a LOCKED line to notify the parent, then
@@ -26,7 +26,7 @@ _HOLDER = textwrap.dedent(
     """
     import sys
     from pathlib import Path
-    from agents.lockfile import hold_lock
+    from assent.lockfile import hold_lock
     with hold_lock(Path(sys.argv[1]), sys.argv[2]):
         sys.stdout.write("LOCKED\\n")
         sys.stdout.flush()

@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agents import AgentsError, gitops
-from agents.config import Config
-from agents.lockfile import LockBusy, LockMissing, probe_lock
+from assent import AssentError, gitops
+from assent.config import Config
+from assent.lockfile import LockBusy, LockMissing, probe_lock
 
 
 def _has_cleanup_target(cfg: Config) -> bool:
@@ -55,7 +55,7 @@ def clean_folder(cfg: Config) -> int:
         if not _has_cleanup_target(cfg):
             print(f"{name}: skipped (no worktree or branch to clean up)")
             return 0
-    except AgentsError as e:
+    except AssentError as e:
         print(f"{name}: skipped (Git query failed: {e})")
         return 1
 
@@ -68,7 +68,7 @@ def clean_folder(cfg: Config) -> int:
     except LockMissing as e:
         print(f"{name}: skipped ({e})")
         return 0
-    except AgentsError as e:
+    except AssentError as e:
         print(f"{name}: skipped (lock file could not be safely acquired: {e})")
         return 0
 
@@ -81,7 +81,7 @@ def _clean_locked(cfg: Config, path: Path) -> int:
         branches = gitops.branches_with_prefix(root, cfg.branch_prefix)
         head = gitops.head_ref(root)
         if head is None:
-            raise AgentsError("The main tree currently has no verifiable HEAD commit")
+            raise AssentError("The main tree currently has no verifiable HEAD commit")
 
         if path.exists():
             if not gitops.is_repo_worktree(root, path):
@@ -90,7 +90,7 @@ def _clean_locked(cfg: Config, path: Path) -> int:
                 return 0
             try:
                 gitops.ensure_clean(path)
-            except AgentsError as e:
+            except AssentError as e:
                 # Match the English substring of gitops's (still bilingual, out-of-scope
                 # for this task) message, so no Han characters are needed here.
                 if "Working tree is not clean" in str(e):
@@ -115,7 +115,7 @@ def _clean_locked(cfg: Config, path: Path) -> int:
                     return 0
 
         unmerged = _unmerged_branches(root, branches, head)
-    except AgentsError as e:
+    except AssentError as e:
         print(f"{name}: skipped (Git evidence gathering failed: {e})")
         return 1
 
@@ -133,7 +133,7 @@ def _clean_locked(cfg: Config, path: Path) -> int:
             gitops.remove_worktree(root, path)
             _remove_empty_container(path)
             print(f"{name}: cleaned (worktree {path})")
-        except AgentsError as e:
+        except AssentError as e:
             print(f"{name}: failed (worktree removal failed: {e})")
             return 1
     else:
@@ -143,7 +143,7 @@ def _clean_locked(cfg: Config, path: Path) -> int:
         try:
             gitops.delete_branch(root, branch)
             print(f"  branch {branch}: cleaned")
-        except AgentsError as e:
+        except AssentError as e:
             failed = True
             print(f"  branch {branch}: failed ({e})")
     return 1 if failed else 0

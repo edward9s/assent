@@ -9,12 +9,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import agents.clean as clean
-from agents import AgentsError, gitops
-from agents.config import load_config
-from agents.lockfile import hold_lock
-from agents.plan import read_entries
-from agents.reject import reject_folder
+import assent.clean as clean
+from assent import AssentError, gitops
+from assent.config import load_config
+from assent.lockfile import hold_lock
+from assent.plan import read_entries
+from assent.reject import reject_folder
 
 
 def _git(root: Path, *args: str) -> str:
@@ -61,7 +61,7 @@ class TestReject(unittest.TestCase):
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
-            'scope = ["agents/"]\n'
+            'scope = ["assent/"]\n'
             'verify = "python -m unittest"\n'
             'goal = "finish task"\n'
             'acceptance = "verification passes"\n',
@@ -179,8 +179,8 @@ class TestReject(unittest.TestCase):
         done = self._write_task(1, "DONE")
         self._worktree_branch(commit=True)
 
-        with patch("agents.reject.gitops.delete_branch_force",
-                   side_effect=AgentsError("simulated deletion failure")):
+        with patch("assent.reject.gitops.delete_branch_force",
+                   side_effect=AssentError("simulated deletion failure")):
             code, output = self._run_reject()
 
         self.assertEqual(code, 1)

@@ -1,4 +1,4 @@
-"""Mirror ``agents run``'s terminal output into the current task folder.
+"""Mirror ``assent run``'s terminal output into the current task folder.
 
 The terminal keeps native output (colors and cursor repositioning included), while the
 task folder's ``_agents.log`` keeps portable, immediately-flushed plain text. Errors can
@@ -15,8 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator, TextIO
 
-from agents.config import list_task_folders
-from agents.plan import Plan
+from assent.config import list_task_folders
+from assent.plan import Plan
 
 _ANSI_RE = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])")
@@ -169,11 +169,11 @@ def terminal_logging(argv: list[str]) -> Iterator[Path]:
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout = TeeTextIO(old_stdout, sink)
         sys.stderr = TeeTextIO(old_stderr, sink)
-        command = "agents" + (" " + " ".join(argv) if argv else "")
+        command = "assent" + (" " + " ".join(argv) if argv else "")
         stamp = datetime.now().astimezone().isoformat(timespec="seconds")
         sink.write(
             "\n\n============================================================\n"
-            f"AGENTS START | {stamp}\n"
+            f"ASSENT START | {stamp}\n"
             f"COMMAND      | {command}\n"
             "============================================================\n"
         )

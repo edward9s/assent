@@ -8,11 +8,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from agents import AgentsError, gitops
-from agents.config import Config
-from agents.engine import write_report
-from agents.lockfile import LockBusy, LockMissing, probe_lock
-from agents.plan import Plan, Task, append_entry, read_entries, set_status
+from assent import AssentError, gitops
+from assent.config import Config
+from assent.engine import write_report
+from assent.lockfile import LockBusy, LockMissing, probe_lock
+from assent.plan import Plan, Task, append_entry, read_entries, set_status
 
 _CASCADE_STATUSES = {"DONE", "WIP", "BLOCKED"}
 _TASK_STATUSES = {"TODO", "WIP", "DONE", "BLOCKED", "SKIP"}
@@ -20,7 +20,7 @@ _CHECKPOINT_RE = re.compile(
     r"^(?:wip|auto)\((?P<folder>[^/()]+)/(?P<task>t[0-9]{3})\): .+$")
 _REWORK_RE = re.compile(
     r"^rework\((?P<folder>[^/()]+)/(?P<task>t[0-9]{3})\): .+$")
-_REWORK_METADATA_PREFIX = "agents-rework-v1:"
+_REWORK_METADATA_PREFIX = "assent-rework-v1:"
 _HASH_RE = re.compile(r"^[0-9a-f]{40,64}$")
 
 
@@ -59,13 +59,13 @@ def rework_task(cfg: Config, task_id: str, cascade: bool = False,
                 return result
             try:
                 write_report(cfg, Plan.parse(cfg.tasks_dir))
-            except (AgentsError, OSError, ValueError) as e:
+            except (AssentError, OSError, ValueError) as e:
                 print(f"{name}: task reopened, but report update failed ({e})")
                 return 1
             return 0
     except LockBusy as e:
         print(f"{name}: rework aborted (a run is in progress): {e}")
-    except (LockMissing, AgentsError, OSError, ValueError) as e:
+    except (LockMissing, AssentError, OSError, ValueError) as e:
         print(f"{name}: rework aborted ({e})")
     return 1
 
@@ -107,11 +107,11 @@ def _ensure_management_writable(tasks: list[Task]) -> None:
     touching Git."""
     for task in tasks:
         if not os.access(task.path, os.W_OK):
-            raise AgentsError(f"task file is not writable: {task.path}")
+            raise AssentError(f"task file is not writable: {task.path}")
         journal = task.journal_path
         target = journal if journal.exists() else journal.parent
         if not os.access(target, os.W_OK):
-            raise AgentsError(f"journal file is not writable: {journal}")
+            raise AssentError(f"journal file is not writable: {journal}")
 
 
 def _entry_values(task: Task, target: Task, head: str,
@@ -166,17 +166,17 @@ def _revert_candidates(path: Path, name: str, task_ids: set[str],
         and match.group("task") in task_ids
     ]
     if not relevant_positions:
-        raise AgentsError("no code checkpoint available for automatic reversion")
+        raise AssentError("no code checkpoint available for automatic reversion")
 
     oldest = relevant_positions[-1]
     commits: list[str] = []
     for commit, parents, subject in current[:oldest + 1]:
         if len(parents) != 1:
-            raise AgentsError(f"checkpoint tail contains a merge commit: {commit}")
+            raise AssentError(f"checkpoint tail contains a merge commit: {commit}")
         match = _CHECKPOINT_RE.fullmatch(subject)
         if (match is None or match.group("folder") != name
                 or match.group("task") not in task_ids):
-            raise AgentsError(
+            raise AssentError(
                 f"checkpoint does not form a safely revertible continuous tail: "
                 f"{commit} {subject}")
         commits.append(commit)
@@ -211,10 +211,10 @@ def _string_list(value: object, field: str) -> tuple[str, ...]:
     """Conservatively parse a string array from a checkpoint."""
     if (not isinstance(value, list)
             or any(not isinstance(item, str) or not item for item in value)):
-        raise AgentsError(f"revert checkpoint {field} has an unparseable format")
+        raise AssentError(f"revert checkpoint {field} has an unparseable format")
     result = tuple(value)
     if len(set(result)) != len(result):
-        raise AgentsError(f"revert checkpoint {field} contains duplicate items")
+        raise AssentError(f"revert checkpoint {field} contains duplicate items")
     return result
 
 
@@ -238,17 +238,17 @@ def _load_revert_record(path: Path, name: str,
     if not metadata_lines:
         return None
     if len(metadata_lines) != 1:
-        raise AgentsError("revert checkpoint contains multiple resume-metadata records")
+        raise AssentError("revert checkpoint contains multiple resume-metadata records")
     try:
         payload = json.loads(metadata_lines[0])
     except json.JSONDecodeError as e:
-        raise AgentsError("revert checkpoint resume metadata is not valid JSON") from e
+        raise AssentError("revert checkpoint resume metadata is not valid JSON") from e
     expected = {
         "cascade", "changed", "downstream", "original_head", "reason",
         "reverted", "statuses", "target",
     }
     if not isinstance(payload, dict) or set(payload) != expected:
-        raise AgentsError("revert checkpoint resume fields are incomplete")
+        raise AssentError("revert checkpoint resume fields are incomplete")
 
     target = payload["target"]
     original_head = payload["original_head"]
@@ -256,36 +256,36 @@ def _load_revert_record(path: Path, name: str,
     cascade = payload["cascade"]
     if (not isinstance(target, str) or not _CHECKPOINT_RE.fullmatch(
             f"auto({name}/{target}): x")):
-        raise AgentsError("revert checkpoint target has an unparseable format")
+        raise AssentError("revert checkpoint target has an unparseable format")
     if target != match.group("task"):
-        raise AgentsError("revert checkpoint target is inconsistent with the subject")
+        raise AssentError("revert checkpoint target is inconsistent with the subject")
     if (not isinstance(original_head, str)
             or _HASH_RE.fullmatch(original_head) is None):
-        raise AgentsError("revert checkpoint original_head has an unparseable format")
+        raise AssentError("revert checkpoint original_head has an unparseable format")
     if not isinstance(reason, str) or not isinstance(cascade, bool):
-        raise AgentsError("revert checkpoint request parameters have an unparseable format")
+        raise AssentError("revert checkpoint request parameters have an unparseable format")
     if len(parents) != 1 or parents[0] != original_head:
-        raise AgentsError("revert checkpoint parent is inconsistent with original_head")
+        raise AssentError("revert checkpoint parent is inconsistent with original_head")
 
     changed = _string_list(payload["changed"], "changed")
     downstream = _string_list(payload["downstream"], "downstream")
     reverted = _string_list(payload["reverted"], "reverted")
     if any(_HASH_RE.fullmatch(item) is None for item in reverted):
-        raise AgentsError("revert checkpoint reverted hash has an unparseable format")
+        raise AssentError("revert checkpoint reverted hash has an unparseable format")
 
     raw_statuses = payload["statuses"]
     if not isinstance(raw_statuses, list):
-        raise AgentsError("revert checkpoint statuses have an unparseable format")
+        raise AssentError("revert checkpoint statuses have an unparseable format")
     statuses: list[tuple[str, str]] = []
     for item in raw_statuses:
         if (not isinstance(item, list) or len(item) != 2
                 or not isinstance(item[0], str)
                 or not isinstance(item[1], str)
                 or item[1] not in _TASK_STATUSES):
-            raise AgentsError("revert checkpoint statuses have an unparseable format")
+            raise AssentError("revert checkpoint statuses have an unparseable format")
         statuses.append((item[0], item[1]))
     if len({task_id for task_id, _ in statuses}) != len(statuses):
-        raise AgentsError("revert checkpoint statuses contain duplicate tasks")
+        raise AssentError("revert checkpoint statuses contain duplicate tasks")
 
     return _RevertRecord(
         checkpoint=checkpoint, original_head=original_head, target=target,
@@ -299,9 +299,9 @@ def _validate_revert_record(record: _RevertRecord, plan: Plan,
     """Confirm the revert checkpoint can be resumed unambiguously from the current plan."""
     expected_plan_ids = (target.id, *(task.id for task in downstream))
     if tuple(task_id for task_id, _ in record.statuses) != expected_plan_ids:
-        raise AgentsError("revert checkpoint is inconsistent with the current dependency scope")
+        raise AssentError("revert checkpoint is inconsistent with the current dependency scope")
     if record.downstream != expected_plan_ids[1:]:
-        raise AgentsError("revert checkpoint is inconsistent with the current downstream scope")
+        raise AssentError("revert checkpoint is inconsistent with the current downstream scope")
 
     original = dict(record.statuses)
     expected_changed = [target.id]
@@ -310,32 +310,32 @@ def _validate_revert_record(record: _RevertRecord, plan: Plan,
             task.id for task in downstream
             if original[task.id] in _CASCADE_STATUSES)
     if tuple(expected_changed) != record.changed or original[target.id] == "TODO":
-        raise AgentsError("revert checkpoint status-cascade scope is inconsistent")
+        raise AssentError("revert checkpoint status-cascade scope is inconsistent")
 
     changed: list[Task] = []
     for task_id in record.changed:
         task = plan.get(task_id)
         if task is None:
-            raise AgentsError(f"revert checkpoint task no longer exists: {task_id}")
+            raise AssentError(f"revert checkpoint task no longer exists: {task_id}")
         changed.append(task)
 
     candidates = _revert_candidates(
         path, name, set(record.changed), ref=record.original_head)
     if tuple(candidates) != record.reverted:
-        raise AgentsError("revert checkpoint stored hashes are inconsistent with history")
+        raise AssentError("revert checkpoint stored hashes are inconsistent with history")
     return changed
 
 
 def _abort_failed_revert(path: Path, name: str, original_head: str,
-                         error: AgentsError) -> int:
+                         error: AssentError) -> int:
     """Abort the failed reversion and verify the scene; when the abort also fails, demand
     explicit manual intervention."""
     try:
         gitops.abort_revert(path)
         if gitops.commit_of(path, "HEAD") != original_head:
-            raise AgentsError("HEAD did not return to its pre-operation position after abort")
+            raise AssentError("HEAD did not return to its pre-operation position after abort")
         gitops.ensure_clean(path)
-    except AgentsError as abort_error:
+    except AssentError as abort_error:
         print(
             f"{name}: code reversion commit failed ({error}); git revert --abort "
             f"also failed ({abort_error}), manual intervention required: {path}")
@@ -389,7 +389,7 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
 
     try:
         plan = Plan.parse(cfg.tasks_dir)
-    except AgentsError as e:
+    except AssentError as e:
         print(f"{name}: rework aborted (task files could not be parsed: {e})")
         return 1
 
@@ -420,18 +420,18 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
     if revert_code:
         try:
             if not path.exists():
-                raise AgentsError(f"worktree does not exist: {path}")
+                raise AssentError(f"worktree does not exist: {path}")
             if not gitops.is_repo_worktree(cfg.root, path):
-                raise AgentsError(
+                raise AssentError(
                     f"fixed path is not a valid worktree of this repo: {path}")
             branch = gitops.current_branch(path)
             if not branch.startswith(cfg.branch_prefix):
                 shown = branch or "detached HEAD"
-                raise AgentsError(f"worktree is on a branch outside this folder: {shown}")
+                raise AssentError(f"worktree is on a branch outside this folder: {shown}")
             gitops.ensure_clean(path)
             head_value = gitops.head_ref(path)
             if head_value is None:
-                raise AgentsError("worktree has no HEAD")
+                raise AssentError("worktree has no HEAD")
             head = head_value
 
             record = _load_revert_record(path, name, task_id)
@@ -464,12 +464,12 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                 )
                 if not logs_complete:
                     if record.cascade != cascade or record.reason != effective_reason:
-                        raise AgentsError(
+                        raise AssentError(
                             "an incomplete revert checkpoint already exists; "
                             "rerun with exactly the same parameters")
                     for task in record_changed:
                         if task.status not in {original[task.id], "TODO"}:
-                            raise AgentsError(
+                            raise AssentError(
                                 f"task status changed after the revert checkpoint: {task.id}")
                 if ((not logs_complete and same_request)
                         or (logs_complete and statuses_complete
@@ -492,7 +492,7 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                         print(
                             f"{name}: {task_id} resuming an incomplete revert "
                             f"checkpoint: {record.checkpoint}")
-        except (AgentsError, OSError, ValueError) as e:
+        except (AssentError, OSError, ValueError) as e:
             print(f"{name}: rework aborted (Git or resume precheck failed: {e}), "
                   "status unchanged")
             return 1
@@ -516,7 +516,7 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
             }
             _ensure_management_writable(changed)
             excludes = cfg.git_excludes
-        except (AgentsError, OSError, ValueError) as e:
+        except (AssentError, OSError, ValueError) as e:
             print(f"{name}: rework aborted (management-plane precheck failed: {e})")
             return 1
 
@@ -526,12 +526,12 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                 path, name, {task.id for task in changed})
         elif not revert_code and path.exists():
             if not gitops.is_repo_worktree(cfg.root, path):
-                raise AgentsError(
+                raise AssentError(
                     f"fixed path is not a valid worktree of this repo: {path}")
             branch = gitops.current_branch(path)
             if not branch.startswith(cfg.branch_prefix):
                 shown = branch or "detached HEAD"
-                raise AgentsError(
+                raise AssentError(
                     f"worktree is on a branch outside this folder: {shown}")
             if gitops.commit_if_dirty(
                     path, f"wip({name}/{target.id}): manual rework pre-archive",
@@ -541,7 +541,7 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
         elif not revert_code:
             head = gitops.commit_of(cfg.root, "HEAD")
             print(f"{name}: worktree does not exist, only reopening management state")
-    except AgentsError as e:
+    except AssentError as e:
         print(f"{name}: rework aborted (Git precheck or archive failed: {e}), "
               "status unchanged")
         return 1
@@ -558,7 +558,7 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
             gitops.revert_no_commit(path, reverted)
             gitops.commit_all(path, message)
             revert_checkpoint = gitops.commit_of(path, "HEAD")
-        except AgentsError as e:
+        except AssentError as e:
             return _abort_failed_revert(path, name, head, e)
 
     if not log_values:
@@ -579,11 +579,11 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                 if task.status != "TODO":
                     set_status(task.path, "TODO")
                     print(f"  task {task.id}: {task.status} -> TODO")
-        except (AgentsError, OSError) as e:
+        except (AssentError, OSError) as e:
             try:
                 complete = _management_complete(
                     cfg.tasks_dir, [task.id for task in changed], log_values)
-            except (AgentsError, OSError, ValueError) as verify_error:
+            except (AssentError, OSError, ValueError) as verify_error:
                 print(
                     f"{name}: task-status write interrupted ({e}), and re-reading "
                     f"disk failed ({verify_error}); rerun with the same parameters")
@@ -603,11 +603,11 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                 append_entry(
                     task.journal_path, by="scheduler",
                     event="rework_requested", summary=summary, detail=detail)
-        except (AgentsError, OSError) as e:
+        except (AssentError, OSError) as e:
             try:
                 complete = _management_complete(
                     cfg.tasks_dir, [task.id for task in changed], log_values)
-            except (AgentsError, OSError, ValueError) as verify_error:
+            except (AssentError, OSError, ValueError) as verify_error:
                 print(
                     f"{name}: rework journal write interrupted ({e}), and re-reading "
                     f"disk failed ({verify_error}); rerun with the same parameters")
@@ -630,7 +630,7 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
                 append_entry(
                     task.journal_path, by="scheduler",
                     event="rework_requested", summary=summary, detail=detail)
-        except (AgentsError, OSError) as e:
+        except (AssentError, OSError) as e:
             print(f"{name}: rework journal write interrupted ({e}), task status "
                   "unchanged; rerun")
             return 1
@@ -640,7 +640,7 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
             for task in ordered:
                 set_status(task.path, "TODO")
                 print(f"  task {task.id}: {task.status} -> TODO")
-        except (AgentsError, OSError) as e:
+        except (AssentError, OSError) as e:
             print(f"{name}: task-status write interrupted ({e}); rerun with the "
                   "same parameters")
             return 1

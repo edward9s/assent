@@ -37,11 +37,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agents import AgentsError
-from agents.adapters import Adapter, TaskResult
+from assent import AssentError
+from assent.adapters import Adapter, TaskResult
 
 if TYPE_CHECKING:
-    from agents.config import Config
+    from assent.config import Config
 
 # Values of rate_limit_event.rate_limit_info.status that mean "throttled/exhausted"
 # (best-effort; the observed success value is "allowed", no sample of the structured status on
@@ -90,7 +90,7 @@ def format_stream_event(raw_line: str) -> str | None:
     """Turn one stream-json event line into live progress text for the terminal;
     None = don't show this line.
 
-    Purpose: let the user watch what the executing AI is doing during `agents run` (what it
+    Purpose: let the user watch what the executing AI is doing during `assent run` (what it
     said, which tools it used, how many tokens it burned) instead of waiting blind until the
     session ends. Display only — it doesn't affect parse_output_for_quota's after-the-fact
     verdict.
@@ -276,7 +276,7 @@ class ClaudeAdapter(Adapter):
         """Resolve the abstract tier into the model argument accepted by the Claude CLI."""
         alias = self.cfg.claude_models.get(model)
         if alias is None:
-            raise AgentsError(
+            raise AssentError(
                 f"model tier {model!r} is not in [adapter.claude.models]; "
                 f"check the plan file's suggested model or the config mapping")
         return alias

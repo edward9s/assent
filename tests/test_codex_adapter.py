@@ -3,12 +3,12 @@ import json
 import unittest
 from pathlib import Path
 
-from agents import AgentsError
-from agents.adapters import TaskResult, get_adapter
-from agents.adapters.codex import (
+from assent import AssentError
+from assent.adapters import TaskResult, get_adapter
+from assent.adapters.codex import (
     CodexAdapter, build_command, format_stream_event, parse_output_for_quota,
 )
-from agents.config import Config
+from assent.config import Config
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -95,7 +95,7 @@ class TestQuota(unittest.TestCase):
 
 class TestRunTask(unittest.TestCase):
     def patch_run(self, fake):
-        import agents.adapters.codex as module
+        import assent.adapters.codex as module
         original = module.run_subprocess
         module.run_subprocess = fake
         self.addCleanup(setattr, module, "run_subprocess", original)
@@ -125,7 +125,7 @@ class TestRunTask(unittest.TestCase):
             "p", adapter.resolve_model("lite"), None, Path(".")).quota_exhausted)
 
     def test_unknown_tier_raises(self):
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             CodexAdapter(make_cfg(codex_models={"core": "x"})).resolve_model(
                 "prime")
 

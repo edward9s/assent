@@ -1,4 +1,4 @@
-"""Task-folder file lock: only one agents run may operate on a given task folder at a time.
+"""Task-folder file lock: only one assent run may operate on a given task folder at a time.
 
 When a run starts, it acquires an OS-level "non-blocking exclusive lock" on the task folder
 (msvcrt on Windows, fcntl on POSIX), held for the process's lifetime. The lock's lifetime is
@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from agents import AgentsError
+from assent import AssentError
 
 LOCK_NAME = "agents.lock"
 
@@ -72,11 +72,11 @@ else:
             pass
 
 
-class LockBusy(AgentsError):
+class LockBusy(AssentError):
     """The task folder is already held by another run; the message includes the holder's PID and folder name."""
 
 
-class LockMissing(AgentsError):
+class LockMissing(AssentError):
     """The lock file does not exist; a caller that must not create it cannot safely acquire the same lock."""
 
 
@@ -122,7 +122,7 @@ def _busy_message(tasks_name: str, diag: dict) -> str:
         if hhmm:
             detail += f", started at {hhmm}"
         detail += ")"
-    return (f"Another agents run is already processing task folder {tasks_name}{detail}. "
+    return (f"Another assent run is already processing task folder {tasks_name}{detail}. "
             "Only one run may operate on a task folder at a time.")
 
 
@@ -175,7 +175,7 @@ def probe_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
             f"Task folder {tasks_name} has no existing {LOCK_NAME}; "
             "cannot prove it is unlocked without modifying .agents") from e
     except OSError as e:
-        raise AgentsError(f"Unable to open lock file for task folder {tasks_name}: {e}") from e
+        raise AssentError(f"Unable to open lock file for task folder {tasks_name}: {e}") from e
 
     handle = os.fdopen(descriptor, "r+b")
     try:

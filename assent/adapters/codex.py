@@ -6,9 +6,9 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agents import AgentsError
-from agents.adapters import Adapter, TaskResult
-from agents.adapters.claude import run_subprocess
+from assent import AssentError
+from assent.adapters import Adapter, TaskResult
+from assent.adapters.claude import run_subprocess
 
 if TYPE_CHECKING:
     from workflow.config import Config
@@ -156,7 +156,7 @@ class CodexAdapter(Adapter):
         """Resolve the abstract tier into the model argument accepted by the Codex CLI."""
         alias = self.cfg.codex_models.get(model)
         if alias is None:
-            raise AgentsError(
+            raise AssentError(
                 f"model tier {model!r} is not in [adapter.codex.models]; "
                 f"check the plan file's suggested model or the config mapping")
         return alias

@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agents import AgentsError
-from agents.config import list_task_folders, load_config
+from assent import AssentError
+from assent.config import list_task_folders, load_config
 
 _MINIMAL = ""
 
@@ -62,49 +62,49 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.lockfile_rel, ".agents/parallel02/agents.lock")
 
     def test_missing_file_raises(self):
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             load_config(self.agents_dir / "agents.toml", "plan01")
 
     def test_removed_plan_section_rejected_as_unknown_key(self):
-        with self.assertRaisesRegex(AgentsError, "unknown top-level keys"):
+        with self.assertRaisesRegex(AssentError, "unknown top-level keys"):
             load_config(self.write('[plan]\ntasks = "plan01"\n'), "plan01")
 
     def test_invalid_toml_raises(self):
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             load_config(self.write("[run\nretry_per_task ="), "plan01")
 
     def test_unknown_top_level_key_raises(self):
-        with self.assertRaisesRegex(AgentsError, "unknown top-level keys"):
+        with self.assertRaisesRegex(AssentError, "unknown top-level keys"):
             load_config(self.write("[plann]\nx = 1\n"), "plan01")
 
     def test_removed_git_section_rejected_as_unknown_key(self):
-        with self.assertRaisesRegex(AgentsError, "unknown top-level keys"):
+        with self.assertRaisesRegex(AssentError, "unknown top-level keys"):
             load_config(self.write("[git]\nenabled = false\n"), "plan01")
 
     def test_folder_name_with_space_rejected(self):
-        with self.assertRaisesRegex(AgentsError, "not a valid task folder name"):
+        with self.assertRaisesRegex(AssentError, "not a valid task folder name"):
             load_config(self.write(_MINIMAL), "my plan")
 
     def test_folder_name_with_slash_rejected(self):
         for bad in ("a/b", "a\\\\b"):
-            with self.assertRaises(AgentsError):
+            with self.assertRaises(AssentError):
                 load_config(self.write(_MINIMAL), bad)
 
     def test_folder_name_leading_dash_or_dot_rejected(self):
         for bad in ("-x", ".x"):
-            with self.assertRaises(AgentsError):
+            with self.assertRaises(AssentError):
                 load_config(self.write(_MINIMAL), bad)
 
     def test_invalid_folder_override_rejected(self):
-        with self.assertRaisesRegex(AgentsError, "Command-line task folder"):
+        with self.assertRaisesRegex(AssentError, "Command-line task folder"):
             load_config(self.write(_MINIMAL), folder="bad/name")
 
     def test_type_error_reported(self):
-        with self.assertRaisesRegex(AgentsError, "wrong type"):
+        with self.assertRaisesRegex(AssentError, "wrong type"):
             load_config(self.write("[watchdog]\nstall_minutes = \"x\"\n"), "plan01")
 
     def test_negative_stall_rejected(self):
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             load_config(self.write("[watchdog]\nstall_minutes = -1\n"), "plan01")
 
     def test_models_table_full_replacement(self):
@@ -113,7 +113,7 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.claude_models, {"prime": "x"})  # whole table replaced, not merged
 
     def test_bad_default_effort_rejected(self):
-        with self.assertRaisesRegex(AgentsError, "effort"):
+        with self.assertRaisesRegex(AssentError, "effort"):
             load_config(self.write(
                 '[adapter.claude.default_effort]\nprime = "max"\n'), "plan01")
 
@@ -139,7 +139,7 @@ class TestLoadConfig(ConfigTestCase):
         )
         for text, message in cases:
             with self.subTest(text=text), self.assertRaisesRegex(
-                    AgentsError, message):
+                    AssentError, message):
                 load_config(self.write(text), "plan01")
 
     def test_bad_efforts_values_rejected(self):
@@ -155,7 +155,7 @@ class TestLoadConfig(ConfigTestCase):
         )
         for text, message in cases:
             with self.subTest(text=text), self.assertRaisesRegex(
-                    AgentsError, message):
+                    AssentError, message):
                 load_config(self.write(text), "plan01")
 
     def test_prompt_template_loaded(self):

@@ -17,9 +17,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agents.folder_scheduler import _send_interrupt, _start_folder, run_all
-from agents.plan import set_status
-from agents.terminal_log import terminal_logging
+from assent.folder_scheduler import _send_interrupt, _start_folder, run_all
+from assent.plan import set_status
+from assent.terminal_log import terminal_logging
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,7 +30,7 @@ def task_text(status: str) -> str:
         'deps = []\n'
         'model = "lite"\n'
         f'status = "{status}"\n'
-        'scope = ["agents/"]\n'
+        'scope = ["assent/"]\n'
         'verify = "python -m unittest"\n'
         'goal = "完成任務"\n'
         'acceptance = "驗證通過"\n'
@@ -94,14 +94,14 @@ class FolderSchedulerTestCase(unittest.TestCase):
 class TestRunAll(FolderSchedulerTestCase):
     def test_child_uses_utf8_merged_text_pipe_and_process_group(self):
         process = object()
-        with patch("agents.folder_scheduler.subprocess.Popen",
+        with patch("assent.folder_scheduler.subprocess.Popen",
                    return_value=process) as popen:
             actual = _start_folder(str(self.config), "work")
 
         self.assertIs(actual, process)
         command = popen.call_args.args[0]
         options = popen.call_args.kwargs
-        self.assertEqual(command[:3], [sys.executable, "-m", "agents"])
+        self.assertEqual(command[:3], [sys.executable, "-m", "assent"])
         self.assertEqual(command[3:5], ["run", "work"])
         self.assertEqual(options["stdin"], subprocess.DEVNULL)
         self.assertEqual(options["stdout"], subprocess.PIPE)
@@ -121,7 +121,7 @@ class TestRunAll(FolderSchedulerTestCase):
         task = self.make_folder("serial")
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "agents.folder_scheduler._start_folder",
+                "assent.folder_scheduler._start_folder",
                 return_value=OutputProcess(task, "第一列\n最後一列")):
             code = run_all(str(self.config), self.agents_dir)
 
@@ -147,7 +147,7 @@ class TestRunAll(FolderSchedulerTestCase):
             return OutputProcess(tasks[folder], outputs[folder])
 
         with contextlib.redirect_stdout(out), patch(
-                "agents.folder_scheduler._start_folder", side_effect=fake_start):
+                "assent.folder_scheduler._start_folder", side_effect=fake_start):
             code = run_all(str(self.config), self.agents_dir, jobs=2)
 
         self.assertEqual(code, 0)
@@ -163,7 +163,7 @@ class TestRunAll(FolderSchedulerTestCase):
         out = io.StringIO()
         raw = "標準錯誤\n".encode("utf-8") + b"bad:\xff"
         with contextlib.redirect_stdout(out), patch(
-                "agents.folder_scheduler._start_folder",
+                "assent.folder_scheduler._start_folder",
                 return_value=OutputProcess(task, raw)):
             code = run_all(str(self.config), self.agents_dir)
 
@@ -183,7 +183,7 @@ class TestRunAll(FolderSchedulerTestCase):
         argv = ["run", "--all", "--config", str(self.config)]
         with contextlib.redirect_stdout(terminal):
             with terminal_logging(argv) as root_log, patch(
-                    "agents.folder_scheduler._start_folder",
+                    "assent.folder_scheduler._start_folder",
                     side_effect=fake_start):
                 code = run_all(str(self.config), self.agents_dir)
 
@@ -191,7 +191,7 @@ class TestRunAll(FolderSchedulerTestCase):
         terminal_text = terminal.getvalue()
         root_text = root_log.read_text(encoding="utf-8")
         self.assertIn("[work] 子行程原始訊息", terminal_text)
-        self.assertIn("AGENTS START", root_text)
+        self.assertIn("ASSENT START", root_text)
         self.assertIn("Starting work folder: work", root_text)
         self.assertIn("Work folder complete: work", root_text)
         self.assertNotIn("子行程原始訊息", root_text)
@@ -205,8 +205,8 @@ class TestRunAll(FolderSchedulerTestCase):
         out = io.StringIO()
 
         with contextlib.redirect_stdout(out), patch(
-                "agents.folder_scheduler.parse_folder_dependency_graph") as parse, \
-                patch("agents.folder_scheduler._start_folder") as start:
+                "assent.folder_scheduler.parse_folder_dependency_graph") as parse, \
+                patch("assent.folder_scheduler._start_folder") as start:
             code = run_all(str(self.config), self.agents_dir)
 
         self.assertEqual(code, 1)
@@ -226,7 +226,7 @@ class TestRunAll(FolderSchedulerTestCase):
             started.append(folder)
             return FinishedProcess(tasks[folder])
 
-        with patch("agents.folder_scheduler._start_folder", side_effect=fake_start):
+        with patch("assent.folder_scheduler._start_folder", side_effect=fake_start):
             code = run_all(str(self.config), self.agents_dir)
 
         self.assertEqual(code, 0)
@@ -245,7 +245,7 @@ class TestRunAll(FolderSchedulerTestCase):
                 tasks[folder],
                 lambda: first_poll_started_count.append(len(started)))
 
-        with patch("agents.folder_scheduler._start_folder", side_effect=fake_start):
+        with patch("assent.folder_scheduler._start_folder", side_effect=fake_start):
             code = run_all(str(self.config), self.agents_dir, jobs=2)
 
         self.assertEqual(code, 0)
@@ -272,7 +272,7 @@ class TestRunAll(FolderSchedulerTestCase):
             "alpha": FinishedProcess(alpha),
             "beta": WritingProcess(),
         }
-        with patch("agents.folder_scheduler._start_folder",
+        with patch("assent.folder_scheduler._start_folder",
                    side_effect=lambda _config, folder: processes[folder]):
             code = run_all(str(self.config), self.agents_dir, jobs=2)
 
@@ -285,7 +285,7 @@ class TestRunAll(FolderSchedulerTestCase):
         out = io.StringIO()
 
         with contextlib.redirect_stdout(out), patch(
-                "agents.folder_scheduler._start_folder") as start:
+                "assent.folder_scheduler._start_folder") as start:
             code = run_all(str(self.config), self.agents_dir)
 
         self.assertEqual(code, 1)
@@ -302,7 +302,7 @@ class TestRunAll(FolderSchedulerTestCase):
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "agents.folder_scheduler._start_folder",
+                "assent.folder_scheduler._start_folder",
                 return_value=FailedProcess()):
             code = run_all(str(self.config), self.agents_dir)
 
@@ -319,7 +319,7 @@ class TestRunAll(FolderSchedulerTestCase):
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "agents.folder_scheduler._start_folder",
+                "assent.folder_scheduler._start_folder",
                 return_value=ControlCExitProcess()):
             code = run_all(str(self.config), self.agents_dir)
 
@@ -343,9 +343,9 @@ class TestRunAll(FolderSchedulerTestCase):
                 return 130
 
         process = InterruptedProcess()
-        with patch("agents.folder_scheduler._start_folder",
+        with patch("assent.folder_scheduler._start_folder",
                    return_value=process), patch(
-                       "agents.folder_scheduler._send_interrupt") as send:
+                       "assent.folder_scheduler._send_interrupt") as send:
             code = run_all(str(self.config), self.agents_dir)
 
         self.assertEqual(code, 130)
@@ -373,7 +373,7 @@ class TestBreakHandlerInterrupt(unittest.TestCase):
     _PROBE = textwrap.dedent(
         """
         import sys, time
-        from agents.__main__ import _install_break_handler
+        from assent.__main__ import _install_break_handler
         _install_break_handler()
         try:
             print("READY", flush=True)

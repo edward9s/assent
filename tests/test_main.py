@@ -17,8 +17,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agents.__main__ import main
-from agents.init import init as run_init
+from assent.__main__ import main
+from assent.init import init as run_init
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _HAN_CHAR_RE = re.compile(r"[一-鿿]")
@@ -52,7 +52,7 @@ class MainTestCase(unittest.TestCase):
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
-            'scope = ["agents/"]\n'
+            'scope = ["assent/"]\n'
             'verify = "python -m unittest"\n'
             'goal = "完成任務"\n'
             'acceptance = "驗證通過"\n',
@@ -76,7 +76,7 @@ class TestDispatch(MainTestCase):
                 env = dict(os.environ)
                 env["PYTHONPATH"] = str(_PROJECT_ROOT)
                 result = subprocess.run(
-                    [sys.executable, "-m", "agents", *argv],
+                    [sys.executable, "-m", "assent", *argv],
                     cwd=self.root, capture_output=True, text=True,
                     encoding="utf-8", env=env)
                 self.assertEqual(result.returncode, 0)
@@ -86,7 +86,7 @@ class TestDispatch(MainTestCase):
         code, out = self.run_main(["status"])
         self.assertEqual(code, 1)
         self.assertIn("Config error", out)
-        self.assertIn("agents init", out)
+        self.assertIn("assent init", out)
 
     def test_run_missing_config_reports_error(self):
         code, out = self.run_main(
@@ -109,7 +109,7 @@ class TestDispatch(MainTestCase):
 
     def test_run_all_dispatches_with_default_jobs(self):
         config = self.write_config()
-        with patch("agents.__main__.run_all", return_value=0) as mocked:
+        with patch("assent.__main__.run_all", return_value=0) as mocked:
             code, _ = self.run_main(["run", "--all", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[2], 1)
@@ -121,7 +121,7 @@ class TestDispatch(MainTestCase):
                     ("check", "check"), ("report", "report"))
         for command, engine_name in commands:
             with self.subTest(command=command), patch(
-                    f"agents.__main__.engine.{engine_name}", return_value=0) as mocked:
+                    f"assent.__main__.engine.{engine_name}", return_value=0) as mocked:
                 code, _ = self.run_main([command, "B", "--config", str(config)])
                 self.assertEqual(code, 0)
                 cfg = mocked.call_args.args[0]
@@ -130,7 +130,7 @@ class TestDispatch(MainTestCase):
 
     def test_clean_accepts_folder_override_and_config_option(self):
         config = self.write_config()
-        with patch("agents.__main__.clean_folders", return_value=0) as mocked:
+        with patch("assent.__main__.clean_folders", return_value=0) as mocked:
             code, _ = self.run_main(["clean", "B", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]], ["B"])
@@ -139,7 +139,7 @@ class TestDispatch(MainTestCase):
         config = self.write_config()
         self.write_task("beta")
         self.write_task("alpha")
-        with patch("agents.__main__.clean_folders", return_value=0) as mocked:
+        with patch("assent.__main__.clean_folders", return_value=0) as mocked:
             code, _ = self.run_main(["clean", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]],
@@ -159,7 +159,7 @@ class TestDispatch(MainTestCase):
 
     def test_reject_dispatches_to_reject_folder(self):
         config = self.write_config()
-        with patch("agents.__main__.reject_folder", return_value=0) as mocked:
+        with patch("assent.__main__.reject_folder", return_value=0) as mocked:
             code, _ = self.run_main(["reject", "B", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "B")
@@ -170,7 +170,7 @@ class TestDispatch(MainTestCase):
             main(["rework", "-h"])
         self.assertEqual(ctx.exception.code, 0)
         text = output.getvalue()
-        self.assertIn("agents rework", text)
+        self.assertIn("assent rework", text)
         self.assertIn("FOLDER TASK", text)
         for option in ("--cascade", "--revert-code", "--reason", "--config"):
             self.assertIn(option, text)
@@ -189,7 +189,7 @@ class TestDispatch(MainTestCase):
 
     def test_rework_dispatches_all_values_without_rewriting_exit_code(self):
         config = self.write_config()
-        with patch("agents.__main__.rework_task", side_effect=[0, 1]) as mocked:
+        with patch("assent.__main__.rework_task", side_effect=[0, 1]) as mocked:
             codes = [self.run_main([
                 "rework", "B", "t003", "--cascade", "--revert-code",
                 "--reason", "驗收不符", "--config", str(config)])[0]
@@ -206,7 +206,7 @@ class TestDispatch(MainTestCase):
 
     def test_rework_configuration_error_returns_one_without_dispatch(self):
         config = self.write_config()
-        with patch("agents.__main__.rework_task") as mocked:
+        with patch("assent.__main__.rework_task") as mocked:
             code, out = self.run_main([
                 "rework", "bad/name", "t001", "--config", str(config)])
         self.assertEqual(code, 1)
@@ -229,7 +229,7 @@ class TestDispatch(MainTestCase):
         config = self.write_config()
         self.write_task("active", "TODO")
         self.write_task("archive", "DONE")
-        with patch("agents.__main__.engine.run", return_value=0) as mocked:
+        with patch("assent.__main__.engine.run", return_value=0) as mocked:
             code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertIn(
@@ -245,7 +245,7 @@ class TestDispatch(MainTestCase):
             'after = ["base"]\n', encoding="utf-8")
         self.write_task("ready", "TODO")
 
-        with patch("agents.__main__.engine.run", return_value=0) as mocked:
+        with patch("assent.__main__.engine.run", return_value=0) as mocked:
             code, out = self.run_main(["run", "--config", str(config)])
 
         self.assertEqual(code, 0)
@@ -259,7 +259,7 @@ class TestDispatch(MainTestCase):
         (config.parent / "waiting" / "_folder.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
 
-        with patch("agents.__main__.engine.run") as mocked:
+        with patch("assent.__main__.engine.run") as mocked:
             code, out = self.run_main(["run", "--config", str(config)])
 
         self.assertEqual(code, 1)
@@ -277,7 +277,7 @@ class TestDispatch(MainTestCase):
                 config = self.write_config()
                 for folder, status in statuses:
                     self.write_task(folder, status)
-                with patch("agents.__main__.engine.run") as mocked:
+                with patch("assent.__main__.engine.run") as mocked:
                     code, out = self.run_main(
                         ["run", "--config", str(config)])
                 self.assertEqual(code, 1)
@@ -298,7 +298,7 @@ class TestDispatch(MainTestCase):
         self.write_task("alpha")
         for command in ("status", "check", "report"):
             with self.subTest(command=command), patch(
-                    f"agents.__main__.engine.{command}", return_value=0) as mocked:
+                    f"assent.__main__.engine.{command}", return_value=0) as mocked:
                 code, _ = self.run_main([command, "--config", str(config)])
                 self.assertEqual(code, 0)
                 self.assertEqual(
@@ -309,7 +309,7 @@ class TestDispatch(MainTestCase):
         config = self.write_config()
         self.write_task("alpha")
         self.write_task("beta")
-        with patch("agents.__main__.engine.check", side_effect=[0, 1]) as mocked:
+        with patch("assent.__main__.engine.check", side_effect=[0, 1]) as mocked:
             code, _ = self.run_main(["check", "--config", str(config)])
         self.assertEqual(code, 1)
         self.assertEqual(mocked.call_count, 2)
@@ -331,7 +331,7 @@ class TestDispatch(MainTestCase):
                     self.write_task("beta")
                     (config.parent / "beta" / "_folder.toml").write_text(
                         declarations[1], encoding="utf-8")
-                with patch("agents.__main__.engine.check", return_value=0):
+                with patch("assent.__main__.engine.check", return_value=0):
                     code, out = self.run_main(
                         ["check", "--config", str(config)])
                 self.assertEqual(code, 1)

@@ -9,10 +9,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agents import AgentsError, gitops
-from agents.clean import clean_folder, clean_folders
-from agents.config import load_config
-from agents.lockfile import hold_lock
+from assent import AssentError, gitops
+from assent.clean import clean_folder, clean_folders
+from assent.config import load_config
+from assent.lockfile import hold_lock
 
 
 def _git(root: Path, *args: str) -> str:
@@ -169,8 +169,8 @@ class TestClean(unittest.TestCase):
 
     def test_git_remove_failure_is_reported_and_returns_one(self) -> None:
         worktree, branch = self._worktree_branch()
-        with patch("agents.clean.gitops.remove_worktree",
-                   side_effect=AgentsError("simulated Windows file lock")):
+        with patch("assent.clean.gitops.remove_worktree",
+                   side_effect=AssentError("simulated Windows file lock")):
             code, output = self._run_clean()
 
         self.assertEqual(code, 1)
@@ -194,8 +194,8 @@ class TestClean(unittest.TestCase):
         before = self._agents_snapshot()
 
         output = io.StringIO()
-        with patch("agents.clean.gitops.remove_worktree",
-                   side_effect=AgentsError("first item failed")), \
+        with patch("assent.clean.gitops.remove_worktree",
+                   side_effect=AssentError("first item failed")), \
                 contextlib.redirect_stdout(output):
             code = clean_folders([self.cfg, second_cfg])
 

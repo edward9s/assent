@@ -3,16 +3,16 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agents"
+name = "assent"
 version = "0.1.0"
 description = "AI plan format + zero-token automatic scheduler (zero third-party dependencies)"
 requires-python = ">=3.11"
 
 [project.scripts]
-agents = "agents.__main__:main"
+assent = "assent.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["agents*"]
+include = ["assent*"]
 
 [tool.setuptools.package-data]
-agents = ["templates/*"]
+assent = ["templates/*"]

@@ -1,4 +1,4 @@
-"""agents init: generate the .agents skeleton and the AGENTS.md bridge notice
+"""assent init: generate the .agents skeleton and the AGENTS.md bridge notice
 in a target project.
 
 - .agents/agents.toml, instructions.md, format.md, verify.py. Work folders are
@@ -16,16 +16,16 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from agents import AgentsError
+from assent import AssentError
 
 _TEMPLATES = Path(__file__).resolve().parent / "templates"
-# Heading of the section that older, pre-English releases of `agents init`
+# Heading of the section that older, pre-English releases of the former CLI
 # wrote into a project's AGENTS.md. It is legacy-detection data, not user-facing
 # prose, so the historical characters are kept as escapes and removed on re-init.
 _LEGACY_SECTION_MARKER = "## AI \u5de5\u4f5c\u9ad4\u7cfb(.agents)"
 _BRIDGE_MARKER = "<!-- agents-instructions -->"
 _BRIDGE_LINE = (
-    "- When using agents, first read `.agents/instructions.md` in the "
+    "- When using assent, first read `.agents/instructions.md` in the "
     "project's main worktree; a worktree session uses the absolute path the "
     f"scheduler provides. {_BRIDGE_MARKER}"
 )
@@ -37,7 +37,7 @@ def _template(name: str) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except OSError as e:
-        raise AgentsError(
+        raise AssentError(
             f"Cannot read built-in template {name}: {e} (broken install?)") from e
 
 
@@ -51,7 +51,7 @@ def _create(path: Path, content: str, made: list[str], skipped: list[str]) -> No
 
 
 def _remove_legacy_section(text: str) -> str:
-    """Remove the legacy agents-generated level-2 section, keeping any
+    """Remove the legacy scheduler-generated level-2 section, keeping any
     project-owned level-2 section that follows it."""
     start = text.find(_LEGACY_SECTION_MARKER)
     if start < 0:
@@ -98,7 +98,7 @@ def _merge_gitignore(root: Path, made: list[str]) -> None:
         if lines and lines[-1]:
             lines.append("")
         if lines:
-            lines.append("# agents management surface and runtime output")
+            lines.append("# assent management surface and runtime output")
         lines.extend(missing)
     target.write_text("\n".join(lines) + ("\n" if lines else ""),
                       encoding="utf-8", newline="\n")
@@ -135,9 +135,9 @@ def init(path: str | Path = ".") -> int:
     print("  1. Fill in AGENTS.md's project description and hard constraints, "
           "and the real check commands in .agents/verify.py")
     print("  2. Start an AI meeting: read .agents/instructions.md and begin an "
-          "agents planning meeting")
+          "assent planning meeting")
     print("  3. The meeting names a work folder for the task at hand (e.g. "
           ".agents/loginfix01/) and produces task files inside it "
           "(format in .agents/format.md)")
-    print("  4. Once agents check passes, run agents run")
+    print("  4. Once assent check passes, run assent run")
     return 0

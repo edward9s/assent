@@ -1,4 +1,4 @@
-# agents scheduler configuration. The work folder is stated explicitly on the
+# assent scheduler configuration. The work folder is stated explicitly on the
 # command line or derived from current task-file state.
 # All relative paths are based on the project root (= the parent of .agents).
 

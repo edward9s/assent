@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agents.terminal_log import (
+from assent.terminal_log import (
     log_path_for_argv, sanitize_log_text, terminal_logging,
 )
 
@@ -37,7 +37,7 @@ class TestTerminalLogging(unittest.TestCase):
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
-            'scope = ["agents/"]\n'
+            'scope = ["assent/"]\n'
             'verify = "python -m unittest"\n'
             'goal = "done"\n'
             'acceptance = "passed"\n', encoding="utf-8")
@@ -92,8 +92,8 @@ class TestTerminalLogging(unittest.TestCase):
                 self.assertIn("AI| hello ", during)
                 self.assertIn("error", during)
         logged = path.read_text(encoding="utf-8")
-        self.assertIn("AGENTS START", logged)
-        self.assertIn("COMMAND      | agents run", logged)
+        self.assertIn("ASSENT START", logged)
+        self.assertIn("COMMAND      | assent run", logged)
         self.assertNotIn("\x1b", logged)
         self.assertNotIn(chr(0x1F680), logged)
         self.assertIn("AI| hello " + chr(0x1F680), terminal_out.getvalue())

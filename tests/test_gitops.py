@@ -7,8 +7,8 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from agents import AgentsError
-from agents.gitops import (
+from assent import AssentError
+from assent.gitops import (
     branches_with_prefix, changes_outside_scope, commit_all, commit_if_dirty,
     ensure_branch,
     ensure_clean, ensure_worktree, head_ref, restore, tracked_paths,
@@ -40,12 +40,12 @@ class TestEnsureClean(GitTestCase):
 
     def test_dirty_repo_raises(self):
         (self.root / "new.txt").write_text("x", encoding="utf-8")
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             ensure_clean(self.root)
 
     def test_modified_tracked_file_raises(self):
         (self.root / "README.md").write_text("changed\n", encoding="utf-8")
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             ensure_clean(self.root)
 
     def test_excluded_runtime_artifacts_are_ignored(self):
@@ -54,13 +54,13 @@ class TestEnsureClean(GitTestCase):
         (self.root / ".agents").mkdir()
         (self.root / ".agents" / "agents.toml").write_text("x", encoding="utf-8")
         _run(self.root, "add", "-A")
-        _run(self.root, "commit", "-m", "track agents dir")
+        _run(self.root, "commit", "-m", "track management dir")
         (self.root / ".agents" / "agents.log").write_text("live", encoding="utf-8")
         ensure_clean(self.root, excludes=(".agents/agents.log",))
 
     def test_without_excludes_runtime_log_counts_as_dirty(self):
         (self.root / "agents.log").write_text("live", encoding="utf-8")
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             ensure_clean(self.root)
 
 
@@ -142,7 +142,7 @@ class TestEnsureWorktree(GitTestCase):
         path.mkdir(parents=True)
         (path / "keep.txt").write_text("do not overwrite\n", encoding="utf-8")
 
-        with self.assertRaisesRegex(AgentsError, "not a valid worktree of this repo"):
+        with self.assertRaisesRegex(AssentError, "not a valid worktree of this repo"):
             ensure_worktree(self.root, "parallel01")
         self.assertEqual((path / "keep.txt").read_text(encoding="utf-8"),
                          "do not overwrite\n")
@@ -376,7 +376,7 @@ class TestRestore(GitTestCase):
 
 class TestGitMissing(unittest.TestCase):
     def test_missing_git_raises_workflow_error(self):
-        import agents.gitops as gitops
+        import assent.gitops as gitops
         original = gitops.subprocess.run
 
         def fake_run(cmd, **kwargs):
@@ -384,7 +384,7 @@ class TestGitMissing(unittest.TestCase):
 
         gitops.subprocess.run = fake_run
         try:
-            with self.assertRaises(AgentsError):
+            with self.assertRaises(AssentError):
                 ensure_clean(Path("."))
         finally:
             gitops.subprocess.run = original

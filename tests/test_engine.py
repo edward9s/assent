@@ -15,10 +15,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agents import AgentsError, engine, gitops
-from agents.adapters import Adapter, TaskResult
-from agents.config import load_config
-from agents.plan import append_entry, journal_path_for, parse_task_file, set_status
+from assent import AssentError, engine, gitops
+from assent.adapters import Adapter, TaskResult
+from assent.config import load_config
+from assent.plan import append_entry, journal_path_for, parse_task_file, set_status
 
 _OK = 'python -c "raise SystemExit(0)"'
 _FAILV = 'python -c "raise SystemExit(3)"'
@@ -159,7 +159,7 @@ class TestRunSuccess(EngineTestCase):
 
         for options in ({"once": True}, {"task_id": "t001"}):
             with self.subTest(options=options), mock.patch(
-                    "agents.engine.lockfile.hold_lock") as hold_lock:
+                    "assent.engine.lockfile.hold_lock") as hold_lock:
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     result = engine.run(cfg, adapter=adapter, **options)
@@ -476,7 +476,7 @@ class TestAcceptanceGates(EngineTestCase):
         self.assertIn("Reason:", adapter.calls[1][0])       # retry prompt carries the failure reason
         self.assertIn("outside.py", self._git_execution(
             "ls-files"))  # output not discarded, gathered into the checkpoint
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         blocked = next(e for e in entries if e["by"] == "scheduler"
                        and e["event"] == "blocked")
@@ -517,7 +517,7 @@ class TestAcceptanceGates(EngineTestCase):
 
         self.run_quiet(cfg, once=True, adapter=ScriptedAdapter([tamper]))
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         self.assertTrue(any("fields other than status" in e["summary"]
                             for e in entries if e["by"] == "scheduler"))
@@ -589,7 +589,7 @@ class TestQuotaAndResume(EngineTestCase):
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(plan01/t001): ")
                             for s in subjects))
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         quota = next(e for e in entries if e["event"] == "quota")
         self.assertEqual(quota["agent"], "claude")
@@ -620,7 +620,7 @@ class TestInterruptedTaskResume(EngineTestCase):
         self.assertEqual(self.run_quiet(
             cfg, once=True, adapter=ScriptedAdapter([interrupted])), 130)
         self.assertEqual(parse_task_file(path).status, "WIP")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         interrupt = next(e for e in entries
                          if e["by"] == "scheduler"
@@ -635,18 +635,18 @@ class TestInterruptedTaskResume(EngineTestCase):
         self.assertIn("resume", adapter.calls[0][0])
         self.assertEqual(parse_task_file(path).status, "DONE")
 
-    def test_agents_error_marks_current_task_wip_and_keeps_exit_code(self):
+    def test_assent_error_marks_current_task_wip_and_keeps_exit_code(self):
         path = self.write_task(1)
         cfg = self.build()
         self.commit_all()
 
         def failed(prompt):
-            raise AgentsError("連線中斷")
+            raise AssentError("連線中斷")
 
         self.assertEqual(self.run_quiet(
             cfg, once=True, adapter=ScriptedAdapter([failed])), 1)
         self.assertEqual(parse_task_file(path).status, "WIP")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         self.assertTrue(any(e["event"] == "interrupt"
                             and "infrastructure error" in e["summary"]
@@ -681,7 +681,7 @@ class TestInterruptedTaskResume(EngineTestCase):
             cfg, once=True, adapter=ScriptedAdapter([quota]),
             sleep=interrupt_sleep), 130)
         self.assertEqual(parse_task_file(path).status, "WIP")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         events = [e["event"] for e in read_entries(journal_path_for(path))]
         self.assertIn("quota", events)
         self.assertIn("interrupt", events)
@@ -896,7 +896,7 @@ class TestQueries(EngineTestCase):
             self.ai_done(p1, {"src/done.py": "ok"}), fail_step])
         self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
 
-        from agents.plan import Plan
+        from assent.plan import Plan
         text = engine.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("t001  DONE", text)
         self.assertIn("t002  BLOCKED", text)
@@ -957,7 +957,7 @@ class TestQueries(EngineTestCase):
             'by = "ai"\nevent = "blocked"\nsummary = "舊日誌仍可讀"\n',
             encoding="utf-8")
         cfg = self.build()
-        from agents.plan import Plan
+        from assent.plan import Plan
         text = engine.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("last journal (ai): 舊日誌仍可讀", text)
 

@@ -11,12 +11,12 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agents import AgentsError
-from agents.adapters import TaskResult, get_adapter
-from agents.adapters.claude import (
+from assent import AssentError
+from assent.adapters import TaskResult, get_adapter
+from assent.adapters.claude import (
     ClaudeAdapter, build_command, format_stream_event, parse_output_for_quota,
     run_subprocess)
-from agents.config import Config
+from assent.config import Config
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -214,10 +214,10 @@ class TestFormatStreamEvent(unittest.TestCase):
 class TestRunTask(unittest.TestCase):
     def setUp(self):
         self._orig = __import__(
-            "agents.adapters.claude", fromlist=["run_subprocess"]).run_subprocess
+            "assent.adapters.claude", fromlist=["run_subprocess"]).run_subprocess
 
     def patch_run(self, fake):
-        import agents.adapters.claude as mod
+        import assent.adapters.claude as mod
         mod.run_subprocess = fake
         self.addCleanup(setattr, mod, "run_subprocess", self._orig)
 
@@ -246,7 +246,7 @@ class TestRunTask(unittest.TestCase):
 
     def test_unknown_tier_raises(self):
         adapter = ClaudeAdapter(make_cfg(claude_models={"core": "opus"}))
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             adapter.resolve_model("prime")
 
     def test_quota_output_sets_flags(self):
@@ -277,7 +277,7 @@ class TestGetAdapter(unittest.TestCase):
         self.assertIsInstance(get_adapter("claude", make_cfg()), ClaudeAdapter)
 
     def test_unknown_name_raises(self):
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             get_adapter("definitely-unknown", make_cfg())
 
 

@@ -10,10 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agents import AgentsError
+from assent import AssentError
 
 if TYPE_CHECKING:
-    from agents.config import Config
+    from assent.config import Config
 
 
 @dataclass
@@ -39,9 +39,9 @@ class Adapter:                     # Base class for each vendor's adapter
 def get_adapter(name: str, cfg: "Config") -> Adapter:
     """Get an adapter instance by name; cfg is injected here (includes the tier -> model mapping)."""
     if name == "claude":
-        from agents.adapters.claude import ClaudeAdapter  # Deferred import to avoid a circular import
+        from assent.adapters.claude import ClaudeAdapter  # Deferred import to avoid a circular import
         return ClaudeAdapter(cfg)
     if name == "codex":
-        from agents.adapters.codex import CodexAdapter
+        from assent.adapters.codex import CodexAdapter
         return CodexAdapter(cfg)
-    raise AgentsError(f"unknown adapter: {name!r} (built in: 'claude' / 'codex')")
+    raise AssentError(f"unknown adapter: {name!r} (built in: 'claude' / 'codex')")
