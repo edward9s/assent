@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assent.__main__ import _start_stdin_stop_watcher, main
+from assent.adapters.process import clear_stop_wake
 from assent.init import init as run_init
 from tests.test_contracts import install_global_contracts
 
@@ -659,6 +660,32 @@ print(result.returncode, flush=True)
 
         self.assertFalse(thread.is_alive())
         interrupt.assert_called_once_with()
+
+    def test_stdin_eof_wakes_blocking_waits_after_marking_the_interrupt(self):
+        """interrupt_main() only makes the exception pending, so the watcher
+        must also release whatever wait the main thread is parked in -- and in
+        that order, so the wait is never woken before there is anything to
+        deliver."""
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        self.addCleanup(reader.close)
+        self.addCleanup(clear_stop_wake)
+
+        class FakeStdin:
+            buffer = reader
+
+        order: list[str] = []
+        with patch.dict(os.environ, {"ASSENT_STDIN_STOP": "1"}), patch.object(
+                sys, "stdin", FakeStdin()), patch(
+                "assent.__main__._thread.interrupt_main",
+                side_effect=lambda: order.append("interrupt")), patch(
+                "assent.__main__.wake_stop_waiters",
+                side_effect=lambda: order.append("wake")):
+            thread = _start_stdin_stop_watcher()
+            os.close(write_fd)
+            thread.join(timeout=10)
+
+        self.assertEqual(order, ["interrupt", "wake"])
 
     @unittest.skipUnless(os.name == "nt", "stdin pipe inheritance hang is Windows-only")
     def test_watcher_pipe_is_not_inherited_by_git_subprocess(self):

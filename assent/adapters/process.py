@@ -6,6 +6,9 @@ display, and reap the child on interrupt.  That mechanism is not vendor knowledg
 lives here rather than inside one vendor's module; a vendor adapter importing another
 vendor adapter just to reuse it made the two impossible to change independently
 (2026-07-27: moved out of ``assent.adapters.claude``, behaviour unchanged).
+
+It also owns the stop-wake mechanism every scheduler-owned blocking wait shares
+(2026-07-28); see the section below for why it lives here.
 """
 from __future__ import annotations
 
@@ -16,6 +19,79 @@ import time
 from pathlib import Path
 
 _SENTINEL = object()
+# Pushed into a waiting queue only to end a blocking get(); never collected as output.
+_WAKE = object()
+
+
+# --------------------------------------------------------------------------- #
+# Stop wake
+# --------------------------------------------------------------------------- #
+# ``run --all`` stops a work-folder child by closing its stdin, and the child's
+# watcher turns that EOF into ``_thread.interrupt_main()``.  That call only marks
+# a KeyboardInterrupt *pending*: it is delivered when the main thread next runs
+# bytecode.  A main thread parked in ``time.sleep`` (the quota countdown) or in a
+# blocking ``queue.get`` (the output collection below) therefore keeps waiting --
+# for a whole countdown segment, for the watchdog duration, or forever when the
+# watchdog is disabled.  All that time the child legitimately still owns the
+# task-folder lock, so the next ``run --all`` is refused even though the command
+# looked finished.
+#
+# The fix is one wake mechanism shared by every such wait: an Event the sleeps
+# wait on, plus a sentinel pushed into each registered output queue.  Waking is
+# all it does -- the pending KeyboardInterrupt is still what stops the run; this
+# only gives it a bytecode boundary to land on.  Nothing polls, so the watchdog's
+# elapsed-time semantics are untouched.
+#
+# It lives in this module because it is the one place ``assent.engine`` and every
+# vendor adapter already depend on, and nothing in ``assent`` imports back into
+# it.
+_wake = threading.Event()
+_wake_lock = threading.Lock()
+_wake_queues: list["queue.Queue"] = []
+
+
+def wake_stop_waiters() -> None:
+    """Release every scheduler-owned blocking wait in this process."""
+    with _wake_lock:
+        _wake.set()
+        pending = list(_wake_queues)
+    for waiting in pending:
+        waiting.put(_WAKE)
+
+
+def clear_stop_wake() -> None:
+    """Forget a previous stop request so a later, unrelated wait still waits.
+
+    ``run`` and ``run_subprocess`` are in-process library and test entry points
+    as well as scheduler steps; without this, one stop request would make every
+    later countdown and adapter session return immediately.
+    """
+    with _wake_lock:
+        _wake.clear()
+
+
+def stop_wake_requested() -> bool:
+    return _wake.is_set()
+
+
+def interruptible_sleep(seconds: float) -> None:
+    """``time.sleep`` that also returns as soon as a stop has been requested."""
+    _wake.wait(seconds)
+
+
+def _register_wake_queue(waiting: "queue.Queue") -> None:
+    """Let wake_stop_waiters() unblock this queue until it is unregistered."""
+    with _wake_lock:
+        _wake_queues.append(waiting)
+        requested = _wake.is_set()
+    if requested:   # requested between clear_stop_wake() and this registration
+        waiting.put(_WAKE)
+
+
+def _unregister_wake_queue(waiting: "queue.Queue") -> None:
+    with _wake_lock:
+        if waiting in _wake_queues:
+            _wake_queues.remove(waiting)
 
 
 def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
@@ -34,6 +110,7 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
     Returns (returncode, full output text, stalled). stalled=True means it was killed on timeout.
     stderr is merged into stdout so quota/error messages are never missed.
     """
+    clear_stop_wake()   # this session's waits are not stopped by an earlier run's request
     proc = subprocess.Popen(
         command, cwd=str(cwd),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -54,6 +131,7 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
     lines: list[str] = []
     stalled = False
     last_activity = time.time()
+    _register_wake_queue(q)
     try:
         try:
             while True:
@@ -74,6 +152,11 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
                     stalled = True
                     proc.kill()
                     break
+                if item is _WAKE:
+                    # A stop was requested.  The pending KeyboardInterrupt has
+                    # normally already been delivered on the way to this line;
+                    # raising covers a caller that woke us without one.
+                    raise KeyboardInterrupt
                 if item is _SENTINEL:
                     break
                 lines.append(item)
@@ -92,7 +175,7 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
                         item = q.get_nowait()
                     except queue.Empty:
                         break
-                    if item is not _SENTINEL:
+                    if item is not _SENTINEL and item is not _WAKE:
                         lines.append(item)
         except KeyboardInterrupt:
             # Never rely solely on the console's own signal propagation to the child: kill it
@@ -102,6 +185,7 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
             proc.wait()
             raise
     finally:
+        _unregister_wake_queue(q)
         if proc.stdout is not None:
             proc.stdout.close()
 

@@ -13,6 +13,7 @@ from collections import Counter
 
 from assent import AssentError, contracts, engine, inspection
 from assent.accept import accept_folder
+from assent.adapters.process import wake_stop_waiters
 from assent.archive import archive_all, archive_folder, restore_folder
 from assent.batch_accept import accept_all, accept_selected_batch
 from assent.clean import clean_folders
@@ -576,6 +577,13 @@ def _start_stdin_stop_watcher() -> threading.Thread | None:
     interrupt entry, the wip checkpoint, exit 130. As a side effect a child
     whose parent crashes also cleans itself up instead of becoming an orphan.
 
+    ``interrupt_main()`` only makes that exception pending until the main thread
+    next runs bytecode, so it is paired with ``wake_stop_waiters()``: the
+    interrupt is marked first, then every scheduler-owned blocking wait (quota
+    countdown, adapter output queue) is released, and the exception is delivered
+    at once instead of after a countdown segment, the watchdog duration, or --
+    with the watchdog disabled -- never.
+
     Without ``ASSENT_STDIN_STOP`` no thread is started at all, so a manual
     ``assent run`` keeps its stdin untouched.
     """
@@ -617,6 +625,7 @@ def _start_stdin_stop_watcher() -> threading.Thread | None:
             if owns_watcher_stream:
                 watcher_stream.close()
         _thread.interrupt_main()
+        wake_stop_waiters()
 
     thread = threading.Thread(target=watch, name="assent-stdin-stop", daemon=True)
     thread.start()

@@ -113,6 +113,29 @@ class TestHoldLock(unittest.TestCase):
             pass
         self.assertTrue((self.tasks_dir / LOCK_NAME).is_file())
 
+    def test_leftover_lockfile_is_not_mistaken_for_an_active_lock(self):
+        """A file left behind by a forcibly terminated run, with a PID that is
+        not this process, still grants the lock: ownership is the OS handle, and
+        the recorded PID is diagnostics only."""
+        path = self.tasks_dir / LOCK_NAME
+        path.write_text(
+            'pid = 999999\nstarted_at = "2026-01-01T00:00:00+00:00"\n'
+            'folder = "parallel01"\n', encoding="utf-8")
+        with hold_lock(self.tasks_dir, "parallel01"):
+            pass
+        self.assertTrue(path.is_file())
+
+    def test_killed_holder_frees_the_lock_for_the_next_run_immediately(self):
+        """The scheduler's forced tree termination is the backstop for a child
+        that will not stop on its own, so the run it kills must not leave the
+        task folder locked against the next one."""
+        proc = self._start_holder()
+        proc.kill()
+        self.assertNotEqual(proc.wait(timeout=10), 0)  # not a clean release
+        with hold_lock(self.tasks_dir, "parallel01"):
+            pass
+        self.assertTrue((self.tasks_dir / LOCK_NAME).is_file())
+
     def test_git_excludes_contains_lockfile(self):
         """Config.git_excludes contains the lock file's relative path (not tracked by git, not part of clean/scope checks)."""
         (self.root / ".assent" / "assent.toml").write_text(

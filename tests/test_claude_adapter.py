@@ -5,17 +5,22 @@ functions — never a real claude CLI, never the network (ground rule 4). The re
 probed once to record a fixture; see stream_json_ok.txt.
 """
 import json
+import subprocess
 import sys
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from assent import AssentError
 from assent.adapters import TaskResult, get_adapter
+from assent.adapters import process as process_runner
 from assent.adapters.claude import (
     ClaudeAdapter, build_command, format_stream_event, parse_output_for_billing,
     parse_output_for_quota, run_subprocess)
+from assent.adapters.process import clear_stop_wake, wake_stop_waiters
 from assent.config import Config
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -212,6 +217,68 @@ class TestRunSubprocess(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(stalled)
         self.assertIn("still here", out)
+
+
+class TestRunSubprocessStopWake(unittest.TestCase):
+    """A stop request must end output collection at once.
+
+    The queue has no timeout when the watchdog is disabled, so a silent CLI used
+    to keep the whole work-folder process -- and therefore its task-folder lock
+    -- alive indefinitely after the scheduler had asked it to stop.
+    """
+
+    # Comfortably longer than starting a process, far shorter than the child's
+    # own sleep, so a hang fails the test instead of slowing it down.
+    _BOUND = 30
+
+    def setUp(self):
+        self.addCleanup(clear_stop_wake)
+
+    def wake_soon(self) -> None:
+        """Stand in for the stdin watcher waking the collection mid-run."""
+        timer = threading.Timer(0.5, wake_stop_waiters)
+        timer.daemon = True
+        timer.start()
+        self.addCleanup(timer.cancel)
+
+    def test_wake_ends_a_silent_child_with_the_watchdog_disabled(self):
+        children: list[subprocess.Popen] = []
+        real_popen = subprocess.Popen
+
+        def spy(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            return child
+
+        self.wake_soon()
+        started = time.monotonic()
+        with mock.patch.object(process_runner.subprocess, "Popen", spy):
+            with self.assertRaises(KeyboardInterrupt):
+                run_subprocess(_py("import time; time.sleep(300)"), Path("."),
+                               stall_seconds=0)  # 0 = watchdog disabled
+
+        self.assertLess(time.monotonic() - started, self._BOUND)
+        # Killed and reaped before the interrupt propagated: no AI descendant
+        # and no zombie survives the session.
+        self.assertIsNotNone(children[0].poll())
+
+    def test_wake_ends_a_child_the_watchdog_would_still_be_waiting_for(self):
+        self.wake_soon()
+        started = time.monotonic()
+        with self.assertRaises(KeyboardInterrupt):
+            run_subprocess(_py("import time; time.sleep(300)"), Path("."),
+                           stall_seconds=300)
+        self.assertLess(time.monotonic() - started, self._BOUND)
+
+    def test_stale_stop_request_does_not_shorten_a_later_run(self):
+        """One stop request must not make every later in-process adapter run
+        return early."""
+        wake_stop_waiters()
+        rc, out, stalled = run_subprocess(
+            _py("print('ok')"), Path("."), stall_seconds=10)
+        self.assertEqual(rc, 0)
+        self.assertFalse(stalled)
+        self.assertIn("ok", out)
 
 
 class TestFormatStreamEvent(unittest.TestCase):

@@ -377,6 +377,10 @@ def _interrupt_and_wait(
     through the terminal-log sink, so a second Ctrl+C can land there just as
     easily as in the wait, and an escape at that point would leave the children
     running with nothing having been notified.
+
+    ``active`` is emptied on the way out, so this is idempotent: every child in
+    it has either exited or been through the forced tree termination, and a
+    caller may call it again on any exit path without notifying anyone twice.
     """
     escalate: set[str] = set()
     try:
@@ -410,6 +414,8 @@ def _interrupt_and_wait(
         _drain_output(output)
     except KeyboardInterrupt:
         _force_cleanup(active, readers, output, "second user interrupt")
+    finally:
+        active.clear()
 
 
 def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
@@ -524,3 +530,11 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
     except KeyboardInterrupt:
         _interrupt_and_wait(active, readers, output)
         return 130
+    finally:
+        # The parent owns every child it started, on every exit path -- a
+        # refusal or a scheduling error must not return while children it
+        # launched keep running and holding their task-folder locks.
+        # _interrupt_and_wait empties `active`, so the interrupt paths above do
+        # not repeat the notification here.
+        if active:
+            _interrupt_and_wait(active, readers, output)
