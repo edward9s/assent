@@ -6,8 +6,11 @@ individual tasks may swap in a faster or stricter command.
 TODO: replace the "project checks" examples below with your project's actual check commands.
 """
 
+import concurrent.futures
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # On Windows, stdout redirected to a pipe/file defaults to the system code page, which garbles non-ASCII text
@@ -47,6 +50,69 @@ def check_committed_delta() -> None:
         fail("unable to determine the candidate's first parent")
 
 
+def _resolve_jobs(module_count: int) -> int:
+    """Pick the thread pool size: env override, falling back to cpu-scaled default."""
+    default = min(module_count, os.cpu_count() or 2)
+    raw = os.environ.get("ASSENT_VERIFY_JOBS")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value <= 0:
+        return default
+    return value
+
+
+def run_unittest_parallel(start_dir: str = "tests", jobs: int | None = None) -> None:
+    """Run each start_dir/test_*.py module in its own subprocess, concurrently.
+
+    Process isolation (not threads) is deliberate: unittest modules mutate
+    process-global state (os.chdir, os.environ), so sharing one interpreter
+    across modules would let them corrupt each other. Threads here only wait
+    on subprocesses; they never run test code directly.
+    """
+    test_dir = ROOT / start_dir
+    modules = sorted(path.stem for path in test_dir.glob("test_*.py"))
+    if not modules:
+        fail(f"no test_*.py modules found under {start_dir}")
+
+    if jobs is None:
+        jobs = _resolve_jobs(len(modules))
+
+    def run_module(name: str):
+        started = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, "-m", "unittest", f"{start_dir}.{name}"],
+            cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace",
+        )
+        elapsed = time.monotonic() - started
+        return proc.returncode, elapsed, proc.stdout, proc.stderr
+
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {executor.submit(run_module, name): name for name in modules}
+        for future in concurrent.futures.as_completed(futures):
+            results[futures[future]] = future.result()
+
+    failed = [name for name in modules if results[name][0] != 0]
+    for name in modules:
+        returncode, elapsed, _stdout, _stderr = results[name]
+        status = "pass" if returncode == 0 else "fail"
+        print(f"{name}: {status} ({elapsed:.2f}s)")
+
+    if failed:
+        for name in failed:
+            _returncode, _elapsed, stdout, stderr = results[name]
+            print(f"--- {name} output ---")
+            if stdout:
+                print(stdout)
+            if stderr:
+                print(stderr)
+        fail(f"test module(s) failed: {', '.join(failed)}")
+
+
 # --- Worktree integrity check (keep) ---
 run("git", "diff", "--check")
 check_committed_delta()
@@ -67,5 +133,6 @@ check_committed_delta()
 # run("ruff", "check", ".")
 # run("ruff", "format", "--check", ".")
 # run("pytest")
+# run_unittest_parallel()
 
 print("verify: OK")
