@@ -274,13 +274,15 @@ class TestLoadConfig(ConfigTestCase):
                 load_config(self.write(text), "plan01")
 
     def test_bad_efforts_values_rejected(self):
+        # A wrong type is a type refusal; a blank string is an explicit-but-useless
+        # value, refused by dotted key (see TestBlankOverrideSemantics).
         cases = (
             ('[adapter.claude.efforts]\nheavy = ""\n',
-             r"\[adapter\.claude\.efforts\].*non-empty string"),
+             r"adapter\.claude\.efforts\.heavy is blank"),
             ('[adapter.claude.efforts]\nnormal = 1\n',
              r"\[adapter\.claude\.efforts\].*non-empty string"),
             ('[adapter.codex.efforts.lite]\nslight = "   "\n',
-             r"\[adapter\.codex\.efforts\.lite\].*non-empty string"),
+             r"adapter\.codex\.efforts\.lite\.slight is blank"),
             ('[adapter.codex.efforts.lite]\nheavy = false\n',
              r"\[adapter\.codex\.efforts\.lite\].*non-empty string"),
         )
@@ -498,6 +500,124 @@ class TestLayeredConfig(ConfigTestCase):
         # a worktree copy keeps the same answer about where a setting came from
         self.assertEqual(cfg.for_worktree(self.root).source_of("adapter.name"),
                          PROJECT_LAYER)
+
+
+class TestBlankOverrideSemantics(ConfigTestCase):
+    """Absence inherits; a blank value is explicit and never a hidden inherit request."""
+
+    def test_omitted_project_key_and_empty_project_table_keep_the_user_value(self):
+        self.write_user(
+            '[adapter]\nname = "codex"\n'
+            '[adapter.codex]\ncommand = "codex.cmd"\n'
+            '[watchdog]\nstall_minutes = 7\n')
+        # [adapter.codex] is stated but empty, [watchdog] is omitted entirely:
+        # neither contributes a leaf override.
+        project = self.write('[adapter.codex]\n[prompt]\n')
+        cfg = load_config(project, "plan01")
+        self.assertEqual(cfg.adapter_name, "codex")
+        self.assertEqual(cfg.codex_command, "codex.cmd")
+        self.assertEqual(cfg.stall_minutes, 7)
+        # an empty table states no leaf, so provenance still points at the user file
+        self.assertEqual(cfg.source_of("adapter.codex.command"), USER_LAYER)
+        self.assertEqual(cfg.source_of("watchdog.stall_minutes"), USER_LAYER)
+        self.assertEqual([source.layer for source in cfg.sources],
+                         [BUILTIN_LAYER, USER_LAYER, PROJECT_LAYER])
+
+    def test_empty_project_array_clears_the_user_array(self):
+        self.write_user('[adapter.claude]\nextra_args = ["--user-a", "--user-b"]\n')
+        cfg = load_config(
+            self.write('[adapter.claude]\nextra_args = []\n'), "plan01")
+        self.assertEqual(cfg.claude_extra_args, [])
+        self.assertEqual(cfg.source_of("adapter.claude.extra_args"), PROJECT_LAYER)
+
+    def test_empty_array_is_still_refused_where_the_schema_forbids_it(self):
+        self.write_user('[adapter]\nname = ["claude", "codex"]\n')
+        with self.assertRaisesRegex(AssentError, "non-empty list"):
+            load_config(self.write('[adapter]\nname = []\n'), "plan01")
+
+    def test_valueless_key_is_invalid_toml_naming_the_offending_file(self):
+        self.write_user('[run]\nretry_per_task = 2\n')
+        project = self.write("[adapter.claude]\ncommand =\n")
+        with self.assertRaises(AssentError) as raised:
+            load_config(project, "plan01")
+        message = str(raised.exception)
+        self.assertIn("Project config file is not valid TOML", message)
+        self.assertIn(str(project.resolve()), message)
+
+    def test_blank_operational_strings_fail_at_load_naming_key_and_source(self):
+        # Every setting whose contract is "useful text": adapter selection, adapter
+        # commands, model mappings, prompt templates, and effort translations.  Each is
+        # refused while loading the config, not later when an adapter is launched.
+        cases = (
+            ('[adapter]\nname = ""\n', "adapter.name"),
+            ('[adapter]\nname = ["claude", "  "]\n', "adapter.name"),
+            ('[adapter.claude]\ncommand = "   "\n', "adapter.claude.command"),
+            ('[adapter.codex.models]\ncore = ""\n', "adapter.codex.models.core"),
+            ('[prompt]\ntemplate = "\\t"\n', "prompt.template"),
+            ('[adapter.claude.efforts]\nnormal = ""\n',
+             "adapter.claude.efforts.normal"),
+            ('[adapter.antigravity.efforts.lite]\nheavy = " "\n',
+             "adapter.antigravity.efforts.lite.heavy"),
+        )
+        for text, dotted in cases:
+            with self.subTest(dotted=dotted, layer=PROJECT_LAYER):
+                user = self.write_user(_MINIMAL)
+                project = self.write(text)
+                with self.assertRaises(AssentError) as raised:
+                    load_config(project, "plan01")
+                message = str(raised.exception)
+                self.assertIn(f"Config {dotted} is blank", message)
+                self.assertIn(PROJECT_LAYER, message)
+                self.assertIn(str(project.resolve()), message)
+                self.assertNotIn(str(user), message)
+            with self.subTest(dotted=dotted, layer=USER_LAYER):
+                user = self.write_user(text)
+                self.write(_MINIMAL)
+                with self.assertRaises(AssentError) as raised:
+                    load_config(self.project_config, "plan01")
+                message = str(raised.exception)
+                self.assertIn(f"Config {dotted} is blank", message)
+                self.assertIn(USER_LAYER, message)
+                self.assertIn(str(user), message)
+
+    def test_blank_project_value_never_falls_back_to_a_valid_user_value(self):
+        user = self.write_user('[adapter.claude]\ncommand = "claude.cmd"\n')
+        project = self.write('[adapter.claude]\ncommand = ""\n')
+        with self.assertRaises(AssentError) as raised:
+            load_config(project, "plan01")
+        message = str(raised.exception)
+        self.assertIn("adapter.claude.command is blank", message)
+        self.assertIn(str(project.resolve()), message)
+        self.assertNotIn(str(user), message)
+
+    def test_enumerated_settings_keep_their_own_domain_refusal(self):
+        # Blank handling must not displace the existing domain checks.
+        with self.assertRaisesRegex(AssentError, "receipt_refresh"):
+            load_config(self.write(
+                '[verification]\nreceipt_refresh = ""\n'), "plan01")
+        with self.assertRaisesRegex(AssentError, "is not a valid effort"):
+            load_config(self.write(
+                '[adapter.claude.default_effort]\ncore = ""\n'), "plan01")
+
+    def test_project_file_of_only_empty_tables_changes_nothing(self):
+        self.write_user(
+            '[adapter]\nname = "claude"\n'
+            '[adapter.claude.models]\ncore = "user-core"\n'
+            '[adapter.claude.efforts.lite]\nheavy = "user-heavy"\n')
+        cfg = load_config(self.write(
+            "[adapter]\n[adapter.claude]\n[adapter.claude.models]\n"
+            "[adapter.claude.efforts]\n[adapter.claude.efforts.lite]\n"
+            "[run]\n[watchdog]\n[prompt]\n[verification]\n"), "plan01")
+        # the user's stated models table still replaces the built-in one whole,
+        # exactly as it does without the project file
+        self.assertEqual(cfg.claude_models, {"core": "user-core"})
+        self.assertEqual(cfg.claude_tier_efforts, {"lite": {"heavy": "user-heavy"}})
+        self.assertEqual(cfg.claude_default_effort,
+                         {"prime": "heavy", "core": "heavy", "lite": "normal"})
+        self.assertEqual(cfg.source_of("adapter.claude.models.core"), USER_LAYER)
+        self.assertEqual(cfg.source_of("adapter.claude.efforts.lite.heavy"),
+                         USER_LAYER)
+        self.assertEqual(cfg.receipt_refresh, "manual")
 
 
 class TestAdapterSettings(ConfigTestCase):

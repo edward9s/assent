@@ -10,6 +10,10 @@
   that name plus "/".
 - Fields not supplied fall back to defaults; an unknown top-level key is
   always an error (so a typo cannot fail silently).
+- Absence is the only way to inherit.  TOML has no null, so a blank string is
+  an explicit value, not a request to fall back: for settings that need useful
+  text it is refused at load time, naming the dotted key and the file that
+  stated it, rather than quietly reinstating a lower layer or a built-in.
 """
 from __future__ import annotations
 
@@ -374,7 +378,40 @@ def _default_effort_map(section: dict, owner: str,
     return merged
 
 
-def _parse_adapter_names(section: dict) -> tuple[str, ...]:
+class _BlankGuard:
+    """Refuse blank operational strings, naming the dotted key and the offending file.
+
+    A higher layer that states ``key = ""`` must never look like an omission: it would
+    otherwise hide a valid user value or silently select a built-in fallback, and the
+    breakage would surface much later as an unusable adapter command line.  Enumerated
+    settings keep their own domain checks; this guard only covers settings whose contract
+    is "some useful text".
+    """
+
+    def __init__(self, provenance: dict[str, str],
+                 sources: tuple[ConfigSource, ...]) -> None:
+        self._provenance = provenance
+        self._paths = {source.layer: source.path for source in sources}
+
+    def text(self, value, dotted: str):
+        if isinstance(value, str) and not value.strip():
+            layer = self._provenance.get(dotted, BUILTIN_LAYER)
+            path = self._paths.get(layer)
+            where = f"the {layer} config file ({path})" if path else f"the {layer} defaults"
+            raise AssentError(
+                f"Config {dotted} is blank in {where}: a blank value is an explicit"
+                " value, not a request to inherit; delete the key to fall back to the"
+                " lower layer")
+        return value
+
+    def values(self, mapping: dict[str, str], prefix: str) -> dict[str, str]:
+        """Apply the same rule to every value of a stated table."""
+        for key, value in mapping.items():
+            self.text(value, f"{prefix}.{key}")
+        return mapping
+
+
+def _parse_adapter_names(section: dict, guard: "_BlankGuard") -> tuple[str, ...]:
     """Parse the configured adapter name or ordered rotation list."""
     if "name" not in section:
         raw = "claude"
@@ -384,7 +421,7 @@ def _parse_adapter_names(section: dict) -> tuple[str, ...]:
         if isinstance(raw, str):
             # Preserve the legacy scalar path; adapter_settings() remains the
             # fail-closed validator for an unknown single adapter name.
-            names = (raw,)
+            names = (guard.text(raw, "adapter.name"),)
         elif isinstance(raw, list):
             if not raw:
                 raise AssentError(
@@ -393,6 +430,7 @@ def _parse_adapter_names(section: dict) -> tuple[str, ...]:
                 if not isinstance(name, str):
                     raise AssentError(
                         f"Config [adapter].name[{index}] must be a string")
+                guard.text(name, "adapter.name")
             names = tuple(raw)
         else:
             raise AssentError(
@@ -421,7 +459,7 @@ def _parse_adapter_names(section: dict) -> tuple[str, ...]:
     return names
 
 
-def _effort_maps(section: dict, owner: str,
+def _effort_maps(section: dict, owner: str, guard: "_BlankGuard",
                  default_flat: dict[str, str] | None = None,
                  default_tier: dict[str, dict[str, str]] | None = None
                  ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
@@ -451,9 +489,10 @@ def _effort_maps(section: dict, owner: str,
                     raise AssentError(
                         f"Config {block} key {effort!r} is not a valid effort"
                         f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
-                if not isinstance(requested, str) or not requested.strip():
+                if not isinstance(requested, str):
                     raise AssentError(
                         f"Config {block} {effort} must be a non-empty string")
+                guard.text(requested, f"{owner}.efforts.{key}.{effort}")
                 tier_values[effort] = requested
             by_tier[key] = tier_values
             continue
@@ -463,8 +502,9 @@ def _effort_maps(section: dict, owner: str,
             raise AssentError(
                 f"Config {block} key {key!r} is not a valid effort"
                 f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str):
             raise AssentError(f"Config {block} {key} must be a non-empty string")
+        guard.text(value, f"{owner}.efforts.{key}")
         flat[key] = value
     return flat, by_tier
 
@@ -651,13 +691,14 @@ def load_config(path: str | Path, folder: str) -> Config:
                    if "antigravity" in adapter else {})
     prompt = _section(data, "prompt")
     verification_section = _section(data, "verification")
-    adapter_names = _parse_adapter_names(adapter)
+    guard = _BlankGuard(provenance, sources)
+    adapter_names = _parse_adapter_names(adapter, guard)
     claude_efforts, claude_tier_efforts = _effort_maps(
-        claude, "adapter.claude")
+        claude, "adapter.claude", guard)
     codex_efforts, codex_tier_efforts = _effort_maps(
-        codex, "adapter.codex")
+        codex, "adapter.codex", guard)
     antigravity_efforts, antigravity_tier_efforts = _effort_maps(
-        antigravity, "adapter.antigravity",
+        antigravity, "adapter.antigravity", guard,
         default_tier=_DEFAULT_ANTIGRAVITY_TIER_EFFORTS)
 
     cfg = Config(
@@ -671,30 +712,40 @@ def load_config(path: str | Path, folder: str) -> Config:
         rotation_poll_minutes=_typed(run, "[run]", "rotation_poll_minutes", int, 1),
         adapter_name=adapter_names[0],
         adapter_names=adapter_names,
-        claude_command=_typed(claude, "[adapter.claude]", "command", str, "claude"),
+        claude_command=guard.text(
+            _typed(claude, "[adapter.claude]", "command", str, "claude"),
+            "adapter.claude.command"),
         claude_extra_args=_str_list(claude, "[adapter.claude]", "extra_args",
                                     _DEFAULT_EXTRA_ARGS),
-        claude_models=_str_map(claude, "adapter.claude", "models", _DEFAULT_MODELS),
+        claude_models=guard.values(
+            _str_map(claude, "adapter.claude", "models", _DEFAULT_MODELS),
+            "adapter.claude.models"),
         claude_default_effort=_default_effort_map(claude, "adapter.claude",
                                                   _DEFAULT_EFFORT),
         claude_efforts=claude_efforts,
         claude_tier_efforts=claude_tier_efforts,
-        codex_command=_typed(codex, "[adapter.codex]", "command", str, "codex"),
+        codex_command=guard.text(
+            _typed(codex, "[adapter.codex]", "command", str, "codex"),
+            "adapter.codex.command"),
         codex_extra_args=_str_list(codex, "[adapter.codex]", "extra_args",
                                    _DEFAULT_CODEX_EXTRA_ARGS),
-        codex_models=_str_map(codex, "adapter.codex", "models",
-                              _DEFAULT_CODEX_MODELS),
+        codex_models=guard.values(
+            _str_map(codex, "adapter.codex", "models", _DEFAULT_CODEX_MODELS),
+            "adapter.codex.models"),
         codex_default_effort=_default_effort_map(codex, "adapter.codex",
                                                  _DEFAULT_CODEX_EFFORT),
         codex_efforts=codex_efforts,
         codex_tier_efforts=codex_tier_efforts,
-        antigravity_command=_typed(antigravity, "[adapter.antigravity]",
-                                   "command", str, "agy"),
+        antigravity_command=guard.text(
+            _typed(antigravity, "[adapter.antigravity]", "command", str, "agy"),
+            "adapter.antigravity.command"),
         antigravity_extra_args=_str_list(antigravity, "[adapter.antigravity]",
                                          "extra_args",
                                          _DEFAULT_ANTIGRAVITY_EXTRA_ARGS),
-        antigravity_models=_str_map(antigravity, "adapter.antigravity", "models",
-                                    _DEFAULT_ANTIGRAVITY_MODELS),
+        antigravity_models=guard.values(
+            _str_map(antigravity, "adapter.antigravity", "models",
+                     _DEFAULT_ANTIGRAVITY_MODELS),
+            "adapter.antigravity.models"),
         antigravity_default_effort=_default_effort_map(
             antigravity, "adapter.antigravity", _DEFAULT_ANTIGRAVITY_EFFORT),
         antigravity_efforts=antigravity_efforts,
@@ -702,7 +753,8 @@ def load_config(path: str | Path, folder: str) -> Config:
         antigravity_print_timeout_minutes=_typed(
             antigravity, "[adapter.antigravity]", "print_timeout_minutes", int,
             _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES),
-        prompt_template=_typed(prompt, "[prompt]", "template", str, None),
+        prompt_template=guard.text(
+            _typed(prompt, "[prompt]", "template", str, None), "prompt.template"),
         receipt_refresh=_typed(verification_section, "[verification]",
                                "receipt_refresh", str, "manual"),
         sources=sources,
