@@ -1112,7 +1112,175 @@ def _batch_drift(configs: dict[str, Config], main: Path, excludes: Sequence[str]
     return changed
 
 
-def _verify_batch_locked(config_path: str, assent_dir: Path) -> int:
+@dataclass(frozen=True)
+class _PrefixRun:
+    """One full verification of a prefix of the recorded merge chain."""
+
+    passed: bool
+    step_trees: tuple[str, ...]
+    exit_code: int
+    failure_summary: str
+
+
+@dataclass(frozen=True)
+class BatchBisectResult:
+    """Which folder broke the batch, and what is still provably good.
+
+    ``kept`` is the longest prefix that was verified and passed during the
+    search, so ``kept_step_trees`` comes from a real full verification and never
+    from a re-run: the last passing step of a prefix bisection is always the
+    prefix immediately before the guilty folder.
+    """
+
+    guilty: str
+    guilty_summary: str
+    kept: tuple[tuple[str, str], ...] = ()
+    kept_step_trees: tuple[str, ...] = ()
+
+
+def _bisect_steps(count: int) -> int:
+    """Worst-case full verifications needed to localize among ``count`` folders."""
+    steps = 0
+    span = count
+    while span > 1:
+        span = (span + 1) // 2
+        steps += 1
+    return steps
+
+
+def _verify_prefix(main: Path, target_tip: str,
+                   sources: Sequence[tuple[str, str]],
+                   script: Path) -> _PrefixRun:
+    """Build and fully verify one prefix of an already-mergeable batch chain.
+
+    The whole chain merged cleanly before localization started, so truncating it
+    repeats a subset of the same merges and cannot conflict.  A conflict here
+    would mean the repository changed underneath the search, which fails closed
+    rather than being recorded as a test failure.
+    """
+    with gitops.temporary_integration_worktree(
+            main, "batch", target_tip) as (candidate, _branch):
+        chain = _merge_chain(candidate, sources)
+        if not chain.ok:
+            raise AssentError(
+                f"merging {chain.conflict_folder} conflicts while localizing a "
+                "batch failure, although the full chain merged cleanly; the "
+                "repository changed during verification")
+        try:
+            result = _run_full_verifier(script, candidate)
+        except OSError as e:
+            return _PrefixRun(False, chain.step_trees, 1,
+                              f"Unable to start verification: {e}")
+    if result.returncode == 0:
+        return _PrefixRun(True, chain.step_trees, 0, "")
+    return _PrefixRun(
+        False, chain.step_trees, result.returncode,
+        _summary(result.stdout, result.stderr,
+                 f"Verification command failed: {VERIFY_COMMAND} "
+                 f"(exit code {result.returncode})"))
+
+
+def bisect_batch_failure(main: Path, target_tip: str,
+                         sources: Sequence[tuple[str, str]], script: Path,
+                         failure_summary: str) -> BatchBisectResult:
+    """Localize a failed batch to the first folder whose merge turns it red.
+
+    The caller has already proven that the full chain merges cleanly and that
+    verifying all of it fails, so the search looks for the smallest failing
+    prefix by bisection: at most ``ceil(log2(N))`` full verifications instead of
+    the ``N`` a folder-by-folder walk would cost.  Batching exists to spend fewer
+    full runs, so localizing it must be cheap too.
+    """
+    total = len(sources)
+    steps = _bisect_steps(total)
+    if steps:
+        print(f"verify --batch: localizing the failure over {total} folders; "
+              f"at most {steps} more full verification(s)")
+    low, high = 1, total
+    last_pass: _PrefixRun | None = None
+    guilty_summary = failure_summary
+    step = 0
+    while low < high:
+        middle = (low + high) // 2
+        step += 1
+        prefix = tuple(sources[:middle])
+        print(f"verify --batch: localizing step {step}/{steps}: verifying "
+              f"{middle} of {total} folders ("
+              + ", ".join(folder for folder, _tip in prefix) + ")")
+        run = _verify_prefix(main, target_tip, prefix, script)
+        if run.passed:
+            last_pass = run
+            low = middle + 1
+        else:
+            high = middle
+            guilty_summary = run.failure_summary
+
+    guilty = sources[high - 1][0]
+    if high == 1:
+        return BatchBisectResult(guilty, guilty_summary)
+    if last_pass is None or len(last_pass.step_trees) != high - 1:
+        raise AssentError(
+            f"batch localization ended at {guilty} without a verified result "
+            f"for the {high - 1} folder(s) ahead of it")
+    return BatchBisectResult(
+        guilty, guilty_summary, tuple(sources[:high - 1]), last_pass.step_trees)
+
+
+def _dependent_folders(graph: dict, folder: str,
+                       candidates: Sequence[str]) -> tuple[str, ...]:
+    """Every candidate that transitively declares ``after`` on ``folder``."""
+    tainted = {folder}
+    growing = True
+    while growing:
+        growing = False
+        for name in candidates:
+            if name in tainted or name not in graph:
+                continue
+            if tainted.intersection(graph[name].after):
+                tainted.add(name)
+                growing = True
+    return tuple(name for name in candidates if name in tainted and name != folder)
+
+
+def _report_localization(assent_dir: Path, folders: Sequence[str],
+                         result: BatchBisectResult) -> str:
+    """Print the localization verdict and return the note stored in the receipt.
+
+    The guilty folder keeps its status and its task files: it is still finished
+    work awaiting a human decision, and this command only says which folder it
+    is.  ``rework`` and ``reject`` remain the only ways to reopen it.
+    """
+    try:
+        graph = parse_folder_dependency_graph(assent_dir)
+    except AssentError:
+        # Localization is a diagnostic; an unparsable graph must not hide the
+        # folder that was just proven guilty.
+        graph = {}
+    downstream = _dependent_folders(graph, result.guilty, folders)
+    print(f"verify --batch: localized the failure to {result.guilty}")
+    for line in result.guilty_summary.splitlines():
+        print(f"  {line}")
+    ejected = f"{result.guilty} is out of this batch"
+    if downstream:
+        ejected = (f"{result.guilty} and its downstream ("
+                   + ", ".join(downstream) + ") are out of this batch")
+    print(f"verify --batch: {ejected}. Its status and task files were not "
+          f"touched; decide with `assent rework {result.guilty}` or "
+          f"`assent reject {result.guilty}`")
+    note = (f"Batch localization: {result.guilty} is the first folder whose "
+            f"merge fails the full verification; {ejected}.")
+    if result.kept:
+        print("verify --batch: reissuing a PASSED batch receipt for the "
+              f"{len(result.kept)} folder(s) verified ahead of it: "
+              + ", ".join(folder for folder, _tip in result.kept))
+    else:
+        print("verify --batch: no folder ahead of it remains, so the batch "
+              "keeps a FAILED receipt and publishes nothing")
+    return _summary(note, result.guilty_summary)
+
+
+def _verify_batch_locked(config_path: str, assent_dir: Path,
+                         bisect: bool = True) -> int:
     """Build, verify, and record one batch candidate with every lock held."""
     root = assent_dir.parent
     main = gitops.main_worktree(root)
@@ -1162,6 +1330,7 @@ def _verify_batch_locked(config_path: str, assent_dir: Path) -> int:
         candidate_result = BatchCandidate()
         result: subprocess.CompletedProcess[str] | None = None
         start_failure = ""
+        localized = False
         with gitops.temporary_integration_worktree(
                 main, "batch", target_tip) as (candidate, _branch):
             candidate_result = _merge_chain(candidate, selection.sources)
@@ -1182,28 +1351,45 @@ def _verify_batch_locked(config_path: str, assent_dir: Path) -> int:
                   "ahead of it) before verifying the batch again")
             return 1
 
+        # A localization may shrink what the receipt certifies to the prefix
+        # ahead of the guilty folder, so the recorded sources and step trees are
+        # decided here rather than assumed to be the whole chain.
+        sources = selection.sources
+        step_trees = candidate_result.step_trees
         if start_failure:
-            receipt = _new_batch_receipt(
-                status="FAILED", target_tip=target_tip,
-                sources=selection.sources,
-                step_trees=candidate_result.step_trees, digest=digest,
-                exit_code=1, failure_summary=start_failure)
+            status, exit_code, summary = "FAILED", 1, start_failure
         else:
             assert result is not None
-            receipt = _new_batch_receipt(
-                status="PASSED" if result.returncode == 0 else "FAILED",
-                target_tip=target_tip, sources=selection.sources,
-                step_trees=candidate_result.step_trees, digest=digest,
-                exit_code=result.returncode,
-                failure_summary=("" if result.returncode == 0 else _summary(
-                    result.stdout, result.stderr,
-                    f"Verification command failed: {VERIFY_COMMAND} "
-                    f"(exit code {result.returncode})")))
+            status = "PASSED" if result.returncode == 0 else "FAILED"
+            exit_code = result.returncode
+            summary = "" if result.returncode == 0 else _summary(
+                result.stdout, result.stderr,
+                f"Verification command failed: {VERIFY_COMMAND} "
+                f"(exit code {result.returncode})")
+            if status == "FAILED" and bisect:
+                bisected = bisect_batch_failure(
+                    main, target_tip, selection.sources, script, summary)
+                summary = _report_localization(
+                    assent_dir, selection.folders, bisected)
+                localized = True
+                if bisected.kept:
+                    sources = bisected.kept
+                    step_trees = bisected.kept_step_trees
+                    status, exit_code = "PASSED", 0
+
+        receipt = _new_batch_receipt(
+            status=status, target_tip=target_tip, sources=sources,
+            step_trees=step_trees, digest=digest, exit_code=exit_code,
+            failure_summary=summary)
 
         changed = _batch_drift(
             configs, main, excludes, target_branch, target_tip,
             selection.sources, script, digest)
         if changed:
+            if localized:
+                print("verify --batch: the repository changed while the batch "
+                      "was being verified, so the localization above certifies "
+                      "nothing and the receipt records the drift instead")
             receipt = _new_batch_receipt(
                 status="FAILED", target_tip=target_tip,
                 sources=selection.sources,
@@ -1216,22 +1402,35 @@ def _verify_batch_locked(config_path: str, assent_dir: Path) -> int:
         print(f"  {source.folder}: source {source.source_tip[:12]} "
               f"-> tree {source.step_tree}")
     if receipt.status == "PASSED":
-        print(f"verify --batch: passed ({receipt.final_tree})")
-        return 0
+        if not localized:
+            print(f"verify --batch: passed ({receipt.final_tree})")
+            return 0
+        # The batch as requested did not pass, so the exit code stays nonzero
+        # even though a smaller batch is now certified: a caller must not read
+        # success for folders that were just proven, or suspected, broken.
+        print(f"verify --batch: failed, but {len(receipt.sources)} folder(s) "
+              f"kept a PASSED batch receipt ({receipt.final_tree}); "
+              "`assent accept --all` publishes exactly those")
+        return 1
     print(f"verify --batch: failed ({receipt.failure_summary.splitlines()[0]})")
     return 1
 
 
-def verify_batch(config_path: str, assent_dir: str | Path) -> int:
+def verify_batch(config_path: str, assent_dir: str | Path,
+                 bisect: bool = True) -> int:
     """Verify every queued folder as one candidate; zero only for PASSED.
 
     An empty batch is success with no receipt: there is nothing to certify, so
     inventing a receipt would be inventing evidence.
+
+    A failed batch is localized to the folder that breaks it, and the folders
+    ahead of that one keep the PASSED receipt they were already proven to earn.
+    ``bisect=False`` turns that off and simply records the failure.
     """
     assent_dir = Path(assent_dir)
     try:
         with hold_integration_lock(assent_dir):
-            return _verify_batch_locked(config_path, assent_dir)
+            return _verify_batch_locked(config_path, assent_dir, bisect)
     except LockBusy as e:
         print(f"verify --batch: refused ({e})")
         return 1

@@ -1,9 +1,10 @@
 """Scheduler handoff tests for unattended folder verification.
 
 The second half of this module covers ``assent verify --batch``: which folders
-enter one candidate, in what order they are merged, and what the resulting batch
-receipt certifies.  Those tests run against disposable local repositories rather
-than mocks, because the facts under test are Git facts.
+enter one candidate, in what order they are merged, what the resulting batch
+receipt certifies, and how a failed batch is localized to the single folder that
+breaks it.  Those tests run against disposable local repositories rather than
+mocks, because the facts under test are Git facts.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import engine, gitops, verification
+from assent.accept import accept_all
 from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
 from assent.verification import (
@@ -488,6 +490,178 @@ class TestBatchCandidateAndReceipt(BatchVerifyRepositoryCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(folder_receipt.read_text(encoding="utf-8"),
                          "placeholder\n")
+
+
+class TestBatchFailureLocalization(BatchVerifyRepositoryCase):
+    """Bisecting a failed batch down to the one folder that turns it red."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.run_log = self.parent / "verifier_runs.txt"
+
+    def write_verify_red_on(self, folder: str) -> None:
+        """Install a verifier that fails exactly when ``folder`` is merged in.
+
+        Every run appends to a log outside the repository, so a test can also
+        assert how many full verifications the localization actually spent.
+        """
+        self.write_verify(
+            "import pathlib\n"
+            "import sys\n"
+            f"pathlib.Path({str(self.run_log)!r}).open('a').write('run\\n')\n"
+            f"if pathlib.Path({folder + '.txt'!r}).exists():\n"
+            f"    print('regression introduced by {folder}')\n"
+            "    sys.exit(3)\n"
+            "sys.exit(0)\n")
+
+    def verifier_runs(self) -> int:
+        if not self.run_log.exists():
+            return 0
+        return len(self.run_log.read_text(encoding="utf-8").splitlines())
+
+    def make_batch(self, *folders: str) -> None:
+        for folder in folders:
+            self.make_source(folder)
+
+    def run_batch(self, bisect: bool = True) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = verify_batch(str(self.config_path), self.assent_dir, bisect)
+        return code, output.getvalue()
+
+    def test_guilty_folder_in_the_middle_is_named_and_the_prefix_is_kept(self
+                                                                        ) -> None:
+        self.make_batch("aa", "bb", "cc", "dd")
+        self.write_verify_red_on("cc")
+        guilty_task = (self.assent_dir / "cc" / "t001_task.e.toml")
+        before = guilty_task.read_bytes()
+        target_tip = self.head()
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("localized the failure to cc", output)
+        self.assertIn("regression introduced by cc", output)
+        # One failing full run, then ceil(log2(4)) localizing runs.
+        self.assertEqual(self.verifier_runs(), 3)
+        self.assertIn("at most 2 more full verification(s)", output)
+        self.assertIn("localizing step 1/2", output)
+        self.assertIn("localizing step 2/2", output)
+
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertEqual(receipt.exit_code, 0)
+        self.assertEqual(receipt.folders, ("aa", "bb"))
+        self.assertIn("cc is the first folder", receipt.failure_summary)
+        # The kept step trees come from a real verification of that prefix, so
+        # rebuilding the same prefix must reproduce them exactly.
+        rebuilt = verification.build_batch_candidate(
+            self.root, target_tip,
+            [(s.folder, s.source_tip) for s in receipt.sources])
+        self.assertTrue(rebuilt.ok)
+        self.assertEqual([s.step_tree for s in receipt.sources],
+                         list(rebuilt.step_trees))
+        self.assertEqual(guilty_task.read_bytes(), before)
+        self.assertEqual(self.head(), target_tip)
+
+    def test_kept_prefix_receipt_is_published_by_accept_all(self) -> None:
+        self.make_batch("aa", "bb", "cc")
+        self.write_verify_red_on("cc")
+
+        code, output = self.run_batch()
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self.read_batch_receipt().folders, ("aa", "bb"))
+
+        published = io.StringIO()
+        with contextlib.redirect_stdout(published):
+            accepted = accept_all(str(self.config_path), self.assent_dir)
+
+        self.assertEqual(accepted, 0, published.getvalue())
+        self.assertIn("batch release done, 2 folder(s) published",
+                      published.getvalue())
+        self.assertTrue((self.root / "aa.txt").exists())
+        self.assertTrue((self.root / "bb.txt").exists())
+        self.assertFalse((self.root / "cc.txt").exists())
+        self.assertFalse(self.receipt_path().exists())
+
+    def test_guilty_first_folder_leaves_a_failed_receipt_and_no_prefix(self
+                                                                      ) -> None:
+        self.make_batch("aa", "bb", "cc")
+        self.write_verify_red_on("aa")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1)
+        self.assertIn("localized the failure to aa", output)
+        self.assertIn("no folder ahead of it remains", output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertNotEqual(receipt.exit_code, 0)
+        self.assertEqual(receipt.folders, ("aa", "bb", "cc"))
+        self.assertIn("aa is the first folder", receipt.failure_summary)
+
+    def test_guilty_last_folder_keeps_every_earlier_folder(self) -> None:
+        self.make_batch("aa", "bb", "cc", "dd")
+        self.write_verify_red_on("dd")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("localized the failure to dd", output)
+        self.assertEqual(self.verifier_runs(), 3)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertEqual(receipt.folders, ("aa", "bb", "cc"))
+
+    def test_a_single_folder_batch_needs_no_extra_verification(self) -> None:
+        self.make_batch("aa")
+        self.write_verify_red_on("aa")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self.verifier_runs(), 1)
+        self.assertIn("localized the failure to aa", output)
+        self.assertEqual(self.read_batch_receipt().status, "FAILED")
+
+    def test_downstream_of_the_guilty_folder_is_named_as_ejected(self) -> None:
+        self.make_batch("aa", "bb", "cc")
+        self.write_after("cc", ("bb",))
+        self.write_verify_red_on("bb")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1)
+        self.assertIn("bb and its downstream (cc) are out of this batch", output)
+        self.assertIn("assent rework bb", output)
+        self.assertEqual(self.read_batch_receipt().folders, ("aa",))
+
+    def test_no_bisect_records_the_failure_without_localizing(self) -> None:
+        self.make_batch("aa", "bb", "cc")
+        self.write_verify_red_on("bb")
+
+        code, output = self.run_batch(bisect=False)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self.verifier_runs(), 1)
+        self.assertNotIn("localiz", output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertEqual(receipt.exit_code, 3)
+        self.assertEqual(receipt.folders, ("aa", "bb", "cc"))
+        self.assertIn("regression introduced by bb", receipt.failure_summary)
+
+    def test_a_conflict_is_still_refused_before_any_localization(self) -> None:
+        self.make_source("aa", filename="shared.txt", content="from aa\n")
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1)
+        self.assertIn("merging bb into the batch candidate conflicts", output)
+        self.assertNotIn("localiz", output)
+        self.assertEqual(self.verifier_runs(), 0)
+        self.assertFalse(self.receipt_path().exists())
 
 
 class TestBatchLocking(BatchVerifyRepositoryCase):

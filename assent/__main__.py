@@ -80,6 +80,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Merge every finished, not-yet-integrated folder in folder-"
              "dependency order into one candidate and verify it once")
     verify_p.add_argument(
+        "--no-bisect", action="store_false", dest="bisect",
+        help="With --batch, record a failure as-is instead of localizing it to "
+             "the first folder that breaks the batch")
+    verify_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
         help=f"Config file location (default: {_DEFAULT_CONFIG})")
     clean_p = sub.add_parser(
@@ -283,6 +287,8 @@ def _dispatch(argv: list[str]) -> int:
             parser.error("verify's --batch and FOLDER cannot be used together")
         if not args.batch and args.folder is None:
             parser.error("verify requires FOLDER or --batch")
+        if not args.batch and not args.bisect:
+            parser.error("verify's --no-bisect only applies to --batch")
 
     if args.command == "archive":
         if args.restore:
@@ -336,7 +342,7 @@ def _dispatch(argv: list[str]) -> int:
                 return 1
         try:
             if args.batch:
-                return verify_batch(args.config, assent_dir)
+                return verify_batch(args.config, assent_dir, args.bisect)
             return verify_folder(cfg)
         except KeyboardInterrupt:
             print("\nverify interrupted; temporary resources were cleaned up.")
