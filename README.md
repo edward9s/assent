@@ -202,11 +202,14 @@ writers. Do not run Git commands that write the same main worktree during
 
 ### Bounded optimistic stacking
 
-Set a downstream folder's `_folder.toml` to `after = ["A"]` to make `after`
-control both scheduler unlock and the Git worktree base. With no unaccepted
-upstream, a folder starts from the current target; with exactly one, it may
-start from that upstream's current tip. Multiple unaccepted upstreams fail
-closed, so resolve all but one upstream or replan before starting downstream.
+Set a downstream folder's `_folder.toml` to `after = ["A"]` to declare A as an
+ordering prerequisite. `base = "A"` declares that the downstream files are
+built on A's commit and makes its worktree a complete checkout of that commit;
+a non-`base` `after` upstream guarantees order only, not file content or
+same-file conflict protection. With no unaccepted upstream, a folder starts
+from the current target; with exactly one, the base may be derived from that
+upstream's current tip. Multiple unaccepted upstreams fail closed unless the
+downstream declares which one is its `base`.
 
 For example: `run A` -> `run B` stacked on A -> combined verification ->
 human `accept A` -> human `accept B`. B's receipt may be created before A is

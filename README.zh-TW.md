@@ -162,10 +162,12 @@ force push,也不宣稱 integration lock 能阻止外部 Git 寫入;accept 期�
 
 ### 有界的樂觀堆疊
 
-下游資料夾的 `_folder.toml` 設為 `after = ["A"]` 後,`after` 同時控制
-scheduler 解鎖與 Git worktree base。沒有未接受 upstream 時從目前 target
-建立;恰有一個時可從該 upstream 的 current tip 建立。多個未接受 upstream
-會 fail closed,必須先處理依賴或重新規劃後才可啟動下游。
+下游資料夾的 `_folder.toml` 設為 `after = ["A"]` 後,表示 A 是排程前提。
+`base = "A"` 宣告下游檔案建立在 A 的 commit 上,其 worktree 會是該 commit
+的完整簽出;非 `base` 的 `after` upstream 只保證順序,不提供檔案內容或同檔
+衝突保護。沒有未接受 upstream 時從目前 target 建立;恰有一個時可從該
+upstream 的 current tip 推導 base。多個未接受 upstream 會 fail closed,除非
+下游宣告其中哪一個是它的 `base`。
 
 例如:`run A` -> `run B` 堆疊在 A 上 -> combined verification -> 人類
 `accept A` -> 人類 `accept B`。B 可在 A 尚未接受時建立 receipt;A 進入 target
