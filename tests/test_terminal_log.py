@@ -136,16 +136,6 @@ class TestTerminalLogging(unittest.TestCase):
                 print(f"{command} output")
         self.assertEqual(log_path.read_text(encoding="utf-8"), "existing run session")
 
-    def test_legacy_management_path_is_refused_without_creating_a_log(self):
-        # This old-brand path is intentional legacy-installation fixture data.
-        legacy_config = self.root / ".agents" / "agents.toml"
-        legacy_config.parent.mkdir()
-        legacy_config.write_text("", encoding="utf-8")
-        with terminal_logging(["run", "--config", str(legacy_config)]) as path:
-            print("config validation will refuse this installation")
-        self.assertFalse(path.exists())
-        self.assertFalse((self.root / ".assent").exists())
-
 
 if __name__ == "__main__":
     unittest.main()

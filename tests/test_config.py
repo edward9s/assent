@@ -65,21 +65,6 @@ class TestLoadConfig(ConfigTestCase):
         with self.assertRaises(AssentError):
             load_config(self.assent_dir / "assent.toml", "plan01")
 
-    def test_legacy_agents_config_path_is_refused_explicitly(self):
-        # This old-brand path is intentional legacy-installation fixture data.
-        legacy_dir = self.root / ".agents"
-        legacy_dir.mkdir()
-        legacy_config = legacy_dir / "agents.toml"
-        legacy_config.write_text("", encoding="utf-8")
-        with self.assertRaisesRegex(AssentError, "Legacy .agents"):
-            load_config(legacy_config, "plan01")
-
-    def test_dual_management_directories_are_refused_as_ambiguous(self):
-        # The old-brand directory is intentional ambiguity-fixture data.
-        (self.root / ".agents").mkdir()
-        with self.assertRaisesRegex(AssentError, "Ambiguous management state"):
-            load_config(self.write(_MINIMAL), "plan01")
-
     def test_removed_plan_section_rejected_as_unknown_key(self):
         with self.assertRaisesRegex(AssentError, "unknown top-level keys"):
             load_config(self.write('[plan]\ntasks = "plan01"\n'), "plan01")

@@ -361,16 +361,10 @@ class TestInit(MainTestCase):
         self.assertNotIn("AGENTS.md", lines)
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertEqual(agents_md.count("<!-- assent-instructions -->"), 1)
-        self.assertNotIn("## AI 工作體系", agents_md)
         config = (self.root / ".assent" / "assent.toml").read_text(
             encoding="utf-8")
         self.assertNotIn("[git]", config)
         self.assertNotIn("[plan]", config)
-        # These old-brand names are negative assertions for fresh-init output.
-        self.assertFalse((self.root / ".agents").exists())
-        self.assertEqual(
-            [path for path in self.root.rglob("*")
-             if path.name.startswith("agents.")], [])
 
     def test_idempotent_no_overwrite_no_duplicates(self):
         run_init(self.root)
@@ -400,58 +394,17 @@ class TestInit(MainTestCase):
         text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# 我的專案"))
         self.assertIn("既有規則。", text)
-        self.assertNotIn("## AI 工作體系", text)
         self.assertEqual(text.count("<!-- assent-instructions -->"), 1)
 
-    def test_migrates_legacy_section_without_touching_later_project_section(self):
-        (self.root / "AGENTS.md").write_text(
-            "# 我的專案\n\n既有規則。\n\n"
-            "## AI 工作體系(.agents)\n\n舊 agents 內容。\n\n"
-            "## 專案附註\n\n必須保留。\n", encoding="utf-8")
-        run_init(self.root)
-        text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertNotIn("舊 agents 內容", text)
-        self.assertIn("## 專案附註\n\n必須保留。", text)
-        self.assertEqual(text.count("<!-- assent-instructions -->"), 1)
-
-    def test_preserves_legacy_ignore_line_and_agents_md_ignore_choice(self):
+    def test_preserves_existing_ignore_lines_and_agents_md_ignore_choice(self):
         (self.root / ".gitignore").write_text(
-            "cache/\nAGENTS.md\n.agents/\n", encoding="utf-8")
+            "cache/\nAGENTS.md\n", encoding="utf-8")
         run_init(self.root)
         lines = (self.root / ".gitignore").read_text(
             encoding="utf-8").splitlines()
         self.assertIn("cache/", lines)
-        self.assertIn(".agents/", lines)  # Preserved legacy user-authored ignore data.
         self.assertIn(".assent/", lines)
         self.assertIn("AGENTS.md", lines)
-
-    def test_legacy_agents_installation_is_refused_before_writing(self):
-        # This old-brand directory and file are intentional legacy-installation fixtures.
-        legacy_dir = self.root / ".agents"
-        legacy_dir.mkdir()
-        (legacy_dir / "agents.toml").write_text("legacy", encoding="utf-8")
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(run_init(self.root), 1)
-        self.assertIn("Legacy .agents management directory detected", out.getvalue())
-        self.assertFalse((self.root / ".assent").exists())
-        self.assertFalse((self.root / "AGENTS.md").exists())
-        self.assertFalse((self.root / ".gitignore").exists())
-
-    def test_dual_management_directories_are_refused_without_changes(self):
-        # The old-brand directory is intentional ambiguous-installation fixture data.
-        legacy_dir = self.root / ".agents"
-        legacy_dir.mkdir()
-        assent_dir = self.root / ".assent"
-        assent_dir.mkdir()
-        sentinel = assent_dir / "keep.txt"
-        sentinel.write_text("unchanged", encoding="utf-8")
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(run_init(self.root), 1)
-        self.assertIn("Ambiguous management state", out.getvalue())
-        self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged")
-        self.assertFalse((assent_dir / "assent.toml").exists())
 
     def test_missing_target_dir_fails(self):
         out = io.StringIO()

@@ -168,16 +168,6 @@ def terminal_logging(argv: list[str]) -> Iterator[Path]:
     if not argv or argv[0] != "run":
         yield log_path
         return
-    config_path = _config_path_for_argv(argv)
-    management_dir = config_path.parent
-    # These old-brand names are compatibility-detection data. Logging starts
-    # before config validation, so it must avoid writing either into a legacy
-    # installation or beside one and accidentally creating competing truths.
-    if (management_dir.name == ".agents"
-            or (management_dir.name == ".assent"
-                and (management_dir.parent / ".agents").exists())):
-        yield log_path
-        return
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w", encoding="utf-8", buffering=1, newline="\n") as log:
         sink = _LogSink(log)

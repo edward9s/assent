@@ -200,35 +200,9 @@ def _validate_tasks_name(tasks_name: str, owner: str) -> None:
             " it also becomes the git branch prefix)")
 
 
-# Spelled out wherever a legacy installation blocks startup, because assent
-# ships no automatic migration: the operator performs these renames by hand.
-_MIGRATION_STEPS = (
-    "rename .agents/ to .assent/, .agents/agents.toml to assent.toml,"
-    " .agents/agents.lock to assent.lock,"
-    " and every .agents/<folder>/_agents.log to _assent.log"
-)
-
-
 def _load_data(path: str | Path) -> tuple[Path, dict]:
     """Read and validate the config content that does not depend on a task folder."""
     path = Path(path).resolve()
-    management_dir = path.parent
-    # Old-brand paths below are compatibility-detection data only; loading
-    # them would revive a second management contract.
-    if management_dir.name == ".agents":
-        raise AssentError(
-            f"Legacy .agents management directory is not supported: {management_dir}; "
-            f"migrate it explicitly before running assent ({_MIGRATION_STEPS})")
-    if management_dir.name == ".assent":
-        legacy_dir = management_dir.parent / ".agents"
-        if legacy_dir.exists():
-            if management_dir.exists():
-                raise AssentError(
-                    f"Ambiguous management state: both {legacy_dir} and "
-                    f"{management_dir} exist; resolve the legacy installation first")
-            raise AssentError(
-                f"Legacy .agents management directory detected: {legacy_dir}; "
-                f"migrate it explicitly before running assent ({_MIGRATION_STEPS})")
     if not path.is_file():
         raise AssentError(
             f"Config file not found: {path}"

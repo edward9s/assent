@@ -83,26 +83,13 @@ def _tracked_old_brand_matches() -> list[tuple[str, int, str]]:
 
 
 def _is_audited_old_brand_exception(path: str, text: str) -> bool:
-    """Allow only documented conventional, migration, fixture, and history data."""
+    """Allow only verbatim history evidence, fixtures, and the AGENTS.md filename."""
     if path == "tests/fixtures/stream_json_ok.txt":
         return True  # Verbatim external-protocol fixture.
     if "AGENTS" in text and ".agents" not in text:
         return True  # The standard agent-tool instruction filename.
-    if path.startswith("docs/") or path in {"README.md", "README.zh-TW.md"}:
-        return any(marker in text for marker in (
-            "former `agents`", "`agents`/`.agents`", "old `.agents`", "legacy `.agents`",
-            "`.agents` and `.assent`", "`.agents` 目錄", "`.agents` 與 `.assent`",
-            "`.agents/`", "從原有的 `agents`", "套件、import 命名空間、CLI 與管理目錄",
-        ))
-    if path.startswith("assent/"):
-        return ".agents" in text or "agents-instructions" in text
-    if path == ".gitignore":
-        return ".agents/" in text  # Legacy path kept ignored during migration.
     if path == "tests/test_language_policy.py":
         return True  # This audit's patterns and its narrow exception definitions.
-    if path.startswith("tests/"):
-        return ".agents" in text or "agents.toml" in text or "agents." in text \
-            or "舊 agents 內容" in text
     return False
 
 
