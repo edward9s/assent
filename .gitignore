@@ -3,6 +3,9 @@
 CLAUDE.md
 .anthropic/
 
+# wflow 執行期產物
+workflow.log
+
 # OS / editor
 .DS_Store
 Thumbs.db

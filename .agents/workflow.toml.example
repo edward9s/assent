@@ -1,0 +1,45 @@
+# wflow 設定範本：複製到專案根目錄、改名 workflow.toml、填掉 TODO。
+# 所有相對路徑以專案根目錄（= 本檔所在目錄 = git repo 根目錄）為基準。
+
+[plan]
+path = ".agents/tasks"            # 任務目錄，格式見 .agents/FORMAT.md
+
+[git]
+enabled = true                    # false 則不建分支、不 commit（不建議）
+branch_prefix = "workflow/"
+
+[watchdog]
+stall_minutes = 30                # session 連續無輸出幾分鐘判定卡死；0 = 關閉
+
+[run]
+retry_per_task = 1                # 驗收失敗後的重試次數
+quota_poll_minutes = 30           # 無法解析額度重置時間時的輪詢間隔
+
+[adapter]
+name = "claude"                   # "claude" 或 "codex"
+
+[adapter.claude]
+command = "claude"
+extra_args = ["--permission-mode", "acceptEdits"]
+# 抽象檔位 → CLI --model 參數（任務檔只寫 prime/core/lite）
+[adapter.claude.models]
+prime = "fable"
+core  = "opus"
+lite  = "sonnet"
+# 任務檔未標 effort 時各檔位的預設值（low/medium/high）
+[adapter.claude.default_effort]
+prime = "high"
+core  = "high"
+lite  = "medium"
+
+[adapter.codex]
+command = "codex"
+extra_args = ["--sandbox", "workspace-write"]
+[adapter.codex.models]
+prime = "gpt-5.6-sol"
+core  = "gpt-5.6-terra"
+lite  = "gpt-5.6-luna"
+[adapter.codex.default_effort]
+prime = "high"
+core  = "medium"
+lite  = "low"

@@ -1,7 +1,7 @@
 # Current state
 
 Updated: <!-- TODO: YYYY-MM-DD -->
-Active task: `.agents/tasks/ACTIVE.md`
+Plan: `.agents/tasks/`（各任務狀態見任務檔表頭）
 Last verified commit: <!-- TODO: git rev-parse --short HEAD -->
 
 ## Current objective

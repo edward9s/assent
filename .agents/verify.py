@@ -34,7 +34,7 @@ def run(*cmd: str) -> None:
 # --- 體系完整性檢查（保留） ---
 require_file("AGENTS.md")
 require_file(".agents/CURRENT.md")
-require_file(".agents/tasks/ACTIVE.md")
+require_file(".agents/FORMAT.md")
 run("git", "diff", "--check")
 
 # --- 專案檢查（TODO: 依技術棧擇一或自行替換） ---
