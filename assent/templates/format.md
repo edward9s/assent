@@ -266,7 +266,7 @@ clear format error.
 title = "Skeleton and test infrastructure"
 deps = []                        # array of upstream task ids; write [] even with none
 model = "prime"                  # prime | core | lite (never write a vendor model name)
-effort = "high"                  # low | medium | high; usually omitted, written only to deliberately deviate from the default
+effort = "heavy"                 # heavy | normal | slight; usually omitted, written only to deliberately deviate from the default
 status = "TODO"                  # TODO | WIP | DONE | BLOCKED | SKIP
 scope = ["assent/", "tests/"]    # allowed path prefixes for changes; fail-closed, must not be empty
 verify = "python .assent/verify.py"   # verification command, exit 0 = pass
@@ -319,8 +319,8 @@ on the same plan and you swap vendors without changing the task file.
 ### The three reasoning investments (effort)
 
 `model` and `effort` are two orthogonal abstract choices. A task file's `effort`
-is optional and accepts only `low` / `medium` / `high`; they express relative
-reasoning investment, not a precise token or money budget. `high` is a
+is optional and accepts only `heavy` / `normal` / `slight`; they express relative
+reasoning investment, not a precise token or money budget. `heavy` is a
 cross-vendor portable high tier, not any vendor's native maximum tier. Usually
 `effort` is omitted, written explicitly only when a task deliberately deviates
 from the current adapter's default for that model.
@@ -329,13 +329,17 @@ The engine first selects the abstract effort by "task explicit value >
 `[adapter.<name>.default_effort]` model default > unspecified"; when
 unspecified it passes no effort and explicitly adopts the CLI default. After
 selection it consults `[adapter.<name>.efforts]`: a tier subsection key takes
-precedence over a flat key, and a flat key over an identity pass-through. For
-example `[adapter.codex.efforts] high = "xhigh"` is the common case for all
-three model tiers, while `[adapter.codex.efforts.lite] high = "max"` overrides
-only `lite/high`. Both layers and every key are optional; write nothing and
-everything is identity, and existing config needs no migration. Vendor-specific
-values live only in the translation table, and may not be written into a task
-file or `default_effort`.
+precedence over a flat key, and a flat key over the built-in baseline. For
+example `[adapter.codex.efforts] heavy = "xhigh"` is the common case for all
+three model tiers, while `[adapter.codex.efforts.lite] heavy = "max"` overrides
+only `lite/heavy`. Both layers and every key are optional; write nothing and
+the built-in baseline applies: `heavy` → `high`, `normal` → `medium`,
+`slight` → `low`. A key missing from a tier subsection falls back per key to
+the flat table, and a key missing from the flat table falls back per key to
+the baseline; this is not a whole-table either/or choice. Abstract and vendor
+words are deliberately different, so abstract words are never sent as CLI
+values. Vendor-specific values live only in the translation table, and may not
+be written into a task file or `default_effort`.
 
 ### Planning for session cost
 
@@ -412,7 +416,7 @@ Longer process notes, blockers, a summary of verification output.
 - `requested_effort` precisely represents the value actually passed to the AI
   CLI this run after the efforts mapping; it is omitted when no abstract effort
   was selected. Task files and `default_effort` still accept only the three
-  abstract values.
+  abstract values: `heavy` / `normal` / `slight`.
 - The scheduler's machine events use `by = "scheduler"`, additionally writing
   `agent = "claude"`, `agent = "codex"`, or `agent = "antigravity"` and the
   same run's `requested_model`. Existing events include a quota interruption
