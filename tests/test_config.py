@@ -42,6 +42,7 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.codex_efforts, {})
         self.assertEqual(cfg.codex_tier_efforts, {})
         self.assertIsNone(cfg.prompt_template)
+        self.assertEqual(cfg.receipt_refresh, "manual")
 
     def test_antigravity_defaults_match_the_probed_agy_capability(self):
         cfg = load_config(self.write(_MINIMAL), "plan01")
@@ -200,6 +201,24 @@ class TestLoadConfig(ConfigTestCase):
         cfg = load_config(self.write(
             '[prompt]\ntemplate = "hi {task_id}"\n'), "plan01")
         self.assertEqual(cfg.prompt_template, "hi {task_id}")
+
+    def test_receipt_refresh_domain_default_and_fail_closed(self):
+        # An absent section, an absent key, and each stated mode; anything else is
+        # refused at load time rather than silently treated as one of the two.
+        self.assertEqual(
+            load_config(self.write("[verification]\n"), "plan01").receipt_refresh,
+            "manual")
+        for mode in ("manual", "auto"):
+            with self.subTest(mode=mode):
+                cfg = load_config(self.write(
+                    f'[verification]\nreceipt_refresh = "{mode}"\n'), "plan01")
+                self.assertEqual(cfg.receipt_refresh, mode)
+        with self.assertRaisesRegex(AssentError, "receipt_refresh"):
+            load_config(self.write(
+                '[verification]\nreceipt_refresh = "always"\n'), "plan01")
+        with self.assertRaisesRegex(AssentError, "wrong type"):
+            load_config(self.write(
+                "[verification]\nreceipt_refresh = true\n"), "plan01")
 
 
 class TestAdapterSettings(ConfigTestCase):

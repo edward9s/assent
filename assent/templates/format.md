@@ -581,11 +581,20 @@ never deletes source before that proof.
 
 `assent run` uses two verification stages. During each AI task session, the
 scheduler runs only that task's focused `verify` command before creating its
-checkpoint. After every task in a folder is complete, the scheduler builds one
-temporary integration candidate outside any AI session and runs the complete
-`.assent/verify.py` once. Its result is a derived `_verification.toml` receipt;
-the report shows whether the receipt is `PASSED` or `FAILED` and `fresh` or
-`stale`.
+checkpoint. The second stage builds one temporary integration candidate outside
+any AI session and runs the complete `.assent/verify.py` once. Its result is a
+derived `_verification.toml` receipt; the report shows whether the receipt is
+`PASSED` or `FAILED` and `fresh` or `stale`.
+
+Who starts that second stage is a project policy, `receipt_refresh` in
+`assent.toml`'s `[verification]` section. Under the default `"manual"`, run
+closeout does not verify at all; it prints the deferral and the receipt comes
+only from an explicit `assent verify [--batch]`, so a batch of folders costs one
+full verification instead of one per folder. Under `"auto"`, run closeout
+refreshes the receipt itself once every task in the folder is complete. The
+policy changes nothing else: the focused per-task `verify` always runs, `accept`
+still requires a fresh PASSED receipt and refuses without one, and the report
+still shows a missing receipt as `NOT RUN`.
 
 `assent verify <FOLDER>` is a zero-token, unattended receipt refresh. It does
 not change the target or open an AI session. It may be run again whenever the
