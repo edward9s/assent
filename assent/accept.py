@@ -13,6 +13,11 @@ receipt covers several folders, their whole merge chain is replayed in one
 temporary worktree, compared tree by tree against that receipt, and published
 by a single ref update -- all of them or none of them.
 
+``assent accept FOLDER_A FOLDER_B`` is the explicit selected-batch path.  It
+requires a fresh receipt for exactly those dependency-normalized folders and
+uses the same replay and publication machinery as ``accept --all`` without
+verification or per-folder fallback.
+
 That receipt may cover only part of what is finished: ``verify --batch`` leaves
 out a folder whose source conflicts, together with everything queued after it,
 so the recorded chain can have gaps in the publishing order.  The release
@@ -405,6 +410,37 @@ def _no_source_remains(main: Path, folder: str) -> bool:
             and not gitops.folder_branches(main, folder))
 
 
+def _selected_batch_order(assent_dir: Path,
+                          folders: Sequence[str]) -> tuple[str, ...]:
+    """Normalize explicit folder names using the current dependency graph."""
+    names = tuple(folders)
+    if len(names) < 2:
+        raise AssentError(
+            "an explicit selected batch needs at least two folder names")
+    if len(set(names)) != len(names):
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        raise AssentError(
+            "an explicit selected batch cannot contain duplicate folder names: "
+            + ", ".join(duplicates))
+
+    graph = parse_folder_dependency_graph(assent_dir)
+    missing = sorted(set(names) - set(graph))
+    if missing:
+        raise AssentError(
+            "selected batch folder(s) were not found: " + ", ".join(missing))
+    return tuple(order_folders_by_dependency(graph, set(names)))
+
+
+def _selected_accept_label(folders: Sequence[str]) -> str:
+    """Format the selected command mode for diagnostics."""
+    return "accept " + " ".join(folders)
+
+
+def _selected_verify_command(folders: Sequence[str]) -> str:
+    """Format the exact verifier command that rebuilds a selected receipt."""
+    return "assent verify " + " ".join(folders)
+
+
 @dataclass(frozen=True)
 class _BatchSource:
     """One batched folder's live Git identity beside its recorded step tree."""
@@ -632,16 +668,69 @@ def _release_batch(config_path: str, assent_dir: Path) -> int | None:
         return 1
 
 
+def accept_selected_batch(config_path: str, assent_dir: Path,
+                          folders: Sequence[str]) -> int:
+    """Publish only a fresh receipt for the exact selected folder set."""
+    assent_dir = Path(assent_dir)
+    requested = tuple(folders)
+    mode = _selected_accept_label(requested)
+    try:
+        with hold_integration_lock(assent_dir):
+            result = _release_batch_locked(
+                config_path, assent_dir,
+                verification.batch_receipt_path(assent_dir),
+                requested_folders=requested)
+            assert result is not None
+            return result
+    except LockBusy as e:
+        print(f"{mode}: refused ({e})")
+        return 1
+    except AssentError as e:
+        print(f"{mode}: failed ({e})")
+        return 1
+
+
 def _release_batch_locked(config_path: str, assent_dir: Path,
-                          path: Path) -> int | None:
+                          path: Path,
+                          requested_folders: Sequence[str] | None = None
+                          ) -> int | None:
     """Gate, replay, and publish one batch with the integration lock held."""
     main = gitops.main_worktree(assent_dir.parent)
+    selected = requested_folders is not None
+    requested = tuple(requested_folders or ())
+    mode = "accept --all"
+    verify_hint = "assent verify --batch"
+    expected_folders: tuple[str, ...] = ()
+    if selected:
+        mode = _selected_accept_label(requested)
+        verify_hint = _selected_verify_command(requested)
+        try:
+            expected_folders = _selected_batch_order(assent_dir, requested)
+        except AssentError as e:
+            print(f"{mode}: refused, {e}. Run `{verify_hint}` to create a "
+                  "fresh receipt for this exact selected set; accept never "
+                  "runs verification")
+            return 1
+        mode = _selected_accept_label(expected_folders)
+        verify_hint = _selected_verify_command(expected_folders)
     try:
         receipt = verification.read_batch_receipt(path, main)
     except AssentError as e:
-        print(f"accept --all: refused, the batch verification receipt is "
-              f"unusable ({e}). It is derived evidence: delete {path} and run "
-              "`assent verify --batch` again")
+        if selected:
+            print(f"{mode}: refused, the batch verification receipt is "
+                  f"unusable ({e}). Keep every source and the target unchanged; "
+                  f"run `{verify_hint}` to create a fresh receipt for this exact "
+                  "selected set")
+        else:
+            print(f"accept --all: refused, the batch verification receipt is "
+                  f"unusable ({e}). It is derived evidence: delete {path} and run "
+                  "`assent verify --batch` again")
+        return 1
+    if selected and receipt.folders != expected_folders:
+        print(f"{mode}: refused, the batch verification receipt covers "
+              f"{', '.join(receipt.folders)}, not the exact selected set "
+              f"{', '.join(expected_folders)}. Keep every source and the target "
+              f"unchanged; run `{verify_hint}` to create the matching receipt")
         return 1
     try:
         # The batch's own order is fixed in the receipt, but a plan whose folder
@@ -649,7 +738,7 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
         # whichever one happens not to read it.
         parse_folder_dependency_graph(assent_dir)
     except AssentError as e:
-        print(f"accept --all: refused, folder dependency graph is invalid ({e})")
+        print(f"{mode}: refused, folder dependency graph is invalid ({e})")
         return 1
     configs = {folder: load_config(config_path, folder)
                for folder in receipt.folders}
@@ -663,13 +752,22 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
         except AssentError as e:
             reasons = (f"its freshness could not be proven: {e}",)
     if reasons:
+        if selected:
+            print(f"{mode}: refused, the batch verification receipt is not fresh ("
+                  + "; ".join(reasons) + f"). Keep every source and the target "
+                  f"unchanged; run `{verify_hint}` to build a fresh receipt")
+            return 1
         print("accept --all: the batch verification receipt has expired ("
               + "; ".join(reasons) + "); deleted, because a receipt is derived "
               "and disposable. Run `assent verify --batch` to build a new one.")
         verification.invalidate_batch_receipt(assent_dir)
         return None
 
-    print(_BATCH_BANNER)
+    if selected:
+        print(f"{mode}: batch release; the exact selected batch is published by "
+              "one ref update or not at all (all or nothing on failure).")
+    else:
+        print(_BATCH_BANNER)
     print(f"  batch receipt covers: {', '.join(receipt.folders)}")
 
     with ExitStack() as locks:
@@ -685,15 +783,15 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
             if not completion.complete:
                 unfinished.append(f"{folder} ({completion.reason})")
         if unfinished:
-            print("accept --all: refused, batched folder(s) are no longer "
+            print(f"{mode}: refused, batched folder(s) are no longer "
                   f"finished: {', '.join(unfinished)}. The target was not "
-                  "changed; run `assent verify --batch` again")
+                  f"changed; run `{verify_hint}` again")
             return 1
 
         sources, drift = _batch_source_identities(main, receipt, configs)
         if drift is not None:
-            print(f"accept --all: refused, {drift}. The target was not changed; "
-                  "run `assent verify --batch` again")
+            print(f"{mode}: refused, {drift}. The target was not changed; "
+                  f"run `{verify_hint}` again")
             return 1
 
         target_branch = gitops.require_current_branch(main)
@@ -701,16 +799,16 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
         problem = _batch_prerequisite_problem(
             main, assent_dir, configs, sources, target_before)
         if problem is not None:
-            print(f"accept --all: refused, {problem}. The target was not "
-                  "changed; accept the prerequisite first, or rebuild the batch "
-                  "with `assent verify --batch` once it is finished")
+            print(f"{mode}: refused, {problem}. The target was not changed; "
+                  f"accept the prerequisite first, or rebuild the batch with "
+                  f"`{verify_hint}` once it is finished")
             return 1
 
         problem = _batch_gate_problem(
             main, configs, sources, target_branch, target_before,
             receipt.verify_script_sha256)
         if problem is not None:
-            print(f"accept --all: refused, {problem}. The target was not "
+            print(f"{mode}: refused, {problem}. The target was not "
                   "changed and every source was kept")
             return 1
 
@@ -751,18 +849,18 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
                 return 1
 
         if replay.conflict_folder:
-            print(f"accept --all: refused, replaying {replay.conflict_folder} "
+            print(f"{mode}: refused, replaying {replay.conflict_folder} "
                   f"into {target_branch} conflicts even though the batch "
                   "verified cleanly; the target was not changed. Conflicting "
                   "file(s):")
             for conflicting in replay.conflicts:
                 print(f"  - {conflicting}")
-            print("Run `assent verify --batch` to rebuild the batch candidate")
+            print(f"Run `{verify_hint}` to rebuild the batch candidate")
             return 1
         if replay.problem:
-            print(f"accept --all: refused, {replay.problem}. The target was not "
-                  "changed and every source was kept; run `assent verify "
-                  "--batch` to rebuild the batch candidate")
+            print(f"{mode}: refused, {replay.problem}. The target was not "
+                  f"changed and every source was kept; run `{verify_hint}` to "
+                  "rebuild the batch candidate")
             return 1
 
         consume_error = ""
@@ -772,8 +870,12 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
             consume_error = str(e)
 
         target_after = gitops.commit_of(main, "HEAD")
-        print(f"accept --all: batch release done, {len(replay.merges)} folder(s) "
-              "published by one ref update without running verification.")
+        if selected:
+            print(f"{mode}: batch release done, {len(replay.merges)} folder(s) "
+                  "published by one ref update without running verification.")
+        else:
+            print(f"accept --all: batch release done, {len(replay.merges)} folder(s) "
+                  "published by one ref update without running verification.")
         print(f"  target branch:   {target_branch}")
         print(f"  target before:   {target_before}")
         print(f"  target after:    {target_after}")
@@ -788,25 +890,30 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
         # Stated at the left margin, not inside the detail block: a partial
         # release exits zero, so the folders it did not publish are the one
         # thing a reader must not miss.
-        outstanding = _unbatched_finished_folders(
-            config_path, assent_dir, main, receipt.folders, target_after)
-        if outstanding:
-            print(f"accept --all: {len(outstanding)} finished folder(s) still "
-                  f"not accepted: {', '.join(outstanding)}.")
-            print("  A batch publishes only what it was built from; a folder "
-                  "is outside it either because it finished later or because "
-                  "the batch was built without it. This run published the "
-                  "batch alone and neither verified nor examined them; run "
-                  "`assent verify --batch` to build the next batch over what "
-                  "remains.")
+        if not selected:
+            outstanding = _unbatched_finished_folders(
+                config_path, assent_dir, main, receipt.folders, target_after)
+            if outstanding:
+                print(f"accept --all: {len(outstanding)} finished folder(s) still "
+                      f"not accepted: {', '.join(outstanding)}.")
+                print("  A batch publishes only what it was built from; a folder "
+                      "is outside it either because it finished later or because "
+                      "the batch was built without it. This run published the "
+                      "batch alone and neither verified nor examined them; run "
+                      "`assent verify --batch` to build the next batch over what "
+                      "remains.")
         if consume_error:
             print(f"warning: the batch was published but its receipt could not "
                   f"be deleted ({consume_error}); delete {path} by hand. It "
                   "describes published work, so it can no longer authorize a "
                   "release.")
         else:
-            print("  batch receipt consumed; rerunning `assent accept --all` is "
-                  "a no-op for the folders it published.")
+            if selected:
+                print(f"  batch receipt consumed; rerunning `{mode}` is a no-op "
+                      "for the folders it published.")
+            else:
+                print("  batch receipt consumed; rerunning `assent accept --all` is "
+                      "a no-op for the folders it published.")
         print("  source branch/worktree kept for every published folder; retain "
               "each while a dependent may still need its source evidence. "
               "`assent clean FOLDER` makes the final safety decision.")

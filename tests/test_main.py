@@ -209,9 +209,10 @@ class TestDispatch(MainTestCase):
             main(["clean", "--force"])
         self.assertEqual(ctx.exception.code, 2)
 
-    def test_accept_requires_exactly_one_folder_and_has_no_remote_options(self):
-        for argv in (["accept"], ["accept", "one", "two"],
-                     ["accept", "one", "--all"],
+    def test_accept_requires_a_folder_and_has_no_remote_options(self):
+        for argv in (["accept"], ["accept", "one", "--all"],
+                     ["accept", "one", "two", "--all"],
+                     ["accept", "one", "one"],
                      ["accept", "one", "--push"]):
             with self.subTest(argv=argv), self.assertRaises(
                     SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
@@ -225,6 +226,16 @@ class TestDispatch(MainTestCase):
                 ["accept", "reviewed", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
+
+    def test_accept_dispatches_two_or_more_folders_as_selected_batch(self):
+        config = self.write_config()
+        with patch("assent.__main__.accept_selected_batch", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["accept", "child", "parent", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(mocked.call_args.args,
+                         (str(config), config.parent.resolve(),
+                          ["child", "parent"]))
 
     def test_verify_requires_a_mode_and_rejects_incompatible_options(self):
         for argv in (["verify"], ["verify", "one", "--all"],

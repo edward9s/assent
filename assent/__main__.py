@@ -11,7 +11,7 @@ import threading
 from collections import Counter
 
 from assent import AssentError, engine
-from assent.accept import accept_all, accept_folder
+from assent.accept import accept_all, accept_folder, accept_selected_batch
 from assent.archive import archive_all, archive_folder, restore_folder
 from assent.clean import clean_folders
 from assent.config import list_task_folders, load_config, validate_config
@@ -130,11 +130,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     accept_p = sub.add_parser(
         "accept", help="Transactionally integrate one reviewed, finished folder "
-                       "into the main worktree's current branch, or every "
-                       "finished folder with --all")
+                       "into the main worktree's current branch, an exact "
+                       "selected batch, or every finished folder with --all")
     accept_p.add_argument(
-        "folder", nargs="?", metavar="FOLDER",
-        help="The reviewed work folder to accept (omit only with --all)")
+        "folder", nargs="*", metavar="FOLDER",
+        help="One reviewed work folder, or two or more exact folders to accept "
+             "as a verified batch (omit only with --all)")
     accept_p.add_argument(
         "--all", action="store_true", dest="all_folders",
         help="Accept every finished work folder in folder-dependency order, "
@@ -318,10 +319,12 @@ def _dispatch(argv: list[str]) -> int:
             parser.error("run's --jobs can only be used with --all")
 
     if args.command == "accept":
-        if args.all_folders and args.folder is not None:
+        if args.all_folders and args.folder:
             parser.error("accept's --all and FOLDER cannot be used together")
-        if not args.all_folders and args.folder is None:
+        if not args.all_folders and not args.folder:
             parser.error("accept requires FOLDER or --all")
+        if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
+            parser.error("accept does not allow duplicate FOLDER names")
 
     if args.command == "verify":
         if args.batch and args.folder:
@@ -377,8 +380,11 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "accept":
         if args.all_folders:
             return accept_all(args.config, assent_dir)
+        if len(args.folder) >= 2:
+            return accept_selected_batch(
+                args.config, assent_dir, args.folder)
         try:
-            cfg = load_config(args.config, args.folder)
+            cfg = load_config(args.config, args.folder[0])
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
