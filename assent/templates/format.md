@@ -146,11 +146,13 @@ running multiple work folders in parallel safe.
 
 The definitions of `after` and `base`, and the rules for choosing a base, are
 in [Work-folder dependencies and completion](#work-folder-dependencies-and-completion).
-Optimistic stacking is bounded: at most one unaccepted upstream may be in a
-downstream stack. More than one unaccepted upstream fails closed rather than
-creating an implicit integration engine. If an upstream advances, the
-downstream stack is stale; preserve its source and use explicit rework/reject
-or a new folder instead of rewriting history.
+Optimistic stacking is bounded: it occurs only through an explicitly declared
+`base`, so at most one unaccepted upstream may be in a downstream stack. More
+than one unaccepted `after` upstream does not create a stack or fail closed;
+without a declared `base`, the downstream starts from the current integration
+target. If an upstream advances, the downstream stack is stale; preserve its
+source and use explicit rework/reject or a new folder instead of rewriting
+history.
 
 The operational sequence is `run A`, `run B` stacked on A under the dependency
 contract above, combined verification, `accept A`, then `accept B`. A matching
@@ -181,10 +183,11 @@ base = "bootstrap01"
 this one". A non-`base` `after` entry provides ordering only: it provides no
 file content and no same-file conflict protection. The downstream worktree is
 a complete checkout of the `base` commit, so the downstream receives only the
-files present on that base branch. When `base` is omitted, assent derives it
-automatically when there are zero or one unaccepted upstreams; with more than
-one unaccepted upstream and no declared `base`, assent refuses execution, and
-declaring `base` is one way to resolve that ambiguity.
+files present on that base branch. When `base` is omitted, the downstream
+starts from the current integration target. The number and acceptance state of
+`after` members do not affect this base selection; they remain ordering
+prerequisites only, and multiple unaccepted upstreams do not create a base
+ambiguity or refusal.
 
 Planning discipline: `base` must point to the upstream whose file content the
 downstream needs. Decide this by comparing the downstream task's `scope` and

@@ -85,7 +85,16 @@ class TestParseFolderDependencies(FolderDepsTestCase):
 
     def test_missing_file_means_no_dependencies(self):
         folder = self.make_folder("work", "TODO")
-        self.assertEqual(parse_folder_dependencies(folder).after, [])
+        dependencies = parse_folder_dependencies(folder)
+        self.assertEqual(dependencies.after, [])
+        self.assertIsNone(dependencies.base)
+
+    def test_existing_file_requires_after(self):
+        folder = self.make_folder("work", "TODO")
+        (folder / "_folder.toml").write_text(
+            'base = "first"\n', encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "missing after"):
+            parse_folder_dependencies(folder)
 
     def test_unknown_key_lists_valid_key(self):
         folder = self.make_folder("work", "TODO")
@@ -347,22 +356,21 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
         self.assertEqual(result.target_snapshot, target)
         self.assertEqual(result.resolved_base, target)
 
-    def test_one_unaccepted_uses_exact_upstream_tip(self):
+    def test_one_unaccepted_without_base_uses_target_head(self):
         self.make_folder("upstream", "DONE", "SKIP")
         downstream = self.make_folder("downstream", "TODO")
         (downstream / "_folder.toml").write_text(
             'after = ["upstream"]\n', encoding="utf-8")
-        _, tip = self.make_source("upstream")
+        self.make_source("upstream")
         target = _git(self.root, "rev-parse", "HEAD")
 
         result = resolve_folder_base(self.root, downstream)
 
         self.assertEqual(result.target_snapshot, target)
-        self.assertEqual(result.speculative_upstream.folder, "upstream")
-        self.assertEqual(result.speculative_upstream.tip, tip)
-        self.assertEqual(result.resolved_base, tip)
+        self.assertIsNone(result.speculative_upstream)
+        self.assertEqual(result.resolved_base, target)
 
-    def test_mixed_accepted_and_unaccepted_uses_only_unaccepted_tip(self):
+    def test_mixed_accepted_and_unaccepted_without_base_uses_target_head(self):
         self.make_folder("accepted", "DONE")
         self.make_folder("pending", "DONE")
         downstream = self.make_folder("downstream", "TODO")
@@ -370,15 +378,15 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
             'after = ["accepted", "pending"]\n', encoding="utf-8")
         _, accepted_tip = self.make_source("accepted")
         _git(self.root, "merge", "--ff-only", accepted_tip)
-        _, pending_tip = self.make_source("pending")
+        self.make_source("pending")
 
         result = resolve_folder_base(self.root, downstream)
 
         self.assertEqual(result.target_snapshot, accepted_tip)
-        self.assertEqual(result.speculative_upstream.folder, "pending")
-        self.assertEqual(result.resolved_base, pending_tip)
+        self.assertIsNone(result.speculative_upstream)
+        self.assertEqual(result.resolved_base, accepted_tip)
 
-    def test_multiple_unaccepted_lists_evidence_without_state_changes(self):
+    def test_multiple_unaccepted_without_base_use_target_without_state_changes(self):
         self.make_folder("first", "DONE")
         self.make_folder("second", "DONE")
         downstream = self.make_folder("downstream", "TODO")
@@ -394,20 +402,51 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
             _git(self.root, "worktree", "list", "--porcelain"),
         )
 
-        with self.assertRaises(AssentError) as raised:
-            resolve_folder_base(self.root, downstream)
+        result = resolve_folder_base(self.root, downstream)
 
-        message = str(raised.exception)
-        for folder, tip in (("first", first_tip), ("second", second_tip)):
-            with self.subTest(folder=folder):
-                self.assertIn(f"folder {folder}, tip {tip}", message)
-                self.assertIn("accept this upstream", message)
+        self.assertIsNone(result.speculative_upstream)
+        self.assertEqual(result.resolved_base, result.target_snapshot)
+        self.assertNotEqual(result.resolved_base, first_tip)
+        self.assertNotEqual(result.resolved_base, second_tip)
         after = (
             _git(self.root, "status", "--porcelain"),
             _git(self.root, "show-ref", "--heads"),
             _git(self.root, "worktree", "list", "--porcelain"),
         )
         self.assertEqual(after, before)
+
+    def test_declared_base_selects_one_of_multiple_unaccepted_tips(self):
+        self.make_folder("first", "DONE")
+        self.make_folder("second", "DONE")
+        downstream = self.make_folder("downstream", "TODO")
+        (downstream / "_folder.toml").write_text(
+            'after = ["first", "second"]\nbase = "first"\n',
+            encoding="utf-8")
+        _, first_tip = self.make_source("first")
+        self.make_source("second")
+
+        result = resolve_folder_base(self.root, downstream)
+
+        self.assertEqual(result.speculative_upstream.folder, "first")
+        self.assertEqual(result.speculative_upstream.tip, first_tip)
+        self.assertEqual(result.resolved_base, first_tip)
+
+    def test_accepted_declared_base_uses_target_despite_unaccepted_peer(self):
+        self.make_folder("first", "DONE")
+        self.make_folder("second", "DONE")
+        downstream = self.make_folder("downstream", "TODO")
+        (downstream / "_folder.toml").write_text(
+            'after = ["first", "second"]\nbase = "first"\n',
+            encoding="utf-8")
+        _, first_tip = self.make_source("first")
+        _git(self.root, "merge", "--ff-only", first_tip)
+        self.make_source("second")
+
+        result = resolve_folder_base(self.root, downstream)
+
+        self.assertEqual(result.target_snapshot, first_tip)
+        self.assertIsNone(result.speculative_upstream)
+        self.assertEqual(result.resolved_base, first_tip)
 
     def test_incomplete_and_blocked_upstreams_fail_closed(self):
         upstream = self.make_folder("upstream", "DONE")
@@ -443,7 +482,7 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
         self.make_folder("upstream", "DONE")
         downstream = self.make_folder("downstream", "TODO")
         (downstream / "_folder.toml").write_text(
-            'after = ["upstream"]\n', encoding="utf-8")
+            'after = ["upstream"]\nbase = "upstream"\n', encoding="utf-8")
         upstream_worktree, old_tip = self.make_source("upstream")
         downstream_worktree, _ = self.make_source("downstream", old_tip)
         (downstream_worktree / "downstream.txt").write_text(
@@ -472,7 +511,7 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
         self.make_folder("upstream", "DONE")
         downstream = self.make_folder("downstream", "TODO")
         (downstream / "_folder.toml").write_text(
-            'after = ["upstream"]\n', encoding="utf-8")
+            'after = ["upstream"]\nbase = "upstream"\n', encoding="utf-8")
         _, upstream_tip = self.make_source("upstream")
         _, downstream_tip = self.make_source("downstream", upstream_tip)
 
@@ -486,7 +525,7 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
         # integrated, so the base is the exact target HEAD with no speculation.
         downstream = self.make_folder("downstream", "TODO")
         (downstream / "_folder.toml").write_text(
-            'after = ["upstream"]\n', encoding="utf-8")
+            'after = ["upstream"]\nbase = "upstream"\n', encoding="utf-8")
         self.write_roster("upstream")
         target = _git(self.root, "rev-parse", "HEAD")
 
@@ -500,7 +539,7 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
         self.make_folder("live", "DONE", "SKIP")
         downstream = self.make_folder("downstream", "TODO")
         (downstream / "_folder.toml").write_text(
-            'after = ["arch", "live"]\n', encoding="utf-8")
+            'after = ["arch", "live"]\nbase = "live"\n', encoding="utf-8")
         self.write_roster("arch")
         _, tip = self.make_source("live")
 
@@ -535,7 +574,8 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
                     (downstream / "t001_task.e.toml").write_text(
                         task_text("TODO"), encoding="utf-8")
                     (downstream / "_folder.toml").write_text(
-                        'after = ["upstream"]\n', encoding="utf-8")
+                        'after = ["upstream"]\nbase = "upstream"\n',
+                        encoding="utf-8")
                     source = worktree_path(root, "upstream")
                     _git(root, "worktree", "add", "-b", "upstream/run",
                          str(source), "HEAD")

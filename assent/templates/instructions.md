@@ -79,9 +79,12 @@ Cleanup is a separate guarded operation: `assent clean` must retain an
 upstream source while any dependent folder remains unaccepted, and skips when
 its merged-and-clean proof is insufficient.
 
-Folder `after` is bounded optimistic stacking: it controls both readiness and
-the worktree base. Zero or one unaccepted upstream is allowed; multiple
-unaccepted upstreams fail closed. If an upstream advances, preserve the
+Folder `after` controls scheduler readiness only; it never supplies a worktree
+base. A declared `base` is the only lineage declaration, and stacking occurs
+only through it, so at most one unaccepted upstream can be in a downstream
+stack. Without a declared `base`, the downstream starts from the current
+integration target; the number or acceptance state of `after` members does not
+create base ambiguity or a refusal. If an upstream advances, preserve the
 downstream result but treat its stack as stale and use rework/reject or a new
 folder. Verify the combined candidate before accepting upstream then
 dependent; matching receipts can be reused, and accept does not rerun the

@@ -39,7 +39,7 @@ from assent import AssentError, gitops, lockfile, verification
 from assent.adapters import Adapter, InvocationRequest, get_adapter
 from assent.config import Config
 from assent.folderdeps import (FolderBaseResolution,
-                               find_unfinished_prerequisites, live_upstreams,
+                               find_unfinished_prerequisites,
                                parse_folder_dependencies,
                                resolve_folder_base)
 from assent.plan import (Plan, Task, append_entry, parse_task_file,
@@ -412,31 +412,28 @@ def _worktree_configuration_errors(cfg: Config) -> list[str]:
 
 @dataclass(frozen=True)
 class _StackState:
-    """Resolved base plus every direct upstream identity used to verify races."""
+    """Resolved base plus the declared base identity used to verify races."""
 
     base: FolderBaseResolution
     sources: tuple[gitops.FolderSourceSnapshot, ...]
 
 
 def _resolve_stack_state(cfg: Config) -> _StackState:
-    """Resolve a reproducible base and snapshot all live direct upstream tips.
+    """Resolve a reproducible base and snapshot only its live source tip.
 
-    An archived upstream has no branch left to snapshot and no race to lose: its
-    content is already in the target, so it is filtered out before any source is
-    resolved (see ``live_upstreams``).
+    A folder without an unaccepted declared base has no source to snapshot:
+    ordering-only ``after`` entries do not provide Git lineage or race evidence.
     """
     base = resolve_folder_base(
         cfg.root, cfg.tasks_dir, excludes=cfg.git_excludes)
-    dependencies = parse_folder_dependencies(cfg.tasks_dir)
-    sources = tuple(
-        gitops.resolve_folder_source(cfg.root, folder, cfg.git_excludes)
-        for folder in live_upstreams(cfg.assent_dir, dependencies)
-    )
-    if base.speculative_upstream is not None:
-        matching = next(
-            (source for source in sources
-             if source.folder == base.speculative_upstream.folder), None)
-        if matching is None or matching.tip != base.speculative_upstream.tip:
+    if base.speculative_upstream is None:
+        sources = ()
+    else:
+        source = gitops.resolve_folder_source(
+            cfg.root, base.speculative_upstream.folder, cfg.git_excludes)
+        sources = (source,)
+        if (source.folder != base.speculative_upstream.folder
+                or source.tip != base.speculative_upstream.tip):
             raise AssentError(
                 "upstream source changed while the stack base was being resolved")
     return _StackState(base, sources)
@@ -444,16 +441,16 @@ def _resolve_stack_state(cfg: Config) -> _StackState:
 
 def _require_stack_ancestry(cfg: Config, state: _StackState,
                             downstream_tip: str) -> None:
-    """Require the downstream tip to contain every current direct upstream."""
-    for source in state.sources:
-        if gitops.is_ancestor(cfg.root, source.tip, downstream_tip):
-            continue
-        raise AssentError(
-            f"stale stack for {cfg.tasks_name}: current upstream "
-            f"{source.folder} tip {source.tip} is not an ancestor of downstream "
-            f"tip {downstream_tip}; all existing work is preserved. Run `assent "
-            f"rework {cfg.tasks_name}` after deciding how to handle the upstream "
-            "change, or replan the dependency")
+    """Require the downstream tip to contain the current declared base, if any."""
+    source = state.base.speculative_upstream
+    if source is None or gitops.is_ancestor(cfg.root, source.tip, downstream_tip):
+        return
+    raise AssentError(
+        f"stale stack for {cfg.tasks_name}: current upstream "
+        f"{source.folder} tip {source.tip} is not an ancestor of downstream "
+        f"tip {downstream_tip}; all existing work is preserved. Run `assent "
+        f"rework {cfg.tasks_name}` after deciding how to handle the upstream "
+        "change, or replan the dependency")
 
 
 def _prepare_worktree(cfg: Config) -> Config:

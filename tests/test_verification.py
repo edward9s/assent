@@ -299,7 +299,7 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
             'goal = "done"\nacceptance = "verified"\n',
             encoding="utf-8")
         (self.tasks_dir / "_folder.toml").write_text(
-            'after = ["base"]\n', encoding="utf-8")
+            'after = ["base"]\nbase = "base"\n', encoding="utf-8")
         self._commit_assent("declare a live upstream")
 
         # A live upstream must still retain one clean, attached source identity.
@@ -325,6 +325,83 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
         receipt = read_receipt(self.tasks_dir / RECEIPT_NAME, self.root)
         self.assertEqual(receipt.status, "PASSED")
         self.assertTrue(receipt_matches_current_candidate(self.cfg))
+
+    def test_declared_base_allows_other_unaccepted_after_upstream(self):
+        for folder in ("A", "B"):
+            upstream = self.assent_dir / folder
+            upstream.mkdir()
+            (upstream / f"t001_{folder.lower()}.e.toml").write_text(
+                f'title = "{folder}"\n'
+                'deps = []\nmodel = "core"\nstatus = "DONE"\n'
+                f'scope = ["{folder.lower()}.txt"]\n'
+                'verify = "python .assent/verify.py"\n'
+                'goal = "done"\nacceptance = "verified"\n',
+                encoding="utf-8")
+        (self.tasks_dir / "_folder.toml").write_text(
+            'after = ["A", "B"]\nbase = "A"\n', encoding="utf-8")
+        self._commit_assent("declare two live upstreams with base A")
+
+        a_source = self.parent / f"{self.root.name}.worktrees" / "A"
+        b_source = self.parent / f"{self.root.name}.worktrees" / "B"
+        _git(self.root, "worktree", "add", "-b", "A/run", str(a_source))
+        _git(self.root, "worktree", "add", "-b", "B/run", str(b_source))
+        (a_source / "a.txt").write_text("A\n", encoding="utf-8")
+        _git(a_source, "add", "a.txt")
+        _git(a_source, "commit", "-m", "finish A")
+        (b_source / "b.txt").write_text("B\n", encoding="utf-8")
+        _git(b_source, "add", "b.txt")
+        _git(b_source, "commit", "-m", "finish B")
+
+        _git(self.source_worktree, "reset", "--hard", "A/run")
+        (self.source_worktree / "downstream.txt").write_text(
+            "downstream\n", encoding="utf-8")
+        _git(self.source_worktree, "add", "downstream.txt")
+        _git(self.source_worktree, "commit", "-m", "finish downstream")
+
+        code, output = self._verify()
+        self.assertEqual(code, 0, output)
+        receipt = read_receipt(self.tasks_dir / RECEIPT_NAME, self.root)
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertNotIn("stale stack", output)
+
+    def test_multiple_unaccepted_after_upstreams_without_base_are_allowed(self):
+        for folder in ("A", "B"):
+            upstream = self.assent_dir / folder
+            upstream.mkdir()
+            (upstream / f"t001_{folder.lower()}.e.toml").write_text(
+                f'title = "{folder}"\n'
+                'deps = []\nmodel = "core"\nstatus = "DONE"\n'
+                f'scope = ["{folder.lower()}.txt"]\n'
+                'verify = "python .assent/verify.py"\n'
+                'goal = "done"\nacceptance = "verified"\n',
+                encoding="utf-8")
+        (self.tasks_dir / "_folder.toml").write_text(
+            'after = ["A", "B"]\n', encoding="utf-8")
+        self._commit_assent("declare two ordering-only upstreams")
+
+        a_source = self.parent / f"{self.root.name}.worktrees" / "A"
+        b_source = self.parent / f"{self.root.name}.worktrees" / "B"
+        _git(self.root, "worktree", "add", "-b", "A/run", str(a_source))
+        _git(self.root, "worktree", "add", "-b", "B/run", str(b_source))
+        (a_source / "a.txt").write_text("A\n", encoding="utf-8")
+        _git(a_source, "add", "a.txt")
+        _git(a_source, "commit", "-m", "finish A")
+        (b_source / "b.txt").write_text("B\n", encoding="utf-8")
+        _git(b_source, "add", "b.txt")
+        _git(b_source, "commit", "-m", "finish B")
+
+        _git(self.source_worktree, "reset", "--hard", "trunk")
+        (self.source_worktree / "downstream.txt").write_text(
+            "downstream\n", encoding="utf-8")
+        _git(self.source_worktree, "add", "downstream.txt")
+        _git(self.source_worktree, "commit", "-m", "finish downstream")
+
+        code, output = self._verify()
+        self.assertEqual(code, 0, output)
+        receipt = read_receipt(self.tasks_dir / RECEIPT_NAME, self.root)
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertNotIn(
+            "cannot form one speculative verification candidate", output)
 
 
 class TestReceiptMatching(VerificationRepositoryCase):
