@@ -311,6 +311,16 @@ class TestPreflight(unittest.TestCase):
         self.assertIn("[adapter.antigravity.efforts.prime] normal = \"high\"", message)
         self.assertIn("current value 'medium'", message)
 
+    def test_preflight_diagnostic_keeps_abstract_key_and_suggests_vendor_value(self):
+        cfg = make_cfg(antigravity_tier_efforts={"prime": {"slight": "medium"}})
+        adapter = AntigravityAdapter(cfg, catalog=catalog())
+        errors = adapter.preflight([request("t008", "prime", "slight", cfg=cfg)])
+
+        self.assertEqual(len(errors), 1)
+        message = errors[0]
+        self.assertIn("[adapter.antigravity.efforts.prime] slight = \"high\"", message)
+        self.assertIn("current value 'medium'", message)
+
     def test_preflight_spends_no_subprocess_when_a_catalog_is_supplied(self):
         adapter = make_adapter()
         with mock.patch("assent.adapters.antigravity.subprocess.run",
@@ -369,6 +379,9 @@ class TestPreflight(unittest.TestCase):
         self.assertEqual(recommended_effort(("low", "high"), "medium"), "high")
         self.assertEqual(recommended_effort(("low", "medium"), "high"), "medium")
         self.assertEqual(recommended_effort(("low", "medium", "high"), "low"), "low")
+
+    def test_recommendation_uses_vendor_order_for_a_translated_effort(self):
+        self.assertEqual(recommended_effort(("medium", "high"), "low"), "medium")
 
 
 class TestOutputContract(unittest.TestCase):
