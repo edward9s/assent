@@ -606,9 +606,20 @@ never deletes source before that proof.
 `assent run` uses two verification stages. During each AI task session, the
 scheduler runs only that task's focused `verify` command before creating its
 checkpoint. The second stage builds one temporary integration candidate outside
-any AI session and runs the complete `.assent/verify.py` once. Its result is a
-derived `_verification.toml` receipt; the report shows whether the receipt is
-`PASSED` or `FAILED` and `fresh` or `stale`.
+any AI session and runs the complete `.assent/verify.py` once. The candidate is
+at `<project>.integration/target-<uuid>`, a sibling of
+`<project>.worktrees/`, on branch `assent-integration/<folder>/<uuid>`. It is
+the merged tree being verified and remains present throughout the entire test
+run, then is removed after the tests finish. Its result is a derived
+`_verification.toml` receipt; the report shows whether the receipt is `PASSED`
+or `FAILED` and `fresh` or `stale`. To reproduce the stage manually, use that
+candidate as the verifier's cwd while it exists and run the verifier script
+from the main worktree, such as `python <main-worktree>/.assent/verify.py`.
+Cleanup runs in a `finally` block, covering normal completion, Python
+exceptions, and Ctrl-C. Only a hard kill, such as `taskkill /F`, or power loss
+can leave residue; Assent has no automatic stale-candidate recovery. Remove
+residue manually with `git worktree remove --force <path>` and `git branch -D
+<branch>`.
 
 Who starts that second stage is a project policy, `receipt_refresh` in
 `assent.toml`'s `[verification]` section. Under the default `"manual"`, run
