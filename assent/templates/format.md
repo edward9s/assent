@@ -855,6 +855,25 @@ can leave residue; Assent has no automatic stale-candidate recovery. Remove
 residue manually with `git worktree remove --force <path>` and `git branch -D
 <branch>`.
 
+That candidate is built by `git worktree add`, so untracked and ignored paths
+are absent from it. Complete verification therefore mirrors, and mirrors only,
+the explicitly provisioned ignored root-level directory links of the source
+worktrees that enter the candidate — Windows junctions and directory symlinks,
+POSIX directory symlinks — at the same relative name and resolved target, and
+only where that destination is absent from the candidate and ignored there.
+Arbitrary ignored content is never exposed: ordinary ignored directories,
+files, nested links, `.assent`, build output, caches, credentials, and editor
+state stay out. Several sources contribute the union of their links; the same
+name and target seen twice is one link, while conflicting targets, an occupied
+destination, or a link that cannot be created refuse before the verifier runs
+and before any `PASSED` evidence exists. The mirrors live only for the verifier
+run and are removed before the temporary worktree is, so neither creating nor
+cleaning a candidate ever traverses, modifies, or deletes a linked target, and
+the source worktree's own link survives success, failure, and interruption.
+Provision such a link yourself, next to the source worktree, when a private
+package directory or a large asset tree must stay out of Git; there is no
+project setting and no force flag that widens this.
+
 Who starts that second stage is a project policy, `receipt_refresh` in
 `assent.toml`'s `[verification]` section. Under the default `"manual"`, run
 closeout does not verify at all; it prints the deferral and the receipt comes

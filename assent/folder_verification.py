@@ -27,9 +27,11 @@ from assent.plan import Plan
 from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
                                         SUMMARY_LIMIT, VERIFY_COMMAND,
                                         atomic_write_text, candidate_tree,
-                                        invalidate_receipt, require_oid,
-                                        run_full_verifier, sha256_file,
-                                        source_snapshot, summary, toml_string)
+                                        invalidate_receipt,
+                                        provisioned_candidate_links,
+                                        require_oid, run_full_verifier,
+                                        sha256_file, source_snapshot, summary,
+                                        toml_string, union_worktree_links)
 
 RECEIPT_NAME = "_verification.toml"
 RECEIPT_VERSION = 1
@@ -262,6 +264,10 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
         raise AssentError(f"Verification script not found: {script}")
     digest = sha256_file(script)
     upstream_sources = _stack_sources(cfg, target_tip, source_tip)
+    # Resolved with the other preflight facts, so a conflicting or unresolvable
+    # provisioned link refuses while the previous receipt is still on disk.
+    links = union_worktree_links(
+        [source_worktree, *(source.worktree for source in upstream_sources)])
     invalidate_receipt(path)
 
     integration_tree = gitops.tree_of(main, target_tip)
@@ -284,25 +290,31 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
                     "temporary integration did not produce the expected two-parent "
                     "candidate")
             integration_tree = gitops.tree_of(candidate, "HEAD")
-            try:
-                result = run_full_verifier(script, candidate)
-            except OSError as e:
-                receipt = _new_receipt(
-                    status="FAILED", source_tip=source_tip,
-                    target_tip=target_tip, integration_tree=integration_tree,
-                    digest=digest, exit_code=1,
-                    failure_summary=f"Unable to start verification: {e}")
-            else:
-                receipt = _new_receipt(
-                    status="PASSED" if result.returncode == 0 else "FAILED",
-                    source_tip=source_tip, target_tip=target_tip,
-                    integration_tree=integration_tree, digest=digest,
-                    exit_code=result.returncode,
-                    failure_summary=("" if result.returncode == 0 else summary(
-                        result.stdout, result.stderr,
-                        f"Verification command failed: {VERIFY_COMMAND} "
-                        f"(exit code {result.returncode})")),
-                )
+            # Every source worktree whose commits are in this candidate may
+            # have provisioned ignored root-level directory links; the verifier
+            # needs the same ones, and an unmirrorable link refuses here rather
+            # than producing evidence for a candidate nobody provisioned.
+            with provisioned_candidate_links(candidate, links):
+                try:
+                    result = run_full_verifier(script, candidate)
+                except OSError as e:
+                    receipt = _new_receipt(
+                        status="FAILED", source_tip=source_tip,
+                        target_tip=target_tip,
+                        integration_tree=integration_tree,
+                        digest=digest, exit_code=1,
+                        failure_summary=f"Unable to start verification: {e}")
+                else:
+                    receipt = _new_receipt(
+                        status="PASSED" if result.returncode == 0 else "FAILED",
+                        source_tip=source_tip, target_tip=target_tip,
+                        integration_tree=integration_tree, digest=digest,
+                        exit_code=result.returncode,
+                        failure_summary=("" if result.returncode == 0 else summary(
+                            result.stdout, result.stderr,
+                            f"Verification command failed: {VERIFY_COMMAND} "
+                            f"(exit code {result.returncode})")),
+                    )
 
     # External Git writes are unsupported, but detecting them keeps the receipt
     # from certifying a candidate different from the identities observed above.
