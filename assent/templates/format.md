@@ -282,6 +282,11 @@ a failed `verify` restarts a whole session under [Lifecycle and review].
   question to a human: an ambiguous condition does not just cost a
   clarification, it costs a full retried session before the ambiguity even
   surfaces.
+- Point each task's `verify` at the narrowest test module(s) that
+  exercise its `scope`, not the full suite: the scheduler already runs
+  `.assent/verify.py` in full, once, automatically, after every task in
+  the folder reaches DONE/SKIP (see "Lifecycle and review"); repeating it
+  per task multiplies suite runtime by task count for no added safety.
 
 ### Status semantics
 
