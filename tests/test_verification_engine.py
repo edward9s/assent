@@ -334,6 +334,7 @@ class BatchVerifyRepositoryCase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.parent = Path(tempfile.mkdtemp(prefix="assent batch verify test "))
+        self.questions: list[str] = []
         self.root = self.parent / "repository"
         self.root.mkdir()
         self.addCleanup(self._cleanup)
@@ -411,10 +412,21 @@ class BatchVerifyRepositoryCase(unittest.TestCase):
     def read_batch_receipt(self) -> verification.BatchVerificationReceipt:
         return verification.read_batch_receipt(self.receipt_path(), self.root)
 
-    def run_batch(self) -> tuple[int, str]:
+    def run_batch(self, bisect: bool = True,
+                  answer: bool = False) -> tuple[int, str]:
+        """Run one batch, recording every conflict-skip question it asks.
+
+        The default answer is no, so a test that expects a verified batch also
+        proves no question was asked unless it says otherwise.
+        """
+        def confirm(question: str) -> bool:
+            self.questions.append(question)
+            return answer
+
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = verify_batch(str(self.config_path), self.assent_dir)
+            code = verify_batch(
+                str(self.config_path), self.assent_dir, bisect, confirm)
         return code, output.getvalue()
 
 
@@ -565,6 +577,220 @@ class TestBatchCandidateAndReceipt(BatchVerifyRepositoryCase):
                          "placeholder\n")
 
 
+class TestSkipConfirmation(unittest.TestCase):
+    """The one interactive question in the whole batch path."""
+
+    def test_only_a_clear_yes_is_a_yes_and_nothing_is_asked_twice(self) -> None:
+        cases = (("", True), ("y", True), ("Y", True), (" yes ", True),
+                 ("YES", True), ("n", False), ("no", False), ("N", False),
+                 ("maybe", False), ("yy", False))
+        for answer, expected in cases:
+            with self.subTest(answer=answer), mock.patch(
+                    "builtins.input", return_value=answer) as ask:
+                self.assertIs(
+                    verification.confirm_on_terminal("Skip? [Y/n]: "), expected)
+                ask.assert_called_once_with("Skip? [Y/n]: ")
+
+    def test_a_closed_stdin_is_a_no(self) -> None:
+        with mock.patch("builtins.input", side_effect=EOFError) as ask:
+            self.assertFalse(verification.confirm_on_terminal("Skip? [Y/n]: "))
+        self.assertEqual(ask.call_count, 1)
+
+
+class TestBatchConflictSkip(BatchVerifyRepositoryCase):
+    """One human decision turns a conflicting batch into its independent subset."""
+
+    def source_tips(self) -> dict[str, str]:
+        return {branch: _git(self.root, "rev-parse", branch)
+                for branch in _git(
+                    self.root, "for-each-ref", "--format=%(refname:short)",
+                    "refs/heads/").splitlines()}
+
+    def test_a_conflict_free_batch_asks_nothing(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.questions, [])
+        self.assertNotIn("[Y/n]", output)
+        self.assertEqual(self.read_batch_receipt().folders, ("aa", "bb"))
+
+    def test_yes_verifies_the_independent_subset_and_names_both_sets(self
+                                                                     ) -> None:
+        first = self.make_source("aa", filename="shared.txt",
+                                 content="from aa\n")
+        conflicting = self.make_source("bb", filename="shared.txt",
+                                       content="from bb\n")
+        third = self.make_source("cc")
+        target_tip = self.head()
+
+        code, output = self.run_batch(answer=True)
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(self.questions), 1)
+        question = self.questions[0]
+        self.assertTrue(question.endswith("[Y/n]: "), question)
+        self.assertIn("Skip bb", question)
+        self.assertIn("remaining 2 folder(s) (aa, cc)", question)
+        self.assertIn("shared.txt", output)
+        self.assertIn("verified aa, cc; skipped bb", output)
+
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertEqual(receipt.folders, ("aa", "cc"))
+        # The receipt records only positive facts about the verified subset,
+        # and those trees are exactly what rebuilding that subset produces.
+        rebuilt = verification.build_batch_candidate(
+            self.root, target_tip, [("aa", first), ("cc", third)])
+        self.assertTrue(rebuilt.ok)
+        self.assertEqual([s.step_tree for s in receipt.sources],
+                         list(rebuilt.step_trees))
+        self.assertEqual(self.head(), target_tip)
+
+        # Strict rebuilding, which every freshness and acceptance check uses,
+        # keeps refusing the same conflict instead of applying the skip.
+        strict = verification.build_batch_candidate(
+            self.root, target_tip,
+            [("aa", first), ("bb", conflicting), ("cc", third)])
+        self.assertFalse(strict.ok)
+        self.assertEqual(strict.conflict_folder, "bb")
+
+    def test_the_queued_downstream_of_a_conflict_is_skipped_with_it(self) -> None:
+        self.make_source("aa", filename="shared.txt", content="from aa\n")
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+        self.make_source("cc")
+        self.make_source("dd")
+        self.write_after("cc", ("bb",))
+
+        code, output = self.run_batch(answer=True)
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("cc is queued after bb", output)
+        self.assertIn("Skip bb, cc", self.questions[0])
+        self.assertIn("remaining 2 folder(s) (aa, dd)", self.questions[0])
+        # A later independent folder is still attempted, so one scan sees every
+        # conflict and the human is asked exactly once.
+        self.assertEqual(self.read_batch_receipt().folders, ("aa", "dd"))
+        self.assertIn("verified aa, dd; skipped bb, cc", output)
+
+    def test_several_conflicts_are_summarized_before_a_single_question(self
+                                                                       ) -> None:
+        self.make_source("aa", filename="one.txt", content="from aa\n")
+        self.make_source("bb", filename="one.txt", content="from bb\n")
+        self.make_source("cc", filename="two.txt", content="from cc\n")
+        self.make_source("dd", filename="two.txt", content="from dd\n")
+
+        code, output = self.run_batch(answer=True)
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(self.questions), 1)
+        self.assertIn("Skip bb, dd", self.questions[0])
+        self.assertIn("remaining 2 folder(s) (aa, cc)", self.questions[0])
+        self.assertIn("merging bb into the batch candidate conflicts", output)
+        self.assertIn("merging dd into the batch candidate conflicts", output)
+        self.assertIn("one.txt", output)
+        self.assertIn("two.txt", output)
+        self.assertEqual(self.read_batch_receipt().folders, ("aa", "cc"))
+
+    def test_no_runs_no_verifier_writes_no_receipt_and_changes_nothing(self
+                                                                      ) -> None:
+        self.make_source("aa", filename="shared.txt", content="from aa\n")
+        code, output = self.run_batch()
+        self.assertEqual(code, 0, output)
+        self.assertTrue(self.receipt_path().exists())
+
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+        target_tip = self.head()
+        tips_before = self.source_tips()
+
+        with mock.patch("assent.verification._run_full_verifier") as verifier:
+            code, output = self.run_batch(answer=False)
+
+        self.assertEqual(code, 1)
+        verifier.assert_not_called()
+        # The first, conflict-free run asked nothing at all.
+        self.assertEqual(len(self.questions), 1)
+        self.assertIn("the skip was declined", output)
+        self.assertEqual(self.head(), target_tip)
+        self.assertEqual(self.source_tips(), tips_before)
+        # The earlier receipt was invalidated when this batch was attempted, so
+        # a declined batch leaves no evidence behind that could still publish.
+        self.assertFalse(self.receipt_path().exists())
+
+    def test_the_default_confirmation_reads_stdin_and_eof_is_a_refusal(self
+                                                                      ) -> None:
+        self.make_source("aa", filename="shared.txt", content="from aa\n")
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=EOFError) as ask, \
+                mock.patch("assent.verification._run_full_verifier") as verifier, \
+                contextlib.redirect_stdout(output):
+            code = verify_batch(str(self.config_path), self.assent_dir)
+
+        self.assertEqual(code, 1, output.getvalue())
+        self.assertTrue(ask.call_args.args[0].endswith("[Y/n]: "))
+        verifier.assert_not_called()
+        self.assertFalse(self.receipt_path().exists())
+
+    def test_an_all_conflicting_batch_asks_nothing_and_writes_no_receipt(self
+                                                                        ) -> None:
+        self.make_source("aa", filename="README.md", content="from aa\n")
+        (self.root / "README.md").write_text("from trunk\n", encoding="utf-8")
+        _git(self.root, "commit", "-am", "move the target")
+        self.make_source("bb")
+        self.write_after("bb", ("aa",))
+        target_tip = self.head()
+
+        with mock.patch("assent.verification._run_full_verifier") as verifier:
+            code, output = self.run_batch(answer=True)
+
+        self.assertEqual(code, 1)
+        verifier.assert_not_called()
+        self.assertEqual(self.questions, [])
+        self.assertIn("README.md", output)
+        self.assertIn("every queued folder conflicts", output)
+        self.assertFalse(self.receipt_path().exists())
+        self.assertEqual(self.head(), target_tip)
+
+    def test_localization_operates_on_the_subset_that_was_verified(self) -> None:
+        self.make_source("aa", filename="shared.txt", content="from aa\n")
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+        self.make_source("cc")
+        self.write_verify(
+            "import pathlib\n"
+            "import sys\n"
+            "if pathlib.Path('cc.txt').exists():\n"
+            "    print('regression introduced by cc')\n"
+            "    sys.exit(3)\n"
+            "sys.exit(0)\n")
+
+        code, output = self.run_batch(answer=True)
+
+        self.assertEqual(code, 1)
+        self.assertIn("localized the failure to cc", output)
+        self.assertNotIn("localized the failure to bb", output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertEqual(receipt.folders, ("aa",))
+
+    def test_no_bisect_still_records_the_filtered_subset(self) -> None:
+        self.make_source("aa", filename="shared.txt", content="from aa\n")
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+        self.make_source("cc")
+        self.write_verify(_VERIFY_FAILS)
+
+        code, output = self.run_batch(bisect=False, answer=True)
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("localiz", output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertEqual(receipt.folders, ("aa", "cc"))
+
+
 class TestBatchFailureLocalization(BatchVerifyRepositoryCase):
     """Bisecting a failed batch down to the one folder that turns it red."""
 
@@ -595,12 +821,6 @@ class TestBatchFailureLocalization(BatchVerifyRepositoryCase):
     def make_batch(self, *folders: str) -> None:
         for folder in folders:
             self.make_source(folder)
-
-    def run_batch(self, bisect: bool = True) -> tuple[int, str]:
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code = verify_batch(str(self.config_path), self.assent_dir, bisect)
-        return code, output.getvalue()
 
     def test_guilty_folder_in_the_middle_is_named_and_the_prefix_is_kept(self
                                                                         ) -> None:

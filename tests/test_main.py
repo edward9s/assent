@@ -187,6 +187,28 @@ class TestDispatch(MainTestCase):
         self.assertEqual(mocked.call_count, 2)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
 
+    def test_verify_batch_dispatches_bisect_and_keeps_the_default_prompt(self):
+        config = self.write_config()
+        with patch("assent.__main__.verify_batch", return_value=0) as mocked:
+            code, _ = self.run_main(["verify", "--batch", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(mocked.call_args.args[2], True)
+        # No confirmation callback is injected, so the CLI keeps the terminal
+        # `input` default that asks about skipping a conflicting source.
+        self.assertEqual(mocked.call_args.kwargs, {})
+
+    def test_verify_batch_help_states_the_conflict_skip_confirmation(self):
+        output = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(
+                output):
+            main(["verify", "-h"])
+        self.assertEqual(ctx.exception.code, 0)
+        text = " ".join(output.getvalue().split())
+        self.assertIn("a conflicting source is reported and, after one "
+                      "confirmation, skipped together with the folders queued "
+                      "after it", text)
+        self.assertNotIn("accept the folders ahead", text)
+
     def test_verify_interrupt_returns_130(self):
         config = self.write_config()
         with patch("assent.__main__.verify_folder", side_effect=KeyboardInterrupt):
