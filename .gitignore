@@ -1,0 +1,10 @@
+# Claude Code / AI tool local artifacts
+.claude/
+CLAUDE.md
+.anthropic/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
