@@ -356,6 +356,36 @@ A `BLOCKED` task only blocks tasks that have it as an upstream; other tasks run
 as usual. When every task is `DONE` / `BLOCKED` / `SKIP` it finishes, prints a
 summary, and updates the `_report.md` inside the work folder.
 
+## Review, acceptance, and cleanup lifecycle
+
+`DONE` is the executing AI's completion claim, not a human approval. A human
+must read the folder's `_report.md`, inspect the task results and checkpoint
+evidence, and make the acceptance decision explicitly with:
+
+```text
+assent accept <FOLDER>
+```
+
+`FOLDER` is required. `accept` integrates exactly one completed folder into
+the target branch currently checked out in the main worktree. It verifies the
+source and the integrated result, records an auditable `--no-ff` merge, and
+keeps the source worktree and branch for later inspection or cleanup. A
+successful rerun is idempotent and does not create a duplicate merge.
+
+Acceptance refuses incomplete, locked, dirty, detached, ambiguous, or
+dependency-unsafe state. A source or post-merge verification failure and a
+conflict do not advance the target. Assent never resolves conflicts, pulls,
+rebases, force pushes, or deletes source, and it has no `--all`, `--push`, or
+`push` subcommand. Remote synchronization is an independent Git operation
+chosen by the human after local acceptance; it is not an Assent feature.
+
+The integration lock serializes Assent `accept` operations. It is not an
+atomic barrier against external programs, so users must not run Git commands
+that write the same main worktree during acceptance. After acceptance and any
+separately chosen synchronization, `assent clean <FOLDER>` may remove the
+source only when its independent merged-and-clean proof succeeds; cleanup
+never deletes source before that proof.
+
 ## Lifecycle and review (the objective gate)
 
 For each task: open a headless session -> after the session ends the scheduler

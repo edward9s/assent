@@ -98,7 +98,12 @@ assent run --all --jobs 2
 # 6. 隨時查看(另開終端、零 token)
 assent status
 assent report
-assent clean [FOLDER]
+# 人類審查後,接受一個已完成的資料夾併入目前目標分支
+assent accept <資料夾>
+# 接受後,用一般 Git(或自行委任的 AI 流程)獨立同步
+git push
+# 接受與所需同步完成後,移除多餘成果
+assent clean <資料夾>
 
 # 驗收會議要求單一任務重做(預設保留程式碼;不自動 run)
 assent rework <FOLDER> <TASK> [--cascade] [--reason TEXT]
@@ -112,13 +117,30 @@ assent reject <FOLDER>
 ```
 git log --oneline <資料夾名>/<run-id>   # 一任務一 commit,逐一查看
 git diff main...<資料夾名>/<run-id>     # 或看整體差異
-# 接受 → merge;單一任務不接受 → assent rework <資料夾> <任務>
+# 人類做決定;Assent 執行受保護的本地整合
+assent accept <資料夾>
+# 再自行選擇一般 Git 同步,例如 `git push`,或委任你自己的 AI 流程
+# 單一任務不接受 → assent rework <資料夾> <任務>
 # 有已開始的下游 → 加 --cascade;確認要反向程式碼 → 加 --revert-code
 # 整個資料夾的實作都不要 → assent reject <資料夾>
 ```
 
 `rework` 成功後會立即更新 `_report.md`,但不印整份報告、也不啟動 AI;人確認
 TODO 與連動範圍正確後,再明示執行 `assent run <FOLDER>`。
+
+`DONE` 是執行 AI 的完成主張,不是人類批准。人類必須先讀 `_report.md`、
+檢查報告與 checkpoint 存證,再呼叫 `assent accept <FOLDER>` 做出接受決定。
+`FOLDER` 必填:`accept` 沒有 `--all`、`--push` 或 `push` subcommand,不會連線
+遠端 hosting、不會 pull、rebase,也不會刪除 source worktree。成功本地接受後,
+用一般 Git 命令,或你自行操作的 AI 流程獨立同步;這不是 Assent 的內建功能。
+只有在接受與所需同步完成、且清理證明成立後,才執行 `assent clean <FOLDER>`。
+
+接受要求主工作樹目前位於 target branch,且 source 已完成、乾淨、唯一可辨識並通過
+依賴安全檢查。Assent 會驗證 source 與整合後結果,以可稽核的 `--no-ff` merge
+留下證據,成功重跑具冪等性。完成、lock、乾淨、branch、依賴或歧義證明不足就拒絕;
+verify failure 或 conflict 不會推進 target。Assent 不自動解衝突、pull、rebase、
+force push,也不宣稱 integration lock 能阻止外部 Git 寫入;accept 期間不要在同一
+主工作樹執行會寫入的 Git 命令。lock 只保證 Assent accept 彼此串行。
 
 ## 平行執行
 
@@ -173,7 +195,10 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 ```
 
 裁決落實 = AI 改任務檔(status 改回 TODO、補說明、加任務、標 SKIP),
-`assent check` 過了回第 2 幕。循環到全部 DONE → merge。
+`assent check` 過了回第 2 幕。`DONE` 仍是執行主張,直到人類讀報告後呼叫
+`assent accept <FOLDER>`。該命令執行安全的本地 `--no-ff` 整合;遠端同步仍是
+獨立的一般 Git 決定,最後可執行 `assent clean <FOLDER>`。循環到需要重做的任務
+都完成並由人類接受。
 新一輪計畫 = 開新工作資料夾即可;舊資料夾可由 `_folder.toml` 的 `after`
 繼續作為前置參與依賴判定。資料夾完成由任務檔推導,全部任務為 DONE/SKIP
 才算完成。
@@ -187,6 +212,13 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 選擇設定檔,預設為 `.assent/assent.toml`;設定檔不再維護工作資料夾指標。
 兩者彼此正交,可以只用其中一個,也可以同時使用,例如
 `assent status --config configs/night.toml parallel01`。
+
+`assent accept <FOLDER>` 是人類對單一已完成資料夾的明示接受動作。要求主工作樹目前
+branch 是 target,驗證 source 與整合後結果,並以帶證據的 `--no-ff` merge 完成本地整合。
+完成、lock、乾淨、branch、依賴或歧義證明不足就拒絕;conflict 或 verify failure 不會
+推進 target。不連線 remote、不 pull、rebase、force push、不自動解衝突、不刪 source。
+integration lock 只串行 Assent accept,無法原子性阻止外部 Git 寫入;accept 期間不要在
+同一主工作樹執行寫入 Git 命令。成功重跑具冪等性。
 
 `assent clean [FOLDER]` 只刪除已完全併入且乾淨的 worktree 與分支;證明不了就跳過,
 不碰 `.assent/`,也沒有強制選項,且與 `git clean` 無關。
@@ -213,6 +245,7 @@ checkpoints 構成目前分支的連續尾段才會建立新的反向 commit,絕
 | `assent status [FOLDER]`<br>`assent status parallel01` | 顯示進度統計、下一個任務、分支與最後檢查點。接受 `--config PATH`。 | **零** |
 | `assent check [FOLDER]`<br>`assent check --config .assent/assent.toml parallel01` | 驗證任務檔格式、依賴無循環、設定與環境,是規劃會議的散會條件。接受 `--config PATH`。 | **零** |
 | `assent report [FOLDER]`<br>`assent report parallel01` | 生成並顯示工作資料夾內的人讀報告 `_report.md`。接受 `--config PATH`。 | **零** |
+| `assent accept <FOLDER>`<br>`assent accept parallel01` | 人類對單一已完成資料夾做接受決定。要求目前主工作樹位於 target branch;驗證 source 與整合後結果,留下可稽核的 `--no-ff` merge,成功重跑具冪等性。完成、lock、乾淨、branch、依賴或歧義證明不足就拒絕;conflict 與 verify failure 不推進 target。沒有 `--all`、`--push`,不連線 remote、不 pull、rebase、force push、不解衝突、不刪 source。 | **零** |
 | `assent clean [FOLDER]`<br>`assent clean parallel01` | 只清理已完全併入且乾淨的 worktree 與同資料夾前綴分支;任何證明不足就跳過,不碰 `.assent/`,且沒有強制選項。省略 `FOLDER` 時作用於全部工作資料夾。 | **零** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | 人工裁決駁回:封存未提交變更後強制刪除該資料夾的 worktree 與同前綴分支(刪除前以完整 tip hash 存證),並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔保存 Git 存證。`FOLDER` 必填;run 進行中拒絕。 | **零** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "驗收不符"` | 非破壞性重開單一任務;預設保留程式碼,`--cascade` 明示連動下游。`--revert-code` 僅在 checkpoints 是連續分支尾段時建立新反向 commit。成功後更新報告,不自動執行 run。接受 `--config PATH`。 | **零** |
