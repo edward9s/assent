@@ -6,6 +6,7 @@ concurrency cap, per-line output, and interrupt forwarding.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import queue
 import signal
@@ -31,16 +32,32 @@ _GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init fi
 # was installed. Both mean "interrupted", not "folder failed" -- treat them
 # the same to avoid a false failure report.
 _INTERRUPT_RETURNCODES = (130, 3221225786)
+# How long a child may take to finish its own interrupt cleanup (wip
+# checkpoint, r-file entry) before the parent escalates to a forced tree
+# termination, and how long a POSIX process group gets between SIGTERM and
+# SIGKILL. The parent never waits without a timeout: an unreachable child must
+# not be able to hang the whole run.
+_INTERRUPT_GRACE_SECONDS = 60
+_TERMINATE_GRACE_SECONDS = 10
 
 
 def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
-    """Start an isolated child process equivalent to ``assent run <folder>``."""
+    """Start an isolated child process equivalent to ``assent run <folder>``.
+
+    stdin is a pipe rather than DEVNULL so the parent has a signal-independent
+    stop channel: closing it (or dying) gives the child EOF, which
+    ``assent.__main__`` turns into KeyboardInterrupt. Console signals do not
+    survive a non-console pty such as tmux's, a pipe always does.
+    """
     command = [
         sys.executable, "-m", "assent", "run", folder,
         "--config", str(Path(config_path).resolve()),
     ]
+    child_env = dict(os.environ)
+    child_env["ASSENT_STDIN_STOP"] = "1"
     kwargs = {
-        "stdin": subprocess.DEVNULL,
+        "env": child_env,
+        "stdin": subprocess.PIPE,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
         "text": True,
@@ -109,12 +126,19 @@ def _drain_output(output: queue.Queue[tuple[str, str]]) -> None:
 
 def _finish_folder_output(
         folder: str, readers: dict[str, threading.Thread],
-        output: queue.Queue[tuple[str, str]]) -> None:
+        output: queue.Queue[tuple[str, str]],
+        timeout: float | None = None) -> None:
     """Wait for the given pipe to hit EOF, then drain its final output before
-    the completion summary."""
+    the completion summary.
+
+    After a normal exit EOF is certain, so the join is unbounded. On the
+    interrupt path a grandchild that outlived the tree termination could still
+    hold the pipe open, so the caller passes a timeout: losing a few trailing
+    lines beats hanging the run.
+    """
     reader = readers.pop(folder, None)
     if reader is not None:
-        reader.join()
+        reader.join(timeout)
     _drain_output(output)
 
 
@@ -195,37 +219,135 @@ def _stack_launch_decision(config_path: str, folder: str) -> tuple[str | None, s
             f"{base.target_snapshot}; worktree {reuse}."), None
 
 
+def _close_stop_channel(process: subprocess.Popen) -> None:
+    """Close the child's stdin pipe, which is the primary stop request."""
+    stream = getattr(process, "stdin", None)
+    if stream is None:
+        return
+    stream.close()
+
+
 def _send_interrupt(process: subprocess.Popen) -> None:
-    """Forward the user's interrupt only to this call's own child process group."""
+    """Ask this call's own child to stop, by both available routes.
+
+    The stdin stop channel comes first because it is the one that works
+    everywhere; the console/process-group signal stays as a second route for a
+    child that is not reading stdin (an older child, or one blocked before the
+    watcher started).
+    """
     if process.poll() is not None:
         return
+    _close_stop_channel(process)
     if os.name == "nt":
         process.send_signal(signal.CTRL_BREAK_EVENT)
     else:
         os.killpg(process.pid, signal.SIGINT)
 
 
+def _kill_tree(folder: str, process: subprocess.Popen, reason: str) -> None:
+    """Forcibly terminate a child and every process it started.
+
+    Forcing a kill is safe here and does not discard token-burned output:
+
+    * the wip checkpoint is written before the quota countdown, so the work
+      that exists at this point is already committed;
+    * the run lock is an OS-level file lock, released by the kernel when the
+      holder dies, so a killed child cannot leave a stale lock behind;
+    * ``templates/format.md``'s "Unclean exit" section and the startup gate in
+      ``engine.run`` already define a forcibly killed run as a recoverable
+      state: the next run either gathers the surviving dirty worktree into a
+      wip checkpoint or refuses, and never throws it away.
+
+    The tree matters because the child owns an AI CLI grandchild; killing only
+    the child would leave that grandchild orphaned.
+    """
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        print(f"Escalating work folder: {folder} (step: taskkill /T /F on pid "
+              f"{process.pid}; reason: {reason})")
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, check=False)
+        return
+    print(f"Escalating work folder: {folder} (step: SIGTERM to process group "
+          f"{process.pid}; reason: {reason})")
+    os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    print(f"Escalating work folder: {folder} (step: SIGKILL to process group "
+          f"{process.pid}; reason: still alive {_TERMINATE_GRACE_SECONDS} "
+          f"seconds after SIGTERM)")
+    os.killpg(process.pid, signal.SIGKILL)
+
+
+def _wait_or_escalate(folder: str, process: subprocess.Popen) -> int | None:
+    """Wait out the child's own cleanup, escalating rather than hanging."""
+    try:
+        return process.wait(timeout=_INTERRUPT_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        _kill_tree(folder, process,
+                   f"no exit within {_INTERRUPT_GRACE_SECONDS} seconds of the "
+                   f"stop request")
+    try:
+        return process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _kill_all(active: dict[str, subprocess.Popen], reason: str) -> None:
+    """Second Ctrl+C: stop asking politely and take the whole tree down."""
+    for folder, process in active.items():
+        try:
+            _kill_tree(folder, process, reason)
+        except OSError as e:
+            print(f"Failed to force-terminate work folder: {folder} ({e})")
+
+
 def _interrupt_and_wait(
         active: dict[str, subprocess.Popen],
         readers: dict[str, threading.Thread],
         output: queue.Queue[tuple[str, str]]) -> None:
-    """Forward the interrupt, then wait for each child to save its own state
-    and exit."""
+    """Forward the interrupt, then wait a bounded time for each child to save
+    its own state and exit, escalating to a forced tree termination instead of
+    waiting forever."""
     print("\nInterrupt received (Ctrl+C): notifying running work folders to "
           "clean up on their own...")
-    for folder, process in active.items():
-        try:
-            _send_interrupt(process)
-            print(f"Interrupting work folder: {folder}")
-        except (OSError, ValueError) as e:
-            print(f"Failed to forward interrupt signal: {folder} ({e})")
-    for folder, process in active.items():
-        try:
-            returncode = process.wait()
-            _finish_folder_output(folder, readers, output)
-            print(f"Work folder finished: {folder} (exit code {returncode})")
-        except OSError as e:
-            print(f"Failed waiting for work folder to finish: {folder} ({e})")
+    escalate: set[str] = set()
+    try:
+        for folder, process in active.items():
+            try:
+                _send_interrupt(process)
+                print(f"Interrupting work folder: {folder}")
+            except (OSError, ValueError) as e:
+                # Neither route reached the child, so waiting on its
+                # cooperation would only waste the grace period.
+                print(f"Failed to forward interrupt signal: {folder} ({e})")
+                escalate.add(folder)
+        for folder, process in active.items():
+            try:
+                if folder in escalate:
+                    _kill_tree(folder, process,
+                               "the stop request could not be delivered")
+                returncode = _wait_or_escalate(folder, process)
+                _finish_folder_output(folder, readers, output,
+                                      _TERMINATE_GRACE_SECONDS)
+                if returncode is None:
+                    print(f"Work folder force-terminated: {folder} "
+                          f"(no exit code)")
+                else:
+                    print(f"Work folder finished: {folder} "
+                          f"(exit code {returncode})")
+            except OSError as e:
+                print(f"Failed waiting for work folder to finish: {folder} ({e})")
+    except KeyboardInterrupt:
+        print("\nSecond interrupt (Ctrl+C): force-terminating every remaining "
+              "work folder now.")
+        _kill_all(active, "second user interrupt")
     _drain_output(output)
 
 
@@ -315,8 +437,13 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
 
             interrupted = False
             for folder, returncode in completed:
-                del active[folder]
+                process = active.pop(folder)
                 attempted.add(folder)
+                # The stop-channel pipe outlives the exited child until the
+                # Popen object is collected; release it as each folder ends so
+                # a long --all run does not accumulate handles.
+                with contextlib.suppress(OSError, ValueError):
+                    _close_stop_channel(process)
                 _finish_folder_output(folder, readers, output)
                 if returncode == 0:
                     print(f"Work folder complete: {folder} (exit code 0)")

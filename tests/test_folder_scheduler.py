@@ -8,7 +8,9 @@ output."""
 import contextlib
 import io
 import os
+import queue
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -17,7 +19,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from assent.folder_scheduler import _send_interrupt, _start_folder, run_all
+from assent.folder_scheduler import (_interrupt_and_wait, _kill_tree,
+                                     _send_interrupt, _start_folder, run_all)
 from assent.plan import set_status
 from assent.terminal_log import terminal_logging
 
@@ -113,7 +116,10 @@ class TestRunAll(FolderSchedulerTestCase):
         options = popen.call_args.kwargs
         self.assertEqual(command[:3], [sys.executable, "-m", "assent"])
         self.assertEqual(command[3:5], ["run", "work"])
-        self.assertEqual(options["stdin"], subprocess.DEVNULL)
+        # stdin is the stop channel, so it must be a pipe and the child must be
+        # told to watch it.
+        self.assertEqual(options["stdin"], subprocess.PIPE)
+        self.assertEqual(options["env"]["ASSENT_STDIN_STOP"], "1")
         self.assertEqual(options["stdout"], subprocess.PIPE)
         self.assertEqual(options["stderr"], subprocess.STDOUT)
         self.assertIs(options["text"], True)
@@ -444,7 +450,7 @@ class TestRunAll(FolderSchedulerTestCase):
             def poll(self):
                 raise KeyboardInterrupt
 
-            def wait(self):
+            def wait(self, timeout=None):
                 self.waited = True
                 return 130
 
@@ -457,6 +463,222 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(code, 130)
         send.assert_called_once_with(process)
         self.assertTrue(process.waited)
+
+
+class StubPipe:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class DeafChild:
+    """Child stand-in that ignores every signal sent to it.
+
+    This is the tmux situation in miniature: the console/process-group signal
+    is accepted and dropped, so only the stdin stop channel -- or a forced
+    kill -- can end the process. ``reads_stdin`` picks which.
+    """
+
+    def __init__(self, *, reads_stdin: bool, pid: int = 4242) -> None:
+        self.stdin = StubPipe()
+        self.pid = pid
+        self.reads_stdin = reads_stdin
+        self.returncode = None
+        self.signals: list[int] = []
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def send_signal(self, number) -> None:
+        self.signals.append(number)
+
+    def die(self, *_args, **_kwargs) -> None:
+        """What a real forced tree termination does to this process."""
+        self.killed = True
+
+    def wait(self, timeout=None):
+        if self.reads_stdin and self.stdin.closed:
+            self.returncode = 130
+        elif self.killed:
+            self.returncode = -9
+        else:
+            raise subprocess.TimeoutExpired("assent", timeout)
+        return self.returncode
+
+
+class TestStopChannelAndEscalation(FolderSchedulerTestCase):
+    """The stdin stop channel is the primary route out; a forced tree
+    termination is the backstop when neither the channel nor a signal is
+    honoured, so the parent never waits without a bound."""
+
+    def interrupt(self, active: dict) -> str:
+        """Run _interrupt_and_wait with both forced-kill syscalls stubbed to
+        the death they would really cause."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch(
+                "assent.folder_scheduler.subprocess.run",
+                side_effect=lambda *a, **k: [
+                    child.die() for child in active.values()]), patch(
+                "assent.folder_scheduler.os.killpg", create=True,
+                side_effect=lambda *a, **k: [
+                    child.die() for child in active.values()]):
+            _interrupt_and_wait(active, {}, queue.Queue())
+        return out.getvalue()
+
+    def test_closing_stdin_lets_a_signal_deaf_child_finish_itself(self):
+        child = DeafChild(reads_stdin=True)
+
+        out = self.interrupt({"work": child})
+
+        self.assertTrue(child.stdin.closed)
+        self.assertIn("Work folder finished: work (exit code 130)", out)
+        self.assertNotIn("Escalating work folder", out)
+
+    def test_child_deaf_to_signal_and_stdin_is_force_terminated(self):
+        child = DeafChild(reads_stdin=False)
+
+        out = self.interrupt({"work": child})
+
+        self.assertTrue(child.stdin.closed)
+        self.assertIn("Escalating work folder: work", out)
+        self.assertIn("no exit within 60 seconds of the stop request", out)
+        self.assertEqual(child.returncode, -9)
+
+    def test_undeliverable_stop_request_skips_the_grace_period(self):
+        child = DeafChild(reads_stdin=False)
+        child.stdin.close = lambda: (_ for _ in ()).throw(ValueError("closed"))
+
+        out = self.interrupt({"work": child})
+
+        self.assertIn("Failed to forward interrupt signal: work", out)
+        self.assertIn("the stop request could not be delivered", out)
+        self.assertNotIn("no exit within 60 seconds", out)
+        self.assertEqual(child.returncode, -9)
+
+    def test_second_interrupt_force_kills_everything_and_returns_130(self):
+        self.make_folder("work")
+        child = DeafChild(reads_stdin=False)
+
+        ctrl_c = iter([True])  # only the very first poll is the user's Ctrl+C
+
+        def first_ctrl_c():
+            if next(ctrl_c, False):
+                raise KeyboardInterrupt
+            return -9 if child.killed else None
+
+        def second_ctrl_c(timeout=None):
+            if child.killed:
+                child.returncode = -9
+                return -9
+            raise KeyboardInterrupt
+
+        def fake_run(args, **kwargs):
+            # run_all also shells out to git; only taskkill means "die".
+            if args and args[0] == "taskkill":
+                child.die()
+                return subprocess.CompletedProcess(args, 0)
+            return subprocess.CompletedProcess(args, 1)
+
+        child.poll = first_ctrl_c
+        child.wait = second_ctrl_c
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch(
+                "assent.folder_scheduler._start_folder",
+                return_value=child), patch(
+                "assent.folder_scheduler.subprocess.run",
+                side_effect=fake_run), patch(
+                "assent.folder_scheduler.os.killpg", create=True,
+                side_effect=lambda *a, **k: child.die()):
+            code = run_all(str(self.config), self.assent_dir)
+
+        self.assertEqual(code, 130)
+        self.assertIn("Second interrupt (Ctrl+C)", out.getvalue())
+        self.assertTrue(child.killed)
+
+    @unittest.skipUnless(os.name == "nt", "taskkill is the Windows tree kill")
+    def test_windows_tree_kill_uses_taskkill_with_tree_and_force(self):
+        child = DeafChild(reads_stdin=False, pid=1234)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch(
+                "assent.folder_scheduler.subprocess.run",
+                side_effect=lambda *a, **k: child.die()) as run:
+            _kill_tree("work", child, "test")
+
+        self.assertEqual(run.call_args.args[0],
+                         ["taskkill", "/PID", "1234", "/T", "/F"])
+        self.assertIn("taskkill /T /F on pid 1234", out.getvalue())
+
+    @unittest.skipIf(os.name == "nt", "process groups are the POSIX tree kill")
+    def test_posix_tree_kill_escalates_sigterm_to_sigkill(self):
+        child = DeafChild(reads_stdin=False, pid=1234)  # never dies
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch(
+                "assent.folder_scheduler.os.killpg") as killpg:
+            _kill_tree("work", child, "test")
+
+        self.assertEqual([call.args for call in killpg.call_args_list],
+                         [(1234, signal.SIGTERM), (1234, signal.SIGKILL)])
+        self.assertIn("SIGKILL to process group 1234", out.getvalue())
+
+
+class TestStdinStopChannelChild(unittest.TestCase):
+    """Real check with a real child: closing stdin ends a process that never
+    reacts to a signal.
+
+    Closing the pipe is exactly what the OS does for us when the parent dies,
+    so the same path is what stops a child from being orphaned by a parent
+    crash.
+    """
+
+    _PROBE = textwrap.dedent(
+        """
+        import sys, time
+        from assent.__main__ import _start_stdin_stop_watcher
+        _start_stdin_stop_watcher()
+        try:
+            print("READY", flush=True)
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                # Short sleeps give the pending KeyboardInterrupt a bytecode
+                # boundary to land on; this mirrors engine's segmented
+                # non-tty countdown.
+                time.sleep(0.005)
+        except KeyboardInterrupt:
+            sys.exit(130)
+        sys.exit(1)
+        """
+    )
+
+    def test_stdin_close_stops_a_child_that_ignores_signals(self):
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(_PROJECT_ROOT)
+        env["ASSENT_STDIN_STOP"] = "1"
+        process = subprocess.Popen(
+            [sys.executable, "-c", self._PROBE],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            text=True,
+        )
+        try:
+            self.assertEqual(process.stdout.readline().strip(), "READY")
+            process.stdin.close()
+            returncode = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:  # pragma: no cover - only hit on a hang
+            process.kill()
+            raise
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+            for stream in (process.stdin, process.stdout):
+                if stream is not None and not stream.closed:
+                    stream.close()
+        self.assertEqual(returncode, 130)
 
 
 @unittest.skipUnless(os.name == "nt", "CTRL_BREAK_EVENT cleanup is Windows-only")

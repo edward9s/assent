@@ -2,9 +2,12 @@
 accept/reject/rework/archive/init."""
 from __future__ import annotations
 
+import _thread
 import argparse
+import os
 import signal
 import sys
+import threading
 from collections import Counter
 
 from assent import AssentError, engine
@@ -24,6 +27,10 @@ from assent.terminal_log import terminal_logging
 from assent.verification import verify_batch, verify_folder
 
 _DEFAULT_CONFIG = ".assent/assent.toml"
+# Set by the parent scheduler on a spawned `assent run <folder>` child to opt
+# that child into the stdin stop channel; a hand-typed `assent run` never sees
+# it, so an interactive stdin (possibly a tty) is left completely alone.
+_STDIN_STOP_ENV = "ASSENT_STDIN_STOP"
 
 
 def _positive_int(value: str) -> int:
@@ -423,8 +430,44 @@ def _install_break_handler() -> None:
         signal.signal(signal.SIGBREAK, signal.default_int_handler)
 
 
+def _start_stdin_stop_watcher() -> threading.Thread | None:
+    """Opt-in stop channel: treat the parent closing our stdin as Ctrl+C.
+
+    ``run --all`` cannot rely on console signals to stop a child. Under tmux or
+    mintty the child's pty is not a Win32 console, so
+    ``GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT)`` never reaches it and the
+    parent waits forever. A stdin pipe is platform-independent and always
+    reaches the child, so the parent closes it (or dies, which closes it too)
+    and this daemon thread turns the resulting EOF -- or any byte -- into
+    ``interrupt_main()``. That raises KeyboardInterrupt in the main thread, so
+    the existing interrupt cleanup runs unchanged: WIP marking, the r-file
+    interrupt entry, the wip checkpoint, exit 130. As a side effect a child
+    whose parent crashes also cleans itself up instead of becoming an orphan.
+
+    Without ``ASSENT_STDIN_STOP`` no thread is started at all, so a manual
+    ``assent run`` keeps its stdin untouched.
+    """
+    if not os.environ.get(_STDIN_STOP_ENV):
+        return None
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    if stream is None:
+        return None
+
+    def watch() -> None:
+        try:
+            stream.read(1)
+        except (OSError, ValueError):
+            pass  # stdin torn down under us -- still a stop request
+        _thread.interrupt_main()
+
+    thread = threading.Thread(target=watch, name="assent-stdin-stop", daemon=True)
+    thread.start()
+    return thread
+
+
 def main(argv: list[str] | None = None) -> int:
     _install_break_handler()
+    _start_stdin_stop_watcher()
     # On Windows, stdout/stderr default to the system code page when
     # redirected to a pipe/file, which mangles non-ASCII output.
     for stream in (sys.stdout, sys.stderr):
