@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from assent import AssentError, gitops
-from assent.clean import _clean_locked, _has_cleanup_target
+from assent.clean import clean_locked, has_cleanup_target
 from assent.config import Config, list_task_folders, load_config
 from assent.folderdeps import infer_folder_completion
 from assent.lockfile import (LOCK_NAME, LockBusy, hold_lock,
@@ -186,11 +186,11 @@ def _do_archive_new(cfg: Config, entries: list[dict]) -> ArchiveResult:
     # source is already gone (accepted and cleaned) skips this step.  When a source
     # remains that clean cannot prove safe to remove, archive refuses rather than
     # compressing a plan whose work is not yet integrated.
-    if _has_cleanup_target(cfg):
+    if has_cleanup_target(cfg):
         clean_path = gitops.worktree_path(cfg.root, name)
-        if _clean_locked(cfg, clean_path) != 0:
+        if clean_locked(cfg, clean_path) != 0:
             return ArchiveResult("error", "clean step failed (see above)")
-        if _has_cleanup_target(cfg):
+        if has_cleanup_target(cfg):
             return ArchiveResult(
                 "skipped",
                 "source branch/worktree is not yet integrated, so clean retained it "

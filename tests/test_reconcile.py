@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from assent import engine, gitops, verification
 from assent import accept as accept_mod
+from assent import batch_accept as batch_accept_mod
 from assent import plan as plan_mod
 from assent.config import load_config
 from assent.reconcile import (reconcile_abort, reconcile_commit_message,
@@ -693,7 +694,7 @@ class LifecycleBoundaryTest(ReconcileRepositoryCase):
                 patch.object(verification, "_run_full_verifier", _forbidden), \
                 patch.object(verification, "verify_batch", _forbidden), \
                 patch.object(accept_mod, "accept_folder", _forbidden), \
-                patch.object(accept_mod, "accept_all", _forbidden), \
+                patch.object(batch_accept_mod, "accept_all", _forbidden), \
                 patch.object(engine, "run", _forbidden), \
                 patch.object(engine, "_run_verify", _forbidden), \
                 patch.object(engine, "_run_verify_quiet", _forbidden), \

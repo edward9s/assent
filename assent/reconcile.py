@@ -32,8 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from assent import AssentError, gitops, verification
-from assent.accept import _COMPLETE_STATUSES, _source_snapshot
 from assent.config import Config
+from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 
@@ -82,12 +82,13 @@ def _remove_empty_container(path: Path) -> None:
 def _require_source(cfg: Config, main: Path) -> tuple[str, str, Path]:
     """Resolve the folder's exact source, requiring its fixed worktree.
 
-    ``_source_snapshot`` is the same identity check verification and acceptance
-    perform (sole ``<folder>/*`` branch, attached, clean).  Reconciliation needs
-    one fact more: the fast-forward at the end runs *in* the source worktree, so a
-    branch without one cannot be advanced without rewriting a ref by hand.
+    ``resolve_source_snapshot`` is the same identity check verification and
+    acceptance perform (sole ``<folder>/*`` branch, attached, clean).
+    Reconciliation needs one fact more: the fast-forward at the end runs *in* the
+    source worktree, so a branch without one cannot be advanced without rewriting
+    a ref by hand.
     """
-    branch, tip, worktree = _source_snapshot(
+    branch, tip, worktree = resolve_source_snapshot(
         main, cfg.tasks_name, cfg.git_excludes, operation="reconcile")
     if worktree is None:
         raise AssentError(
@@ -285,7 +286,7 @@ def _start(cfg: Config) -> int:
 
     plan = Plan.parse(cfg.tasks_dir)
     unfinished = [f"{task.id}={task.status}" for task in plan.tasks
-                  if task.status not in _COMPLETE_STATUSES]
+                  if task.status not in COMPLETE_STATUSES]
     if unfinished:
         print(f"{label}: refused, the folder is not finished "
               f"({', '.join(unfinished)}); every task must be DONE or SKIP")

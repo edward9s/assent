@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from assent import AssentError, engine
+from assent import AssentError, engine, inspection
 from assent import gitops
 from assent.adapters import Adapter, TaskResult
 from assent.config import load_config
@@ -154,8 +154,8 @@ class TestScenarios(E2ETestCase):
         self.assertFalse(task.with_name("t001_task.e.r.toml").exists())
         self.assertIn(str(task), adapter.calls[0])
         self.assertIn(str(journal), adapter.calls[0])
-        report = engine.render_report(
-            self.cfg(), engine.Plan.parse(self.plan_dir))
+        report = inspection.render_report(
+            self.cfg(), inspection.Plan.parse(self.plan_dir))
         self.assertIn("t001  DONE", report)
 
     def test_smooth_run_three_tasks(self):
@@ -368,10 +368,10 @@ class TestWorktreeScenarios(E2ETestCase):
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(engine.status(cfg), 0)
+            self.assertEqual(inspection.status(cfg), 0)
         self.assertIn(f"Current branch: {worktree_branch}", out.getvalue())
         self.assertIn("auto(plan01/t001)", out.getvalue())
-        report = engine.render_report(cfg, engine.Plan.parse(cfg.tasks_dir))
+        report = inspection.render_report(cfg, inspection.Plan.parse(cfg.tasks_dir))
         self.assertIn(f"Branch: {worktree_branch}", report)
         self.assertIn("t001  DONE", report)
         self.assertIn("[", report)
@@ -471,7 +471,7 @@ class TestWorktreeScenarios(E2ETestCase):
         self.add_upstream_dependency(base=True)
         self.start()
         upstream, _ = self.make_source("upstream")
-        real_resolve = engine._resolve_stack_state
+        real_resolve = engine.resolve_stack_state
         calls = 0
 
         def advance_before_second_resolution(cfg):
@@ -485,7 +485,7 @@ class TestWorktreeScenarios(E2ETestCase):
             return real_resolve(cfg)
 
         adapter = ScriptedAdapter([])
-        with mock.patch("assent.engine._resolve_stack_state",
+        with mock.patch("assent.engine.resolve_stack_state",
                         side_effect=advance_before_second_resolution):
             self.assertEqual(self.run_engine(adapter, once=True), 1)
 
@@ -520,7 +520,7 @@ class TestWorktreeScenarios(E2ETestCase):
         self.configure_git_run()
         self.add_task(1)
         self.start()
-        real_resolve = engine._resolve_stack_state
+        real_resolve = engine.resolve_stack_state
         calls = 0
 
         def interrupt_second_resolution(cfg):
@@ -531,7 +531,7 @@ class TestWorktreeScenarios(E2ETestCase):
             return real_resolve(cfg)
 
         adapter = ScriptedAdapter([])
-        with mock.patch("assent.engine._resolve_stack_state",
+        with mock.patch("assent.engine.resolve_stack_state",
                         side_effect=interrupt_second_resolution):
             self.assertEqual(self.run_engine(adapter, once=True), 130)
 
@@ -545,7 +545,7 @@ class TestWorktreeScenarios(E2ETestCase):
         self.configure_git_run()
         self.add_task(1)
         self.start()
-        real_resolve = engine._resolve_stack_state
+        real_resolve = engine.resolve_stack_state
         calls = 0
 
         def fail_second_resolution(cfg):
@@ -558,7 +558,7 @@ class TestWorktreeScenarios(E2ETestCase):
         adapter = ScriptedAdapter([])
         out = io.StringIO()
         with contextlib.redirect_stdout(out), mock.patch(
-                "assent.engine._resolve_stack_state",
+                "assent.engine.resolve_stack_state",
                 side_effect=fail_second_resolution), mock.patch(
                     "assent.gitops.cleanup_unstarted_worktree",
                     side_effect=AssentError("simulated cleanup failure")):

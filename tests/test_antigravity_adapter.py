@@ -24,7 +24,7 @@ from assent.adapters.antigravity import (
     format_output_line, load_catalog, log_file, parse_models_catalog,
     parse_version, recommended_effort, reserved_argument_errors,
 )
-from assent.adapters.claude import run_subprocess
+from assent.adapters.process import run_subprocess
 from assent.config import Config
 from assent.plan import append_entry, read_entries
 
@@ -557,7 +557,7 @@ class TestRegistrationAndJournal(unittest.TestCase):
 # Every test below spawns tests/fixtures/fake_agy.py as a genuine child process --
 # `sys.executable` in front of it, since a bare .py file is not directly executable on
 # Windows -- so the no-shell argv list, real stdout/stderr merge, watchdog timing and
-# process-kill mechanics of assent.adapters.claude.run_subprocess are exercised for real.
+# process-kill mechanics of assent.adapters.process.run_subprocess are exercised for real.
 # Nothing here touches the network, a real login or a real model: FAKE_AGY_SCENARIO
 # selects the outcome, so these tests are fully hermetic and deterministic.
 # --------------------------------------------------------------------------- #

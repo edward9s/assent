@@ -1,0 +1,320 @@
+"""inspection tests: the read-only report / status / check commands.
+
+These commands take no lock, start no session and change no Git state, so each case checks
+exactly what they print for a folder as it stands -- the progress counts and next task, the
+environment and format verdicts, the rendered report with its checkpoint hashes, and the
+stack lines both surfaces share. Runs appear here only as a way to produce the state being
+reported on. Shared fixtures come from tests.engine_support.
+
+Chinese literals that remain are deliberate user/upstream passthrough data (task titles,
+journal summaries) used to prove that non-English data flows through verbatim."""
+import contextlib
+import io
+import unittest
+from unittest import mock
+
+from assent import AssentError, gitops, inspection, preflight
+from assent.config import load_config
+from assent.plan import journal_path_for, set_status
+from tests.engine_support import (_FAILV, EngineTestCase, ScriptedAdapter,
+                                  ok_result, task_text)
+
+
+class TestQueries(EngineTestCase):
+    def test_status_reports_counts_and_next(self):
+        self.write_task(1, status="DONE")
+        self.write_task(2, deps=("t001",), title="第二個")
+        cfg = self.build()
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.status(cfg), 0)
+        text = out.getvalue()
+        self.assertIn("DONE 1", text)
+        self.assertIn("t002", text)
+        self.assertIn("第二個", text)
+
+    def test_check_passes_on_valid_setup(self):
+        self.write_task(1)
+        cfg = self.build()
+        self.commit_all()  # claude command = python, so --version is always runnable
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 0)
+        self.assertIn("Result: passed", out.getvalue())
+
+    def test_check_fails_on_dependency_cycle(self):
+        self.write_task(1, deps=("t002",))
+        self.write_task(2, deps=("t001",))
+        cfg = self.build()
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 1)
+        self.assertIn("FAIL", out.getvalue())
+
+    def test_check_validates_selected_folder_declaration(self):
+        self.write_task(1)
+        (self.plan_dir / "_folder.toml").write_text(
+            'after = []\nunknown = true\n', encoding="utf-8")
+        cfg = self.build()
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 1)
+        self.assertIn("Folder dependencies: FAIL", out.getvalue())
+        self.assertIn("unknown keys", out.getvalue())
+
+    def test_check_displays_resolved_assignment_and_default_marker(self):
+        self.write_task(1, slug="任務分配顯示", model="core")
+        self.write_task(2, slug="explicit", model="lite", effort="heavy",
+                        status="DONE")
+        cfg = self.build(adapter_name="codex", extra_config=(
+            '[adapter.codex]\ncommand = "python"\n'
+            '[adapter.codex.models]\n'
+            'core = "gpt-5.6-luna"\n'
+            'lite = "gpt-lite"\n'
+            '[adapter.codex.default_effort]\n'
+            'core = "heavy"\n'
+            'lite = "slight"\n'
+            '[adapter.codex.efforts.core]\n'
+            'heavy = "max"\n'
+            '[adapter.codex.efforts.lite]\n'
+            'heavy = "max"\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 0)
+        text = out.getvalue()
+        self.assertIn("Task assignment (adapter = codex):", text)
+        self.assertIn("t001_任務分配顯示", text)
+        self.assertIn("core/heavy*", text)
+        self.assertIn("gpt-5.6-luna/max", text)
+        self.assertIn("lite/heavy", text)
+        self.assertIn("gpt-lite/max", text)
+        self.assertIn("(* effort filled from default_effort)", text)
+
+    def test_check_shows_the_builtin_effort_when_the_table_is_empty(self):
+        # An empty default_effort table leaves the built-in codex core default (normal)
+        # in place, so the assignment still names both the abstract and the actual value.
+        self.write_task(1, model="core")
+        cfg = self.build(adapter_name="codex", extra_config=(
+            '[adapter.codex]\ncommand = "python"\n'
+            '[adapter.codex.models]\ncore = "gpt-core"\n'
+            '[adapter.codex.default_effort]\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 0)
+        line = next(line for line in out.getvalue().splitlines()
+                    if "t001_task" in line)
+        self.assertRegex(line, r"core/normal\*\s+-> gpt-core/medium$")
+        self.assertIn("(* effort filled from default_effort)", out.getvalue())
+
+    def test_check_truncates_cjk_task_names_without_exceeding_line_width(self):
+        self.write_task(1, slug="這是一個非常非常長的任務名稱甲乙丙丁戊己庚辛壬癸",
+                        model="core", effort="slight")
+        cfg = self.build(adapter_name="codex", extra_config=(
+            '[adapter.codex]\ncommand = "python"\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 0)
+        line = next(line for line in out.getvalue().splitlines()
+                    if line.startswith("  t001_"))
+        self.assertEqual(line.count("…"), 1)
+        self.assertLessEqual(preflight._display_width(line), 78)
+
+    def test_check_displays_one_assignment_block_per_adapter(self):
+        self.write_task(1, model="core", effort="slight")
+        (self.root / ".assent" / "assent.toml").write_text(
+            '[adapter]\nname = ["claude", "codex"]\n'
+            '[adapter.claude]\ncommand = "python"\n'
+            '[adapter.codex]\ncommand = "python"\n',
+            encoding="utf-8")
+        cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 0)
+        text = out.getvalue()
+        self.assertEqual(text.count("Task assignment (adapter = "), 2)
+        self.assertIn("Task assignment (adapter = claude):", text)
+        self.assertIn("Task assignment (adapter = codex):", text)
+        self.assertIn("opus/low", text)
+        self.assertIn("gpt-5.6-terra/low", text)
+
+    def test_report_lists_checkpoints_and_blocked_summary(self):
+        p1 = self.write_task(1)
+        p2 = self.write_task(2, verify=_FAILV, title="會卡住")
+        cfg = self.build(retry=0)
+        self.commit_all()
+
+        def fail_step(prompt):
+            set_status(p2, "DONE")
+            return ok_result()
+
+        adapter = ScriptedAdapter([
+            self.ai_done(p1, {"src/done.py": "ok"}), fail_step])
+        self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
+
+        from assent.plan import Plan
+        text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
+        self.assertIn("t001  DONE", text)
+        self.assertIn("t002  BLOCKED", text)
+        self.assertIn("last journal (scheduler)", text)
+        self.assertIn("[", text)  # DONE task carries a checkpoint hash
+        # _report.md written out, but not version-controlled
+        self.assertTrue((cfg.tasks_dir / "_report.md").is_file())
+        self.assertNotIn("_report.md", self._git_execution("ls-files"))
+
+    def test_report_isolates_namespaced_checkpoints(self):
+        self.write_task(1, status="DONE", title="目前一")
+        self.write_task(3, status="DONE", title="目前三")
+        other_dir = self.root / ".assent" / "plan010"
+        other_dir.mkdir()
+        (other_dir / "t001_other.e.toml").write_text(
+            task_text(status="DONE", title="其他一"), encoding="utf-8",
+            newline="\n")
+        (other_dir / "t003_other.e.toml").write_text(
+            task_text(status="DONE", title="其他三"), encoding="utf-8",
+            newline="\n")
+        cfg = self.build()
+        other_cfg = load_config(
+            self.root / ".assent" / "assent.toml", folder="plan010")
+        self.commit_all()
+
+        def checkpoint(subject):
+            self._git("commit", "--allow-empty", "-m", subject)
+            return self._git("rev-parse", "--short", "HEAD").strip()
+
+        other_t1 = checkpoint("auto(plan010/t001): 其他一")
+        other_t3 = checkpoint("auto(plan010/t003): 其他三")
+        legacy_t3 = checkpoint("auto(t003): legacy format, ownership unclear")
+        wrong_id = checkpoint("auto(plan01/t0010): task id is only a prefix")
+        current_t1 = checkpoint("auto(plan01/t001): 目前一")
+        current_t3 = checkpoint("auto(plan01/t003): 目前三")
+
+        current = inspection.render_report(cfg, inspection.Plan.parse(cfg.tasks_dir))
+        other = inspection.render_report(
+            other_cfg, inspection.Plan.parse(other_cfg.tasks_dir))
+
+        self.assertIn(f"t001  DONE     目前一  [{current_t1}]", current)
+        self.assertIn(f"t003  DONE     目前三  [{current_t3}]", current)
+        self.assertNotIn(other_t1, current)
+        self.assertNotIn(other_t3, current)
+        self.assertNotIn(legacy_t3, current)
+        self.assertNotIn(wrong_id, current)
+        self.assertIn(f"t001  DONE     其他一  [{other_t1}]", other)
+        self.assertIn(f"t003  DONE     其他三  [{other_t3}]", other)
+        self.assertNotIn(current_t1, other)
+        self.assertNotIn(current_t3, other)
+        self.assertIn("Progress: DONE 2 / BLOCKED 0 / WIP 0 / TODO 0 / SKIP 0 (2 total)",
+                      current)
+
+    def test_report_reads_legacy_ai_entry_without_identity_fields(self):
+        path = self.write_task(1, status="BLOCKED")
+        journal_path_for(path).write_text(
+            '[[entry]]\ntime = "2026-07-17T00:00:00+00:00"\n'
+            'by = "ai"\nevent = "blocked"\nsummary = "舊日誌仍可讀"\n',
+            encoding="utf-8")
+        cfg = self.build()
+        from assent.plan import Plan
+        text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
+        self.assertIn("last journal (ai): 舊日誌仍可讀", text)
+
+    def test_try_write_report_does_not_swallow_process_control_exceptions(self):
+        cfg = self.build()
+        self.write_task(1)
+        with mock.patch.object(inspection, "write_report", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                inspection.try_write_report(cfg)
+
+class TestStackReportLines(EngineTestCase):
+    """A complete folder (all DONE/SKIP) must skip stack resolution entirely;
+    an incomplete folder must keep today's three existing outputs verbatim."""
+
+    def test_complete_folder_skips_resolution_and_reports_not_applicable(self):
+        self.write_task(1, status="DONE")
+        self.write_task(2, slug="skip", status="SKIP", title="略過")
+        cfg = self.build()
+        self.commit_all()
+        from assent.plan import Plan
+        plan = Plan.parse(cfg.tasks_dir)
+        with mock.patch(
+                "assent.inspection.resolve_stack_state",
+                side_effect=AssertionError(
+                    "must not resolve stack state for a complete folder")):
+            lines = inspection._stack_report_lines(cfg, plan)
+        self.assertEqual(
+            lines, ["Stack base: not applicable (folder complete)"])
+
+    def test_incomplete_folder_still_reports_current_target_main(self):
+        self.write_task(1)  # TODO, no upstream declared
+        cfg = self.build()
+        self.commit_all()
+        from assent.plan import Plan
+        plan = Plan.parse(cfg.tasks_dir)
+        lines = inspection._stack_report_lines(cfg, plan)
+        self.assertEqual(lines, [
+            "Stack base: current target main",
+            "Speculative upstream: none (all direct upstreams accepted)"])
+
+    def test_incomplete_folder_still_reports_unavailable_on_resolution_error(self):
+        self.write_task(1)  # TODO
+        cfg = self.build()
+        self.commit_all()
+        from assent.plan import Plan
+        plan = Plan.parse(cfg.tasks_dir)
+        with mock.patch(
+                "assent.inspection.resolve_stack_state",
+                side_effect=AssentError(
+                    "upstream folder plan00 has no plan00/* source branch")):
+            lines = inspection._stack_report_lines(cfg, plan)
+        self.assertEqual(lines, [
+            "Stack base: unavailable (upstream folder plan00 has no "
+            "plan00/* source branch)"])
+
+    def test_incomplete_folder_still_reports_stacked_speculative_upstream(self):
+        self.write_task(1)  # TODO
+        cfg = self.build()
+        self.commit_all()
+        from assent.plan import Plan
+        from assent.folderdeps import FolderBaseResolution
+        plan = Plan.parse(cfg.tasks_dir)
+        upstream = gitops.FolderSourceSnapshot(
+            folder="plan00", branch="plan00/run", worktree=self.root,
+            tip="abc123")
+        state = preflight.StackState(
+            base=FolderBaseResolution(
+                target_snapshot="deadbeef", speculative_upstream=upstream,
+                resolved_base="abc123"),
+            sources=(upstream,))
+        with mock.patch(
+                "assent.inspection.resolve_stack_state", return_value=state):
+            lines = inspection._stack_report_lines(cfg, plan)
+        self.assertEqual(lines, [
+            "Stack base: abc123",
+            "Speculative upstream: plan00 @ abc123 (unaccepted)"])
+
+    def test_status_and_report_show_not_applicable_for_complete_folder(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build()
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.status(cfg), 0)
+        self.assertIn(
+            "Stack base: not applicable (folder complete)", out.getvalue())
+        from assent.plan import Plan
+        text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
+        self.assertIn(
+            "Stack base: not applicable (folder complete)", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -433,8 +433,13 @@ def _effort_maps(section: dict, owner: str,
     return flat, by_tier
 
 
-def _validate_tasks_name(tasks_name: str, owner: str) -> None:
-    """Validate a task folder name so it is safe to use as a git branch prefix."""
+def validate_tasks_name(tasks_name: str, owner: str) -> None:
+    """Validate a task folder name so it is safe to use as a git branch prefix.
+
+    Public because folder-dependency parsing and receipt reading validate names
+    this module never sees; ``owner`` names the caller's field so the refusal
+    says which input was rejected.
+    """
     valid = isinstance(tasks_name, str) and bool(tasks_name)
     if valid:
         valid = (
@@ -495,7 +500,7 @@ def list_task_folders(assent_dir: str | Path) -> list[str]:
             continue
         if any(child.is_file() and _TASK_FILE_RE.match(child.name)
                for child in entry.iterdir()):
-            _validate_tasks_name(entry.name, "Live task folder")
+            validate_tasks_name(entry.name, "Live task folder")
             folders.append(entry.name)
     return sorted(folders)
 
@@ -503,7 +508,7 @@ def list_task_folders(assent_dir: str | Path) -> list[str]:
 def load_config(path: str | Path, folder: str) -> Config:
     """Load the config and build derived paths from the caller-supplied task folder name."""
     resolved, data = _load_data(path)
-    _validate_tasks_name(folder, "Command-line task folder")
+    validate_tasks_name(folder, "Command-line task folder")
 
     assent_dir = resolved.parent
     root = assent_dir.parent

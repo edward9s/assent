@@ -97,6 +97,22 @@ class TestRework(unittest.TestCase):
         self.assertFalse(hasattr(rework_module, "clean_folders"))
         self.assertFalse(hasattr(rework_module, "reject_folder"))
 
+    def test_rework_transaction_is_split_into_named_phases(self) -> None:
+        import inspect
+
+        import assent.rework as rework_module
+
+        coordinator = inspect.getsource(rework_module._rework_locked)
+        for phase in ("_resolve_request", "_resume_interrupted_revert",
+                      "_prepare_management_plane", "_prepare_git_scene",
+                      "_apply_code_revert", "_build_log_values",
+                      "_persist_status_first", "_persist_journal_first"):
+            with self.subTest(phase=phase):
+                self.assertTrue(callable(getattr(rework_module, phase)))
+                self.assertIn(phase, coordinator)
+        # The coordinator only sequences the phases; it must not absorb their bodies again.
+        self.assertLess(len(coordinator.splitlines()), 40)
+
     def test_all_non_todo_target_statuses_can_reopen(self) -> None:
         task = self._write_task(1, "DONE")
         head = _git(self.root, "rev-parse", "HEAD")
