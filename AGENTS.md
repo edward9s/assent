@@ -78,9 +78,12 @@ Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
   (peers of the models table) and must not be hardcoded in adapter code.
 - When using assent, first read `.assent/instructions.md` in the project's main worktree; a worktree session uses the absolute path the scheduler provides. <!-- assent-instructions -->
 
-- Work-folder `after` controls both scheduler readiness and the Git worktree
-  base. At most one not-yet-accepted upstream may be stacked; multiple
-  unaccepted upstreams fail closed. Stale downstream work is preserved for
-  explicit rework/reject or a new plan, and cleanup retains upstream source
-  evidence until direct dependents are accepted and mechanically proven
-  integrated and clean.
+- Work-folder `after` controls scheduler readiness only: it means "these
+  folders must finish before me", and it never supplies a Git worktree base.
+  The base is declared by `base`, which must be one of the `after` members;
+  with no `base` a folder is cut from the current integration target. Stacking
+  stays bounded because it can happen only through an explicit `base`, so at
+  most one not-yet-accepted upstream is ever in a stack. Stale downstream work
+  is preserved for explicit rework/reject or a new plan, and cleanup retains
+  upstream source evidence until direct dependents are accepted and
+  mechanically proven integrated and clean.
