@@ -84,11 +84,25 @@ class TestClean(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertFalse(worktree.exists())
+        self.assertFalse(self.container.exists())
         self.assertEqual(gitops.branches_with_prefix(
             self.root, f"{self.folder}/"), [])
         self.assertIn("已清(worktree", output)
         self.assertIn(f"分支 {branch}:已清", output)
         self.assertIn(f"分支 {self.folder}/較早:已清", output)
+
+    def test_container_with_other_worktree_is_retained(self) -> None:
+        worktree, branch = self._worktree_branch(commit=True)
+        _git(self.root, "merge", "--ff-only", branch)
+        other = gitops.ensure_worktree(self.root, "plan99")
+
+        code, output = self._run_clean()
+
+        self.assertEqual(code, 0)
+        self.assertFalse(worktree.exists())
+        self.assertTrue(other.exists())
+        self.assertTrue(self.container.exists())
+        self.assertIn("已清(worktree", output)
 
     def test_dirty_worktree_is_retained(self) -> None:
         worktree, branch = self._worktree_branch()

@@ -20,6 +20,18 @@ def _unmerged_branches(root: Path, branches: list[str], head: str) -> list[str]:
             if not gitops.is_ancestor(root, branch, head)]
 
 
+def _remove_empty_container(path: Path) -> None:
+    """worktree 移除後,容器目錄(<repo>.worktrees)已空就順手刪掉。
+
+    rmdir 只在空目錄成功,天然避免誤刪其他工作資料夾的 worktree;
+    非空或移除失敗(如其他行程佔用)都靜默保留,不影響清理結果。
+    """
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
+
+
 def _print_retained_branches(branches: list[str], unmerged: set[str]) -> None:
     for branch in branches:
         if branch in unmerged:
@@ -104,6 +116,7 @@ def _clean_locked(cfg: Config, path: Path) -> int:
     if path.exists():
         try:
             gitops.remove_worktree(root, path)
+            _remove_empty_container(path)
             print(f"{name}:已清(worktree {path})")
         except AgentsError as e:
             print(f"{name}:失敗(worktree 移除失敗:{e})")
