@@ -15,6 +15,7 @@ from agents import AgentsError
 from agents.lockfile import LOCK_NAME
 
 _TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt"}
+_MODEL_TIERS = {"prime", "core", "lite"}
 _EFFORT_LEVELS = {"low", "medium", "high"}
 
 # 工作資料夾名稱:不含空白與路徑分隔符,不以 - 或 . 開頭(它會成為 git 分支前綴)
@@ -50,6 +51,8 @@ class Config:
         default_factory=lambda: dict(_DEFAULT_MODELS))
     claude_default_effort: dict[str, str] = field(
         default_factory=lambda: dict(_DEFAULT_EFFORT))
+    claude_efforts: dict[str, str] = field(default_factory=dict)
+    claude_tier_efforts: dict[str, dict[str, str]] = field(default_factory=dict)
     codex_command: str = "codex"
     codex_extra_args: list[str] = field(
         default_factory=lambda: list(_DEFAULT_CODEX_EXTRA_ARGS))
@@ -57,6 +60,8 @@ class Config:
         default_factory=lambda: dict(_DEFAULT_CODEX_MODELS))
     codex_default_effort: dict[str, str] = field(
         default_factory=lambda: dict(_DEFAULT_CODEX_EFFORT))
+    codex_efforts: dict[str, str] = field(default_factory=dict)
+    codex_tier_efforts: dict[str, dict[str, str]] = field(default_factory=dict)
     prompt_template: str | None = None
     source_root: Path | None = None  # 隔離執行時的原始主工作樹;不來自設定檔
 
@@ -142,6 +147,46 @@ def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> di
     return dict(val)
 
 
+def _effort_maps(section: dict, owner: str
+                 ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """解析 efforts 的平面與檔位分節對照表,並對所有結構 fail-closed。"""
+    raw = _typed(section, f"[{owner}]", "efforts", dict, None)
+    if raw is None:
+        return {}, {}
+
+    flat: dict[str, str] = {}
+    by_tier: dict[str, dict[str, str]] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict):
+            if key not in _MODEL_TIERS:
+                raise AgentsError(
+                    f"設定檔 [{owner}.efforts] 的分節 {key!r} 不合法"
+                    f"({'/'.join(sorted(_MODEL_TIERS))})")
+            tier_values: dict[str, str] = {}
+            block = f"[{owner}.efforts.{key}]"
+            for effort, requested in value.items():
+                if effort not in _EFFORT_LEVELS:
+                    raise AgentsError(
+                        f"設定檔 {block} 的鍵 {effort!r} 不是有效 effort"
+                        f"({'/'.join(sorted(_EFFORT_LEVELS))})")
+                if not isinstance(requested, str) or not requested.strip():
+                    raise AgentsError(
+                        f"設定檔 {block} 的 {effort} 應為非空字串")
+                tier_values[effort] = requested
+            by_tier[key] = tier_values
+            continue
+
+        block = f"[{owner}.efforts]"
+        if key not in _EFFORT_LEVELS:
+            raise AgentsError(
+                f"設定檔 {block} 的鍵 {key!r} 不是有效 effort"
+                f"({'/'.join(sorted(_EFFORT_LEVELS))})")
+        if not isinstance(value, str) or not value.strip():
+            raise AgentsError(f"設定檔 {block} 的 {key} 應為非空字串")
+        flat[key] = value
+    return flat, by_tier
+
+
 def _validate_tasks_name(tasks_name: str, owner: str) -> None:
     """驗證工作資料夾名稱，確保它可安全作為 git 分支前綴。"""
     if not _FOLDER_RE.match(tasks_name) or tasks_name[0] in "-.":
@@ -209,6 +254,10 @@ def load_config(path: str | Path, folder: str) -> Config:
     claude = _section(adapter, "claude") if "claude" in adapter else {}
     codex = _section(adapter, "codex") if "codex" in adapter else {}
     prompt = _section(data, "prompt")
+    claude_efforts, claude_tier_efforts = _effort_maps(
+        claude, "adapter.claude")
+    codex_efforts, codex_tier_efforts = _effort_maps(
+        codex, "adapter.codex")
 
     cfg = Config(
         root=root,
@@ -225,6 +274,8 @@ def load_config(path: str | Path, folder: str) -> Config:
         claude_models=_str_map(claude, "adapter.claude", "models", _DEFAULT_MODELS),
         claude_default_effort=_str_map(claude, "adapter.claude", "default_effort",
                                        _DEFAULT_EFFORT),
+        claude_efforts=claude_efforts,
+        claude_tier_efforts=claude_tier_efforts,
         codex_command=_typed(codex, "[adapter.codex]", "command", str, "codex"),
         codex_extra_args=_str_list(codex, "[adapter.codex]", "extra_args",
                                    _DEFAULT_CODEX_EXTRA_ARGS),
@@ -232,6 +283,8 @@ def load_config(path: str | Path, folder: str) -> Config:
                               _DEFAULT_CODEX_MODELS),
         codex_default_effort=_str_map(codex, "adapter.codex", "default_effort",
                                       _DEFAULT_CODEX_EFFORT),
+        codex_efforts=codex_efforts,
+        codex_tier_efforts=codex_tier_efforts,
         prompt_template=_typed(prompt, "[prompt]", "template", str, None),
     )
 

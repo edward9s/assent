@@ -28,6 +28,14 @@ lite  = "sonnet"
 prime = "high"
 core  = "high"
 lite  = "medium"
+# 抽象 effort -> CLI 實際值;查找順序:檔位分節 > 平面 > 等值。
+# 兩層與各鍵皆可省略;全部省略即維持 low/medium/high 等值直通。
+# [adapter.claude.efforts]
+# low = "low"
+# medium = "medium"
+# high = "high"
+# [adapter.claude.efforts.lite]
+# high = "max"                  # 只覆寫 lite/high,其他格不受影響
 
 [adapter.codex]
 command = "codex"
@@ -44,9 +52,17 @@ lite  = "gpt-5.6-luna"
 prime = "high"
 core  = "medium"
 lite  = "low"
+# [adapter.codex.efforts]
+# low = "low"
+# medium = "medium"
+# high = "high"
+# [adapter.codex.efforts.prime]
+# high = "xhigh"                # 廠牌特有值只出現在設定翻譯層
 
 [prompt]
 # 可覆寫預設提示詞模板;可用變數:{agents_md_path} {instructions_path} {task_path}
 # {journal_path} {verify_command} {task_id} {task_title} {agent} {requested_model}
+# {effort} {requested_effort}
 # {agent} 是 codex 或 claude;{requested_model} 是本次傳給 AI CLI 的 --model 值。
+# {effort} 是抽象 low/medium/high;{requested_effort} 是實際 CLI 值,未傳時為空字串。
 # template = """..."""

@@ -37,6 +37,10 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.adapter_name, "claude")
         self.assertEqual(cfg.claude_models["prime"], "fable")
         self.assertEqual(cfg.codex_models["lite"], "gpt-5.6-luna")
+        self.assertEqual(cfg.claude_efforts, {})
+        self.assertEqual(cfg.claude_tier_efforts, {})
+        self.assertEqual(cfg.codex_efforts, {})
+        self.assertEqual(cfg.codex_tier_efforts, {})
         self.assertIsNone(cfg.prompt_template)
 
     def test_runtime_artifact_paths(self):
@@ -112,6 +116,47 @@ class TestLoadConfig(ConfigTestCase):
         with self.assertRaisesRegex(AgentsError, "effort"):
             load_config(self.write(
                 '[adapter.claude.default_effort]\nprime = "max"\n'), "plan01")
+
+    def test_efforts_flat_and_tier_sections_loaded(self):
+        cfg = load_config(self.write(
+            '[adapter.codex.efforts]\n'
+            'low = "minimal"\nmedium = "balanced"\n'
+            '[adapter.codex.efforts.lite]\n'
+            'high = "max"\n'), "plan01")
+        self.assertEqual(cfg.codex_efforts,
+                         {"low": "minimal", "medium": "balanced"})
+        self.assertEqual(cfg.codex_tier_efforts,
+                         {"lite": {"high": "max"}})
+
+    def test_bad_efforts_keys_and_section_names_rejected(self):
+        cases = (
+            ('[adapter.claude.efforts]\nmax = "x"\n',
+             r"\[adapter\.claude\.efforts\].*max"),
+            ('[adapter.codex.efforts.ultra]\nlow = "x"\n',
+             r"\[adapter\.codex\.efforts\].*ultra"),
+            ('[adapter.codex.efforts.lite]\nmax = "x"\n',
+             r"\[adapter\.codex\.efforts\.lite\].*max"),
+        )
+        for text, message in cases:
+            with self.subTest(text=text), self.assertRaisesRegex(
+                    AgentsError, message):
+                load_config(self.write(text), "plan01")
+
+    def test_bad_efforts_values_rejected(self):
+        cases = (
+            ('[adapter.claude.efforts]\nlow = ""\n',
+             r"\[adapter\.claude\.efforts\].*非空字串"),
+            ('[adapter.claude.efforts]\nlow = 1\n',
+             r"\[adapter\.claude\.efforts\].*非空字串"),
+            ('[adapter.codex.efforts.lite]\nhigh = "   "\n',
+             r"\[adapter\.codex\.efforts\.lite\].*非空字串"),
+            ('[adapter.codex.efforts.lite]\nhigh = false\n',
+             r"\[adapter\.codex\.efforts\.lite\].*非空字串"),
+        )
+        for text, message in cases:
+            with self.subTest(text=text), self.assertRaisesRegex(
+                    AgentsError, message):
+                load_config(self.write(text), "plan01")
 
     def test_prompt_template_loaded(self):
         cfg = load_config(self.write(

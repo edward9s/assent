@@ -1,4 +1,4 @@
-"""Codex CLI adapter using the official ``codex exec --json`` JSONL stream."""
+"""Codex CLI adapter:組合 ``codex exec --json`` 命令並解析 JSONL 事件流。"""
 from __future__ import annotations
 
 import json
@@ -21,13 +21,13 @@ _QUOTA_TEXT_RE = re.compile(
 )
 
 
-def build_command(cfg: "Config", prompt: str, alias: str,
-                  effort: str | None) -> list[str]:
-    """Build a non-interactive, machine-readable Codex invocation."""
+def build_command(cfg: "Config", prompt: str, requested_model: str,
+                  requested_effort: str | None) -> list[str]:
+    """組合非互動、可由程式解析的 Codex 命令。"""
     cmd = [cfg.codex_command, "exec", "--json", "--color", "never",
-           "--model", alias]
-    if effort:
-        cmd += ["-c", f'model_reasoning_effort="{effort}"']
+           "--model", requested_model]
+    if requested_effort:
+        cmd += ["-c", f'model_reasoning_effort="{requested_effort}"']
     cmd += list(cfg.codex_extra_args)
     cmd.append(prompt)
     return cmd
@@ -161,9 +161,11 @@ class CodexAdapter(Adapter):
                 f"請檢查計畫檔的建議模型或設定檔對照表")
         return alias
 
-    def run_task(self, prompt: str, requested_model: str, effort: str | None,
+    def run_task(self, prompt: str, requested_model: str,
+                 requested_effort: str | None,
                  cwd: Path) -> TaskResult:
-        command = build_command(self.cfg, prompt, requested_model, effort)
+        command = build_command(
+            self.cfg, prompt, requested_model, requested_effort)
         stall_seconds = self.cfg.stall_minutes * 60 if self.cfg.stall_minutes else 0
         returncode, output, stalled = run_subprocess(
             command, cwd, stall_seconds, echo=self._echo_line)

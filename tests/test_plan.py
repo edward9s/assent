@@ -337,6 +337,7 @@ class TestJournal(PlanTestCase):
     def test_append_creates_valid_toml_and_accumulates(self):
         journal = self.dir / "t001_x.r.toml"
         append_entry(journal, by="codex", requested_model="gpt-test",
+                     requested_effort="max",
                      event="done", summary="第一筆",
                      detail="細節\n多行", time_str="2026-07-17T00:00:00+00:00")
         append_entry(journal, by="scheduler", agent="codex",
@@ -346,6 +347,7 @@ class TestJournal(PlanTestCase):
         self.assertEqual(len(entries), 2)
         self.assertEqual(entries[0]["summary"], "第一筆")
         self.assertEqual(entries[0]["requested_model"], "gpt-test")
+        self.assertEqual(entries[0]["requested_effort"], "max")
         self.assertIn("多行", entries[0]["detail"])
         self.assertEqual(entries[1]["by"], "scheduler")
         self.assertEqual(entries[1]["agent"], "codex")
@@ -353,6 +355,7 @@ class TestJournal(PlanTestCase):
         lines = journal.read_text(encoding="utf-8").splitlines()
         first = lines.index('by = "codex"')
         self.assertEqual(lines[first + 1], 'requested_model = "gpt-test"')
+        self.assertEqual(lines[first + 2], 'requested_effort = "max"')
         second = lines.index('by = "scheduler"')
         self.assertEqual(lines[second + 1], 'agent = "codex"')
         self.assertEqual(lines[second + 2], 'requested_model = "gpt-test"')
@@ -391,6 +394,11 @@ class TestJournal(PlanTestCase):
         with self.assertRaises(AgentsError):
             append_entry(self.dir / "t001_x.r.toml", by="human", event="e",
                          summary="s")
+
+    def test_empty_requested_effort_rejected(self):
+        with self.assertRaisesRegex(AgentsError, "requested_effort"):
+            append_entry(self.dir / "t001_x.r.toml", by="codex", event="done",
+                         summary="s", requested_effort=" ")
 
     def test_read_entries_missing_file_empty(self):
         self.assertEqual(read_entries(self.dir / "t009_x.r.toml"), [])

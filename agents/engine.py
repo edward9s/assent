@@ -38,14 +38,16 @@ _DEFAULT_PROMPT_TEMPLATE = (
     "你是 agents 的執行 AI。先讀專案規則 {agents_md_path},\n"
     "再讀 agents 工作指示 {instructions_path} 與任務檔 {task_path}。\n"
     "只執行任務 {task_id},不要碰其他任務檔。\n"
-    "本次日誌身分為 by = \"{agent}\",requested_model = \"{requested_model}\";\n"
+    "本次日誌身分為 by = \"{agent}\",requested_model = \"{requested_model}\"。\n"
     "requested_model 是本次傳給 AI CLI 的 --model 值。\n"
+    "本次抽象 effort = \"{effort}\",實際 requested_effort = \"{requested_effort}\";\n"
+    "requested_effort 是本次實際傳給 AI CLI 的值;空字串表示不傳、採 CLI 預設。\n"
     "自行驗證時在目前工作樹執行:{verify_command}\n"
     "完成後:\n"
     "1. 把 {task_path} 的 status 改為 DONE 或 BLOCKED——整份任務檔只准改這一行。\n"
     "2. 在 {journal_path} 檔尾 append 一筆 [[entry]] 日誌(TOML,含 time、\n"
     "   by = \"{agent}\"、requested_model = \"{requested_model}\"、event、summary、\n"
-    "   detail;檔案不存在就建立)。\n"
+    "   detail;requested_effort 有值時也必須寫入;檔案不存在就建立)。\n"
     "不要執行 git commit,檢查點由調度器負責。"
 )
 _RETRY_SUFFIX = ("\n上一輪未通過驗收,原因:{failure_reason}。"
@@ -62,10 +64,12 @@ _GIT_REQUIRED_MESSAGE = "本專案尚未初始化 git,請先執行 git init"
 
 @dataclass(frozen=True)
 class _SessionIdentity:
-    """一次任務執行共用的 adapter 身分與 CLI 模型參數。"""
+    """一次任務執行共用的抽象選擇與實際 CLI 身分。"""
 
     agent: str
     requested_model: str
+    effort: str | None
+    requested_effort: str | None
 
 
 @dataclass
@@ -92,7 +96,9 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
             .replace("{task_id}", task.id)
             .replace("{task_title}", task.title)
             .replace("{agent}", session.agent)
-            .replace("{requested_model}", session.requested_model))
+            .replace("{requested_model}", session.requested_model)
+            .replace("{effort}", session.effort or "")
+            .replace("{requested_effort}", session.requested_effort or ""))
     if resumed:
         text += _RESUME_SUFFIX
     if failure_reason:
@@ -103,9 +109,12 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
 def _resolve_session(cfg: Config, adapter: Adapter,
                      task: Task) -> _SessionIdentity:
     """在啟動 adapter 前解析身分;同一結果供提示、日誌與 CLI 命令共用。"""
+    effort = _resolve_effort(cfg, task)
     return _SessionIdentity(
         agent=cfg.adapter_name,
         requested_model=adapter.resolve_model(task.model),
+        effort=effort,
+        requested_effort=_resolve_requested_effort(cfg, task.model, effort),
     )
 
 
@@ -126,6 +135,18 @@ def _resolve_effort(cfg: Config, task: Task) -> str | None:
     defaults = (cfg.codex_default_effort if cfg.adapter_name == "codex"
                 else cfg.claude_default_effort)
     return defaults.get(task.model)
+
+
+def _resolve_requested_effort(cfg: Config, model: str,
+                              effort: str | None) -> str | None:
+    """依「檔位分節 > 平面 > 等值」把抽象 effort 翻成 CLI 實際值。"""
+    if effort is None:
+        return None
+    if cfg.adapter_name == "codex":
+        flat, by_tier = cfg.codex_efforts, cfg.codex_tier_efforts
+    else:
+        flat, by_tier = cfg.claude_efforts, cfg.claude_tier_efforts
+    return by_tier.get(model, {}).get(effort, flat.get(effort, effort))
 
 
 def _task_excludes(cfg: Config, task: Task) -> list[str]:
@@ -372,6 +393,7 @@ def _mark_interrupted_task(task: Task, session: _SessionIdentity, summary: str,
             task.journal_path, by="scheduler", event="interrupt",
             summary=summary, detail=detail,
             agent=session.agent, requested_model=session.requested_model,
+            requested_effort=session.requested_effort,
             time_str=now().isoformat(timespec="seconds"))
     except Exception as e:  # 狀態與日誌各自嘗試,其中一項失敗不妨礙另一項
         print(f"中斷日誌寫入失敗:{e}(工作區保持原樣,未丟棄)")
@@ -398,12 +420,12 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
     while True:
         session = _resolve_session(cfg, adapter, task)
         session_state.identity = session
-        effort = _resolve_effort(cfg, task)
         prompt = _build_prompt(cfg, task, failure_reason, session, resumed)
         print(f"  開 session(model={task.model} -> {session.requested_model}, "
-              f"effort={effort or 'CLI 預設'})...")
+              f"effort(抽象)={session.effort or '未指定'} -> "
+              f"requested_effort(實際)={session.requested_effort or 'CLI 預設'})...")
         result = adapter.run_task(
-            prompt, session.requested_model, effort, cfg.root)
+            prompt, session.requested_model, session.requested_effort, cfg.root)
 
         if result.quota_exhausted:  # 額度耗盡不計失敗
             print("  額度耗盡 -> 保留進度(wip 檢查點)並等待重置後接續...")
@@ -411,6 +433,7 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
                          summary="額度耗盡,保留進度等待重置後接續",
                          agent=session.agent,
                          requested_model=session.requested_model,
+                         requested_effort=session.requested_effort,
                          time_str=now().isoformat(timespec="seconds"))
             if gitops.commit_if_dirty(
                     cfg.root, _checkpoint_subject(
@@ -535,6 +558,7 @@ def _mark_blocked(cfg: Config, task: Task, session: _SessionIdentity, reason: st
                  summary=f"調度器標 BLOCKED:{reason}", detail=detail,
                  agent=session.agent,
                  requested_model=session.requested_model,
+                 requested_effort=session.requested_effort,
                  time_str=now().isoformat(timespec="seconds"))
     gitops.commit_if_dirty(
         cfg.root, _checkpoint_subject(
@@ -724,9 +748,13 @@ def status(cfg: Config) -> int:
     selected = plan.next_task()
     if selected is not None:
         nxt, resumed = selected
-        effort = _resolve_effort(cfg, nxt) or "CLI 預設"
+        effort = _resolve_effort(cfg, nxt)
+        requested_effort = _resolve_requested_effort(cfg, nxt.model, effort)
+        effort_label = (f"{effort} -> {requested_effort}" if effort
+                        else "CLI 預設")
         tag = "(WIP 續作)" if resumed else ""
-        print(f"下一個任務:{nxt.id} [{nxt.model} /{effort}] {nxt.title}{tag}")
+        print(f"下一個任務:{nxt.id} [{nxt.model} /{effort_label}] "
+              f"{nxt.title}{tag}")
     elif counts.get("TODO", 0):
         print("下一個任務:(尚有 TODO,但前置未完成或被 BLOCKED 擋住)")
     else:

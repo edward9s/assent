@@ -51,12 +51,12 @@ _QUOTA_TEXT_RE = re.compile(
 _SENTINEL = object()
 
 
-def build_command(cfg: "Config", prompt: str, alias: str,
-                  effort: str | None) -> list[str]:
-    """依 2.4 組 claude CLI 命令;alias 已是 CLI --model 值,effort 已由 engine 解析。"""
-    cmd = [cfg.claude_command, "-p", prompt, "--model", alias]
-    if effort:
-        cmd += ["--effort", effort]
+def build_command(cfg: "Config", prompt: str, requested_model: str,
+                  requested_effort: str | None) -> list[str]:
+    """組 claude CLI 命令;模型與 effort 都已由 engine 解析成實際值。"""
+    cmd = [cfg.claude_command, "-p", prompt, "--model", requested_model]
+    if requested_effort:
+        cmd += ["--effort", requested_effort]
     # 解析所需的固定旗標(--verbose 為探勘實證的硬性需求);extra_args 原樣附加於末。
     cmd += ["--output-format", "stream-json", "--verbose"]
     cmd += list(cfg.claude_extra_args)
@@ -263,9 +263,11 @@ class ClaudeAdapter(Adapter):
                 f"請檢查計畫檔的建議模型或設定檔對照表")
         return alias
 
-    def run_task(self, prompt: str, requested_model: str, effort: str | None,
+    def run_task(self, prompt: str, requested_model: str,
+                 requested_effort: str | None,
                  cwd: Path) -> TaskResult:
-        cmd = build_command(self.cfg, prompt, requested_model, effort)
+        cmd = build_command(
+            self.cfg, prompt, requested_model, requested_effort)
         stall_seconds = self.cfg.stall_minutes * 60 if self.cfg.stall_minutes else 0
         returncode, output, stalled = run_subprocess(
             cmd, cwd, stall_seconds, echo=self._echo_line)

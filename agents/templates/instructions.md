@@ -48,8 +48,9 @@ r 檔(日誌;除錯或被明確引用才讀)、工作資料夾內的 `_agents.lo
    不碰其他任務檔。
 3. 在調度器提示的 r 檔絕對路徑檔尾 append 一筆 [[entry]]:
    time、提示詞指定的 by = "codex" 或 "claude"、requested_model、event、
-   summary(可驗證事實,一句話)、detail(過程細節)。requested_model 是本次傳給
-   AI CLI 的 --model 值,不代表服務端最終採用或回報的模型。
+   summary(可驗證事實,一句話)、detail(過程細節);提示詞的 requested_effort
+   有值時也必須寫入。requested_model 與 requested_effort 是本次實際傳給 AI
+   CLI 的值,不代表服務端最終採用或回報的模型與推理投入。
 4. 不執行 git commit——檢查點由調度器負責。
 
 ## 會議 session 收尾(互動時)

@@ -193,7 +193,7 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
   ——agents session 行為與跨專案共通規則;專案規則留在 `AGENTS.md`。
 - 設定檔範本:[agents/templates/agents.toml](agents/templates/agents.toml)
   ——adapter 選擇、抽象檔位(prime/core/lite)對照表、
-  watchdog 與重試參數。
+  抽象 effort(low/medium/high)的預設與 CLI 值翻譯、watchdog 與重試參數。
 
 ## 常見問題
 
@@ -216,8 +216,10 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 **Q:如何接 Claude / Codex 以外的 AI CLI?**
 繼承 `Adapter` 並實作兩步介面。`resolve_model(model: str) -> str` 先把任務檔的
 抽象檔位解析成這次實際傳給 AI CLI `--model` 的 `requested_model`；接著
-`run_task(prompt, requested_model, effort, cwd) -> TaskResult` 必須使用這個 CLI
-模型值執行。`TaskResult` 包含 `exit_code`、`output`、`quota_exhausted`、
+engine 依設定檔把抽象 effort 翻成 `requested_effort`,再呼叫既有的
+`run_task(prompt, requested_model, requested_effort, cwd) -> TaskResult`。Adapter
+不另設 effort 翻譯方法,只使用收到的 CLI 實際值執行。`TaskResult` 包含
+`exit_code`、`output`、`quota_exhausted`、
 `reset_at`；額度偵測封裝在 adapter 內,主迴圈不感知廠牌差異。
 
 ## 專案狀態

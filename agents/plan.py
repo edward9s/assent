@@ -324,11 +324,13 @@ def _toml_multiline(value: str) -> str:
 def append_entry(journal: Path, *, by: str, event: str, summary: str,
                  detail: str = "", time_str: str | None = None,
                  agent: str | None = None,
-                 requested_model: str | None = None) -> None:
+                 requested_model: str | None = None,
+                 requested_effort: str | None = None) -> None:
     """在 .r.toml 日誌檔尾 append 一筆 [[entry]];不存在就建立。寫後解析驗證。
 
-    ``agent`` 與 ``requested_model`` 是新版選填欄位;舊日誌仍由 ``read_entries``
-    原樣讀取,但新寫入不再接受無法辨認 adapter 的籠統 ``by = "ai"``。
+    ``agent``、``requested_model`` 與 ``requested_effort`` 是新版選填欄位;
+    舊日誌仍由 ``read_entries`` 原樣讀取,但新寫入不再接受無法辨認 adapter 的
+    籠統 ``by = "ai"``。
     """
     if by not in _ENTRY_BY:
         raise AgentsError(
@@ -337,6 +339,8 @@ def append_entry(journal: Path, *, by: str, event: str, summary: str,
         raise AgentsError(f"日誌 agent 欄位不合法:{agent!r}(codex / claude)")
     if requested_model is not None and not requested_model.strip():
         raise AgentsError("日誌 requested_model 不可為空字串")
+    if requested_effort is not None and not requested_effort.strip():
+        raise AgentsError("日誌 requested_effort 不可為空字串")
     if time_str is None:
         time_str = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -350,6 +354,9 @@ def append_entry(journal: Path, *, by: str, event: str, summary: str,
     if requested_model is not None:
         block_lines.append(
             f"requested_model = {_toml_str(requested_model)}")
+    if requested_effort is not None:
+        block_lines.append(
+            f"requested_effort = {_toml_str(requested_effort)}")
     block_lines += [
         f"event = {_toml_str(event)}",
         f"summary = {_toml_str(summary)}",

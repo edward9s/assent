@@ -100,7 +100,7 @@ tNNN**(id 只存在於檔名,檔內不重複存)。執行順序 = 檔名字典�
 title = "骨架與測試基建"
 deps = []                        # 前置任務 id 陣列;無前置也要明寫 []
 model = "prime"                  # prime | core | lite(絕不寫廠牌型號)
-effort = "high"                  # low | medium | high;可省略,由 agents.toml 預設
+effort = "high"                  # low | medium | high;通常省略,刻意偏離預設才明寫
 status = "TODO"                  # TODO | WIP | DONE | BLOCKED | SKIP
 scope = ["agents/", "tests/"]    # 允許改動的路徑前綴;fail-closed,不可為空
 verify = "python .agents/verify.py"   # 驗收命令,exit 0 = 通過
@@ -146,6 +146,21 @@ notes = """
 | `core` | 中堅主力 | 一般實作、需要推理的除錯 |
 | `lite` | 快速便宜 | 機械性修改、樣板、文件同步 |
 
+### 三檔推理投入(effort)
+
+`model` 與 `effort` 是正交的兩個抽象選擇。任務檔的 `effort` 選填且只接受
+`low` / `medium` / `high`;它們表示相對推理投入,不是精確 token 或金額預算。
+`high` 是跨廠牌可攜的高檔,不等於任一廠牌原生最高檔。通常省略 `effort`,只有
+任務刻意偏離目前 adapter 對該 model 的預設時才明寫。
+
+engine 先依「任務明寫值 > `[adapter.<名>.default_effort]` 的 model 預設 >
+未指定」選出抽象 effort;未指定時不傳 effort,明確採用 CLI 預設。選出後再查
+`[adapter.<名>.efforts]`:檔位分節鍵優先於平面鍵,平面鍵優先於等值直通。
+例如 `[adapter.codex.efforts] high = "xhigh"` 是三個 model 檔位的通例,
+`[adapter.codex.efforts.lite] high = "max"` 則只覆寫 `lite/high`。兩層與每個鍵
+都可省略;什麼都不寫即全部等值,既有設定不需遷移。廠牌特有值只放在翻譯表,
+不可寫進任務檔或 `default_effort`。
+
 ### 狀態語意
 
 | 狀態 | 意義 |
@@ -172,6 +187,7 @@ notes = """
 time = "2026-07-17T02:03:04+00:00"
 by = "codex"                     # 執行者:codex | claude
 requested_model = "gpt-5.6-sol" # 本次傳給 AI CLI 的 --model 值
+requested_effort = "high"       # 有傳 effort 時才寫;本次送入 CLI 的實際值
 event = "done"                   # 建議值:done | blocked | quota | interrupt | note
 summary = "完成骨架,37 測試全綠"
 detail = '''
@@ -180,11 +196,13 @@ detail = '''
 ```
 
 - 執行 AI 每次 session 收尾使用 `by = "codex"` 或 `by = "claude"`,並寫入
-  `requested_model`。它的 summary 會被 report 直接引用,請寫可驗證事實,
-  不寫自我敘事。
+  `requested_model`;該次有傳 effort 時另寫 `requested_effort`。它的 summary
+  會被 report 直接引用,請寫可驗證事實,不寫自我敘事。
 - `requested_model` 精確表示 agents.toml 對照後、本次傳給 AI CLI 的
   `--model` 值;不保證是服務端最終採用或回報的模型。任務檔的 `model` 仍只寫
   `prime` / `core` / `lite`。
+- `requested_effort` 精確表示 efforts 對照後、本次實際傳給 AI CLI 的值;
+  沒有選出抽象 effort 時省略。任務檔與 `default_effort` 仍只接受抽象三值。
 - 調度器的機器事件使用 `by = "scheduler"`,另寫 `agent = "codex"` 或
   `agent = "claude"` 與同一次的 `requested_model`。既有事件包括額度中斷
   `quota`、使用者或基礎設施中斷 `interrupt`、標記 `blocked`;不另寫 session
@@ -199,6 +217,7 @@ time = "2026-07-17T02:05:06+00:00"
 by = "scheduler"
 agent = "claude"
 requested_model = "fable"
+requested_effort = "high"
 event = "quota"
 summary = "額度耗盡,保留進度等待重置後接續"
 ```

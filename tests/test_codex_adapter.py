@@ -1,4 +1,4 @@
-"""Codex adapter tests; no network or real Codex session is used."""
+"""Codex adapter 測試;不使用網路或真實 Codex session。"""
 import json
 import unittest
 from pathlib import Path
@@ -23,10 +23,10 @@ def make_cfg(**overrides) -> Config:
 
 class TestBuildCommand(unittest.TestCase):
     def test_json_model_effort_sandbox_and_prompt(self):
-        cmd = build_command(make_cfg(), "提示詞", "gpt-5.6-sol", "high")
+        cmd = build_command(make_cfg(), "提示詞", "gpt-5.6-sol", "max")
         self.assertEqual(cmd[:3], ["codex", "exec", "--json"])
         self.assertEqual(cmd[cmd.index("--model") + 1], "gpt-5.6-sol")
-        self.assertIn('model_reasoning_effort="high"', cmd)
+        self.assertIn('model_reasoning_effort="max"', cmd)
         self.assertEqual(cmd[-3:], ["--sandbox", "workspace-write", "提示詞"])
 
     def test_effort_can_be_omitted_and_extra_args_are_verbatim(self):

@@ -94,13 +94,15 @@ class EngineTestCase(unittest.TestCase):
             ["git", *args], cwd=self.execution_root(), capture_output=True,
             encoding="utf-8", check=True).stdout
 
-    def build(self, retry=1, adapter_name="claude", prompt_template=None):
+    def build(self, retry=1, adapter_name="claude", prompt_template=None,
+              extra_config=""):
         prompt = (f'[prompt]\ntemplate = {json.dumps(prompt_template)}\n'
                   if prompt_template is not None else "")
         (self.root / ".agents" / "agents.toml").write_text(
             f"[run]\nretry_per_task = {retry}\n"
             f'[adapter]\nname = "{adapter_name}"\n'
             '[adapter.claude]\ncommand = "python"\n'
+            + extra_config
             + prompt,
             encoding="utf-8")
         return load_config(self.root / ".agents" / "agents.toml", "plan01")
@@ -277,19 +279,74 @@ class TestRunSuccess(EngineTestCase):
 
     def test_effort_from_task_overrides_default(self):
         p1 = self.write_task(1, effort="low")
-        cfg = self.build()
+        cfg = self.build(extra_config=
+            '[adapter.claude.default_effort]\nlite = "high"\n'
+            '[adapter.claude.efforts]\nlow = "minimal"\n')
         self.commit_all()
         adapter = ScriptedAdapter([self.ai_done(p1)])
         self.run_quiet(cfg, once=True, adapter=adapter)
-        self.assertEqual(adapter.calls[0][2], "low")
+        self.assertEqual(adapter.calls[0][2], "minimal")
 
     def test_effort_default_applied_per_tier(self):
         p1 = self.write_task(1, model="lite")  # 內建 lite 預設 medium
-        cfg = self.build()
+        cfg = self.build(extra_config=
+            '[adapter.claude.efforts]\nmedium = "balanced"\n')
         self.commit_all()
         adapter = ScriptedAdapter([self.ai_done(p1)])
         self.run_quiet(cfg, once=True, adapter=adapter)
-        self.assertEqual(adapter.calls[0], (adapter.calls[0][0], "lite", "medium"))
+        self.assertEqual(adapter.calls[0],
+                         (adapter.calls[0][0], "lite", "balanced"))
+
+    def test_effort_omitted_without_default_is_not_sent(self):
+        p1 = self.write_task(1, model="lite")
+        cfg = self.build(extra_config=
+            '[adapter.claude.default_effort]\n'
+            '[adapter.claude.efforts]\nlow = "minimal"\n')
+        self.commit_all()
+        adapter = ScriptedAdapter([self.ai_done(p1)])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            engine.run(cfg, once=True, adapter=adapter)
+        self.assertIsNone(adapter.calls[0][2])
+        self.assertIn("effort(抽象)=未指定", out.getvalue())
+        self.assertIn("requested_effort(實際)=CLI 預設", out.getvalue())
+
+    def test_effort_translation_uses_tier_then_flat_then_identity(self):
+        cfg = self.build(extra_config=
+            '[adapter.claude.efforts]\n'
+            'low = "minimal"\nmedium = "balanced"\n'
+            '[adapter.claude.efforts.lite]\nlow = "tiny"\n')
+        self.assertEqual(engine._resolve_requested_effort(cfg, "lite", "low"),
+                         "tiny")
+        self.assertEqual(engine._resolve_requested_effort(
+            cfg, "lite", "medium"), "balanced")
+        self.assertEqual(engine._resolve_requested_effort(cfg, "lite", "high"),
+                         "high")
+        self.assertEqual(engine._resolve_requested_effort(cfg, "core", "low"),
+                         "minimal")
+        self.assertEqual(engine._resolve_requested_effort(cfg, "core", "high"),
+                         "high")
+
+        tier_only = self.build(extra_config=
+            '[adapter.claude.efforts.lite]\nhigh = "max"\n')
+        self.assertEqual(engine._resolve_requested_effort(
+            tier_only, "lite", "high"), "max")
+        self.assertEqual(engine._resolve_requested_effort(
+            tier_only, "lite", "low"), "low")
+        self.assertEqual(engine._resolve_requested_effort(
+            tier_only, "core", "high"), "high")
+
+    def test_codex_uses_its_own_effort_translation(self):
+        p1 = self.write_task(1, model="lite", effort="high")
+        cfg = self.build(adapter_name="codex", extra_config=
+            '[adapter.claude.efforts]\nhigh = "claude-value"\n'
+            '[adapter.codex.efforts.lite]\nhigh = "max"\n')
+        self.commit_all()
+        adapter = ScriptedAdapter([
+            self.ai_done(p1, by="codex", requested_model="gpt-cli")],
+            resolved_model="gpt-cli")
+        self.run_quiet(cfg, once=True, adapter=adapter)
+        self.assertEqual(adapter.calls[0][2], "max")
 
     def test_prompt_contains_task_and_journal_paths(self):
         p1 = self.write_task(1)
@@ -304,6 +361,8 @@ class TestRunSuccess(EngineTestCase):
         self.assertIn(_OK, prompt)
         self.assertIn('by = "claude"', prompt)
         self.assertIn('requested_model = "lite"', prompt)
+        self.assertIn('抽象 effort = "medium"', prompt)
+        self.assertIn('requested_effort = "medium"', prompt)
 
     def test_codex_prompt_uses_resolved_cli_model(self):
         p1 = self.write_task(1)
@@ -327,13 +386,27 @@ class TestRunSuccess(EngineTestCase):
     def test_custom_prompt_can_use_agent_and_requested_model(self):
         p1 = self.write_task(1)
         cfg = self.build(
-            prompt_template="{agent}|{requested_model}|{task_id}")
+            prompt_template=("{agent}|{requested_model}|{effort}|"
+                             "{requested_effort}|{task_id}"))
         self.commit_all()
         adapter = ScriptedAdapter(
             [self.ai_done(p1, requested_model="cli-model")],
             resolved_model="cli-model")
         self.run_quiet(cfg, once=True, adapter=adapter)
-        self.assertEqual(adapter.calls[0][0], "claude|cli-model|t001")
+        self.assertEqual(adapter.calls[0][0],
+                         "claude|cli-model|medium|medium|t001")
+
+    def test_session_output_distinguishes_abstract_and_requested_effort(self):
+        p1 = self.write_task(1, model="lite", effort="high")
+        cfg = self.build(extra_config=
+            '[adapter.claude.efforts.lite]\nhigh = "max"\n')
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            engine.run(cfg, once=True,
+                       adapter=ScriptedAdapter([self.ai_done(p1)]))
+        self.assertIn("effort(抽象)=high", out.getvalue())
+        self.assertIn("requested_effort(實際)=max", out.getvalue())
 
     def test_worktree_default_verify_uses_main_script_and_worktree_cwd(self):
         cfg = self.build()
@@ -404,6 +477,7 @@ class TestAcceptanceGates(EngineTestCase):
                        and e["event"] == "blocked")
         self.assertEqual(blocked["agent"], "claude")
         self.assertEqual(blocked["requested_model"], "lite")
+        self.assertEqual(blocked["requested_effort"], "medium")
 
     def test_verify_failure_then_success_on_retry(self):
         path = self.write_task(1, verify=_NEEDS_OK_TXT)
@@ -515,6 +589,7 @@ class TestQuotaAndResume(EngineTestCase):
         quota = next(e for e in entries if e["event"] == "quota")
         self.assertEqual(quota["agent"], "claude")
         self.assertEqual(quota["requested_model"], "lite")
+        self.assertEqual(quota["requested_effort"], "medium")
         self.assertNotIn("session", [e["event"] for e in entries])
 
     def test_wip_task_resumed_on_startup(self):
@@ -548,6 +623,7 @@ class TestInterruptedTaskResume(EngineTestCase):
                          and "使用者中斷" in e["summary"])
         self.assertEqual(interrupt["agent"], "claude")
         self.assertEqual(interrupt["requested_model"], "lite")
+        self.assertEqual(interrupt["requested_effort"], "medium")
 
         adapter = ScriptedAdapter([self.ai_done(path)])
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)

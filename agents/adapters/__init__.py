@@ -28,8 +28,10 @@ class Adapter:                     # 各廠牌 adapter 的基底
         """把任務抽象檔位解析成這次傳給 CLI 的 ``--model`` 值。"""
         return model
 
-    def run_task(self, prompt: str, requested_model: str, effort: str | None,
+    def run_task(self, prompt: str, requested_model: str,
+                 requested_effort: str | None,
                  cwd: Path) -> TaskResult:
+        """使用 engine 已解析的 CLI 模型與 effort 實際值執行任務。"""
         raise NotImplementedError
 
 

@@ -38,11 +38,11 @@ class TestBuildCommand(unittest.TestCase):
 
     def test_model_effort_and_prompt_placement(self):
         cmd = build_command(make_cfg(claude_command="claude.cmd"),
-                            "提示詞", "opus", "low")
+                            "提示詞", "opus", "max")
         self.assertEqual(cmd[0], "claude.cmd")
         self.assertEqual(cmd[cmd.index("-p") + 1], "提示詞")
         self.assertEqual(cmd[cmd.index("--model") + 1], "opus")
-        self.assertEqual(cmd[cmd.index("--effort") + 1], "low")
+        self.assertEqual(cmd[cmd.index("--effort") + 1], "max")
 
     def test_effort_omitted_when_none(self):
         cmd = build_command(make_cfg(), "x", "sonnet", None)
