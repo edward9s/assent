@@ -321,13 +321,15 @@ class TestWorktreeScenarios(E2ETestCase):
         return worktree, self.git_at(
             worktree, "rev-parse", "HEAD").strip()
 
-    def add_upstream_dependency(self, folder="upstream"):
+    def add_upstream_dependency(self, folder="upstream", base=False):
         upstream = self.root / ".assent" / folder
         upstream.mkdir()
         (upstream / "t001_task.e.toml").write_text(
             task_text(status="DONE"), encoding="utf-8", newline="\n")
         (self.plan_dir / "_folder.toml").write_text(
-            f'after = ["{folder}"]\n', encoding="utf-8")
+            f'after = ["{folder}"]\n'
+            + (f'base = "{folder}"\n' if base else ""),
+            encoding="utf-8")
 
     def test_run_isolated_from_main_tree_and_queries_use_worktree(self):
         self.configure_git_run()
@@ -377,7 +379,7 @@ class TestWorktreeScenarios(E2ETestCase):
     def test_first_downstream_run_starts_from_unaccepted_upstream_tip(self):
         self.configure_git_run()
         task = self.add_task(1)
-        self.add_upstream_dependency()
+        self.add_upstream_dependency(base=True)
         self.start()
         _, upstream_tip = self.make_source("upstream")
         adapter = ScriptedAdapter([])
@@ -432,7 +434,7 @@ class TestWorktreeScenarios(E2ETestCase):
     def test_advanced_upstream_refuses_existing_downstream_without_changes(self):
         self.configure_git_run()
         self.add_task(1)
-        self.add_upstream_dependency()
+        self.add_upstream_dependency(base=True)
         self.start()
         upstream, old_tip = self.make_source("upstream")
         downstream = gitops.ensure_worktree(
@@ -466,7 +468,7 @@ class TestWorktreeScenarios(E2ETestCase):
     def test_upstream_creation_race_cleans_only_new_downstream_resources(self):
         self.configure_git_run()
         self.add_task(1)
-        self.add_upstream_dependency()
+        self.add_upstream_dependency(base=True)
         self.start()
         upstream, _ = self.make_source("upstream")
         real_resolve = engine._resolve_stack_state
