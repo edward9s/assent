@@ -76,10 +76,11 @@ class AdapterSettings:
 
     Both resolution orders are fixed and live here so no caller has to branch on an adapter
     name to resolve an invocation:
-    - abstract effort selection: task annotation > this adapter's tier default > unset;
+    - abstract effort selection: task annotation > this adapter's tier default;
     - vendor effort translation: tier-specific > flat > built-in baseline.
-    An empty ``default_effort`` for a tier means no abstract effort is chosen, so no effort flag
-    is passed and no CLI default is invented.
+    A loaded config always carries a default for every known tier (a stated
+    ``default_effort`` table overrides per tier rather than replacing the built-in one), so a
+    known tier resolves to an explicit portable effort instead of a vendor CLI default.
     """
 
     name: str
@@ -100,7 +101,11 @@ class AdapterSettings:
         return alias
 
     def resolve_effort(self, task_effort: str | None, model: str) -> str | None:
-        """Choose the abstract effort: the task annotation wins, else this tier's default, else None."""
+        """Choose the abstract effort: the task annotation wins, else this tier's default.
+
+        None is returned only for a tier this adapter states no default for, which a loaded
+        config never leaves open for prime/core/lite.
+        """
         if task_effort:
             return task_effort
         return self.default_effort.get(model)
@@ -289,6 +294,32 @@ def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> di
     if not all(isinstance(v, str) for v in val.values()):
         raise AssentError(f"Config [{owner}.{key}] must have all-string values")
     return dict(val)
+
+
+def _default_effort_map(section: dict, owner: str,
+                        builtin: dict[str, str]) -> dict[str, str]:
+    """Merge a stated ``default_effort`` table over the complete built-in tier defaults.
+
+    Unlike ``models`` and ``efforts``, which a stated table replaces whole, this table states
+    per-tier overrides: an absent, empty, or partial table keeps the built-in value for every
+    omitted tier.  A tier therefore always selects an explicit portable effort, instead of an
+    omission silently handing the decision to the vendor CLI's own default.
+    """
+    raw = _typed(section, owner, "default_effort", dict, None)
+    merged = dict(builtin)
+    if raw is None:
+        return merged
+    for model, eff in raw.items():
+        if model not in _MODEL_TIERS:
+            raise AssentError(
+                f"[{owner}.default_effort] key {model!r} is not a valid model tier"
+                f" ({'/'.join(sorted(_MODEL_TIERS))})")
+        if eff not in _EFFORT_LEVELS:
+            raise AssentError(
+                f"[{owner}.default_effort] {model} = {eff!r} is not a valid effort"
+                f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
+        merged[model] = eff
+    return merged
 
 
 def _parse_adapter_names(section: dict) -> tuple[str, ...]:
@@ -482,8 +513,8 @@ def load_config(path: str | Path, folder: str) -> Config:
         claude_extra_args=_str_list(claude, "[adapter.claude]", "extra_args",
                                     _DEFAULT_EXTRA_ARGS),
         claude_models=_str_map(claude, "adapter.claude", "models", _DEFAULT_MODELS),
-        claude_default_effort=_str_map(claude, "adapter.claude", "default_effort",
-                                       _DEFAULT_EFFORT),
+        claude_default_effort=_default_effort_map(claude, "adapter.claude",
+                                                  _DEFAULT_EFFORT),
         claude_efforts=claude_efforts,
         claude_tier_efforts=claude_tier_efforts,
         codex_command=_typed(codex, "[adapter.codex]", "command", str, "codex"),
@@ -491,8 +522,8 @@ def load_config(path: str | Path, folder: str) -> Config:
                                    _DEFAULT_CODEX_EXTRA_ARGS),
         codex_models=_str_map(codex, "adapter.codex", "models",
                               _DEFAULT_CODEX_MODELS),
-        codex_default_effort=_str_map(codex, "adapter.codex", "default_effort",
-                                      _DEFAULT_CODEX_EFFORT),
+        codex_default_effort=_default_effort_map(codex, "adapter.codex",
+                                                 _DEFAULT_CODEX_EFFORT),
         codex_efforts=codex_efforts,
         codex_tier_efforts=codex_tier_efforts,
         antigravity_command=_typed(antigravity, "[adapter.antigravity]",
@@ -502,9 +533,8 @@ def load_config(path: str | Path, folder: str) -> Config:
                                          _DEFAULT_ANTIGRAVITY_EXTRA_ARGS),
         antigravity_models=_str_map(antigravity, "adapter.antigravity", "models",
                                     _DEFAULT_ANTIGRAVITY_MODELS),
-        antigravity_default_effort=_str_map(antigravity, "adapter.antigravity",
-                                            "default_effort",
-                                            _DEFAULT_ANTIGRAVITY_EFFORT),
+        antigravity_default_effort=_default_effort_map(
+            antigravity, "adapter.antigravity", _DEFAULT_ANTIGRAVITY_EFFORT),
         antigravity_efforts=antigravity_efforts,
         antigravity_tier_efforts=antigravity_tier_efforts,
         antigravity_print_timeout_minutes=_typed(
@@ -530,13 +560,4 @@ def load_config(path: str | Path, folder: str) -> Config:
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
-    for owner, efforts in (
-            ("adapter.claude", cfg.claude_default_effort),
-            ("adapter.codex", cfg.codex_default_effort),
-            ("adapter.antigravity", cfg.antigravity_default_effort)):
-        for model, eff in efforts.items():
-            if eff not in _EFFORT_LEVELS:
-                raise AssentError(
-                    f"[{owner}.default_effort] {model} = {eff!r} is not a valid effort"
-                    f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
     return cfg

@@ -230,9 +230,14 @@ deliberately deviating from the adapter's default for that model. The three
 effort values describe a portable relative investment, not a precise
 budget; `heavy` does not claim to equal any vendor's native maximum tier.
 
-Effort resolves in two steps, selection then translation: a task's explicit
-value takes precedence over `default_effort[model]`, and if neither is set,
-no value is passed and the CLI default is used. After the abstract value is
+Effort resolves in two steps, selection then translation. Selection is
+deterministic and has three ordered sources: the task's explicit value, the
+configured `default_effort` override for that tier, and the built-in per-tier
+default. A stated `default_effort` table overrides per tier rather than
+replacing the built-in one, so an absent, empty, or partial table still leaves
+every known tier with a value. The consequence is the decision this settles:
+every supported invocation passes a concrete requested effort, and assent never
+omits the flag to inherit a vendor CLI's own default. After the abstract value is
 selected, the engine looks up the `efforts` config in the order "tier
 subsection > flat > built-in baseline". The built-in baseline maps `heavy` to
 `high`, `normal` to `medium`, and `slight` to `low`; each abstract key falls
@@ -244,6 +249,34 @@ exceptions. Vendor-specific effort values are configuration data at the same
 level as the models mapping table, and must not enter the task format,
 `default_effort`, or adapter code; the adapter interface only receives the
 already-translated actual value.
+
+Because the identity is now fully resolved before a session opens, `run`
+states it in one compact line, `Session: codex | core->gpt-5.6-terra |
+heavy->high`: the adapter, then each abstract value on the left of an arrow
+beside the actual CLI argument on its right. The four audit facts — adapter,
+tier, model, effort — stay intact on one line and are not expanded back into
+verbose labels.
+
+## Media as ordinary project context
+
+Media a task works with — an image, a PDF, an audio file, a video — is project
+context referenced by the textual task contract, not a schema feature. The
+fixed task fields therefore do not change: assent adds no `inputs`, image,
+audio, or video field, no adapter attachment protocol, no inference about which
+media a model can consume, and no second review state.
+
+A task that uses a media file already in the project names its
+project-relative path and its purpose in `behavior` or `notes`. A path that is
+only read need not enter `scope`; every media file the task may create or
+modify must be covered by `scope`, exactly like source. Media belongs in
+versioned worktree files so a run is reproducible, and never in the generated
+`.assent/` management plane. `verify` still carries the machine-checkable
+requirements, and visual or perceptual judgment stays part of the explicit
+human `accept`.
+
+This holds until a concrete adapter attachment requirement proves a schema
+change is necessary; the textual contract is the cheaper answer while it
+suffices.
 
 ## Quality standard (replacing token-count KPIs)
 

@@ -597,8 +597,13 @@ goal = "用 Gemini 3.1 Pro(最高品質)審查程式碼庫。"
 effort 的翻譯。查找順序永遠是:
 
 1. 任務檔明示的 `effort` 註記(如有)
-2. Adapter 的 `default_effort` 為此檔位(如有)
-3. 無 effort flag(某些 adapter/檔位可能不支援)
+2. 組態中此檔位的 `default_effort` 覆寫(如有)
+3. 此檔位的內建預設值
+
+寫出來的 `[adapter.<name>.default_effort]` 表是「逐檔位覆寫」,不是整張取代內建
+表。因此該表缺席、為空或只寫一部分時,每個檔位仍然都有值——只寫 `lite`,
+`prime`/`core` 就沿用各自的內建預設。結果是:每一次受支援的呼叫都會傳入具體的
+effort 值;assent 不會省略該旗標而去沿用廠商 CLI 自己的預設。
 
 與 effort 翻譯:
 
@@ -618,6 +623,19 @@ effort 的翻譯。查找順序永遠是:
 [adapter.antigravity.efforts.prime]
 normal = "medium"
 ```
+
+### 讀懂 session 行
+
+`run` 開啟 session 時會印出一行精簡訊息,說明整個已解析的身分:
+
+```
+  Session: codex | core->gpt-5.6-terra | heavy->high
+```
+
+讀法是:先看 adapter,再看兩組對應。每個箭頭都由左邊「任務檔寫的可攜抽象值」
+指向右邊「實際傳給該 adapter CLI 的引數」——所以 `core->gpt-5.6-terra` 是這次
+的 `--model` 值,`heavy->high` 是這次的 `--effort` 值。四項稽核事實
+(adapter、檔位、模型、effort)都在這一行上;它維持單行,不會再展開回冗長標籤。
 
 ### 設定 Antigravity print timeout
 
@@ -707,6 +725,22 @@ normal = "medium"
 - 設定檔範本:[assent/templates/assent.toml](assent/templates/assent.toml)
   ——adapter 選擇、抽象檔位(prime/core/lite)對照表、
   抽象 effort(heavy/normal/slight)的預設與 CLI 值翻譯、watchdog 與重試參數。
+
+### 使用專案媒體檔的任務
+
+任務需要的圖片、PDF、音訊或其他媒體都是一般的專案脈絡,所以計畫 schema 維持不
+變——沒有 `inputs`、image、audio 或 video 欄位,assent 也不會替你把檔案附加給
+adapter,或推測某個模型能讀哪種媒體。
+
+- 在任務的 `behavior` 或 `notes` 裡,以專案相對路徑寫出既有媒體檔並說明用途。
+  只讀取的參考路徑不必進入 `scope`。
+- 任務可能建立或修改的每一個媒體檔,都必須被 `scope` 涵蓋。
+- 優先使用工作樹中已納入版控的檔案以確保可重現;不要把來源媒體放進產生出來的
+  `.assent/` 管理層。
+- `verify` 仍然只承載客觀檢查;視覺或感受性的判斷留給人在 `accept` 決定,不會
+  變成第二個審查狀態。
+
+格式契約中附有完整範例。
 
 ## 常見問題
 

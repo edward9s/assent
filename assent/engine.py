@@ -57,8 +57,7 @@ _DEFAULT_PROMPT_TEMPLATE = (
     "working instructions or the existing entries only show other agent names.\n"
     "requested_model is the --model value passed to the AI CLI this run.\n"
     "This run's abstract effort = \"{effort}\", actual requested_effort = \"{requested_effort}\";\n"
-    "requested_effort is the value actually passed to the AI CLI this run; an empty string\n"
-    "means it is not passed and the CLI default applies.\n"
+    "requested_effort is the value actually passed to the AI CLI this run.\n"
     "To verify yourself, run this in the current working tree: {verify_command}\n"
     "This is the focused task gate. If an outer tool times out while the child result is\n"
     "unknown, do not start a concurrent duplicate and do not mark the task BLOCKED solely\n"
@@ -68,8 +67,8 @@ _DEFAULT_PROMPT_TEMPLATE = (
     "1. Change the status of {task_path} to DONE or BLOCKED -- the status line is the only\n"
     "   line you may change in the whole task file.\n"
     "2. Append one [[entry]] journal record to the end of {journal_path} (TOML, with time,\n"
-    "   by = \"{agent}\", requested_model = \"{requested_model}\", event, summary, detail;\n"
-    "   also write requested_effort when it has a value; create the file if it does not exist).\n"
+    "   by = \"{agent}\", requested_model = \"{requested_model}\", requested_effort, event,\n"
+    "   summary, detail; create the file if it does not exist).\n"
     "Do not run git commit; the scheduler owns the checkpoint."
 )
 _RETRY_SUFFIX = ("\nThe previous attempt failed acceptance. Reason: {failure_reason}. "
@@ -253,6 +252,18 @@ def _resolve_session(cfg: Config, adapter: Adapter, task: Task,
     )
 
 
+def _session_line(adapter_name: str, task: Task,
+                  session: _SessionIdentity) -> str:
+    """The one opening line that states the whole resolved session identity.
+
+    Four facts, in the order they are decided: which adapter runs, and each abstract choice
+    beside the concrete value actually sent to that adapter's CLI, e.g.
+    ``Session: codex | core->gpt-5.6-luna | heavy->max``.
+    """
+    return (f"  Session: {adapter_name} | {task.model}->{session.requested_model}"
+            f" | {session.effort}->{session.requested_effort}")
+
+
 def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
                          task_id: str | None = None,
                          adapter_name: str | None = None) -> list[InvocationRequest]:
@@ -379,7 +390,7 @@ def _checkpoint_subject(cfg: Config, kind: str, task: Task, detail: str) -> str:
 def _resolve_effort(cfg: Config, task: Task,
                     adapter_name: str | None = None) -> str | None:
     """Abstract effort for the current adapter: task-file annotation wins; otherwise the
-    adapter's tier default; if neither -> None (do not pass --effort).
+    adapter's tier default, which a loaded config states for every known tier.
 
     The current adapter's settings are looked up by name and fail closed for an unknown adapter,
     so a third adapter never inherits Claude's defaults."""
@@ -1122,9 +1133,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         session = _resolve_session(cfg, adapter, task, adapter_name)
         session_state.identity = session
         prompt = _build_prompt(cfg, task, failure_reason, session, resumed)
-        print(f"  Opening session (model={task.model} -> {session.requested_model}, "
-              f"effort(abstract)={session.effort or 'unspecified'} -> "
-              f"requested_effort(actual)={session.requested_effort or 'CLI default'})...")
+        print(_session_line(adapter_name, task, session))
         main_tree_baseline = (gitops.dirty_paths(cfg.source_root, _task_excludes(cfg, task))
                               if cfg.source_root is not None else None)
         result = adapter.run_task(
@@ -1584,8 +1593,7 @@ def status(cfg: Config) -> int:
         try:
             effort = _resolve_effort(cfg, nxt)
             requested_effort = _resolve_requested_effort(cfg, nxt.model, effort)
-            effort_label = (f"{effort} -> {requested_effort}" if effort
-                            else "CLI default")
+            effort_label = f"{effort} -> {requested_effort}"
         except AssentError as e:
             effort_label = f"unavailable ({e})"
         tag = " (WIP resume)" if resumed else ""

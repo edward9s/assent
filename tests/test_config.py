@@ -115,7 +115,7 @@ class TestLoadConfig(ConfigTestCase):
             with self.subTest(adapter=adapter):
                 settings = cfg.adapter_settings(adapter)
                 self.assertEqual(set(settings.models), tiers)
-                self.assertTrue(set(settings.default_effort) <= tiers)
+                self.assertEqual(set(settings.default_effort), tiers)
                 self.assertTrue(set(settings.default_effort.values()) <= efforts)
         self.assertEqual(cfg.antigravity_print_timeout_minutes, 120)
 
@@ -306,27 +306,57 @@ class TestAdapterSettings(ConfigTestCase):
                                     r"\[adapter\.codex\.models\]"):
             codex.resolve_model("nonexistent")
 
-    def test_resolve_effort_precedence_task_then_default_then_none(self):
+    def test_resolve_effort_precedence_task_then_stated_default_then_builtin(self):
         cfg = load_config(self.write(
             '[adapter.claude.default_effort]\n'
-            'prime = "heavy"\ncore = "normal"\n'), "plan01")
+            'prime = "slight"\ncore = "normal"\n'), "plan01")
         settings = cfg.adapter_settings("claude")
         # task annotation wins over the tier default
         self.assertEqual(settings.resolve_effort("slight", "prime"), "slight")
-        # tier default applies when the task omits effort
-        self.assertEqual(settings.resolve_effort(None, "prime"), "heavy")
+        # a stated tier default applies when the task omits effort
+        self.assertEqual(settings.resolve_effort(None, "prime"), "slight")
         self.assertEqual(settings.resolve_effort(None, "core"), "normal")
-        # no default for this tier -> None (no effort chosen)
-        self.assertIsNone(settings.resolve_effort(None, "lite"))
+        # the partial table overrides only the tiers it names; lite keeps the built-in
+        self.assertEqual(settings.resolve_effort(None, "lite"), "normal")
 
-    def test_empty_default_effort_chooses_no_effort(self):
+    def test_default_effort_table_overrides_per_tier_never_suppresses(self):
+        # An absent, empty, and partial table all keep the complete built-in defaults,
+        # so no tier falls through to whatever the vendor CLI would have picked.
+        builtin = {"prime": "heavy", "core": "heavy", "lite": "normal"}
+        for text in ("", '[adapter.claude.default_effort]\n',
+                     '[adapter.claude.default_effort]\ncore = "slight"\n'):
+            with self.subTest(text=text):
+                cfg = load_config(self.write(text), "plan01")
+                settings = cfg.adapter_settings("claude")
+                expected = dict(builtin)
+                if "core =" in text:
+                    expected["core"] = "slight"
+                self.assertEqual(settings.default_effort, expected)
+                for model, effort in expected.items():
+                    self.assertEqual(settings.resolve_effort(None, model), effort)
+                    self.assertEqual(
+                        settings.resolve_requested_effort(model, effort),
+                        {"heavy": "high", "normal": "medium",
+                         "slight": "low"}[effort])
+
+    def test_default_effort_keeps_builtin_defaults_for_every_adapter(self):
         cfg = load_config(self.write(
-            '[adapter.claude.default_effort]\n'), "plan01")
-        settings = cfg.adapter_settings("claude")
-        for model in ("prime", "core", "lite"):
-            self.assertIsNone(settings.resolve_effort(None, model))
-            # nothing chosen -> nothing translated, no invented CLI default
-            self.assertIsNone(settings.resolve_requested_effort(model, None))
+            '[adapter.codex.default_effort]\n'
+            '[adapter.antigravity.default_effort]\nlite = "slight"\n'), "plan01")
+        self.assertEqual(cfg.adapter_settings("codex").default_effort,
+                         {"prime": "heavy", "core": "normal", "lite": "slight"})
+        self.assertEqual(cfg.adapter_settings("antigravity").default_effort,
+                         {"prime": "heavy", "core": "heavy", "lite": "slight"})
+
+    def test_bad_default_effort_tier_key_rejected(self):
+        with self.assertRaisesRegex(
+                AssentError,
+                r"\[adapter\.claude\.default_effort\].*'ultra'.*model tier"):
+            load_config(self.write(
+                '[adapter.claude.default_effort]\nultra = "heavy"\n'), "plan01")
+        with self.assertRaisesRegex(AssentError, "wrong type"):
+            load_config(self.write(
+                '[adapter.claude]\ndefault_effort = "heavy"\n'), "plan01")
 
     def test_requested_effort_grid_tier_then_flat_then_baseline(self):
         cfg = load_config(self.write(

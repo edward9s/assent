@@ -177,14 +177,45 @@ fresh、可重現的 `PASSED` 完整驗證 receipt。Reconcile 不是整合引�
 通常省略,只有刻意偏離 adapter 對該 model 的預設時才明寫。三個 effort 值
 描述可攜的相對投入,不是精確預算;`heavy` 也不宣稱等於廠牌原生最高檔。
 
-effort 分成選擇與翻譯兩步:任務明寫值優先於 `default_effort[model]`,兩者皆無
-就不傳值、採 CLI 預設;選出抽象值後,engine 依「檔位分節 > 平面 > 內建基準」查
+effort 分成選擇與翻譯兩步。選擇是決定性的,依序有三個來源:任務明寫值、組態中
+該檔位的 `default_effort` 覆寫、該檔位的內建預設值。寫出來的 `default_effort`
+表是逐檔位覆寫,不是整張取代內建表,所以該表缺席、為空或只寫一部分時,每個已知
+檔位仍然都有值。由此得到本次定案的結論:每一次受支援的呼叫都會傳入具體的
+requested effort,assent 絕不省略該旗標去沿用廠商 CLI 自己的預設。
+選出抽象值後,engine 依「檔位分節 > 平面 > 內建基準」查
 `efforts` 設定。內建基準把 `heavy` 對應 `high`,`normal` 對應 `medium`,把
 `slight` 對應 `low`;每個抽象鍵都會獨立地從檔位分節退回平面表,再退回基準表。
 抽象詞與廠商 effort 詞刻意不同字,因此抽象值不能原值直通。平面層表達 adapter
 的通例,model 檔位分節只寫少數例外格。
 廠牌特有 effort 是與 models 對照表同級的設定資料,不得進入任務格式、
 `default_effort` 或 Adapter 程式碼;Adapter 介面只接收翻譯後的實際值。
+
+由於身分在 session 開啟前就已完整解析,`run` 會用一行精簡訊息表示:
+
+```
+  Session: codex | core->gpt-5.6-terra | heavy->high
+```
+
+讀法是先看 adapter,再看兩組對應。每個箭頭都把左側任務檔寫的可攜抽象值,
+對應到右側實際傳給該 adapter CLI 的引數;因此 `core->gpt-5.6-terra` 是這次的
+`--model` 值,`heavy->high` 是這次的 `--effort` 值。adapter、檔位、模型、effort
+四項稽核事實都保留在單行,不再展開成冗長標籤。
+
+## 媒體是一般的專案脈絡
+
+任務使用的媒體——圖片、PDF、音訊檔、影片——是由文字任務契約引用的一般專案
+脈絡,不是 schema 功能。固定任務欄位因此不變:assent 不新增 `inputs`、image、
+audio 或 video 欄位,不提供 adapter 附件協定,不推測模型的媒體能力,也不新增第二個
+審查狀態。
+
+任務若使用專案中已存在的媒體檔,必須在 `behavior` 或 `notes` 以專案相對路徑寫明
+檔案與用途。只讀取的參考路徑不必放進 `scope`;任務可能建立或修改的每個媒體檔都
+必須由 `scope` 涵蓋,與原始碼相同。媒體應放在已納入版控的工作樹檔案中以確保可重現,
+不要把來源媒體放進產生的 `.assent/` 管理面。`verify` 仍承載可由機器檢查的要求,
+視覺或感知判斷仍是人類明確執行 `accept` 的一部分,不會成為第二個審查狀態。
+
+在具體的 adapter 附件需求證明 schema 變更確有必要以前,文字契約在足夠時就是較簡單
+的做法。
 
 ## 品質標準(取代 token 數字 KPI)
 
