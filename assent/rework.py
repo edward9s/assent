@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from assent import AssentError, gitops, verification
@@ -371,32 +371,74 @@ def _management_complete(tasks_dir: Path, task_ids: list[str],
     return True
 
 
-def _rework_locked(cfg: Config, task_id: object, cascade: object,
-                   reason: object, revert_code: object) -> int:
-    """After acquiring the lock, run every precheck, preserve the Git scene, then write
-    journal and status."""
+@dataclass(frozen=True)
+class _ReworkRequest:
+    """The validated request together with the plan scope it resolves to."""
+
+    cfg: Config
+    name: str
+    task_id: str
+    cascade: bool
+    reason: str
+    revert_code: bool
+    plan: Plan
+    target: Task
+    downstream: list[Task]
+    blockers: list[str]
+    path: Path
+
+
+@dataclass
+class _ReworkState:
+    """Transaction state handed from one rework phase to the next."""
+
+    changed: list[Task] = field(default_factory=list)
+    journal_entries: dict[str, list[dict]] = field(default_factory=dict)
+    log_values: dict[str, tuple[str, str]] = field(default_factory=dict)
+    excludes: tuple[str, ...] = ()
+    head: str = ""
+    reverted: list[str] | None = None
+    revert_checkpoint: str | None = None
+    resuming: bool = False
+
+
+def _ensure_folder_worktree(cfg: Config, path: Path) -> None:
+    """Refuse a path that is not this repository's worktree, or one checked out on a
+    branch outside this folder."""
+    if not gitops.is_repo_worktree(cfg.root, path):
+        raise AssentError(
+            f"fixed path is not a valid worktree of this repo: {path}")
+    branch = gitops.current_branch(path)
+    if not branch.startswith(cfg.branch_prefix):
+        shown = branch or "detached HEAD"
+        raise AssentError(f"worktree is on a branch outside this folder: {shown}")
+
+
+def _resolve_request(cfg: Config, task_id: object, cascade: object,
+                     reason: object, revert_code: object) -> _ReworkRequest | None:
+    """Phase: validate the entry parameters, parse the plan, and resolve the target and
+    its downstream scope. Prints and returns ``None`` when the request is refused."""
     name = cfg.tasks_name
     request_error = _validate_request(task_id, cascade, reason, revert_code)
     if request_error:
         print(f"{name}: rework aborted ({request_error})")
-        return 1
+        return None
 
     assert isinstance(task_id, str)
     assert isinstance(cascade, bool)
     assert isinstance(reason, str)
     assert isinstance(revert_code, bool)
-    effective_reason = reason.strip() or "manual rework requested"
 
     try:
         plan = Plan.parse(cfg.tasks_dir)
     except AssentError as e:
         print(f"{name}: rework aborted (task files could not be parsed: {e})")
-        return 1
+        return None
 
     target = plan.get(task_id)
     if target is None:
         print(f"{name}: rework aborted (exact task id not found: {task_id})")
-        return 1
+        return None
 
     downstream = _downstream_tasks(plan, task_id)
     blockers = [task.id for task in downstream
@@ -404,253 +446,309 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
     if target.status != "TODO" and blockers and not cascade:
         print(f"{name}: {task_id} has downstream tasks that must be reopened "
               f"together; specify cascade: {', '.join(blockers)}")
+        return None
+
+    return _ReworkRequest(
+        cfg=cfg, name=name, task_id=task_id, cascade=cascade,
+        reason=reason.strip() or "manual rework requested",
+        revert_code=revert_code, plan=plan, target=target,
+        downstream=downstream, blockers=blockers,
+        path=gitops.worktree_path(cfg.root, name))
+
+
+def _adopt_revert_record(request: _ReworkRequest, state: _ReworkState,
+                         record: _RevertRecord) -> None:
+    """Decide whether an existing revert checkpoint may be resumed, and load its
+    management data into the transaction state when it may."""
+    record_changed = _validate_revert_record(
+        record, request.plan, request.target, request.downstream,
+        request.path, request.name)
+    original = dict(record.statuses)
+    log_values = {
+        task.id: _entry_values(
+            task, request.target, record.original_head, request.downstream,
+            record.cascade, record.reason, list(record.reverted),
+            record.checkpoint, list(record.changed),
+            original_status=original[task.id])
+        for task in record_changed
+    }
+    entries = {
+        task.id: read_entries(task.journal_path) for task in record_changed
+    }
+    logs_complete = all(
+        _has_entry(entries[task.id], *log_values[task.id])
+        for task in record_changed
+    )
+    statuses_complete = all(task.status == "TODO" for task in record_changed)
+    same_request = (record.cascade == request.cascade
+                    and record.reason == request.reason)
+    if not logs_complete:
+        if record.cascade != request.cascade or record.reason != request.reason:
+            raise AssentError(
+                "an incomplete revert checkpoint already exists; "
+                "rerun with exactly the same parameters")
+        for task in record_changed:
+            if task.status not in {original[task.id], "TODO"}:
+                raise AssentError(
+                    f"task status changed after the revert checkpoint: {task.id}")
+    if not same_request or (logs_complete and not statuses_complete):
+        return
+
+    if not logs_complete:
+        _ensure_management_writable(record_changed)
+    state.changed = record_changed
+    state.journal_entries = entries
+    state.log_values = log_values
+    state.head = record.original_head
+    state.reverted = list(record.reverted)
+    state.revert_checkpoint = record.checkpoint
+    state.resuming = True
+    if logs_complete:
+        print(f"{request.name}: {request.task_id} revert checkpoint management data "
+              f"already persisted, continuing to update the report: "
+              f"{record.checkpoint}")
+    else:
+        print(f"{request.name}: {request.task_id} resuming an incomplete revert "
+              f"checkpoint: {record.checkpoint}")
+
+
+def _resume_interrupted_revert(request: _ReworkRequest,
+                               state: _ReworkState) -> bool:
+    """Phase: check the Git scene for a revert rework and, when HEAD is this folder's
+    not-yet-finished revert checkpoint, rebuild the original parameters and statuses
+    from its commit body so no code is reverted again."""
+    try:
+        if not request.path.exists():
+            raise AssentError(f"worktree does not exist: {request.path}")
+        _ensure_folder_worktree(request.cfg, request.path)
+        gitops.ensure_clean(request.path)
+        head_value = gitops.head_ref(request.path)
+        if head_value is None:
+            raise AssentError("worktree has no HEAD")
+        state.head = head_value
+
+        record = _load_revert_record(
+            request.path, request.name, request.task_id)
+        if record is not None:
+            _adopt_revert_record(request, state, record)
+    except (AssentError, OSError, ValueError) as e:
+        print(f"{request.name}: rework aborted (Git or resume precheck failed: {e}), "
+              "status unchanged")
+        return False
+    return True
+
+
+def _prepare_management_plane(request: _ReworkRequest,
+                              state: _ReworkState) -> bool:
+    """Phase: for a fresh rework, resolve the status-cascade set and confirm the
+    management files can be written before Git is touched."""
+    name = request.name
+    target = request.target
+    if target.status == "TODO":
+        print(f"{name}: {request.task_id} is already TODO, no rework needed")
+        return False
+    if request.blockers and not request.cascade:
+        print(f"{name}: {request.task_id} has downstream tasks that must be reopened "
+              f"together; specify cascade: {', '.join(request.blockers)}")
+        return False
+
+    changed = [target]
+    if request.cascade:
+        changed.extend(task for task in request.downstream
+                       if task.status in _CASCADE_STATUSES)
+    try:
+        state.journal_entries = {
+            task.id: read_entries(task.journal_path) for task in changed
+        }
+        _ensure_management_writable(changed)
+        state.excludes = request.cfg.git_excludes
+    except (AssentError, OSError, ValueError) as e:
+        print(f"{name}: rework aborted (management-plane precheck failed: {e})")
+        return False
+    state.changed = changed
+    return True
+
+
+def _prepare_git_scene(request: _ReworkRequest, state: _ReworkState) -> bool:
+    """Phase: pick the checkpoint tail a reversion would undo, or -- for the
+    code-preserving default -- archive uncommitted work and record HEAD."""
+    name = request.name
+    try:
+        if request.revert_code:
+            if not state.resuming:
+                state.reverted = _revert_candidates(
+                    request.path, name, {task.id for task in state.changed})
+        elif request.path.exists():
+            _ensure_folder_worktree(request.cfg, request.path)
+            if gitops.commit_if_dirty(
+                    request.path,
+                    f"wip({name}/{request.target.id}): manual rework pre-archive",
+                    state.excludes):
+                print(f"{name}: {request.target.id} uncommitted changes archived "
+                      "as a wip checkpoint")
+            state.head = gitops.commit_of(request.path, "HEAD")
+        else:
+            state.head = gitops.commit_of(request.cfg.root, "HEAD")
+            print(f"{name}: worktree does not exist, only reopening management state")
+    except AssentError as e:
+        print(f"{name}: rework aborted (Git precheck or archive failed: {e}), "
+              "status unchanged")
+        return False
+    return True
+
+
+def _apply_code_revert(request: _ReworkRequest, state: _ReworkState) -> bool:
+    """Phase: the only mutation landing before the management files -- revert the proven
+    checkpoint tail and commit it together with its resume metadata."""
+    if not request.revert_code or state.resuming:
+        return True
+    assert state.reverted is not None
+    message = _revert_message(
+        request.name, request.target, request.cascade, request.reason,
+        request.downstream, state.changed, state.head, state.reverted)
+    print(f"{request.name}: {request.target.id} will revert the following code checkpoints:")
+    for commit in state.reverted:
+        print(f"  - {commit}")
+    try:
+        gitops.revert_no_commit(request.path, state.reverted)
+        gitops.commit_all(request.path, message)
+        state.revert_checkpoint = gitops.commit_of(request.path, "HEAD")
+    except AssentError as e:
+        _abort_failed_revert(request.path, request.name, state.head, e)
+        return False
+    return True
+
+
+def _build_log_values(request: _ReworkRequest, state: _ReworkState) -> None:
+    """Phase: derive the journal text once; a resumed checkpoint keeps the text it
+    already wrote, so an entry from before the interruption stays recognizable."""
+    if state.log_values:
+        return
+    state.log_values = {
+        task.id: _entry_values(
+            task, request.target, state.head, request.downstream,
+            request.cascade, request.reason, state.reverted,
+            state.revert_checkpoint, [item.id for item in state.changed])
+        for task in state.changed
+    }
+
+
+def _status_order(request: _ReworkRequest, state: _ReworkState) -> list[Task]:
+    """Downstream first, target last: while the target is still not TODO, the same
+    command can resume."""
+    return ([task for task in state.changed if task.id != request.target.id]
+            + [request.target])
+
+
+def _write_statuses(tasks: list[Task], skip_todo: bool) -> None:
+    """Reset each task file to TODO in the given order."""
+    for task in tasks:
+        if skip_todo and task.status == "TODO":
+            continue
+        set_status(task.path, "TODO")
+        print(f"  task {task.id}: {task.status} -> TODO")
+
+
+def _write_journals(state: _ReworkState) -> None:
+    """Append the rework entry to each journal, skipping one a prior run already wrote."""
+    for task in state.changed:
+        summary, detail = state.log_values[task.id]
+        if _has_entry(state.journal_entries[task.id], summary, detail):
+            continue
+        append_entry(
+            task.journal_path, by="scheduler", event="rework_requested",
+            summary=summary, detail=detail)
+
+
+def _tolerate_partial_write(request: _ReworkRequest, state: _ReworkState,
+                            error: Exception, stage: str, settled: str) -> bool:
+    """Re-read from disk after a reported write failure: management data that fully
+    landed still counts as complete, anything else demands a rerun."""
+    name = request.name
+    try:
+        complete = _management_complete(
+            request.cfg.tasks_dir, [task.id for task in state.changed],
+            state.log_values)
+    except (AssentError, OSError, ValueError) as verify_error:
+        print(f"{name}: {stage} interrupted ({error}), and re-reading disk failed "
+              f"({verify_error}); rerun with the same parameters")
+        return False
+    if not complete:
+        print(f"{name}: {stage} interrupted ({error}); rerun with the same parameters")
+        return False
+    print(f"{name}: {settled} reported failure, but management data is fully persisted")
+    return True
+
+
+def _persist_status_first(request: _ReworkRequest, state: _ReworkState) -> bool:
+    """Phase: status is written first, journal last; a complete same-checkpoint journal
+    therefore serves as a durable completion marker, letting an already-finished old
+    rework and this management-plane-interrupted rework be told apart unambiguously."""
+    try:
+        _write_statuses(_status_order(request, state), skip_todo=True)
+    except (AssentError, OSError) as e:
+        if not _tolerate_partial_write(
+                request, state, e, "task-status write", "status write"):
+            return False
+    try:
+        _write_journals(state)
+    except (AssentError, OSError) as e:
+        if not _tolerate_partial_write(
+                request, state, e, "rework journal write", "journal write"):
+            return False
+    return True
+
+
+def _persist_journal_first(request: _ReworkRequest, state: _ReworkState) -> bool:
+    """Phase: the code-preserving default reuses t001's transaction order -- status is
+    touched only after the journal is complete."""
+    name = request.name
+    try:
+        _write_journals(state)
+    except (AssentError, OSError) as e:
+        print(f"{name}: rework journal write interrupted ({e}), task status "
+              "unchanged; rerun")
+        return False
+    try:
+        _write_statuses(_status_order(request, state), skip_todo=False)
+    except (AssentError, OSError) as e:
+        print(f"{name}: task-status write interrupted ({e}); rerun with the "
+              "same parameters")
+        return False
+    return True
+
+
+def _rework_locked(cfg: Config, task_id: object, cascade: object,
+                   reason: object, revert_code: object) -> int:
+    """After acquiring the lock, run the rework phases in the order that keeps every
+    precheck ahead of the Git scene and the journal a durable completion marker."""
+    request = _resolve_request(cfg, task_id, cascade, reason, revert_code)
+    if request is None:
         return 1
 
     # Reopening a task takes the folder back out of the finished set the batch
     # candidate was built from, so the batch receipt stops describing publishable
     # work here -- before any status, journal, or revert checkpoint is written.
     if verification.invalidate_batch_receipt(cfg.assent_dir):
-        print(f"{name}: batch verification receipt invalidated; run "
+        print(f"{request.name}: batch verification receipt invalidated; run "
               "`assent verify --batch` again before the next batch release")
 
-    path = gitops.worktree_path(cfg.root, name)
-    changed: list[Task] = []
-    journal_entries: dict[str, list[dict]] = {}
-    log_values: dict[str, tuple[str, str]] = {}
-    reverted: list[str] | None = None
-    revert_checkpoint: str | None = None
-    resuming = False
-
-    # The revert checkpoint is the only fact that lands before the management files;
-    # when HEAD is the same not-yet-finished checkpoint, its commit body rebuilds the
-    # original parameters and statuses, and no code is reverted again.
-    if revert_code:
-        try:
-            if not path.exists():
-                raise AssentError(f"worktree does not exist: {path}")
-            if not gitops.is_repo_worktree(cfg.root, path):
-                raise AssentError(
-                    f"fixed path is not a valid worktree of this repo: {path}")
-            branch = gitops.current_branch(path)
-            if not branch.startswith(cfg.branch_prefix):
-                shown = branch or "detached HEAD"
-                raise AssentError(f"worktree is on a branch outside this folder: {shown}")
-            gitops.ensure_clean(path)
-            head_value = gitops.head_ref(path)
-            if head_value is None:
-                raise AssentError("worktree has no HEAD")
-            head = head_value
-
-            record = _load_revert_record(path, name, task_id)
-            if record is not None:
-                record_changed = _validate_revert_record(
-                    record, plan, target, downstream, path, name)
-                original = dict(record.statuses)
-                record_log_values = {
-                    task.id: _entry_values(
-                        task, target, record.original_head, downstream,
-                        record.cascade, record.reason, list(record.reverted),
-                        record.checkpoint, list(record.changed),
-                        original_status=original[task.id])
-                    for task in record_changed
-                }
-                record_entries = {
-                    task.id: read_entries(task.journal_path)
-                    for task in record_changed
-                }
-                logs_complete = all(
-                    _has_entry(record_entries[task.id],
-                               *record_log_values[task.id])
-                    for task in record_changed
-                )
-                statuses_complete = all(
-                    task.status == "TODO" for task in record_changed)
-                same_request = (
-                    record.cascade == cascade
-                    and record.reason == effective_reason
-                )
-                if not logs_complete:
-                    if record.cascade != cascade or record.reason != effective_reason:
-                        raise AssentError(
-                            "an incomplete revert checkpoint already exists; "
-                            "rerun with exactly the same parameters")
-                    for task in record_changed:
-                        if task.status not in {original[task.id], "TODO"}:
-                            raise AssentError(
-                                f"task status changed after the revert checkpoint: {task.id}")
-                if ((not logs_complete and same_request)
-                        or (logs_complete and statuses_complete
-                            and same_request)):
-                    if not logs_complete:
-                        _ensure_management_writable(record_changed)
-                    changed = record_changed
-                    journal_entries = record_entries
-                    log_values = record_log_values
-                    head = record.original_head
-                    reverted = list(record.reverted)
-                    revert_checkpoint = record.checkpoint
-                    resuming = True
-                    if logs_complete:
-                        print(
-                            f"{name}: {task_id} revert checkpoint management data "
-                            f"already persisted, continuing to update the report: "
-                            f"{record.checkpoint}")
-                    else:
-                        print(
-                            f"{name}: {task_id} resuming an incomplete revert "
-                            f"checkpoint: {record.checkpoint}")
-        except (AssentError, OSError, ValueError) as e:
-            print(f"{name}: rework aborted (Git or resume precheck failed: {e}), "
-                  "status unchanged")
-            return 1
-
-    if not resuming:
-        if target.status == "TODO":
-            print(f"{name}: {task_id} is already TODO, no rework needed")
-            return 1
-        if blockers and not cascade:
-            print(f"{name}: {task_id} has downstream tasks that must be reopened "
-                  f"together; specify cascade: {', '.join(blockers)}")
-            return 1
-
-        changed = [target]
-        if cascade:
-            changed.extend(task for task in downstream
-                           if task.status in _CASCADE_STATUSES)
-        try:
-            journal_entries = {
-                task.id: read_entries(task.journal_path) for task in changed
-            }
-            _ensure_management_writable(changed)
-            excludes = cfg.git_excludes
-        except (AssentError, OSError, ValueError) as e:
-            print(f"{name}: rework aborted (management-plane precheck failed: {e})")
-            return 1
-
-    try:
-        if revert_code and not resuming:
-            reverted = _revert_candidates(
-                path, name, {task.id for task in changed})
-        elif not revert_code and path.exists():
-            if not gitops.is_repo_worktree(cfg.root, path):
-                raise AssentError(
-                    f"fixed path is not a valid worktree of this repo: {path}")
-            branch = gitops.current_branch(path)
-            if not branch.startswith(cfg.branch_prefix):
-                shown = branch or "detached HEAD"
-                raise AssentError(
-                    f"worktree is on a branch outside this folder: {shown}")
-            if gitops.commit_if_dirty(
-                    path, f"wip({name}/{target.id}): manual rework pre-archive",
-                    excludes):
-                print(f"{name}: {target.id} uncommitted changes archived as a wip checkpoint")
-            head = gitops.commit_of(path, "HEAD")
-        elif not revert_code:
-            head = gitops.commit_of(cfg.root, "HEAD")
-            print(f"{name}: worktree does not exist, only reopening management state")
-    except AssentError as e:
-        print(f"{name}: rework aborted (Git precheck or archive failed: {e}), "
-              "status unchanged")
+    state = _ReworkState()
+    if request.revert_code and not _resume_interrupted_revert(request, state):
+        return 1
+    if not state.resuming and not _prepare_management_plane(request, state):
+        return 1
+    if not _prepare_git_scene(request, state):
+        return 1
+    if not _apply_code_revert(request, state):
         return 1
 
-    if revert_code and not resuming:
-        assert reverted is not None
-        message = _revert_message(
-            name, target, cascade, effective_reason, downstream, changed,
-            head, reverted)
-        print(f"{name}: {target.id} will revert the following code checkpoints:")
-        for commit in reverted:
-            print(f"  - {commit}")
-        try:
-            gitops.revert_no_commit(path, reverted)
-            gitops.commit_all(path, message)
-            revert_checkpoint = gitops.commit_of(path, "HEAD")
-        except AssentError as e:
-            return _abort_failed_revert(path, name, head, e)
+    _build_log_values(request, state)
+    persist = (_persist_status_first if request.revert_code
+               else _persist_journal_first)
+    if not persist(request, state):
+        return 1
 
-    if not log_values:
-        log_values = {
-            task.id: _entry_values(
-                task, target, head, downstream, cascade, effective_reason,
-                reverted, revert_checkpoint, [item.id for item in changed])
-            for task in changed
-        }
-
-    ordered = [task for task in changed if task.id != target.id] + [target]
-    if revert_code:
-        # Status is written first, journal last; a complete same-checkpoint journal
-        # therefore serves as a durable completion marker, letting an already-finished
-        # old rework and this management-plane-interrupted rework be told apart unambiguously.
-        try:
-            for task in ordered:
-                if task.status != "TODO":
-                    set_status(task.path, "TODO")
-                    print(f"  task {task.id}: {task.status} -> TODO")
-        except (AssentError, OSError) as e:
-            try:
-                complete = _management_complete(
-                    cfg.tasks_dir, [task.id for task in changed], log_values)
-            except (AssentError, OSError, ValueError) as verify_error:
-                print(
-                    f"{name}: task-status write interrupted ({e}), and re-reading "
-                    f"disk failed ({verify_error}); rerun with the same parameters")
-                return 1
-            if complete:
-                print(f"{name}: status write reported failure, but management data "
-                      "is fully persisted")
-            else:
-                print(f"{name}: task-status write interrupted ({e}); rerun with "
-                      "the same parameters")
-                return 1
-        try:
-            for task in changed:
-                summary, detail = log_values[task.id]
-                if _has_entry(journal_entries[task.id], summary, detail):
-                    continue
-                append_entry(
-                    task.journal_path, by="scheduler",
-                    event="rework_requested", summary=summary, detail=detail)
-        except (AssentError, OSError) as e:
-            try:
-                complete = _management_complete(
-                    cfg.tasks_dir, [task.id for task in changed], log_values)
-            except (AssentError, OSError, ValueError) as verify_error:
-                print(
-                    f"{name}: rework journal write interrupted ({e}), and re-reading "
-                    f"disk failed ({verify_error}); rerun with the same parameters")
-                return 1
-            if complete:
-                print(f"{name}: journal write reported failure, but management data "
-                      "is fully persisted")
-            else:
-                print(f"{name}: rework journal write interrupted ({e}); rerun with "
-                      "the same parameters")
-                return 1
-    else:
-        try:
-            # The default path reuses t001's transaction order: status is touched only
-            # after the journal is complete.
-            for task in changed:
-                summary, detail = log_values[task.id]
-                if _has_entry(journal_entries[task.id], summary, detail):
-                    continue
-                append_entry(
-                    task.journal_path, by="scheduler",
-                    event="rework_requested", summary=summary, detail=detail)
-        except (AssentError, OSError) as e:
-            print(f"{name}: rework journal write interrupted ({e}), task status "
-                  "unchanged; rerun")
-            return 1
-        # Downstream is written first, target last. While the target is still not TODO,
-        # the same command can resume.
-        try:
-            for task in ordered:
-                set_status(task.path, "TODO")
-                print(f"  task {task.id}: {task.status} -> TODO")
-        except (AssentError, OSError) as e:
-            print(f"{name}: task-status write interrupted ({e}); rerun with the "
-                  "same parameters")
-            return 1
-
-    print(f"{name}: {target.id} rework complete ({len(changed)} task(s) reset to TODO)")
+    print(f"{request.name}: {request.target.id} rework complete "
+          f"({len(state.changed)} task(s) reset to TODO)")
     return 0
