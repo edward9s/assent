@@ -62,9 +62,11 @@ Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
 - A verification receipt is a deletable derived artifact, never an independent
   source of truth: source commits, the reconstructed integration tree, and the
   verification-script digest must reproduce it before it can authorize accept.
-- Cross-folder speculative execution, when implemented, may stack on at most one
-  not-yet-accepted upstream tip; multiple unaccepted upstreams fail closed rather
-  than creating an implicit integration engine.
+- Cross-folder speculative execution stacks only on an explicitly declared
+  `base`, so at most one not-yet-accepted upstream tip is ever in a stack. A
+  folder that declares no `base` is cut from the integration target; the
+  scheduler must never infer a base from `after` or otherwise build an implicit
+  integration engine.
 - Rework preserves existing code by default. A from-scratch rework must be an
   explicit human choice and may reverse only a checkpoint tail whose ownership
   is mechanically provable.
@@ -78,12 +80,3 @@ Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
   (peers of the models table) and must not be hardcoded in adapter code.
 - When using assent, first read `.assent/instructions.md` in the project's main worktree; a worktree session uses the absolute path the scheduler provides. <!-- assent-instructions -->
 
-- Work-folder `after` controls scheduler readiness only: it means "these
-  folders must finish before me", and it never supplies a Git worktree base.
-  The base is declared by `base`, which must be one of the `after` members;
-  with no `base` a folder is cut from the current integration target. Stacking
-  stays bounded because it can happen only through an explicit `base`, so at
-  most one not-yet-accepted upstream is ever in a stack. Stale downstream work
-  is preserved for explicit rework/reject or a new plan, and cleanup retains
-  upstream source evidence until direct dependents are accepted and
-  mechanically proven integrated and clean.
