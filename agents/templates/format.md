@@ -15,7 +15,7 @@ project/
     ├── instructions.md          # agents session 指示與跨專案共通規則
     ├── format.md                # 本檔
     ├── verify.py                # 共用驗收腳本(任務檔 verify 欄位的預設選擇)
-    └── plan01/                  # 工作資料夾(名稱由會議決定,= git 分支前綴)
+    └── bootstrap01/             # 工作資料夾(依任務性質命名,由會議決定,= git 分支前綴)
         ├── agents.lock          # 該資料夾一 run 的檔案鎖
         ├── _agents.log          # 該資料夾的執行期終端輸出(不進版控)
         ├── t001_骨架與測試基建.e.toml  # 任務檔(會議產出)
@@ -28,8 +28,9 @@ project/
 ## 工作資料夾
 
 - 位於 `.agents/` 內,含至少一個 `tNNN_名稱.e.toml` 正式任務檔。
-- 名稱規則:不含空白與路徑分隔符,不以 `-` 或 `.` 開頭(它同時是 git 分支前綴,
-  分支形如 `plan01/<UTC 時間戳>`)。
+- 名稱依任務性質命名(如 `bootstrap01`、`loginfix01`),沒有保留字或慣例名;
+  規則:不含空白與路徑分隔符,不以 `-` 或 `.` 開頭(它同時是 git 分支前綴,
+  分支形如 `bootstrap01/<UTC 時間戳>`)。
 - **計畫輪替 = 開新資料夾**:新一輪計畫直接開新資料夾即可;舊資料夾作為
   `after` 前置繼續參與依賴判定。`run` 省略資料夾時依任務現況與前置完成狀態
   推導選定唯一可執行資料夾,有歧義就拒絕;`status`、`check`、`report` 省略時
@@ -69,7 +70,7 @@ worktree,不得以切換開關或無 Git 降級模式取代;這是安全平行�
 資料夾的 `after` 字串陣列:
 
 ```toml
-after = ["plan01"]
+after = ["bootstrap01"]
 ```
 
 沒有 `_folder.toml` 就視為 `after = []`;若檔案存在,則必須明寫 `after`,且

@@ -1,6 +1,7 @@
 """agents init:在目標專案生成 .agents 骨架與 AGENTS.md 橋接指示。
 
-- .agents/agents.toml、instructions.md、format.md、verify.py、預設工作資料夾。
+- .agents/agents.toml、instructions.md、format.md、verify.py。
+  工作資料夾不預建:名稱依任務性質由規劃會議決定。
 - AGENTS.md:不存在 -> 建立專案範本;已存在 -> 只補一行 instructions 橋接。
   舊版「AI 工作體系」區塊會移除,其他專案內容不動。
 - .gitignore:排除整個 .agents/;既有的 AGENTS.md 版控選擇不干涉。
@@ -20,7 +21,6 @@ _BRIDGE_LINE = (
     "worktree session 以調度器提示的絕對路徑為準。 "
     f"{_BRIDGE_MARKER}"
 )
-_DEFAULT_FOLDER = "plan01"
 _GITIGNORE_LINES = [".agents/"]
 
 
@@ -112,7 +112,6 @@ def init(path: str | Path = ".") -> int:
     _create(agents_dir / "instructions.md", _template("instructions.md"), made, skipped)
     _create(agents_dir / "format.md", _template("format.md"), made, skipped)
     _create(agents_dir / "verify.py", _template("verify.py"), made, skipped)
-    (agents_dir / _DEFAULT_FOLDER).mkdir(parents=True, exist_ok=True)
     _merge_agents_md(root, made, skipped)
     _merge_gitignore(root, made)
 
@@ -125,7 +124,7 @@ def init(path: str | Path = ".") -> int:
     print("接下來:")
     print("  1. 填寫 AGENTS.md 的專案描述與硬限制、.agents/verify.py 的實際檢查命令")
     print("  2. 開 AI 會議:請讀 .agents/instructions.md,開始 agents 規劃會議")
-    print(f"  3. 會議產出任務檔到 .agents/{_DEFAULT_FOLDER}/"
-          "(格式見 .agents/format.md;資料夾名可自行決定)")
+    print("  3. 會議依任務性質命名工作資料夾(如 .agents/loginfix01/),"
+          "產出任務檔於其中(格式見 .agents/format.md)")
     print("  4. agents check 通過後,agents run")
     return 0

@@ -262,7 +262,9 @@ class TestInit(MainTestCase):
                     ".agents/instructions.md", ".agents/verify.py",
                     "AGENTS.md", ".gitignore"):
             self.assertTrue((self.root / rel).is_file(), rel)
-        self.assertTrue((self.root / ".agents" / "plan01").is_dir())
+        # 不預建工作資料夾:名稱依任務性質由會議決定,預建反而誤導
+        subdirs = [p for p in (self.root / ".agents").iterdir() if p.is_dir()]
+        self.assertEqual(subdirs, [])
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
         lines = gitignore.splitlines()
         self.assertIn(".agents/", lines)
