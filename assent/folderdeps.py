@@ -1,7 +1,8 @@
 """Folder-level dependency parsing, completion inference, and cycle checks.
 
-- ``_folder.toml`` declares ``after`` and an optional ``base``; a missing file
-  means no folder prerequisites.
+- ``_folder.toml`` declares ordering with ``after`` and lineage with an optional
+  ``base``; ``after`` never supplies a Git base.  A missing file means no folder
+  prerequisites and no declared base.
 - Folder completion is always inferred on the spot from the formal task
   files, with no separate state file.
 - This module only provides the capability; wiring it into the run/check
@@ -218,8 +219,8 @@ def live_upstreams(assent_dir: str | Path,
     proof that the folder's content is already merged into the integration
     target, and it then deletes the branch and the live directory.  So an
     archived name is complete, already integrated, and contributes no source
-    tip, no speculative base, and no ancestry check -- a downstream base cut
-    from the target already contains its content.
+    tip, inherited lineage, or ancestry check -- a downstream base cut from the
+    target already contains its content.
 
     The judgement is roster membership alone, never a hash recorded in the
     roster, because the project may rewrite Git history.
@@ -311,10 +312,10 @@ def resolve_folder_base(
         downstream_tip: str | None = None) -> FolderBaseResolution:
     """Resolve the immutable base for a downstream folder, failing closed.
 
-    Every direct prerequisite is reconstructed from its current task files and
-    sole clean, attached source.  A source tip already reachable from the current
-    target ``HEAD`` is accepted.  At most one other tip may become the speculative
-    base unless the downstream explicitly declares which ``base`` to use.
+    Every live direct prerequisite must be complete because ``after`` declares
+    scheduler ordering only.  Git lineage comes exclusively from an explicit
+    ``base``: its unaccepted tip becomes the lineage source, while a missing,
+    archived, or already accepted base resolves to the current target ``HEAD``.
 
     When ``downstream_tip`` is supplied, it must descend from the newly resolved
     base.  This turns an upstream that advanced after downstream creation into an
@@ -331,34 +332,19 @@ def resolve_folder_base(
 
     target = gitops.main_worktree(root)
     target_snapshot = gitops.commit_of(target, "HEAD")
-    candidates: list[gitops.FolderSourceSnapshot] = []
-    # An archived upstream is complete and already merged into the target, so it
-    # contributes no speculative base (see live_upstreams).
-    for folder in live_upstreams(tasks_dir.parent, dependencies):
+    live = live_upstreams(tasks_dir.parent, dependencies)
+    for folder in live:
         completion = infer_folder_completion(tasks_dir.parent / folder)
         if not completion.complete:
             raise AssentError(
                 f"upstream folder {folder} is incomplete: {completion.reason}")
-        source = gitops.resolve_folder_source(root, folder, excludes)
-        if not gitops.is_ancestor(target, source.tip, target_snapshot):
-            candidates.append(source)
 
-    if dependencies.base is None:
-        if len(candidates) > 1:
-            detail = "\n".join(
-                f"  - folder {source.folder}, tip {source.tip}: accept this upstream "
-                "into the target"
-                for source in candidates)
-            raise AssentError(
-                "multiple unaccepted upstream folders cannot form one speculative "
-                f"base:\n{detail}\nDeclare `base = \"<folder>\"` to inherit from "
-                "one candidate, or accept the extra upstreams before starting the "
-                "downstream task")
-        upstream = candidates[0] if candidates else None
-    else:
-        upstream = next(
-            (source for source in candidates if source.folder == dependencies.base),
-            None)
+    upstream: gitops.FolderSourceSnapshot | None = None
+    if dependencies.base is not None and dependencies.base in live:
+        source = gitops.resolve_folder_source(
+            root, dependencies.base, excludes)
+        if not gitops.is_ancestor(target, source.tip, target_snapshot):
+            upstream = source
 
     resolved_base = upstream.tip if upstream is not None else target_snapshot
     if downstream_tip is not None:
