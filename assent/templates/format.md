@@ -59,6 +59,17 @@ project/
   this it skips and explains why; it does not touch `.assent/` (the t/r files
   there are the archive itself), has no `--force`, and is unrelated to
   `git clean` — it deletes nothing untracked or unmerged.
+- **Acceptance**: `assent accept <FOLDER>` records a human acceptance decision
+  by transactionally integrating exactly one completed folder into the normal
+  branch currently checked out in the main worktree. `FOLDER` is required; the
+  command has no batch, push, remote, pull-request, or hosting behavior, and no
+  other command infers acceptance from DONE tasks. It verifies the source and a
+  throwaway `--no-ff` merge before a final fast-forward-only target update,
+  records structured evidence in the merge commit, and keeps the source branch
+  and worktree. Its repository integration lock coordinates Assent commands,
+  not arbitrary external Git writers; observed target changes are refused, but
+  callers must not treat the lock as cross-process atomicity against Git commands
+  run outside Assent.
 - **Rejection**: `assent reject <FOLDER>` is an explicit human-adjudicated
   rejection, kept separate from routine cleanup: after archiving uncommitted
   changes it force-deletes that folder's worktree and same-prefix branches

@@ -68,7 +68,7 @@ class TestDispatch(MainTestCase):
         self.assertEqual(ctx.exception.code, 0)
 
     def test_help_output_is_english_for_top_level_and_every_subcommand(self):
-        commands = ("run", "status", "check", "report", "clean",
+        commands = ("run", "status", "check", "report", "clean", "accept",
                     "reject", "rework", "init")
         for argv in (["--help"],) + tuple(
                 [command, "--help"] for command in commands):
@@ -149,6 +149,29 @@ class TestDispatch(MainTestCase):
         with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
                 io.StringIO()):
             main(["clean", "--force"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_accept_requires_exactly_one_folder_and_has_no_remote_options(self):
+        for argv in (["accept"], ["accept", "one", "two"],
+                     ["accept", "one", "--all"],
+                     ["accept", "one", "--push"]):
+            with self.subTest(argv=argv), self.assertRaises(
+                    SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2)
+
+    def test_accept_dispatches_explicit_folder(self):
+        config = self.write_config()
+        with patch("assent.__main__.accept_folder", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["accept", "reviewed", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
+
+    def test_no_push_subcommand_exists(self):
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
+                io.StringIO()):
+            main(["push"])
         self.assertEqual(ctx.exception.code, 2)
 
     def test_reject_requires_folder(self):

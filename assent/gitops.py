@@ -640,6 +640,41 @@ def temporary_source_worktree(root: Path, commit: str) -> Iterator[Path]:
         _cleanup_temporary_worktree(primary, path)
 
 
+@dataclass(frozen=True)
+class MergeOutcome:
+    """Result of a no-fast-forward merge attempt."""
+
+    ok: bool
+    conflicts: tuple[str, ...] = ()
+
+
+def conflict_paths(worktree: Path) -> list[str]:
+    """List unmerged paths in stable order."""
+    out = _git(worktree, "diff", "--name-only", "--diff-filter=U")
+    return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+
+def merge_no_ff(worktree: Path, commit: str, message: str) -> MergeOutcome:
+    """Merge an explicit commit without fast-forwarding or resolving conflicts."""
+    snapshot = _commit_snapshot(worktree, commit)
+    result = _run_git(worktree, "merge", "--no-ff", "-m", message, snapshot)
+    if result.returncode == 0:
+        return MergeOutcome(True)
+    conflicts = conflict_paths(worktree)
+    if not conflicts:
+        raise AssentError(
+            f"git merge --no-ff {snapshot} failed (exit code {result.returncode}): "
+            f"{result.stderr.strip() or result.stdout.strip()}")
+    _run_git(worktree, "merge", "--abort")
+    return MergeOutcome(False, tuple(conflicts))
+
+
+def fast_forward(root: Path, commit: str) -> None:
+    """Advance the checked-out branch only when Git can fast-forward it."""
+    snapshot = _commit_snapshot(root, commit)
+    _git(root, "merge", "--ff-only", snapshot)
+
+
 @contextlib.contextmanager
 def temporary_integration_worktree(
         root: Path, folder: str,
