@@ -1276,4 +1276,3 @@ def _print_summary(plan: Plan) -> None:
             print(f"  - {t.id}: {t.title}")
     if counts.get("TODO", 0) == 0 and counts.get("WIP", 0) == 0:
         print("All tasks are DONE/BLOCKED/SKIP.")
-
