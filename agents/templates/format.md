@@ -82,8 +82,10 @@ after = ["plan01"]
 ### adapter 沙箱的硬需求
 
 執行 AI 必須能寫入主樹 `.agents/`,因為改自己任務檔的 status 與 append r 檔是
-分內事。若整個 `.agents/` 被 gitignore 的專案使用 codex `workspace-write`,它會被劃成
-「專案外」唯讀,任務會全數假性 BLOCKED；此組合需使用 `danger-full-access`。
+分內事。若整個 `.agents/` 被 gitignore 的專案使用 codex `workspace-write`,主樹
+`.agents/` 會是唯讀,不符合任務收尾需求。執行 AI 也必須能寫入系統暫存目錄——
+tempfile 型測試會寫在那裡,`workspace-write` 同樣會拒絕。這兩項是預設設定改用
+`danger-full-access` 而非 `workspace-write` 的原因；收緊沙箱時兩者都須放行。
 執行 AI 也必須保持整潔:臨時探針或墊片用完即刪,尤其不得留下內嵌 git repo。
 
 ## 任務檔(tNNN_名稱.e.toml)
