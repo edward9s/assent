@@ -104,6 +104,21 @@ class TestLoadConfig(ConfigTestCase):
                          {"prime": {"medium": "high"}, "lite": {"high": "medium"}})
         self.assertEqual(cfg.antigravity_print_timeout_minutes, 120)
 
+    def test_shipped_template_loads_with_expected_adapter_settings(self):
+        template = (Path(__file__).resolve().parents[1]
+                    / "assent" / "templates" / "assent.toml")
+        cfg = load_config(self.write(template.read_text(encoding="utf-8")),
+                          "template01")
+        tiers = {"prime", "core", "lite"}
+        efforts = {"low", "medium", "high"}
+        for adapter in ("claude", "codex", "antigravity"):
+            with self.subTest(adapter=adapter):
+                settings = cfg.adapter_settings(adapter)
+                self.assertEqual(set(settings.models), tiers)
+                self.assertTrue(set(settings.default_effort) <= tiers)
+                self.assertTrue(set(settings.default_effort.values()) <= efforts)
+        self.assertEqual(cfg.antigravity_print_timeout_minutes, 120)
+
     def test_antigravity_effort_table_is_replaced_whole_not_merged(self):
         cfg = load_config(self.write(
             '[adapter.antigravity.efforts.prime]\nmedium = "medium"\n'), "plan01")
