@@ -68,7 +68,11 @@ project/
   work folder in `after` dependency order, refreshing a stale verification
   receipt with a full unattended verification before accepting each folder,
   and stops the chain fail-closed at the first failure while
-  already-published merges remain published. It still has no push, remote,
+  already-published merges remain published. A finished folder whose source
+  branch and worktree have both already been cleaned away is skipped instead
+  of verified, and the skip does not count as a chain failure; only `--all`
+  skips this way, a directly named `accept FOLDER` still fails closed on a
+  missing source. It still has no push, remote,
   pull-request, or hosting behavior, and no other command infers acceptance
   from DONE tasks. It quickly rebuilds the
   temporary integration candidate and compares the source tip, integration
