@@ -22,7 +22,7 @@ _TEMPLATES = Path(__file__).resolve().parent / "templates"
 # Heading of the section that older, pre-English releases of `agents init`
 # wrote into a project's AGENTS.md. It is legacy-detection data, not user-facing
 # prose, so the historical characters are kept as escapes and removed on re-init.
-_LEGACY_SECTION_MARKER = "## AI 工作體系(.agents)"
+_LEGACY_SECTION_MARKER = "## AI \u5de5\u4f5c\u9ad4\u7cfb(.agents)"
 _BRIDGE_MARKER = "<!-- agents-instructions -->"
 _BRIDGE_LINE = (
     "- When using agents, first read `.agents/instructions.md` in the "
