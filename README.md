@@ -29,10 +29,12 @@
               │              主迴圈(零 token)               │
  .agents/     │  1. 掃工作資料夾,選任務:WIP 續作優先,        │
  工作資料夾 ──▶     否則第一個「TODO 且前置皆 DONE/SKIP」      │
- (tNNN.toml)  │  2. 讀該任務的檔位/effort,開 headless session │──▶ 執行 AI
+ (tNNN_名稱   │  2. 讀該任務的檔位/effort,開 headless session │──▶ 執行 AI
+  .e.toml)    │                                                   │
               │  3. session 結束後客觀驗收:                  │◀── 更新任務檔
-              │     狀態 → 結構比對(防竄改)→ scope → verify │     + r 檔日誌
-              │  4a. 通過 → auto(tNNN) 檢查點 → 回到 1       │
+              │     狀態 → 結構比對(防竄改)→ scope → verify │     + 同名 .r.toml 日誌
+              │  4a. 通過 → auto(工作資料夾/tNNN) 檢查點     │
+              │      → 回到 1                                  │
               │  4b. 失敗 → 保留成果帶原因重試 → 仍失敗則      │
               │      標 BLOCKED 連成果一起 commit → 回到 1    │
               │  4c. 額度耗盡 → wip 檢查點 → 倒數等重置        │
@@ -40,8 +42,9 @@
               └────────────────────────────────────────────┘
 ```
 
-- **任務檔即狀態**:每個任務一個 TOML 檔(狀態、依賴、檔位、scope、verify、
-  驗收條件),日誌一任務一檔(r 檔,append-only、預設不讀)。斷電、當機、
+- **任務檔即狀態**:每個任務一個 `tNNN_名稱.e.toml` 檔(狀態、依賴、檔位、
+  scope、verify、驗收條件),日誌則是同主幹的 `tNNN_名稱.r.toml`
+  (append-only、預設不讀)。斷電、當機、
   額度中斷,重新 `agents run` 就從現況接著跑。
 - **格式契約**:`.agents/format.md`(`agents init` 會放進專案),
   規劃 AI 讀它產生任務檔,調度器解析器與它逐字對齊。
@@ -99,7 +102,9 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 ## 平行執行
 
 可在 N 個終端各自指定不同的工作資料夾執行，例如 `agents run parallel01`、
-`agents run parallel02`。每個工作資料夾都有自己的 `agents.lock`，同一資料夾
+`agents run parallel02`。各資料夾內的任務與日誌分別使用
+`tNNN_名稱.e.toml`、`tNNN_名稱.r.toml`。每個工作資料夾都有自己的
+`agents.lock`，同一資料夾
 同時只允許一個 run；Git 啟用時,每個資料夾一律使用
 `<專案名>.worktrees/<資料夾>/` 的獨立 worktree,這是安全平行處理的基礎。
 
@@ -135,7 +140,8 @@ AI 會議在主樹進行。從主樹可直接用 `git worktree list`、`git log 
 再對要裁決的任務開 session:
 
 ```text
-請讀 .agents/<資料夾>/t003_xxx.toml、r003_xxx.toml 與 commit <hash> 的 diff,
+請讀 .agents/<資料夾>/t003_xxx.e.toml、t003_xxx.r.toml 與
+auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 說明卡點並提出修正方案。
 ```
 
@@ -145,17 +151,22 @@ AI 會議在主樹進行。從主樹可直接用 `git worktree list`、`git log 
 
 ## 指令參考
 
-| 指令 | 作用 | token 消耗 |
-|---|---|---|
-| `agents run` | 主命令:跑到全部 DONE/BLOCKED/SKIP | 僅執行 AI 的 session 本身 |
-| `agents run --once` | 只執行下一個任務後停止(試跑用) | 同上,單一任務 |
-| `agents run --task t003` | 指定執行單一任務(仍檢查前置) | 同上,單一任務 |
-| `agents status` | 進度統計、下一個任務、分支與最後檢查點 | **零** |
-| `agents check` | 驗任務檔格式、依賴無循環、設定與環境 | **零** |
-| `agents report` | 生成並顯示人讀報告 _report.md | **零** |
-| `agents init` | 在專案生成 .agents 骨架與 AGENTS.md | **零** |
+`run`、`status`、`check`、`report` 的完整形式都是
+`agents <指令> [選項] [FOLDER]`。可省略的位置參數 `FOLDER` 覆寫設定檔
+`[plan] tasks` 的工作資料夾名稱；`--config PATH` 選擇設定檔，預設為
+`.agents/agents.toml`。兩者彼此正交，可以只用其中一個，也可以同時使用，例如
+`agents status --config configs/night.toml parallel01`。
 
-所有指令(init 除外)接受 `--config <path>`(預設 `.agents/agents.toml`)。
+| 指令與代表性命令 | 選項與作用 | token 消耗 |
+|---|---|---|
+| `agents run [FOLDER]`<br>`agents run parallel01` | 執行工作資料夾，直到任務全為 DONE/BLOCKED/SKIP。接受 `--config PATH`；`--once` 只執行下一個任務後停止；`--task ID` 指定單一任務且仍檢查前置，例如 `agents run --task t003 parallel01`。 | 僅執行 AI session 時消耗；`--once` 或 `--task` 最多執行單一任務 |
+| `agents status [FOLDER]`<br>`agents status parallel01` | 顯示進度統計、下一個任務、分支與最後檢查點。接受 `--config PATH`。 | **零** |
+| `agents check [FOLDER]`<br>`agents check --config .agents/agents.toml parallel01` | 驗證任務檔格式、依賴無循環、設定與環境，是規劃會議的散會條件。接受 `--config PATH`。 | **零** |
+| `agents report [FOLDER]`<br>`agents report parallel01` | 生成並顯示工作資料夾內的人讀報告 `_report.md`。接受 `--config PATH`。 | **零** |
+| `agents init`<br>`agents init --path C:\\work\\my-project` | 在目標專案生成 `.agents` 骨架與 `AGENTS.md`；`--path DIR` 預設為目前目錄。它不接受 `FOLDER` 或 `--config`。 | **零** |
+
+各子命令的 `-h`／`--help` 會顯示該層實際語法；頂層沒有可套用到所有子命令的
+`--config` 等全域選項。
 
 ## 計畫格式與設定檔
 
@@ -178,16 +189,19 @@ AI 會議在主樹進行。從主樹可直接用 `git worktree list`、`git log 
 自動以「接續」提示續作。
 
 **Q:執行 AI 亂改任務檔放寬自己的驗收怎麼辦?**
-三層防禦:scope 豁免只有它自己 t 檔與 r 檔;t 檔除 status 外任何欄位被改動
-即驗收失敗(逐欄位與檢查點版本比對);check 每輪驗 deps 完整性與循環。
+三層防禦:scope 豁免只有它自己的 `tNNN_名稱.e.toml` 任務檔與
+`tNNN_名稱.r.toml` 日誌檔;任務檔除 status 外任何欄位被改動即驗收失敗
+(逐欄位與檢查點版本比對);check 每輪驗 deps 完整性與循環。
 
 **Q:BLOCKED 的任務會擋住全部進度嗎?**
 只擋以它為前置的任務;其他任務照常繼續。_report.md 會列出所有卡點與最後日誌。
 
 **Q:如何接 Claude / Codex 以外的 AI CLI?**
-實作一個 adapter:`run_task(prompt, model, effort, cwd) -> TaskResult`
-(含 exit_code / output / quota_exhausted / reset_at);額度偵測封裝在 adapter
-內,主迴圈不感知廠牌差異。任務檔寫抽象檔位,對照表翻譯成自家型號。
+繼承 `Adapter` 並實作兩步介面。`resolve_model(model: str) -> str` 先把任務檔的
+抽象檔位解析成這次實際傳給 AI CLI `--model` 的 `requested_model`；接著
+`run_task(prompt, requested_model, effort, cwd) -> TaskResult` 必須使用這個 CLI
+模型值執行。`TaskResult` 包含 `exit_code`、`output`、`quota_exhausted`、
+`reset_at`；額度偵測封裝在 adapter 內,主迴圈不感知廠牌差異。
 
 ## 專案狀態
 
