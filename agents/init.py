@@ -3,7 +3,7 @@
 - .agents/agents.toml、.agents/format.md、.agents/verify.py、預設工作資料夾。
 - AGENTS.md:不存在 -> 整檔複製;已存在且缺「AI 工作體系」一節 -> 整段 append;
   已有該節 -> 不動。
-- .gitignore:補上執行期產物(agents.log、report.md),已有就不重複加。
+- .gitignore:補上整個 .agents/,已有就不重複加。
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from agents import AgentsError
 _TEMPLATES = Path(__file__).resolve().parent / "templates"
 _SECTION_MARKER = "## AI 工作體系"
 _DEFAULT_FOLDER = "plan01"
-_GITIGNORE_LINES = [".agents/agents.log", ".agents/*/report.md"]
+_GITIGNORE_LINES = [".agents/"]
 
 
 def _template(name: str) -> str:

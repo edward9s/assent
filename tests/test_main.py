@@ -81,8 +81,9 @@ class TestInit(MainTestCase):
             self.assertTrue((self.root / rel).is_file(), rel)
         self.assertTrue((self.root / ".agents" / "plan01").is_dir())
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
-        self.assertIn(".agents/agents.log", gitignore)
-        self.assertIn(".agents/*/report.md", gitignore)
+        self.assertIn(".agents/", gitignore.splitlines())
+        self.assertNotIn(".agents/agents.log", gitignore.splitlines())
+        self.assertNotIn(".agents/*/report.md", gitignore.splitlines())
 
     def test_idempotent_no_overwrite_no_duplicates(self):
         run_init(self.root)
@@ -96,7 +97,7 @@ class TestInit(MainTestCase):
                       .read_text(encoding="utf-8"))
         # gitignore 不重複累加
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
-        self.assertEqual(gitignore.count(".agents/agents.log"), 1)
+        self.assertEqual(gitignore.splitlines().count(".agents/"), 1)
         # AGENTS.md 已含該節,不重複 append
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertEqual(agents_md.count("## AI 工作體系"), 1)
