@@ -50,6 +50,23 @@ Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
 - Do not introduce a hand-maintained "current folder" pointer; the work folder
   is stated explicitly by argument or derived from task-file facts, and any
   ambiguity is refused.
+- Human approval is the explicit `assent accept FOLDER` action plus the resulting
+  Git integration; do not add a second per-task `review` state alongside task
+  execution status.
+- Expensive full-project verification belongs to unattended `run` / `verify`,
+  not the interactive acceptance decision. `accept` may publish only an exact
+  integration tree covered by a fresh, reproducible verification receipt and
+  must refuse stale or missing evidence instead of silently starting a long
+  test run.
+- A verification receipt is a deletable derived artifact, never an independent
+  source of truth: source commits, the reconstructed integration tree, and the
+  verification-script digest must reproduce it before it can authorize accept.
+- Cross-folder speculative execution, when implemented, may stack on at most one
+  not-yet-accepted upstream tip; multiple unaccepted upstreams fail closed rather
+  than creating an implicit integration engine.
+- Rework preserves existing code by default. A from-scratch rework must be an
+  explicit human choice and may reverse only a checkpoint tail whose ownership
+  is mechanically provable.
 - `build/lib/` is an old build artifact; never modify it.
 - `model` and `effort` are orthogonal abstract tiers: `model` uses
   prime/core/lite; the optional `effort` uses low/medium/high and is written
