@@ -29,8 +29,27 @@ def run(*cmd: str) -> None:
         fail(f"command failed (exit code {result.returncode}): {' '.join(cmd)}")
 
 
+def check_committed_delta() -> None:
+    """Check the candidate commit against its first parent, when one exists."""
+    parent = subprocess.run(
+        ("git", "rev-parse", "--verify", "HEAD^1"),
+        cwd=ROOT,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if parent.returncode == 0:
+        first_parent = parent.stdout.strip()
+        if not first_parent:
+            fail("git returned an empty first parent")
+        run("git", "diff", "--check", first_parent, "HEAD")
+    elif parent.returncode != 128:
+        fail("unable to determine the candidate's first parent")
+
+
 # --- Worktree integrity check (keep) ---
 run("git", "diff", "--check")
+check_committed_delta()
 
 # --- Project checks (TODO: pick one per your stack or replace as needed) ---
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -114,6 +115,54 @@ class VerificationRepositoryCase(unittest.TestCase):
         paths = list(container.iterdir()) if container.exists() else []
         return branches, paths
 
+
+class TestPackagedVerifier(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parent = Path(tempfile.mkdtemp(prefix="assent verifier "))
+        self.addCleanup(shutil.rmtree, self.parent, ignore_errors=True)
+        self.root = self.parent / "candidate path with spaces"
+        self.root.mkdir()
+        subprocess.run(["git", "init"], cwd=self.root, check=True,
+                       capture_output=True)
+        self._git_config()
+        self.script = self.root / ".assent" / "verify.py"
+        self.script.parent.mkdir()
+        template = Path(__file__).parents[1] / "assent/templates/verify.py"
+        self.script.write_text(template.read_text(encoding="utf-8"),
+                               encoding="utf-8")
+
+    def _git_config(self) -> None:
+        for key, value in (("user.name", "Verifier Test"),
+                           ("user.email", "verifier@example.invalid")):
+            subprocess.run(["git", "config", key, value], cwd=self.root,
+                           check=True, capture_output=True)
+
+    def _commit(self, message: str) -> None:
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-m", message], cwd=self.root,
+                       check=True, capture_output=True)
+
+    def _run(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([sys.executable, str(self.script)], cwd=self.root,
+                              capture_output=True, encoding="utf-8",
+                              errors="replace")
+
+    def test_committed_trailing_whitespace_fails_in_candidate_path_with_spaces(self):
+        (self.root / "base.txt").write_text("base\n", encoding="utf-8")
+        self._commit("root")
+        (self.root / "changed.txt").write_text("bad \n", encoding="utf-8")
+        self._commit("trailing whitespace")
+        result = self._run()
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_clean_committed_delta_and_root_commit_pass(self):
+        (self.root / "base.txt").write_text("base\n", encoding="utf-8")
+        self._commit("root")
+        self.assertEqual(self._run().returncode, 0)
+        (self.root / "changed.txt").write_text("clean\n", encoding="utf-8")
+        self._commit("clean delta")
+        self.assertEqual(self._run().returncode, 0)
 
 class TestVerificationRun(VerificationRepositoryCase):
     def test_full_verify_runs_once_in_two_parent_candidate_and_preserves_refs(self):

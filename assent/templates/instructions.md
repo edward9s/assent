@@ -53,6 +53,25 @@ the `_assent.log` inside a work folder.
   again and do not mark the task BLOCKED solely because of that timeout; the
   scheduler's post-session verification is authoritative.
 
+The adapter result is authoritative for the session boundary: a nonzero exit
+code or watchdog stall is an adapter failure, not permission to claim DONE or
+BLOCKED. The scheduler records the adapter event, keeps the work, and retries.
+Only after its tamper guard and fail-closed scope check pass may the scheduler
+accept a terminal task result; a self-marked BLOCKED then goes directly to its
+checkpoint without focused verification. Full candidate verification remains
+an unattended scheduler step after the folder is complete.
+
+Cleanup is a separate guarded operation: `assent clean` must retain an
+upstream source while any dependent folder remains unaccepted, and skips when
+its merged-and-clean proof is insufficient.
+
+The worktree is a change-isolation, conflict-management, audit, and recovery
+boundary, not a security sandbox. With `danger-full-access` or
+`bypassPermissions`, an AI can still access resources available to its OS
+identity, including external Git writers, network services, credentials, and
+files outside the worktree. Use unattended execution only in trusted projects
+and account environments; Assent does not create a container or VM sandbox.
+
 ## Task session closeout (when scheduled by assent)
 
 1. Self-check against the task file's acceptance item by item, and run the

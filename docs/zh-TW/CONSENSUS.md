@@ -77,6 +77,17 @@ merge metadata 只供人讀稽核,不是 clean 後的狀態資料庫。dependent
 Git 同步 -> `clean`。accept 僅限本地、單一資料夾,沒有 `--all`、`--push`、remote/PR、
 pull、rebase、force、自動解衝突或刪 source。
 
+打包 verifier 會檢查 working tree,也會檢查 candidate 的 `HEAD` 相對第一父提交的
+committed delta; root commit 沒有父提交時安全略過第二項。這能抓到已提交的尾端空白,
+不讀專案私有 verifier,也不呼叫 shell。`assent init` 永不取代既有的
+`.assent/verify.py`,專案要自行人工同步。verifier digest 改變會使舊 receipt stale,
+因此接受前必須在無人值守階段以 `assent verify <FOLDER>` refresh 證據。
+
+worktree 是變更隔離、衝突管理、稽核與 Git 復原邊界,不是安全 sandbox。`danger-full-access`
+與 `bypassPermissions` 等完整權限模式仍讓 AI 接觸其 OS 身分可用的 network、credential、
+外部 Git 寫入者與 worktree 外檔案。使用者必須選擇可信任的專案與帳號環境;產品不另建
+container 或 VM sandbox。
+
 ## 位置慣例
 
 - `AGENTS.md` 必須留在 project root——agent 工具自動在 root 尋找指令檔,

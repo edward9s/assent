@@ -58,7 +58,9 @@ project/
   results are fully merged into the main tree's current HEAD. If it cannot prove
   this it skips and explains why; it does not touch `.assent/` (the t/r files
   there are the archive itself), has no `--force`, and is unrelated to
-  `git clean` — it deletes nothing untracked or unmerged.
+  `git clean` — it deletes nothing untracked or unmerged. It also refuses to
+  clean an upstream source while an unaccepted dependent folder still needs
+  that source.
 - **Acceptance**: `assent accept <FOLDER>` records a human acceptance decision
   by transactionally integrating exactly one completed folder into the normal
   branch currently checked out in the main worktree. `FOLDER` is required; the
@@ -129,7 +131,7 @@ refuse execution. `check` validates the full folder dependency graph and detects
 and refuses cycles; any validation or dependency-resolution error stays fail
 closed.
 
-### Hard requirements for the adapter sandbox
+### Execution permissions and the worktree boundary
 
 The executing AI must be able to write to the main-tree `.assent/`, because
 changing its own task file's status and appending to the r file are part of its
@@ -139,9 +141,15 @@ meet the task closeout requirement. The executing AI must also be able to write
 to the system temp directory — tempfile-style tests write there, and
 `workspace-write` refuses that too. These two are why the default configuration
 uses `danger-full-access` rather than `workspace-write`; both must be permitted
-when tightening the sandbox. The executing AI must also stay tidy: delete
-temporary probes or shims once used, and above all leave no embedded git repo
-behind.
+when tightening the sandbox. The worktree isolates changes, supports conflict
+management, and gives Git auditable recovery boundaries; it is not a security
+sandbox. With `danger-full-access` or `bypassPermissions`, the AI can still
+reach resources available to its OS identity, including external Git writers,
+network, credentials, and files outside the worktree. Use unattended execution
+only in trusted project and account environments. Assent does not create a
+container or VM sandbox, and it must not claim to intercept those external
+effects. The executing AI must also stay tidy: delete temporary probes or
+shims once used, and above all leave no embedded git repo behind.
 
 ## Task file (tNNN_name.e.toml)
 
@@ -423,12 +431,14 @@ checks in order, and commits only when all pass:
 3. **scope check**: all changes since the task's start (including wip
    checkpoints) fall within the task's `scope`; its own t file / r file and
    runtime artifacts are exempt.
-4. **focused verification command**: run the task's `verify`, exit code 0 =
-   pass. Full candidate verification belongs to the post-folder scheduler
-   stage, not to the AI tool.
+4. **focused verification command**: run the task's `verify`; exit code 0 is
+   pass. A nonzero adapter exit or watchdog stall is a scheduler failure and
+   is recorded before retrying. Full candidate verification belongs to the
+   post-folder scheduler stage, not to the AI tool.
 
 - Pass -> an `auto(<work folder>/tNNN): <title>` checkpoint commit. A
-  self-marked BLOCKED -> committed directly in the same namespace without
+  self-marked BLOCKED -> after the structural tamper and fail-closed scope
+  checks, committed directly in the same namespace without focused
   verification (BLOCKED is also a legitimate result, handed to human
   adjudication).
 - Failure -> **do not revert the workspace**, retry with the failure reason;

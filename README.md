@@ -251,6 +251,21 @@ scheduler builds a temporary integration candidate and runs the full
 tokens and no AI session. Its `PASSED`/`FAILED` and `fresh`/`stale` state is
 shown in the report, so a stale receipt can be refreshed unattended.
 
+The packaged `.assent/verify.py` checks both the candidate working tree and the
+committed delta from `HEAD` to its first parent. This catches committed
+trailing whitespace that plain `git diff --check` cannot see. `assent init`
+never overwrites an existing verifier; copy the template's checks into that
+project manually when synchronizing. A verifier digest change makes old
+receipts stale, so refresh them with `assent verify <FOLDER>` during unattended
+verification before asking a human to accept.
+
+A worktree is a change-isolation, conflict-management, audit, and recovery
+boundary, not a security sandbox. `danger-full-access` or `bypassPermissions`
+still permits an AI to reach resources available to its OS identity, including
+network, credentials, external Git writers, and files outside the worktree.
+Use unattended runs only with trusted projects and accounts; Assent does not
+provide a container or VM sandbox or intercept those external effects.
+
 **Act 3: review meeting** (interactive session)
 
 First read `_report.md` yourself (it is the agenda: progress, BLOCKED
