@@ -7,6 +7,8 @@ from collections import Counter
 
 from agents import AgentsError, engine
 from agents.config import list_task_folders, load_config, validate_config
+from agents.folderdeps import (find_unfinished_prerequisites,
+                               parse_folder_dependency_graph)
 from agents.init import init as run_init
 from agents.plan import Plan
 from agents.terminal_log import terminal_logging
@@ -54,29 +56,35 @@ def _status_summary(plan: Plan) -> str:
 
 
 def _select_run_folder(config_path: str, folders: list[str]) -> str | None:
-    """依任務現況選唯一進行中資料夾;任何歧義或壞檔皆拒絕猜測。"""
-    plans: list[tuple[str, Plan]] = []
+    """依任務與前置現況選唯一可跑資料夾；歧義或壞檔皆拒絕猜測。"""
+    plans: list[tuple[str, Plan, list[str]]] = []
     errors: list[tuple[str, str]] = []
     for folder in folders:
         try:
             cfg = load_config(config_path, folder)
-            plans.append((folder, Plan.parse(cfg.tasks_dir)))
+            plan = Plan.parse(cfg.tasks_dir)
+            waiting = [item.name for item in
+                       find_unfinished_prerequisites(cfg.tasks_dir)]
+            plans.append((folder, plan, waiting))
         except AgentsError as e:
             errors.append((folder, str(e)))
 
-    ongoing = [folder for folder, plan in plans
-               if any(task.status in ("TODO", "WIP") for task in plan.tasks)]
-    if len(ongoing) == 1 and not errors:
-        selected = ongoing[0]
-        print(f"工作資料夾:{selected}(唯一進行中,自動選定)")
+    runnable = [folder for folder, plan, waiting in plans
+                if (any(task.status in ("TODO", "WIP") for task in plan.tasks)
+                    and not waiting)]
+    if len(runnable) == 1 and not errors:
+        selected = runnable[0]
+        print(f"工作資料夾:{selected}(唯一進行中且可跑,自動選定)")
         return selected
 
-    print(f"無法自動選定工作資料夾:進行中資料夾共 {len(ongoing)} 個。")
+    print(f"無法自動選定工作資料夾:進行中且可跑資料夾共 {len(runnable)} 個。")
     print("工作資料夾狀態:")
     if not plans and not errors:
         print("  (未找到含任務檔的工作資料夾)")
-    for folder, plan in plans:
-        print(f"  {folder}: {_status_summary(plan)}")
+    for folder, plan, waiting in plans:
+        reason = f"(等待 {'、'.join(waiting)})" if waiting and any(
+            task.status in ("TODO", "WIP") for task in plan.tasks) else ""
+        print(f"  {folder}: {_status_summary(plan)}{reason}")
     for folder, error in errors:
         print(f"  {folder}: 無法解析({error})")
     print("請明寫工作資料夾參數:agents run <folder>")
@@ -104,6 +112,19 @@ def _dispatch_all(command: str, config_path: str, folders: list[str]) -> int:
     return result
 
 
+def _dispatch_check_all(config_path: str, agents_dir, folders: list[str]) -> int:
+    """驗證全部資料夾本身，並額外驗證完整依賴圖與循環。"""
+    graph_ok = True
+    try:
+        graph = parse_folder_dependency_graph(agents_dir)
+        print(f"資料夾依賴圖:OK({len(graph)} 個工作資料夾,引用完整且無循環)")
+    except AgentsError as e:
+        graph_ok = False
+        print(f"資料夾依賴圖:FAIL({e})")
+    checks_ok = _dispatch_all("check", config_path, folders) == 0
+    return 0 if graph_ok and checks_ok else 1
+
+
 def _dispatch(argv: list[str]) -> int:
     args = _build_parser().parse_args(argv)
 
@@ -122,6 +143,8 @@ def _dispatch(argv: list[str]) -> int:
             folder = _select_run_folder(args.config, folders)
             if folder is None:
                 return 1
+        elif args.command == "check":
+            return _dispatch_check_all(args.config, agents_dir, folders)
         else:
             return _dispatch_all(args.command, args.config, folders)
     else:

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import tomllib
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,25 @@ class FolderCompletion:
 
     complete: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class UnfinishedPrerequisite:
+    """一個尚未完成的前置資料夾及其任務狀態統計。"""
+
+    name: str
+    counts: tuple[tuple[str, int], ...]
+
+    @property
+    def total(self) -> int:
+        """未完成任務總數。"""
+        return sum(count for _, count in self.counts)
+
+    def message(self) -> str:
+        """產生供 run 拒跑時顯示的單行原因。"""
+        detail = "、".join(f"{status} {count}" for status, count in self.counts)
+        return (f"前置資料夾 {self.name} 尚有 {self.total} 個未完成任務"
+                f"({detail})")
 
 
 def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
@@ -103,6 +123,30 @@ def infer_folder_completion(tasks_dir: str | Path) -> FolderCompletion:
     if unfinished:
         return FolderCompletion(False, f"尚未完成的任務:{', '.join(unfinished)}")
     return FolderCompletion(True, "全部任務皆為 DONE 或 SKIP")
+
+
+def find_unfinished_prerequisites(
+        tasks_dir: str | Path) -> list[UnfinishedPrerequisite]:
+    """檢查直接 ``after`` 前置，回傳尚未全部 ``DONE/SKIP`` 的項目。
+
+    任一依賴檔或前置任務檔無法解析時直接拋錯，讓呼叫端維持 fail-closed。
+    """
+    tasks_dir = Path(tasks_dir)
+    dependencies = parse_folder_dependencies(tasks_dir)
+    unfinished: list[UnfinishedPrerequisite] = []
+    status_order = ("TODO", "WIP", "BLOCKED")
+    for name in dependencies.after:
+        plan = Plan.parse(tasks_dir.parent / name)
+        counts = Counter(
+            task.status for task in plan.tasks
+            if task.status not in ("DONE", "SKIP"))
+        if counts:
+            ordered = tuple(
+                (status, counts[status])
+                for status in status_order
+                if counts.get(status, 0))
+            unfinished.append(UnfinishedPrerequisite(name, ordered))
+    return unfinished
 
 
 def parse_folder_dependency_graph(

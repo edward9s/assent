@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 
 from agents import AgentsError
-from agents.folderdeps import (infer_folder_completion,
+from agents.folderdeps import (find_unfinished_prerequisites,
+                               infer_folder_completion,
                                parse_folder_dependencies,
                                parse_folder_dependency_graph)
 
@@ -152,6 +153,20 @@ class TestInferFolderCompletion(FolderDepsTestCase):
         result = infer_folder_completion(folder)
         self.assertFalse(result.complete)
         self.assertIn("沒有任務檔", result.reason)
+
+    def test_unfinished_prerequisites_include_status_counts(self):
+        self.make_folder("base", "TODO", "WIP", "BLOCKED", "DONE", "SKIP")
+        folder = self.make_folder("work", "TODO")
+        (folder / "_folder.toml").write_text(
+            'after = ["base"]\n', encoding="utf-8")
+
+        result = find_unfinished_prerequisites(folder)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].total, 3)
+        self.assertEqual(
+            result[0].message(),
+            "前置資料夾 base 尚有 3 個未完成任務(TODO 1、WIP 1、BLOCKED 1)")
 
 
 class TestFolderDependencyGraph(FolderDepsTestCase):

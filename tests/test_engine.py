@@ -138,6 +138,49 @@ class EngineTestCase(unittest.TestCase):
 
 
 class TestRunSuccess(EngineTestCase):
+    def test_unfinished_folder_prerequisite_refuses_before_lock(self):
+        self.write_task(1)
+        base = self.root / ".agents" / "base"
+        base.mkdir()
+        for index, status in enumerate(("TODO", "WIP", "BLOCKED", "DONE"), 1):
+            (base / f"t{index:03d}_task.e.toml").write_text(
+                task_text(status=status), encoding="utf-8")
+        (self.plan_dir / "_folder.toml").write_text(
+            'after = ["base"]\n', encoding="utf-8")
+        cfg = self.build()
+        self.commit_all()
+        adapter = ScriptedAdapter([])
+
+        for options in ({"once": True}, {"task_id": "t001"}):
+            with self.subTest(options=options), mock.patch(
+                    "agents.engine.lockfile.hold_lock") as hold_lock:
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    result = engine.run(cfg, adapter=adapter, **options)
+                self.assertEqual(result, 1)
+                self.assertIn(
+                    "前置資料夾 base 尚有 3 個未完成任務"
+                    "(TODO 1、WIP 1、BLOCKED 1)", out.getvalue())
+                hold_lock.assert_not_called()
+        self.assertEqual(adapter.calls, [])
+
+    def test_done_and_skip_folder_prerequisite_allows_run(self):
+        path = self.write_task(1)
+        base = self.root / ".agents" / "base"
+        base.mkdir()
+        for index, status in enumerate(("DONE", "SKIP"), 1):
+            (base / f"t{index:03d}_task.e.toml").write_text(
+                task_text(status=status), encoding="utf-8")
+        (self.plan_dir / "_folder.toml").write_text(
+            'after = ["base"]\n', encoding="utf-8")
+        cfg = self.build()
+        self.commit_all()
+        adapter = ScriptedAdapter([self.ai_done(path, {"src/result.py": "ok"})])
+
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertEqual(len(adapter.calls), 1)
+
     def test_task_runs_with_prompt_scope_and_journal_paths(self):
         path = self.write_task(1)
         cfg = self.build()
@@ -744,6 +787,18 @@ class TestQueries(EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.check(cfg), 1)
         self.assertIn("FAIL", out.getvalue())
+
+    def test_check_validates_selected_folder_declaration(self):
+        self.write_task(1)
+        (self.plan_dir / "_folder.toml").write_text(
+            'after = []\nunknown = true\n', encoding="utf-8")
+        cfg = self.build()
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 1)
+        self.assertIn("資料夾依賴:FAIL", out.getvalue())
+        self.assertIn("未知鍵", out.getvalue())
 
     def test_report_lists_checkpoints_and_blocked_summary(self):
         p1 = self.write_task(1)

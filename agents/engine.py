@@ -28,6 +28,8 @@ from typing import Callable, TextIO
 from agents import AgentsError, gitops, lockfile
 from agents.adapters import Adapter, get_adapter
 from agents.config import Config
+from agents.folderdeps import (find_unfinished_prerequisites,
+                               parse_folder_dependencies)
 from agents.plan import (Plan, Task, append_entry, parse_task_file,
                          read_entries, same_except_status, set_status)
 
@@ -195,10 +197,21 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         now: Callable[[], datetime] | None = None) -> int:
     """執行任務直到全部 DONE/BLOCKED/SKIP(或 once/task_id 只做一個)。回傳進程退出碼。
 
-    起手先取工作資料夾檔案鎖(在任何驗證與 git 動作之前),鎖涵蓋整個 run
+    起手先檢查資料夾前置，再取工作資料夾檔案鎖；鎖涵蓋整個 run
     (含額度等待的長睡眠);同資料夾已有 run 在跑就印訊息、以退出碼 1 失敗,
     不碰工作區任何東西。status / check / report 唯讀,不取鎖,可在 run 進行中使用。
     """
+    try:
+        unfinished = find_unfinished_prerequisites(cfg.tasks_dir)
+    except AgentsError as e:
+        print(f"前置資料夾閘門:FAIL({e})")
+        return 1
+    if unfinished:
+        print("前置資料夾尚未完成，拒絕執行:")
+        for prerequisite in unfinished:
+            print(f"  - {prerequisite.message()}")
+        return 1
+
     if not _has_git_marker(cfg.root):
         print(_GIT_REQUIRED_MESSAGE)
         return 1
@@ -752,6 +765,15 @@ def check(cfg: Config) -> int:
     except AgentsError as e:
         ok = False
         print(f"任務檔格式:FAIL({e})")
+
+    # 指定資料夾的依賴宣告格式與引用完整性；全圖循環由 CLI 無參數 check 驗證。
+    try:
+        dependencies = parse_folder_dependencies(cfg.tasks_dir)
+        after = "、".join(dependencies.after) or "無"
+        print(f"資料夾依賴:OK(after = {after})")
+    except AgentsError as e:
+        ok = False
+        print(f"資料夾依賴:FAIL({e})")
 
     # adapter 可解析
     try:

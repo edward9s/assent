@@ -101,8 +101,39 @@ class TestDispatch(MainTestCase):
         with patch("agents.__main__.engine.run", return_value=0) as mocked:
             code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 0)
-        self.assertIn("工作資料夾:active(唯一進行中,自動選定)", out)
+        self.assertIn("工作資料夾:active(唯一進行中且可跑,自動選定)", out)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "active")
+
+    def test_run_without_folder_excludes_waiting_folder(self):
+        config = self.write_config()
+        self.write_task("base", "BLOCKED")
+        self.write_task("waiting", "TODO")
+        (config.parent / "waiting" / "_folder.toml").write_text(
+            'after = ["base"]\n', encoding="utf-8")
+        self.write_task("ready", "TODO")
+
+        with patch("agents.__main__.engine.run", return_value=0) as mocked:
+            code, out = self.run_main(["run", "--config", str(config)])
+
+        self.assertEqual(code, 0)
+        self.assertIn("工作資料夾:ready", out)
+        self.assertEqual(mocked.call_args.args[0].tasks_name, "ready")
+
+    def test_run_without_folder_lists_waiting_reason(self):
+        config = self.write_config()
+        self.write_task("base", "BLOCKED")
+        self.write_task("waiting", "TODO")
+        (config.parent / "waiting" / "_folder.toml").write_text(
+            'after = ["base"]\n', encoding="utf-8")
+
+        with patch("agents.__main__.engine.run") as mocked:
+            code, out = self.run_main(["run", "--config", str(config)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("進行中且可跑資料夾共 0 個", out)
+        self.assertIn("waiting:", out)
+        self.assertIn("(等待 base)", out)
+        mocked.assert_not_called()
 
     def test_run_without_folder_refuses_zero_or_multiple_ongoing(self):
         for case, statuses in (("zero", [("archive", "DONE")]),
@@ -149,6 +180,29 @@ class TestDispatch(MainTestCase):
             code, _ = self.run_main(["check", "--config", str(config)])
         self.assertEqual(code, 1)
         self.assertEqual(mocked.call_count, 2)
+
+    def test_check_without_folder_rejects_bad_folder_graph(self):
+        cases = {
+            "壞格式": ('after = [\n',),
+            "引用不存在": ('after = ["missing"]\n',),
+            "循環": ('after = ["beta"]\n', 'after = ["alpha"]\n'),
+        }
+        for name, declarations in cases.items():
+            with self.subTest(name=name):
+                shutil.rmtree(self.root / ".agents", ignore_errors=True)
+                config = self.write_config()
+                self.write_task("alpha")
+                (config.parent / "alpha" / "_folder.toml").write_text(
+                    declarations[0], encoding="utf-8")
+                if len(declarations) == 2:
+                    self.write_task("beta")
+                    (config.parent / "beta" / "_folder.toml").write_text(
+                        declarations[1], encoding="utf-8")
+                with patch("agents.__main__.engine.check", return_value=0):
+                    code, out = self.run_main(
+                        ["check", "--config", str(config)])
+                self.assertEqual(code, 1)
+                self.assertIn("資料夾依賴圖:FAIL", out)
 
 
 class TestInit(MainTestCase):
