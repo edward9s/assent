@@ -13,7 +13,10 @@ from unittest import mock
 
 from assent import engine
 from assent.config import load_config
-from assent.verification import VerificationReceipt, verify_folder_if_needed
+from assent.verification import (
+    VerificationReceipt, _run_full_verifier, _verify_locked,
+    verify_folder_if_needed,
+)
 
 
 def _task(status: str) -> str:
@@ -172,6 +175,20 @@ class TestAutomaticReceiptPolicy(VerificationEngineCase):
         self.assertEqual(result, 1)
         full.assert_not_called()
 
+    def test_explicit_refresh_preserves_invalid_receipt_and_starts_no_candidate(self):
+        self.write_status("DONE")
+        path = self.tasks_dir / "_verification.toml"
+        invalid = "not valid = ["
+        path.write_text(invalid, encoding="utf-8")
+
+        with mock.patch(
+                "assent.verification.gitops.temporary_integration_worktree") as candidate:
+            with self.assertRaises(engine.AssentError):
+                _verify_locked(self.cfg)
+
+        self.assertEqual(path.read_text(encoding="utf-8"), invalid)
+        candidate.assert_not_called()
+
 
 class TestVerificationPrompt(VerificationEngineCase):
     def test_timeout_is_not_defined_as_sufficient_for_blocked(self):
@@ -184,7 +201,39 @@ class TestVerificationPrompt(VerificationEngineCase):
         self.assertIn("focused task gate", prompt)
         self.assertIn("do not start a concurrent duplicate", prompt)
         self.assertIn("do not mark the task BLOCKED solely", prompt)
-        self.assertIn("The scheduler runs the same command", prompt)
+        self.assertIn("scheduler runs the\nsame command", prompt)
+
+
+class TestFullVerifierProcess(unittest.TestCase):
+    def test_slow_verifier_has_no_timeout_and_reports_elapsed_and_exit_code(self):
+        completed = subprocess.CompletedProcess(["verifier"], 7, "out", "err")
+        output = io.StringIO()
+        with mock.patch("assent.verification.subprocess.run",
+                        return_value=completed) as run_child, \
+                mock.patch("assent.verification.time.monotonic",
+                           side_effect=[10.0, 311.25]), \
+                contextlib.redirect_stdout(output):
+            actual = _run_full_verifier(
+                Path("verify.py"), Path("candidate with spaces"))
+
+        self.assertIs(actual, completed)
+        self.assertNotIn("timeout", run_child.call_args.kwargs)
+        self.assertEqual(run_child.call_args.kwargs["cwd"],
+                         "candidate with spaces")
+        self.assertIn("Full verification started", output.getvalue())
+        self.assertIn("elapsed 301.2s, exit code 7", output.getvalue())
+
+    def test_interrupt_is_reported_and_propagated_for_candidate_cleanup(self):
+        output = io.StringIO()
+        with mock.patch("assent.verification.subprocess.run",
+                        side_effect=KeyboardInterrupt), \
+                mock.patch("assent.verification.time.monotonic",
+                           side_effect=[20.0, 325.0]), \
+                contextlib.redirect_stdout(output), \
+                self.assertRaises(KeyboardInterrupt):
+            _run_full_verifier(Path("verify.py"), Path("candidate"))
+
+        self.assertIn("elapsed 305.0s, exit code 130", output.getvalue())
 
 
 if __name__ == "__main__":

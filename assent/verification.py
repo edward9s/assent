@@ -267,8 +267,46 @@ def _candidate_tree(main: Path, folder: str, target_tip: str,
         return gitops.tree_of(candidate, "HEAD"), outcome
 
 
+def _run_full_verifier(script: Path,
+                       candidate: Path) -> subprocess.CompletedProcess[str]:
+    """Run the full suite in the foreground, without an arbitrary timeout.
+
+    The child deliberately remains in Assent's foreground process group.  A
+    real Ctrl-C therefore reaches the verifier and the unittest descendants it
+    starts, while ``subprocess.run`` waits for the child before the surrounding
+    temporary-worktree context removes its resources.
+    """
+    started = time.monotonic()
+    print(f"Full verification started: {VERIFY_COMMAND}", flush=True)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script)], cwd=str(candidate),
+            capture_output=True, encoding="utf-8", errors="replace")
+    except KeyboardInterrupt:
+        elapsed = time.monotonic() - started
+        print("Full verification interrupted: "
+              f"elapsed {elapsed:.1f}s, exit code 130", flush=True)
+        raise
+    except OSError:
+        elapsed = time.monotonic() - started
+        print("Full verification finished: "
+              f"elapsed {elapsed:.1f}s, exit code 1", flush=True)
+        raise
+    elapsed = time.monotonic() - started
+    print("Full verification finished: "
+          f"elapsed {elapsed:.1f}s, exit code {result.returncode}",
+          flush=True)
+    return result
+
+
 def _verify_locked(cfg: Config) -> VerificationReceipt:
     path = receipt_path(cfg)
+    main = gitops.main_worktree(cfg.root)
+    # A malformed cache is evidence of an unsafe state, not permission to
+    # erase it.  Validate it before candidate construction or invalidation;
+    # an explicit refresh still replaces every valid receipt below.
+    if path.exists():
+        read_receipt(path, main)
     try:
         path.unlink(missing_ok=True)
     except OSError as e:
@@ -282,7 +320,6 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
             "folder is not complete; every task must be DONE or SKIP "
             f"({', '.join(unfinished)})")
 
-    main = gitops.main_worktree(cfg.root)
     target_branch = gitops.require_current_branch(main)
     if not gitops.working_tree_status(main, cfg.git_excludes).is_clean:
         raise AssentError(f"target worktree {main} is not clean")
@@ -313,31 +350,15 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
                     "temporary integration did not produce the expected two-parent "
                     "candidate")
             candidate_tree = gitops.tree_of(candidate, "HEAD")
-            started = time.monotonic()
-            print(f"Full verification started: {VERIFY_COMMAND}", flush=True)
             try:
-                result = subprocess.run(
-                    [sys.executable, str(script)], cwd=str(candidate),
-                    capture_output=True, encoding="utf-8", errors="replace")
-            except KeyboardInterrupt:
-                elapsed = time.monotonic() - started
-                print("Full verification interrupted: "
-                      f"elapsed {elapsed:.1f}s, exit code 130", flush=True)
-                raise
+                result = _run_full_verifier(script, candidate)
             except OSError as e:
-                elapsed = time.monotonic() - started
-                print("Full verification finished: "
-                      f"elapsed {elapsed:.1f}s, exit code 1", flush=True)
                 receipt = _new_receipt(
                     status="FAILED", source_tip=source_tip,
                     target_tip=target_tip, integration_tree=candidate_tree,
                     digest=digest, exit_code=1,
                     failure_summary=f"Unable to start verification: {e}")
             else:
-                elapsed = time.monotonic() - started
-                print("Full verification finished: "
-                      f"elapsed {elapsed:.1f}s, exit code {result.returncode}",
-                      flush=True)
                 receipt = _new_receipt(
                     status="PASSED" if result.returncode == 0 else "FAILED",
                     source_tip=source_tip, target_tip=target_tip,
