@@ -63,9 +63,14 @@ project/
   that source.
 - **Acceptance**: `assent accept <FOLDER>` records a human acceptance decision
   by transactionally integrating exactly one completed folder into the normal
-  branch currently checked out in the main worktree. `FOLDER` is required; the
-  command has no batch, push, remote, pull-request, or hosting behavior, and no
-  other command infers acceptance from DONE tasks. It quickly rebuilds the
+  branch currently checked out in the main worktree. `FOLDER` and `--all` are
+  mutually exclusive alternatives: `--all` serially accepts every finished
+  work folder in `after` dependency order, refreshing a stale verification
+  receipt with a full unattended verification before accepting each folder,
+  and stops the chain fail-closed at the first failure while
+  already-published merges remain published. It still has no push, remote,
+  pull-request, or hosting behavior, and no other command infers acceptance
+  from DONE tasks. It quickly rebuilds the
   temporary integration candidate and compares the source tip, integration
   tree, and verifier digest with a PASSED receipt; it does not run the full
   verifier. Missing or stale receipts require `assent verify <FOLDER>` first.
@@ -411,18 +416,22 @@ evidence, and make the acceptance decision explicitly with:
 assent accept <FOLDER>
 ```
 
-`FOLDER` is required. `accept` integrates exactly one completed folder into
-the target branch currently checked out in the main worktree. It verifies the
-source and the integrated result, records an auditable `--no-ff` merge, and
-keeps the source worktree and branch for later inspection or cleanup. A
-successful rerun is idempotent and does not create a duplicate merge.
+`FOLDER` and `--all` are mutually exclusive alternatives: `--all` walks every
+finished work folder in dependency order and accepts each in turn. Each
+`accept` still integrates exactly one completed folder into the target
+branch currently checked out in the main worktree. It verifies the source and
+the integrated result, records an auditable `--no-ff` merge, and keeps the
+source worktree and branch for later inspection or cleanup. A successful
+rerun is idempotent and does not create a duplicate merge.
 
 Acceptance refuses incomplete, locked, dirty, detached, ambiguous, or
 dependency-unsafe state. A source or post-merge verification failure and a
 conflict do not advance the target. Assent never resolves conflicts, pulls,
-rebases, force pushes, or deletes source, and it has no `--all`, `--push`, or
-`push` subcommand. Remote synchronization is an independent Git operation
-chosen by the human after local acceptance; it is not an Assent feature.
+rebases, force pushes, or deletes source, and it has no `--push` or `push`
+subcommand; `--all` stops the chain fail-closed at the first verification or
+merge failure while already-accepted folders remain published. Remote
+synchronization is an independent Git operation chosen by the human after
+local acceptance; it is not an Assent feature.
 
 The integration lock serializes Assent `accept` operations. It is not an
 atomic barrier against external programs, so users must not run Git commands
