@@ -483,6 +483,12 @@ checks in order, and commits only when all pass:
 - Quota exhausted -> not counted as a failure: the r file records `quota`,
   progress is gathered into a `wip(<work folder>/tNNN)` checkpoint, a countdown
   waits for the reset, and the same task reruns carrying a "resume" prompt.
+- Unclean exit (power loss, a forced kill) never reaches the Ctrl+C/quota
+  interrupt handlers, so a dirty worktree can survive to the next `run`
+  startup. The startup gate checks whether every uncommitted change is
+  provably inside the scope of the resumable candidate task: provable ->
+  gathered into a `wip` checkpoint and the run continues, no AI session;
+  otherwise -> fail-closed, `run` refuses and hands the state to a human.
 - The executing AI never runs git commit — the checkpoint is created by the
   scheduler.
 

@@ -1325,6 +1325,83 @@ class TestInterruptedTaskResume(EngineTestCase):
         self.assertFalse(journal_path_for(path).exists())
 
 
+class TestCrashDirtyWorktreeRecovery(EngineTestCase):
+    """Startup recovery of a worktree left dirty by an unclean process exit (hard power loss /
+    kill) that never reached the Ctrl+C / quota / infrastructure interrupt handlers."""
+
+    def _reused_worktree(self):
+        """A worktree that a prior run created and left behind, on the folder's work branch."""
+        worktree = gitops.ensure_worktree(self.root, "plan01")
+        gitops.ensure_branch(worktree, "plan01/")
+        return worktree
+
+    def test_scope_attributable_dirty_worktree_recovers_and_resumes(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "partial.py").write_text("wip", encoding="utf-8")
+
+        adapter = ScriptedAdapter([self.ai_done(path)])
+        rc = self.run_quiet(cfg, once=True, adapter=adapter)
+        self.assertEqual(rc, 0)
+        # The crash progress is gathered into a wip checkpoint before any session.
+        self.assertTrue(
+            any(s.startswith("wip(plan01/t001): recovered dirty worktree")
+                for s in self.subjects()))
+        # Recovery opens no session of its own; the candidate then resumes exactly
+        # once with a continue prompt -- no retry counter is consumed.
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertIn("resume", adapter.calls[0][0])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        # A scheduler recovery entry, with no fabricated AI session identity.
+        from assent.plan import read_entries
+        recovery = next(
+            e for e in read_entries(journal_path_for(path))
+            if e["by"] == "scheduler" and e["event"] == "interrupt"
+            and "Recovered a dirty worktree" in e["summary"])
+        self.assertNotIn("agent", recovery)
+        self.assertNotIn("requested_model", recovery)
+        # The recovered partial work survived into the tree, never discarded.
+        self.assertTrue((worktree / "src" / "partial.py").is_file())
+
+    def test_changes_outside_candidate_scope_stay_fail_closed(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "outside.txt").write_text("stray", encoding="utf-8")
+
+        adapter = ScriptedAdapter([])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(cfg, once=True, adapter=adapter), 1)
+        self.assertIn("Working tree is not clean", out.getvalue())
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(parse_task_file(path).status, "TODO")
+        self.assertFalse(any(s.startswith("wip(plan01/t001)")
+                             for s in self.subjects()))
+        self.assertFalse(journal_path_for(path).exists())
+
+    def test_no_resumable_candidate_stays_fail_closed(self):
+        path = self.write_task(1, status="DONE")
+        cfg = self.build()
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "stray.py").write_text("x", encoding="utf-8")
+
+        adapter = ScriptedAdapter([])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(cfg, once=True, adapter=adapter), 1)
+        self.assertIn("Working tree is not clean", out.getvalue())
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertFalse(any(s.startswith("wip(plan01/") for s in self.subjects()))
+
+
 class TestSchedulingAndRefusals(EngineTestCase):
     def test_run_and_check_refuse_root_without_own_git_marker(self):
         nested_root = self.root / "not-repo"
