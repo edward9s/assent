@@ -1915,5 +1915,131 @@ class TestReworkPromptSuffix(EngineTestCase):
         self.assertNotIn("rejected by a human reviewer", prompt)
 
 
+class TestMainTreeEscapeDetection(EngineTestCase):
+    """A session is expected to write only into its isolated worktree (self.execution_root());
+    these tests reproduce a session instead writing into the main tree (self.root) and check
+    the scheduler's mechanical detect + port-back-or-fail-closed handling."""
+
+    def test_no_new_main_tree_dirt_is_byte_identical_to_today(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        # Dirt already present in the main tree before the session starts (e.g. left over
+        # from unrelated manual work) is the pre-session baseline, not an escape.
+        (self.root / "leftover.txt").write_text("leftover\n", encoding="utf-8")
+
+        adapter = ScriptedAdapter([self.ai_done(path, {"src/a.py": "ok"})])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertEqual(
+            (self.root / "leftover.txt").read_text(encoding="utf-8"), "leftover\n")
+        from assent.plan import read_entries
+        self.assertFalse(any(e.get("event") == "main_tree_escape"
+                             for e in read_entries(journal_path_for(path))))
+        self.assertTrue(any(s.startswith("auto(plan01/t001): ")
+                            for s in self.subjects()))
+
+    def test_in_scope_escape_is_ported_back_and_main_tree_restored(self):
+        path = self.write_task(1)  # default scope=("src/",)
+        # "src/" must already be a tracked directory before the leak: otherwise git status
+        # collapses a wholly-new untracked directory into a single "?? src/" line instead of
+        # naming the leaked file, which this test does not exercise.
+        (self.root / "src").mkdir()
+        (self.root / "src" / "existing.py").write_text("existing\n", encoding="utf-8")
+        cfg = self.build()         # default retry=1: one retry survives the escaped attempt
+        self.commit_all()
+
+        def leak_step(prompt):
+            leaked = self.root / "src" / "leaked.py"
+            leaked.parent.mkdir(parents=True, exist_ok=True)
+            leaked.write_text("leaked-content\n", encoding="utf-8")
+            return ok_result()
+
+        adapter = ScriptedAdapter(
+            [leak_step, self.ai_done(path, {"src/formal.py": "ok"})])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertEqual(len(adapter.calls), 2)
+        # The main tree is restored: the escaped path no longer exists there.
+        self.assertFalse((self.root / "src" / "leaked.py").exists())
+        # The escaped content survived, ported into the worktree (never discarded), and the
+        # next attempt's own output is there too.
+        self.assertEqual(
+            (self.execution_root() / "src" / "leaked.py").read_text(encoding="utf-8"),
+            "leaked-content\n")
+        self.assertEqual(
+            (self.execution_root() / "src" / "formal.py").read_text(encoding="utf-8"), "ok")
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        escapes = [e for e in entries if e.get("event") == "main_tree_escape"]
+        self.assertEqual(len(escapes), 1)
+        self.assertEqual(escapes[0]["by"], "scheduler")
+        self.assertIn("src/leaked.py", escapes[0]["detail"])
+
+    def test_escape_apply_failure_leaves_both_trees_untouched(self):
+        path = self.write_task(1, scope=("src/",))
+        src_dir = self.root / "src"
+        src_dir.mkdir()
+        (src_dir / "original.py").write_text("a\nb\nc\n", encoding="utf-8")
+        cfg = self.build(retry=0)
+        self.commit_all()
+
+        def diverge_step(prompt):
+            # A normal, legitimate worktree edit ...
+            (self.execution_root() / "src" / "original.py").write_text(
+                "x\nb\nc\n", encoding="utf-8")
+            # ... and, separately, an overlapping edit that escaped into the main tree; the
+            # escaped diff's context no longer matches the worktree's own edit, so the patch
+            # cannot apply cleanly.
+            (self.root / "src" / "original.py").write_text(
+                "a\ny\nc\n", encoding="utf-8")
+            return ok_result()
+
+        adapter = ScriptedAdapter([diverge_step])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        # Both trees are left exactly as the step wrote them: nothing ported, nothing
+        # reverted, nothing discarded.
+        self.assertEqual(
+            (self.root / "src" / "original.py").read_text(encoding="utf-8"), "a\ny\nc\n")
+        self.assertEqual(
+            (self.execution_root() / "src" / "original.py").read_text(encoding="utf-8"),
+            "x\nb\nc\n")
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertFalse(any(e.get("event") == "main_tree_escape" for e in entries))
+        blocked = next(e for e in entries if e.get("event") == "blocked")
+        self.assertIn("port back manually", blocked["summary"])
+
+    def test_out_of_scope_escape_leaves_main_tree_untouched(self):
+        path = self.write_task(1, scope=("src/",))
+        cfg = self.build(retry=0)
+        self.commit_all()
+
+        def leak_outside_step(prompt):
+            (self.root / "outside.txt").write_text("stray\n", encoding="utf-8")
+            return ok_result()
+
+        adapter = ScriptedAdapter([leak_outside_step])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        self.assertEqual(
+            (self.root / "outside.txt").read_text(encoding="utf-8"), "stray\n")
+        self.assertFalse((self.execution_root() / "outside.txt").exists())
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertFalse(any(e.get("event") == "main_tree_escape" for e in entries))
+        blocked = next(e for e in entries if e.get("event") == "blocked")
+        self.assertIn("outside.txt", blocked["summary"])
+        self.assertIn("outside this task's scope", blocked["summary"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -891,6 +891,59 @@ def _mark_billing_task(task: Task, session: _SessionIdentity, detail: str,
         print(f"Writing the billing journal failed: {e} (working tree left as is, nothing discarded)")
 
 
+def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
+                             now: Callable[[], datetime]) -> str | None:
+    """Detect and, where possible, port back paths a just-finished session wrote into the main
+    tree (``cfg.source_root``) instead of its isolated worktree (``cfg.root``).
+
+    ``baseline`` is the main tree's dirty-path snapshot taken immediately before the session
+    started; the diff against a fresh snapshot is what the session wrote. No new dirt ->
+    returns None and the caller proceeds exactly as before (byte-for-byte identical to a run
+    without this check). Any new dirt always makes this attempt's evaluation fail -- a session
+    that wrote outside its isolated worktree cannot be trusted to have produced attributable,
+    verifiable output, regardless of what verify/status on the worktree side would otherwise
+    have said:
+    - every escaped path inside this task's scope -> ported into the worktree and restored in
+      the main tree (all-or-nothing), with a mechanical scheduler journal record of exactly
+      what moved;
+    - any escaped path outside scope -> unattributable, main tree left untouched entirely;
+    - a proven in-scope path that still fails to port (e.g. the worktree copy already
+      diverged) -> fail closed, both trees left untouched, needs a human to port manually.
+
+    Known limitation (accepted): under parallel folder runs, scope attribution of concurrent
+    main-tree dirt is heuristic; overlapping scope between parallel tasks can misattribute a
+    path, but the fail-closed branch above guarantees it never silently corrupts the main
+    tree's content.
+    """
+    current = gitops.dirty_paths(cfg.source_root, _task_excludes(cfg, task))
+    escaped = sorted(current - baseline)
+    if not escaped:
+        return None
+
+    outside = set(gitops.changes_outside_scope(
+        cfg.source_root, task.scope, excludes=_task_excludes(cfg, task)))
+    outside_escaped = sorted(outside & set(escaped))
+    if outside_escaped:
+        shown = ", ".join(outside_escaped[:5]) + (" ..." if len(outside_escaped) > 5 else "")
+        return (f"session wrote outside the isolated worktree, outside this task's scope "
+                f"(main tree not touched): {shown}")
+
+    ok, apply_reason = gitops.port_back_main_tree_escape(
+        cfg.source_root, cfg.root, escaped)
+    if not ok:
+        return (f"session wrote outside the isolated worktree; automatic port-back failed "
+                f"({apply_reason}); main tree and worktree left unchanged, port back manually")
+
+    shown = ", ".join(escaped[:5]) + (" ..." if len(escaped) > 5 else "")
+    append_entry(
+        task.journal_path, by="scheduler", event="main_tree_escape",
+        summary=(f"Ported {len(escaped)} path(s) that escaped into the main tree back "
+                 "into the isolated worktree"),
+        detail=f"paths ported back and restored in the main tree: {', '.join(escaped)}",
+        time_str=now().isoformat(timespec="seconds"))
+    return f"session wrote outside the isolated worktree; changes ported back ({shown})"
+
+
 def _process_task(cfg: Config, task: Task, adapter: Adapter,
                   sleep: Callable[[float], None],
                   now: Callable[[], datetime], session_state: _SessionState,
@@ -919,10 +972,18 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
         print(f"  Opening session (model={task.model} -> {session.requested_model}, "
               f"effort(abstract)={session.effort or 'unspecified'} -> "
               f"requested_effort(actual)={session.requested_effort or 'CLI default'})...")
+        main_tree_baseline = (gitops.dirty_paths(cfg.source_root, _task_excludes(cfg, task))
+                              if cfg.source_root is not None else None)
         result = adapter.run_task(
             prompt, session.requested_model, session.requested_effort, cfg.root)
+        escape_reason = (
+            _handle_main_tree_escape(cfg, task, main_tree_baseline, now)
+            if main_tree_baseline is not None else None)
 
-        if result.quota_exhausted:  # quota exhaustion does not count as a failure
+        if escape_reason is not None:
+            print(f"  {escape_reason}")
+            outcome, reason = "fail", escape_reason
+        elif result.quota_exhausted:  # quota exhaustion does not count as a failure
             print("  Quota exhausted -> keep progress (wip checkpoint) and wait for reset before resuming...")
             append_entry(task.journal_path, by="scheduler", event="quota",
                          summary="Quota exhausted; progress kept, waiting for reset before resuming",
@@ -939,8 +1000,7 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
             _wait_for_quota(cfg, result.reset_at, sleep, now)
             resumed = True
             continue  # resume the same task, without counting a retry
-
-        if result.failure_kind == "billing":
+        elif result.failure_kind == "billing":
             # A zero prepaid balance is an account-level condition, not a per-task one:
             # retrying cannot fix it and every following TODO task would fail identically.
             # Abort the whole run here (no retry consumed) so the abort handler keeps this
@@ -950,8 +1010,7 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
                 result.failure_kind)
             print(f"  Adapter failure: {reason}")
             raise _BillingAbort(reason)
-
-        if result.exit_code != 0 or result.stalled:
+        elif result.exit_code != 0 or result.stalled:
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output,
                 result.failure_kind)
