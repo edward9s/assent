@@ -40,14 +40,18 @@ the `_assent.log` inside a work folder.
 - Do not modify files unrelated to the current task.
 - Reference shared specifications; do not copy them into each task file.
 - Keep conjecture, changed, verified, and unverified separately recorded.
-- Do not declare completion without passing verification; pending must not be
-  dressed up as completed.
+- Do not declare completion without passing the task's focused `verify` command;
+  pending must not be dressed up as completed. The scheduler performs the
+  complete candidate verification after the folder's AI sessions finish.
 - Code, git, and test results are the final source of truth.
 - Never kill / Stop-Process any process the session did not itself start — your
   parent process chain leads straight to the scheduler, and killing the wrong
   one makes the whole run die silently.
 - The correct response to a command timeout is to raise the timeout or rerun in
-  batches, not to hunt down a process that "looks stuck".
+  batches, not to hunt down a process that "looks stuck". If an outer tool
+  timeout may have left children running, do not run the command in parallel
+  again and do not mark the task BLOCKED solely because of that timeout; the
+  scheduler's post-session verification is authoritative.
 
 ## Task session closeout (when scheduled by assent)
 

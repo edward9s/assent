@@ -63,10 +63,12 @@ project/
   by transactionally integrating exactly one completed folder into the normal
   branch currently checked out in the main worktree. `FOLDER` is required; the
   command has no batch, push, remote, pull-request, or hosting behavior, and no
-  other command infers acceptance from DONE tasks. It verifies the source and a
-  throwaway `--no-ff` merge before a final fast-forward-only target update,
-  records structured evidence in the merge commit, and keeps the source branch
-  and worktree. Its repository integration lock coordinates Assent commands,
+  other command infers acceptance from DONE tasks. It quickly rebuilds the
+  temporary integration candidate and compares the source tip, integration
+  tree, and verifier digest with a PASSED receipt; it does not run the full
+  verifier. Missing or stale receipts require `assent verify <FOLDER>` first.
+  A matching receipt is published with an auditable `--no-ff` merge, and the
+  source branch and worktree remain. Its repository integration lock coordinates Assent commands,
   not arbitrary external Git writers; observed target changes are refused, but
   callers must not treat the lock as cross-process atomicity against Git commands
   run outside Assent.
@@ -388,6 +390,28 @@ never deletes source before that proof.
 
 ## Lifecycle and review (the objective gate)
 
+`assent run` uses two verification stages. During each AI task session, the
+scheduler runs only that task's focused `verify` command before creating its
+checkpoint. After every task in a folder is complete, the scheduler builds one
+temporary integration candidate outside any AI session and runs the complete
+`.assent/verify.py` once. Its result is a derived `_verification.toml` receipt;
+the report shows whether the receipt is `PASSED` or `FAILED` and `fresh` or
+`stale`.
+
+`assent verify <FOLDER>` is a zero-token, unattended receipt refresh. It does
+not change the target or open an AI session. It may be run again whenever the
+receipt is stale or missing. A receipt is derived and disposable: it never
+outranks Git and can be deleted and rebuilt. A changed target commit does not
+by itself make acceptance impossible when the rebuilt candidate tree is
+identical; a changed candidate tree makes the receipt stale.
+
+There is no `review` task-file field. `DONE` is the executing AI's completion
+claim, the receipt is the scheduler's complete-verification evidence, and
+calling `accept` is the human approval. The lifecycle is:
+
+`run` -> full unattended verification receipt -> human review -> `accept` ->
+ordinary Git synchronization, if desired -> `clean`.
+
 For each task: open a headless session -> after the session ends the scheduler
 checks in order, and commits only when all pass:
 
@@ -399,7 +423,9 @@ checks in order, and commits only when all pass:
 3. **scope check**: all changes since the task's start (including wip
    checkpoints) fall within the task's `scope`; its own t file / r file and
    runtime artifacts are exempt.
-4. **verification command**: run the task's `verify`, exit code 0 = pass.
+4. **focused verification command**: run the task's `verify`, exit code 0 =
+   pass. Full candidate verification belongs to the post-folder scheduler
+   stage, not to the AI tool.
 
 - Pass -> an `auto(<work folder>/tNNN): <title>` checkpoint commit. A
   self-marked BLOCKED -> committed directly in the same namespace without
