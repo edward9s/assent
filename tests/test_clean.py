@@ -2,6 +2,7 @@
 a real Git repo."""
 import contextlib
 import io
+import json
 import shutil
 import subprocess
 import tempfile
@@ -10,9 +11,27 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assent import AssentError, gitops
+from assent import clean as clean_mod
 from assent.clean import clean_folder, clean_folders
 from assent.config import load_config
-from assent.lockfile import hold_lock
+from assent.lockfile import hold_integration_lock, hold_lock
+
+
+_VERIFY = 'python -c "raise SystemExit(0)"'
+
+
+def _task_text(status: str = "DONE") -> str:
+    return "\n".join((
+        'title = "Cleanup task"',
+        "deps = []",
+        'model = "lite"',
+        f"status = {json.dumps(status)}",
+        'scope = ["src/"]',
+        f"verify = {json.dumps(_VERIFY)}",
+        'goal = "Keep cleanup safe."',
+        'acceptance = "Cleanup preserves required evidence."',
+        "",
+    ))
 
 
 def _git(root: Path, *args: str) -> str:
@@ -40,7 +59,7 @@ class TestClean(unittest.TestCase):
         self.config_path = self.root / ".assent" / "assent.toml"
         self.config_path.write_text("", encoding="utf-8")
         (self.tasks_dir / "t001_task.e.toml").write_text(
-            'status = "DONE"\n', encoding="utf-8")
+            _task_text(), encoding="utf-8")
         (self.tasks_dir / "assent.lock").write_text(
             'folder = "plan01"\n', encoding="utf-8")
         self.cfg = load_config(self.config_path, self.folder)
@@ -74,6 +93,30 @@ class TestClean(unittest.TestCase):
         if commit:
             (worktree / "result.txt").write_text(branch, encoding="utf-8")
             gitops.commit_all(worktree, "finish result")
+        return worktree, branch
+
+    def _folder(self, name: str, status: str = "DONE", *,
+                after: list[str] | None = None, lock: bool = True) -> Path:
+        folder = self.root / ".assent" / name
+        folder.mkdir(exist_ok=True)
+        (folder / "t001_task.e.toml").write_text(
+            _task_text(status), encoding="utf-8")
+        if after is not None:
+            quoted = ", ".join(json.dumps(item) for item in after)
+            (folder / "_folder.toml").write_text(
+                f"after = [{quoted}]\n", encoding="utf-8")
+        if lock:
+            (folder / "assent.lock").write_text(
+                f'folder = "{name}"\n', encoding="utf-8")
+        return folder
+
+    def _source(self, folder: str, *, commit: bool = True) -> tuple[Path, str]:
+        worktree = gitops.ensure_worktree(self.root, folder)
+        branch = gitops.ensure_branch(worktree, f"{folder}/")
+        if commit:
+            (worktree / f"{folder}.txt").write_text(
+                f"result for {folder}\n", encoding="utf-8")
+            gitops.commit_all(worktree, f"finish {folder}")
         return worktree, branch
 
     def test_clean_merged_worktree_and_all_prefixed_branches(self) -> None:
@@ -155,6 +198,51 @@ class TestClean(unittest.TestCase):
             self.root, f"{self.folder}/"))
         self.assertIn("a run is in progress, refusing cleanup", output)
 
+    def test_busy_integration_lock_refuses_cleanup(self) -> None:
+        worktree, branch = self._worktree_branch()
+        with hold_integration_lock(self.root / ".assent"):
+            code, output = self._run_clean()
+
+        self.assertEqual(code, 0)
+        self.assertTrue(worktree.exists())
+        self.assertIn(branch, gitops.folder_branches(self.root, self.folder))
+        self.assertIn("repository integration is in progress", output)
+
+    def test_lock_order_and_locked_graph_recheck(self) -> None:
+        worktree, branch = self._worktree_branch(commit=True)
+        _git(self.root, "merge", "--ff-only", branch)
+        events: list[str] = []
+        real_integration = clean_mod.hold_integration_lock
+        real_probe = clean_mod.probe_lock
+
+        @contextlib.contextmanager
+        def traced_integration(path):
+            events.append("enter integration")
+            with real_integration(path):
+                yield
+            events.append("exit integration")
+
+        @contextlib.contextmanager
+        def traced_probe(path, folder):
+            events.append(f"enter folder {folder}")
+            with real_probe(path, folder):
+                yield
+            events.append(f"exit folder {folder}")
+
+        with patch.object(clean_mod, "hold_integration_lock", traced_integration), \
+                patch.object(clean_mod, "probe_lock", traced_probe), \
+                patch.object(
+                    clean_mod, "parse_folder_dependency_graph",
+                    wraps=clean_mod.parse_folder_dependency_graph) as parse_graph:
+            code, output = self._run_clean()
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(worktree.exists())
+        self.assertEqual(events, [
+            "enter integration", f"enter folder {self.folder}",
+            f"exit folder {self.folder}", "exit integration"])
+        self.assertGreaterEqual(parse_graph.call_count, 2)
+
     def test_merged_branch_without_worktree_is_deleted(self) -> None:
         branch = f"{self.folder}/leftover"
         _git(self.root, "branch", branch, "HEAD")
@@ -185,7 +273,7 @@ class TestClean(unittest.TestCase):
         second_dir = self.root / ".assent" / second
         second_dir.mkdir()
         (second_dir / "t001_task.e.toml").write_text(
-            'status = "DONE"\n', encoding="utf-8")
+            _task_text(), encoding="utf-8")
         (second_dir / "assent.lock").write_text(
             'folder = "plan02"\n', encoding="utf-8")
         second_branch = f"{second}/leftover"
@@ -230,6 +318,176 @@ class TestClean(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(worktree.exists())
         self.assertIn("worktree HEAD not yet merged, retained", output)
+
+    def test_unfinished_direct_dependents_retain_upstream_source(self) -> None:
+        worktree, branch = self._worktree_branch(commit=True)
+        _git(self.root, "merge", "--ff-only", branch)
+        dependent = self._folder("dependent", after=[self.folder])
+
+        for status in ("TODO", "WIP", "BLOCKED"):
+            with self.subTest(status=status):
+                (dependent / "t001_task.e.toml").write_text(
+                    _task_text(status), encoding="utf-8")
+                code, output = self._run_clean()
+                self.assertEqual(code, 0, output)
+                self.assertTrue(worktree.exists())
+                self.assertIn(branch, gitops.folder_branches(
+                    self.root, self.folder))
+                self.assertIn(f"dependent dependent: unfinished tasks: t001={status}",
+                              output)
+                self.assertIn("upstream-first order", output)
+
+    def test_completed_but_unaccepted_dependent_retains_upstream(self) -> None:
+        upstream, upstream_branch = self._worktree_branch(commit=True)
+        _git(self.root, "merge", "--ff-only", upstream_branch)
+        self._folder("dependent", after=[self.folder])
+        dependent, _branch = self._source("dependent")
+
+        code, output = self._run_clean()
+
+        self.assertEqual(code, 0, output)
+        self.assertTrue(upstream.exists())
+        self.assertTrue(dependent.exists())
+        self.assertIn("current source tip", output)
+        self.assertIn("not integrated into the current target", output)
+
+    def test_accepted_dependent_allows_upstream_first_cleanup(self) -> None:
+        upstream, upstream_branch = self._worktree_branch(commit=True)
+        _git(self.root, "merge", "--ff-only", upstream_branch)
+        self._folder("dependent", after=[self.folder])
+        dependent, dependent_branch = self._source("dependent")
+        _git(self.root, "merge", "--no-ff", "-m", "accept dependent",
+             dependent_branch)
+
+        code, output = self._run_clean()
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(upstream.exists())
+        self.assertTrue(dependent.exists())
+        self.assertIn(f"branch {upstream_branch}: cleaned", output)
+
+    def test_completed_dependent_source_states_fail_closed(self) -> None:
+        upstream, upstream_branch = self._worktree_branch(commit=True)
+        _git(self.root, "merge", "--ff-only", upstream_branch)
+        dependent_dir = self._folder("dependent", after=[self.folder])
+
+        code, output = self._run_clean()
+        self.assertEqual(code, 0, output)
+        self.assertIn("no source worktree", output)
+        self.assertTrue(upstream.exists())
+
+        dependent, dependent_branch = self._source("dependent")
+        (dependent / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+        code, output = self._run_clean()
+        self.assertEqual(code, 0, output)
+        self.assertIn("source worktree", output)
+        self.assertIn("not clean", output)
+        (dependent / "dirty.txt").unlink()
+
+        _git(dependent, "checkout", "--detach")
+        code, output = self._run_clean()
+        self.assertEqual(code, 0, output)
+        self.assertIn("detached HEAD", output)
+
+        _git(dependent, "checkout", dependent_branch)
+        gitops.remove_worktree(self.root, dependent)
+        _git(self.root, "branch", "dependent/second", "HEAD")
+        code, output = self._run_clean()
+        self.assertEqual(code, 0, output)
+        self.assertIn("current source is ambiguous", output)
+        self.assertTrue(dependent_dir.exists())
+        self.assertTrue(upstream.exists())
+
+    def test_only_direct_dependents_control_each_cleanup_boundary(self) -> None:
+        upstream, upstream_branch = self._worktree_branch(commit=True)
+        _git(self.root, "merge", "--ff-only", upstream_branch)
+        self._folder("middle", after=[self.folder])
+        middle, middle_branch = self._source("middle")
+        _git(self.root, "merge", "--no-ff", "-m", "accept middle", middle_branch)
+        self._folder("downstream", status="TODO", after=["middle"])
+
+        code, output = self._run_clean()
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(upstream.exists())
+        self.assertTrue(middle.exists())
+        middle_cfg = load_config(self.config_path, "middle")
+        middle_output = io.StringIO()
+        with contextlib.redirect_stdout(middle_output):
+            middle_code = clean_folder(middle_cfg)
+        self.assertEqual(middle_code, 0, middle_output.getvalue())
+        self.assertTrue(middle.exists())
+        self.assertIn("dependent downstream: unfinished tasks: t001=TODO",
+                      middle_output.getvalue())
+
+    def test_bad_unrelated_plan_and_cycle_fail_before_deletion(self) -> None:
+        worktree, branch = self._worktree_branch(commit=True)
+        _git(self.root, "merge", "--ff-only", branch)
+        unrelated = self._folder("unrelated")
+        (unrelated / "t001_task.e.toml").write_text(
+            "not valid = [\n", encoding="utf-8")
+
+        code, output = self._run_clean()
+
+        self.assertEqual(code, 1, output)
+        self.assertTrue(worktree.exists())
+        self.assertIn("dependency evidence could not be parsed", output)
+
+        (unrelated / "t001_task.e.toml").write_text(
+            _task_text(), encoding="utf-8")
+        (self.tasks_dir / "_folder.toml").write_text(
+            'after = ["unrelated"]\n', encoding="utf-8")
+        (unrelated / "_folder.toml").write_text(
+            f'after = ["{self.folder}"]\n', encoding="utf-8")
+        code, output = self._run_clean()
+        self.assertEqual(code, 1, output)
+        self.assertTrue(worktree.exists())
+        self.assertIn("form a cycle", output)
+
+    def test_dependent_lock_is_held_through_destructive_cleanup(self) -> None:
+        upstream, upstream_branch = self._worktree_branch(commit=True)
+        _git(self.root, "merge", "--ff-only", upstream_branch)
+        dependent_dir = self._folder("dependent", after=[self.folder])
+        _dependent, dependent_branch = self._source("dependent")
+        _git(self.root, "merge", "--no-ff", "-m", "accept dependent",
+             dependent_branch)
+        real_remove = gitops.remove_worktree
+        lock_was_busy = False
+
+        def observe_lock(root: Path, path: Path) -> None:
+            nonlocal lock_was_busy
+            try:
+                with hold_lock(dependent_dir, "dependent"):
+                    pass
+            except AssentError:
+                lock_was_busy = True
+            real_remove(root, path)
+
+        with patch.object(gitops, "remove_worktree", side_effect=observe_lock):
+            code, output = self._run_clean()
+
+        self.assertEqual(code, 0, output)
+        self.assertTrue(lock_was_busy)
+        self.assertFalse(upstream.exists())
+
+    def test_clean_all_uses_upstream_first_order(self) -> None:
+        upstream, upstream_branch = self._worktree_branch(commit=True)
+        _git(self.root, "merge", "--ff-only", upstream_branch)
+        self._folder("dependent", after=[self.folder])
+        dependent, dependent_branch = self._source("dependent")
+        _git(self.root, "merge", "--no-ff", "-m", "accept dependent",
+             dependent_branch)
+        dependent_cfg = load_config(self.config_path, "dependent")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = clean_folders([dependent_cfg, self.cfg])
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertFalse(upstream.exists())
+        self.assertFalse(dependent.exists())
+        self.assertLess(output.getvalue().index(f"{self.folder}: cleaned"),
+                        output.getvalue().index("dependent: cleaned"))
 
 
 if __name__ == "__main__":

@@ -198,6 +198,9 @@ class TestAcceptSuccess(AcceptRepositoryCase):
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.folder_branches(self.root, self.folder))
         self.assertIn("without running verification", output)
+        self.assertIn("retain it while a dependent may still need its source evidence",
+                      output)
+        self.assertIn("clean plan01", output)
         self._assert_no_temporary_state()
 
         code, output = self._accept()
