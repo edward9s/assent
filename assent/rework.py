@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from assent import AssentError, gitops
+from assent import AssentError, gitops, verification
 from assent.config import Config
 from assent.engine import write_report
 from assent.lockfile import LockBusy, LockMissing, probe_lock
@@ -405,6 +405,13 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
         print(f"{name}: {task_id} has downstream tasks that must be reopened "
               f"together; specify cascade: {', '.join(blockers)}")
         return 1
+
+    # Reopening a task takes the folder back out of the finished set the batch
+    # candidate was built from, so the batch receipt stops describing publishable
+    # work here -- before any status, journal, or revert checkpoint is written.
+    if verification.invalidate_batch_receipt(cfg.assent_dir):
+        print(f"{name}: batch verification receipt invalidated; run "
+              "`assent verify --batch` again before the next batch release")
 
     path = gitops.worktree_path(cfg.root, name)
     changed: list[Task] = []

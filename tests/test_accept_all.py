@@ -2,6 +2,11 @@
 dependency order, verify-then-accept interleaving, fail-closed chain stop,
 and idempotent rerun.
 
+The second half of this module covers the batch release path: how ``--all``
+chooses between releasing a fresh batch receipt and the per-folder path, what
+the released merges look like, which gates refuse a release, and which commands
+invalidate a batch receipt.
+
 CLI argument-combination tests for ``--all`` live in tests/test_accept_cli.py;
 this module exercises ``accept_all`` directly against disposable local
 repositories, the same style ``tests/test_accept.py`` uses for
@@ -15,13 +20,18 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from assent import gitops, verification
 from assent.accept import accept_all, accept_folder
 from assent.clean import clean_folder
 from assent.config import load_config
+from assent.lockfile import hold_lock
+from assent.reject import reject_folder
+from assent.rework import rework_task
 
 _VERIFY_OK = "raise SystemExit(0)\n"
 
@@ -352,6 +362,304 @@ class TestSkipCleanedFolder(AcceptAllRepositoryCase):
 
         self.assertEqual(code, 1)
         self.assertIn("no source worktree", output.getvalue())
+
+
+class BatchReleaseCase(AcceptAllRepositoryCase):
+    """An ``accept --all`` repository plus helpers for one verified batch."""
+
+    def _verify_batch(self) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = verification.verify_batch(str(self.config_path), self.assent_dir)
+        return code, output.getvalue()
+
+    def _batch_path(self) -> Path:
+        return verification.batch_receipt_path(self.assent_dir)
+
+    def _batch_receipt(self) -> verification.BatchVerificationReceipt:
+        return verification.read_batch_receipt(self._batch_path(), self.root)
+
+    def _prepare_batch(self, *folders: str
+                       ) -> verification.BatchVerificationReceipt:
+        """Finish every folder, then certify them all with one full verification."""
+        for folder in folders:
+            self._write_task(folder)
+            self._make_source(folder)
+        code, output = self._verify_batch()
+        self.assertEqual(code, 0, output)
+        return self._batch_receipt()
+
+    def _message(self, ref: str) -> str:
+        return _git(self.root, "log", "-1", "--format=%B", ref)
+
+
+class TestBatchReleasePublication(BatchReleaseCase):
+    def test_batch_release_publishes_every_folder_in_one_ref_update(self) -> None:
+        receipt = self._prepare_batch("alpha", "beta")
+        target_before = self._head()
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("batch release", output)
+        self.assertIn("all or nothing", output)
+        self.assertIn("batch receipt covers: alpha, beta", output)
+        self.assertEqual(self._accept_subjects(), [
+            "accept(alpha): integrate into trunk",
+            "accept(beta): integrate into trunk",
+        ])
+        # Two independent no-ff merges chained onto the untouched target: the
+        # exact graph two single-folder accepts would have left behind.
+        self.assertEqual(self._head("HEAD^1^1"), target_before)
+        self.assertEqual(self._head("HEAD^1^2"), receipt.sources[0].source_tip)
+        self.assertEqual(self._head("HEAD^2"), receipt.sources[1].source_tip)
+        self.assertEqual(gitops.tree_of(self.root, "HEAD^1"),
+                         receipt.sources[0].step_tree)
+        self.assertEqual(gitops.tree_of(self.root, "HEAD"), receipt.final_tree)
+
+    def test_each_published_merge_carries_single_folder_accept_evidence(self) -> None:
+        receipt = self._prepare_batch("alpha", "beta")
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        for ref, source in zip(("HEAD^1", "HEAD"), receipt.sources):
+            branch = gitops.folder_branches(self.root, source.folder)[0]
+            expected = gitops.accept_commit_message(
+                f"accept({source.folder}): integrate into trunk", source.folder,
+                branch, source.source_tip, source.step_tree,
+                receipt.verify_script_sha256)
+            self.assertEqual(self._message(ref), expected.strip())
+
+    def test_a_batched_merge_message_matches_a_per_folder_accept_message(self) -> None:
+        """Audit granularity must not change with the path that published it."""
+        self._prepare_batch("alpha")
+        batch_code, batch_output = self._accept_all()
+        self.assertEqual(batch_code, 0, batch_output)
+        batched = self._message("HEAD")
+
+        self._write_task("zulu")
+        self._make_source("zulu")
+        per_folder_code, per_folder_output = self._accept_all()
+        self.assertEqual(per_folder_code, 0, per_folder_output)
+        per_folder = self._message("HEAD")
+
+        def trailer_keys(message: str) -> list[str]:
+            return [line.split(":")[0] for line in message.splitlines()
+                    if line.startswith("Assent-")]
+
+        self.assertEqual(trailer_keys(batched), trailer_keys(per_folder))
+        self.assertEqual(batched.splitlines()[0],
+                         "accept(alpha): integrate into trunk")
+        self.assertEqual(per_folder.splitlines()[0],
+                         "accept(zulu): integrate into trunk")
+        self.assertIn("Assent-Folder: alpha", batched)
+        self.assertIn("Assent-Folder: zulu", per_folder)
+
+    def test_the_consumed_receipt_makes_a_rerun_an_idempotent_noop(self) -> None:
+        self._prepare_batch("alpha", "beta")
+        first_code, first_output = self._accept_all()
+        self.assertEqual(first_code, 0, first_output)
+        self.assertFalse(self._batch_path().exists())
+        published = self._head()
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self._head(), published)
+        self.assertIn("no batch verification receipt", output)
+        self.assertIn("per-folder verify+accept", output)
+        self.assertIn("already accepted", output)
+
+
+class TestBatchPathSelection(BatchReleaseCase):
+    def test_without_a_batch_receipt_the_per_folder_path_announces_itself(self) -> None:
+        self._write_task("solo")
+        self._make_source("solo")
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("no batch verification receipt", output)
+        self.assertIn("per-folder verify+accept", output)
+        self.assertNotIn("batch release", output)
+        self.assertEqual(self._accept_subjects(),
+                         ["accept(solo): integrate into trunk"])
+
+    def test_an_expired_batch_receipt_is_deleted_and_the_per_folder_path_runs(
+            self) -> None:
+        self._prepare_batch("alpha", "beta")
+        # One more commit on one source expires the whole batch: the recorded
+        # chain no longer describes the sources that exist now.
+        worktree = gitops.folder_worktree(self.root, "alpha")
+        (worktree / "extra.txt").write_text("more\n", encoding="utf-8")
+        gitops.commit_all(worktree, "more alpha work")
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("batch verification receipt has expired", output)
+        self.assertIn("per-folder verify+accept", output)
+        self.assertFalse(self._batch_path().exists())
+        self.assertEqual(self._accept_subjects(), [
+            "accept(alpha): integrate into trunk",
+            "accept(beta): integrate into trunk",
+        ])
+
+
+class TestBatchReleaseGates(BatchReleaseCase):
+    def test_a_dirty_main_worktree_refuses_and_keeps_the_receipt(self) -> None:
+        self._prepare_batch("alpha", "beta")
+        (self.root / "README.md").write_text("edited\n", encoding="utf-8")
+        target_before = self._head()
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._head(), target_before)
+        self.assertIn("is not clean", output)
+        self.assertEqual(self._accept_subjects(), [])
+        self.assertTrue(self._batch_path().exists())
+
+    def test_a_dirty_source_worktree_refuses_the_whole_batch(self) -> None:
+        self._prepare_batch("alpha", "beta")
+        worktree = gitops.folder_worktree(self.root, "beta")
+        (worktree / "beta.txt").write_text("uncommitted\n", encoding="utf-8")
+        target_before = self._head()
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._head(), target_before)
+        self.assertIn("beta", output)
+        self.assertIn("not clean", output)
+        self.assertEqual(self._accept_subjects(), [])
+        self.assertTrue(self._batch_path().exists())
+
+    def test_a_busy_folder_lock_refuses_the_whole_batch(self) -> None:
+        self._prepare_batch("alpha", "beta")
+        target_before = self._head()
+
+        with hold_lock(self.assent_dir / "beta", "beta"):
+            code, output = self._accept_all()
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._head(), target_before)
+        self.assertIn("accept --all: refused", output)
+        self.assertIn("beta", output)
+        self.assertEqual(self._accept_subjects(), [])
+        self.assertTrue(self._batch_path().exists())
+
+    def test_a_reopened_batched_folder_refuses_the_release(self) -> None:
+        self._prepare_batch("alpha", "beta")
+        self._write_task("beta", status="WIP")
+        target_before = self._head()
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._head(), target_before)
+        self.assertIn("no longer finished", output)
+        self.assertEqual(self._accept_subjects(), [])
+        self.assertTrue(self._batch_path().exists())
+
+    def test_a_batch_never_publishes_a_folder_ahead_of_its_prerequisite(self) -> None:
+        """The same refusal a single-folder accept makes, widened to the batch.
+
+        ``upstream`` is unfinished, so only ``downstream`` -- whose branch was
+        cut from upstream's tip -- enters the batch. Publishing it alone would
+        carry upstream's unverified commits into the target.
+        """
+        self._write_task("upstream", status="WIP")
+        _worktree, _branch, upstream_tip = self._make_source("upstream")
+        self._write_task("zdownstream")
+        self._write_after("zdownstream", ("upstream",))
+        self._make_source("zdownstream", start_snapshot=upstream_tip)
+        verify_code, verify_output = self._verify_batch()
+        self.assertEqual(verify_code, 0, verify_output)
+        self.assertEqual(self._batch_receipt().folders, ("zdownstream",))
+        target_before = self._head()
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._head(), target_before)
+        self.assertIn("prerequisite upstream of zdownstream", output)
+        self.assertEqual(self._accept_subjects(), [])
+        self.assertTrue(self._batch_path().exists())
+
+    def test_a_step_tree_that_does_not_replay_aborts_with_the_target_untouched(
+            self) -> None:
+        receipt = self._prepare_batch("alpha", "beta")
+        # A receipt claiming a step tree the chain does not produce, held fresh
+        # by the freshness oracle: the replay compares every step itself, so the
+        # release must still refuse rather than trust the receipt.
+        sources = list(receipt.sources)
+        sources[0] = verification.BatchSource(
+            sources[0].folder, sources[0].source_tip,
+            gitops.tree_of(self.root, "HEAD"))
+        verification.write_batch_receipt(
+            self._batch_path(), replace(receipt, sources=tuple(sources)),
+            self.root)
+        target_before = self._head()
+
+        with patch.object(verification, "batch_receipt_staleness",
+                          return_value=()):
+            code, output = self._accept_all()
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._head(), target_before)
+        self.assertIn("not the verified", output)
+        self.assertEqual(self._accept_subjects(), [])
+        self.assertIn("assent verify --batch", output)
+
+
+class TestBatchReceiptInvalidation(BatchReleaseCase):
+    def _write_folder_lock(self, folder: str) -> None:
+        (self.assent_dir / folder / "assent.lock").write_text(
+            f'folder = "{folder}"\n', encoding="utf-8")
+
+    def test_reject_invalidates_the_batch_receipt(self) -> None:
+        self._prepare_batch("alpha", "beta")
+        self._write_folder_lock("beta")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = reject_folder(self._config("beta"),
+                                 confirm=lambda prompt: "y")
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertIn("batch verification receipt invalidated", output.getvalue())
+        self.assertFalse(self._batch_path().exists())
+
+    def test_rework_invalidates_the_batch_receipt(self) -> None:
+        self._prepare_batch("alpha", "beta")
+        self._write_folder_lock("alpha")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = rework_task(self._config("alpha"), "t001",
+                               reason="reopen the batched folder")
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertIn("batch verification receipt invalidated", output.getvalue())
+        self.assertFalse(self._batch_path().exists())
+
+    def test_a_rejected_folder_can_no_longer_be_released_as_a_batch(self) -> None:
+        self._prepare_batch("alpha", "beta")
+        self._write_folder_lock("beta")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                reject_folder(self._config("beta"), confirm=lambda prompt: "y"),
+                0)
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("no batch verification receipt", output)
+        self.assertIn("per-folder verify+accept", output)
+        self.assertEqual(self._accept_subjects(),
+                         ["accept(alpha): integrate into trunk"])
 
 
 if __name__ == "__main__":

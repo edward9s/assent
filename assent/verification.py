@@ -704,6 +704,22 @@ def batch_receipt_path(assent_dir: str | Path) -> Path:
     return Path(assent_dir) / BATCH_RECEIPT_NAME
 
 
+def invalidate_batch_receipt(assent_dir: str | Path) -> bool:
+    """Delete the batch receipt so no release can consume it; True if one existed.
+
+    This is the single invalidation entry point for every command that changes
+    what a batch was verified against: ``reject`` and ``rework`` reopen work the
+    candidate was built from, and a batch release consumes the receipt once it
+    has published.  The receipt is derived and disposable, so deleting it only
+    ever costs one ``assent verify --batch``; it never destroys a source of
+    truth.
+    """
+    path = batch_receipt_path(assent_dir)
+    existed = path.exists()
+    _invalidate_receipt(path)
+    return existed
+
+
 def _batch_receipt_text(receipt: BatchVerificationReceipt) -> str:
     text = (
         f"version = {receipt.version}\n"
