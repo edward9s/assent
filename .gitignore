@@ -5,6 +5,8 @@ CLAUDE.md
 
 # assent management plane and runtime artifacts
 .assent/
+# Former contract; kept ignored so an unmigrated checkout cannot commit it
+.agents/
 
 # Python
 __pycache__/

@@ -96,6 +96,8 @@ def _is_audited_old_brand_exception(path: str, text: str) -> bool:
         ))
     if path.startswith("assent/"):
         return ".agents" in text or "agents-instructions" in text
+    if path == ".gitignore":
+        return ".agents/" in text  # Legacy path kept ignored during migration.
     if path == "tests/test_language_policy.py":
         return True  # This audit's patterns and its narrow exception definitions.
     if path.startswith("tests/"):
