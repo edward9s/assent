@@ -23,9 +23,10 @@ from assent.lockfile import hold_lock
 from assent.plan import append_entry, journal_path_for, parse_task_file, set_status
 from tests.engine_support import (_FAILV, _NEEDS_OK_TXT, _OK, EngineTestCase,
                                   ScriptedAdapter, ok_result, task_text)
+from tests.test_contracts import GlobalContractsMixin
 
 
-class TestFocusedVerification(EngineTestCase):
+class TestFocusedVerification(GlobalContractsMixin, EngineTestCase):
     def prepare_source(self):
         self.commit_all()
         worktree = gitops.ensure_worktree(self.root, "plan01")
@@ -102,7 +103,7 @@ class TestFocusedVerification(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "SKIP")
 
 
-class TestRunSuccess(EngineTestCase):
+class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
     def test_unfinished_folder_prerequisite_refuses_before_lock(self):
         self.write_task(1)
         base = self.root / ".assent" / "base"
@@ -394,7 +395,10 @@ class TestRunSuccess(EngineTestCase):
         adapter = ScriptedAdapter([self.ai_done(p1)])
         self.run_quiet(cfg, once=True, adapter=adapter)
         prompt = adapter.calls[0][0]
-        self.assertIn(str(cfg.assent_dir / "instructions.md"), prompt)
+        # The working instructions are the global contract; the task and journal
+        # stay in the project's own management plane.
+        self.assertIn(str(self.user_home / "instructions.md"), prompt)
+        self.assertNotIn(str(cfg.assent_dir / "instructions.md"), prompt)
         self.assertIn(str(p1), prompt)
         self.assertIn(str(p1.with_name("t001_task.r.toml")), prompt)
         self.assertIn(_OK, prompt)
@@ -465,7 +469,7 @@ class TestRunSuccess(EngineTestCase):
         self.assertFalse((self.root / "verified.txt").exists())
 
 
-class TestAcceptanceGates(EngineTestCase):
+class TestAcceptanceGates(GlobalContractsMixin, EngineTestCase):
     def test_self_blocked_committed_without_verify(self):
         # verify is an always-failing command: self-marked BLOCKED skips verify so it passes
         # (verify only runs when there is an implementation)
@@ -760,7 +764,7 @@ class TestAcceptanceGates(EngineTestCase):
         self.assertLess(i_failed, i_tail)
 
 
-class TestSchedulingAndRefusals(EngineTestCase):
+class TestSchedulingAndRefusals(GlobalContractsMixin, EngineTestCase):
     def test_run_and_check_refuse_root_without_own_git_marker(self):
         nested_root = self.root / "not-repo"
         nested_plan = nested_root / ".assent" / "plan01"
@@ -855,7 +859,7 @@ class TestSchedulingAndRefusals(EngineTestCase):
         self.assertEqual(adapter.calls, [])
 
 
-class TestReworkPromptSuffix(EngineTestCase):
+class TestReworkPromptSuffix(GlobalContractsMixin, EngineTestCase):
     """A TODO task whose journal's last entry is a pending rework_requested record gets a
     prompt suffix carrying the rejection reason, so the execution AI does not mistake the
     rejected implementation/tests for the current spec."""
@@ -923,6 +927,60 @@ class TestReworkPromptSuffix(EngineTestCase):
 
         prompt = adapter.calls[0][0]
         self.assertNotIn("rejected by a human reviewer", prompt)
+
+
+class TestGlobalContractGate(GlobalContractsMixin, EngineTestCase):
+    """No session may start against a missing or out-of-date global contract.
+
+    The CLI refuses earlier with the same message, but these cases call
+    ``engine.run`` directly, because the library entry point is the gate that
+    actually has to hold.  Each one leaves a project ``.assent/instructions.md``
+    in place: an old project copy is not a fallback, it is just a file.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.task = self.write_task(1)
+        self.cfg = self.build()
+        self.project_instructions = self.root / ".assent" / "instructions.md"
+        self.project_instructions.write_text(
+            "an older project's own working instructions\n", encoding="utf-8")
+        self.commit_all()
+
+    def refuse(self) -> str:
+        """Run with no injected adapter, so resolving one at all is a failure."""
+        out = io.StringIO()
+        with mock.patch.object(
+                engine, "get_adapter",
+                side_effect=AssertionError(
+                    "no adapter may be resolved once the contract gate fails")):
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(engine.run(self.cfg, once=True), 1)
+        text = out.getvalue()
+        self.assertIn("Global contracts: FAIL", text)
+        self.assertIn("assent init", text)
+        # Nothing was started and nothing was written back.
+        self.assertEqual(parse_task_file(self.task).status, "TODO")
+        self.assertFalse(gitops.worktree_path(self.root, "plan01").exists())
+        return text
+
+    def test_a_missing_contract_refuses_the_run(self):
+        (self.user_home / "instructions.md").unlink()
+        text = self.refuse()
+        self.assertIn(str(self.user_home / "instructions.md"), text)
+        self.assertIn("is missing", text)
+
+    def test_a_stale_contract_refuses_the_run(self):
+        (self.user_home / "format.md").write_text(
+            "an older assent's plan format\n", encoding="utf-8")
+        text = self.refuse()
+        self.assertIn(str(self.user_home / "format.md"), text)
+        self.assertIn("is stale", text)
+
+    def test_the_refusal_never_falls_back_to_the_project_instructions(self):
+        (self.user_home / "instructions.md").unlink()
+        text = self.refuse()
+        self.assertNotIn(str(self.project_instructions), text)
 
 
 if __name__ == "__main__":

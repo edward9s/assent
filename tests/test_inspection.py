@@ -13,14 +13,15 @@ import io
 import unittest
 from unittest import mock
 
-from assent import AssentError, gitops, inspection, preflight
+from assent import AssentError, contracts, gitops, inspection, preflight
 from assent.config import load_config
 from assent.plan import journal_path_for, set_status
 from tests.engine_support import (_FAILV, EngineTestCase, ScriptedAdapter,
                                   ok_result, task_text)
+from tests.test_contracts import GlobalContractsMixin
 
 
-class TestQueries(EngineTestCase):
+class TestQueries(GlobalContractsMixin, EngineTestCase):
     def test_status_reports_counts_and_next(self):
         self.write_task(1, status="DONE")
         self.write_task(2, deps=("t001",), title="第二個")
@@ -234,7 +235,114 @@ class TestQueries(EngineTestCase):
             with self.assertRaises(KeyboardInterrupt):
                 inspection.try_write_report(cfg)
 
-class TestStackReportLines(EngineTestCase):
+class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
+    """`check` answers the two questions a layered setup makes ambiguous: are the
+    global contracts current, and which layer decided each setting the printed task
+    assignment actually used."""
+
+    def write_user_config(self, text: str) -> None:
+        (self.user_home / "assent.toml").write_text(text, encoding="utf-8")
+
+    def load(self):
+        # The project file is the locator whether or not it exists.
+        return load_config(self.root / ".assent" / "assent.toml", "plan01")
+
+    def check_output(self, cfg, expected_code=0) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), expected_code)
+        return out.getvalue()
+
+    def test_a_missing_contract_is_a_focused_check_failure(self):
+        self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        (self.user_home / "format.md").unlink()
+
+        text = self.check_output(cfg, expected_code=1)
+        self.assertIn("Global contracts: FAIL", text)
+        self.assertIn(f"{self.user_home / 'format.md'} is missing", text)
+        self.assertIn(contracts.CONTRACT_REMEDY, text)
+        # Focused: the contract that is still current is not named as a problem,
+        # and the unrelated verdicts are still reported.
+        self.assertNotIn(f"{self.user_home / 'instructions.md'} is", text)
+        self.assertIn("Task-file format: OK", text)
+
+    def test_current_contracts_pass_and_are_reported_once(self):
+        self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+
+        text = self.check_output(cfg)
+        self.assertIn(f"Global contracts: OK ({self.user_home}: "
+                      "instructions.md, format.md current)", text)
+        self.assertIn("Result: passed", text)
+
+    def test_the_user_config_alone_resolves_and_reports_its_assignments(self):
+        self.write_task(1, model="core")
+        self.write_user_config(
+            '[adapter]\nname = "codex"\n'
+            '[adapter.codex]\ncommand = "python"\n'
+            '[adapter.codex.models]\ncore = "gpt-from-user"\n')
+        cfg = self.load()
+        self.commit_all()
+
+        text = self.check_output(cfg)
+        self.assertIn(f"Config sources (lowest priority first): builtin, "
+                      f"user ({self.user_home / 'assent.toml'})", text)
+        self.assertIn(f"  project override {self.root / '.assent' / 'assent.toml'}: "
+                      "absent (optional)", text)
+        self.assertIn("Task assignment (adapter = codex):", text)
+        self.assertIn("gpt-from-user", text)
+        self.assertIn("Setting sources: adapter.name = user (active: codex)", text)
+        self.assertIn("codex: models.core = user", text)
+
+    def test_a_project_override_reports_the_winning_project_keys(self):
+        self.write_task(1, model="core")
+        self.write_user_config(
+            '[adapter]\nname = "codex"\n'
+            '[adapter.codex]\ncommand = "python"\n'
+            '[adapter.codex.models]\ncore = "gpt-from-user"\n'
+            '[adapter.codex.default_effort]\ncore = "slight"\n')
+        (self.root / ".assent" / "assent.toml").write_text(
+            '[adapter.codex.models]\ncore = "gpt-from-project"\n',
+            encoding="utf-8")
+        cfg = self.load()
+        self.commit_all()
+
+        text = self.check_output(cfg)
+        self.assertIn(
+            f"user ({self.user_home / 'assent.toml'}), "
+            f"project ({self.root / '.assent' / 'assent.toml'})", text)
+        self.assertNotIn("absent (optional)", text)
+        # The adapter name is still the user's; only the overridden model moved.
+        self.assertIn("Setting sources: adapter.name = user (active: codex)", text)
+        self.assertIn("codex: models.core = project", text)
+        self.assertIn("default_effort.core = user", text)
+        self.assertIn("gpt-from-project", text)
+
+    def test_the_source_report_names_only_the_keys_the_assignment_used(self):
+        self.write_task(1, model="lite")
+        self.write_user_config(
+            '[adapter]\nname = "claude"\n'
+            '[adapter.claude]\ncommand = "python"\n'
+            '[adapter.claude.models]\nlite = "haiku-from-user"\n'
+            '[adapter.codex]\ncommand = "python"\n'
+            '[run]\nretry_per_task = 3\n')
+        cfg = self.load()
+        self.commit_all()
+
+        text = self.check_output(cfg)
+        source_line = next(line for line in text.splitlines()
+                           if line.strip().startswith("claude:"))
+        self.assertIn("models.lite = ", source_line)
+        # No unrelated settings are dumped into the provenance report.
+        self.assertNotIn("retry_per_task", text)
+        self.assertNotIn("models.prime", source_line)
+        self.assertNotIn("models.core", source_line)
+
+
+class TestStackReportLines(GlobalContractsMixin, EngineTestCase):
     """A complete folder (all DONE/SKIP) must skip stack resolution entirely;
     an incomplete folder must keep today's three existing outputs verbatim."""
 

@@ -33,6 +33,20 @@ def install_global_contracts(case: unittest.TestCase) -> Path:
     return home
 
 
+class GlobalContractsMixin:
+    """Give a test case current global contracts under a temporary user home.
+
+    ``run`` and ``check`` now fail closed without them, so every case that drives
+    either one mixes this in ahead of its own base class.  It deliberately stays a
+    plain mixin -- it must compose with the git-backed engine fixtures without this
+    module having to import them.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_home = install_global_contracts(self)
+
+
 class TestContractPaths(unittest.TestCase):
     def test_paths_resolve_under_the_redirected_user_home(self):
         home = install_global_contracts(self)

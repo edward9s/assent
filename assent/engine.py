@@ -180,7 +180,7 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
     template = cfg.prompt_template or _DEFAULT_PROMPT_TEMPLATE
     text = (template
             .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
-            .replace("{instructions_path}", _instructions_path_for_prompt(cfg))
+            .replace("{instructions_path}", str(contracts.instructions_path()))
             .replace("{task_path}", cfg.rel(task.path))
             .replace("{journal_path}", cfg.rel(task.journal_path))
             .replace("{verify_command}",
@@ -337,21 +337,6 @@ def _verify_command_for_prompt(cfg: Config, command: str) -> str:
             else shlex.join(parts))
 
 
-def _instructions_path_for_prompt(cfg: Config) -> str:
-    """Name the global working instructions the session is expected to read.
-
-    ``assent run`` refuses before opening any adapter process when that contract is
-    missing, so every scheduled session names the single absolute ``~/.assent`` file.
-    A direct ``engine.run`` library call bypasses the CLI gate; there the project's own
-    copy stays the answer, because a prompt must never point the execution AI at a file
-    that is not on disk.
-    """
-    path = contracts.instructions_path()
-    if path.is_file():
-        return str(path)
-    return cfg.rel(cfg.assent_dir / "instructions.md")
-
-
 def _agents_md_path_for_prompt(cfg: Config) -> str:
     """Choose the project rules: prefer the branch version, else fall back to the main
     working tree's absolute path."""
@@ -484,6 +469,16 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     anything in the working tree. status / check / report are read-only, take no lock, and can
     be used while a run is in progress.
     """
+    # The final global-contracts gate.  The CLI refuses earlier with the same
+    # message, but a library caller reaches the adapters only through here, so
+    # this check -- not that one -- is what guarantees no session can start
+    # against a missing or out-of-date ~/.assent contract.
+    try:
+        contracts.require_contracts()
+    except AssentError as e:
+        print(f"Global contracts: FAIL ({e})")
+        return 1
+
     try:
         unfinished = find_unfinished_prerequisites(cfg.tasks_dir)
     except AssentError as e:

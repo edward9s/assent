@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 from assent.__main__ import _start_stdin_stop_watcher, main
 from assent.init import init as run_init
+from tests.test_contracts import install_global_contracts
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _HAN_CHAR_RE = re.compile(r"[一-鿿]")
@@ -44,6 +45,10 @@ class MainTestCase(unittest.TestCase):
         os.chdir(self.root)
         self.addCleanup(os.chdir, self._old_cwd)
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        # `run` refuses without the global contracts, and every layered config
+        # read consults the user home, so both point at a temporary one here
+        # rather than at whatever the developer happens to have installed.
+        self.user_home = install_global_contracts(self)
 
     def run_main(self, argv) -> tuple[int, str]:
         out = io.StringIO()
@@ -118,6 +123,45 @@ class TestDispatch(MainTestCase):
         code, out = self.run_main(
             ["run", "--config", str(self.root / "nope" / "assent.toml")])
         self.assertEqual(code, 1)
+
+    def test_run_refuses_before_dispatch_when_a_global_contract_is_broken(self):
+        config = self.write_config()
+        self.write_task("plan01")
+        cases = {"missing": lambda p: p.unlink(),
+                 "stale": lambda p: p.write_text("older\n", encoding="utf-8")}
+        for state, break_contract in cases.items():
+            for argv in (["run"], ["run", "plan01"], ["run", "--all"]):
+                with self.subTest(state=state, argv=argv):
+                    home = install_global_contracts(self)
+                    break_contract(home / "instructions.md")
+                    with patch("assent.__main__.engine.run",
+                               side_effect=AssertionError("must not dispatch")), \
+                            patch("assent.__main__.run_all",
+                                  side_effect=AssertionError("must not dispatch")):
+                        code, out = self.run_main(
+                            [*argv, "--config", str(config)])
+                    self.assertEqual(code, 1)
+                    self.assertIn("Global contracts: FAIL", out)
+                    self.assertIn("assent init", out)
+
+    def test_an_absent_default_project_file_is_not_an_error(self):
+        # Everything stated user-wide is a complete, ordinary setup.
+        (self.user_home / "assent.toml").write_text(
+            '[adapter]\nname = "claude"\n', encoding="utf-8")
+        self.write_task("plan01")
+        self.assertFalse((self.root / ".assent" / "assent.toml").exists())
+
+        code, out = self.run_main(["status"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("Config error", out)
+
+    def test_config_help_presents_the_project_file_as_an_optional_override(self):
+        out = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(out):
+            main(["run", "--help"])
+        text = " ".join(out.getvalue().split())
+        self.assertIn("Optional project settings file", text)
+        self.assertIn("~/.assent/assent.toml", text)
 
     def test_run_all_accepts_an_explicit_prefix(self):
         config = self.write_config()

@@ -20,9 +20,10 @@ from assent.config import load_config
 from assent.plan import append_entry, journal_path_for, parse_task_file, set_status
 from tests.engine_support import (EngineTestCase, ScriptedAdapter, ok_result,
                                   task_text)
+from tests.test_contracts import GlobalContractsMixin
 
 
-class TestAntigravitySession(EngineTestCase):
+class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
     def setUp(self):
         super().setUp()
         from assent.adapters import antigravity
@@ -168,7 +169,7 @@ class TestAntigravitySession(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
 
 
-class TestAdapterProcessOutcomes(EngineTestCase):
+class TestAdapterProcessOutcomes(GlobalContractsMixin, EngineTestCase):
     def test_nonzero_done_retries_without_done_checkpoint_then_succeeds(self):
         path = self.write_task(1)
         cfg = self.build(retry=1)
@@ -314,7 +315,7 @@ class TestAdapterProcessOutcomes(EngineTestCase):
         self.assertNotIn("quota", [e["event"] for e in entries])
 
 
-class TestBillingAbort(EngineTestCase):
+class TestBillingAbort(GlobalContractsMixin, EngineTestCase):
     """A billing/insufficient-balance failure aborts the whole run without a retry.
 
     Dispatch is purely on failure_kind="billing" (never an adapter name), so this uses a
@@ -384,7 +385,7 @@ class TestBillingAbort(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
 
 
-class TestQuotaAndResume(EngineTestCase):
+class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
     def rotation_config(self):
         cfg = self.build()
         cfg.adapter_names = ("claude", "codex")
@@ -546,7 +547,7 @@ class TestQuotaAndResume(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
 
 
-class TestInterruptedTaskResume(EngineTestCase):
+class TestInterruptedTaskResume(GlobalContractsMixin, EngineTestCase):
     def test_keyboard_interrupt_marks_unverified_done_wip_then_resumes(self):
         path = self.write_task(1)
         cfg = self.build()
@@ -663,7 +664,7 @@ class TestInterruptedTaskResume(EngineTestCase):
         self.assertFalse(journal_path_for(path).exists())
 
 
-class TestQuotaMath(EngineTestCase):
+class TestQuotaMath(GlobalContractsMixin, EngineTestCase):
     def test_quota_wait_seconds(self):
         cfg = self.build()
         t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
