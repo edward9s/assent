@@ -239,6 +239,57 @@ class TestAcceptSuccess(AcceptRepositoryCase):
         self.assertIn("does not infer authorization", output)
 
 
+class TestIdempotentAfterTargetAdvance(AcceptRepositoryCase):
+    """Reproduces the acceptall01 incident: a folder accepted into main, with
+
+    main advancing further afterwards, must still resolve as an idempotent
+    no-op on rerun -- ancestry alone proves nothing is left to publish, so
+    receipt state (fresh, stale, or missing) must not matter.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._write_task()
+        self.worktree, self.branch, self.source_tip = self._make_source()
+        self._write_receipt()
+        code, output = self._accept()
+        self.assertEqual(code, 0, output)
+        self.published = self._head()
+        (self.root / "advance.txt").write_text("advance\n", encoding="utf-8")
+        _git(self.root, "add", "advance.txt")
+        _git(self.root, "commit", "-m", "advance target after acceptance")
+        self.advanced = self._head()
+        self.assertNotEqual(self.advanced, self.published)
+
+    def test_target_advance_after_accept_is_still_idempotent(self) -> None:
+        code, output = self._accept()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self._head(), self.advanced)
+        self.assertIn("already accepted", output)
+        self.assertIn("fully contained", output)
+        self._assert_no_temporary_state()
+
+    def test_target_advance_survives_missing_receipt(self) -> None:
+        (self.tasks_dir / verification.RECEIPT_NAME).unlink()
+
+        code, output = self._accept()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self._head(), self.advanced)
+        self.assertIn("already accepted", output)
+
+    def test_target_advance_survives_changed_verify_script(self) -> None:
+        with (self.assent_dir / "verify.py").open("a", encoding="utf-8") as handle:
+            handle.write("# script changed after acceptance\n")
+
+        code, output = self._accept()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self._head(), self.advanced)
+        self.assertIn("already accepted", output)
+
+
 class TestAcceptPrechecks(AcceptRepositoryCase):
     def test_unfinished_statuses_refuse_but_done_and_skip_are_complete(self) -> None:
         for status in ("TODO", "WIP", "BLOCKED"):

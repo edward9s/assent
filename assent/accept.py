@@ -163,6 +163,12 @@ def _accept_locked(cfg: Config) -> int:
         print(f"accept {folder}: refused, {e}")
         return 1
 
+    if gitops.is_ancestor(main, source_tip, target_before):
+        print(f"accept {folder}: already accepted; current source {source_branch} "
+              f"({source_tip[:12]}) is fully contained in {target_branch}. "
+              "Nothing to do.")
+        return 0
+
     stale_dependencies = [
         f"{dependency} ({tip[:12]})"
         for dependency, tip in dependency_tips
@@ -200,7 +206,6 @@ def _accept_locked(cfg: Config) -> int:
         print(_refresh_message(folder, "the verification script changed"))
         return 1
 
-    already_merged = gitops.is_ancestor(main, source_tip, target_before)
     subject = f"accept({folder}): integrate into {target_branch}"
     message = gitops.accept_commit_message(
         subject, folder, source_branch, source_tip,
@@ -228,7 +233,7 @@ def _accept_locked(cfg: Config) -> int:
                     gate_problem = (
                         "reconstructed candidate tree differs from the PASSED receipt "
                         f"({candidate_tree} != {receipt.integration_tree})")
-                elif not already_merged:
+                else:
                     parents = gitops.commit_parents(candidate, "HEAD")
                     if parents != (target_before, source_tip):
                         gate_problem = (
@@ -303,12 +308,6 @@ def _accept_locked(cfg: Config) -> int:
         print("accept did not publish; target refs/worktree remain as currently "
               "observed, and the source branch/worktree was kept")
         return 1
-    if already_merged:
-        print(f"accept {folder}: already accepted; current source {source_branch} "
-              f"({source_tip[:12]}) is contained in {target_branch}, and the "
-              "reconstructed tree exactly matches the PASSED receipt. Nothing to do.")
-        return 0
-
     target_after = gitops.commit_of(main, "HEAD")
     print(f"accept {folder}: done, PASSED receipt tree published without running verification.")
     print(f"  folder:          {folder}")

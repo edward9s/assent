@@ -257,6 +257,42 @@ class TestIdempotentRerun(AcceptAllRepositoryCase):
         self.assertIn("already accepted", second_output)
         self.assertIn("accepted:  solo", second_output)
 
+    def test_multiple_already_merged_folders_noop_then_pending_folder_proceeds(
+            self) -> None:
+        """Reproduces the acceptall01 incident inside ``--all``: folders
+
+        already accepted before main advanced further must each resolve as
+        idempotent no-ops, and the chain must still continue on to accept a
+        genuinely pending folder afterwards.
+        """
+        for folder in ("alpha", "beta"):
+            self._write_task(folder)
+            self._make_source(folder)
+        first_code, first_output = self._accept_all()
+        self.assertEqual(first_code, 0, first_output)
+        published = self._head()
+
+        (self.root / "advance.txt").write_text("advance\n", encoding="utf-8")
+        _git(self.root, "add", "advance.txt")
+        _git(self.root, "commit", "-m", "advance target after acceptance")
+        advanced = self._head()
+        self.assertNotEqual(advanced, published)
+
+        self._write_task("gamma")
+        self._make_source("gamma")
+
+        code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("already accepted", output)
+        self.assertIn("accepted:  alpha, beta, gamma", output)
+        self.assertEqual(self._accept_subjects(), [
+            "accept(alpha): integrate into trunk",
+            "accept(beta): integrate into trunk",
+            "accept(gamma): integrate into trunk",
+        ])
+        self.assertEqual(self._head("HEAD^"), advanced)
+
 
 class TestSkipCleanedFolder(AcceptAllRepositoryCase):
     """Reproduces the crashresume01 incident: a finished folder that was
