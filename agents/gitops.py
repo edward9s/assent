@@ -193,10 +193,32 @@ def _pathspec_excludes(root: Path, excludes: Sequence[str]) -> list[str]:
     return keep
 
 
+def _embedded_repo_paths(root: Path) -> list[str]:
+    """找出目前工作區變更中帶有 .git 標記的內嵌 repo。"""
+    out = _git(root, "status", "--porcelain", "--untracked-files=all")
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        path = _status_path(line).rstrip("/")
+        if path in seen:
+            continue
+        candidate = root / path
+        if candidate.is_dir() and (candidate / ".git").exists():
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
 def commit_all(root: Path, message: str, excludes: Sequence[str] = ()) -> None:
-    """git add -A(排除執行期產物)&& git commit -m message。"""
+    """git add -A(排除執行期產物與內嵌 repo)&& git commit -m message。"""
+    embedded = _embedded_repo_paths(root)
+    for path in embedded:
+        print(f"警告:跳過內嵌 repo:{path},請人工處理")
+    all_excludes = [*excludes, *embedded]
     spec = ["--", "."] + [f":(exclude){e}"
-                          for e in _pathspec_excludes(root, excludes)]
+                          for e in _pathspec_excludes(root, all_excludes)]
     _git(root, "add", "-A", *spec)
     _git(root, "commit", "-m", message)
 

@@ -3,6 +3,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 from agents import AgentsError
@@ -263,6 +265,25 @@ class TestCommitAll(GitTestCase):
         self.assertIn("new.txt", tracked)
         self.assertNotIn("live.log", tracked)   # 未被 ignore 的排除項仍生效
         self.assertNotIn("ignored.log", tracked)
+
+    def test_embedded_repo_without_commit_is_skipped(self):
+        nested = self.root / ".test-tmp" / "probe" / "inner"
+        nested.mkdir(parents=True)
+        _run(nested, "init")
+        (nested / "orphan.txt").write_text("未提交\n", encoding="utf-8")
+        (self.root / "normal.txt").write_text("正常變更\n", encoding="utf-8")
+
+        output = StringIO()
+        with redirect_stdout(output):
+            commit_all(self.root, "auto(t010): 跳過內嵌 repo")
+
+        tracked = subprocess.run(
+            ["git", "ls-files"], cwd=self.root, capture_output=True,
+            encoding="utf-8", check=True).stdout.splitlines()
+        self.assertIn("normal.txt", tracked)
+        self.assertFalse(any(path.startswith(".test-tmp/") for path in tracked))
+        self.assertIn("跳過內嵌 repo:.test-tmp/probe/inner,請人工處理",
+                      output.getvalue())
 
 
 class TestCommitIfDirty(GitTestCase):
