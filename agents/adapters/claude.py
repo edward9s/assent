@@ -1,8 +1,8 @@
-"""claude CLI adapter:組命令、stream-json、watchdog、額度偵測(W1 實作)。
+"""claude CLI adapter:組命令、stream-json、watchdog、額度偵測。
 
 技術事實見 workflow 專案 WORKFLOW_GUIDE.md 2.4;額度偵測策略見 2.5。
 
-W1 真 CLI 探勘所得(fixture: tests/fixtures/stream_json_ok.txt,見工作日誌):
+首次真 CLI 探勘所得(fixture: tests/fixtures/stream_json_ok.txt,見工作日誌):
 - `claude -p ... --output-format stream-json` **必須同時給 `--verbose`**,否則 CLI
   直接報 "requires --verbose" 並以非零退出。故本 adapter 一律注入 `--verbose`。
   (WORKFLOW_GUIDE 2.4 / README 命令形未含此旗標,已列為規格疑義交使用者。)
@@ -12,9 +12,9 @@ W1 真 CLI 探勘所得(fixture: tests/fixtures/stream_json_ok.txt,見工作日�
   `status`(成功時為 "allowed")、`resetsAt`(五小時窗重置的 Unix 秒數)、
   `rateLimitType`("five_hour")。這比 regex 掃文字可靠,故列為主要偵測來源;
   額度耗盡時的實際 status 值本次未取得樣本(成功案例是 "allowed"),
-  `_BLOCKED_STATUSES` 與文字 regex 皆為 best-effort,待 W5 首次真實遇到時校正(鐵則允許)。
+  `_BLOCKED_STATUSES` 與文字 regex 皆為 best-effort,待首次真實撞限時校正(見下方,鐵則允許)。
 
-W5 實測校正(2026-07-15,Pro 訂閱、fable/high 真實撞限):
+實測校正(2026-07-15,Pro 訂閱、fable/high 真實撞限):
 - 額度耗盡時 CLI 的人類可讀訊息實測為
   「You've hit your session limit · resets 4am (Asia/Taipei)」——不含
   "usage limit"/"rate limit"/"limit reached" 任何一種舊 regex 樣式,
@@ -38,7 +38,8 @@ if TYPE_CHECKING:
     from agents.config import Config
 
 # rate_limit_event.rate_limit_info.status 中代表「已被限流/耗盡」的值(best-effort;
-# 成功時實測為 "allowed",耗盡時的實際值待 W5 校正)。
+# 成功時實測為 "allowed",耗盡時的結構化 status 值仍未取得樣本,靠下方文字後備兜底,
+# 見檔頭 2026-07-15 校正)。
 _BLOCKED_STATUSES = {"rejected", "blocked", "exhausted", "throttled", "limited", "reached"}
 # 文字後備:僅比對「人類可讀字串」(result 文字、assistant 文字、非 JSON 的 stderr 行),
 # **不**掃原始 JSON,否則成功輸出裡的 "rate_limit_event"/"rateLimitType" 字樣會誤觸。

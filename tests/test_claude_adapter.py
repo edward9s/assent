@@ -1,7 +1,7 @@
 """claude adapter 測試:組命令、watchdog、額度偵測、檔位翻譯。
 
 全部用假子程序(sys.executable -c ...)或直接餵字串給純函式——不打真實 claude CLI、
-不依賴網路(鐵則 4)。真 CLI 探勘只在 W1 一次性錄 fixture,見 stream_json_ok.txt。
+不依賴網路(鐵則 4)。真 CLI 探勘只一次性錄 fixture,見 stream_json_ok.txt。
 """
 import json
 import sys
@@ -98,8 +98,8 @@ class TestParseQuota(unittest.TestCase):
         exhausted, _ = parse_output_for_quota("Error: rate limit exceeded\n")
         self.assertTrue(exhausted)
 
-    def test_w5_real_session_limit_message_detected(self):
-        # W5 真實撞限實測訊息(2026-07-15,Pro 訂閱):舊 regex 漏接的樣式
+    def test_real_session_limit_message_detected(self):
+        # 真實撞限實測訊息(2026-07-15,Pro 訂閱):舊 regex 漏接的樣式
         line = json.dumps({"type": "assistant", "message": {"content": [
             {"type": "text",
              "text": "You've hit your session limit · resets 4am (Asia/Taipei)"}]}})
