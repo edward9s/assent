@@ -226,9 +226,11 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
 
-    def test_verify_requires_one_folder_and_has_no_all_option(self):
-        for argv in (["verify"], ["verify", "one", "two"],
-                     ["verify", "one", "--all"]):
+    def test_verify_requires_a_mode_and_rejects_incompatible_options(self):
+        for argv in (["verify"], ["verify", "one", "--all"],
+                     ["verify", "one", "two", "--focus"],
+                     ["verify", "one", "--focus", "--no-bisect"],
+                     ["verify", "one", "one"]):
             with self.subTest(argv=argv), self.assertRaises(
                     SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
                 main(argv)
@@ -243,6 +245,24 @@ class TestDispatch(MainTestCase):
         self.assertEqual(codes, [0, 1])
         self.assertEqual(mocked.call_count, 2)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
+
+    def test_verify_dispatches_exact_selected_batch_and_focus(self):
+        config = self.write_config()
+        with patch("assent.__main__.verify_selected_batch", return_value=0) as batch:
+            code, _ = self.run_main([
+                "verify", "later", "earlier", "--no-bisect",
+                "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(batch.call_args.args[:2],
+                         (str(config), config.parent.resolve()))
+        self.assertEqual(batch.call_args.args[2], ["later", "earlier"])
+        self.assertFalse(batch.call_args.args[3])
+
+        with patch("assent.__main__.engine.verify_focused", return_value=0) as focus:
+            code, _ = self.run_main([
+                "verify", "reviewed", "--focus", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(focus.call_args.args[0].tasks_name, "reviewed")
 
     def test_verify_batch_dispatches_bisect_and_keeps_the_default_prompt(self):
         config = self.write_config()

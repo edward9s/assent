@@ -24,7 +24,8 @@ from assent.plan import Plan
 from assent.reject import reject_folder
 from assent.rework import rework_task
 from assent.terminal_log import terminal_logging
-from assent.verification import verify_batch, verify_folder
+from assent.verification import (verify_batch, verify_folder,
+                                  verify_selected_batch)
 
 _DEFAULT_CONFIG = ".assent/assent.toml"
 # Set by the parent scheduler on a spawned `assent run <folder>` child to opt
@@ -80,12 +81,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "report", help="Generate the human-readable run report _report.md "
                        "(zero tokens)")
     verify_p = sub.add_parser(
-        "verify", help="Refresh full integration verification for exactly one "
-                       "folder, or for every queued folder as one candidate "
-                       "with --batch")
+        "verify", help="Refresh full integration verification for one folder, "
+                       "an exact selected batch, or every queued folder with "
+                       "--batch")
     verify_p.add_argument(
-        "folder", nargs="?", metavar="FOLDER",
-        help="The completed work folder to verify (omit only with --batch)")
+        "folder", nargs="*", metavar="FOLDER",
+        help="One completed folder, or two or more exact folders to verify "
+             "as one dependency-ordered candidate (omit with --batch)")
     verify_p.add_argument(
         "--batch", action="store_true",
         help="Merge every finished, not-yet-integrated folder in folder-"
@@ -94,8 +96,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "skipped together with the folders queued after it")
     verify_p.add_argument(
         "--no-bisect", action="store_false", dest="bisect",
-        help="With --batch, record a failure as-is instead of localizing it to "
-             "the first folder that breaks the batch")
+        help="With --batch or an exact selected batch, record a failure as-is "
+             "instead of localizing it to the first folder that breaks the batch")
+    verify_p.add_argument(
+        "--focus", action="store_true",
+        help="With exactly one FOLDER, rerun its distinct DONE-task focused "
+             "verify commands in the source worktree; this cannot authorize "
+             "accept and creates no receipt")
     verify_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
         help=f"Config file location (default: {_DEFAULT_CONFIG})")
@@ -317,12 +324,22 @@ def _dispatch(argv: list[str]) -> int:
             parser.error("accept requires FOLDER or --all")
 
     if args.command == "verify":
-        if args.batch and args.folder is not None:
+        if args.batch and args.folder:
             parser.error("verify's --batch and FOLDER cannot be used together")
-        if not args.batch and args.folder is None:
-            parser.error("verify requires FOLDER or --batch")
-        if not args.batch and not args.bisect:
-            parser.error("verify's --no-bisect only applies to --batch")
+        if args.focus:
+            if args.batch:
+                parser.error("verify's --focus and --batch cannot be used together")
+            if len(args.folder) != 1:
+                parser.error("verify's --focus requires exactly one FOLDER")
+            if not args.bisect:
+                parser.error("verify's --no-bisect cannot be used with --focus")
+        elif not args.batch:
+            if not args.folder:
+                parser.error("verify requires FOLDER, a selected batch, or --batch")
+            if len(args.folder) == 1 and not args.bisect:
+                parser.error("verify's --no-bisect only applies to a batch")
+            if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
+                parser.error("verify does not allow duplicate FOLDER names")
 
     if args.command == "archive":
         if args.restore:
@@ -378,14 +395,19 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "verify":
         if not args.batch:
             try:
-                cfg = load_config(args.config, args.folder)
+                cfg = load_config(args.config, args.folder[0])
             except AssentError as e:
                 print(f"Config error: {e}")
                 return 1
         try:
             if args.batch:
                 return verify_batch(args.config, assent_dir, args.bisect)
-            return verify_folder(cfg)
+            if args.focus:
+                return engine.verify_focused(cfg)
+            if len(args.folder) == 1:
+                return verify_folder(cfg)
+            return verify_selected_batch(
+                args.config, assent_dir, args.folder, args.bisect)
         except KeyboardInterrupt:
             print("\nverify interrupted; temporary resources were cleaned up.")
             return 130

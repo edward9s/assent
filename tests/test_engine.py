@@ -18,6 +18,7 @@ from unittest import mock
 from assent import AssentError, engine, gitops
 from assent.adapters import Adapter, TaskResult
 from assent.config import load_config
+from assent.lockfile import hold_lock
 from assent.plan import append_entry, journal_path_for, parse_task_file, set_status
 
 _OK = 'python -c "raise SystemExit(0)"'
@@ -147,6 +148,83 @@ class EngineTestCase(unittest.TestCase):
                          summary="完成")
             return ok_result()
         return step
+
+
+class TestFocusedVerification(EngineTestCase):
+    def prepare_source(self):
+        self.commit_all()
+        worktree = gitops.ensure_worktree(self.root, "plan01")
+        branch = gitops.ensure_branch(worktree, "plan01/")
+        (worktree / "plan01.txt").write_text("source\n", encoding="utf-8")
+        gitops.commit_all(worktree, "finish plan01")
+        return worktree, gitops.branch_tip(self.root, branch)
+
+    def test_focus_orders_done_tasks_deduplicates_runs_in_source_cwd(self):
+        command = ('python -c "import pathlib,sys; '
+                   "sys.exit(0 if pathlib.Path('plan01.txt').is_file() else 7)\"")
+        self.write_task(1, slug="first", status="DONE", verify=command)
+        self.write_task(2, slug="duplicate", status="DONE", verify=command)
+        self.write_task(3, slug="skipped", status="SKIP",
+                        verify=_FAILV)
+        self.write_task(4, slug="unfinished", status="TODO", verify=_FAILV)
+        cfg = self.build()
+        worktree, source_tip = self.prepare_source()
+        target_tip = gitops.commit_of(self.root, "HEAD")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = engine.verify_focused(cfg)
+
+        self.assertEqual(result, 0, output.getvalue())
+        text = output.getvalue()
+        self.assertEqual(text.count(f"verify: {command}"), 1)
+        self.assertIn("complete integration verification has not run", text)
+        self.assertIn("cannot authorize `accept`", text)
+        self.assertEqual(gitops.commit_of(self.root, "HEAD"), target_tip)
+        self.assertEqual(
+            gitops.branch_tip(self.root, gitops.current_branch(worktree)),
+            source_tip)
+        self.assertFalse((self.plan_dir / "_verification.toml").exists())
+        self.assertFalse((self.root / ".assent" / "_batch_verification.toml").exists())
+        self.assertTrue((worktree / "plan01.txt").is_file())
+
+    def test_focus_stops_at_first_failed_done_task(self):
+        later = ('python -c "import pathlib; '
+                 "pathlib.Path('later.txt').write_text('ran')\"")
+        self.write_task(1, slug="fails", status="DONE", verify=_FAILV)
+        self.write_task(2, slug="later", status="DONE", verify=later)
+        cfg = self.build()
+        worktree, _source_tip = self.prepare_source()
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = engine.verify_focused(cfg)
+
+        self.assertEqual(result, 1)
+        self.assertNotIn("verify: " + later, output.getvalue())
+        self.assertFalse((worktree / "later.txt").exists())
+
+    def test_focus_refuses_busy_folder_and_no_eligible_command(self):
+        path = self.write_task(1, status="SKIP")
+        self.write_task(2, slug="waiting", status="TODO")
+        cfg = self.build()
+        self.prepare_source()
+
+        with hold_lock(cfg.tasks_dir, cfg.tasks_name):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = engine.verify_focused(cfg)
+        self.assertEqual(result, 1)
+        self.assertIn("refused", output.getvalue())
+
+        # Release the lock, then prove the no-eligible-command refusal without
+        # starting a subprocess or changing either Git identity.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = engine.verify_focused(cfg)
+        self.assertEqual(result, 1)
+        self.assertIn("no DONE task", output.getvalue())
+        self.assertEqual(parse_task_file(path).status, "SKIP")
 
 
 class TestRunSuccess(EngineTestCase):
