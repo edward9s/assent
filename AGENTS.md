@@ -72,11 +72,14 @@ Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
   is mechanically provable.
 - `build/lib/` is an old build artifact; never modify it.
 - `model` and `effort` are orthogonal abstract tiers: `model` uses
-  prime/core/lite; the optional `effort` uses low/medium/high and is written
-  explicitly only when a task must deviate from the model default. `high` means
+  prime/core/lite; the optional `effort` uses heavy/normal/slight and is written
+  explicitly only when a task must deviate from the model default. `heavy` means
   a portable high reasoning investment, not a vendor's native maximum tier; an
   adapter must not silently ignore or up/down-shift an effort a task states
-  explicitly. Vendor-specific effort values belong to configuration mappings
-  (peers of the models table) and must not be hardcoded in adapter code.
+  explicitly. Abstract and vendor effort names intentionally differ; when a
+  translation is missing, the settings-layer built-in baseline maps heavy ->
+  high, normal -> medium, and slight -> low instead of sending the abstract
+  name as a CLI value. Vendor-specific effort values belong to configuration
+  mappings (peers of the models table) and must not be hardcoded in adapter
+  code.
 - When using assent, first read `.assent/instructions.md` in the project's main worktree; a worktree session uses the absolute path the scheduler provides. <!-- assent-instructions -->
-

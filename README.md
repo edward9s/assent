@@ -442,7 +442,7 @@ Assent works with different AI CLI tools via pluggable adapters. Each task file
 specifies an abstract **tier** (`prime`, `core`, or `lite`) instead of a concrete
 model name; the adapter's configuration table translates that tier into the actual
 CLI model for this run. Similarly, a task can request an abstract **effort** level
-(`low`, `medium`, or `high`), which the adapter translates to the vendor's
+(`heavy`, `normal`, or `slight`), which the adapter translates to the vendor's
 concrete CLI value (if any).
 
 ### Supported adapters
@@ -493,20 +493,20 @@ lite  = "gemini-3.5-flash" # Gemini 3.5 Flash – efficient
 
 # Antigravity effort translations per tier. The notes below explain each.
 [adapter.antigravity.default_effort]
-prime = "high"
-core  = "high"
-lite  = "high"
+prime = "heavy"
+core  = "heavy"
+lite  = "heavy"
 
 # Gemini 3.1 Pro supports only low and high efforts, not medium. For quality,
-# medium is translated up to high (never silently downgraded).
+# the abstract normal effort is translated up to vendor high (never silently downgraded).
 [adapter.antigravity.efforts.prime]
-medium = "high"
+normal = "high"
 
-# Gemini 3.5 Flash supports only low and medium, not high. The lite tier's high
-# is translated to medium (the family's ceiling), visible here in the config
-# table where it can be inspected and overridden if needed.
+# Gemini 3.5 Flash supports only low and medium, not high. The lite tier's
+# abstract heavy effort is translated to vendor medium (the family's ceiling),
+# visible here in the config table where it can be inspected and overridden if needed.
 [adapter.antigravity.efforts.lite]
-high = "medium"
+heavy = "medium"
 ```
 
 ### Model/effort matrix
@@ -519,31 +519,31 @@ each task-file (tier, effort) pair resolves to in each adapter:
 
 | Effort | prime<br/>(Fable) | core<br/>(Opus) | lite<br/>(Sonnet) |
 |--------|---|---|---|
-| low | `--model fable` | `--model opus` | `--model sonnet` |
-| medium | `--model fable --effort medium` | `--model opus --effort medium` | `--model sonnet --effort medium` |
-| high | `--model fable --effort high` | `--model opus --effort high` | `--model sonnet --effort high` |
+| slight | `--model fable --effort low` | `--model opus --effort low` | `--model sonnet --effort low` |
+| normal | `--model fable --effort medium` | `--model opus --effort medium` | `--model sonnet --effort medium` |
+| heavy | `--model fable --effort high` | `--model opus --effort high` | `--model sonnet --effort high` |
 
 #### Codex adapter
 
 | Effort | prime<br/>(gpt-5.6-sol) | core<br/>(gpt-5.6-terra) | lite<br/>(gpt-5.6-luna) |
 |--------|---|---|---|
-| low | `--model gpt-5.6-sol` | `--model gpt-5.6-terra` | `--model gpt-5.6-luna` |
-| medium | `--model gpt-5.6-sol --effort medium` | `--model gpt-5.6-terra --effort medium` | `--model gpt-5.6-luna --effort medium` |
-| high | `--model gpt-5.6-sol --effort high` | `--model gpt-5.6-terra --effort high` | `--model gpt-5.6-luna --effort high` |
+| slight | `--model gpt-5.6-sol --effort low` | `--model gpt-5.6-terra --effort low` | `--model gpt-5.6-luna --effort low` |
+| normal | `--model gpt-5.6-sol --effort medium` | `--model gpt-5.6-terra --effort medium` | `--model gpt-5.6-luna --effort medium` |
+| heavy | `--model gpt-5.6-sol --effort high` | `--model gpt-5.6-terra --effort high` | `--model gpt-5.6-luna --effort high` |
 
 #### Antigravity adapter (1.1.5+)
 
 | Effort | prime<br/>(3.1 Pro) | core<br/>(3.6 Flash) | lite<br/>(3.5 Flash) |
 |--------|---|---|---|
-| low | `--model gemini-3.1-pro --effort low` | `--model gemini-3.6-flash --effort low` | `--model gemini-3.5-flash --effort low` |
-| medium | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort medium` | `--model gemini-3.5-flash --effort medium` |
-| high | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort high` | `--model gemini-3.5-flash --effort medium` |
+| slight | `--model gemini-3.1-pro --effort low` | `--model gemini-3.6-flash --effort low` | `--model gemini-3.5-flash --effort low` |
+| normal | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort medium` | `--model gemini-3.5-flash --effort medium` |
+| heavy | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort high` | `--model gemini-3.5-flash --effort medium` |
 
 Notes:
-- **Antigravity prime/medium**: Gemini 3.1 Pro does not support `medium`, so
+- **Antigravity prime/normal**: Gemini 3.1 Pro does not support `medium`, so
   assent chooses `high` instead (quality-first mapping). This is not a silent
   fallback—the configuration table makes it visible and auditable.
-- **Antigravity lite/high**: Gemini 3.5 Flash has no `high` effort level, so
+- **Antigravity lite/heavy**: Gemini 3.5 Flash has no `high` effort level, so
   `high` is translated to `medium`, the family's maximum available.
 - **Antigravity 1.1.5 minimum**: This is the version that supports `--effort`,
   stable model slugs, and the headless fixes required for unattended execution.
@@ -567,7 +567,7 @@ workspace trust remain under your control.
 ```toml
 title = "Analyze code with high-quality reasoning"
 model = "prime"
-effort = "high"
+effort = "heavy"
 status = "TODO"
 scope = ["src/", "tests/"]
 verify = "python -m pytest"
@@ -585,7 +585,7 @@ When `assent run` executes this task, it will:
 **Switching adapters in an existing project**
 
 Changing `[adapter]` name is a one-line config change. Existing task files do
-not need to change; they still use `model = "prime"` and `effort = "high"`, and
+not need to change; they still use `model = "prime"` and `effort = "heavy"`, and
 the new adapter's configuration table translates those the same way. Once you
 have switched adapters, the next `assent check` will validate the new adapter
 before any session starts.
@@ -604,7 +604,9 @@ And for effort translation:
 
 1. Tier-specific section: `[adapter.<name>.efforts.<tier>]`
 2. Flat section: `[adapter.<name>.efforts]`
-3. Identity (send the abstract value as-is)
+3. Built-in baseline: `heavy` → `high`, `normal` → `medium`, `slight` → `low`
+   (each abstract key falls back independently when a higher-priority table
+   lacks that key).
 
 Example: if your Antigravity setup has a newer 3.1 Pro that supports medium,
 you can remove the quality-first mapping:
@@ -612,11 +614,11 @@ you can remove the quality-first mapping:
 ```toml
 # Remove this line:
 # [adapter.antigravity.efforts.prime]
-# medium = "high"
+# normal = "high"
 
 # Or set it to the actual value:
 [adapter.antigravity.efforts.prime]
-medium = "medium"
+normal = "medium"
 ```
 
 ### Configuring Antigravity print timeout
@@ -689,17 +691,17 @@ not depend on the quota-limited folder.
 **Fixing configuration after a preflight error**
 
 Do not modify the task file's abstract tier or effort. Instead, update only the
-adapter configuration. For example, if prime/medium is mapped to high but you
+adapter configuration. For example, if prime/normal is mapped to high but you
 want to change it:
 
 ```toml
 # Before
 [adapter.antigravity.efforts.prime]
-medium = "high"
+normal = "high"
 
-# After (if medium is now supported)
+# After (if normal is now supported)
 [adapter.antigravity.efforts.prime]
-medium = "medium"
+normal = "medium"
 ```
 
 After fixing the config, no changes to the `.assent/` management files are
@@ -714,7 +716,7 @@ needed; `assent check` will re-validate and `assent run` will retry.
   stay in `AGENTS.md`.
 - Config template: [assent/templates/assent.toml](assent/templates/assent.toml)
   — adapter selection, the abstract tier (prime/core/lite) mapping table,
-  abstract effort (low/medium/high) defaults and CLI-value translation,
+  abstract effort (heavy/normal/slight) defaults and CLI-value translation,
   watchdog, and retry parameters.
 
 ## FAQ
