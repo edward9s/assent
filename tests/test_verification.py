@@ -22,7 +22,7 @@ from assent.folder_verification import (RECEIPT_NAME, VerificationReceipt,
                                         write_receipt)
 from assent.gitops import (branch_tip, commit_of, folder_branches, tree_of,
                            working_tree_status)
-from assent.verification_common import (ProvisionedLink,
+from assent.verification_common import (ProvisionedLink, _require_no_overlap,
                                         provisioned_candidate_links, summary,
                                         union_worktree_links)
 
@@ -75,10 +75,21 @@ class VerificationRepositoryCase(unittest.TestCase):
             'goal = "done"\nacceptance = "verified"\n',
             encoding="utf-8")
         (self.root / "README.md").write_text("initial\n", encoding="utf-8")
-        # Shared by trunk and every source branch, so a provisioned root-level
-        # link stays ignored in the source worktree and in the candidate alike.
+        # Shared by trunk and every source branch, so a provisioned link stays
+        # ignored in the source worktree and in the candidate alike.  The
+        # tracked lib/ tree gives the nested cases a real parent chain: an
+        # ignored directory link at lib/l10n/arb, an ignored generated leaf
+        # beside a tracked source at lib/models/task.g.dart, and an ordinary
+        # ignored cache directory nested in the same tree.
         (self.root / ".gitignore").write_text(
-            "pkg/\nassets/\nignored/\n", encoding="utf-8")
+            "pkg/\nassets/\nignored/\nlib/l10n/arb/\n*.g.dart\n"
+            "lib/.cache/\n", encoding="utf-8")
+        (self.root / "lib" / "models").mkdir(parents=True)
+        (self.root / "lib" / "l10n").mkdir(parents=True)
+        (self.root / "lib" / "models" / "task.dart").write_text(
+            "tracked source\n", encoding="utf-8")
+        (self.root / "lib" / "l10n" / "app_en.arb").write_text(
+            "{}\n", encoding="utf-8")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "initial")
         self.target_tip = commit_of(self.root, "HEAD")
@@ -104,6 +115,13 @@ class VerificationRepositoryCase(unittest.TestCase):
         (target / "marker.txt").write_text(f"{name} marker\n", encoding="utf-8")
         return target
 
+    def _peer_worktree(self) -> Path:
+        """Add a second source worktree, so Git's ignore rules apply there too."""
+        peer = self.source_worktree.parent / "peer plan"
+        _git(self.root, "branch", "peer/run", self.target_tip)
+        _git(self.root, "worktree", "add", str(peer), "peer/run")
+        return peer
+
     def _provision_link(self, worktree: Path, name: str) -> Path:
         """Link ``worktree/name`` at a fresh external target and return it."""
         target = self._link_target(name)
@@ -112,14 +130,15 @@ class VerificationRepositoryCase(unittest.TestCase):
 
     def _write_verifier(self, exit_code: int, output_size: int = 0,
                         stderr: str = "", probe: Sequence[str] = (),
-                        absent: Sequence[str] = ()) -> None:
+                        absent: Sequence[str] = (),
+                        read: Sequence[str] = ()) -> None:
         """Write the stand-in full verifier.
 
-        ``probe`` names root-level paths whose ``marker.txt`` the verifier must
-        be able to read from inside the candidate, and ``absent`` names paths
-        that must not exist there; either expectation failing makes the run
-        exit nonzero, which is exactly how a missing or unwanted candidate link
-        should surface.
+        ``probe`` names directory paths whose ``marker.txt`` the verifier must
+        be able to read from inside the candidate, ``read`` names files it must
+        be able to read directly, and ``absent`` names paths that must not exist
+        there; any expectation failing makes the run exit nonzero, which is
+        exactly how a missing or unwanted candidate link should surface.
         """
         script = (
             "from pathlib import Path\n"
@@ -133,6 +152,9 @@ class VerificationRepositoryCase(unittest.TestCase):
             "observed.write_text(str(Path.cwd()) + '\\n' + parents, encoding='utf-8')\n"
             f"for name in {list(probe)!r}:\n"
             "    print('probe', name, (Path(name) / 'marker.txt')"
+            ".read_text(encoding='utf-8').strip())\n"
+            f"for name in {list(read)!r}:\n"
+            "    print('read', name, Path(name)"
             ".read_text(encoding='utf-8').strip())\n"
             f"for name in {list(absent)!r}:\n"
             "    assert not Path(name).exists(), 'unexpected candidate path: ' + name\n"
@@ -159,8 +181,10 @@ class VerificationRepositoryCase(unittest.TestCase):
 
     def _commit_target_verifier(self, exit_code: int, output_size: int = 0,
                                 stderr: str = "", probe: Sequence[str] = (),
-                                absent: Sequence[str] = ()) -> None:
-        self._write_verifier(exit_code, output_size, stderr, probe, absent)
+                                absent: Sequence[str] = (),
+                                read: Sequence[str] = ()) -> None:
+        self._write_verifier(exit_code, output_size, stderr, probe, absent,
+                             read)
         _git(self.root, "add", ".assent/verify.py")
         _git(self.root, "commit", "-m", "change full verifier")
 
@@ -598,14 +622,13 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         target = self._link_target("pkg")
         with provisioned_candidate_links(
                 self.root, (ProvisionedLink("pkg", target),)) as mirrored:
-            self.assertEqual([link.name for link in mirrored], ["pkg"])
+            self.assertEqual([link.path for link in mirrored], ["pkg"])
             self.assertTrue((self.root / "pkg" / "marker.txt").is_file())
         self.assertFalse((self.root / "pkg").exists())
         self.assertTrue((target / "marker.txt").is_file())
 
     def test_two_worktrees_disagreeing_about_one_name_refuse(self):
-        peer = self.parent / "peer worktree"
-        peer.mkdir()
+        peer = self._peer_worktree()
         self._provision_link(self.source_worktree, "pkg")
         make_directory_link(peer / "pkg", self._link_target("other pkg"))
 
@@ -648,7 +671,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         branches, paths = self._temporary_resources()
         self.assertEqual((branches, paths), ([], []))
 
-    def test_a_dangling_link_is_not_provisioned(self):
+    def test_a_dangling_link_refuses_without_writing_evidence(self):
         target = self._provision_link(self.source_worktree, "pkg")
         shutil.rmtree(target)
 
@@ -656,10 +679,133 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         with contextlib.redirect_stdout(output):
             code = verify_folder(self.cfg)
 
-        # A dangling link is not a directory link, so it is simply not
-        # provisioned; the run proceeds and the verifier decides.
-        self.assertEqual(code, 0, output.getvalue())
+        # The human provisioned pkg deliberately, so a target that has gone
+        # missing is a refusal rather than a candidate quietly missing it.
+        self.assertEqual(code, 1, output.getvalue())
+        self.assertIn("cannot be resolved", output.getvalue())
+        self.assertFalse(receipt_path(self.cfg).exists())
+        self.assertFalse(self.counter.exists())
         self.assertFalse((self.source_worktree / "pkg").is_dir())
+
+
+class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
+    """Nested directory links and source-adjacent ignored leaf files.
+
+    Everything here uses genuine filesystem links -- a junction on Windows, a
+    directory symlink elsewhere, and an automatically created candidate file
+    link -- because whether Git and the filesystem agree about a nested link is
+    the fact under test.
+    """
+
+    def _provision_nested(self) -> Path:
+        """Link the ignored lib/l10n/arb below tracked parents in the source."""
+        target = self.parent / "external arb"
+        target.mkdir()
+        (target / "app_localizations.dart").write_text(
+            "// generated localizations\n", encoding="utf-8")
+        make_directory_link(self.source_worktree / "lib/l10n/arb", target)
+        return target
+
+    def _provision_generated_part(self) -> Path:
+        """Write an ordinary ignored generated part beside its tracked source."""
+        part = self.source_worktree / "lib/models/task.g.dart"
+        part.write_text("// generated part\n", encoding="utf-8")
+        return part
+
+    def test_a_nested_directory_link_reaches_the_candidate_unchanged(self):
+        target = self._provision_nested()
+        self._commit_target_verifier(
+            exit_code=0, read=("lib/l10n/arb/app_localizations.dart",))
+
+        self.assertEqual(verify_folder(self.cfg), 0)
+
+        self.assertEqual(
+            read_receipt(receipt_path(self.cfg), self.root).status, "PASSED")
+        # The source link and the external target both survive the run.
+        self.assertTrue((target / "app_localizations.dart").is_file())
+        self.assertTrue(
+            (self.source_worktree / "lib/l10n/arb"
+             / "app_localizations.dart").is_file())
+        branches, paths = self._temporary_resources()
+        self.assertEqual((branches, paths), ([], []))
+
+    def test_an_ignored_generated_part_is_linked_without_preparation(self):
+        part = self._provision_generated_part()
+        self._commit_target_verifier(
+            exit_code=0, read=("lib/models/task.g.dart",))
+
+        # No hardlink twin and no symlink were prepared: the file is an
+        # ordinary ignored file beside its tracked source.
+        self.assertFalse(os.path.islink(part))
+        self.assertEqual(verify_folder(self.cfg), 0)
+
+        self.assertEqual(
+            read_receipt(receipt_path(self.cfg), self.root).status, "PASSED")
+        self.assertEqual(part.read_text(encoding="utf-8"), "// generated part\n")
+
+    def test_ignored_trees_and_link_descendants_stay_out_of_the_candidate(self):
+        self._provision_nested()
+        self._provision_generated_part()
+        cache = self.source_worktree / "lib/.cache"
+        cache.mkdir()
+        (cache / "build.g.dart").write_text("cached\n", encoding="utf-8")
+
+        links = union_worktree_links([self.source_worktree])
+
+        self.assertEqual(
+            [(link.path, link.kind) for link in links],
+            [("lib/l10n/arb", "directory"), ("lib/models/task.g.dart", "file")])
+        self._commit_target_verifier(
+            exit_code=0, read=("lib/models/task.g.dart",),
+            absent=("lib/.cache",))
+        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertTrue((cache / "build.g.dart").is_file())
+
+    def test_cleanup_removes_only_the_parents_assent_created(self):
+        # lib/models is part of the candidate's tracked tree, so only a parent
+        # chain Assent had to create may be removed again afterwards.
+        target = self._link_target("nested pkg")
+        link = ProvisionedLink("pkg/deep/nested", target)
+        with provisioned_candidate_links(self.root, (link,)) as mirrored:
+            self.assertEqual([entry.path for entry in mirrored],
+                             ["pkg/deep/nested"])
+            self.assertTrue((self.root / "pkg/deep/nested/marker.txt").is_file())
+        self.assertFalse((self.root / "pkg").exists())
+        self.assertTrue((self.root / "lib" / "models").is_dir())
+        self.assertTrue((target / "marker.txt").is_file())
+
+    def test_two_worktrees_offering_different_file_contents_refuse(self):
+        peer = self._peer_worktree()
+        self._provision_generated_part()
+        (peer / "lib/models/task.g.dart").write_text(
+            "// a different generation\n", encoding="utf-8")
+
+        # Identical content at one path is one artifact, not a conflict.
+        self.assertEqual(
+            union_worktree_links([self.source_worktree, self.source_worktree]),
+            union_worktree_links([self.source_worktree]))
+        with self.assertRaises(AssentError) as ctx:
+            union_worktree_links([self.source_worktree, peer])
+        self.assertIn("differing contents", str(ctx.exception))
+
+    def test_two_worktrees_disagreeing_about_a_kind_refuse(self):
+        peer = self._peer_worktree()
+        self._provision_generated_part()
+        make_directory_link(peer / "lib/models/task.g.dart",
+                            self._link_target("kind clash"))
+
+        with self.assertRaises(AssentError) as ctx:
+            union_worktree_links([self.source_worktree, peer])
+        self.assertIn("as both a", str(ctx.exception))
+
+    def test_one_provisioned_path_inside_another_refuses(self):
+        # Discovery prunes a link's own descendants, so overlap can only arrive
+        # from two worktrees; the union guard is what refuses it either way.
+        with self.assertRaises(AssentError) as ctx:
+            _require_no_overlap((
+                ProvisionedLink("lib/l10n", self._link_target("outer")),
+                ProvisionedLink("lib/l10n/arb", self._link_target("inner"))))
+        self.assertIn("lies inside", str(ctx.exception))
 
 
 if __name__ == "__main__":

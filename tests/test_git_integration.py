@@ -271,7 +271,7 @@ class TestTemporaryWorktrees(GitRepositoryCase):
                 self.root, "plan01", snapshot) as (path, _branch):
             with provisioned_candidate_links(
                     path, (ProvisionedLink("pkg", target),)) as mirrored:
-                self.assertEqual([link.name for link in mirrored], ["pkg"])
+                self.assertEqual([link.path for link in mirrored], ["pkg"])
                 self.assertTrue((path / "pkg" / "marker.txt").is_file())
             self.assertFalse((path / "pkg").exists())
 

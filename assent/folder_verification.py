@@ -291,9 +291,10 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
                     "candidate")
             integration_tree = gitops.tree_of(candidate, "HEAD")
             # Every source worktree whose commits are in this candidate may
-            # have provisioned ignored root-level directory links; the verifier
-            # needs the same ones, and an unmirrorable link refuses here rather
-            # than producing evidence for a candidate nobody provisioned.
+            # hold ignored directory links and generated leaf files; the
+            # verifier needs the same ones, and an unmirrorable artifact
+            # refuses here rather than producing evidence for a candidate
+            # nobody provisioned.
             with provisioned_candidate_links(candidate, links):
                 try:
                     result = run_full_verifier(script, candidate)

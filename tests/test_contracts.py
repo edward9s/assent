@@ -79,7 +79,9 @@ class TestContractContent(unittest.TestCase):
         install_global_contracts(self)
         text = contracts.installed_contract_text("format.md")
         for phrase in (
-                "explicitly provisioned ignored root-level directory links",
+                "explicitly provisioned ignored\ndirectory links",
+                "ordinary ignored leaf files that sit inside an otherwise "
+                "tracked\ndirectory",
                 "Arbitrary ignored content is never exposed",
                 "removed before the temporary worktree"):
             with self.subTest(phrase=phrase):

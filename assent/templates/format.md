@@ -857,22 +857,37 @@ residue manually with `git worktree remove --force <path>` and `git branch -D
 
 That candidate is built by `git worktree add`, so untracked and ignored paths
 are absent from it. Complete verification therefore mirrors, and mirrors only,
-the explicitly provisioned ignored root-level directory links of the source
-worktrees that enter the candidate — Windows junctions and directory symlinks,
-POSIX directory symlinks — at the same relative name and resolved target, and
-only where that destination is absent from the candidate and ignored there.
-Arbitrary ignored content is never exposed: ordinary ignored directories,
-files, nested links, `.assent`, build output, caches, credentials, and editor
-state stay out. Several sources contribute the union of their links; the same
-name and target seen twice is one link, while conflicting targets, an occupied
-destination, or a link that cannot be created refuse before the verifier runs
-and before any `PASSED` evidence exists. The mirrors live only for the verifier
-run and are removed before the temporary worktree is, so neither creating nor
-cleaning a candidate ever traverses, modifies, or deletes a linked target, and
-the source worktree's own link survives success, failure, and interruption.
-Provision such a link yourself, next to the source worktree, when a private
-package directory or a large asset tree must stay out of Git; there is no
-project setting and no force flag that widens this.
+two kinds of artifact from the source worktrees that enter the candidate, at
+the root or nested below tracked parents: the explicitly provisioned ignored
+directory links — Windows junctions and directory symlinks, POSIX directory
+symlinks — and ordinary ignored leaf files that sit inside an otherwise tracked
+directory, such as a generated `lib/models/task.g.dart` beside its tracked
+source. A directory is mirrored as a link to the same resolved target, a file
+as a candidate-side link to the source file (a same-volume hard link on
+Windows, a file symlink on POSIX); only missing parent directories are created,
+and cleanup removes exactly those. Nothing is copied, and nobody has to prepare
+hardlink twins or turn a generated file into a symlink by hand.
+
+Arbitrary ignored content is never exposed. Whole ignored directory trees are
+pruned rather than enumerated, so `.git`, `.assent`, build output, caches,
+credentials, editor state, and every path inside a mirrored link's target stay
+out, as does any file whose parent chain is not part of the candidate's tracked
+tree. Each destination must be absent from the candidate and ignored there; a
+provisioned artifact may add an ignored path, never replace or shadow tracked
+content. Several sources contribute the union of their artifacts: the same
+relative path resolving to the same directory target, or to a file with the
+same content digest, is one artifact, while conflicting targets, differing file
+contents, a path that is a directory in one worktree and a file in another, an
+overlap between one artifact and another's subtree, a dangling or unsupported
+link, an occupied destination, and a link that cannot be created all refuse
+before the verifier runs and before any `PASSED` evidence exists. The mirrors
+live only for the verifier run and are removed before the temporary worktree
+is, deepest path first, so neither creating nor cleaning a candidate ever
+traverses, modifies, or deletes a linked target, and the source worktree's own
+links and files survive success, failure, and interruption. Provision a
+directory link yourself, next to the source worktree, when a private package
+directory or a large asset tree must stay out of Git; there is no project
+setting and no force flag that widens any of this.
 
 Who starts that second stage is a project policy, `receipt_refresh` in
 `assent.toml`'s `[verification]` section. Under the default `"manual"`, run

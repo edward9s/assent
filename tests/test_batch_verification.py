@@ -55,10 +55,19 @@ class BatchVerifyRepositoryCase(unittest.TestCase):
         _git(self.root, "config", "user.email", "assent@example.invalid")
         _git(self.root, "checkout", "-b", "trunk")
         # pkg/ and assets/ let a test provision a real root-level directory
-        # link that stays ignored in the source worktree and the candidate.
+        # link that stays ignored in the source worktree and the candidate;
+        # lib/ adds the nested cases, a directory link at lib/l10n/arb and an
+        # ignored generated leaf beside the tracked lib/models/task.dart.
         (self.root / ".gitignore").write_text(
-            ".assent/\npkg/\nassets/\nignored/\n", encoding="utf-8")
+            ".assent/\npkg/\nassets/\nignored/\nlib/l10n/arb/\n*.g.dart\n",
+            encoding="utf-8")
         (self.root / "README.md").write_text("initial\n", encoding="utf-8")
+        (self.root / "lib" / "models").mkdir(parents=True)
+        (self.root / "lib" / "models" / "task.dart").write_text(
+            "tracked source\n", encoding="utf-8")
+        (self.root / "lib" / "l10n").mkdir(parents=True)
+        (self.root / "lib" / "l10n" / "app_en.arb").write_text(
+            "{}\n", encoding="utf-8")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "initial")
 
@@ -944,6 +953,39 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
             self.assertTrue((source_link / "marker.txt").is_file())
             self.assertTrue((target / "marker.txt").is_file())
         self.assertTrue(ordinary.is_dir())
+
+    def test_dynamic_batch_mirrors_nested_links_and_generated_leaf_files(
+            self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        arb = self.parent / "external arb"
+        arb.mkdir()
+        (arb / "app_localizations.dart").write_text("// l10n\n", encoding="utf-8")
+        make_directory_link(
+            gitops.worktree_path(self.root, "aa") / "lib/l10n/arb", arb)
+        part = gitops.worktree_path(self.root, "bb") / "lib/models/task.g.dart"
+        part.write_text("// generated part\n", encoding="utf-8")
+        cache = gitops.worktree_path(self.root, "bb") / "ignored"
+        cache.mkdir()
+        (cache / "build.g.dart").write_text("cached\n", encoding="utf-8")
+        self.write_verify(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "for name in ['lib/l10n/arb/app_localizations.dart',\n"
+            "             'lib/models/task.g.dart']:\n"
+            "    print('read', name, Path(name).read_text(encoding='utf-8')"
+            ".strip())\n"
+            "assert not Path('ignored').exists(), 'ignored tree leaked'\n"
+            "sys.exit(0)\n")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.read_batch_receipt().status, "PASSED")
+        # Both sources keep what they provisioned, and the target is untouched.
+        self.assertTrue((arb / "app_localizations.dart").is_file())
+        self.assertEqual(part.read_text(encoding="utf-8"), "// generated part\n")
+        self.assertTrue((cache / "build.g.dart").is_file())
 
     def test_selected_batch_mirrors_the_links_of_the_named_folders(self) -> None:
         self.make_source("aa")

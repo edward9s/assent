@@ -6,8 +6,8 @@ write and digest helpers both of them use, the source-identity snapshot the
 folder and batch paths both take, the two candidate builders (one folder
 merged into the target, and an ordered chain of folders) that both the batch
 freshness rules and the batch execution path rebuild, and the provisioned
-root-level directory links the folder and batch runs both mirror into a
-candidate before starting the full verifier.
+directory links and ignored leaf files the folder and batch runs both mirror
+into a candidate before starting the full verifier.
 
 This module deliberately imports none of ``folder_verification``,
 ``batch_receipt``, or ``batch_verification``, so those three stay independent
@@ -48,14 +48,14 @@ def invalidate_receipt(path: Path) -> None:
             f"Unable to invalidate old verification receipt {path}: {e}") from e
 
 
-def sha256_file(path: Path) -> str:
+def sha256_file(path: Path, label: str = "verification script") -> str:
     digest = hashlib.sha256()
     try:
         with open(path, "rb") as handle:
             for block in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(block)
     except OSError as e:
-        raise AssentError(f"Unable to read verification script {path}: {e}") from e
+        raise AssentError(f"Unable to read {label} {path}: {e}") from e
     return digest.hexdigest()
 
 
@@ -187,20 +187,35 @@ def run_full_verifier(script: Path,
     return result
 
 
+DIRECTORY_LINK = "directory"
+FILE_LINK = "file"
+_EXCLUDED_ROOTS = (".git", ".assent")
+
+
 @dataclass(frozen=True)
 class ProvisionedLink:
-    """One root-level directory link a source worktree provisions explicitly.
+    """One artifact a source worktree keeps outside Git and a candidate needs.
 
-    ``name`` is the immediate-child name inside the worktree and ``target`` is
-    the already-resolved directory it points at, so two worktrees offering the
-    same name can be compared by target without touching the filesystem again.
+    ``path`` is the normalized project-relative path inside the worktree, which
+    may be nested below tracked parents, and ``kind`` says what is mirrored
+    there: a ``directory`` link, or an ordinary ignored leaf ``file`` sitting
+    beside tracked sources.  ``target`` is the already-resolved source-side path
+    and ``digest`` the file's content digest (empty for a directory), so two
+    worktrees offering the same relative path can be compared without touching
+    the filesystem again.
     """
 
-    name: str
+    path: str
     target: Path
+    kind: str = DIRECTORY_LINK
+    digest: str = ""
+
+    @property
+    def is_directory(self) -> bool:
+        return self.kind == DIRECTORY_LINK
 
 
-def _is_directory_link(path: Path) -> bool:
+def _is_link(path: Path) -> bool:
     """True for a POSIX symlink, a Windows directory symlink, or a junction.
 
     ``os.path.islink`` is False for a Windows junction, so the reparse tag is
@@ -219,67 +234,140 @@ def _is_directory_link(path: Path) -> bool:
             and getattr(info, "st_reparse_tag", None) == mount_point)
 
 
-def discover_worktree_links(worktree: Path) -> tuple[ProvisionedLink, ...]:
-    """List the immediate-child directory links a source worktree provisions.
+def _require_safe_relative(relative: str) -> None:
+    """Refuse anything that is not a plain relative path inside the worktree."""
+    parts = relative.split("/")
+    if (not relative or relative.startswith("/") or ":" in parts[0]
+            or any(part in ("", ".", "..") for part in parts)):
+        raise AssentError(
+            f"source worktree entry {relative!r} is not a safe relative path "
+            "and cannot be provisioned into an integration candidate")
 
-    Only the root level is scanned, and only links: an ordinary ignored
-    directory, an ignored file, a link to a file, a dangling link, and anything
-    nested inside a linked target are all left alone.  A directory link whose
-    target cannot be resolved is a refusal rather than a silent omission,
-    because verification would otherwise run against a candidate the human
-    believes was provisioned.
+
+def _excluded(relative: str) -> bool:
+    return relative.split("/")[0] in _EXCLUDED_ROOTS
+
+
+def _has_linked_parent(worktree: Path, relative: str) -> bool:
+    """True when any parent directory of ``relative`` is itself a link.
+
+    A file below an undiscovered link is a descendant of someone else's linked
+    tree, not a source-adjacent leaf, so it is left alone instead of dragging
+    the traversal into that target.
     """
-    worktree = Path(worktree)
+    parts = relative.split("/")[:-1]
+    current = worktree
+    for part in parts:
+        current = current / part
+        if _is_link(current):
+            return True
+    return False
+
+
+def _classify_link(worktree: Path, relative: str) -> ProvisionedLink:
+    """Resolve one source-worktree link into a directory or file artifact."""
+    path = worktree / relative
     try:
-        with os.scandir(worktree) as entries:
-            names = sorted(entry.name for entry in entries)
+        target = Path(os.path.realpath(path, strict=True))
     except OSError as e:
         raise AssentError(
-            f"Unable to inspect source worktree {worktree} for provisioned "
-            f"directory links: {e}") from e
-    links: list[ProvisionedLink] = []
-    for name in names:
-        path = worktree / name
-        if name == ".git" or not _is_directory_link(path):
+            f"source worktree link {path} cannot be resolved to an existing "
+            f"target: {e}") from e
+    if target.is_dir():
+        return ProvisionedLink(relative, target, DIRECTORY_LINK)
+    if target.is_file():
+        return ProvisionedLink(relative, target, FILE_LINK,
+                               sha256_file(target, "provisioned source file"))
+    raise AssentError(
+        f"source worktree link {path} resolves to {target}, which is neither "
+        "a directory nor a file")
+
+
+def discover_worktree_links(worktree: Path) -> tuple[ProvisionedLink, ...]:
+    """List the artifacts a source worktree holds outside Git for the verifier.
+
+    Two kinds qualify, at the root or nested below tracked parents: an
+    explicitly provisioned directory link, and an ordinary ignored leaf file
+    that sits inside an otherwise tracked directory tree, such as a generated
+    ``*.g.dart`` beside its tracked source.  Git's own ignore walk supplies the
+    enumeration with whole ignored trees collapsed, so an ignored directory,
+    build output, a cache, and everything nested inside any linked target are
+    pruned rather than listed as independent inputs.  A link whose target
+    cannot be resolved is a refusal rather than a silent omission, because
+    verification would otherwise run against a candidate the human believes was
+    provisioned.
+    """
+    worktree = Path(worktree)
+    directories: list[ProvisionedLink] = []
+    files: list[ProvisionedLink] = []
+    for entry in gitops.ignored_entries(worktree):
+        relative = entry.rstrip("/")
+        if _excluded(relative):
             continue
-        if not path.is_dir():           # a file link or a dangling link
-            continue
-        try:
-            target = Path(os.path.realpath(path, strict=True))
-        except OSError as e:
-            raise AssentError(
-                f"source worktree link {worktree / name} cannot be resolved to "
-                f"a directory target: {e}") from e
-        if not target.is_dir():
-            raise AssentError(
-                f"source worktree link {worktree / name} resolves to {target}, "
-                "which is not a directory")
-        links.append(ProvisionedLink(name, target))
-    return tuple(links)
+        _require_safe_relative(relative)
+        path = worktree / relative
+        if _is_link(path):
+            link = _classify_link(worktree, relative)
+            (directories if link.is_directory else files).append(link)
+        elif entry.endswith("/"):
+            continue                    # an ordinary ignored directory tree
+        elif _has_linked_parent(worktree, relative):
+            continue                    # a descendant of someone's linked tree
+        else:
+            files.append(ProvisionedLink(
+                relative, path, FILE_LINK,
+                sha256_file(path, "provisioned source file")))
+    inside = tuple(f"{link.path}/" for link in directories)
+    leaves = [link for link in files if not link.path.startswith(inside)]
+    return tuple(sorted(directories + leaves, key=lambda link: link.path))
+
+
+def _require_no_overlap(links: Sequence[ProvisionedLink]) -> None:
+    """Refuse a set where one provisioned path lives inside another one."""
+    for index, link in enumerate(links):
+        for other in links[index + 1:]:
+            if other.path.startswith(f"{link.path}/"):
+                raise AssentError(
+                    f"source worktrees provision overlapping paths: {other.path} "
+                    f"lies inside {link.path}")
 
 
 def union_worktree_links(
         worktrees: Iterable[Path | None]) -> tuple[ProvisionedLink, ...]:
-    """Union the provisioned links of every source worktree entering a candidate.
+    """Union the provisioned artifacts of every source worktree in a candidate.
 
-    The same relative name resolving to the same target in two worktrees is one
-    link, not a conflict.  The same name resolving to different targets has no
-    correct answer, so it fails closed before anything is created.
+    The same relative path resolving to the same directory target, or to a file
+    with the same content digest, is one artifact rather than a conflict.
+    Differing targets, differing file contents, a path that is a directory in
+    one worktree and a file in another, and a path nested inside another
+    worktree's link have no correct answer, so they fail closed before anything
+    is created.
     """
     merged: dict[str, ProvisionedLink] = {}
     for worktree in worktrees:
         if worktree is None:
             continue
         for link in discover_worktree_links(worktree):
-            existing = merged.get(link.name)
+            existing = merged.get(link.path)
             if existing is None:
-                merged[link.name] = link
-            elif existing.target != link.target:
+                merged[link.path] = link
+            elif existing.kind != link.kind:
+                raise AssentError(
+                    f"source worktrees provision {link.path} as both a "
+                    f"{existing.kind} and a {link.kind}")
+            elif existing.is_directory and existing.target != link.target:
                 raise AssentError(
                     "source worktrees provision conflicting targets for the "
-                    f"root-level link {link.name}: {existing.target} and "
+                    f"directory link {link.path}: {existing.target} and "
                     f"{link.target}")
-    return tuple(merged[name] for name in sorted(merged))
+            elif not existing.is_directory and existing.digest != link.digest:
+                raise AssentError(
+                    "source worktrees provision differing contents for the "
+                    f"ignored file {link.path}: {existing.target} and "
+                    f"{link.target}")
+    ordered = tuple(merged[path] for path in sorted(merged))
+    _require_no_overlap(ordered)
+    return ordered
 
 
 def _create_directory_link(destination: Path, target: Path) -> None:
@@ -296,61 +384,111 @@ def _create_directory_link(destination: Path, target: Path) -> None:
         os.symlink(target, destination, target_is_directory=True)
 
 
-def _remove_directory_link(destination: Path) -> None:
-    """Remove one mirrored link only; the target it points at is never touched.
+def _create_file_link(destination: Path, target: Path) -> None:
+    """Link one source file into the candidate without copying its content.
 
-    Both a Windows junction and a Windows directory symlink are removed with
-    ``rmdir`` on the reparse point itself, and a POSIX symlink with ``unlink``.
-    Neither call descends into the target.
+    Windows gets a hard link, which needs no privilege but does need both paths
+    on one volume; POSIX gets a file symlink.  A platform that cannot create
+    the link raises ``OSError`` and the caller fails closed, because a copy
+    would silently detach the candidate from the file the source is using.
     """
     if os.name == "nt":
+        os.link(target, destination)
+    else:
+        os.symlink(target, destination)
+
+
+def _remove_link(destination: Path, kind: str) -> None:
+    """Remove one mirrored link only; the target it points at is never touched.
+
+    A Windows junction and a Windows directory symlink are removed with
+    ``rmdir`` on the reparse point itself, a POSIX symlink and a Windows hard
+    link with ``unlink``.  No call descends into the target.
+    """
+    if kind == DIRECTORY_LINK and os.name == "nt":
         os.rmdir(destination)
     else:
         os.unlink(destination)
+
+
+def _create_parents(candidate: Path, relative: str) -> list[Path]:
+    """Create the missing parent directories of one mirrored path.
+
+    Only genuinely missing directories are created, and each one is returned so
+    cleanup removes exactly those and nothing that the candidate tree or an
+    earlier artifact already owned.
+    """
+    created: list[Path] = []
+    current = candidate
+    for part in relative.split("/")[:-1]:
+        current = current / part
+        if current.is_dir() and not _is_link(current):
+            continue
+        if os.path.lexists(current):
+            raise AssentError(
+                f"unable to provision {relative} into the integration "
+                f"candidate: {current} exists and is not a directory")
+        try:
+            current.mkdir()
+        except OSError as e:
+            raise AssentError(
+                f"unable to create the parent directory {current} for the "
+                f"provisioned artifact {relative}: {e}") from e
+        created.append(current)
+    return created
 
 
 @contextlib.contextmanager
 def provisioned_candidate_links(
         candidate: Path,
         links: Sequence[ProvisionedLink]) -> Iterator[tuple[ProvisionedLink, ...]]:
-    """Mirror provisioned source links into a candidate for the verifier run only.
+    """Mirror provisioned source artifacts into a candidate for the verifier run.
 
     The links exist only while the full verifier runs: they are created after
     the candidate's merge commits are already made and removed before the
     temporary worktree is, so the committed candidate tree never changes and
     ``git worktree remove`` never sees a reparse point to walk into.  Removal
-    unlinks the mirror alone, so an interrupted or failed run leaves both the
-    external target and the persistent source-worktree link untouched.
+    unlinks the mirrors alone, deepest path first, and then removes only the
+    empty parent directories this function created, so an interrupted or failed
+    run leaves both the external target and the persistent source-worktree link
+    untouched.
 
     A destination that already exists in the candidate is a refusal: a
-    provisioned link may add an ignored path, never replace candidate content.
-    A destination Git does not ignore there is skipped rather than mirrored.
+    provisioned artifact may add an ignored path, never replace or shadow
+    candidate content.  A destination Git does not ignore there is skipped
+    rather than mirrored.
     """
-    created: list[Path] = []
+    created: list[tuple[Path, str]] = []
+    parents: list[Path] = []
     mirrored: list[ProvisionedLink] = []
     primary_error: BaseException | None = None
     try:
-        for link in links:
-            destination = candidate / link.name
+        for link in sorted(links, key=lambda link: link.path):
+            destination = candidate / link.path
             if os.path.lexists(destination):
                 raise AssentError(
-                    f"the integration candidate already contains {link.name}; a "
+                    f"the integration candidate already contains {link.path}; a "
                     "provisioned source link must never replace candidate "
                     "content")
-            if not gitops.is_path_ignored(candidate, link.name, directory=True):
+            if not gitops.is_path_ignored(candidate, link.path,
+                                          directory=link.is_directory):
                 continue
+            parents.extend(_create_parents(candidate, link.path))
             try:
-                _create_directory_link(destination, link.target)
+                if link.is_directory:
+                    _create_directory_link(destination, link.target)
+                else:
+                    _create_file_link(destination, link.target)
             except OSError as e:
                 raise AssentError(
-                    f"unable to mirror the provisioned source link {link.name} "
-                    f"-> {link.target} into the integration candidate: "
-                    f"{e}") from e
-            created.append(destination)
+                    f"unable to mirror the provisioned source {link.kind} "
+                    f"{link.path} -> {link.target} into the integration "
+                    f"candidate: {e}") from e
+            created.append((destination, link.kind))
             mirrored.append(link)
         if mirrored:
             print("Provisioned candidate link(s): "
-                  + ", ".join(f"{link.name} -> {link.target}"
+                  + ", ".join(f"{link.path} -> {link.target}"
                               for link in mirrored), flush=True)
         yield tuple(mirrored)
     except BaseException as e:
@@ -358,11 +496,20 @@ def provisioned_candidate_links(
         raise
     finally:
         problems: list[str] = []
-        for destination in reversed(created):
+        for destination, kind in sorted(
+                created, key=lambda item: len(item[0].parts), reverse=True):
             try:
-                _remove_directory_link(destination)
+                _remove_link(destination, kind)
             except OSError as e:
                 problems.append(f"unable to remove mirrored link {destination}: {e}")
+        for parent in sorted(parents, key=lambda path: len(path.parts),
+                             reverse=True):
+            try:
+                parent.rmdir()
+            except OSError as e:
+                problems.append(
+                    f"unable to remove the provisioned parent directory "
+                    f"{parent}: {e}")
         if problems:
             cleanup_error = AssentError(
                 "Provisioned candidate link cleanup was incomplete: "
