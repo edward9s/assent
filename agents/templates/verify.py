@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""共用驗收腳本:任務不算完成,除非 verify 命令 exit 0。
+"""Shared verification script: a task is not complete unless the verify command exits 0.
 
-任務檔的 verify 欄位預設指向本腳本(python .agents/verify.py);
-個別任務可換更快或更嚴的命令。
-TODO: 把下方「專案檢查」的示例換成你專案的實際檢查命令。
+A task file's verify field points to this script by default (python .agents/verify.py);
+individual tasks may swap in a faster or stricter command.
+TODO: replace the "project checks" examples below with your project's actual check commands.
 """
 
 import subprocess
 import sys
 from pathlib import Path
 
-# Windows 下 stdout 導向管線/檔案時預設用系統 code page,中文會變亂碼
+# On Windows, stdout redirected to a pipe/file defaults to the system code page, which garbles non-ASCII text
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-# 驗收目標一律是調度器指定的 cwd;隔離執行時腳本本體仍在主樹。
+# The verification target is always the cwd the scheduler sets; under isolated execution the script body still lives in the main tree.
 ROOT = Path.cwd().resolve()
 
 
@@ -26,13 +26,13 @@ def fail(message: str) -> None:
 def run(*cmd: str) -> None:
     result = subprocess.run(cmd, cwd=ROOT)
     if result.returncode != 0:
-        fail(f"命令失敗(退出碼 {result.returncode}): {' '.join(cmd)}")
+        fail(f"command failed (exit code {result.returncode}): {' '.join(cmd)}")
 
 
-# --- 工作樹完整性檢查(保留) ---
+# --- Worktree integrity check (keep) ---
 run("git", "diff", "--check")
 
-# --- 專案檢查(TODO: 依技術棧擇一或自行替換) ---
+# --- Project checks (TODO: pick one per your stack or replace as needed) ---
 
 # Flutter / Dart:
 # run("dart", "format", "--output=none", "--set-exit-if-changed", ".")

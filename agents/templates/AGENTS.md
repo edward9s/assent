@@ -2,10 +2,10 @@
 
 ## Project
 
-<!-- TODO: 一句話描述專案:技術棧、平台、用途 -->
+<!-- TODO: one sentence describing the project: stack, platform, purpose -->
 
 ## Permanent constraints
 
-<!-- TODO: 放每次都成立的硬限制;跨計畫仍有效的決策也沉澱到這裡 -->
+<!-- TODO: hard constraints that always hold; decisions that stay valid across plans also settle here -->
 
-- 使用 agents 時,請先讀專案主工作樹的 `.agents/instructions.md`;worktree session 以調度器提示的絕對路徑為準。 <!-- agents-instructions -->
+- When using agents, first read `.agents/instructions.md` in the project's main worktree; a worktree session uses the absolute path the scheduler provides. <!-- agents-instructions -->
