@@ -124,6 +124,15 @@ expired batch evidence selects the sequential path that runs
 malformed batch receipt refuses rather than falling back; the sequential path
 stops at its first real failure and preserves earlier publications.
 
+The literal token `...`, written once as the last positional argument, adds
+every remaining folder a folder-taking command would discover. It is a
+remainder operator, not an alias for `--all`, and cannot be combined with it;
+a `...`-expanded selection is an ordinary exact selection, so
+`assent accept A ...` still requires evidence for exactly the expanded set and
+still starts no verification. `assent run --verify` chains complete
+verification onto a run that exited zero, matching that same selection; a
+failing run verifies nothing, and `--once` or `--task` refuse the flag.
+
 The worktree is a change-isolation, conflict-management, audit, and recovery
 boundary, not a security sandbox. With `danger-full-access` or
 `bypassPermissions`, an AI can still access resources available to its OS

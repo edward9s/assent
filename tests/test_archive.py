@@ -11,9 +11,9 @@ import zipfile
 from pathlib import Path
 
 from assent import gitops
-from assent.archive import (archive_all, archive_folder, read_roster,
-                            restore_folder, _archive_dir, _write_roster,
-                            _zip_path)
+from assent.archive import (archive_all, archive_folder, archive_selected,
+                            read_roster, restore_folder, _archive_dir,
+                            _write_roster, _zip_path)
 from assent.config import load_config
 from assent.lockfile import LockBusy, hold_lock
 from assent.__main__ import _dispatch
@@ -405,6 +405,40 @@ class TestArchive(unittest.TestCase):
             self.assertEqual(sorted(entry),
                              ["archived_at", "folder", "main_tip"])
 
+    # ---- explicit multi-folder selection ---------------------------------
+
+    def test_selected_archive_reports_an_ineligible_folder_as_a_failure(self) -> None:
+        """``--all`` skips what it cannot archive; a named folder is a request."""
+        self._folder("plan02", status="TODO")  # ineligible: unfinished
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = archive_selected(str(self.config_path),
+                                    [self.folder, "plan02"])
+        text = output.getvalue()
+
+        self.assertEqual(code, 1, text)
+        self.assertIn("plan02: skipped", text)
+        self.assertIn("archive summary: 1 archived, 1 not archived.", text)
+        # The refusal does not stop the folders selected alongside it.
+        self.assertTrue(_zip_path(self.assent_dir, self.folder).exists())
+        self.assertFalse(_zip_path(self.assent_dir, "plan02").exists())
+
+    def test_selected_archive_files_every_eligible_folder(self) -> None:
+        self._folder("plan02")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = archive_selected(str(self.config_path),
+                                    ["plan02", self.folder])
+        text = output.getvalue()
+
+        self.assertEqual(code, 0, text)
+        self.assertIn("archive summary: 2 archived, 0 not archived.", text)
+        self.assertEqual(
+            sorted(entry["folder"] for entry in read_roster(self.assent_dir)),
+            ["plan01", "plan02"])
+
     # ---- CLI argument guards --------------------------------------------
 
     def test_bare_archive_is_a_parser_error(self) -> None:
@@ -422,6 +456,12 @@ class TestArchive(unittest.TestCase):
     def test_restore_without_folder_is_a_parser_error(self) -> None:
         with self.assertRaises(SystemExit):
             _dispatch(["archive", "--restore"])
+
+    def test_restore_stays_single_folder_even_with_a_remainder(self) -> None:
+        for argv in (["archive", "plan01", "plan02", "--restore"],
+                     ["archive", "plan01", "...", "--restore"]):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                _dispatch(argv)
 
 
 if __name__ == "__main__":

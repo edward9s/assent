@@ -170,11 +170,18 @@ assent run <資料夾>
 
 # 只依寫出的順序執行 A、再執行 B
 assent run A B
-# 先依序執行 A、B,再執行其餘未完成資料夾
+# 先依序執行 A、B,再把其餘未完成資料夾交給 --all scheduler
 assent run A B --all
+# 字面 `...` 是 remainder selector:先 A、再 B,再加上其餘每個工作資料夾,
+# 整批在動任何東西之前就先定格成一個明確選擇
+assent run A B ...
 
 # 依資料夾 after 依賴順序執行全部未完成資料夾,最多同時跑 2 個
 assent run --all --jobs 2
+
+# 在 exit code 為零的 run 之後接上完整驗證(失敗的 run 不驗證任何東西);
+# 驗證的 exit code 就是這道命令的 exit code
+assent run --all --verify
 
 # 6. 預設 [verification] receipt_refresh = "manual" 下,run 收尾不會留下
 #    receipt,直接/selected accept 會被拒絕並提示先 verify。離席時顯式刷新(零
@@ -184,6 +191,8 @@ assent verify --batch
 assent verify <FOLDER>
 # 把 A、B 當成一個依賴排序的 selected batch 做完整驗證
 assent verify A B
+# 把 A 加上其餘每個已完成資料夾,當成一個 exact selected batch 驗證
+assent verify A ...
 # 在 FOLDER 的 source worktree 重跑 DONE task 的 focused checks(不寫 receipt)
 assent verify <FOLDER> --focus
 # 想要 run 收尾就自動刷新 receipt,改設 receipt_refresh = "auto"
@@ -197,12 +206,21 @@ assent accept --all
 assent accept <資料夾>
 # 只接受有相符 batch receipt 的 A、B
 assent accept A B
+# 接受 A 加上其餘每個已完成資料夾;這仍是 exact selection,
+# 需要恰好涵蓋展開後集合的 receipt,且一律不驗證
+assent accept A ...
 # 接受後,用一般 Git(或自行委任的 AI 流程)獨立同步
 git push
 # 接受與所需同步完成後,移除多餘成果
 assent clean <資料夾>
+# 一次清理多個資料夾,upstream-first(單獨的 assent clean 仍代表全部)
+assent clean A B
+assent clean A ...
 # 不再需要時,把已接受資料夾的計畫封存進 _archive/
 assent archive --all
+# 也可以指名要退場的資料夾;被指名卻不合格的資料夾算失敗,
+# 與會直接略過的 --all 不同
+assent archive A B
 
 # 驗收會議要求單一任務重做(預設保留程式碼;不自動 run)
 assent rework <FOLDER> <TASK> [--cascade] [--reason TEXT]
@@ -278,6 +296,73 @@ A 與 B 修改同一檔案也遵守同一規則。Git 能自動合併時由 exac
 前置,第一個設定或執行失敗就停止。`assent run A B --all` 先完成這個明示順序,
 再把其餘未完成資料夾交給正常的依賴排序 `--all` scheduler;兩者都不會暗中
 建立完整 integration candidate 或接受任何東西。
+
+#### `...` remainder selector
+
+字面 ASCII token `...` 是 `run`、`verify`、`accept`、`clean`、`archive` 共用的
+最後一個位置參數,意思是「再加上這道命令自己會發現的其餘每個資料夾」,所以
+`assent run A B ...` 就是「先 A、再 B、然後其他全部」。它不是 `--all` 的另一種
+寫法:`...` 產生的是一個 exact folder selection,而且在動任何東西之前就先定格;
+`--all` 則保留自己的動態全專案模式。兩者併用是用法錯誤,`...` 出現一次以上、
+或不放在最後,同樣是用法錯誤。資料夾名稱永遠不能含 `..`,所以這個 token 不會
+和真實資料夾相撞。
+
+每道命令用自己的發現規則展開 remainder:`verify` 與 `accept` 只加入已完成的
+資料夾(那正是它們全專案模式處理的集合),`run`、`clean`、`archive` 則納入每個
+工作資料夾,之後再照常做各自的逐資料夾判斷。remainder 接在明示前綴之後,各命令
+再套用自己的排序:`run` 保持前綴寫下的順序、remainder 依資料夾依賴順序,
+`verify` 與 `accept` 把整個選擇正規化為依賴順序,`clean` 則正規化為
+upstream-first。展開結果會在開工前印出;展開後選不到任何資料夾則拒絕執行。
+`...` 只負責選資料夾,不會把命令切換成另一種模式:即使是單獨的
+`assent run ...`,也是照一般的明示資料夾路徑逐一走完展開後的選擇,而不是交給
+`--all` scheduler,`--jobs` 仍然只是 `--all` 的選項。
+
+決定走哪條路徑的仍是數量,不是這個 token:一個資料夾走單一資料夾路徑(folder
+receipt、direct accept、單一 `archive`),兩個以上走 exact selected batch。因此
+`assent verify A ...` 寫出的 batch receipt 恰好涵蓋展開後的集合,而
+`assent accept A ...` 也要求恰好同一集合的 fresh receipt,並且一律不驗證。
+`...` 不可與 `verify --batch`、`verify --focus`、`run --once`、`run --task`,以及
+只還原單一資料夾的 `archive --restore` 併用。
+
+#### `run --verify`
+
+`assent run --verify` 只在 run 的 exit code 為零時接上一次完整驗證;失敗的 run
+會原樣回傳、不驗證任何東西,因為根本沒有完成的計畫可背書。驗證範圍與選擇一致:
+
+| 呼叫方式 | 驗證什麼 |
+| --- | --- |
+| `assent run --verify`(自動選出的資料夾) | 該資料夾的 receipt |
+| `assent run A --verify` | A 的 folder receipt |
+| `assent run A B --verify` | A 與 B 當成一個 selected batch |
+| `assent run A ... --verify` | 展開後的 exact selection 當成一個 batch |
+| `assent run --all --verify` | 全專案的動態 batch |
+| `assent run ... --verify` | 全專案的動態 batch |
+
+單獨的 `...` 是全專案請求,因此剛好落在 `--all` 使用的同一個動態 batch,而不是
+把 scheduler 之後可能還會擴充的集合凍結起來;帶明示前綴的 `...` 則仍是 exact
+expanded selection,驗證的正是它所執行的那些資料夾。驗證的 exit code 就是這道
+命令的 exit code。`--verify` 不能與刻意在資料夾收尾前停止的 `--once`、`--task`
+併用;它屬於呼叫層級的請求,不理會設定中的 `receipt_refresh` 政策。
+
+#### 多資料夾的 `clean` 與 `archive`
+
+`assent clean A B` 與 `assent clean A ...` 在一趟 upstream-first 的流程裡清理多個
+資料夾,每個資料夾自己的證據規則不變;單獨的 `assent clean` 仍代表全部資料夾。
+`assent archive A B` 封存每個被指名的資料夾,遵守的是單一資料夾 `archive` 的
+契約而非 `--all` 的:既然是人類指名的,只是不合格也算被拒絕的請求。每個被指名的
+資料夾都會嘗試,結尾以一行摘要報告封存了幾個,只要有任何一個沒封存就以非零
+exit code 結束 —— 而 `assent archive --all` 遇到不合格的資料夾只是略過,不算失敗。
+`archive --restore FOLDER` 只還原一份封存,不接受 `--all`,也不接受 `...`。
+
+#### 有顏色的 help
+
+在標準函式庫會為 `--help` 上色的環境(Python 3.14 以後),assent 只換掉
+`usage:` 前綴與段落標題的顏色,讓它們不再是預設佈景那種難以辨識的深藍;其餘
+選項與標籤顏色都維持標準值。這個替換發生在 argparse 自己的顏色判斷之內,所以
+`NO_COLOR`、`FORCE_COLOR`、`PYTHON_COLORS`,以及被重導或不支援的輸出串流,仍
+決定究竟要不要輸出任何 escape sequence。在 argparse 尚無顏色支援的
+Python 3.11-3.13,help 是純文字。因此顏色從來不是承諾 —— 沒有顏色時 help 一樣
+好讀。
 
 `assent verify A B` 只選取 A、B,正規化成依賴順序,建立一個 integration candidate,
 只執行一次完整 verifier,並寫一份記錄這些 source identity 與中間 tree 的 batch
@@ -583,7 +668,7 @@ verifier,也不連線 remote、`--push`、pull、rebase、force push、自動解
 integration lock 不能阻止外部 Git 寫入。接受期間不要在同一主工作樹執行寫入 Git
 命令。source 已整合時重跑是冪等 no-op。
 
-`assent clean [FOLDER]` 只刪除已完全併入且乾淨的 worktree 與分支;證明不了就跳過,
+`assent clean [FOLDER ...]` 只刪除已完全併入且乾淨的 worktree 與分支;證明不了就跳過,
 不碰 `.assent/`,也沒有強制選項,且與 `git clean` 無關。
 
 `assent reject <FOLDER>` 是人工裁決的明示駁回動作,與常規 clean 分流:先把
@@ -604,19 +689,21 @@ checkpoints 構成目前分支的連續尾段才會建立新的反向 commit,絕
 | 指令與代表性命令 | 選項與作用 | token 消耗 |
 |---|---|---|
 | `assent run [FOLDER]`<br>`assent run parallel01` | 執行工作資料夾,直到任務全為 DONE/BLOCKED/SKIP。省略 `FOLDER` 時推導唯一可執行資料夾;`--once` 只執行下一個任務後停止;`--task ID` 指定單一任務且仍檢查前置,例如 `assent run --task t003 parallel01`。 | 僅執行 AI session 時消耗;`--once` 或 `--task` 最多執行單一任務 |
-| `assent run A B`<br>`assent run A B --all` | 只依序執行 A、B,第一個失敗就停止。加 `--all` 時,再依依賴順序執行其餘未完成資料夾;兩種形式都不暗中驗證或接受。 | 僅執行 AI session 時消耗 |
+| `assent run A B`<br>`assent run A B --all`<br>`assent run A B ...` | 只依序執行 A、B,第一個失敗就停止。加 `--all` 時,再依依賴順序執行其餘未完成資料夾;字面 `...` 則是把其餘每個資料夾接在後面,整批在開跑前先定格成一個選擇。`...` 與 `--all` 不可併用,兩種形式也都不暗中驗證或接受。 | 僅執行 AI session 時消耗 |
+| `assent run --all --verify`<br>`assent run A B --verify` | 先執行,只有在 exit code 為零時,才執行與選擇一致的完整驗證:一個資料夾寫 folder receipt,明示的多資料夾選擇寫該 selected batch,`--all` 或單獨的 `...` 則是全專案 batch。驗證的 exit code 就是這道命令的 exit code;不可與 `--once`、`--task` 併用。 | 僅執行 AI session 時消耗;驗證本身為**零** |
 | `assent run --all`<br>`assent run --all --jobs 2` | 依 `_folder.toml` 的資料夾依賴順序執行全部未完成資料夾;`--jobs N` 限制同時執行的資料夾數(預設 1),家長終端以 `[工作資料夾] 訊息` 即時標示各子行程輸出。 | 僅執行 AI session 時消耗 |
 | `assent status [FOLDER]`<br>`assent status parallel01` | 顯示進度統計、下一個任務、分支與最後檢查點。接受 `--config PATH`。 | **零** |
 | `assent check [FOLDER]`<br>`assent check --config .assent/assent.toml parallel01` | 驗證任務檔格式、依賴無循環、設定與環境,是規劃會議的散會條件。接受 `--config PATH`。 | **零** |
 | `assent report [FOLDER]`<br>`assent report parallel01` | 生成並顯示工作資料夾內的人讀報告 `_report.md`。接受 `--config PATH`。 | **零** |
 | `assent verify <FOLDER>`<br>`assent verify parallel01` | 對單一資料夾的臨時 integration candidate 執行一次完整 verifier 並刷新 derived receipt;不改 target、不開 AI session。報告顯示 `PASSED`/`FAILED`、`fresh`/`stale`。 | **零** |
-| `assent verify A B`<br>`assent verify A B --no-bisect` | 依依賴順序只驗證 A、B,一個 candidate、一次完整 verifier,寫一份只涵蓋該集合的 batch receipt。selected conflict 會拒絕,不跳過。 | **零** |
+| `assent verify A B`<br>`assent verify A ...` | 依依賴順序只驗證 A、B,一個 candidate、一次完整 verifier,寫一份只涵蓋該集合的 batch receipt;`--no-bisect` 只適用於 batch。selected conflict 會拒絕,不跳過。`A ...` 把其餘已完成資料夾一併展開進來,仍是 exact selection。 | **零** |
 | `assent verify <FOLDER> --focus`<br>`assent verify parallel01 --focus` | 在 source worktree 重跑 distinct DONE-task verify 命令;不寫 receipt,不能授權接受。 | **零** |
 | `assent accept <FOLDER>`<br>`assent accept parallel01` | 人類明示批准單一資料夾。從不執行完整驗證;除了 ancestry no-op,需要 fresh 且精確的 `PASSED` receipt 才快速重建 candidate。 | **零** |
-| `assent accept A B`<br>`assent accept A B --config PATH` | 人類明示批准恰好 A、B,只接受相符的 fresh batch receipt;依賴排序後重播、不驗證,一次發布全部或一個也不發布,不擴大也不 fallback。 | **零** |
+| `assent accept A B`<br>`assent accept A ...` | 人類明示批准恰好 A、B,只接受相符的 fresh batch receipt;依賴排序後重播、不驗證,一次發布全部或一個也不發布,不擴大也不 fallback。`A ...` 也選入其餘已完成資料夾,並且同樣要求恰好涵蓋展開後集合的證據。 | **零** |
 | `assent accept --all` | Fresh PASSED batch receipt:不新增驗證、原子重播。Evidence 缺少/過期:依賴順序逐資料夾 `verify_folder_if_needed` 再 accept,失敗即停但保留先前成果。Malformed evidence 會拒絕;已整合 no-op、source 已清除則跳過。 | **零** |
 | `assent reconcile <FOLDER>`<br>`assent reconcile --continue parallel01` | 在隔離 worktree `<project>.reconcile/<FOLDER>` 內準備單一已完成資料夾的 source 對 target conflict,讓人工編輯被回報的檔案;`--continue` 把該解決加入索引並驗證、提交 merge、fast-forward source 分支;`--abort` 只丟棄已證明的受管 worktree 與分支。從不改 target、不解決內容、不執行聚焦或完整驗證、不寫 receipt、也不接受。`FOLDER` 必填;沒有 `--all`。 | **零** |
-| `assent clean [FOLDER]`<br>`assent clean parallel01` | 只清理已完全併入且乾淨的 worktree 與同資料夾前綴分支;任何證明不足就跳過,不碰 `.assent/`,且沒有強制選項。省略 `FOLDER` 時作用於全部工作資料夾。 | **零** |
+| `assent clean [FOLDER ...]`<br>`assent clean A B`<br>`assent clean A ...` | 只清理已完全併入且乾淨的 worktree 與同資料夾前綴分支;任何證明不足就跳過,不碰 `.assent/`,且沒有強制選項。可指定一個、多個或字面 `...` remainder,都不指名時作用於全部工作資料夾;多個資料夾在一趟 upstream-first 流程裡清理。 | **零** |
+| `assent archive <FOLDER ...>`<br>`assent archive --all`<br>`assent archive --restore FOLDER` | 讓已完成資料夾退場:內含 `clean`,再把計畫壓縮進 `_archive/` 並登錄到 roster。被指名的資料夾遵守單一資料夾 `archive` 的契約 —— 每個都會嘗試,只要有不合格的就以非零 exit code 結束 —— 而 `--all` 遇到不合格的資料夾只是略過,不算失敗。`--restore` 只還原一份封存,不接受 `--all`,也不接受 `...`。 | **零** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | 人工裁決駁回:封存未提交變更後強制刪除該資料夾的 worktree 與同前綴分支(刪除前以完整 tip hash 存證),並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔保存 Git 存證。`FOLDER` 必填;run 進行中拒絕。 | **零** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "驗收不符"` | 非破壞性重開單一任務;預設保留程式碼,`--cascade` 明示連動下游。`--revert-code` 僅在 checkpoints 是連續分支尾段時建立新反向 commit。成功後更新報告,不自動執行 run。接受 `--config PATH`。 | **零** |
 | `assent init --test CHOICE`<br>`assent init --path C:\work\my-project --test pytest` | 安裝使用者家目錄 `~/.assent`(共用設定與 `instructions.md`、`format.md` 兩份契約),以及專案的 `.assent/verify.py`、`AGENTS.md` bridge 那一行與 `.gitignore` 條目,並精確選一個真正的專案測試:平行 unittest、pytest、npm test、Flutter test 或 custom argv。新鮮 init 省略 `--test` 時顯示編號選單;重跑不提問、保留既有 verifier、刷新兩份使用者家目錄契約,並只補入遺漏的 active 設定。專案內舊契約副本只有與打包文字完全相同時才移除;專案 `assent.toml` 保留為覆寫並回報。無效輸入/TOML 會在任何受管檔案改動前拒絕。 | **零** |

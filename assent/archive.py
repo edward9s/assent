@@ -30,6 +30,7 @@ import os
 import shutil
 import tomllib
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -341,6 +342,36 @@ def archive_folder(cfg: Config) -> int:
     """Archive one explicitly named folder; refuse (exit 1) on any unmet precondition."""
     result = _archive_one(cfg)
     return 0 if result.status == "archived" else 1
+
+
+def archive_selected(config_path: str, folders: Sequence[str]) -> int:
+    """Archive every explicitly named folder; anything not archived is a failure.
+
+    This is the multi-folder form of ``archive_folder``, and it keeps that
+    command's contract rather than ``--all``'s: the human named these folders,
+    so a folder that is merely ineligible is still a refused request, not a
+    skip.  Every selected folder is attempted, so one refusal does not hide the
+    state of the rest.
+    """
+    archived: list[str] = []
+    refused: list[str] = []
+    for index, folder in enumerate(folders):
+        if index:
+            print()
+        try:
+            cfg = load_config(config_path, folder)
+        except AssentError as e:
+            print(f"{folder}: archive error (config error: {e})")
+            refused.append(folder)
+            continue
+        if _archive_one(cfg).status == "archived":
+            archived.append(folder)
+        else:
+            refused.append(folder)
+    print()
+    print(f"archive summary: {len(archived)} archived, "
+          f"{len(refused)} not archived.")
+    return 1 if refused else 0
 
 
 def archive_all(config_path: str, assent_dir: Path) -> int:

@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assent import gitops, verification
+from assent.__main__ import _dispatch
 from assent.batch_accept import accept_selected_batch
 from assent.lockfile import hold_lock
 from assent.reject import reject_folder
@@ -163,6 +164,53 @@ class TestSelectedBatchRelease(SelectedBatchReleaseCase):
         self.assertTrue(self._batch_path().exists())
         self.assertIn("not fresh", output)
         self.assertIn("assent verify alpha beta", output)
+
+
+class TestRemainderSelectedRelease(SelectedBatchReleaseCase):
+    """``accept A ...`` is the selected batch of its expansion, and nothing else."""
+
+    def _accept_cli(self, *folders: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = _dispatch(
+                ["accept", *folders, "--config", str(self.config_path)])
+        return code, output.getvalue()
+
+    def test_remainder_release_replays_the_matching_evidence_only(self) -> None:
+        receipt = self._prepare_selected("alpha", "beta")
+        target_before = self._head()
+
+        with patch("assent.batch_accept.verification.verify_folder_if_needed",
+                   side_effect=AssertionError("selected accept verified")), \
+                patch("assent.__main__.accept_all",
+                      side_effect=AssertionError("fell back to accept --all")):
+            code, output = self._accept_cli("beta", "...")
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("accept: `...` selects beta, alpha", output)
+        self.assertIn("accept alpha beta: batch release done", output)
+        self.assertNotIn("accept --all", output)
+        self.assertEqual(self._head("HEAD^1^1"), target_before)
+        self.assertEqual(self._head("HEAD^2"), receipt.sources[1].source_tip)
+
+    def test_a_broader_expansion_refuses_instead_of_verifying_or_shrinking(
+            self) -> None:
+        self._prepare_selected("alpha", "beta")
+        self._write_task("gamma")
+        self._make_source("gamma")
+        target_before = self._head()
+
+        with patch("assent.batch_accept.verification.verify_folder_if_needed",
+                   side_effect=AssertionError("selected accept verified")), \
+                patch("assent.__main__.accept_all",
+                      side_effect=AssertionError("fell back to accept --all")):
+            code, output = self._accept_cli("alpha", "...")
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("accept: `...` selects alpha, beta, gamma", output)
+        self.assertIn("not the exact selected set", output)
+        self.assertEqual(self._head(), target_before)
+        self.assertTrue(self._batch_path().exists())
 
 
 class TestBatchReleasePublication(BatchReleaseCase):

@@ -92,6 +92,39 @@ prefix but still returns failure and cannot authorize the original selection.
 None of these verification or run commands changes a target ref or accepts a
 folder.
 
+Selection syntax is symmetric across the folder-taking commands. `run`,
+`verify`, `accept`, `clean`, and `archive` all accept the literal token `...`
+as a final positional argument meaning "and every remaining folder this command
+would discover" — `verify` and `accept` discover only finished folders, the
+other three every work folder. `...` is a remainder operator, not an alias for
+`--all`: it yields one exact selection, snapshotted before anything is mutated,
+and combining it with `--all` (or with `verify --batch`/`--focus`,
+`run --once`/`--task`, or the one-folder `archive --restore`) is a usage error.
+The remainder is appended after the explicit prefix, and each command then
+applies its own ordering: `run` keeps the stated prefix order and takes the
+remainder in folder-dependency order, `verify` and `accept` normalize the whole
+selection to dependency order, and `clean` normalizes it upstream-first.
+Cardinality still selects the
+path, so a remainder-expanded selection is an ordinary exact selection: one
+folder is the single-folder path, two or more the exact selected batch, and
+selected acceptance still demands evidence for exactly the expanded set without
+verifying anything.
+
+`assent run --verify` chains complete verification onto a successful run only.
+A nonzero run is returned as-is and certifies nothing; otherwise the
+verification matches the selection — one folder as a folder receipt, an exact
+multi-folder selection as that selected batch, and `--all` or a bare `...` as
+the whole-project dynamic batch — and its exit code becomes the command's. It
+is refused with `--once` and `--task`, which deliberately stop before folder
+closeout, and being an invocation-level request it runs regardless of the
+configured receipt-refresh policy.
+
+Multi-folder `clean A B` cleans in one upstream-first pass with every evidence
+rule unchanged. Multi-folder `archive A B` keeps single-folder `archive`'s
+contract instead of `--all`'s: every named folder is attempted, and one that is
+merely ineligible is a refusal that exits nonzero, whereas `archive --all`
+skips it without failing.
+
 `DONE` is the executing AI's claim, a receipt is the scheduler's complete-
 verification evidence, and `accept` is explicit human approval. Direct
 `assent accept <FOLDER>` never runs the verifier: an ancestry-proven

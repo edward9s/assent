@@ -74,6 +74,30 @@ tree、最終 tree 與 verifier digest;失敗要求即使 bisect 留下 PASSED p
 仍回傳失敗,不能授權原本的 selected acceptance。這些 run 或 verify 命令都不改
 target ref,也不接受任何資料夾。
 
+選取語法在各個吃資料夾的命令之間是對稱的。`run`、`verify`、`accept`、`clean`、
+`archive` 都接受字面 token `...` 作為最後一個位置參數,意思是「再加上這道命令
+自己會發現的其餘每個資料夾」——`verify` 與 `accept` 只發現已完成的資料夾,其餘
+三者則是每個工作資料夾。`...` 是 remainder operator,不是 `--all` 的別名:它產生
+一個 exact selection,並在動任何東西之前先定格;與 `--all`(或
+`verify --batch`/`--focus`、`run --once`/`--task`,以及只處理單一資料夾的
+`archive --restore`)併用是用法錯誤。remainder 接在明示前綴之後,各命令再套用
+自己的排序:`run` 保持前綴寫下的順序、remainder 依資料夾依賴順序,`verify` 與
+`accept` 把整個選擇正規化為依賴順序,`clean` 則正規化為 upstream-first。
+決定路徑的仍是數量,所以展開後的選擇就是一般的
+exact selection:一個資料夾走單一資料夾路徑,兩個以上走 exact selected batch,而
+selected acceptance 仍要求恰好涵蓋展開後集合的證據,且不驗證任何東西。
+
+`assent run --verify` 只在 run 成功時接上完整驗證。失敗的 run 原樣回傳、不背書
+任何東西;成功時驗證範圍與選擇一致 —— 一個資料夾寫 folder receipt,明示的多
+資料夾選擇寫該 selected batch,`--all` 或單獨的 `...` 則是全專案的動態 batch ——
+其 exit code 就是這道命令的 exit code。它不能與刻意在資料夾收尾前停止的
+`--once`、`--task` 併用;作為呼叫層級的請求,它不理會設定中的 receipt 刷新政策。
+
+多資料夾的 `clean A B` 在一趟 upstream-first 流程裡清理,每個資料夾的證據規則
+不變。多資料夾的 `archive A B` 遵守的是單一資料夾 `archive` 的契約而非 `--all`
+的:每個被指名的資料夾都會嘗試,只是不合格也算被拒絕、以非零 exit code 結束,
+而 `archive --all` 遇到這種資料夾只是略過,不算失敗。
+
 `DONE` 是執行 AI 的主張,receipt 是 scheduler 的完整驗證證據,`accept` 則是明示
 的人類批准。直接 `assent accept <FOLDER>` 從不執行 verifier:若 source tip 已由
 ancestry 證明在 target 中,就是具冪等性的 no-op;否則必須有精確匹配的 fresh
