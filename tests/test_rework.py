@@ -1,0 +1,345 @@
+"""單一任務非破壞性重開與下游相依連動測試。"""
+import contextlib
+import io
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from agents import AgentsError, gitops
+from agents.config import load_config
+from agents.lockfile import hold_lock
+from agents.plan import read_entries, set_status
+from agents.rework import rework_task
+
+
+def _git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=root, capture_output=True,
+        encoding="utf-8", errors="replace", check=True)
+    return result.stdout.strip()
+
+
+class TestRework(unittest.TestCase):
+    """以真實暫存 repo 驗證重開操作不破壞任何 Git 成果。"""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        _git(self.root, "init")
+        _git(self.root, "config", "user.name", "Test")
+        _git(self.root, "config", "user.email", "test@example.com")
+        (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
+        (self.root / "README.md").write_text("起點\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "init")
+
+        self.folder = "plan01"
+        self.tasks_dir = self.root / ".agents" / self.folder
+        self.tasks_dir.mkdir(parents=True)
+        self.config_path = self.root / ".agents" / "agents.toml"
+        self.config_path.write_text("", encoding="utf-8")
+        (self.tasks_dir / "agents.lock").write_text(
+            'folder = "plan01"\n', encoding="utf-8")
+        self.cfg = load_config(self.config_path, self.folder)
+        self.container = self.root.parent / f"{self.root.name}.worktrees"
+        self.addCleanup(self._cleanup_worktrees)
+
+    def _cleanup_worktrees(self) -> None:
+        shutil.rmtree(self.container, ignore_errors=True)
+        subprocess.run(["git", "worktree", "prune"], cwd=self.root,
+                       capture_output=True)
+
+    def _write_task(self, number: int, status: str,
+                    deps: tuple[int, ...] = ()) -> Path:
+        dependencies = ", ".join(f'"t{item:03d}"' for item in deps)
+        path = self.tasks_dir / f"t{number:03d}_task.e.toml"
+        path.write_text(
+            'title = "任務"\n'
+            f'deps = [{dependencies}]\n'
+            'model = "lite"\n'
+            f'status = "{status}"\n'
+            'scope = ["agents/"]\n'
+            'verify = "python -m unittest"\n'
+            'goal = "完成任務"\n'
+            'acceptance = "驗證通過"\n',
+            encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _status(path: Path) -> str:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("status"):
+                return line.split('"')[1]
+        raise AssertionError(f"{path} 沒有 status 行")
+
+    def _run(self, task_id: str = "t001", **kwargs) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = rework_task(self.cfg, task_id, **kwargs)
+        return code, output.getvalue()
+
+    def _worktree(self, prefix: str | None = None) -> tuple[Path, str]:
+        path = gitops.ensure_worktree(self.root, self.folder)
+        branch = gitops.ensure_branch(path, prefix or self.cfg.branch_prefix)
+        return path, branch
+
+    def test_all_non_todo_target_statuses_can_reopen(self) -> None:
+        task = self._write_task(1, "DONE")
+        head = _git(self.root, "rev-parse", "HEAD")
+        for status in ("DONE", "WIP", "BLOCKED", "SKIP"):
+            with self.subTest(status=status):
+                set_status(task, status)
+                code, _ = self._run(reason="")
+                self.assertEqual(code, 0)
+                self.assertEqual(self._status(task), "TODO")
+                entry = read_entries(
+                    self.tasks_dir / "t001_task.r.toml")[-1]
+                self.assertEqual(entry["by"], "scheduler")
+                self.assertEqual(entry["event"], "rework_requested")
+                self.assertIn(f"原狀態: {status}", entry["detail"])
+                self.assertIn(f"HEAD: {head}", entry["detail"])
+                self.assertIn("reason: 人工要求重做", entry["detail"])
+
+    def test_exact_id_and_todo_are_rejected_without_mutation(self) -> None:
+        task = self._write_task(1, "TODO")
+
+        missing_code, missing_output = self._run("T001")
+        todo_code, todo_output = self._run()
+
+        self.assertEqual(missing_code, 1)
+        self.assertEqual(todo_code, 1)
+        self.assertEqual(self._status(task), "TODO")
+        self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
+        self.assertIn("找不到精確任務 id:T001", missing_output)
+        self.assertIn("無須重開", todo_output)
+
+    def test_downstream_blockers_are_complete_and_in_plan_order(self) -> None:
+        target = self._write_task(1, "DONE")
+        second = self._write_task(2, "DONE", (1,))
+        third = self._write_task(3, "BLOCKED", (2,))
+        fourth = self._write_task(4, "WIP", (1,))
+        self._write_task(5, "TODO", (1,))
+        self._write_task(6, "SKIP", (2,))
+
+        code, output = self._run()
+
+        self.assertEqual(code, 1)
+        self.assertIn("t002, t003, t004", output)
+        self.assertEqual(self._status(target), "DONE")
+        self.assertEqual(self._status(second), "DONE")
+        self.assertEqual(self._status(third), "BLOCKED")
+        self.assertEqual(self._status(fourth), "WIP")
+        self.assertEqual(list(self.tasks_dir.glob("*.r.toml")), [])
+
+    def test_cascade_reopens_active_downstream_but_preserves_todo_and_skip(self) -> None:
+        target = self._write_task(1, "SKIP")
+        done = self._write_task(2, "DONE", (1,))
+        blocked = self._write_task(3, "BLOCKED", (2,))
+        wip = self._write_task(4, "WIP", (1,))
+        todo = self._write_task(5, "TODO", (1,))
+        skipped = self._write_task(6, "SKIP", (2,))
+
+        code, _ = self._run(cascade=True, reason="規格需要重做")
+
+        self.assertEqual(code, 0)
+        for path in (target, done, blocked, wip, todo):
+            self.assertEqual(self._status(path), "TODO")
+        self.assertEqual(self._status(skipped), "SKIP")
+        for number, original in ((1, "SKIP"), (2, "DONE"),
+                                 (3, "BLOCKED"), (4, "WIP")):
+            entries = read_entries(
+                self.tasks_dir / f"t{number:03d}_task.r.toml")
+            self.assertEqual(len(entries), 1)
+            self.assertIn(f"原狀態: {original}", entries[0]["detail"])
+            self.assertIn("cascade 範圍: t002, t003, t004, t005, t006",
+                          entries[0]["detail"])
+            self.assertIn("reason: 規格需要重做", entries[0]["detail"])
+        self.assertFalse((self.tasks_dir / "t005_task.r.toml").exists())
+        self.assertFalse((self.tasks_dir / "t006_task.r.toml").exists())
+
+    def test_dirty_worktree_is_checkpointed_and_fully_retained(self) -> None:
+        task = self._write_task(1, "DONE")
+        worktree, branch = self._worktree()
+        (worktree / "既有成果.txt").write_text("已提交\n", encoding="utf-8")
+        gitops.commit_all(worktree, "既有成果")
+        prior = _git(worktree, "rev-parse", "HEAD")
+        (worktree / "未提交成果.txt").write_text("保留\n", encoding="utf-8")
+
+        code, _ = self._run()
+
+        current = _git(worktree, "rev-parse", "HEAD")
+        self.assertEqual(code, 0)
+        self.assertNotEqual(current, prior)
+        self.assertTrue((worktree / "未提交成果.txt").is_file())
+        self.assertEqual(_git(worktree, "branch", "--show-current"), branch)
+        self.assertIn(prior, _git(worktree, "rev-list", "HEAD"))
+        self.assertIn("人工 rework 前封存",
+                      _git(worktree, "log", "-1", "--pretty=%s"))
+        entry = read_entries(task.with_name("t001_task.r.toml"))[-1]
+        self.assertIn(f"HEAD: {current}", entry["detail"])
+
+    def test_missing_worktree_only_changes_management_state(self) -> None:
+        task = self._write_task(1, "BLOCKED")
+        main_head = _git(self.root, "rev-parse", "HEAD")
+
+        code, output = self._run()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self._status(task), "TODO")
+        self.assertFalse(self.container.exists())
+        self.assertEqual(_git(self.root, "rev-parse", "HEAD"), main_head)
+        self.assertIn("只重開管理狀態", output)
+
+    def test_fake_worktree_and_wrong_branch_fail_closed(self) -> None:
+        task = self._write_task(1, "DONE")
+        fake = gitops.worktree_path(self.root, self.folder)
+        fake.mkdir(parents=True)
+        (fake / "不可動.txt").write_text("保留\n", encoding="utf-8")
+
+        fake_code, fake_output = self._run()
+
+        self.assertEqual(fake_code, 1)
+        self.assertEqual(self._status(task), "DONE")
+        self.assertIn("不是本 repo 的有效 worktree", fake_output)
+        shutil.rmtree(fake)
+        worktree, _ = self._worktree("other/")
+
+        branch_code, branch_output = self._run()
+
+        self.assertEqual(branch_code, 1)
+        self.assertEqual(self._status(task), "DONE")
+        self.assertTrue(worktree.exists())
+        self.assertIn("非本資料夾分支", branch_output)
+        self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
+
+    def test_checkpoint_failure_does_not_touch_status_or_journal(self) -> None:
+        task = self._write_task(1, "WIP")
+        worktree, _ = self._worktree()
+        (worktree / "未提交成果.txt").write_text("保留\n", encoding="utf-8")
+
+        with patch("agents.rework.gitops.commit_if_dirty",
+                   side_effect=AgentsError("模擬封存失敗")):
+            code, output = self._run()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(self._status(task), "WIP")
+        self.assertTrue((worktree / "未提交成果.txt").is_file())
+        self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
+        self.assertIn("模擬封存失敗", output)
+
+    def test_bad_task_and_bad_journal_fail_before_git_checkpoint(self) -> None:
+        task = self._write_task(1, "DONE")
+        worktree, _ = self._worktree()
+        dirty = worktree / "未提交成果.txt"
+        dirty.write_text("保留\n", encoding="utf-8")
+        before = _git(worktree, "rev-parse", "HEAD")
+        journal = self.tasks_dir / "t001_task.r.toml"
+        journal.write_text("不是 TOML = [\n", encoding="utf-8")
+
+        bad_journal_code, bad_journal_output = self._run()
+
+        self.assertEqual(bad_journal_code, 1)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
+        self.assertEqual(self._status(task), "DONE")
+        self.assertIn("管理面預檢失敗", bad_journal_output)
+        journal.unlink()
+        with task.open("a", encoding="utf-8") as stream:
+            stream.write('unknown = "錯誤"\n')
+
+        bad_task_code, bad_task_output = self._run()
+
+        self.assertEqual(bad_task_code, 1)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
+        self.assertTrue(dirty.is_file())
+        self.assertIn("任務檔無法解析", bad_task_output)
+
+    def test_busy_and_missing_lock_fail_closed(self) -> None:
+        task = self._write_task(1, "DONE")
+        with hold_lock(self.tasks_dir, self.folder):
+            busy_code, busy_output = self._run()
+        (self.tasks_dir / "agents.lock").unlink()
+
+        missing_code, missing_output = self._run()
+
+        self.assertEqual(busy_code, 1)
+        self.assertEqual(missing_code, 1)
+        self.assertEqual(self._status(task), "DONE")
+        self.assertIn("run 進行中", busy_output)
+        self.assertIn("沒有既有 agents.lock", missing_output)
+        self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
+
+    def test_partial_journal_write_can_be_retried_without_duplicates(self) -> None:
+        target = self._write_task(1, "DONE")
+        downstream = self._write_task(2, "BLOCKED", (1,))
+        from agents.plan import append_entry as real_append_entry
+
+        calls = 0
+
+        def interrupt_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("模擬日誌中斷")
+            return real_append_entry(*args, **kwargs)
+
+        with patch("agents.rework.append_entry", side_effect=interrupt_second):
+            first_code, _ = self._run(cascade=True)
+        second_code, _ = self._run(cascade=True)
+
+        self.assertEqual(first_code, 1)
+        self.assertEqual(second_code, 0)
+        self.assertEqual(self._status(target), "TODO")
+        self.assertEqual(self._status(downstream), "TODO")
+        self.assertEqual(len(read_entries(
+            self.tasks_dir / "t001_task.r.toml")), 1)
+        self.assertEqual(len(read_entries(
+            self.tasks_dir / "t002_task.r.toml")), 1)
+
+    def test_partial_status_write_resumes_before_target(self) -> None:
+        target = self._write_task(1, "DONE")
+        second = self._write_task(2, "DONE", (1,))
+        third = self._write_task(3, "BLOCKED", (2,))
+        real_set_status = set_status
+        calls = 0
+
+        def interrupt_second(path, status):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("模擬狀態中斷")
+            return real_set_status(path, status)
+
+        with patch("agents.rework.set_status", side_effect=interrupt_second):
+            first_code, _ = self._run(cascade=True)
+        self.assertEqual(self._status(target), "DONE")
+        second_code, _ = self._run(cascade=True)
+
+        self.assertEqual(first_code, 1)
+        self.assertEqual(second_code, 0)
+        for path in (target, second, third):
+            self.assertEqual(self._status(path), "TODO")
+        for number in (1, 2, 3):
+            self.assertEqual(len(read_entries(
+                self.tasks_dir / f"t{number:03d}_task.r.toml")), 1)
+
+    def test_default_path_never_calls_destructive_git_helpers(self) -> None:
+        self._write_task(1, "DONE")
+        helper_names = ("restore", "remove_worktree", "delete_branch",
+                        "delete_branch_force")
+        patches = [patch(f"agents.rework.gitops.{name}")
+                   for name in helper_names]
+        mocks = [item.start() for item in patches]
+        self.addCleanup(lambda: [item.stop() for item in patches])
+
+        code, _ = self._run()
+
+        self.assertEqual(code, 0)
+        for mocked in mocks:
+            mocked.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
