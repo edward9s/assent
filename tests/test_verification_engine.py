@@ -24,7 +24,7 @@ from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
 from assent.verification import (
     VerificationReceipt, _run_full_verifier, _verify_locked,
-    verify_batch, verify_folder, verify_folder_if_needed,
+    verify_batch, verify_folder, verify_folder_if_needed, verify_selected_batch,
 )
 
 
@@ -429,6 +429,14 @@ class BatchVerifyRepositoryCase(unittest.TestCase):
                 str(self.config_path), self.assent_dir, bisect, confirm)
         return code, output.getvalue()
 
+    def run_selected(self, *folders: str, bisect: bool = True
+                     ) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = verify_selected_batch(
+                str(self.config_path), self.assent_dir, folders, bisect)
+        return code, output.getvalue()
+
 
 class TestBatchSelection(BatchVerifyRepositoryCase):
     def test_no_folder_at_all_is_an_empty_batch_with_no_receipt(self) -> None:
@@ -575,6 +583,103 @@ class TestBatchCandidateAndReceipt(BatchVerifyRepositoryCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(folder_receipt.read_text(encoding="utf-8"),
                          "placeholder\n")
+
+
+class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
+    def test_selected_names_are_normalized_and_receipt_is_exact(self) -> None:
+        parent = self.make_source("parent")
+        child = self.make_source("child")
+        self.write_after("child", ("parent",))
+
+        target_tip = self.head()
+        code, output = self.run_selected("child", "parent")
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("merging 2 folder(s) in dependency order: parent, child",
+                      output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.folders, ("parent", "child"))
+        self.assertEqual(
+            [(source.folder, source.source_tip) for source in receipt.sources],
+            [("parent", parent), ("child", child)])
+        self.assertEqual(self.head(), target_tip)
+
+    def test_unselected_live_prerequisite_refuses_before_full_verifier(self) -> None:
+        self.make_source("parent", status="TODO")
+        self.make_source("child")
+        self.make_source("sibling")
+        self.write_after("child", ("parent",))
+
+        with mock.patch("assent.verification._run_full_verifier") as verifier:
+            code, output = self.run_selected("child", "sibling")
+
+        self.assertEqual(code, 1)
+        self.assertIn("prerequisite parent", output)
+        verifier.assert_not_called()
+        self.assertFalse(self.receipt_path().exists())
+
+    def test_selected_conflict_invalidates_old_receipt_without_question(self) -> None:
+        self.make_source("aa", filename="shared.txt", content="from aa\n")
+        first_code, first_output = self.run_batch()
+        self.assertEqual(first_code, 0, first_output)
+        old_receipt = self.receipt_path().read_bytes()
+
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+        target_tip = self.head()
+        branch_tips = {
+            branch: _git(self.root, "rev-parse", branch)
+            for branch in _git(
+                self.root, "for-each-ref", "--format=%(refname:short)",
+                "refs/heads/").splitlines()
+        }
+        with mock.patch("assent.verification.confirm_on_terminal") as ask, \
+                mock.patch("assent.verification._run_full_verifier") as verifier:
+            code, output = self.run_selected("aa", "bb")
+
+        self.assertEqual(code, 1)
+        self.assertIn("exact selected set conflicts", output)
+        self.assertIn("shared.txt", output)
+        ask.assert_not_called()
+        verifier.assert_not_called()
+        self.assertFalse(self.receipt_path().exists())
+        self.assertNotEqual(old_receipt, b"")
+        self.assertEqual(self.head(), target_tip)
+        self.assertEqual(branch_tips, {
+            branch: _git(self.root, "rev-parse", branch)
+            for branch in branch_tips
+        })
+
+    def test_selected_no_bisect_records_the_requested_set(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        self.write_verify(_VERIFY_FAILS)
+
+        code, output = self.run_selected("bb", "aa", bisect=False)
+
+        self.assertEqual(code, 1)
+        self.assertNotIn("localiz", output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertEqual(receipt.folders, ("aa", "bb"))
+
+    def test_selected_bisection_prefix_cannot_authorize_original_set(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        self.make_source("cc")
+        self.write_verify(
+            "import pathlib\n"
+            "import sys\n"
+            "if pathlib.Path('cc.txt').exists():\n"
+            "    print('regression introduced by cc')\n"
+            "    sys.exit(3)\n"
+            "sys.exit(0)\n")
+
+        code, output = self.run_selected("cc", "aa", "bb")
+
+        self.assertEqual(code, 1)
+        self.assertIn("smaller PASSED prefix receipt does not authorize acceptance "
+                      "of the originally requested full set", output)
+        self.assertEqual(self.read_batch_receipt().folders, ("aa", "bb"))
 
 
 class TestSkipConfirmation(unittest.TestCase):

@@ -27,7 +27,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assent import gitops, verification
-from assent.accept import accept_all, accept_folder
+from assent.accept import accept_all, accept_folder, accept_selected_batch
 from assent.clean import clean_folder
 from assent.config import load_config
 from assent.lockfile import hold_lock
@@ -122,6 +122,13 @@ class AcceptAllRepositoryCase(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             code = accept_all(str(self.config_path), self.assent_dir)
+        return code, output.getvalue()
+
+    def _accept_selected(self, *folders: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = accept_selected_batch(
+                str(self.config_path), self.assent_dir, folders)
         return code, output.getvalue()
 
     def _head(self, ref: str = "HEAD") -> str:
@@ -400,6 +407,97 @@ class BatchReleaseCase(AcceptAllRepositoryCase):
 
     def _message(self, ref: str) -> str:
         return _git(self.root, "log", "-1", "--format=%B", ref)
+
+
+class SelectedBatchReleaseCase(BatchReleaseCase):
+    """Helpers for the explicit ``accept FOLDER_A FOLDER_B`` path."""
+
+    def _verify_selected(self, *folders: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = verification.verify_selected_batch(
+                str(self.config_path), self.assent_dir, folders)
+        return code, output.getvalue()
+
+    def _prepare_selected(self, *folders: str
+                          ) -> verification.BatchVerificationReceipt:
+        for folder in folders:
+            self._write_task(folder)
+            self._make_source(folder)
+        code, output = self._verify_selected(*folders)
+        self.assertEqual(code, 0, output)
+        return self._batch_receipt()
+
+
+class TestSelectedBatchRelease(SelectedBatchReleaseCase):
+    def test_selected_release_normalizes_order_and_publishes_atomically(self) -> None:
+        receipt = self._prepare_selected("alpha", "beta")
+        target_before = self._head()
+
+        code, output = self._accept_selected("beta", "alpha")
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("accept alpha beta: batch release done", output)
+        self.assertNotIn("accept --all", output)
+        self.assertIn("accepted:  alpha, beta", output)
+        self.assertFalse(self._batch_path().exists())
+        self.assertEqual(self._accept_subjects(), [
+            "accept(alpha): integrate into trunk",
+            "accept(beta): integrate into trunk",
+        ])
+        self.assertEqual(self._head("HEAD^1^1"), target_before)
+        self.assertEqual(self._head("HEAD^1^2"), receipt.sources[0].source_tip)
+        self.assertEqual(self._head("HEAD^2"), receipt.sources[1].source_tip)
+
+    def test_selected_release_requires_the_exact_receipt_set(self) -> None:
+        self._prepare_selected("alpha", "beta")
+        self._write_task("gamma")
+        self._make_source("gamma")
+        target_before = self._head()
+
+        code, output = self._accept_selected("gamma", "alpha")
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._head(), target_before)
+        self.assertTrue(self._batch_path().exists())
+        self.assertIn("not the exact selected set", output)
+        self.assertIn("assent verify alpha gamma", output)
+        self.assertNotIn("accept --all", output)
+
+    def test_selected_release_refuses_stale_receipt_without_verification_or_fallback(
+            self) -> None:
+        self._prepare_selected("alpha", "beta")
+        source = gitops.folder_worktree(self.root, "alpha")
+        self.assertIsNotNone(source)
+        assert source is not None
+        (source / "changed.txt").write_text("drift\n", encoding="utf-8")
+        gitops.commit_all(source, "drift alpha")
+        target_before = self._head()
+
+        with patch("assent.accept.verification.verify_folder_if_needed",
+                   side_effect=AssertionError("selected accept verified")):
+            code, output = self._accept_selected("alpha", "beta")
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._head(), target_before)
+        self.assertTrue(self._batch_path().exists())
+        self.assertIn("not fresh", output)
+        self.assertIn("assent verify alpha beta", output)
+
+    def test_selected_release_refuses_failed_receipt_and_keeps_it(self) -> None:
+        receipt = self._prepare_selected("alpha", "beta")
+        verification.write_batch_receipt(
+            self._batch_path(), replace(receipt, status="FAILED", exit_code=1,
+                                         failure_summary="failed"), self.root)
+        target_before = self._head()
+
+        code, output = self._accept_selected("alpha", "beta")
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._head(), target_before)
+        self.assertTrue(self._batch_path().exists())
+        self.assertIn("not fresh", output)
+        self.assertIn("assent verify alpha beta", output)
 
 
 class TestBatchReleasePublication(BatchReleaseCase):

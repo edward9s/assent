@@ -72,31 +72,62 @@ Proof of correctness → the task file's verify command
 ## Verification, receipts, and human acceptance
 
 The scheduler separates focused task verification from complete candidate
-verification. The AI session runs only the task's `verify` command. After a
-folder is complete, scheduler code outside the AI session builds one temporary
-integration candidate and runs the full `.assent/verify.py`; the result is a
-derived `_verification.toml` receipt. `assent verify <FOLDER>` is the zero-token
-receipt refresh and reports `PASSED`/`FAILED` plus `fresh`/`stale` state.
+verification. During an AI task session, and in `assent verify FOLDER --focus`,
+the distinct task-level `verify` commands run in the folder's source worktree.
+Focused verification writes no receipt, creates no integration candidate, and
+cannot authorize acceptance. After a folder is complete, unattended full
+verification builds a temporary integration candidate and runs the complete
+`.assent/verify.py`; the result is a derived `_verification.toml` receipt.
+`assent verify <FOLDER>` is the zero-token single-folder refresh.
 
-`DONE` is the executing AI's claim, the receipt is the scheduler's complete
-verification evidence, and `assent accept <FOLDER>` is the human approval.
-Accept requires one explicit folder and is intentionally fast: it rebuilds the
-candidate and compares source tip, integration tree, and verifier digest with a
-fresh `PASSED` receipt, without rerunning the full verifier. A missing or stale
-receipt must be refreshed with `assent verify`. The task format has no `review`
-field.
+Explicit selection is exact. `assent run A B` runs exactly A then B in the
+written order and stops on the first failure; `assent run A B --all` runs that
+sequence first, then the remaining incomplete folders in dependency order.
+`assent verify A B` normalizes exactly A and B to dependency order, merges them
+into one integration candidate, and runs the full verifier once. A selected
+conflict refuses instead of shrinking the set. A successful PASSED batch
+receipt records exactly the selected source identities, intermediate trees,
+final tree, and verifier digest; a failed request may leave a localized PASSED
+prefix but still returns failure and cannot authorize the original selection.
+None of these verification or run commands changes a target ref or accepts a
+folder.
+
+`DONE` is the executing AI's claim, a receipt is the scheduler's complete-
+verification evidence, and `accept` is explicit human approval. Direct
+`assent accept <FOLDER>` never runs the verifier: an ancestry-proven
+already-integrated source is an idempotent no-op, otherwise the command
+requires a fresh exact per-folder PASSED receipt and replays its reconstructed
+candidate. Selected `assent accept A B` likewise never verifies, and requires
+a fresh batch receipt for exactly the dependency-ordered set A and B; it
+replays every recorded merge and publishes all selected folders atomically or
+none. Neither form expands its set or silently accepts leftovers.
+
+`assent accept --all` deliberately has two modes. A fresh PASSED batch receipt
+is replayed and released atomically without new verification, publishing only
+the folders it records; finished folders outside it are only reported. A
+missing or expired/non-PASSED batch receipt selects the sequential path, which
+calls `verify_folder_if_needed` before each not-already-integrated folder and
+then performs the ordinary receipt-backed accept in dependency order. An
+already-integrated folder is an ancestry no-op; a finished folder whose source
+branch and worktree were both cleaned after proven integration is skipped only
+on this path. A malformed batch receipt refuses rather than falling back. The
+first real verification or acceptance failure stops the sequential chain while
+earlier publications remain.
 
 Receipts are disposable derived artifacts and never outrank Git. A target tip
 change is acceptable when the rebuilt integration tree is identical; a content
-change makes the receipt stale. Acceptance refuses after the source worktree or
-branch disappears. Passive merge metadata is for human audit only, not a
-post-clean state database; retain upstream sources while dependents remain
-unaccepted.
+change makes the receipt stale. Direct and selected acceptance refuse missing,
+malformed, stale, or mismatched evidence instead of starting verification.
+Passive merge metadata is for human audit only, not a post-clean state
+database; retain upstream sources while dependents remain unaccepted. All
+acceptance paths keep local human approval, refuse conflicts without advancing
+the target, and provide no remote, pull, rebase, force, automatic conflict
+resolution, or source-deletion behavior.
 
-The lifecycle is `run` -> full unattended verification receipt -> human review
--> `accept` -> ordinary Git synchronization, if desired -> `clean`. Acceptance
-is local-only and single-folder: no `--all`, `--push`, remote or PR operation,
-pull, rebase, force, automatic conflict resolution, or source deletion.
+The lifecycle is `run` -> focused checks -> explicit full `verify` (single,
+selected, or dynamic batch) -> human review -> `accept` -> ordinary Git
+synchronization, if desired -> `clean`. A verification receipt alone never
+publishes anything.
 
 The packaged verifier checks the working tree and the candidate's committed
 delta against its first parent, safely skipping that second check for a root
@@ -138,6 +169,12 @@ environments; the product does not add a container or VM sandbox.
 - A work folder's `assent.lock` guarantees one run per folder; a worktree
   path is `<project name>.worktrees/<folder>/`, and the work folder can be
   stated via a positional argument.
+- Work-folder names use the portable Windows/Git-ref contract: non-empty, no
+  whitespace, path separators, control characters, Git-ref-forbidden
+  characters (`~`, `^`, `:`, `?`, `*`, `[`), or Windows-forbidden characters
+  (`<`, `>`, `"`, `|`); no leading `-` or `.`, `..`, `@{`, trailing `.` or
+  `.lock`, or reserved Windows device name. The name is also the Git branch
+  prefix, so this validation is applied before any worktree or branch is made.
 
 ## Folder-dependency consensus
 
@@ -149,13 +186,15 @@ formal task file in it, complete only when all are `DONE` or `SKIP`. Both
 fail-closed: an incomplete upstream, a reference to something nonexistent, a
 parse failure, or a cycle all refuse to continue.
 
-The `after` declaration also selects the reproducible worktree base. A
-downstream may stack on zero or exactly one not-yet-accepted upstream; more
-than one is refused rather than becoming an implicit integration engine. The
-operational sequence is `run A` -> `run B` stacked on A -> combined
-verification -> human `accept A` -> human `accept B`. A matching receipt can
-be reused when its source tip, integration tree, and verifier digest still
-match, so accept remains a fast evidence check rather than a full-suite rerun.
+The `after` declaration controls readiness, while only an explicit `base`
+selects reproducible stacked file content. A downstream may stack on zero or
+exactly one not-yet-accepted upstream through `base`; additional `after`
+upstreams provide ordering only, and a missing `base` starts from the current
+integration target rather than becoming an implicit integration engine. The
+operational sequence is `run A`, `run B` stacked on A, combined verification,
+human `accept A`, then human `accept B`. A matching receipt can be reused when
+its source tip, integration tree, and verifier digest still match, so direct
+and selected accept remain fast evidence checks rather than full-suite reruns.
 If A advances, B is stale but its work is retained; rework/reject B or open a
 new folder instead of rewriting stack history. Same-file edits use ordinary
 Git integration: exact-tree verification covers an automatic merge, while a
@@ -183,12 +222,14 @@ independent left to offer refuses outright without asking.
 Skipping is deliberately not a form of resolution: it changes nothing about
 the target or any source, conflicting or merged, and the conflicting
 folder's own source still requires an explicit human `rework` or `reject`
-before it can rejoin a future batch. `accept --all`'s batch-release path
-mirrors this discipline on the publishing side: it publishes only the exact
-folders a fresh receipt covers in one atomic ref update and, in that same
-run, only reports every other finished folder the receipt leaves out — never
-a second prompt, and never a same-run fallback that would verify or accept
-that leftover set on its own initiative. `archive --all` extends the same
+before it can rejoin a future batch. `accept --all` has two distinct modes:
+with a fresh PASSED batch receipt its release path publishes only the exact
+receipt folders in one atomic ref update and only reports every other finished
+folder left out; it does not verify or accept those leftovers in the same run.
+With no receipt, or with expired/non-PASSED evidence, its intentional
+sequential path verifies and accepts folders one by one, stopping on the first
+real failure while preserving earlier publications. A malformed receipt
+refuses instead of selecting that fallback. `archive --all` extends the same
 upstream-first rule `clean` already enforces: it archives only a folder that
 is independently eligible and continues to retain the source evidence an
 unaccepted dependent still needs.

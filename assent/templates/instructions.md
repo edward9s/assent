@@ -104,6 +104,17 @@ complete suite. Conflicts are human decisions. Cleanup is upstream-first and
 must retain source evidence until direct dependents are accepted and proven
 integrated.
 
+Acceptance is a human decision, not an implicit side effect of verification.
+Direct `assent accept FOLDER` and selected `assent accept A B` never run the
+complete verifier; except for an ancestry-proven already-integrated no-op, they
+require matching fresh receipt evidence and replay that exact evidence. The
+intentional exception is `assent accept --all`: a fresh PASSED batch receipt is
+replayed and released atomically without new verification, while missing or
+expired batch evidence selects the sequential path that runs
+`verify_folder_if_needed` before each not-already-integrated folder accept. A
+malformed batch receipt refuses rather than falling back; the sequential path
+stops at its first real failure and preserves earlier publications.
+
 The worktree is a change-isolation, conflict-management, audit, and recovery
 boundary, not a security sandbox. With `danger-full-access` or
 `bypassPermissions`, an AI can still access resources available to its OS

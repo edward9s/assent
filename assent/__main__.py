@@ -12,7 +12,7 @@ import threading
 from collections import Counter
 
 from assent import AssentError, engine
-from assent.accept import accept_all, accept_folder
+from assent.accept import accept_all, accept_folder, accept_selected_batch
 from assent.archive import archive_all, archive_folder, restore_folder
 from assent.clean import clean_folders
 from assent.config import list_task_folders, load_config, validate_config
@@ -27,7 +27,8 @@ from assent.reconcile import (reconcile_abort, reconcile_continue,
 from assent.reject import reject_folder
 from assent.rework import rework_task
 from assent.terminal_log import terminal_logging
-from assent.verification import verify_batch, verify_folder
+from assent.verification import (verify_batch, verify_folder,
+                                  verify_selected_batch)
 
 _DEFAULT_CONFIG = ".assent/assent.toml"
 # Set by the parent scheduler on a spawned `assent run <folder>` child to opt
@@ -63,8 +64,12 @@ def _build_parser() -> argparse.ArgumentParser:
                                 metavar="{run,status,check,report,verify,clean,accept,reconcile,reject,rework,archive,init,doctor}")
 
     run_p = sub.add_parser(
-        "run", help="Run the tasks in the given [FOLDER] until all are "
+        "run", help="Run one or more folders in order until all are "
                     "DONE/BLOCKED/SKIP")
+    run_p.add_argument(
+        "folders", nargs="*", metavar="FOLDER",
+        help="Work folders to run in the stated order; omit to select one "
+             "automatically")
     run_p.add_argument("--once", action="store_true",
                        help="Run only the next task, then stop")
     run_p.add_argument("--task", metavar="ID",
@@ -84,12 +89,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "report", help="Generate the human-readable run report _report.md "
                        "(zero tokens)")
     verify_p = sub.add_parser(
-        "verify", help="Refresh full integration verification for exactly one "
-                       "folder, or for every queued folder as one candidate "
-                       "with --batch")
+        "verify", help="Refresh full integration verification for one folder, "
+                       "an exact selected batch, or every queued folder with "
+                       "--batch")
     verify_p.add_argument(
-        "folder", nargs="?", metavar="FOLDER",
-        help="The completed work folder to verify (omit only with --batch)")
+        "folder", nargs="*", metavar="FOLDER",
+        help="One completed folder, or two or more exact folders to verify "
+             "as one dependency-ordered candidate (omit with --batch)")
     verify_p.add_argument(
         "--batch", action="store_true",
         help="Merge every finished, not-yet-integrated folder in folder-"
@@ -98,8 +104,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "skipped together with the folders queued after it")
     verify_p.add_argument(
         "--no-bisect", action="store_false", dest="bisect",
-        help="With --batch, record a failure as-is instead of localizing it to "
-             "the first folder that breaks the batch")
+        help="With --batch or an exact selected batch, record a failure as-is "
+             "instead of localizing it to the first folder that breaks the batch")
+    verify_p.add_argument(
+        "--focus", action="store_true",
+        help="With exactly one FOLDER, rerun its distinct DONE-task focused "
+             "verify commands in the source worktree; this cannot authorize "
+             "accept and creates no receipt")
     verify_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
         help=f"Config file location (default: {_DEFAULT_CONFIG})")
@@ -127,11 +138,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     accept_p = sub.add_parser(
         "accept", help="Transactionally integrate one reviewed, finished folder "
-                       "into the main worktree's current branch, or every "
-                       "finished folder with --all")
+                       "into the main worktree's current branch, an exact "
+                       "selected batch, or every finished folder with --all")
     accept_p.add_argument(
-        "folder", nargs="?", metavar="FOLDER",
-        help="The reviewed work folder to accept (omit only with --all)")
+        "folder", nargs="*", metavar="FOLDER",
+        help="One reviewed work folder, or two or more exact folders to accept "
+             "as a verified batch (omit only with --all)")
     accept_p.add_argument(
         "--all", action="store_true", dest="all_folders",
         help="Accept every finished work folder in folder-dependency order, "
@@ -213,12 +225,15 @@ def _build_parser() -> argparse.ArgumentParser:
                        "adapter CLIs, temp directory); needs no existing "
                        ".assent/ project")
 
-    for p in (run_p, status_p, check_p, report_p, clean_p):
+    for p in (status_p, check_p, report_p, clean_p):
         p.add_argument(
             "folder", nargs="?", metavar="FOLDER",
-            help="The work folder; run derives it automatically if omitted, "
-                 "other commands act on all folders")
+            help="The work folder; omit to act on all folders")
         p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
+                       help=f"Config file location (default: {_DEFAULT_CONFIG})")
+    # ``run`` has its own ordered positional list and still accepts the same
+    # config option as the other plan commands.
+    run_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                        help=f"Config file location (default: {_DEFAULT_CONFIG})")
     return parser
 
@@ -308,31 +323,61 @@ def _dispatch_check_all(config_path: str, assent_dir, folders: list[str]) -> int
     return 0 if graph_ok and checks_ok else 1
 
 
+def _dispatch_run_folders(
+        config_path: str, folders: list[str], *, once: bool,
+        task_id: str | None) -> int:
+    """Run explicitly named folders in order, stopping on the first failure."""
+    for folder in folders:
+        try:
+            cfg = load_config(config_path, folder)
+        except AssentError as e:
+            print(f"Config error: {e}")
+            return 1
+        result = engine.run(cfg, once=once, task_id=task_id)
+        if result != 0:
+            return result
+    return 0
+
+
 def _dispatch(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
     if args.command == "run":
-        if args.all_folders and args.folder is not None:
-            parser.error("run's --all and FOLDER cannot be used together")
+        if len(args.folders) != len(set(args.folders)):
+            parser.error("run does not allow duplicate FOLDER names")
         if args.all_folders and (args.once or args.task is not None):
             parser.error("run's --all cannot be used with --once or --task")
+        if len(args.folders) > 1 and (args.once or args.task is not None):
+            parser.error("run's --once and --task each require at most one FOLDER")
         if not args.all_folders and args.jobs is not None:
             parser.error("run's --jobs can only be used with --all")
 
     if args.command == "accept":
-        if args.all_folders and args.folder is not None:
+        if args.all_folders and args.folder:
             parser.error("accept's --all and FOLDER cannot be used together")
-        if not args.all_folders and args.folder is None:
+        if not args.all_folders and not args.folder:
             parser.error("accept requires FOLDER or --all")
+        if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
+            parser.error("accept does not allow duplicate FOLDER names")
 
     if args.command == "verify":
-        if args.batch and args.folder is not None:
+        if args.batch and args.folder:
             parser.error("verify's --batch and FOLDER cannot be used together")
-        if not args.batch and args.folder is None:
-            parser.error("verify requires FOLDER or --batch")
-        if not args.batch and not args.bisect:
-            parser.error("verify's --no-bisect only applies to --batch")
+        if args.focus:
+            if args.batch:
+                parser.error("verify's --focus and --batch cannot be used together")
+            if len(args.folder) != 1:
+                parser.error("verify's --focus requires exactly one FOLDER")
+            if not args.bisect:
+                parser.error("verify's --no-bisect cannot be used with --focus")
+        elif not args.batch:
+            if not args.folder:
+                parser.error("verify requires FOLDER, a selected batch, or --batch")
+            if len(args.folder) == 1 and not args.bisect:
+                parser.error("verify's --no-bisect only applies to a batch")
+            if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
+                parser.error("verify does not allow duplicate FOLDER names")
 
     if args.command == "archive":
         if args.restore:
@@ -357,13 +402,24 @@ def _dispatch(argv: list[str]) -> int:
         print(f"Config error: {e}")
         return 1
 
-    if args.command == "run" and args.all_folders:
-        return run_all(args.config, assent_dir, args.jobs or 1)
+    if args.command == "run":
+        if args.folders:
+            result = _dispatch_run_folders(
+                args.config, args.folders, once=args.once, task_id=args.task)
+            if result != 0:
+                return result
+        if args.all_folders:
+            return run_all(args.config, assent_dir, args.jobs or 1)
+        if args.folders:
+            return 0
     if args.command == "accept":
         if args.all_folders:
             return accept_all(args.config, assent_dir)
+        if len(args.folder) >= 2:
+            return accept_selected_batch(
+                args.config, assent_dir, args.folder)
         try:
-            cfg = load_config(args.config, args.folder)
+            cfg = load_config(args.config, args.folder[0])
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
@@ -380,14 +436,19 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "verify":
         if not args.batch:
             try:
-                cfg = load_config(args.config, args.folder)
+                cfg = load_config(args.config, args.folder[0])
             except AssentError as e:
                 print(f"Config error: {e}")
                 return 1
         try:
             if args.batch:
                 return verify_batch(args.config, assent_dir, args.bisect)
-            return verify_folder(cfg)
+            if args.focus:
+                return engine.verify_focused(cfg)
+            if len(args.folder) == 1:
+                return verify_folder(cfg)
+            return verify_selected_batch(
+                args.config, assent_dir, args.folder, args.bisect)
         except KeyboardInterrupt:
             print("\nverify interrupted; temporary resources were cleaned up.")
             return 130
@@ -432,12 +493,12 @@ def _dispatch(argv: list[str]) -> int:
                 print(f"Config error: {e}")
                 return 1
         return clean_folders(configs)
-    if args.folder is None:
-        if args.command == "run":
-            folder = _select_run_folder(args.config, folders)
-            if folder is None:
-                return 1
-        elif args.command == "check":
+    if args.command == "run":
+        folder = _select_run_folder(args.config, folders)
+        if folder is None:
+            return 1
+    elif args.folder is None:
+        if args.command == "check":
             return _dispatch_check_all(args.config, assent_dir, folders)
         else:
             return _dispatch_all(args.command, args.config, folders)
@@ -542,8 +603,11 @@ def _start_stdin_stop_watcher() -> threading.Thread | None:
 def main(argv: list[str] | None = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
     _install_break_handler()
-    # The stop channel is for scheduler-spawned `run` children.  Keep it out
-    # of in-process dispatch and commands that exit during argument parsing.
+    # The stop channel belongs to a real scheduler-spawned ``run`` process.
+    # ``main(argv)`` is also the in-process CLI entry point used by tests and
+    # library callers; starting a watcher there would let the caller's closed
+    # stdin interrupt unrelated dispatch.  Help should likewise remain a
+    # normal parser operation even when it inherits the scheduler environment.
     if (argv is None and actual_argv[:1] == ["run"]
             and "-h" not in actual_argv and "--help" not in actual_argv):
         _start_stdin_stop_watcher()

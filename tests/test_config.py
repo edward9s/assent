@@ -178,19 +178,29 @@ class TestLoadConfig(ConfigTestCase):
         with self.assertRaisesRegex(AssentError, "unknown top-level keys"):
             load_config(self.write("[git]\nenabled = false\n"), "plan01")
 
-    def test_folder_name_with_space_rejected(self):
-        with self.assertRaisesRegex(AssentError, "not a valid task folder name"):
-            load_config(self.write(_MINIMAL), "my plan")
+    def test_portable_folder_names_are_accepted(self):
+        for good in ("plan01", "selectedbatch01", "conflictreconcile01",
+                     "sessionidentity01", "versionflag01", "alpha.beta",
+                     "name-with-dash", "name_with_underscore", "v2"):
+            with self.subTest(good=good):
+                cfg = load_config(self.write(_MINIMAL), good)
+                self.assertEqual(cfg.tasks_name, good)
 
-    def test_folder_name_with_slash_rejected(self):
-        for bad in ("a/b", "a\\\\b"):
-            with self.assertRaises(AssentError):
-                load_config(self.write(_MINIMAL), bad)
-
-    def test_folder_name_leading_dash_or_dot_rejected(self):
-        for bad in ("-x", ".x"):
-            with self.assertRaises(AssentError):
-                load_config(self.write(_MINIMAL), bad)
+    def test_git_and_windows_invalid_folder_names_are_rejected(self):
+        invalid = (
+            "", "my plan", "a/b", "a\\b", "-x", ".x",
+            "bad\x00name", "bad\x01name", "bad\x7fname", "bad~name",
+            "bad^name", "bad:name",
+            "bad?name", "bad*name", "bad[name", "bad<name", "bad>name",
+            'bad"name', "bad|name", "bad..name", "bad@{name", "bad.",
+            "bad.lock", "bad.LOCK", "CON", "con.txt", "PrN.log", "AUX",
+            "nul.data", "COM1", "lpt9.txt", "COM¹", "LPT³")
+        for bad in invalid:
+            with self.subTest(bad=bad):
+                with self.assertRaises(AssentError) as raised:
+                    load_config(self.write(_MINIMAL), bad)
+                self.assertIn(repr(bad), str(raised.exception))
+                self.assertIn("not a valid task folder name", str(raised.exception))
 
     def test_invalid_folder_override_rejected(self):
         with self.assertRaisesRegex(AssentError, "Command-line task folder"):
@@ -440,6 +450,13 @@ class TestListTaskFolders(ConfigTestCase):
             folder.mkdir()
             (folder / filename).write_text("", encoding="utf-8")
         self.assertEqual(list_task_folders(self.assent_dir), ["alpha", "beta"])
+
+    def test_invalid_visible_live_folder_is_rejected(self):
+        folder = self.assent_dir / "bad.lock"
+        folder.mkdir()
+        (folder / "t001_task.e.toml").write_text("", encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "bad\\.lock.*not a valid task folder name"):
+            list_task_folders(self.assent_dir)
 
     def test_missing_assent_directory_is_empty(self):
         self.assertEqual(list_task_folders(self.root / "missing"), [])

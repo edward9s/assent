@@ -56,26 +56,50 @@
 
 ## 驗證、receipt 與人類接受
 
-調度器分開 focused task verification 與完整 candidate verification。AI session
-只執行任務的 `verify`;資料夾全部完成後,AI session 外的 scheduler 建立一次臨時
-integration candidate,執行完整 `.assent/verify.py`,結果寫成可刪除重建的
-`_verification.toml` derived receipt。`assent verify <FOLDER>` 是零 token 的
-receipt refresh,報告會顯示 `PASSED`/`FAILED` 以及 `fresh`/`stale`。
+調度器分開 focused task verification 與完整 candidate verification。在 AI task
+session 中,以及 `assent verify FOLDER --focus` 中,distinct task-level `verify`
+命令都在該資料夾的 source worktree 執行。focused verification 不寫 receipt、
+不建立 integration candidate,即使通過也不能授權接受。資料夾完成後,無人值守的
+完整驗證建立臨時 integration candidate 並執行完整 `.assent/verify.py`,結果寫成
+可刪除重建的 `_verification.toml` derived receipt。`assent verify <FOLDER>` 是
+零 token 的單一資料夾 refresh。
 
-`DONE` 是執行 AI 的主張,receipt 是 scheduler 的完整驗證證據,呼叫
-`assent accept <FOLDER>` 才是人類批准。accept 必須明示單一資料夾,只快速重建
-candidate 並比對 source tip、integration tree、verifier digest 與 fresh `PASSED`
-receipt,不重跑完整 verifier。missing/stale receipt 必須先執行
-`assent verify`;task format 沒有 `review` 欄位。
+明示選取必須精確。`assent run A B` 只依寫出的順序執行 A、再執行 B,第一個
+設定或執行失敗就停止;`assent run A B --all` 先完成這個明示順序,再依依賴順序
+執行其餘未完成資料夾。`assent verify A B` 將恰好 A、B 正規化為依賴順序,合併
+成一個 integration candidate,只執行一次完整 verifier。selected conflict 會拒絕,
+不縮小集合。成功的 PASSED batch receipt 精確記錄選取的 source identity、中間
+tree、最終 tree 與 verifier digest;失敗要求即使 bisect 留下 PASSED prefix,命令
+仍回傳失敗,不能授權原本的 selected acceptance。這些 run 或 verify 命令都不改
+target ref,也不接受任何資料夾。
+
+`DONE` 是執行 AI 的主張,receipt 是 scheduler 的完整驗證證據,`accept` 則是明示
+的人類批准。直接 `assent accept <FOLDER>` 從不執行 verifier:若 source tip 已由
+ancestry 證明在 target 中,就是具冪等性的 no-op;否則必須有精確匹配的 fresh
+per-folder PASSED receipt,並重播其重建的 candidate。selected
+`assent accept A B` 同樣從不驗證,必須有恰好涵蓋依賴排序後 A、B 的 fresh batch
+receipt;它重播每個記錄的 merge,一次原子發佈全部 selected 資料夾或一個也不發佈。
+這兩種形式都不擴大集合,也不靜默接受剩餘資料夾。
+
+`assent accept --all` 刻意有兩種模式。fresh PASSED batch receipt 會在不新增驗證
+的情況下重播並原子發佈,只發佈 receipt 記錄的資料夾,其餘已完成資料夾只回報。
+沒有 receipt,或 batch receipt 已過期/不是 PASSED 時,改走逐資料夾路徑:依依賴順序,
+對每個尚未整合的資料夾先呼叫 `verify_folder_if_needed`,再執行一般 receipt-backed
+accept。已整合資料夾是 ancestry no-op;已完成且 source branch 與 worktree 都在
+已證明整合後被清除的資料夾,只有這條路徑會跳過。malformed batch receipt 會拒絕,
+不會 fallback。逐資料夾路徑第一次真正的驗證或接受失敗就停止,但先前已發佈的成果
+保留不撤回。
 
 receipt 是 derived artifact,不凌駕 Git。target tip 改變但重建後 integration tree
-完全相同仍可接受;內容改變就 stale。source worktree 或 branch 消失後拒絕;passive
-merge metadata 只供人讀稽核,不是 clean 後的狀態資料庫。dependent 尚未接受時,
-保留 upstream source。
+完全相同仍可接受;內容改變就 stale。直接與 selected acceptance 遇到 missing、
+malformed、stale 或 mismatch evidence 時會拒絕,不自行啟動驗證。passive merge
+metadata 只供人讀稽核,不是 clean 後的狀態資料庫;dependent 尚未接受時保留
+upstream source。所有接受路徑都維持本地人類批准,conflict 不推進 target,也沒有
+remote、pull、rebase、force、自動解衝突或刪除 source 的行為。
 
-流程是 `run` -> 無人值守完整驗證 receipt -> 人類審查 -> `accept` -> 可選的一般
-Git 同步 -> `clean`。accept 僅限本地、單一資料夾,沒有 `--all`、`--push`、remote/PR、
-pull、rebase、force、自動解衝突或刪 source。
+流程是 `run` -> focused checks -> 明示的完整 `verify`(單一、selected 或 dynamic
+batch) -> 人類審查 -> `accept` -> 可選的一般 Git 同步 -> `clean`。單有
+verification receipt 從不會發布任何東西。
 
 打包 verifier 會檢查 working tree,也會檢查 candidate 的 `HEAD` 相對第一父提交的
 committed delta; root commit 沒有父提交時安全略過第二項。這能抓到已提交的尾端空白,
@@ -104,6 +128,11 @@ container 或 VM sandbox。
   都會 fail-closed,避免第二份真本。
 - 工作資料夾內的 `assent.lock` 保證同一資料夾一個 run;worktree 路徑為
   `<專案名>.worktrees/<資料夾>/`,可用位置參數指定工作資料夾。
+- 工作資料夾名稱採可攜的 Windows/Git-ref 契約:不可為空,不可含空白、路徑
+  分隔符、控制字元、Git-ref 禁用字元(`~`、`^`、`:`、`?`、`*`、`[`),或
+  Windows 禁用字元(`<`、`>`、`"`、`|`);不可 `-` 或 `.` 開頭,不可含 `..`
+  或 `@{`,不可用 `.` 或 `.lock` 結尾,也不可使用保留的 Windows 裝置名稱。
+  它同時是 Git branch prefix,所以建立 worktree 或 branch 前就會套用這項驗證。
 
 ## 資料夾依賴共識
 
@@ -113,17 +142,17 @@ container 或 VM sandbox。
 的完整依賴圖驗證都採 fail-closed:前置未完成、引用不存在、解析失敗或循環
 一律拒絕繼續。
 
-`after` 也選出可重現的 worktree base。下游最多只能堆疊在零個或恰一個
-尚未接受的 upstream 上;多個時拒絕,不把它變成隱含的 integration engine。
-操作順序是 `run A` -> `run B` 堆疊在 A 上 -> combined verification -> 人類
-`accept A` -> 人類 `accept B`。若 source tip、integration tree、verifier digest
-仍相同,combined candidate 的 receipt 可重用,因此 accept 是快速證據檢查,
-不重跑完整 suite。A 前進後,B 會 stale 但成果保留;應 rework/reject B 或開新
-資料夾,不重寫 stack history。同檔案修改也採一般 Git 整合:能自動合併時由
-exact-tree verification 覆蓋,conflict 則 target 不變交由人工作裁決。Assent
-不自動 rebase、解衝突或 push。清理採 upstream-first:直接 dependent 在接受且
-有機械證據證明整合並乾淨前都保留 source evidence;之後才可清除多餘成果,
-不另設狀態資料庫。
+`after` 控制 readiness,只有明示的 `base` 才選出可重現的堆疊檔案內容。下游
+只能透過 `base` 堆疊在零個或恰一個尚未接受的 upstream 上;其他 `after` upstream
+只提供順序,沒有 `base` 時從目前 integration target 開始,不會變成隱含的
+integration engine。操作順序是 `run A`、`run B` 堆疊在 A 上、combined verification、
+人類 `accept A`,再人類 `accept B`。若 source tip、integration tree、verifier digest
+仍相同,receipt 可重用,因此 direct 與 selected accept 都是快速證據檢查,不重跑
+完整 suite。A 前進後,B 會 stale 但成果保留;應 rework/reject B 或開新資料夾,
+不重寫 stack history。同檔案修改也採一般 Git 整合:能自動合併時由 exact-tree
+verification 覆蓋,conflict 則 target 不變交由人工作裁決。Assent 不自動 rebase、
+解衝突或 push。清理採 upstream-first:直接 dependent 在接受且有機械證據證明
+整合並乾淨前都保留 source evidence;之後才可清除多餘成果,不另設狀態資料庫。
 
 ## 批次衝突略過共識(2026-07-26)
 
@@ -140,13 +169,13 @@ conflict 的資料夾與其遞移排在其 `after` 之後的下游一併蒐集�
 
 略過刻意不是任何形式的解決:它不改變 target 或任何 source(不論被略過
 或已合併),conflict 資料夾自身的 source 仍須經過明確的人工 `rework` 或
-`reject` 才能重新加入未來的批次。`accept --all` 的批次發佈路徑在發佈端
-呼應同一紀律:它只在一次原子 ref 更新中發佈 receipt 涵蓋的確切資料夾,
-並在同一次執行內,只回報 receipt 未涵蓋的其餘已完成資料夾——不會有第二次
-提問,也不會有同一次執行內自行驗證或接受那批剩餘項目的 fallback。
-`archive --all` 延伸 `clean` 已在強制的 upstream-first 規則:只封存
-獨立符合資格的資料夾,並持續保留尚未被接受的 dependent 仍需要的
-source evidence。
+`reject` 才能重新加入未來的批次。`accept --all` 有兩種不同模式:fresh PASSED
+batch receipt 的 release 路徑只在一次原子 ref 更新中發佈 receipt 涵蓋的確切
+資料夾,其餘被排除的已完成資料夾只回報,同一次執行不驗證或接受它們。沒有 receipt,
+或 evidence 已過期/不是 PASSED 時,刻意的逐資料夾路徑會逐一驗證並接受,第一次
+真正失敗就停止但保留先前發佈的成果。malformed receipt 會拒絕,不選擇這個 fallback。
+`archive --all` 延伸 `clean` 已在強制的 upstream-first 規則:只封存獨立符合資格的
+資料夾,並持續保留尚未被接受的 dependent 仍需要的 source evidence。
 
 ## 人工調解共識(2026-07-27)
 

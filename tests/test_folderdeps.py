@@ -120,10 +120,20 @@ class TestParseFolderDependencies(FolderDepsTestCase):
 
     def test_invalid_dependency_name_rejected(self):
         folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
-            'after = ["bad/name"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AssentError, "not a valid task folder name"):
-            parse_folder_dependencies(folder)
+        invalid = (
+            "", "bad/name", "bad\\name", "bad name", "-bad", ".bad",
+            "bad\x00name", "bad~name", "bad^name", "bad:name",
+            "bad?name", "bad*name", "bad[name", "bad<name", "bad>name",
+            'bad"name', "bad|name", "bad..name", "bad@{name", "bad.",
+            "bad.lock", "bad.LOCK", "CON.txt", "COM¹")
+        for name in invalid:
+            with self.subTest(name=name):
+                (folder / "_folder.toml").write_text(
+                    f"after = {json.dumps([name])}\n", encoding="utf-8")
+                with self.assertRaises(AssentError) as raised:
+                    parse_folder_dependencies(folder)
+                self.assertIn(repr(name), str(raised.exception))
+                self.assertIn("not a valid task folder name", str(raised.exception))
 
     def test_missing_folder_rejected(self):
         folder = self.make_folder("work", "TODO")

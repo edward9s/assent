@@ -94,15 +94,24 @@ assent run
 # 也可以用位置參數指定工作資料夾(與 --config 正交)
 assent run <資料夾>
 
+# 只依寫出的順序執行 A、再執行 B
+assent run A B
+# 先依序執行 A、B,再執行其餘未完成資料夾
+assent run A B --all
+
 # 依資料夾 after 依賴順序執行全部未完成資料夾,最多同時跑 2 個
 assent run --all --jobs 2
 
 # 6. 預設 [verification] receipt_refresh = "manual" 下,run 收尾不會留下
-#    receipt,直接 accept 會被拒絕並提示先 verify。離席時顯式刷新(零
+#    receipt,直接/selected accept 會被拒絕並提示先 verify。離席時顯式刷新(零
 #    token):一次驗證多個已完成資料夾,成本等同驗證一個
 assent verify --batch
 # 或只刷新單一資料夾的 receipt
 assent verify <FOLDER>
+# 把 A、B 當成一個依賴排序的 selected batch 做完整驗證
+assent verify A B
+# 在 FOLDER 的 source worktree 重跑 DONE task 的 focused checks(不寫 receipt)
+assent verify <FOLDER> --focus
 # 想要 run 收尾就自動刷新 receipt,改設 receipt_refresh = "auto"
 
 # 7. 隨時查看(另開終端、零 token),再進行審查
@@ -112,6 +121,8 @@ assent report
 assent accept --all
 # 或只接受一個已完成的資料夾併入目前目標分支
 assent accept <資料夾>
+# 只接受有相符 batch receipt 的 A、B
+assent accept A B
 # 接受後,用一般 Git(或自行委任的 AI 流程)獨立同步
 git push
 # 接受與所需同步完成後,移除多餘成果
@@ -143,23 +154,31 @@ assent accept <資料夾>
 TODO 與連動範圍正確後,再明示執行 `assent run <FOLDER>`。
 
 `DONE` 是執行 AI 的完成主張,不是人類批准。人類必須先讀 `_report.md`、
-檢查報告與 checkpoint 存證,再呼叫 `assent accept <FOLDER>` 做出接受決定。
-receipt 是 scheduler 的完整驗證證據;呼叫 `accept` 才是人類批准。
-`assent verify <FOLDER>` 是零 token、可離席刷新 missing/stale receipt 的命令,
-不改 target 也不開 AI session。
-`FOLDER` 必填:`accept` 沒有 `--all`、`--push` 或 `push` subcommand,不會連線
-遠端 hosting、不會 pull、rebase,也不會刪除 source worktree。成功本地接受後,
-用一般 Git 命令,或你自行操作的 AI 流程獨立同步;這不是 Assent 的內建功能。
-只有在接受與所需同步完成、且清理證明成立後,才執行 `assent clean <FOLDER>`。
-具有未接受 dependent 時,不應先 clean upstream source branch;source worktree 或
-branch 消失後再次 accept 會直接拒絕,不把 passive merge metadata 當狀態資料庫。
+檢查報告與 checkpoint 存證,再明示做出接受決定。receipt 是 scheduler 的完整
+驗證證據;呼叫 `accept` 才是人類批准。
 
-接受要求主工作樹目前位於 target branch,且 source 已完成、乾淨、唯一可辨識並通過
-依賴安全檢查。Assent 會驗證 source 與整合後結果,以可稽核的 `--no-ff` merge
-留下證據,成功重跑具冪等性。完成、lock、乾淨、branch、依賴或歧義證明不足就拒絕;
-verify failure 或 conflict 不會推進 target。Assent 不自動解衝突、pull、rebase、
-force push,也不宣稱 integration lock 能阻止外部 Git 寫入;accept 期間不要在同一
-主工作樹執行會寫入的 Git 命令。lock 只保證 Assent accept 彼此串行。
+直接 `assent accept <FOLDER>` 與 selected `assent accept A B` 從不執行完整 verifier。
+直接資料夾若已由 ancestry 證明包含在 target 中,就是具冪等性的 no-op;否則直接
+形式需要 source tip、重建 integration tree 與 verifier digest 完全相符的 fresh
+PASSED per-folder receipt。selected 形式需要恰好涵蓋依賴排序後 A、B 的 fresh
+PASSED batch receipt。missing、malformed、stale、mismatch 或 drift evidence 都會
+拒絕,並提示相應的 `assent verify`;兩者都不會靜默驗證或接受明示集合以外的資料夾。
+
+`assent accept --all` 是刻意保留的例外,有兩種模式。fresh PASSED batch receipt 會
+在不新增完整驗證的情況下重播並原子發佈,只發布 receipt 記錄的確切資料夾;沒有
+receipt,或 batch receipt 已過期/不是 PASSED 時,改走逐資料夾路徑:依依賴順序對每個
+尚未整合的資料夾先執行 `verify_folder_if_needed`,再做一般 receipt-backed accept。
+malformed batch receipt 會拒絕,不會 fallback。逐資料夾路徑把已整合資料夾當作
+ancestry no-op;已完成且 source branch 與 worktree 都在已證明整合後被清除的資料夾,
+只有此 `--all` 路徑會跳過。第一次真正的驗證或接受失敗就停止,但先前發布的成果
+保留;fresh batch 路徑對 receipt 以外的已完成資料夾只回報,同一次不驗證也不接受。
+
+所有接受路徑都要求明示的人類決定、完整且依賴安全的 source,以及乾淨、唯一可辨識
+的 Git 狀態。conflict 不會自動解決,失敗閘門不會推進 target;不連線 remote、
+不 `pull`、`rebase`、force push、刪 source 或提供自動衝突處理。integration lock
+只能串行 Assent accept,不能阻擋外部 Git 寫入;接受期間不要在同一主工作樹執行會
+寫入的 Git 命令。只有在接受與所需同步完成、且清理證明成立後,才執行
+`assent clean <FOLDER>`。
 
 ### 有界的樂觀堆疊
 
@@ -178,6 +197,25 @@ force push,也不宣稱 integration lock 能阻止外部 Git 寫入;accept 期�
 A 與 B 修改同一檔案也遵守同一規則。Git 能自動合併時由 exact-tree verification
 證明結果;Git conflict 則 target 不變,交由人工作裁決。Assent 不自動 rebase、
 解衝突或 push。
+
+### 明示的 selected workflow
+
+`assent run A B` 只依寫出的順序執行 A、再執行 B。每個資料夾仍會檢查自己的
+前置,第一個設定或執行失敗就停止。`assent run A B --all` 先完成這個明示順序,
+再把其餘未完成資料夾交給正常的依賴排序 `--all` scheduler;兩者都不會暗中
+建立完整 integration candidate 或接受任何東西。
+
+`assent verify A B` 只選取 A、B,正規化成依賴順序,建立一個 integration candidate,
+只執行一次完整 verifier,並寫一份記錄這些 source identity 與中間 tree 的 batch
+receipt。selected merge conflict 會拒絕,不跳過也不縮小集合;它不改 target ref、
+也不接受資料夾。若失敗要求被 bisect 成通過 prefix,命令仍回傳失敗,該 prefix
+不能授權原本的 selected acceptance。
+
+`assent verify <FOLDER> --focus` 則不同:它在該資料夾的 source worktree 執行
+distinct DONE-task verification commands,不建立 integration candidate、不寫 receipt,
+即使通過也不能授權接受。成功的 exact selected verification 之後,人類審查可執行
+`assent accept A B`;它要求恰好 A、B 的 fresh receipt,不重跑驗證,一次原子發布
+全部 selected 資料夾或一個也不發布。
 
 清理採 upstream-first 且以證據為準。直接 dependent 尚未完成、接受、乾淨、存在,
 或無法證明已整合時都保留 source;`assent clean A` 會拒絕並說明原因。全部
@@ -208,12 +246,13 @@ conflict 資料夾及其衝突路徑,並回報每個排在某個 conflict 資料
 source 仍需經過明確的人工 `assent rework` 或 `assent reject`,才能
 重新加入未來的批次。
 
-`assent accept --all` 只在一次原子 ref 更新中發佈 receipt 涵蓋的確切
-資料夾,並在同一次執行內回報 receipt 未涵蓋的其餘已完成資料夾(可能是
-太晚完成而沒被納入批次,也可能是建置批次時就沒包含它),既不驗證也不
-接受它們:不會有第二次提問,也不會有同一次執行內轉回逐資料夾路徑的
-fallback。之後可再次執行 `assent verify --batch`,對剩餘部分建置下一個
-批次。
+`assent accept --all` 有兩種刻意區分的模式。fresh PASSED batch receipt 時,只在
+一次原子 ref 更新中發佈 receipt 涵蓋的確切資料夾,並在同一次執行內回報 receipt
+未涵蓋的其餘已完成資料夾;不會驗證或接受這些剩餘項目,也沒有第二次提問或隱藏的
+集合擴張。沒有 batch receipt,或 evidence 已過期/不是 PASSED 時,改走逐資料夾
+路徑,在每個尚未整合的 accept 前執行 `verify_folder_if_needed`。malformed receipt
+會拒絕而不 fallback;逐資料夾路徑在第一次真正失敗時停止,保留先前已發布成果。
+之後可再次執行 `assent verify --batch`,對剩餘部分建置下一個明示批次。
 
 `assent archive --all` 只封存獨立符合資格的資料夾(已完成,且其 source
 已經不存在,或 `clean` 本身的機械證明可以移除它);對於任何 source 仍被
@@ -230,7 +269,7 @@ Assent 則負責這些編輯周圍的每一個 Git 操作。完整順序是:
 assent reconcile parallel01              # 在 worktree 中準備好衝突
                                          # (人工編輯被回報的檔案)
 assent reconcile --continue parallel01   # 加入索引、提交、推進 source
-assent verify parallel01                 # 選用、明確、昂貴
+assent verify parallel01                 # 接受前必須執行、明確、昂貴
 assent accept parallel01                 # 明確的人類批准
 ```
 
@@ -331,8 +370,10 @@ focused verify;資料夾完成後是否還在 AI session 外建立臨時 integra
 `assent verify <FOLDER>` 是零 token、可離席執行的完整驗證 receipt refresh,不改
 target、不開 AI session;`assent verify --batch` 則對每個已完成、尚未整合的資料夾
 一次做同樣的事。兩者的報告都會顯示 `PASSED`/`FAILED` 與 `fresh`/`stale`,stale
-時可在無人值守階段重新 refresh;沒有新鮮的 `PASSED` receipt,`assent accept` 會
-拒絕並提示先 verify。
+時可在無人值守階段重新 refresh。直接 `assent accept <FOLDER>` 與 selected
+`assent accept A B` 沒有相符的新鮮 `PASSED` receipt 就拒絕,且從不自行啟動
+verifier;`assent accept --all` 則依 fresh batch release,或 batch evidence 缺少/
+過期時的刻意逐資料夾 verify-then-accept 模式執行。
 
 打包的 `.assent/verify.py` 同時檢查 candidate working tree 與 candidate `HEAD` 相對
 第一父提交的 committed delta,因此能抓到單純 `git diff --check` 看不到的已提交尾端
@@ -385,11 +426,12 @@ auto(<資料夾>/t003) 對應 commit <hash> 的 diff,
 
 裁決落實 = AI 改任務檔(status 改回 TODO、補說明、加任務、標 SKIP),
 `assent check` 過了回第 2 幕。`DONE` 仍是執行主張;receipt 是 scheduler 證據,
-不是批准。人類讀報告後呼叫 `assent accept <FOLDER>`;它快速重建 candidate,
-比對 source tip、integration tree、verifier digest,只有完全重現 fresh `PASSED`
-receipt 才發布,不執行完整測試。missing/stale receipt 要先 `assent verify <FOLDER>`。
-沒有 task `review` 欄位。遠端同步仍是獨立的一般 Git 決定,最後可執行
-`assent clean <FOLDER>`。循環到需要重做的任務
+不是批准。人類讀報告後,直接 `assent accept <FOLDER>` 只快速重建 candidate,
+比對 source tip、integration tree、verifier digest,需要 fresh `PASSED` receipt
+才發布且不執行完整測試;selected `assent accept A B` 也只發布恰好相符的
+batch receipt,不驗證。`assent accept --all` 是例外:fresh batch receipt 會原子重播,
+batch evidence 缺少/過期時才走逐資料夾驗證 fallback。沒有 task `review` 欄位。
+遠端同步仍是獨立的一般 Git 決定,最後可執行 `assent clean <FOLDER>`。循環到需要重做的任務
 都完成並由人類接受。
 新一輪計畫 = 開新工作資料夾即可;舊資料夾可由 `_folder.toml` 的 `after`
 繼續作為前置參與依賴判定。資料夾完成由任務檔推導,全部任務為 DONE/SKIP
@@ -405,13 +447,28 @@ receipt 才發布,不執行完整測試。missing/stale receipt 要先 `assent v
 兩者彼此正交,可以只用其中一個,也可以同時使用,例如
 `assent status --config configs/night.toml parallel01`。
 
-`assent verify <FOLDER>` 是單一資料夾的零 token receipt refresh,不改 target、不開 AI。
-`assent accept <FOLDER>` 是人類批准,只快速重建 candidate 並比對 fresh `PASSED`
-receipt,不執行完整測試。receipt 是可刪除重建的 derived evidence;內容變更會 stale,
-target commit 改變但重建後 integration tree 相同仍可接受。source worktree/branch
-消失就拒絕。它不連線 remote、沒有 `--all`/`--push`、不 pull、rebase、force push、
-自動解衝突或刪 source;integration lock 不能阻止外部 Git 寫入。接受期間不要在同一
-主工作樹執行寫入 Git 命令。成功重跑具冪等性。
+工作資料夾名稱必須是可攜的 Windows/Git-ref 名稱:不可為空,不可含空白、路徑
+分隔符、控制字元、Git-ref 禁用字元(`~`、`^`、`:`、`?`、`*`、`[`),或 Windows
+禁用字元(`<`、`>`、`"`、`|`);不可 `-` 或 `.` 開頭,不可含 `..` 或 `@{`,不可用
+`.` 或 `.lock` 結尾,也不可使用保留的 Windows 裝置名稱。它會成為 Git branch
+prefix,所以建立 worktree 或 branch 前就會先驗證。
+
+`assent verify <FOLDER>` 是單一資料夾的零 token 完整驗證 receipt refresh,不改
+target、不開 AI。`assent verify A B` 是精確 selected batch:將 A、B 依賴排序,
+只建一個 candidate、只跑一次完整 verifier,並寫一份只涵蓋該集合的 batch receipt。
+`assent verify <FOLDER> --focus` 則在 source worktree 重跑 distinct DONE-task checks,
+不寫 receipt,不能授權接受。
+
+`assent accept <FOLDER>` 是人類明示批准,從不執行完整測試;除了 ancestry no-op,
+必須有 fresh 且完全匹配的 `PASSED` receipt,才快速重建 candidate 並記錄受保護的
+`--no-ff` merge。`assent accept A B` 必須有恰好 A、B 的 fresh batch receipt,
+不驗證,一次發布全部 selected 或一個也不發布。`assent accept --all` 是刻意的兩種
+模式例外:fresh PASSED batch receipt 原子重播;batch evidence 缺少或過期則逐資料夾
+verify-then-accept。malformed batch evidence 會拒絕,不 fallback。receipt 是可刪除
+重建的 derived evidence;內容變更會 stale。direct 與 selected 不會擴大集合或啟動
+verifier,也不連線 remote、`--push`、pull、rebase、force push、自動解衝突或刪 source;
+integration lock 不能阻止外部 Git 寫入。接受期間不要在同一主工作樹執行寫入 Git
+命令。source 已整合時重跑是冪等 no-op。
 
 `assent clean [FOLDER]` 只刪除已完全併入且乾淨的 worktree 與分支;證明不了就跳過,
 不碰 `.assent/`,也沒有強制選項,且與 `git clean` 無關。
@@ -434,12 +491,17 @@ checkpoints 構成目前分支的連續尾段才會建立新的反向 commit,絕
 | 指令與代表性命令 | 選項與作用 | token 消耗 |
 |---|---|---|
 | `assent run [FOLDER]`<br>`assent run parallel01` | 執行工作資料夾,直到任務全為 DONE/BLOCKED/SKIP。省略 `FOLDER` 時推導唯一可執行資料夾;`--once` 只執行下一個任務後停止;`--task ID` 指定單一任務且仍檢查前置,例如 `assent run --task t003 parallel01`。 | 僅執行 AI session 時消耗;`--once` 或 `--task` 最多執行單一任務 |
-| `assent run --all`<br>`assent run --all --jobs 2` | 依 `_folder.toml` 的資料夾依賴順序執行全部未完成資料夾;`--jobs N` 限制同時執行的資料夾數(預設 1),家長終端以 `[工作資料夾] 訊息` 即時標示各子行程輸出。不可與 `FOLDER`、`--once` 或 `--task` 並用。 | 僅執行 AI session 時消耗 |
+| `assent run A B`<br>`assent run A B --all` | 只依序執行 A、B,第一個失敗就停止。加 `--all` 時,再依依賴順序執行其餘未完成資料夾;兩種形式都不暗中驗證或接受。 | 僅執行 AI session 時消耗 |
+| `assent run --all`<br>`assent run --all --jobs 2` | 依 `_folder.toml` 的資料夾依賴順序執行全部未完成資料夾;`--jobs N` 限制同時執行的資料夾數(預設 1),家長終端以 `[工作資料夾] 訊息` 即時標示各子行程輸出。 | 僅執行 AI session 時消耗 |
 | `assent status [FOLDER]`<br>`assent status parallel01` | 顯示進度統計、下一個任務、分支與最後檢查點。接受 `--config PATH`。 | **零** |
 | `assent check [FOLDER]`<br>`assent check --config .assent/assent.toml parallel01` | 驗證任務檔格式、依賴無循環、設定與環境,是規劃會議的散會條件。接受 `--config PATH`。 | **零** |
 | `assent report [FOLDER]`<br>`assent report parallel01` | 生成並顯示工作資料夾內的人讀報告 `_report.md`。接受 `--config PATH`。 | **零** |
-| `assent verify <FOLDER>`<br>`assent verify parallel01` | 對單一資料夾的臨時 integration candidate 執行一次完整 verifier 並刷新 derived receipt;不改 target、不開 AI session。報告顯示 `PASSED`/`FAILED`、`fresh`/`stale`;沒有 `--all`。 | **零** |
-| `assent accept <FOLDER>`<br>`assent accept parallel01` | 人類批准單一已完成資料夾。快速重建 candidate,只在完全比對 fresh `PASSED` receipt 時發布;不執行完整驗證。missing/stale receipt 要先 `assent verify`;沒有 `--all`、`--push`、remote、pull、rebase、force、自動解衝突或刪 source。 | **零** |
+| `assent verify <FOLDER>`<br>`assent verify parallel01` | 對單一資料夾的臨時 integration candidate 執行一次完整 verifier 並刷新 derived receipt;不改 target、不開 AI session。報告顯示 `PASSED`/`FAILED`、`fresh`/`stale`。 | **零** |
+| `assent verify A B`<br>`assent verify A B --no-bisect` | 依依賴順序只驗證 A、B,一個 candidate、一次完整 verifier,寫一份只涵蓋該集合的 batch receipt。selected conflict 會拒絕,不跳過。 | **零** |
+| `assent verify <FOLDER> --focus`<br>`assent verify parallel01 --focus` | 在 source worktree 重跑 distinct DONE-task verify 命令;不寫 receipt,不能授權接受。 | **零** |
+| `assent accept <FOLDER>`<br>`assent accept parallel01` | 人類明示批准單一資料夾。從不執行完整驗證;除了 ancestry no-op,需要 fresh 且精確的 `PASSED` receipt 才快速重建 candidate。 | **零** |
+| `assent accept A B`<br>`assent accept A B --config PATH` | 人類明示批准恰好 A、B,只接受相符的 fresh batch receipt;依賴排序後重播、不驗證,一次發布全部或一個也不發布,不擴大也不 fallback。 | **零** |
+| `assent accept --all` | Fresh PASSED batch receipt:不新增驗證、原子重播。Evidence 缺少/過期:依賴順序逐資料夾 `verify_folder_if_needed` 再 accept,失敗即停但保留先前成果。Malformed evidence 會拒絕;已整合 no-op、source 已清除則跳過。 | **零** |
 | `assent reconcile <FOLDER>`<br>`assent reconcile --continue parallel01` | 在隔離 worktree `<project>.reconcile/<FOLDER>` 內準備單一已完成資料夾的 source 對 target conflict,讓人工編輯被回報的檔案;`--continue` 把該解決加入索引並驗證、提交 merge、fast-forward source 分支;`--abort` 只丟棄已證明的受管 worktree 與分支。從不改 target、不解決內容、不執行聚焦或完整驗證、不寫 receipt、也不接受。`FOLDER` 必填;沒有 `--all`。 | **零** |
 | `assent clean [FOLDER]`<br>`assent clean parallel01` | 只清理已完全併入且乾淨的 worktree 與同資料夾前綴分支;任何證明不足就跳過,不碰 `.assent/`,且沒有強制選項。省略 `FOLDER` 時作用於全部工作資料夾。 | **零** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | 人工裁決駁回:封存未提交變更後強制刪除該資料夾的 worktree 與同前綴分支(刪除前以完整 tip hash 存證),並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔保存 Git 存證。`FOLDER` 必填;run 進行中拒絕。 | **零** |

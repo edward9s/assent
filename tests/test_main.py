@@ -118,11 +118,14 @@ class TestDispatch(MainTestCase):
             ["run", "--config", str(self.root / "nope" / "assent.toml")])
         self.assertEqual(code, 1)
 
-    def test_run_all_and_folder_are_mutually_exclusive(self):
-        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
-                io.StringIO()):
-            main(["run", "work", "--all"])
-        self.assertEqual(ctx.exception.code, 2)
+    def test_run_all_accepts_an_explicit_prefix(self):
+        config = self.write_config()
+        with patch("assent.__main__.engine.run", return_value=0), patch(
+                "assent.__main__.run_all", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["run", "work", "--all", "--config", str(config)])
+        self.assertEqual(code, 0)
+        mocked.assert_called_once()
 
     def test_run_jobs_requires_all_and_positive_number(self):
         for argv in (["run", "--jobs", "2"],
@@ -138,6 +141,60 @@ class TestDispatch(MainTestCase):
             code, _ = self.run_main(["run", "--all", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[2], 1)
+
+    def test_run_named_folders_dispatch_in_given_order(self):
+        config = self.write_config()
+        with patch("assent.__main__.engine.run", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["run", "first", "second", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [call.args[0].tasks_name for call in mocked.call_args_list],
+            ["first", "second"])
+
+    def test_run_named_folders_stops_after_first_failure(self):
+        config = self.write_config()
+        with patch("assent.__main__.engine.run", side_effect=[1, 0]) as mocked:
+            code, _ = self.run_main(
+                ["run", "first", "second", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [call.args[0].tasks_name for call in mocked.call_args_list],
+            ["first"])
+
+    def test_run_named_folders_with_all_runs_remainder_once(self):
+        config = self.write_config()
+        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
+                patch("assent.__main__.run_all", return_value=0) as all_mock:
+            code, _ = self.run_main([
+                "run", "first", "second", "--all", "--jobs", "3",
+                "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [call.args[0].tasks_name for call in run_mock.call_args_list],
+            ["first", "second"])
+        all_mock.assert_called_once_with(str(config), config.parent.resolve(), 3)
+
+    def test_run_named_folders_rejects_duplicates(self):
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
+                io.StringIO()):
+            main(["run", "first", "first"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_run_named_folders_rejects_single_folder_options(self):
+        cases = (
+            ["run", "first", "second", "--once"],
+            ["run", "first", "second", "--task", "t001"],
+            ["run", "first", "--jobs", "2"],
+            ["run", "first", "second", "--jobs", "2"],
+            ["run", "first", "--all", "--once"],
+            ["run", "first", "--all", "--task", "t001"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv), self.assertRaises(
+                    SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2)
 
     def test_all_plan_commands_accept_folder_override(self):
         config = self.write_config()
@@ -176,9 +233,10 @@ class TestDispatch(MainTestCase):
             main(["clean", "--force"])
         self.assertEqual(ctx.exception.code, 2)
 
-    def test_accept_requires_exactly_one_folder_and_has_no_remote_options(self):
-        for argv in (["accept"], ["accept", "one", "two"],
-                     ["accept", "one", "--all"],
+    def test_accept_requires_a_folder_and_has_no_remote_options(self):
+        for argv in (["accept"], ["accept", "one", "--all"],
+                     ["accept", "one", "two", "--all"],
+                     ["accept", "one", "one"],
                      ["accept", "one", "--push"]):
             with self.subTest(argv=argv), self.assertRaises(
                     SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
@@ -193,9 +251,21 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
 
-    def test_verify_requires_one_folder_and_has_no_all_option(self):
-        for argv in (["verify"], ["verify", "one", "two"],
-                     ["verify", "one", "--all"]):
+    def test_accept_dispatches_two_or_more_folders_as_selected_batch(self):
+        config = self.write_config()
+        with patch("assent.__main__.accept_selected_batch", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["accept", "child", "parent", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(mocked.call_args.args,
+                         (str(config), config.parent.resolve(),
+                          ["child", "parent"]))
+
+    def test_verify_requires_a_mode_and_rejects_incompatible_options(self):
+        for argv in (["verify"], ["verify", "one", "--all"],
+                     ["verify", "one", "two", "--focus"],
+                     ["verify", "one", "--focus", "--no-bisect"],
+                     ["verify", "one", "one"]):
             with self.subTest(argv=argv), self.assertRaises(
                     SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
                 main(argv)
@@ -210,6 +280,24 @@ class TestDispatch(MainTestCase):
         self.assertEqual(codes, [0, 1])
         self.assertEqual(mocked.call_count, 2)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
+
+    def test_verify_dispatches_exact_selected_batch_and_focus(self):
+        config = self.write_config()
+        with patch("assent.__main__.verify_selected_batch", return_value=0) as batch:
+            code, _ = self.run_main([
+                "verify", "later", "earlier", "--no-bisect",
+                "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(batch.call_args.args[:2],
+                         (str(config), config.parent.resolve()))
+        self.assertEqual(batch.call_args.args[2], ["later", "earlier"])
+        self.assertFalse(batch.call_args.args[3])
+
+        with patch("assent.__main__.engine.verify_focused", return_value=0) as focus:
+            code, _ = self.run_main([
+                "verify", "reviewed", "--focus", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(focus.call_args.args[0].tasks_name, "reviewed")
 
     def test_verify_batch_dispatches_bisect_and_keeps_the_default_prompt(self):
         config = self.write_config()

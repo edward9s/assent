@@ -1097,6 +1097,92 @@ def select_batch_folders(config_path: str, assent_dir: Path, main: Path,
     return BatchSelection(tuple(sources), tuple(skipped)), configs
 
 
+def _explicit_source_snapshot(cfg: Config, main: Path) -> tuple[str, str,
+                                                                  Path | None]:
+    """Resolve one named batch source only when its branch identity is unique."""
+    branch = gitops.unique_folder_branch(main, cfg.tasks_name)
+    if branch is None:
+        raise AssentError(
+            f"folder {cfg.tasks_name} has no source branch or worktree")
+    current, tip, worktree = _source_snapshot(cfg, main)
+    if current != branch:
+        raise AssentError(
+            f"folder {cfg.tasks_name} source branch changed while it was being "
+            "resolved")
+    return current, tip, worktree
+
+
+def select_explicit_batch_folders(
+        config_path: str, assent_dir: Path, main: Path, target_tip: str,
+        folder_names: Sequence[str]) -> tuple[BatchSelection, dict[str, Config]]:
+    """Resolve an exact named folder set without dynamic skips or omissions.
+
+    Every selected folder must be finished and have one clean source that is
+    not already in the target.  Direct live prerequisites are either earlier in
+    this normalized set or independently proven to be in the target.
+    """
+    names = tuple(folder_names)
+    if len(names) < 2:
+        raise AssentError(
+            "an explicit selected batch needs at least two folder names")
+    if len(set(names)) != len(names):
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        raise AssentError(
+            "an explicit selected batch cannot contain duplicate folder names: "
+            + ", ".join(duplicates))
+
+    graph = parse_folder_dependency_graph(assent_dir)
+    missing = sorted(set(names) - set(graph))
+    if missing:
+        raise AssentError(
+            "selected batch folder(s) were not found: " + ", ".join(missing))
+    selected = set(names)
+    ordered = order_folders_by_dependency(graph, selected)
+    configs: dict[str, Config] = {}
+    sources: list[tuple[str, str]] = []
+    for folder in ordered:
+        completion = infer_folder_completion(assent_dir / folder)
+        if not completion.complete:
+            raise AssentError(
+                f"selected batch folder {folder} is not finished: "
+                f"{completion.reason}")
+        cfg = load_config(config_path, folder)
+        _branch, source_tip, _worktree = _explicit_source_snapshot(cfg, main)
+        if gitops.is_ancestor(main, source_tip, target_tip):
+            raise AssentError(
+                f"selected batch folder {folder} is already accepted into the "
+                f"target (source {source_tip[:12]} is contained in it)")
+        configs[folder] = cfg
+        sources.append((folder, source_tip))
+
+    earlier: set[str] = set()
+    for folder in ordered:
+        dependencies = graph[folder]
+        for dependency in live_upstreams(assent_dir, dependencies):
+            if dependency in selected:
+                if dependency not in earlier:
+                    raise AssentError(
+                        f"selected batch prerequisite {dependency} of {folder} "
+                        "was not normalized earlier in the selected set")
+                continue
+            dependency_completion = infer_folder_completion(
+                assent_dir / dependency)
+            if not dependency_completion.complete:
+                raise AssentError(
+                    f"prerequisite {dependency} of selected folder {folder} is "
+                    f"not finished: {dependency_completion.reason}")
+            dependency_cfg = load_config(config_path, dependency)
+            _branch, dependency_tip, _worktree = _explicit_source_snapshot(
+                dependency_cfg, main)
+            if not gitops.is_ancestor(main, dependency_tip, target_tip):
+                raise AssentError(
+                    f"prerequisite {dependency} of selected folder {folder} "
+                    f"(source {dependency_tip[:12]}) is neither in the target "
+                    "nor present earlier in the selected batch")
+        earlier.add(folder)
+    return BatchSelection(tuple(sources)), configs
+
+
 def _batch_drift(configs: dict[str, Config], main: Path, excludes: Sequence[str],
                  target_branch: str, target_tip: str,
                  sources: Sequence[tuple[str, str]], script: Path,
@@ -1393,7 +1479,8 @@ def _skip_question(chain: FilteredBatchChain) -> str:
 
 
 def _report_localization(assent_dir: Path, folders: Sequence[str],
-                         result: BatchBisectResult) -> str:
+                         result: BatchBisectResult,
+                         requested_folders: Sequence[str] | None = None) -> str:
     """Print the localization verdict and return the note stored in the receipt.
 
     The guilty folder keeps its status and its task files: it is still finished
@@ -1423,6 +1510,10 @@ def _report_localization(assent_dir: Path, folders: Sequence[str],
         print("verify --batch: reissuing a PASSED batch receipt for the "
               f"{len(result.kept)} folder(s) verified ahead of it: "
               + ", ".join(folder for folder, _tip in result.kept))
+        if requested_folders is not None:
+            print("verify --batch: this smaller PASSED prefix receipt does not "
+                  "authorize acceptance of the originally requested full set: "
+                  + ", ".join(requested_folders))
     else:
         print("verify --batch: no folder ahead of it remains, so the batch "
               "keeps a FAILED receipt and publishes nothing")
@@ -1430,8 +1521,15 @@ def _report_localization(assent_dir: Path, folders: Sequence[str],
 
 
 def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
-                         confirm: Callable[[str], bool]) -> int:
-    """Build, verify, and record one batch candidate with every lock held."""
+                         confirm: Callable[[str], bool],
+                         selected_folders: Sequence[str] | None = None) -> int:
+    """Build, verify, and record one batch candidate with every lock held.
+
+    ``selected_folders`` switches the inherited dynamic skip/confirm policy to
+    exact selection: the names are validated before the candidate is built and
+    any merge conflict refuses the whole request without asking to skip it.
+    """
+    exact = selected_folders is not None
     root = assent_dir.parent
     main = gitops.main_worktree(root)
     path = batch_receipt_path(assent_dir)
@@ -1442,11 +1540,18 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
 
     target_branch = gitops.require_current_branch(main)
     target_tip = gitops.commit_of(main, target_branch)
-    selection, configs = select_batch_folders(
-        config_path, assent_dir, main, target_tip)
+    if exact:
+        selection, configs = select_explicit_batch_folders(
+            config_path, assent_dir, main, target_tip, selected_folders)
+    else:
+        selection, configs = select_batch_folders(
+            config_path, assent_dir, main, target_tip)
     for folder, reason in selection.skipped:
         print(f"verify --batch: skip {folder} ({reason})")
     if not selection.sources:
+        if exact:
+            raise AssentError(
+                "the explicit selected batch resolved to no source folders")
         print("verify --batch: no folder has anything left to verify; "
               "no receipt was written.")
         return 0
@@ -1462,7 +1567,12 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
         if not gitops.working_tree_status(main, excludes).is_clean:
             raise AssentError(f"target worktree {main} is not clean")
         for folder, source_tip in selection.sources:
-            _branch, current, _worktree = _source_snapshot(configs[folder], main)
+            if exact:
+                _branch, current, _worktree = _explicit_source_snapshot(
+                    configs[folder], main)
+            else:
+                _branch, current, _worktree = _source_snapshot(
+                    configs[folder], main)
             if current != source_tip:
                 raise AssentError(
                     f"source tip for {folder} changed while the batch locks "
@@ -1481,35 +1591,64 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
         result: subprocess.CompletedProcess[str] | None = None
         start_failure = ""
         localized = False
+        batch_sources: tuple[tuple[str, str], ...]
+        batch_step_trees: tuple[str, ...]
+        batch_folders: tuple[str, ...]
+        batch_skipped: tuple[str, ...] = ()
         refusal = ""
         with gitops.temporary_integration_worktree(
                 main, "batch", target_tip) as (candidate, _branch):
-            chain = _merge_chain_skipping_conflicts(
-                candidate, selection.sources, graph)
-            if chain.conflicts:
-                _report_batch_conflicts(chain, main, target_tip)
-            if chain.conflicts and not chain.sources:
-                # Nothing is left to offer, so there is no decision to ask for.
-                refusal = ("every queued folder conflicts, so no independent "
-                           "subset remains to verify")
-            elif chain.conflicts and not confirm(_skip_question(chain)):
-                refusal = "the skip was declined, so nothing was verified"
-            else:
+            if exact:
+                chain = _merge_chain(candidate, selection.sources)
+                if not chain.ok:
+                    print("verify --batch: the exact selected set conflicts "
+                          f"while merging {chain.conflict_folder}. "
+                          "Conflicting file(s):")
+                    for conflict in chain.conflicts:
+                        print(f"  - {conflict}")
+                    print("verify --batch: refused; an explicit selected set "
+                          "cannot be reduced by skipping a conflict. The target "
+                          "and every source were left unchanged and no receipt "
+                          "was written")
+                    return 1
+                batch_sources = tuple(selection.sources)
+                batch_step_trees = chain.step_trees
+                batch_folders = selection.folders
                 try:
                     result = _run_full_verifier(script, candidate)
                 except OSError as e:
                     start_failure = f"Unable to start verification: {e}"
+            else:
+                chain = _merge_chain_skipping_conflicts(
+                    candidate, selection.sources, graph)
+                if chain.conflicts:
+                    _report_batch_conflicts(chain, main, target_tip)
+                if chain.conflicts and not chain.sources:
+                    # Nothing is left to offer, so there is no decision to ask for.
+                    refusal = ("every queued folder conflicts, so no independent "
+                               "subset remains to verify")
+                elif chain.conflicts and not confirm(_skip_question(chain)):
+                    refusal = "the skip was declined, so nothing was verified"
+                else:
+                    try:
+                        result = _run_full_verifier(script, candidate)
+                    except OSError as e:
+                        start_failure = f"Unable to start verification: {e}"
+                if refusal:
+                    print(f"verify --batch: refused, {refusal}. The target and "
+                          "every source were left unchanged and no receipt was "
+                          "written")
+                    return 1
+                batch_sources = chain.sources
+                batch_step_trees = chain.step_trees
+                batch_folders = chain.folders
+                batch_skipped = chain.skipped
 
-        if refusal:
-            print(f"verify --batch: refused, {refusal}. The target and every "
-                  "source were left unchanged and no receipt was written")
-            return 1
-
-        # Both a human skip and a localization shrink what the receipt
-        # certifies, so the recorded sources and step trees are decided here
-        # rather than assumed to be every queued folder.
-        sources = chain.sources
-        step_trees = chain.step_trees
+        # A human skip or a localization may shrink what the dynamic receipt
+        # certifies. Exact selection starts from the complete requested set and
+        # only bisection may retain a smaller verified prefix.
+        sources = batch_sources
+        step_trees = batch_step_trees
         if start_failure:
             status, exit_code, summary = "FAILED", 1, start_failure
         else:
@@ -1522,9 +1661,10 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                 f"(exit code {result.returncode})")
             if status == "FAILED" and bisect:
                 bisected = bisect_batch_failure(
-                    main, target_tip, chain.sources, script, summary)
+                    main, target_tip, batch_sources, script, summary)
                 summary = _report_localization(
-                    assent_dir, chain.folders, bisected)
+                    assent_dir, batch_folders, bisected,
+                    batch_folders if exact else None)
                 localized = True
                 if bisected.kept:
                     sources = bisected.kept
@@ -1538,15 +1678,15 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
 
         changed = _batch_drift(
             configs, main, excludes, target_branch, target_tip,
-            chain.sources, script, digest)
+            batch_sources, script, digest)
         if changed:
             if localized:
                 print("verify --batch: the repository changed while the batch "
                       "was being verified, so the localization above certifies "
                       "nothing and the receipt records the drift instead")
             receipt = _new_batch_receipt(
-                status="FAILED", target_tip=target_tip, sources=chain.sources,
-                step_trees=chain.step_trees, digest=digest,
+                status="FAILED", target_tip=target_tip, sources=batch_sources,
+                step_trees=batch_step_trees, digest=digest,
                 exit_code=1, failure_summary="; ".join(changed))
 
         write_batch_receipt(path, receipt, main)
@@ -1557,9 +1697,9 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
     if receipt.status == "PASSED":
         if not localized:
             print(f"verify --batch: passed ({receipt.final_tree})")
-            if chain.skipped:
-                print("verify --batch: verified " + ", ".join(chain.folders)
-                      + "; skipped " + ", ".join(chain.skipped))
+            if batch_skipped:
+                print("verify --batch: verified " + ", ".join(batch_folders)
+                      + "; skipped " + ", ".join(batch_skipped))
             return 0
         # The batch as requested did not pass, so the exit code stays nonzero
         # even though a smaller batch is now certified: a caller must not read
@@ -1599,3 +1739,30 @@ def verify_batch(config_path: str, assent_dir: str | Path, bisect: bool = True,
     except AssentError as e:
         print(f"verify --batch: failed ({e})")
         return 1
+
+
+def verify_selected_batch(config_path: str, assent_dir: str | Path,
+                          folders: Sequence[str], bisect: bool = True) -> int:
+    """Verify exactly the named folders as one dependency-ordered candidate.
+
+    Unlike the dynamic batch path, a selected conflict is a refusal rather than
+    an invitation to skip folders.  The requested set is never broadened or
+    silently reduced, and a smaller PASSED prefix from bisection still returns
+    nonzero because it does not certify the original request.
+    """
+    assent_dir = Path(assent_dir)
+    try:
+        with hold_integration_lock(assent_dir):
+            return _verify_batch_locked(
+                config_path, assent_dir, bisect, confirm_on_terminal, folders)
+    except LockBusy as e:
+        print(f"verify --batch: refused ({e})")
+        return 1
+    except AssentError as e:
+        print(f"verify --batch: failed ({e})")
+        return 1
+
+
+# Keep both word orders discoverable for library callers while the CLI uses the
+# explicit ``verify_selected_batch`` name.
+verify_batch_selected = verify_selected_batch
