@@ -1661,5 +1661,75 @@ class TestStackReportLines(EngineTestCase):
             "Stack base: not applicable (folder complete)", text)
 
 
+class TestReworkPromptSuffix(EngineTestCase):
+    """A TODO task whose journal's last entry is a pending rework_requested record gets a
+    prompt suffix carrying the rejection reason, so the execution AI does not mistake the
+    rejected implementation/tests for the current spec."""
+
+    def test_rework_requested_last_entry_carries_reason_into_prompt(self):
+        path = self.write_task(1)
+        append_entry(
+            journal_path_for(path), by="scheduler", event="rework_requested",
+            summary="Manual rework requested; scheduler reset status DONE back to TODO",
+            detail=("target id: t001\noriginal status: DONE\nHEAD: deadbeef\n"
+                    "cascade scope: disabled\n"
+                    "reason: the parser drops trailing whitespace"))
+        cfg = self.build()
+        self.commit_all()
+        adapter = ScriptedAdapter([self.ai_done(path)])
+
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        prompt = adapter.calls[0][0]
+        self.assertIn("rejected by a human reviewer", prompt)
+        self.assertIn("the parser drops trailing whitespace", prompt)
+        self.assertIn("do not assume the existing code or existing tests are correct", prompt)
+
+    def test_last_entry_not_rework_requested_adds_no_suffix(self):
+        path = self.write_task(1)
+        append_entry(
+            journal_path_for(path), by="scheduler", event="blocked",
+            summary="Still failed acceptance after 1 retries")
+        cfg = self.build()
+        self.commit_all()
+        adapter = ScriptedAdapter([self.ai_done(path)])
+
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        prompt = adapter.calls[0][0]
+        self.assertNotIn("rejected by a human reviewer", prompt)
+
+    def test_missing_journal_adds_no_suffix_and_does_not_raise(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        adapter = ScriptedAdapter([self.ai_done(path)])
+
+        self.assertFalse(journal_path_for(path).exists())
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        prompt = adapter.calls[0][0]
+        self.assertNotIn("rejected by a human reviewer", prompt)
+
+    def test_unparseable_journal_adds_no_suffix_and_does_not_raise(self):
+        path = self.write_task(1)
+        journal_path_for(path).write_text("not [valid toml", encoding="utf-8")
+        cfg = self.build()
+        self.commit_all()
+
+        # This step avoids append_entry: the pre-existing broken journal is the very
+        # condition under test, and append_entry re-parsing it is a separate concern.
+        def step(prompt):
+            set_status(path, "DONE")
+            return ok_result()
+
+        adapter = ScriptedAdapter([step])
+
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        prompt = adapter.calls[0][0]
+        self.assertNotIn("rejected by a human reviewer", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
