@@ -8,6 +8,7 @@ from tests.engine_support.
 Chinese literals that remain are deliberate user/upstream passthrough data."""
 import contextlib
 import io
+import subprocess
 import unittest
 
 from assent import engine, gitops
@@ -74,12 +75,67 @@ class TestCrashDirtyWorktreeRecovery(EngineTestCase):
                              for s in self.subjects()))
         self.assertFalse(journal_path_for(path).exists())
 
-    def test_no_resumable_candidate_stays_fail_closed(self):
-        path = self.write_task(1, status="DONE")
+    def _commit_in_worktree(self, worktree, subject):
+        """Commit whatever is currently in the worktree under an exact checkpoint subject."""
+        for args in (("add", "-A"), ("commit", "-m", subject)):
+            subprocess.run(["git", *args], cwd=worktree, capture_output=True,
+                           encoding="utf-8", check=True)
+
+    def test_uncheckpointed_done_work_recovers_against_its_own_task(self):
+        """The observed crash: the AI marked t001 DONE and the scheduler died before writing
+        its auto checkpoint, so next_task() already points at the disjoint-scope t002."""
+        first = self.write_task(1, status="DONE", scope=("src/",))
+        second = self.write_task(2, slug="next", scope=("other/",))
         cfg = self.build()
         self.commit_all()
         worktree = self._reused_worktree()
         (worktree / "src").mkdir()
+        (worktree / "src" / "done_work.py").write_text("produced", encoding="utf-8")
+
+        adapter = ScriptedAdapter([self.ai_done(first)])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertTrue(
+            any(s.startswith("wip(plan01/t001): recovered dirty worktree")
+                for s in self.subjects()))
+        # t001 is resumed as its own task; t002 never sees the work or a session.
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertIn("resume", adapter.calls[0][0])
+        self.assertEqual(parse_task_file(first).status, "DONE")
+        self.assertEqual(parse_task_file(second).status, "TODO")
+        self.assertFalse(any(s.startswith("wip(plan01/t002)") for s in self.subjects()))
+        self.assertEqual(
+            (worktree / "src" / "done_work.py").read_text(encoding="utf-8"), "produced")
+
+    def test_two_plausible_uncheckpointed_done_tasks_stay_fail_closed(self):
+        first = self.write_task(1, status="DONE", scope=("src/",))
+        second = self.write_task(2, slug="also", status="DONE", scope=("src/",))
+        cfg = self.build()
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "ambiguous.py").write_text("x", encoding="utf-8")
+
+        adapter = ScriptedAdapter([])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(cfg, once=True, adapter=adapter), 1)
+        self.assertIn("Working tree is not clean", out.getvalue())
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(parse_task_file(first).status, "DONE")
+        self.assertEqual(parse_task_file(second).status, "DONE")
+        self.assertFalse(any(s.startswith("wip(plan01/") for s in self.subjects()))
+
+    def test_already_checkpointed_done_task_is_not_reopened(self):
+        """A terminal auto() checkpoint is proof the scheduler already closed that task out, so
+        the remaining dirt is someone else's and no resumable candidate owns it."""
+        path = self.write_task(1, status="DONE", scope=("src/",))
+        cfg = self.build()
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "checkpointed.py").write_text("done", encoding="utf-8")
+        self._commit_in_worktree(worktree, "auto(plan01/t001): 任務")
         (worktree / "src" / "stray.py").write_text("x", encoding="utf-8")
 
         adapter = ScriptedAdapter([])
@@ -90,6 +146,46 @@ class TestCrashDirtyWorktreeRecovery(EngineTestCase):
         self.assertEqual(adapter.calls, [])
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertFalse(any(s.startswith("wip(plan01/") for s in self.subjects()))
+
+    def test_dirt_outside_the_done_task_scope_stays_fail_closed(self):
+        path = self.write_task(1, status="DONE", scope=("src/",))
+        cfg = self.build()
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "inside.py").write_text("x", encoding="utf-8")
+        (worktree / "outside.txt").write_text("stray", encoding="utf-8")
+
+        adapter = ScriptedAdapter([])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(cfg, once=True, adapter=adapter), 1)
+        self.assertIn("Working tree is not clean", out.getvalue())
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertFalse(any(s.startswith("wip(plan01/") for s in self.subjects()))
+
+    def test_wip_backed_done_task_without_auto_commit_is_not_reopened(self):
+        """A DONE task can legitimately have no auto() commit when all of its changes were
+        already stored in an earlier wip checkpoint; that clean state stays untouched."""
+        first = self.write_task(1, status="DONE", scope=("src/",))
+        second = self.write_task(2, slug="next", scope=("other/",))
+        cfg = self.build()
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "stored.py").write_text("stored", encoding="utf-8")
+        self._commit_in_worktree(worktree, "wip(plan01/t001): quota interrupt, progress kept")
+
+        adapter = ScriptedAdapter([self.ai_done(second)])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(parse_task_file(first).status, "DONE")
+        self.assertEqual(parse_task_file(second).status, "DONE")
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertNotIn("resume", adapter.calls[0][0])
+        self.assertFalse(any(s.startswith("wip(plan01/t001): recovered")
+                             for s in self.subjects()))
 
 
 class TestMainTreeEscapeDetection(EngineTestCase):

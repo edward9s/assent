@@ -39,6 +39,11 @@ _INTERRUPT_RETURNCODES = (130, 3221225786)
 # not be able to hang the whole run.
 _INTERRUPT_GRACE_SECONDS = 60
 _TERMINATE_GRACE_SECONDS = 10
+# How many times a forced-cleanup step may be restarted after a further Ctrl+C
+# preempted it. Each restart resumes idempotent work, so a handful of attempts
+# is enough to outlast a person hammering the key, while the bound keeps a
+# stuck key from pinning the scheduler in the loop.
+_FORCED_CLEANUP_ATTEMPTS = 5
 
 
 def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
@@ -308,17 +313,75 @@ def _kill_all(active: dict[str, subprocess.Popen], reason: str) -> None:
             print(f"Failed to force-terminate work folder: {folder} ({e})")
 
 
+def _reap_all(
+        active: dict[str, subprocess.Popen],
+        readers: dict[str, threading.Thread],
+        output: queue.Queue[tuple[str, str]]) -> None:
+    """Collect every force-terminated child so neither a zombie process nor a
+    stop-channel pipe survives the run."""
+    for folder, process in active.items():
+        try:
+            returncode = process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+            print(f"Work folder force-terminated: {folder} "
+                  f"(exit code {returncode})")
+        except subprocess.TimeoutExpired:
+            print(f"Work folder force-terminated: {folder} (no exit code)")
+        except OSError as e:
+            print(f"Failed waiting for work folder to finish: {folder} ({e})")
+        with contextlib.suppress(OSError, ValueError):
+            _close_stop_channel(process)
+        _finish_folder_output(folder, readers, output, _TERMINATE_GRACE_SECONDS)
+
+
+def _run_uninterruptible(action) -> None:
+    """Repeat one forced-cleanup step until Ctrl+C stops preempting it.
+
+    Every step is idempotent -- an already-dead child is skipped, a closed pipe
+    stays closed -- so a repeat only finishes what the interrupt cut short. The
+    attempt count is bounded because a key held down must not be able to hold
+    the scheduler here forever; the last attempt's interrupt is dropped rather
+    than allowed to escape, since escaping is exactly the traceback this path
+    exists to prevent.
+    """
+    for _ in range(_FORCED_CLEANUP_ATTEMPTS):
+        try:
+            action()
+            return
+        except KeyboardInterrupt:
+            continue
+
+
+def _force_cleanup(
+        active: dict[str, subprocess.Popen],
+        readers: dict[str, threading.Thread],
+        output: queue.Queue[tuple[str, str]], reason: str) -> None:
+    """Take every remaining child down and collect it, whatever the keyboard
+    does from here on."""
+    _run_uninterruptible(lambda: print(
+        "\nSecond interrupt (Ctrl+C): force-terminating every remaining "
+        "work folder now."))
+    _run_uninterruptible(lambda: _kill_all(active, reason))
+    _run_uninterruptible(lambda: _reap_all(active, readers, output))
+    _run_uninterruptible(lambda: _drain_output(output))
+
+
 def _interrupt_and_wait(
         active: dict[str, subprocess.Popen],
         readers: dict[str, threading.Thread],
         output: queue.Queue[tuple[str, str]]) -> None:
     """Forward the interrupt, then wait a bounded time for each child to save
     its own state and exit, escalating to a forced tree termination instead of
-    waiting forever."""
-    print("\nInterrupt received (Ctrl+C): notifying running work folders to "
-          "clean up on their own...")
+    waiting forever.
+
+    The announcement is inside the guard together with the rest: it writes
+    through the terminal-log sink, so a second Ctrl+C can land there just as
+    easily as in the wait, and an escape at that point would leave the children
+    running with nothing having been notified.
+    """
     escalate: set[str] = set()
     try:
+        print("\nInterrupt received (Ctrl+C): notifying running work folders "
+              "to clean up on their own...")
         for folder, process in active.items():
             try:
                 _send_interrupt(process)
@@ -344,11 +407,9 @@ def _interrupt_and_wait(
                           f"(exit code {returncode})")
             except OSError as e:
                 print(f"Failed waiting for work folder to finish: {folder} ({e})")
+        _drain_output(output)
     except KeyboardInterrupt:
-        print("\nSecond interrupt (Ctrl+C): force-terminating every remaining "
-              "work folder now.")
-        _kill_all(active, "second user interrupt")
-    _drain_output(output)
+        _force_cleanup(active, readers, output, "second user interrupt")
 
 
 def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
