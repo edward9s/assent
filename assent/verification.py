@@ -15,6 +15,7 @@ files:
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -30,9 +31,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from assent import AssentError, gitops
-from assent.config import Config, _validate_tasks_name
+from assent.config import Config, _validate_tasks_name, load_config
 from assent.folderdeps import (infer_folder_completion, live_upstreams,
-                               parse_folder_dependencies)
+                               order_folders_by_dependency,
+                               parse_folder_dependencies,
+                               parse_folder_dependency_graph)
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 
