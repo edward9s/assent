@@ -1169,7 +1169,7 @@ def render_report(cfg: Config, plan: Plan,
         f"Progress: DONE {counts.get('DONE', 0)} / BLOCKED {counts.get('BLOCKED', 0)} / "
         f"WIP {counts.get('WIP', 0)} / TODO {counts.get('TODO', 0)} / "
         f"SKIP {counts.get('SKIP', 0)} ({len(plan.tasks)} total)",
-        *_stack_report_lines(cfg),
+        *_stack_report_lines(cfg, plan),
         "",
     ]
     for t in plan.tasks:
@@ -1212,8 +1212,10 @@ def _try_write_report(cfg: Config) -> None:
         pass
 
 
-def _stack_report_lines(cfg: Config) -> list[str]:
+def _stack_report_lines(cfg: Config, plan: Plan) -> list[str]:
     """Describe the currently derived stack without authorizing any action."""
+    if all(t.status in ("DONE", "SKIP") for t in plan.tasks):
+        return ["Stack base: not applicable (folder complete)"]
     try:
         state = _resolve_stack_state(cfg)
     except AssentError as e:
@@ -1261,7 +1263,7 @@ def status(cfg: Config) -> int:
     print(f"Current branch: {branch or 'N/A'}")
     last = _git_read(git_root, "log", "-1", "--grep=^auto(", "--pretty=%h %s")
     print(f"Last checkpoint: {last or '(no auto() commit yet)'}")
-    for line in _stack_report_lines(cfg):
+    for line in _stack_report_lines(cfg, plan):
         print(line)
 
     selected = plan.next_task()

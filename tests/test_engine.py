@@ -1656,5 +1656,87 @@ class TestQueries(EngineTestCase):
         self.assertIn("last journal (ai): 舊日誌仍可讀", text)
 
 
+class TestStackReportLines(EngineTestCase):
+    """A complete folder (all DONE/SKIP) must skip stack resolution entirely;
+    an incomplete folder must keep today's three existing outputs verbatim."""
+
+    def test_complete_folder_skips_resolution_and_reports_not_applicable(self):
+        self.write_task(1, status="DONE")
+        self.write_task(2, slug="skip", status="SKIP", title="略過")
+        cfg = self.build()
+        self.commit_all()
+        from assent.plan import Plan
+        plan = Plan.parse(cfg.tasks_dir)
+        with mock.patch(
+                "assent.engine._resolve_stack_state",
+                side_effect=AssertionError(
+                    "must not resolve stack state for a complete folder")):
+            lines = engine._stack_report_lines(cfg, plan)
+        self.assertEqual(
+            lines, ["Stack base: not applicable (folder complete)"])
+
+    def test_incomplete_folder_still_reports_current_target_main(self):
+        self.write_task(1)  # TODO, no upstream declared
+        cfg = self.build()
+        self.commit_all()
+        from assent.plan import Plan
+        plan = Plan.parse(cfg.tasks_dir)
+        lines = engine._stack_report_lines(cfg, plan)
+        self.assertEqual(lines, [
+            "Stack base: current target main",
+            "Speculative upstream: none (all direct upstreams accepted)"])
+
+    def test_incomplete_folder_still_reports_unavailable_on_resolution_error(self):
+        self.write_task(1)  # TODO
+        cfg = self.build()
+        self.commit_all()
+        from assent.plan import Plan
+        plan = Plan.parse(cfg.tasks_dir)
+        with mock.patch(
+                "assent.engine._resolve_stack_state",
+                side_effect=AssentError(
+                    "upstream folder plan00 has no plan00/* source branch")):
+            lines = engine._stack_report_lines(cfg, plan)
+        self.assertEqual(lines, [
+            "Stack base: unavailable (upstream folder plan00 has no "
+            "plan00/* source branch)"])
+
+    def test_incomplete_folder_still_reports_stacked_speculative_upstream(self):
+        self.write_task(1)  # TODO
+        cfg = self.build()
+        self.commit_all()
+        from assent.plan import Plan
+        from assent.folderdeps import FolderBaseResolution
+        plan = Plan.parse(cfg.tasks_dir)
+        upstream = gitops.FolderSourceSnapshot(
+            folder="plan00", branch="plan00/run", worktree=self.root,
+            tip="abc123")
+        state = engine._StackState(
+            base=FolderBaseResolution(
+                target_snapshot="deadbeef", speculative_upstream=upstream,
+                resolved_base="abc123"),
+            sources=(upstream,))
+        with mock.patch(
+                "assent.engine._resolve_stack_state", return_value=state):
+            lines = engine._stack_report_lines(cfg, plan)
+        self.assertEqual(lines, [
+            "Stack base: abc123",
+            "Speculative upstream: plan00 @ abc123 (unaccepted)"])
+
+    def test_status_and_report_show_not_applicable_for_complete_folder(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build()
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.status(cfg), 0)
+        self.assertIn(
+            "Stack base: not applicable (folder complete)", out.getvalue())
+        from assent.plan import Plan
+        text = engine.render_report(cfg, Plan.parse(cfg.tasks_dir))
+        self.assertIn(
+            "Stack base: not applicable (folder complete)", text)
+
+
 if __name__ == "__main__":
     unittest.main()
