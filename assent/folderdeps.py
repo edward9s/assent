@@ -1,7 +1,7 @@
 """Folder-level dependency parsing, completion inference, and cycle checks.
 
-- ``_folder.toml`` only declares ``after``; a missing file means no folder
-  prerequisites.
+- ``_folder.toml`` declares ``after`` and an optional ``base``; a missing file
+  means no folder prerequisites.
 - Folder completion is always inferred on the spot from the formal task
   files, with no separate state file.
 - This module only provides the capability; wiring it into the run/check
@@ -20,7 +20,7 @@ from assent.config import _validate_tasks_name, list_task_folders
 from assent.plan import Plan
 
 _FOLDER_CONFIG_NAME = "_folder.toml"
-_KNOWN_KEYS = {"after"}
+_KNOWN_KEYS = {"after", "base"}
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,7 @@ class FolderDependencies:
     name: str
     after: list[str]
     path: Path
+    base: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,7 +92,7 @@ def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
     ``.assent/_archived.toml`` roster (an upstream already archived after being
     proven integrated).  A name present in neither is refused as a typo; a name
     present in both is a contradictory state and fails closed.  A missing
-    ``_folder.toml`` yields an empty ``after``.
+    ``_folder.toml`` yields an empty ``after`` and no ``base``.
     """
     tasks_dir = Path(tasks_dir)
     if not tasks_dir.is_dir():
@@ -144,8 +145,24 @@ def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
                 f"Folder {name}'s after references a task folder that does not exist"
                 f" or has no task files, and is not in the archive roster: {dependency}")
 
+    base: str | None = None
+    if "base" in data:
+        base_value = data["base"]
+        config_path = path.resolve()
+        if not isinstance(base_value, str):
+            raise AssentError(
+                f"Folder dependency file {config_path} field base must be a string")
+        if not base_value:
+            raise AssentError(
+                f"Folder dependency file {config_path} field base must not be empty")
+        if base_value not in after:
+            raise AssentError(
+                f"Folder dependency file {config_path} field base {base_value!r}"
+                f" is not an after member; after = {after!r}")
+        base = base_value
+
     return FolderDependencies(
-        name=name, after=list(after), path=path.resolve())
+        name=name, after=list(after), path=path.resolve(), base=base)
 
 
 def infer_folder_completion(tasks_dir: str | Path) -> FolderCompletion:
