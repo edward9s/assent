@@ -3,8 +3,8 @@
 CLAUDE.md
 .anthropic/
 
-# agents management plane and runtime artifacts
-.agents/
+# assent management plane and runtime artifacts
+.assent/
 
 # Python
 __pycache__/
