@@ -9,6 +9,16 @@ stall_minutes = 30                # minutes of no session output before it is ju
 retry_per_task = 1                # number of retries after a verification failure
 quota_poll_minutes = 30           # polling interval when the quota reset time cannot be parsed
 
+[verification]
+# Who refreshes a folder's verification receipt.
+# "manual" (default): run closeout does not build a candidate or run the full
+# suite; it prints the next step and the receipt comes only from an explicit
+# `assent verify [--batch]`. Best for batch workflows, where one batch
+# verification replaces N per-folder ones.
+# "auto": run closeout refreshes a stale receipt itself, so a run ends knowing
+# whether the integration candidate is green.
+# receipt_refresh = "manual"
+
 [adapter]
 name = "claude"                   # "claude", "codex", or "antigravity"
 

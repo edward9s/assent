@@ -600,7 +600,14 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         print(f"Failed to parse task folder after run: {e}")
         return 1
     if all(task.status in ("DONE", "SKIP") for task in plan.tasks):
-        result = verification.verify_folder_if_needed(cfg)
+        if cfg.receipt_refresh == "auto":
+            result = verification.verify_folder_if_needed(cfg)
+        else:
+            # Default policy: a batch workflow verifies once with an explicit
+            # `assent verify [--batch]`, so per-folder refreshes here would
+            # mostly expire before acceptance anyway.
+            print(f"verify {cfg.tasks_name}: receipt refresh deferred (default); "
+                  "run `assent verify [--batch]` before accepting")
         _try_write_report(cfg)
     return result
 

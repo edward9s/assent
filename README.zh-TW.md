@@ -96,18 +96,27 @@ assent run <資料夾>
 # 依資料夾 after 依賴順序執行全部未完成資料夾,最多同時跑 2 個
 assent run --all --jobs 2
 
-# 6. 無人值守刷新完整驗證 receipt(零 token)
+# 6. 預設 [verification] receipt_refresh = "manual" 下,run 收尾不會留下
+#    receipt,直接 accept 會被拒絕並提示先 verify。離席時顯式刷新(零
+#    token):一次驗證多個已完成資料夾,成本等同驗證一個
+assent verify --batch
+# 或只刷新單一資料夾的 receipt
 assent verify <FOLDER>
+# 想要 run 收尾就自動刷新 receipt,改設 receipt_refresh = "auto"
 
 # 7. 隨時查看(另開終端、零 token),再進行審查
 assent status
 assent report
-# 人類審查後,接受一個已完成的資料夾併入目前目標分支
+# 人類審查後,依資料夾依賴順序接受全部已完成資料夾
+assent accept --all
+# 或只接受一個已完成的資料夾併入目前目標分支
 assent accept <資料夾>
 # 接受後,用一般 Git(或自行委任的 AI 流程)獨立同步
 git push
 # 接受與所需同步完成後,移除多餘成果
 assent clean <資料夾>
+# 不再需要時,把已接受資料夾的計畫封存進 _archive/
+assent archive --all
 
 # 驗收會議要求單一任務重做(預設保留程式碼;不自動 run)
 assent rework <FOLDER> <TASK> [--cascade] [--reason TEXT]
@@ -213,12 +222,16 @@ AI 會議在主樹進行。從主樹可直接用 `git worktree list`、`git log 
 會議中每達成一項共識就落成任務檔;散會前跑 `assent check`,不過就是還沒開完。
 
 **第 2 幕:無人值守執行**:`assent run`,去睡覺。每個 task session 只跑該任務的
-focused verify;資料夾全部完成後,scheduler 在 AI session 外建立臨時 integration
-candidate 並執行完整 `.assent/verify.py`。
+focused verify;資料夾完成後是否還在 AI session 外建立臨時 integration candidate
+並執行完整 `.assent/verify.py`,取決於 `assent.toml`「[verification]」的
+`receipt_refresh`:預設 `"manual"` 把這一步留給之後顯式的
+`assent verify [--batch]`;`"auto"` 則在資料夾全部任務完成時的 run 收尾就執行。
 
 `assent verify <FOLDER>` 是零 token、可離席執行的完整驗證 receipt refresh,不改
-target、不開 AI session。報告會顯示 `PASSED`/`FAILED` 與 `fresh`/`stale`,stale
-時可在無人值守階段重新 refresh。
+target、不開 AI session;`assent verify --batch` 則對每個已完成、尚未整合的資料夾
+一次做同樣的事。兩者的報告都會顯示 `PASSED`/`FAILED` 與 `fresh`/`stale`,stale
+時可在無人值守階段重新 refresh;沒有新鮮的 `PASSED` receipt,`assent accept` 會
+拒絕並提示先 verify。
 
 打包的 `.assent/verify.py` 同時檢查 candidate working tree 與 candidate `HEAD` 相對
 第一父提交的 committed delta,因此能抓到單純 `git diff --check` 看不到的已提交尾端

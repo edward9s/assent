@@ -17,9 +17,15 @@ from pathlib import Path
 from assent import AssentError
 from assent.lockfile import LOCK_NAME
 
-_TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt"}
+_TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt", "verification"}
 _MODEL_TIERS = {"prime", "core", "lite"}
 _EFFORT_LEVELS = {"low", "medium", "high"}
+
+# Who refreshes the folder verification receipt.  "manual" (the default) leaves it
+# to an explicit `assent verify [--batch]`, so a batch workflow verifies once
+# instead of once per folder at every run closeout; "auto" keeps run closeout
+# refreshing a stale receipt itself.
+_RECEIPT_REFRESH_MODES = {"manual", "auto"}
 
 # Task folder name: no whitespace or path separators, must not start with
 # - or . (it becomes the git branch prefix)
@@ -146,6 +152,7 @@ class Config:
     # adapter always states one instead of inheriting the CLI default.
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
     prompt_template: str | None = None
+    receipt_refresh: str = "manual"  # "manual" = explicit verify only, "auto" = also at run closeout
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
 
     @property
@@ -388,6 +395,7 @@ def load_config(path: str | Path, folder: str) -> Config:
     antigravity = (_section(adapter, "antigravity")
                    if "antigravity" in adapter else {})
     prompt = _section(data, "prompt")
+    verification_section = _section(data, "verification")
     claude_efforts, claude_tier_efforts = _effort_maps(
         claude, "adapter.claude")
     codex_efforts, codex_tier_efforts = _effort_maps(
@@ -438,6 +446,8 @@ def load_config(path: str | Path, folder: str) -> Config:
             antigravity, "[adapter.antigravity]", "print_timeout_minutes", int,
             _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES),
         prompt_template=_typed(prompt, "[prompt]", "template", str, None),
+        receipt_refresh=_typed(verification_section, "[verification]",
+                               "receipt_refresh", str, "manual"),
     )
 
     if cfg.stall_minutes < 0:
@@ -446,6 +456,10 @@ def load_config(path: str | Path, folder: str) -> Config:
         raise AssentError("[run] retry_per_task must not be negative")
     if cfg.quota_poll_minutes < 1:
         raise AssentError("[run] quota_poll_minutes must be at least 1")
+    if cfg.receipt_refresh not in _RECEIPT_REFRESH_MODES:
+        raise AssentError(
+            f"[verification] receipt_refresh = {cfg.receipt_refresh!r} is not valid"
+            f" ({'/'.join(sorted(_RECEIPT_REFRESH_MODES))})")
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")

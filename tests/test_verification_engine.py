@@ -58,8 +58,21 @@ class VerificationEngineCase(unittest.TestCase):
     def write_status(self, status: str) -> None:
         self.task_path.write_text(_task(status), encoding="utf-8")
 
+    def set_receipt_refresh(self, mode: str) -> None:
+        """State the [verification] receipt_refresh policy and reload the config."""
+        self.config_path.write_text(
+            f'[verification]\nreceipt_refresh = "{mode}"\n', encoding="utf-8")
+        self.cfg = load_config(self.config_path, "work")
+
 
 class TestRunVerificationHandoff(VerificationEngineCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # This class is about the handoff itself, which only run closeout under
+        # the "auto" policy performs; the default "manual" has its own tests in
+        # TestRunCloseoutReceiptPolicy below.
+        self.set_receipt_refresh("auto")
+
     def _run_with_body(self, body, verify_result=0, **options):
         events: list[str] = []
 
@@ -125,6 +138,66 @@ class TestRunVerificationHandoff(VerificationEngineCase):
         result, events = self._run_with_body(lambda *_args: 1)
         self.assertEqual(result, 1)
         self.assertNotIn("verify", events)
+
+
+class TestRunCloseoutReceiptPolicy(VerificationEngineCase):
+    """[verification] receipt_refresh decides who refreshes the folder receipt.
+
+    The default "manual" makes run closeout cost zero full verifications, which is
+    what a batch workflow wants; "auto" is the pre-policy behavior kept available
+    for projects that want a run to end knowing the candidate is green.
+    """
+
+    def _run_closeout(self, **options) -> tuple[int, list[str], str]:
+        calls: list[str] = []
+        self.write_status("TODO")
+
+        def body(*_args):
+            self.write_status("DONE")
+            return 0
+
+        def verify(_cfg):
+            calls.append("verify")
+            print("verify work: passed (deadbeef)")
+            return 0
+
+        @contextmanager
+        def folder_lock(*_args):
+            yield
+
+        out = io.StringIO()
+        with mock.patch("assent.engine.lockfile.hold_lock", folder_lock), \
+                mock.patch("assent.engine._run_locked", side_effect=body), \
+                mock.patch("assent.engine.verification.verify_folder_if_needed",
+                           side_effect=verify), \
+                mock.patch("assent.engine._try_write_report") as report:
+            with contextlib.redirect_stdout(out):
+                result = engine.run(self.cfg, once=True, **options)
+        self.assertTrue(report.called)
+        return result, calls, out.getvalue()
+
+    def test_default_manual_runs_no_full_verification_and_states_the_next_step(self):
+        result, calls, output = self._run_closeout()
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("receipt refresh deferred (default)", output)
+        self.assertIn("assent verify [--batch]", output)
+        self.assertFalse((self.tasks_dir / "_verification.toml").exists())
+
+    def test_explicit_manual_matches_the_default(self):
+        self.set_receipt_refresh("manual")
+        result, calls, output = self._run_closeout()
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("receipt refresh deferred (default)", output)
+
+    def test_auto_keeps_the_previous_closeout_behavior_and_output(self):
+        self.set_receipt_refresh("auto")
+        result, calls, output = self._run_closeout()
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["verify"])
+        # Nothing is added around the verification layer's own line under "auto".
+        self.assertEqual(output, "verify work: passed (deadbeef)\n")
 
 
 class TestAutomaticReceiptPolicy(VerificationEngineCase):
