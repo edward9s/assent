@@ -9,7 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 from assent import AssentError
 
@@ -24,6 +24,26 @@ class TaskResult:
     quota_exhausted: bool          # True = quota exhausted; this round doesn't count as a failure
     reset_at: datetime | None      # Parsed reset time; None if it couldn't be parsed
     stalled: bool = False          # True = watchdog terminated the subprocess; never quota
+    # Optional adapter-supplied classification of a failed session (for example "quota",
+    # "permission", "unsupported_model", "timeout").  It is evidence for the scheduler's
+    # journal and retry prompt only: the adapter never writes task status or checkpoints,
+    # and a classification never turns a non-zero exit into a success.
+    failure_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class InvocationRequest:
+    """One invocation a run may issue: the abstract choices plus the resolved CLI values.
+
+    The engine resolves these before any session starts so an adapter can validate every
+    model/effort combination the run could send without spending a token.
+    """
+
+    task_id: str
+    model: str                     # abstract tier (prime / core / lite)
+    effort: str | None             # abstract effort (low / medium / high), None = unset
+    requested_model: str           # the actual --model value
+    requested_effort: str | None    # the actual effort value, None = no effort flag
 
 
 class Adapter:                     # Base class for each vendor's adapter
@@ -57,6 +77,16 @@ class Adapter:                     # Base class for each vendor's adapter
             return True, result.stdout.strip() or "runnable"
         return False, f"--version exit code {result.returncode}"
 
+    def preflight(self, requests: "Sequence[InvocationRequest]") -> list[str]:
+        """Validate every invocation the run could issue; return stable English diagnostics.
+
+        A non-empty result makes the caller refuse before an AI session, a task checkpoint or
+        any status write, so a configuration that cannot be sent costs nothing.  The base
+        implementation states no vendor capability restriction, which keeps adapters whose
+        CLI has no capability catalog unaffected.
+        """
+        return []
+
     def run_task(self, prompt: str, requested_model: str,
                  requested_effort: str | None,
                  cwd: Path) -> TaskResult:
@@ -72,4 +102,8 @@ def get_adapter(name: str, cfg: "Config") -> Adapter:
     if name == "codex":
         from assent.adapters.codex import CodexAdapter
         return CodexAdapter(cfg)
-    raise AssentError(f"unknown adapter: {name!r} (built in: 'claude' / 'codex')")
+    if name == "antigravity":
+        from assent.adapters.antigravity import AntigravityAdapter
+        return AntigravityAdapter(cfg)
+    raise AssentError(
+        f"unknown adapter: {name!r} (built in: 'antigravity' / 'claude' / 'codex')")

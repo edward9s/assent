@@ -28,8 +28,11 @@ _MODEL_TIERS = {"prime", "core", "lite"}
 _EFFORT_LEVELS = {"low", "medium", "high"}
 _KNOWN_KEYS = {"title", "deps", "model", "effort", "status", "scope", "verify",
                "goal", "behavior", "acceptance", "notes"}
-_ENTRY_BY = {"codex", "claude", "scheduler"}
-_ENTRY_AGENT = {"codex", "claude"}
+# Journal identities a new write may claim.  Reading is deliberately unrestricted, so a
+# journal written before an adapter existed (including the retired catch-all by = "ai")
+# still parses and still reports.
+_ENTRY_BY = {"antigravity", "codex", "claude", "scheduler"}
+_ENTRY_AGENT = {"antigravity", "codex", "claude"}
 # Status line: leading status = "VALUE" (tolerates leading whitespace and a trailing comment)
 _STATUS_LINE_RE = re.compile(
     r'^(\s*status\s*=\s*")(TODO|WIP|DONE|BLOCKED|SKIP)("\s*(?:#.*)?)$')
@@ -351,9 +354,12 @@ def append_entry(journal: Path, *, by: str, event: str, summary: str,
     """
     if by not in _ENTRY_BY:
         raise AssentError(
-            f"Journal field by is invalid: {by!r} (codex / claude / scheduler)")
+            f"Journal field by is invalid: {by!r}"
+            f" ({' / '.join(sorted(_ENTRY_BY))})")
     if agent is not None and agent not in _ENTRY_AGENT:
-        raise AssentError(f"Journal field agent is invalid: {agent!r} (codex / claude)")
+        raise AssentError(
+            f"Journal field agent is invalid: {agent!r}"
+            f" ({' / '.join(sorted(_ENTRY_AGENT))})")
     if requested_model is not None and not requested_model.strip():
         raise AssentError("Journal field requested_model must not be an empty string")
     if requested_effort is not None and not requested_effort.strip():

@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 from assent import AssentError, gitops, lockfile, verification
-from assent.adapters import Adapter, get_adapter
+from assent.adapters import Adapter, InvocationRequest, get_adapter
 from assent.config import Config
 from assent.folderdeps import (FolderBaseResolution,
                                find_unfinished_prerequisites,
@@ -52,6 +52,8 @@ _DEFAULT_PROMPT_TEMPLATE = (
     "then read the assent working instructions {instructions_path} and the task file {task_path}.\n"
     "Run only task {task_id}; do not touch other task files.\n"
     "This run's journal identity is by = \"{agent}\", requested_model = \"{requested_model}\".\n"
+    "That resolved identity is authoritative for this run's journal entry, even when the\n"
+    "working instructions or the existing entries only show other agent names.\n"
     "requested_model is the --model value passed to the AI CLI this run.\n"
     "This run's abstract effort = \"{effort}\", actual requested_effort = \"{requested_effort}\";\n"
     "requested_effort is the value actually passed to the AI CLI this run; an empty string\n"
@@ -147,6 +149,42 @@ def _resolve_session(cfg: Config, adapter: Adapter,
     )
 
 
+def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
+                         task_id: str | None = None) -> list[InvocationRequest]:
+    """Resolve every invocation this run could still issue, without starting anything.
+
+    Only tasks that can still run are resolved: a settled task will not open a session, and
+    refusing a run because of a mapping a finished task once used would be noise.
+    """
+    requests: list[InvocationRequest] = []
+    for task in plan.tasks:
+        if task_id is not None and task.id != task_id:
+            continue
+        if task.status not in ("TODO", "WIP"):
+            continue
+        effort = _resolve_effort(cfg, task)
+        requests.append(InvocationRequest(
+            task_id=task.id, model=task.model, effort=effort,
+            requested_model=adapter.resolve_model(task.model),
+            requested_effort=_resolve_requested_effort(cfg, task.model, effort)))
+    return requests
+
+
+def _capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
+                       task_id: str | None = None) -> list[str]:
+    """Ask the active adapter to prove every planned model/effort before anything starts.
+
+    This is a zero-token gate: it runs before an AI session, a task checkpoint or any status
+    write, so an invocation the vendor would refuse costs no quota and leaves no trace.  A
+    resolution error (an unmapped tier, say) is itself a preflight failure.
+    """
+    try:
+        requests = _planned_invocations(cfg, adapter, plan, task_id)
+    except AssentError as e:
+        return [str(e)]
+    return adapter.preflight(requests)
+
+
 def _short(text: str, limit: int = 60) -> str:
     """Squash to a single line and truncate, for use in a commit message."""
     return " ".join(text.split())[:limit]
@@ -172,16 +210,22 @@ def _bounded_adapter_diagnostic(output: str,
     return "..." + compact[-(limit - 3):]
 
 
-def _adapter_failure_reason(exit_code: int, stalled: bool, output: str) -> str:
+def _adapter_failure_reason(exit_code: int, stalled: bool, output: str,
+                            failure_kind: str | None = None) -> str:
     kind = "watchdog stalled" if stalled else "exited nonzero"
     diagnostic = _bounded_adapter_diagnostic(output)
-    return (f"Adapter process {kind} (exit code {exit_code}); "
+    # An adapter may classify its own failure (quota, permission, unsupported model, ...).
+    # It is recorded as the adapter's reading of the evidence; the verdict stays the
+    # scheduler's, so the exit code and the diagnostic are still reported in full.
+    label = f" classified by the adapter as {failure_kind}" if failure_kind else ""
+    return (f"Adapter process {kind} (exit code {exit_code}){label}; "
             f"bounded diagnostic: {diagnostic}")
 
 
 def _append_adapter_failure_entry(task: Task, session: _SessionIdentity,
                                   exit_code: int, stalled: bool, summary: str,
-                                  now: Callable[[], datetime]) -> None:
+                                  now: Callable[[], datetime],
+                                  failure_kind: str | None = None) -> None:
     """Append the machine-readable scheduler evidence for one non-quota failure.
 
     This event needs a numeric ``exit_code`` in addition to the shared journal fields.  It is
@@ -202,8 +246,10 @@ def _append_adapter_failure_entry(task: Task, session: _SessionIdentity,
         f"event = {json.dumps('adapter_stall' if stalled else 'adapter_exit')}",
         f"exit_code = {int(exit_code)}",
         f"stalled = {'true' if stalled else 'false'}",
-        f"summary = {json.dumps(summary, ensure_ascii=False)}",
     ]
+    if failure_kind:
+        fields.append(f"failure_kind = {json.dumps(failure_kind)}")
+    fields.append(f"summary = {json.dumps(summary, ensure_ascii=False)}")
     block = "\n".join(fields) + "\n"
     existing = (task.journal_path.read_text(encoding="utf-8")
                 if task.journal_path.is_file() else "")
@@ -492,9 +538,27 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     try:
         # Validate the requested folder itself before stack discovery.  This
         # preserves the task-file error as the primary zero-token diagnostic.
-        Plan.parse(cfg.tasks_dir)
+        plan = Plan.parse(cfg.tasks_dir)
     except AssentError as e:
         print(f"Failed to parse task folder: {e}")
+        return 1
+
+    # The adapter is resolved and its planned invocations proven before the worktree exists,
+    # so a configuration the vendor would refuse costs no quota, no status write and no Git
+    # change at all.
+    if adapter is None:
+        try:
+            adapter = get_adapter(cfg.adapter_name, cfg)
+        except AssentError as e:
+            print(str(e))
+            return 1
+
+    capability_errors = _capability_errors(cfg, adapter, plan, task_id)
+    if capability_errors:
+        print(f"{cfg.adapter_name} capability preflight: FAIL "
+              "(refusing before any AI session)")
+        for message in capability_errors:
+            print(f"  - {message}")
         return 1
 
     if cfg.source_root is None:
@@ -505,13 +569,6 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             return 130
         except (AssentError, OSError) as e:
             print(f"git worktree setup failed: {e}")
-            return 1
-
-    if adapter is None:
-        try:
-            adapter = get_adapter(cfg.adapter_name, cfg)
-        except AssentError as e:
-            print(str(e))
             return 1
 
     try:
@@ -683,9 +740,11 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
 
         if result.exit_code != 0 or result.stalled:
             reason = _adapter_failure_reason(
-                result.exit_code, result.stalled, result.output)
+                result.exit_code, result.stalled, result.output,
+                result.failure_kind)
             _append_adapter_failure_entry(
-                task, session, result.exit_code, result.stalled, reason, now)
+                task, session, result.exit_code, result.stalled, reason, now,
+                failure_kind=result.failure_kind)
             print(f"  Adapter failure: {reason}")
 
             # A failed subprocess cannot authorize either terminal result or run
@@ -1086,6 +1145,7 @@ def check(cfg: Config) -> int:
 
     # Task folder and task-file format (parsing is the full check: required fields, tiers,
     # non-empty scope, deps exist without cycles, no duplicate ids)
+    plan: Plan | None = None
     try:
         plan = Plan.parse(cfg.tasks_dir)
         print(f"Task-file format: OK ({len(plan.tasks)} tasks, dependencies acyclic)")
@@ -1111,6 +1171,18 @@ def check(cfg: Config) -> int:
     except AssentError as e:
         ok = False
         print(f"adapter: FAIL ({e})")
+
+    # Every model/effort the plan could still send, proven against the active adapter's
+    # capability contract; the same gate `run` applies before opening a session.
+    if adapter is not None and plan is not None:
+        capability_errors = _capability_errors(cfg, adapter, plan)
+        if capability_errors:
+            ok = False
+            print(f"{cfg.adapter_name} capability preflight: FAIL")
+            for message in capability_errors:
+                print(f"  - {message}")
+        else:
+            print(f"{cfg.adapter_name} capability preflight: OK")
 
     # git repo
     inside = _git_read(cfg.root, "rev-parse", "--is-inside-work-tree")

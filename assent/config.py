@@ -37,6 +37,27 @@ _DEFAULT_CODEX_MODELS = {
 }
 _DEFAULT_CODEX_EFFORT = {"prime": "high", "core": "medium", "lite": "low"}
 
+# Antigravity defaults.  The slugs and the effort translations below are the base family
+# names AGY 1.1.5 proved it accepts; the reasoning behind each one, and the recorded probe
+# it came from, are documented in assent/adapters/antigravity.py.
+# A headless run cannot answer a permission prompt, and assent must not edit the user's own
+# antigravity-cli settings.json, so unattended execution states the skip explicitly.
+_DEFAULT_ANTIGRAVITY_EXTRA_ARGS = ["--dangerously-skip-permissions"]
+_DEFAULT_ANTIGRAVITY_MODELS = {
+    "prime": "gemini-3.1-pro",     # low/high only
+    "core": "gemini-3.6-flash",    # low/medium/high
+    "lite": "gemini-3.5-flash",    # low/medium; AGY exposes no Flash Lite at all
+}
+_DEFAULT_ANTIGRAVITY_EFFORT = {"prime": "high", "core": "high", "lite": "high"}
+# Vendor effort translation lives here, never in adapter code: Gemini 3.1 Pro has no medium
+# (quality-first, so medium goes up to high), and Gemini 3.5 Flash has no high (so the lite
+# tier's high lands on that family's ceiling instead of being sent and refused).
+_DEFAULT_ANTIGRAVITY_TIER_EFFORTS = {
+    "prime": {"medium": "high"},
+    "lite": {"high": "medium"},
+}
+_DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES = 120
+
 
 @dataclass(frozen=True)
 class AdapterSettings:
@@ -110,6 +131,20 @@ class Config:
         default_factory=lambda: dict(_DEFAULT_CODEX_EFFORT))
     codex_efforts: dict[str, str] = field(default_factory=dict)
     codex_tier_efforts: dict[str, dict[str, str]] = field(default_factory=dict)
+    antigravity_command: str = "agy"
+    antigravity_extra_args: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_ANTIGRAVITY_EXTRA_ARGS))
+    antigravity_models: dict[str, str] = field(
+        default_factory=lambda: dict(_DEFAULT_ANTIGRAVITY_MODELS))
+    antigravity_default_effort: dict[str, str] = field(
+        default_factory=lambda: dict(_DEFAULT_ANTIGRAVITY_EFFORT))
+    antigravity_efforts: dict[str, str] = field(default_factory=dict)
+    antigravity_tier_efforts: dict[str, dict[str, str]] = field(
+        default_factory=lambda: {tier: dict(values) for tier, values
+                                 in _DEFAULT_ANTIGRAVITY_TIER_EFFORTS.items()})
+    # Print mode has its own upstream wait limit, far shorter than a task session; the
+    # adapter always states one instead of inheriting the CLI default.
+    antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
     prompt_template: str | None = None
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
 
@@ -140,8 +175,16 @@ class Config:
                 default_effort=self.codex_default_effort,
                 efforts=self.codex_efforts,
                 tier_efforts=self.codex_tier_efforts)
+        if name == "antigravity":
+            return AdapterSettings(
+                name="antigravity", command=self.antigravity_command,
+                extra_args=tuple(self.antigravity_extra_args),
+                models=self.antigravity_models,
+                default_effort=self.antigravity_default_effort,
+                efforts=self.antigravity_efforts,
+                tier_efforts=self.antigravity_tier_efforts)
         raise AssentError(
-            f"unknown adapter: {name!r} (built in: 'claude' / 'codex')")
+            f"unknown adapter: {name!r} (built in: 'antigravity' / 'claude' / 'codex')")
 
     def rel(self, path: Path) -> str:
         """Path for use in prompts; relative inside the project, absolute for an external source of truth."""
@@ -226,12 +269,20 @@ def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> di
     return dict(val)
 
 
-def _effort_maps(section: dict, owner: str
+def _effort_maps(section: dict, owner: str,
+                 default_flat: dict[str, str] | None = None,
+                 default_tier: dict[str, dict[str, str]] | None = None
                  ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
-    """Parse the flat and per-tier ``efforts`` maps, fail-closed on any bad structure."""
+    """Parse the flat and per-tier ``efforts`` maps, fail-closed on any bad structure.
+
+    Like ``models``, a stated ``efforts`` table replaces the built-in one whole rather than
+    merging into it: a vendor translation is a single coherent decision, and a half-merged
+    one would hide which value is actually being sent.
+    """
     raw = _typed(section, f"[{owner}]", "efforts", dict, None)
     if raw is None:
-        return {}, {}
+        return (dict(default_flat or {}),
+                {tier: dict(values) for tier, values in (default_tier or {}).items()})
 
     flat: dict[str, str] = {}
     by_tier: dict[str, dict[str, str]] = {}
@@ -334,11 +385,16 @@ def load_config(path: str | Path, folder: str) -> Config:
     adapter = _section(data, "adapter")
     claude = _section(adapter, "claude") if "claude" in adapter else {}
     codex = _section(adapter, "codex") if "codex" in adapter else {}
+    antigravity = (_section(adapter, "antigravity")
+                   if "antigravity" in adapter else {})
     prompt = _section(data, "prompt")
     claude_efforts, claude_tier_efforts = _effort_maps(
         claude, "adapter.claude")
     codex_efforts, codex_tier_efforts = _effort_maps(
         codex, "adapter.codex")
+    antigravity_efforts, antigravity_tier_efforts = _effort_maps(
+        antigravity, "adapter.antigravity",
+        default_tier=_DEFAULT_ANTIGRAVITY_TIER_EFFORTS)
 
     cfg = Config(
         root=root,
@@ -366,6 +422,21 @@ def load_config(path: str | Path, folder: str) -> Config:
                                       _DEFAULT_CODEX_EFFORT),
         codex_efforts=codex_efforts,
         codex_tier_efforts=codex_tier_efforts,
+        antigravity_command=_typed(antigravity, "[adapter.antigravity]",
+                                   "command", str, "agy"),
+        antigravity_extra_args=_str_list(antigravity, "[adapter.antigravity]",
+                                         "extra_args",
+                                         _DEFAULT_ANTIGRAVITY_EXTRA_ARGS),
+        antigravity_models=_str_map(antigravity, "adapter.antigravity", "models",
+                                    _DEFAULT_ANTIGRAVITY_MODELS),
+        antigravity_default_effort=_str_map(antigravity, "adapter.antigravity",
+                                            "default_effort",
+                                            _DEFAULT_ANTIGRAVITY_EFFORT),
+        antigravity_efforts=antigravity_efforts,
+        antigravity_tier_efforts=antigravity_tier_efforts,
+        antigravity_print_timeout_minutes=_typed(
+            antigravity, "[adapter.antigravity]", "print_timeout_minutes", int,
+            _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES),
         prompt_template=_typed(prompt, "[prompt]", "template", str, None),
     )
 
@@ -375,9 +446,13 @@ def load_config(path: str | Path, folder: str) -> Config:
         raise AssentError("[run] retry_per_task must not be negative")
     if cfg.quota_poll_minutes < 1:
         raise AssentError("[run] quota_poll_minutes must be at least 1")
+    if cfg.antigravity_print_timeout_minutes < 1:
+        raise AssentError(
+            "[adapter.antigravity] print_timeout_minutes must be at least 1")
     for owner, efforts in (
             ("adapter.claude", cfg.claude_default_effort),
-            ("adapter.codex", cfg.codex_default_effort)):
+            ("adapter.codex", cfg.codex_default_effort),
+            ("adapter.antigravity", cfg.antigravity_default_effort)):
         for model, eff in efforts.items():
             if eff not in _EFFORT_LEVELS:
                 raise AssentError(
