@@ -8,7 +8,7 @@ from pathlib import Path
 from agents import AgentsError
 from agents.gitops import (
     changes_outside_scope, commit_all, commit_if_dirty, ensure_branch,
-    ensure_clean, head_ref, restore)
+    ensure_clean, ensure_worktree, head_ref, restore, worktree_path)
 
 
 def _run(root: Path, *args: str) -> None:
@@ -79,6 +79,78 @@ class TestEnsureBranch(GitTestCase):
         _run(self.root, "checkout", "master")
         branch2 = ensure_branch(self.root, "workflow/")
         self.assertNotEqual(branch1, branch2)
+
+
+class TestEnsureWorktree(GitTestCase):
+    def tearDown(self) -> None:
+        container = self.root.parent / f"{self.root.name}.worktrees"
+        if container.exists():
+            for path in container.iterdir():
+                if (path / ".git").is_file():
+                    _run(self.root, "worktree", "remove", "--force", str(path))
+                else:
+                    shutil.rmtree(path)
+            container.rmdir()
+        _run(self.root, "worktree", "prune")
+        super().tearDown()
+
+    def test_worktree_path_is_beside_main_tree(self):
+        expect = self.root.parent / f"{self.root.name}.worktrees" / "parallel01"
+        self.assertEqual(worktree_path(self.root, "parallel01"), expect)
+
+    def test_creates_and_idempotently_reuses_worktree(self):
+        first = ensure_worktree(self.root, "parallel01")
+        second = ensure_worktree(self.root, "parallel01")
+        self.assertEqual(first, second)
+        self.assertTrue((first / ".git").is_file())
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"], cwd=first,
+            capture_output=True, encoding="utf-8", check=True).stdout.strip()
+        self.assertEqual(branch, "")
+
+        listed = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout
+        listed_paths = [Path(line.removeprefix("worktree ")).resolve()
+                        for line in listed.splitlines()
+                        if line.startswith("worktree ")]
+        self.assertEqual(listed_paths.count(first.resolve()), 1)
+
+    def test_prunes_stale_metadata_and_recreates_deleted_worktree(self):
+        path = ensure_worktree(self.root, "parallel01")
+        shutil.rmtree(path)
+
+        rebuilt = ensure_worktree(self.root, "parallel01")
+        self.assertEqual(rebuilt, path)
+        self.assertTrue((rebuilt / ".git").is_file())
+
+    def test_existing_non_worktree_directory_raises(self):
+        path = worktree_path(self.root, "parallel01")
+        path.mkdir(parents=True)
+        (path / "keep.txt").write_text("不可覆蓋\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(AgentsError, "不是本 repo 的有效 worktree"):
+            ensure_worktree(self.root, "parallel01")
+        self.assertEqual((path / "keep.txt").read_text(encoding="utf-8"),
+                         "不可覆蓋\n")
+
+    def test_branch_and_commit_do_not_affect_main_worktree(self):
+        main_branch = subprocess.run(
+            ["git", "branch", "--show-current"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout.strip()
+        path = ensure_worktree(self.root, "parallel01")
+
+        branch = ensure_branch(path, "parallel01/")
+        (path / "README.md").write_text("worktree\n", encoding="utf-8")
+        commit_all(path, "test: worktree commit")
+
+        current_main = subprocess.run(
+            ["git", "branch", "--show-current"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout.strip()
+        self.assertTrue(branch.startswith("parallel01/"))
+        self.assertEqual(current_main, main_branch)
+        self.assertEqual((self.root / "README.md").read_text(encoding="utf-8"),
+                         "init\n")
 
 
 class TestChangesOutsideScope(GitTestCase):

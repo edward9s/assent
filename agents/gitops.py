@@ -1,4 +1,4 @@
-"""git 操作:分支、乾淨/scope 檢查、commit、還原。
+"""git 操作:worktree、分支、乾淨/scope 檢查、commit、還原。
 
 全部以 cwd=專案根目錄執行 git,回傳前先檢查 returncode;git 缺席時給清楚錯誤訊息
 而非 traceback。`excludes` 為執行期產物的相對路徑清單(.agents/agents.log、
@@ -93,6 +93,48 @@ def ensure_branch(root: Path, prefix: str) -> str:
     branch = f"{prefix}{run_id}"
     _git(root, "checkout", "-b", branch)
     return branch
+
+
+def worktree_path(root: Path, folder: str) -> Path:
+    """回傳指定工作資料夾的固定 worktree 路徑。"""
+    return root.parent / f"{root.name}.worktrees" / folder
+
+
+def _resolved_git_path(root: Path, value: str) -> Path:
+    """把 git 回傳的絕對或相對路徑正規化為可比較的絕對路徑。"""
+    path = Path(value.strip())
+    if not path.is_absolute():
+        path = root / path
+    return path.resolve()
+
+
+def _is_repo_worktree(root: Path, path: Path) -> bool:
+    """判斷 path 是否為 root 所屬 repo 的有效頂層 worktree。"""
+    top = _run_git(path, "rev-parse", "--show-toplevel")
+    common = _run_git(path, "rev-parse", "--git-common-dir")
+    if top.returncode != 0 or common.returncode != 0:
+        return False
+
+    root_common = _git(root, "rev-parse", "--git-common-dir")
+    return (_resolved_git_path(path, top.stdout) == path.resolve()
+            and _resolved_git_path(path, common.stdout)
+            == _resolved_git_path(root, root_common))
+
+
+def ensure_worktree(root: Path, folder: str) -> Path:
+    """建立或重用固定路徑、detached HEAD 的 git worktree。"""
+    root = root.resolve()
+    path = worktree_path(root, folder)
+    if path.exists():
+        if path.is_dir() and _is_repo_worktree(root, path):
+            return path
+        raise AgentsError(
+            f"worktree 路徑已存在,但不是本 repo 的有效 worktree:{path}")
+
+    # 路徑曾被手動刪除時,先清除主 repo 仍保留的 worktree metadata。
+    _git(root, "worktree", "prune")
+    _git(root, "worktree", "add", "--detach", str(path))
+    return path
 
 
 def changes_outside_scope(root: Path, scope: list[str],
