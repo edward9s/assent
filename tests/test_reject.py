@@ -88,6 +88,38 @@ class TestReject(unittest.TestCase):
             gitops.commit_all(worktree, "finish result")
         return worktree, branch
 
+    def _dependent_folder(self, name: str, status: str = "DONE", *,
+                          after: list[str] | None = None, lock: bool = True) -> Path:
+        folder = self.root / ".assent" / name
+        folder.mkdir(exist_ok=True)
+        (folder / "t001_task.e.toml").write_text(
+            'title = "task"\n'
+            'deps = []\n'
+            'model = "lite"\n'
+            f'status = "{status}"\n'
+            'scope = ["assent/"]\n'
+            'verify = "python -m unittest"\n'
+            'goal = "finish task"\n'
+            'acceptance = "verification passes"\n',
+            encoding="utf-8")
+        if after is not None:
+            quoted = ", ".join(f'"{item}"' for item in after)
+            (folder / "_folder.toml").write_text(
+                f"after = [{quoted}]\n", encoding="utf-8")
+        if lock:
+            (folder / "assent.lock").write_text(
+                f'folder = "{name}"\n', encoding="utf-8")
+        return folder
+
+    def _dependent_source(self, name: str, *, commit: bool = True) -> tuple[Path, str]:
+        worktree = gitops.ensure_worktree(self.root, name)
+        branch = gitops.ensure_branch(worktree, f"{name}/")
+        if commit:
+            (worktree / f"{name}.txt").write_text(
+                f"result for {name}\n", encoding="utf-8")
+            gitops.commit_all(worktree, f"finish {name}")
+        return worktree, branch
+
     def test_clean_module_does_not_expose_reject(self) -> None:
         self.assertFalse(hasattr(clean, "reject_folder"))
 
@@ -230,6 +262,85 @@ class TestReject(unittest.TestCase):
         self.assertEqual(self._task_status(done), "DONE")
         self.assertIn("cancelled", output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
+
+    def test_reject_without_dependents_output_unchanged(self) -> None:
+        self._write_task(1, "DONE")
+        worktree, branch = self._worktree_branch(commit=True)
+
+        code, output = self._run_reject()
+
+        self.assertEqual(code, 0)
+        self.assertFalse(worktree.exists())
+        self.assertNotIn("dependent", output)
+        self.assertNotIn("stranded", output)
+        self.assertNotIn("Two ways forward", output)
+
+    def test_reject_unaccepted_dependent_defaults_to_refused(self) -> None:
+        self._write_task(1, "DONE")
+        worktree, branch = self._worktree_branch(commit=True)
+        self._dependent_folder("downstream", status="TODO", after=[self.folder])
+
+        code, output = self._run_reject(confirm=lambda prompt: "n")
+
+        self.assertEqual(code, 1)
+        self.assertTrue(worktree.exists())
+        self.assertIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"))
+        self.assertIn("downstream", output)
+        self.assertIn("unfinished tasks: t001=TODO", output)
+        self.assertIn("Two ways forward", output)
+        self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
+
+    def test_reject_unaccepted_dependent_confirmed_records_stranded(self) -> None:
+        self._write_task(1, "DONE")
+        worktree, branch = self._worktree_branch(commit=True)
+        self._dependent_folder("downstream", status="TODO", after=[self.folder])
+
+        code, output = self._run_reject()
+
+        self.assertEqual(code, 0)
+        self.assertFalse(worktree.exists())
+        self.assertIn("downstream", output)
+        entries = read_entries(self.tasks_dir / "t001_task.r.toml")
+        self.assertEqual(entries[-1]["event"], "rejected")
+        self.assertIn("downstream", entries[-1]["detail"])
+        self.assertIn("stranding", entries[-1]["detail"].lower())
+
+    def test_reject_dependent_lock_busy_refuses_without_prompt(self) -> None:
+        self._write_task(1, "DONE")
+        worktree, branch = self._worktree_branch(commit=True)
+        dependent_dir = self._dependent_folder(
+            "downstream", status="TODO", after=[self.folder])
+
+        def _fail_confirm(prompt: str) -> str:
+            raise AssertionError("confirm must not be asked when a dependent is busy")
+
+        with hold_lock(dependent_dir, "downstream"):
+            code, output = self._run_reject(confirm=_fail_confirm)
+
+        self.assertEqual(code, 1)
+        self.assertTrue(worktree.exists())
+        self.assertIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"))
+        self.assertIn("downstream", output)
+        self.assertIn("its task folder is being changed by another run", output)
+        self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
+
+    def test_reject_accepted_dependent_does_not_trigger_guard(self) -> None:
+        self._write_task(1, "DONE")
+        worktree, branch = self._worktree_branch(commit=True)
+        self._dependent_folder("downstream", status="DONE", after=[self.folder])
+        _dependent, dependent_branch = self._dependent_source("downstream")
+        _git(self.root, "merge", "--no-ff", "-m", "accept downstream", dependent_branch)
+
+        code, output = self._run_reject()
+
+        self.assertEqual(code, 0)
+        self.assertFalse(worktree.exists())
+        self.assertNotIn("stranded", output)
+        self.assertNotIn("Two ways forward", output)
+        entries = read_entries(self.tasks_dir / "t001_task.r.toml")
+        self.assertNotIn("stranding", entries[-1]["detail"].lower())
 
 
 if __name__ == "__main__":

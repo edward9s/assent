@@ -1,11 +1,15 @@
 """Implementation of manual-decision rejection for a task folder and its task statuses."""
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Callable
 
 from assent import AssentError, gitops
+from assent.accept import _source_snapshot
+from assent.clean import _direct_dependents
 from assent.config import Config
+from assent.folderdeps import parse_folder_dependency_graph
 from assent.lockfile import LockBusy, LockMissing, probe_lock
 from assent.plan import Plan, append_entry, set_status
 
@@ -33,7 +37,8 @@ def reject_folder(cfg: Config, confirm: Callable[[str], str] | None = None) -> i
     _remove_empty_container(path)
     try:
         with probe_lock(cfg.tasks_dir, name):
-            return _reject_locked(cfg, path, confirm)
+            with ExitStack() as dependent_locks:
+                return _reject_locked(cfg, path, dependent_locks, confirm)
     except LockBusy as e:
         print(f"{name}: reject aborted (a run is in progress): {e}")
         return 1
@@ -43,7 +48,8 @@ def reject_folder(cfg: Config, confirm: Callable[[str], str] | None = None) -> i
 
 
 def _confirm_destructive(name: str, path: Path, branches: list[str],
-                         reset_candidates: list, confirm: Callable[[str], str] | None) -> bool:
+                         reset_candidates: list, stranded: list[tuple[str, str]],
+                         confirm: Callable[[str], str] | None) -> bool:
     """Print a preview of what reject is about to destroy and ask for interactive
     confirmation. Anything other than exactly "y"/"Y", including EOF, declines."""
     print(f"{name}: about to reject (destructive, cannot be undone):")
@@ -60,6 +66,13 @@ def _confirm_destructive(name: str, path: Path, branches: list[str],
             print(f"    {task.id}: {task.status}")
     else:
         print("  tasks to reset to TODO: none")
+    if stranded:
+        print("  unaccepted dependent folders that would be stranded:")
+        for dependent, reason in stranded:
+            print(f"    {dependent}: {reason}")
+        print("  Two ways forward: (a) reject each dependent first, bottom-up, "
+              "then reject this folder; or (b) confirm below to accept stranding "
+              "them.")
 
     ask = confirm if confirm is not None else input
     try:
@@ -69,7 +82,81 @@ def _confirm_destructive(name: str, path: Path, branches: list[str],
     return answer.strip().lower() == "y"
 
 
-def _reject_locked(cfg: Config, path: Path,
+def _check_dependents(cfg: Config, stack: ExitStack
+                      ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Lock direct dependent folders and classify each as busy or unaccepted.
+
+    Reuses ``clean.py``'s dependency graph and dependent-lock proof instead of
+    a second implementation. Every direct dependent's ``assent.lock`` is held
+    via ``stack`` for the rest of this reject, the same way ``clean.py``
+    ``_lock_and_check_dependents`` holds them for the rest of a cleanup. A
+    dependent whose source tip is already an ancestor of the main worktree
+    HEAD is accepted and never reported. Returns ``(busy, unaccepted)``:
+    ``busy`` is non-empty only when some dependent's own run lock could not be
+    probed (it is currently running), which must abort before any
+    confirmation prompt; ``unaccepted`` lists every other dependent not yet
+    provably accepted, paired with the reason.
+    """
+    name = cfg.tasks_name
+    graph = parse_folder_dependency_graph(cfg.assent_dir)
+    dependents = _direct_dependents(graph, name)
+    if not dependents:
+        return [], []
+
+    busy: list[tuple[str, str]] = []
+    unaccepted: list[tuple[str, str]] = []
+    for dependent in dependents:
+        try:
+            stack.enter_context(probe_lock(cfg.assent_dir / dependent, dependent))
+        except LockBusy:
+            busy.append((dependent, "its task folder is being changed by another run"))
+        except LockMissing as e:
+            unaccepted.append((dependent, str(e)))
+        except AssentError as e:
+            unaccepted.append((dependent, f"its task-folder lock is unavailable: {e}"))
+
+    locked_graph = parse_folder_dependency_graph(cfg.assent_dir)
+    locked_dependents = _direct_dependents(locked_graph, name)
+    if locked_dependents != dependents:
+        raise AssentError(
+            "direct dependents changed while reject was acquiring locks "
+            f"({', '.join(dependents) or 'none'} -> "
+            f"{', '.join(locked_dependents) or 'none'})")
+
+    if busy:
+        return busy, []
+
+    main = gitops.main_worktree(cfg.root)
+    head = gitops.head_ref(main)
+    if head is None:
+        raise AssentError("The main tree currently has no verifiable HEAD commit")
+
+    already_unaccepted = {dependent for dependent, _ in unaccepted}
+    for dependent in dependents:
+        if dependent in already_unaccepted:
+            continue
+        plan = Plan.parse(cfg.assent_dir / dependent)
+        unfinished = [f"{task.id}={task.status}" for task in plan.tasks
+                      if task.status not in ("DONE", "SKIP")]
+        if unfinished:
+            unaccepted.append((dependent, f"unfinished tasks: {', '.join(unfinished)}"))
+            continue
+        try:
+            _branch, source_tip, _worktree = _source_snapshot(
+                main, dependent, cfg.git_excludes, operation="reject dependency proof")
+        except AssentError as e:
+            unaccepted.append((dependent, str(e)))
+            continue
+        if not gitops.is_ancestor(main, source_tip, head):
+            unaccepted.append((
+                dependent,
+                f"current source tip {source_tip[:12]} is not yet merged into "
+                f"the main worktree HEAD {head[:12]}"))
+    unaccepted.sort()
+    return [], unaccepted
+
+
+def _reject_locked(cfg: Config, path: Path, dependent_locks: ExitStack,
                    confirm: Callable[[str], str] | None = None) -> int:
     """With the lock held, precheck the task files first, confirm interactively,
     then clear the Git scene, and finally reset task statuses."""
@@ -82,9 +169,16 @@ def _reject_locked(cfg: Config, path: Path,
               "Git scene unchanged")
         return 1
 
+    busy, stranded = _check_dependents(cfg, dependent_locks)
+    if busy:
+        print(f"{name}: reject aborted (an unaccepted dependent folder is busy):")
+        for dependent, reason in busy:
+            print(f"  dependent {dependent}: {reason}")
+        return 1
+
     branches = gitops.branches_with_prefix(root, cfg.branch_prefix)
     reset_candidates = [t for t in plan.tasks if t.status in RESETTABLE_STATUSES]
-    if not _confirm_destructive(name, path, branches, reset_candidates, confirm):
+    if not _confirm_destructive(name, path, branches, reset_candidates, stranded, confirm):
         print(f"{name}: reject cancelled, no changes made")
         return 1
 
@@ -122,16 +216,19 @@ def _reject_locked(cfg: Config, path: Path,
     except AssentError as e:
         print(f"{name}: reject aborted (Git step failed: {e}), task files not reset")
         return 1
-    return _reset_rejected_tasks(cfg, plan, evidence)
+    return _reset_rejected_tasks(cfg, plan, evidence, stranded)
 
 
-def _reset_rejected_tasks(cfg: Config, plan: Plan,
-                          evidence: list[str]) -> int:
+def _reset_rejected_tasks(cfg: Config, plan: Plan, evidence: list[str],
+                          stranded: list[tuple[str, str]] = ()) -> int:
     """Reset DONE/WIP/BLOCKED back to TODO, and preserve full Git evidence in the r file."""
     name = cfg.tasks_name
     reset = 0
     detail = "Git evidence before deletion:\n" + (
         "\n".join(evidence) if evidence else "no worktree or same-prefix branches")
+    if stranded:
+        detail += "\n\nConfirmed stranding unaccepted dependent folder(s):\n" + "\n".join(
+            f"{dependent}: {reason}" for dependent, reason in stranded)
     try:
         for task in plan.tasks:
             # SKIP is an explicit human decision to abandon; TODO is already
