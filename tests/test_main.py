@@ -77,18 +77,24 @@ class TestInit(MainTestCase):
         code, out = self.run_main(["init"])
         self.assertEqual(code, 0)
         for rel in (".agents/agents.toml", ".agents/format.md",
-                    ".agents/verify.py", "AGENTS.md", ".gitignore"):
+                    ".agents/instructions.md", ".agents/verify.py",
+                    "AGENTS.md", ".gitignore"):
             self.assertTrue((self.root / rel).is_file(), rel)
         self.assertTrue((self.root / ".agents" / "plan01").is_dir())
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
-        self.assertIn(".agents/", gitignore.splitlines())
-        self.assertNotIn(".agents/agents.log", gitignore.splitlines())
-        self.assertNotIn(".agents/*/_report.md", gitignore.splitlines())
+        lines = gitignore.splitlines()
+        self.assertIn(".agents/", lines)
+        self.assertNotIn("AGENTS.md", lines)
+        agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertEqual(agents_md.count("<!-- agents-instructions -->"), 1)
+        self.assertNotIn("## AI 工作體系", agents_md)
 
     def test_idempotent_no_overwrite_no_duplicates(self):
         run_init(self.root)
         (self.root / ".agents" / "agents.toml").write_text(
             '[plan]\ntasks = "custom"\n', encoding="utf-8")
+        (self.root / ".agents" / "instructions.md").write_text(
+            "本機自訂指示\n", encoding="utf-8")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(run_init(self.root), 0)
@@ -98,19 +104,42 @@ class TestInit(MainTestCase):
         # gitignore 不重複累加
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
         self.assertEqual(gitignore.splitlines().count(".agents/"), 1)
-        # AGENTS.md 已含該節,不重複 append
+        # 已有檔案不覆蓋,AGENTS.md 橋接不重複
+        self.assertEqual((self.root / ".agents" / "instructions.md")
+                         .read_text(encoding="utf-8"), "本機自訂指示\n")
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertEqual(agents_md.count("## AI 工作體系"), 1)
+        self.assertEqual(agents_md.count("<!-- agents-instructions -->"), 1)
 
-    def test_merges_section_into_existing_agents_md(self):
+    def test_adds_one_bridge_line_to_existing_agents_md(self):
         (self.root / "AGENTS.md").write_text(
             "# 我的專案\n\n既有規則。\n", encoding="utf-8")
         run_init(self.root)
         text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# 我的專案"))
         self.assertIn("既有規則。", text)
-        self.assertIn("## AI 工作體系", text)
-        self.assertEqual(text.count("## AI 工作體系"), 1)
+        self.assertNotIn("## AI 工作體系", text)
+        self.assertEqual(text.count("<!-- agents-instructions -->"), 1)
+
+    def test_migrates_legacy_section_without_touching_later_project_section(self):
+        (self.root / "AGENTS.md").write_text(
+            "# 我的專案\n\n既有規則。\n\n"
+            "## AI 工作體系(.agents)\n\n舊 agents 內容。\n\n"
+            "## 專案附註\n\n必須保留。\n", encoding="utf-8")
+        run_init(self.root)
+        text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertNotIn("舊 agents 內容", text)
+        self.assertIn("## 專案附註\n\n必須保留。", text)
+        self.assertEqual(text.count("<!-- agents-instructions -->"), 1)
+
+    def test_removes_agents_md_ignore_for_version_control(self):
+        (self.root / ".gitignore").write_text(
+            "cache/\nAGENTS.md\n.agents/\n", encoding="utf-8")
+        run_init(self.root)
+        lines = (self.root / ".gitignore").read_text(
+            encoding="utf-8").splitlines()
+        self.assertIn("cache/", lines)
+        self.assertIn(".agents/", lines)
+        self.assertNotIn("AGENTS.md", lines)
 
     def test_missing_target_dir_fails(self):
         out = io.StringIO()

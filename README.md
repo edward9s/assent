@@ -13,7 +13,7 @@
 
 1. **在確保輸出品質可信可靠的前提下,最小化 tokens 消耗。**
    調度、驗收、報告全部是純 Python 本地作業;每個 AI session 的必讀集只有
-   AGENTS.md + 它自己的任務檔。
+   專案 AGENTS.md + agents 工作指示 + 它自己的任務檔。
 2. **保持靈活,少即是多。** 零第三方依賴(只用 Python 標準庫);
    狀態就是任務檔本身,沒有資料庫、沒有隱藏狀態。
 3. **AI 能處理的全部自動處理,人類只做審查與裁決。**
@@ -64,10 +64,12 @@ pip install -e .
 ```
 # 0. cd 到目標專案根目錄(需為 git repo)
 
-# 1. 生成 .agents 骨架與 AGENTS.md(已存在的檔案一律不覆蓋)
+# 1. 生成 .agents 骨架與 AGENTS.md
+#    (既有 AGENTS.md 只補一行 agents 橋接,其他內容不覆蓋)
 agents init
 
 # 2. 填 AGENTS.md 的專案描述/硬限制、.agents/verify.py 的實際檢查命令
+#    AGENTS.md 要提交進 Git;整個 .agents/ 留在主工作樹,不提交
 
 # 3. 開 AI 會議產出任務檔(這一步是互動 session,見下方「使用循環」)
 
@@ -101,6 +103,12 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 同時只允許一個 run；若在 `.agents/agents.toml` 開啟 `[git] worktree = true`，
 每個資料夾會使用 `<專案名>.worktrees/<資料夾>/` 的獨立 worktree。
 
+版控邊界刻意簡單:`AGENTS.md` 是專案規則,必須進 Git 並跟著分支進入
+worktree;整個 `.agents/` 是 agents 管理面,由 `.gitignore` 排除並只留在主工作樹。
+調度器會在提示詞中提供 instructions、t/r 與預設驗收腳本的主樹絕對路徑;
+驗收腳本雖從主樹載入,執行 cwd 仍是 worktree。若 `AGENTS.md` 未被追蹤,
+或任何 `.agents/` 檔案已進 Git,調度器會在開 session 前 fail-closed 拒絕執行。
+
 平行執行的固有代價是額度共享，以及各分支 merge 回主線由人負責。
 
 ## 使用循環(三幕)
@@ -108,7 +116,7 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 **第 1 幕:規劃會議**(互動 session)
 
 ```text
-開始規劃。請讀 AGENTS.md 與 .agents/format.md,
+開始規劃。請讀 AGENTS.md、.agents/instructions.md 與 .agents/format.md,
 然後跟我討論以下目標,把共識逐步寫成 .agents/<工作資料夾>/ 的任務檔:
 <你的目標>
 ```
@@ -149,6 +157,8 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 
 - 格式契約全文:[agents/templates/format.md](agents/templates/format.md)
   (`agents init` 會複製到專案的 `.agents/format.md`)。
+- 工作指示範本:[agents/templates/instructions.md](agents/templates/instructions.md)
+  ——agents session 行為與跨專案共通規則;專案規則留在 `AGENTS.md`。
 - 設定檔範本:[agents/templates/agents.toml](agents/templates/agents.toml)
   ——工作資料夾名稱、adapter 選擇、抽象檔位(prime/core/lite)對照表、
   watchdog 與重試參數。
@@ -178,5 +188,5 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 ## 專案狀態
 
 核心完成:TOML 任務/日誌格式、五個子命令、claude 與 codex adapter、
-160 個 unittest(無網路、無真實 CLI 也能跑)。設計共識見
+完整 unittest 測試套件(無網路、無真實 CLI 也能跑)。設計共識見
 [docs/CONSENSUS.md](docs/CONSENSUS.md)。

@@ -14,7 +14,8 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-ROOT = Path(__file__).resolve().parent.parent
+# 驗收目標一律是調度器指定的 cwd;worktree 模式時腳本本體仍在主樹。
+ROOT = Path.cwd().resolve()
 
 
 def fail(message: str) -> None:
@@ -33,9 +34,8 @@ def run(*cmd: str) -> None:
         fail(f"命令失敗(退出碼 {result.returncode}): {' '.join(cmd)}")
 
 
-# --- 體系完整性檢查(保留) ---
+# --- 工作樹完整性檢查(保留) ---
 require_file("AGENTS.md")
-require_file(".agents/format.md")
 run("git", "diff", "--check")
 
 # --- 專案檢查(TODO: 依技術棧擇一或自行替換) ---

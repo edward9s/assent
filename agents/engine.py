@@ -15,6 +15,7 @@ agents 新增的驗收防禦(格式契約「防禦規則」):
 """
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 import time
@@ -31,8 +32,10 @@ from agents.plan import (Plan, Task, append_entry, parse_task_file,
 
 # 預設提示詞模板(可用 [prompt] template 覆寫;變數以字面替換,容忍模板內其他大括號)。
 _DEFAULT_PROMPT_TEMPLATE = (
-    "你是 agents 的執行 AI。先讀專案根目錄的 AGENTS.md,再讀任務檔 {task_path},\n"
+    "你是 agents 的執行 AI。先讀專案根目錄的 AGENTS.md(若存在),\n"
+    "再讀 agents 工作指示 {instructions_path} 與任務檔 {task_path}。\n"
     "只執行任務 {task_id},不要碰其他任務檔。\n"
+    "自行驗證時在目前工作樹執行:{verify_command}\n"
     "完成後:\n"
     "1. 把 {task_path} 的 status 改為 DONE 或 BLOCKED——整份任務檔只准改這一行。\n"
     "2. 在 {journal_path} 檔尾 append 一筆 [[entry]] 日誌(TOML,含 time、\n"
@@ -47,6 +50,7 @@ _RESUME_SUFFIX = ("\n上次執行此任務時中斷(額度耗盡或使用者中�
 
 _QUOTA_BUFFER = timedelta(minutes=2)  # 重置時間 + 緩衝,避免剛好卡在邊界又被擋
 _QUOTA_TICK = 1.0                     # 倒數的更新間隔(秒)
+_DEFAULT_VERIFY_COMMAND = "python .agents/verify.py"
 
 
 # --------------------------------------------------------------------------- #
@@ -56,8 +60,12 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
                   resumed: bool = False) -> str:
     template = cfg.prompt_template or _DEFAULT_PROMPT_TEMPLATE
     text = (template
+            .replace("{instructions_path}",
+                     cfg.rel(cfg.agents_dir / "instructions.md"))
             .replace("{task_path}", cfg.rel(task.path))
             .replace("{journal_path}", cfg.rel(task.journal_path))
+            .replace("{verify_command}",
+                     _verify_command_for_prompt(cfg, task.verify))
             .replace("{task_id}", task.id)
             .replace("{task_title}", task.title))
     if resumed:
@@ -101,6 +109,33 @@ def _git_read(root, *args: str) -> str | None:
     return result.stdout.strip()
 
 
+def _verify_command_for_prompt(cfg: Config, command: str) -> str:
+    """worktree 模式把預設驗收腳本展開成主樹絕對路徑。"""
+    if cfg.source_root is None or command.strip() != _DEFAULT_VERIFY_COMMAND:
+        return command
+    parts = [sys.executable, str((cfg.agents_dir / "verify.py").resolve())]
+    return (subprocess.list2cmdline(parts) if sys.platform == "win32"
+            else shlex.join(parts))
+
+
+def _worktree_configuration_errors(cfg: Config) -> list[str]:
+    """worktree 只納入專案 AGENTS.md,.agents 管理面必須留在主樹。"""
+    errors: list[str] = []
+    agents_md = cfg.git_rel(cfg.root / "AGENTS.md")
+    if not gitops.is_tracked(cfg.root, agents_md, ref="HEAD"):
+        errors.append("worktree 的 HEAD 缺少已追蹤的專案 AGENTS.md")
+
+    agents_path = cfg.git_rel(cfg.agents_dir)
+    tracked = sorted(set(gitops.tracked_paths(cfg.root, agents_path))
+                     | set(gitops.tracked_paths(cfg.root, agents_path,
+                                                ref="HEAD")))
+    if tracked:
+        shown = ", ".join(tracked[:5]) + (" ..." if len(tracked) > 5 else "")
+        errors.append(f".agents 已有 Git 追蹤檔案:{shown}"
+                      "(worktree 模式下整個 .agents 必須留在主工作樹)")
+    return errors
+
+
 # --------------------------------------------------------------------------- #
 # run:主迴圈
 # --------------------------------------------------------------------------- #
@@ -134,6 +169,12 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     """已持有工作資料夾鎖後的實際 run 主體。"""
     if cfg.git_enabled and cfg.git_worktree and cfg.source_root is None:
         try:
+            errors = _worktree_configuration_errors(cfg)
+            if errors:
+                print("git worktree 版控分層錯誤:")
+                for error in errors:
+                    print(f"  - {error}")
+                return 1
             root = gitops.ensure_worktree(cfg.root, cfg.tasks_name)
             cfg = cfg.for_worktree(root)
             print(f"隔離 worktree:{root}")
@@ -369,10 +410,20 @@ def _evaluate(cfg: Config, task: Task,
 
 
 def _run_verify(cfg: Config, command: str) -> int:
-    """在專案根目錄以 shell 執行 verify 命令,退出碼 0 = 通過。"""
-    result = subprocess.run(
-        command, shell=True, cwd=str(cfg.root),
-        capture_output=True, encoding="utf-8", errors="replace")
+    """在目標工作樹執行 verify,退出碼 0 = 通過。
+
+    worktree 模式的預設腳本從主樹以絕對路徑載入,其餘命令維持原本的 shell
+    語意;兩者的 cwd 都是目前目標工作樹。
+    """
+    if cfg.source_root is not None and command.strip() == _DEFAULT_VERIFY_COMMAND:
+        result = subprocess.run(
+            [sys.executable, str((cfg.agents_dir / "verify.py").resolve())],
+            cwd=str(cfg.root), capture_output=True, encoding="utf-8",
+            errors="replace")
+    else:
+        result = subprocess.run(
+            command, shell=True, cwd=str(cfg.root),
+            capture_output=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-8:]
         if tail:
@@ -632,6 +683,18 @@ def check(cfg: Config) -> int:
     inside = _git_read(cfg.root, "rev-parse", "--is-inside-work-tree")
     if inside == "true":
         print("git repo:OK")
+        if cfg.git_enabled and cfg.git_worktree:
+            try:
+                errors = _worktree_configuration_errors(cfg)
+            except AgentsError as e:
+                errors = [str(e)]
+            if errors:
+                ok = False
+                print("worktree 版控分層:FAIL")
+                for error in errors:
+                    print(f"  - {error}")
+            else:
+                print("worktree 版控分層:OK")
     elif cfg.git_enabled:
         ok = False
         print("git repo:FAIL(專案根目錄不是 git 工作樹,或 git 未安裝/未在 PATH)")

@@ -207,8 +207,25 @@ class TestRunSuccess(EngineTestCase):
         adapter = ScriptedAdapter([self.ai_done(p1)])
         self.run_quiet(cfg, once=True, adapter=adapter)
         prompt = adapter.calls[0][0]
+        self.assertIn(".agents/instructions.md", prompt)
         self.assertIn(".agents/plan01/t001_task.toml", prompt)
         self.assertIn(".agents/plan01/r001_task.toml", prompt)
+        self.assertIn(_OK, prompt)
+
+    def test_worktree_default_verify_uses_main_script_and_worktree_cwd(self):
+        cfg = self.build(git_enabled=False)
+        worktree = self.root / "isolated"
+        worktree.mkdir()
+        (cfg.agents_dir / "verify.py").write_text(
+            "from pathlib import Path\n"
+            "Path('verified.txt').write_text('ok', encoding='utf-8')\n",
+            encoding="utf-8")
+
+        self.assertEqual(engine._run_verify(
+            cfg.for_worktree(worktree), "python .agents/verify.py"), 0)
+        self.assertEqual((worktree / "verified.txt").read_text(encoding="utf-8"),
+                         "ok")
+        self.assertFalse((self.root / "verified.txt").exists())
 
 
 class TestAcceptanceGates(EngineTestCase):

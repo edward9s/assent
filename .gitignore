@@ -3,9 +3,8 @@
 CLAUDE.md
 .anthropic/
 
-# agents 執行期產物
+# agents 管理面與執行期產物
 .agents/
-AGENTS.md
 
 # Python
 __pycache__/

@@ -39,7 +39,7 @@ lite  = "medium"
 [adapter.codex]
 command = "codex"
 # danger-full-access:workspace-write 沙箱有兩個實測炸點——(1)tempfile 型測試
-# 寫系統暫存目錄被拒;(2).agents/ 被 .gitignore 的專案會被劃成「專案外」唯讀,
+# 寫系統暫存目錄被拒;(2)被 .gitignore 的工作資料夾會被劃成「專案外」唯讀,
 # 執行 AI 改不了自己任務檔的 status,任務全數假性 BLOCKED。客觀閘門不受影響。
 # 要收緊可改回 workspace-write 並以 writable_roots 放行暫存目錄(僅解炸點 1)。
 extra_args = ["--sandbox", "danger-full-access"]
@@ -53,5 +53,6 @@ core  = "medium"
 lite  = "low"
 
 [prompt]
-# 可覆寫預設提示詞模板;可用變數:{task_path} {journal_path} {task_id} {task_title}
+# 可覆寫預設提示詞模板;可用變數:{instructions_path} {task_path}
+# {journal_path} {verify_command} {task_id} {task_title}
 # template = """..."""

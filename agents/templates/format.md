@@ -2,16 +2,17 @@
 
 > 本檔是「AI 會議產出計畫」與「agents 調度器自動執行」共同遵守的唯一格式契約。
 > 規劃 AI:產生或修改任務檔前,必須先讀本檔。
-> 執行 AI:不需要讀本檔,只讀 AGENTS.md 與被指派的那一個任務檔。
+> 執行 AI:不需要讀本檔,只讀專案 AGENTS.md、instructions.md 與被指派的任務檔。
 > 格式合格的客觀標準:`agents check` 通過——這也是會議的散會條件。
 
 ## 目錄佈局
 
 ```text
 project/
-├── AGENTS.md                    # 永久規則(root,工具自動載入;agents init 生成或合併)
+├── AGENTS.md                    # 專案規則(root,進版控;只留一行 agents 橋接)
 └── .agents/
     ├── agents.toml              # 調度器設定:工作資料夾、adapter、檔位對照表
+    ├── instructions.md          # agents session 指示與跨專案共通規則
     ├── format.md                # 本檔
     ├── verify.py                # 共用驗收腳本(任務檔 verify 欄位的預設選擇)
     └── plan01/                  # 工作資料夾(名稱由會議決定,= git 分支前綴)
@@ -37,18 +38,25 @@ project/
   執行期使用 `<專案名>.worktrees/<資料夾>/`，位置參數可用
   `agents run <資料夾>` 覆寫設定檔中的工作資料夾，並與 `--config` 正交。
 
-### .agents/ 的版控選擇
+### 專案規則與 agents 管理面
 
-`.agents/` 進不進版控是專案自己的選擇,調度器兩種模式都正確運作。預設不追蹤
-(`init` 的 `.gitignore` 排除整個 `.agents/`)是過程鷹架不留歷史的模型；選擇追蹤
-則可讓回退時狀態與程式碼原子一致,團隊或稽核需求可自行移除 `.gitignore` 該行。
-不追蹤時磁碟是唯一副本,備份由專案自行負責。`AGENTS.md` 是跨 AI 工具的專案規則,
-不在預設 ignore 之列。
+`AGENTS.md` 是專案規則,必須進版控並跟著分支進入 worktree;其中只保留一行
+橋接,要求使用 agents 時讀取主工作樹的 `.agents/instructions.md`。專案特有限制
+不與 agents session 流程混在同一個受工具管理的區塊。
+
+整個 `.agents/` 是調度器管理面,預設由 `.gitignore` 排除且永遠留在主工作樹;
+worktree 不含 `.agents/`。調度器提示詞會把 instructions、t/r 與預設驗收腳本
+展開成主樹絕對路徑。`.agents/verify.py` 的腳本本體從主樹載入,但執行 cwd
+是 worktree,因此驗收目標仍是隔離工作樹。worktree 模式會 fail-closed 拒絕
+未追蹤的 `AGENTS.md` 或任何已進 Git 的 `.agents/` 檔案。
+
+`.agents/` 以主樹磁碟為唯一副本,備份由專案自行負責。若團隊或稽核需求必須追蹤
+`.agents/`,必須關閉 `[git] worktree`,避免主工作樹與 worktree 同時成為真本。
 
 ### adapter 沙箱的硬需求
 
-執行 AI 必須能寫入 `.agents/`,因為改自己任務檔的 status 與 append 自己的 r 檔是
-分內事。若 `.agents/` 被 gitignore 的專案使用 codex `workspace-write`,它會被劃成
+執行 AI 必須能寫入主樹 `.agents/`,因為改自己任務檔的 status 與 append r 檔是
+分內事。若整個 `.agents/` 被 gitignore 的專案使用 codex `workspace-write`,它會被劃成
 「專案外」唯讀,任務會全數假性 BLOCKED；此組合需使用 `danger-full-access`。
 執行 AI 也必須保持整潔:臨時探針或墊片用完即刪,尤其不得留下內嵌 git repo。
 
@@ -91,7 +99,8 @@ notes = """
   多行字串之前,調度器靠這一點做精準寫回。
 - scope 是 **fail-closed**:空陣列或缺欄位 = 格式錯誤,`run` 起點直接拒跑。
   任務自己的 t 檔(status 行)與 r 檔由調度器自動豁免,不必列入 scope。
-- 任務檔必須「執行上自包含」:零記憶的 AI 只讀 AGENTS.md + 本檔就能無歧義開工。
+- 任務檔必須「執行上自包含」:零記憶的 AI 只讀 AGENTS.md + instructions.md +
+  本檔就能無歧義開工。
 
 ### 三檔位(model)
 
@@ -182,17 +191,19 @@ _report.md 是執行期產物:不進版控、不參與乾淨/scope 檢查,每次
 
 ## 會議規範
 
-- 開局會議:讀 AGENTS.md + 本檔,把共識逐步落成任務檔(草稿可以是散文,
+- 開局會議:讀 AGENTS.md + instructions.md + 本檔,把共識逐步落成任務檔
+  (草稿可以是散文,
   定稿必須是任務檔),散會條件 = `agents check` 通過。
 - 驗收會議:人先讀 `_report.md`(零 token),只對要裁決的任務開 AI session,
   指名「讀 tNNN/rNNN 與對應 commit」;裁決落實 = 改任務檔(status 改回 TODO、
   補充說明、加新任務、標 SKIP),若裁決回退某任務的檢查點(git revert),同一次會議
   必須把該任務 status 改回 TODO 或標 SKIP,並檢視以它為前置的下游任務是否需要
   連動重作；狀態與程式碼事實不一致即未完成,散會仍須 `agents check` 通過。
-- 跨計畫仍有效的決策沉澱進 AGENTS.md,不靠舊任務檔傳承。
+- 專案特有且跨計畫仍有效的決策沉澱進 AGENTS.md,不靠舊任務檔傳承;
+  跨專案共通的 agents 規則則更新 instructions 範本。
 
 ## 冷啟動測試(計畫合格的品質標準)
 
-一個零記憶的新 AI session,只給它 AGENTS.md 與任一 `TODO` 任務檔,必須能不追問
-就說出:目標、可改動範圍、驗收條件、下一步。做不到 = 任務檔資訊不足,計畫還沒
-定稿。機器側等價物:`agents check` 通過。
+一個零記憶的新 AI session,只給它 AGENTS.md、instructions.md 與任一 `TODO`
+任務檔,必須能不追問就說出:目標、可改動範圍、驗收條件、下一步。做不到 =
+任務檔資訊不足,計畫還沒定稿。機器側等價物:`agents check` 通過。

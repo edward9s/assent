@@ -137,6 +137,25 @@ def ensure_worktree(root: Path, folder: str) -> Path:
     return path
 
 
+def is_tracked(root: Path, path: str, ref: str | None = None) -> bool:
+    """判斷 repo 相對路徑是否存在於索引,或指定的 commit/ref。"""
+    return bool(tracked_paths(root, path, ref=ref))
+
+
+def tracked_paths(root: Path, path: str, ref: str | None = None) -> list[str]:
+    """列出指定路徑下的索引檔案;有 ref 時改查該 commit/ref。"""
+    normalized = _normalize(path)
+    if ref is None:
+        out = _git(root, "ls-files", "--", normalized)
+    else:
+        result = _run_git(root, "ls-tree", "-r", "--name-only", ref,
+                          "--", normalized)
+        if result.returncode != 0:
+            return []
+        out = result.stdout
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 def changes_outside_scope(root: Path, scope: list[str],
                           since_ref: str | None = None,
                           excludes: Sequence[str] = ()) -> list[str]:

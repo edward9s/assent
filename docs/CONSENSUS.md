@@ -11,7 +11,8 @@
 讓每次任務只需載入「足以無歧義開工的最小上下文」。
 
 ```text
-永久規則   → AGENTS.md(root,工具自動載入的入口)
+專案規則   → AGENTS.md(root,工具自動載入的入口,進版控)
+工作指示   → .agents/instructions.md(agents session 行為與跨專案共通規則)
 本次任務   → .agents/<工作資料夾>/tNNN_名稱.toml(任務檔,執行上自包含)
 目前狀態   → 任務檔的 status + git(任務檔即狀態,沒有另外的狀態檔)
 歷史證據   → rNNN_名稱.toml(一任務一檔日誌,append-only,預設不讀)
@@ -22,8 +23,9 @@
 
 1. **分層**
    規則、任務、狀態、歷史不混檔。
-   執行 session 的必讀集只有 AGENTS.md + 被指派的那一個任務檔;
-   會議 session 加讀 format.md,驗收會議加讀工作資料夾內的 `_report.md`。
+   執行 session 的必讀集只有專案 AGENTS.md + instructions.md + 被指派的
+   那一個任務檔;會議 session 加讀 format.md,驗收會議加讀工作資料夾內的
+   `_report.md`。
 
 2. **生成而非快照**
    早期設計有一份手寫的 CURRENT.md 導航快照,而「失真的權威快照比沒有
@@ -35,7 +37,7 @@
    任務檔記現在式:status 由調度器精準寫回,其餘位元組不動。
    過程細節 append 進 r 檔,永不回改既有條目。
    任務檔「執行上自包含」(目標、範圍、驗收直接寫),但共用知識引用而非
-   複製,避免版本分歧;跨計畫仍有效的決策沉澱進 AGENTS.md。
+   複製,避免版本分歧;專案特有且跨計畫仍有效的決策沉澱進 AGENTS.md。
 
 4. **測試證明正確**
    文字說明意圖,verify 證明正確。「執行 AI 自稱 DONE」只是宣稱,
@@ -46,15 +48,23 @@
 ## 位置慣例
 
 - `AGENTS.md` 必須留在 project root——agent 工具自動在 root 尋找指令檔,
-  位置本身就是功能。它變薄,只做「規則 + session 行為」。
-- 其餘 AI 工作檔全部收進 `.agents/`,root 保持乾淨。
-- 驗收腳本預設在 `.agents/verify.py`,內容是專案自己的檢查命令,CI 可複用。
+  位置本身就是功能。它只放專案規則與一行 agents 橋接,並且必須進版控,
+  讓每個 worktree 都取得對應分支的專案規則。
+- agents session 行為與跨專案共通規則放在 `.agents/instructions.md`,不混入
+  專案 AGENTS.md。其餘管理檔也全部收進 `.agents/`,root 保持乾淨。
+- 整個 `.agents/` 由 `.gitignore` 排除,只留在主工作樹;調度器用絕對路徑
+  把 instructions、t/r 與預設驗收腳本交給 worktree session,不製造第二份真本。
+- 驗收腳本預設在主樹 `.agents/verify.py`,內容是專案自己的檢查命令;
+  worktree 模式從主樹載入腳本,但以 worktree 為 cwd 驗收隔離後的成果。
+- worktree 模式 fail-closed 要求 `AGENTS.md` 已追蹤,並拒絕任何已追蹤的
+  `.agents/` 檔案。若確實要把 `.agents/` 進版控,就必須關閉 worktree 模式。
 - 工作資料夾內的 `agents.lock` 保證同一資料夾一個 run；worktree 模式的路徑為
   `<專案名>.worktrees/<資料夾>/`，可用位置參數指定工作資料夾。
 
 ## 品質標準(取代 token 數字 KPI)
 
-**冷啟動測試**:一個零記憶的新 AI 只讀 AGENTS.md + 任一 `TODO` 任務檔,
+**冷啟動測試**:一個零記憶的新 AI 只讀 AGENTS.md + instructions.md +
+任一 `TODO` 任務檔,
 能否不問問題就正確說出目標、可改動範圍、驗收條件、下一步?
 能 → 計畫定稿;不能 → 任務檔資訊不足。
 機器側等價物:`agents check` 通過——這也是規劃會議的散會條件。
@@ -66,8 +76,8 @@
 ## 維護紀律
 
 - AI 交接最容易在 session 尾聲、上下文快滿時鬆掉 → 收尾協定寫死在
-  AGENTS.md,且不靠自覺:調度器的結構比對讓「放寬自己的驗收」直接判失敗,
-  scope 豁免只有任務自己的 t 檔與 r 檔。
+  `.agents/instructions.md`,且不靠自覺:調度器的結構比對讓「放寬自己的驗收」
+  直接判失敗,scope 豁免只有任務自己的 t 檔與 r 檔。
 - 人的角色只剩審查與裁決:讀 `_report.md`(零 token),只對要裁決的任務
   開 session 下指令;人不手改檔案,改檔一律由 AI 依指示執行。
 - 執行 AI 燒過 tokens 的產出絕不丟棄:額度中斷收 wip 檢查點續作;
@@ -86,8 +96,9 @@
 
 ## 一句話定案
 
-> 用 AGENTS 管規則、任務檔管本次與現在、r 檔管歷史、verify 管真假;
-> 執行 session 預設只讀 AGENTS + 自己的任務檔,結束時客觀驗收、
+> 用 AGENTS 管專案規則、instructions 管 agents 行為、任務檔管本次與現在、
+> r 檔管歷史、verify 管真假;執行 session 預設只讀 AGENTS + instructions +
+> 自己的任務檔,結束時客觀驗收、
 > 精準寫回、細節歸檔。
 >
 > 文件負責讓 AI 快速接手,Git 與調度器的客觀閘門負責保證事實,

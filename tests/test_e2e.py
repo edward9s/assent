@@ -21,6 +21,7 @@ from agents.plan import (append_entry, journal_path_for, parse_task_file,
                          set_status)
 
 _OK = 'python -c "raise SystemExit(0)"'
+_WORKTREE_GITIGNORE = ".agents/\n"
 
 
 def task_text(*, title="任務", deps=(), status="TODO",
@@ -67,6 +68,17 @@ class E2ETestCase(unittest.TestCase):
         self.plan_dir.mkdir(parents=True)
         (self.root / ".agents" / "agents.toml").write_text(
             '[plan]\ntasks = "plan01"\n[run]\nretry_per_task = 1\n',
+            encoding="utf-8")
+        (self.root / "AGENTS.md").write_text("專案規則\n", encoding="utf-8")
+        (self.root / ".agents" / "instructions.md").write_text(
+            "agents 工作指示\n", encoding="utf-8")
+        (self.root / ".agents" / "format.md").write_text(
+            "計畫格式\n", encoding="utf-8")
+        (self.root / ".agents" / "verify.py").write_text(
+            "from pathlib import Path\n"
+            "root = Path.cwd()\n"
+            "ok = (root / 'AGENTS.md').is_file() and not (root / '.agents').exists()\n"
+            "raise SystemExit(0 if ok else 1)\n",
             encoding="utf-8")
 
     def _git(self, *args) -> str:
@@ -199,7 +211,8 @@ class TestScenarios(E2ETestCase):
 
 class TestWorktreeScenarios(E2ETestCase):
     def enable_worktree(self):
-        (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text(
+            _WORKTREE_GITIGNORE, encoding="utf-8")
         (self.root / ".agents" / "agents.toml").write_text(
             '[plan]\ntasks = "plan01"\n'
             '[git]\nworktree = true\n'
@@ -240,6 +253,8 @@ class TestWorktreeScenarios(E2ETestCase):
         worktree = gitops.worktree_path(self.root, "plan01")
         self.assertEqual(adapter.cwds, [worktree.resolve()])
         self.assertIn(str(task.resolve()), adapter.calls[0])
+        self.assertIn(str((self.root / ".agents" / "instructions.md").resolve()),
+                      adapter.calls[0])
         self.assertEqual(parse_task_file(task).status, "DONE")
         self.assertEqual(self._git("status", "--porcelain"), "")
         self.assertEqual(self._git("branch", "--show-current").strip(), main_branch)
@@ -259,6 +274,58 @@ class TestWorktreeScenarios(E2ETestCase):
         self.assertIn(f"分支:{worktree_branch}", report)
         self.assertIn("t001  DONE", report)
         self.assertIn("[", report)
+
+    def test_default_verify_script_runs_inside_worktree(self):
+        self.enable_worktree()
+        task = self.add_task(1, verify="python .agents/verify.py")
+        self.start()
+        adapter = ScriptedAdapter([])
+        adapter.steps.append(self.isolated_done_step(
+            adapter, task, {"src/ok.txt": "ok"}))
+
+        self.assertEqual(self.run_engine(adapter, once=True), 0)
+        self.assertEqual(parse_task_file(task).status, "DONE")
+        self.assertIn(str((self.root / ".agents" / "verify.py").resolve()),
+                      adapter.calls[0])
+
+    def test_tracked_task_folder_is_rejected_before_worktree_creation(self):
+        self.enable_worktree()
+        task = self.add_task(1)
+        self._git("add", "-f", str(task.relative_to(self.root)))
+        self.start()
+        worktree = gitops.worktree_path(self.root, "plan01")
+        adapter = ScriptedAdapter([])
+
+        self.assertEqual(self.run_engine(adapter), 1)
+        self.assertEqual(adapter.calls, [])
+        self.assertFalse(worktree.exists())
+
+    def test_missing_tracked_agents_md_is_rejected_before_worktree_creation(self):
+        self.enable_worktree()
+        self.add_task(1)
+        (self.root / "AGENTS.md").unlink()
+        self.start()
+        worktree = gitops.worktree_path(self.root, "plan01")
+        adapter = ScriptedAdapter([])
+
+        self.assertEqual(self.run_engine(adapter), 1)
+        self.assertEqual(adapter.calls, [])
+        self.assertFalse(worktree.exists())
+
+    def test_staged_only_agents_md_is_rejected_before_worktree_creation(self):
+        self.enable_worktree()
+        self.add_task(1)
+        (self.root / "AGENTS.md").unlink()
+        self.start()
+        (self.root / "AGENTS.md").write_text("尚未提交的專案規則\n",
+                                               encoding="utf-8")
+        self._git("add", "AGENTS.md")
+        worktree = gitops.worktree_path(self.root, "plan01")
+        adapter = ScriptedAdapter([])
+
+        self.assertEqual(self.run_engine(adapter), 1)
+        self.assertEqual(adapter.calls, [])
+        self.assertFalse(worktree.exists())
 
     def test_two_folders_use_independent_worktrees_and_branches(self):
         self.enable_worktree()
