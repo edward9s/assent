@@ -203,6 +203,70 @@ class TestRunSuccess(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertEqual(len(adapter.calls), 1)
 
+    def test_only_declared_base_must_be_ancestor_of_downstream(self):
+        path = self.write_task(1)
+        for folder in ("A", "B"):
+            upstream = self.root / ".assent" / folder
+            upstream.mkdir()
+            (upstream / "t001_task.e.toml").write_text(
+                task_text(status="DONE"), encoding="utf-8")
+        (self.plan_dir / "_folder.toml").write_text(
+            'after = ["A", "B"]\nbase = "A"\n', encoding="utf-8")
+        cfg = self.build()
+        self.commit_all()
+        for folder in ("A", "B"):
+            source = gitops.worktree_path(self.root, folder)
+            self._git("worktree", "add", "-b", f"{folder}/run",
+                      str(source), "HEAD")
+            (source / f"{folder}.txt").write_text(
+                f"{folder}\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "-A"], cwd=source,
+                capture_output=True, encoding="utf-8", check=True)
+            subprocess.run(
+                ["git", "commit", "-m", f"finish {folder}"], cwd=source,
+                capture_output=True, encoding="utf-8", check=True)
+        adapter = ScriptedAdapter([self.ai_done(path, {"src/result.py": "ok"})])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = engine.run(cfg, once=True, adapter=adapter)
+
+        self.assertEqual(result, 0, out.getvalue())
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertNotIn("stale stack", out.getvalue())
+
+    def test_ordering_only_prerequisites_do_not_supply_a_stack_base(self):
+        path = self.write_task(1)
+        for folder in ("A", "B"):
+            upstream = self.root / ".assent" / folder
+            upstream.mkdir()
+            (upstream / "t001_task.e.toml").write_text(
+                task_text(status="DONE"), encoding="utf-8")
+        (self.plan_dir / "_folder.toml").write_text(
+            'after = ["A", "B"]\n', encoding="utf-8")
+        cfg = self.build()
+        self.commit_all()
+        for folder in ("A", "B"):
+            source = gitops.worktree_path(self.root, folder)
+            self._git("worktree", "add", "-b", f"{folder}/run",
+                      str(source), "HEAD")
+            (source / f"{folder}.txt").write_text(
+                f"{folder}\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "-A"], cwd=source,
+                capture_output=True, encoding="utf-8", check=True)
+            subprocess.run(
+                ["git", "commit", "-m", f"finish {folder}"], cwd=source,
+                capture_output=True, encoding="utf-8", check=True)
+        adapter = ScriptedAdapter([self.ai_done(path, {"src/result.py": "ok"})])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = engine.run(cfg, once=True, adapter=adapter)
+
+        self.assertEqual(result, 0, out.getvalue())
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertIn("Stacked upstream: none", out.getvalue())
+
     def test_archived_folder_prerequisite_creates_worktree_without_a_source(self):
         # Incident regression: the downstream's after named an upstream that had
         # already been accepted, cleaned and archived, so no base/* branch was
