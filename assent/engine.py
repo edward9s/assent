@@ -949,6 +949,7 @@ def render_report(cfg: Config, plan: Plan,
         f"Progress: DONE {counts.get('DONE', 0)} / BLOCKED {counts.get('BLOCKED', 0)} / "
         f"WIP {counts.get('WIP', 0)} / TODO {counts.get('TODO', 0)} / "
         f"SKIP {counts.get('SKIP', 0)} ({len(plan.tasks)} total)",
+        *_stack_report_lines(cfg),
         "",
     ]
     for t in plan.tasks:
@@ -991,6 +992,20 @@ def _try_write_report(cfg: Config) -> None:
         pass
 
 
+def _stack_report_lines(cfg: Config) -> list[str]:
+    """Describe the currently derived stack without authorizing any action."""
+    try:
+        state = _resolve_stack_state(cfg)
+    except AssentError as e:
+        return [f"Stack base: unavailable ({e})"]
+    upstream = state.base.speculative_upstream
+    if upstream is None:
+        return ["Stack base: current target main",
+                "Speculative upstream: none (all direct upstreams accepted)"]
+    return [f"Stack base: {state.base.resolved_base}",
+            f"Speculative upstream: {upstream.folder} @ {upstream.tip} (unaccepted)"]
+
+
 def report(cfg: Config) -> int:
     """Subcommand: generate _report.md and print it to the terminal (zero tokens)."""
     try:
@@ -1026,6 +1041,8 @@ def status(cfg: Config) -> int:
     print(f"Current branch: {branch or 'N/A'}")
     last = _git_read(git_root, "log", "-1", "--grep=^auto(", "--pretty=%h %s")
     print(f"Last checkpoint: {last or '(no auto() commit yet)'}")
+    for line in _stack_report_lines(cfg):
+        print(line)
 
     selected = plan.next_task()
     if selected is not None:

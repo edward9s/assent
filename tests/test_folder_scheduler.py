@@ -232,6 +232,38 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(started, ["first", "second", "third"])
 
+    def test_real_git_launch_prints_resolved_stack_decision_before_child(self):
+        task = self.make_folder("downstream")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch(
+                "assent.folder_scheduler._has_usable_git", return_value=True), patch(
+                "assent.folder_scheduler._stack_launch_decision",
+                return_value=("Stack decision: downstream: base abc from unaccepted "
+                              "upstream upstream @ abc; worktree create.", None)), patch(
+                "assent.folder_scheduler._start_folder",
+                return_value=FinishedProcess(task)):
+            code = run_all(str(self.config), self.assent_dir)
+
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("unaccepted upstream upstream", text)
+        self.assertLess(text.index("Stack decision:"),
+                        text.index("Starting work folder: downstream"))
+
+    def test_stack_refusal_does_not_start_a_child(self):
+        self.make_folder("downstream")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch(
+                "assent.folder_scheduler._has_usable_git", return_value=True), patch(
+                "assent.folder_scheduler._stack_launch_decision",
+                return_value=(None, "multiple unaccepted upstream folders")), patch(
+                "assent.folder_scheduler._start_folder") as start:
+            code = run_all(str(self.config), self.assent_dir)
+
+        self.assertEqual(code, 1)
+        self.assertIn("Work folder refused: downstream", out.getvalue())
+        start.assert_not_called()
+
     def test_jobs_two_starts_two_independent_folders_before_polling(self):
         alpha = self.make_folder("alpha")
         beta = self.make_folder("beta")
