@@ -1,4 +1,4 @@
-"""Codex CLI adapter:組合 ``codex exec --json`` 命令並解析 JSONL 事件流。"""
+"""Codex CLI adapter: builds the ``codex exec --json`` command and parses the JSONL event stream."""
 from __future__ import annotations
 
 import json
@@ -23,7 +23,7 @@ _QUOTA_TEXT_RE = re.compile(
 
 def build_command(cfg: "Config", prompt: str, requested_model: str,
                   requested_effort: str | None) -> list[str]:
-    """組合非互動、可由程式解析的 Codex 命令。"""
+    """Build a non-interactive, programmatically parseable Codex command."""
     cmd = [cfg.codex_command, "exec", "--json", "--color", "never",
            "--model", requested_model]
     if requested_effort:
@@ -49,28 +49,28 @@ def _item_brief(item: dict) -> str | None:
     if kind == "reasoning":
         text = item.get("text") or item.get("summary")
         brief = _one_line(text)
-        return f"  思考| {brief}" if brief else None
+        return f"  Think| {brief}" if brief else None
     if kind == "command_execution":
         brief = _one_line(item.get("command"))
         status = _one_line(item.get("status"), 30)
-        return "  工具| command" + (f" {brief}" if brief else "") + (
+        return "  Tool| command" + (f" {brief}" if brief else "") + (
             f" [{status}]" if status else "")
     if kind == "file_change":
         paths: list[str] = []
         for change in item.get("changes") or []:
             if isinstance(change, dict) and isinstance(change.get("path"), str):
                 paths.append(change["path"])
-        return "  工具| file_change" + (f" {', '.join(paths[:4])}" if paths else "")
+        return "  Tool| file_change" + (f" {', '.join(paths[:4])}" if paths else "")
     if kind == "mcp_tool_call":
         server = item.get("server") or item.get("server_name") or "?"
         tool = item.get("tool") or item.get("tool_name") or "?"
-        return f"  工具| MCP {server}/{tool}"
+        return f"  Tool| MCP {server}/{tool}"
     if kind == "web_search":
         brief = _one_line(item.get("query"))
-        return "  工具| web_search" + (f" {brief}" if brief else "")
+        return "  Tool| web_search" + (f" {brief}" if brief else "")
     if kind == "plan_update":
         brief = _one_line(item.get("text") or item.get("plan"))
-        return f"  計畫| {brief}" if brief else "  計畫| 已更新"
+        return f"  Plan| {brief}" if brief else "  Plan| updated"
     return None
 
 
@@ -88,22 +88,22 @@ def format_stream_event(raw_line: str) -> str | None:
 
     kind = event.get("type")
     if kind == "thread.started":
-        return f"  --| session 開始(thread={event.get('thread_id', '?')})"
+        return f"  --| session started (thread={event.get('thread_id', '?')})"
     if kind in ("item.started", "item.completed", "item.updated"):
         item = event.get("item")
         return _item_brief(item) if isinstance(item, dict) else None
     if kind == "turn.completed":
         usage = event.get("usage") or {}
-        parts = ["session 結束"]
+        parts = ["session ended"]
         if isinstance(usage.get("output_tokens"), (int, float)):
-            parts.append(f"輸出 {usage['output_tokens']} tokens")
+            parts.append(f"output {usage['output_tokens']} tokens")
         if isinstance(usage.get("reasoning_output_tokens"), (int, float)):
-            parts.append(f"推理 {usage['reasoning_output_tokens']} tokens")
+            parts.append(f"reasoning {usage['reasoning_output_tokens']} tokens")
         return "  --| " + ",".join(parts)
     if kind == "turn.failed":
         error = event.get("error") or {}
         message = error.get("message") if isinstance(error, dict) else error
-        return f"  !| session 失敗:{_one_line(message) or '未知錯誤'}"
+        return f"  !| session failed: {_one_line(message) or 'unknown error'}"
     if kind == "error":
         message = event.get("message") or event.get("error")
         if isinstance(message, dict):
@@ -153,12 +153,12 @@ class CodexAdapter(Adapter):
         self.cfg = cfg
 
     def resolve_model(self, model: str) -> str:
-        """把抽象檔位解析成 Codex CLI 實際接收的模型參數。"""
+        """Resolve the abstract tier into the model argument accepted by the Codex CLI."""
         alias = self.cfg.codex_models.get(model)
         if alias is None:
             raise AgentsError(
-                f"模型檔位 {model!r} 不在 [adapter.codex.models] 對照表中;"
-                f"請檢查計畫檔的建議模型或設定檔對照表")
+                f"model tier {model!r} is not in [adapter.codex.models]; "
+                f"check the plan file's suggested model or the config mapping")
         return alias
 
     def run_task(self, prompt: str, requested_model: str,

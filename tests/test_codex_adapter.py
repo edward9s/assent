@@ -1,4 +1,4 @@
-"""Codex adapter 測試;不使用網路或真實 Codex session。"""
+"""Codex adapter tests; never use the network or a real Codex session."""
 import json
 import unittest
 from pathlib import Path
@@ -23,11 +23,11 @@ def make_cfg(**overrides) -> Config:
 
 class TestBuildCommand(unittest.TestCase):
     def test_json_model_effort_sandbox_and_prompt(self):
-        cmd = build_command(make_cfg(), "提示詞", "gpt-5.6-sol", "max")
+        cmd = build_command(make_cfg(), "the prompt", "gpt-5.6-sol", "max")
         self.assertEqual(cmd[:3], ["codex", "exec", "--json"])
         self.assertEqual(cmd[cmd.index("--model") + 1], "gpt-5.6-sol")
         self.assertIn('model_reasoning_effort="max"', cmd)
-        self.assertEqual(cmd[-3:], ["--sandbox", "workspace-write", "提示詞"])
+        self.assertEqual(cmd[-3:], ["--sandbox", "workspace-write", "the prompt"])
 
     def test_effort_can_be_omitted_and_extra_args_are_verbatim(self):
         cfg = make_cfg(codex_command="codex.cmd",
@@ -48,6 +48,8 @@ class TestFormatStreamEvent(unittest.TestCase):
         self.assertFalse(parse_output_for_quota("\n".join(lines)))
 
     def test_agent_message_is_displayed(self):
+        # The agent_message text is opaque upstream fixture data (Chinese kept on purpose to
+        # prove multiline Unicode passthrough); it must render verbatim, never translated.
         event = {"type": "item.completed", "item": {
             "id": "i1", "type": "agent_message", "text": "第一行\n第二行"}}
         rendered = format_stream_event(json.dumps(event, ensure_ascii=False))
@@ -63,7 +65,7 @@ class TestFormatStreamEvent(unittest.TestCase):
             "output_tokens": 12, "reasoning_output_tokens": 3}}
         rendered = format_stream_event(json.dumps(done))
         self.assertIn("12", rendered)
-        self.assertIn("結束", rendered)
+        self.assertIn("ended", rendered)
 
     def test_failure_error_and_non_json_are_displayed(self):
         failed = {"type": "turn.failed", "error": {"message": "boom"}}

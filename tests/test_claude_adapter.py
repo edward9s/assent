@@ -1,7 +1,8 @@
-"""claude adapter 測試:組命令、watchdog、額度偵測、檔位翻譯。
+"""claude adapter tests: command construction, the watchdog, quota detection, tier resolution.
 
-全部用假子程序(sys.executable -c ...)或直接餵字串給純函式——不打真實 claude CLI、
-不依賴網路(鐵則 4)。真 CLI 探勘只一次性錄 fixture,見 stream_json_ok.txt。
+Everything uses a fake subprocess (sys.executable -c ...) or feeds strings directly to pure
+functions — never a real claude CLI, never the network (ground rule 4). The real CLI was
+probed once to record a fixture; see stream_json_ok.txt.
 """
 import json
 import sys
@@ -21,7 +22,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def make_cfg(**overrides) -> Config:
-    """建立測試用 Config;預設檔位對照表沿用內建(prime→fable 等)。"""
+    """Build a test Config; the default tier mapping uses the built-ins (prime -> fable, etc.)."""
     base = dict(root=Path("."), agents_dir=Path("./.agents"),
                 tasks_dir=Path("./.agents/plan01"), tasks_name="plan01")
     base.update(overrides)
@@ -30,17 +31,17 @@ def make_cfg(**overrides) -> Config:
 
 class TestBuildCommand(unittest.TestCase):
     def test_includes_verbose_and_stream_json(self):
-        # 探勘實證:stream-json 必須配 --verbose,adapter 一律注入
-        cmd = build_command(make_cfg(), "做事", "fable", "high")
+        # Found by probing: stream-json must be paired with --verbose; the adapter always injects it
+        cmd = build_command(make_cfg(), "do the task", "fable", "high")
         self.assertIn("--verbose", cmd)
         i = cmd.index("--output-format")
         self.assertEqual(cmd[i + 1], "stream-json")
 
     def test_model_effort_and_prompt_placement(self):
         cmd = build_command(make_cfg(claude_command="claude.cmd"),
-                            "提示詞", "opus", "max")
+                            "the prompt", "opus", "max")
         self.assertEqual(cmd[0], "claude.cmd")
-        self.assertEqual(cmd[cmd.index("-p") + 1], "提示詞")
+        self.assertEqual(cmd[cmd.index("-p") + 1], "the prompt")
         self.assertEqual(cmd[cmd.index("--model") + 1], "opus")
         self.assertEqual(cmd[cmd.index("--effort") + 1], "max")
 
@@ -58,8 +59,8 @@ class TestBuildCommand(unittest.TestCase):
 
 class TestParseQuota(unittest.TestCase):
     def test_real_ok_fixture_is_not_quota(self):
-        # 成功 fixture 內含 "rate_limit_event"/"rateLimitType" 字樣但 status=allowed,
-        # 絕不可誤判為額度耗盡
+        # The success fixture contains the literal strings "rate_limit_event"/"rateLimitType"
+        # but status=allowed; this must never be mistaken for quota exhaustion
         output = (FIXTURES / "stream_json_ok.txt").read_text(encoding="utf-8")
         exhausted, reset_at = parse_output_for_quota(output)
         self.assertFalse(exhausted)
@@ -81,7 +82,8 @@ class TestParseQuota(unittest.TestCase):
         self.assertIsNone(reset_at)
 
     def test_text_fallback_from_result_message(self):
-        # 無結構化 blocked status,只有人類可讀文字命中 → 仍判額度耗盡,reset 無法解析
+        # No structured blocked status, only a human-readable text hit -> still judged
+        # exhausted; reset can't be parsed
         line = json.dumps({"type": "result", "subtype": "error_max_turns",
                            "result": "Usage limit reached. Try again later."})
         exhausted, reset_at = parse_output_for_quota(line + "\n")
@@ -89,8 +91,9 @@ class TestParseQuota(unittest.TestCase):
         self.assertIsNone(reset_at)
 
     def test_text_fallback_ignores_raw_json_key_names(self):
-        # 光是出現 result 型別、內文正常,不該因 JSON 裡的鍵名(如含 limit 的欄位)誤觸
-        line = json.dumps({"type": "result", "result": "完成任務,一切正常"})
+        # A plain result type with ordinary body text must not false-positive just because
+        # a JSON key name (e.g. one containing "limit") appears somewhere
+        line = json.dumps({"type": "result", "result": "Task complete, everything is fine"})
         exhausted, _ = parse_output_for_quota(line + "\n")
         self.assertFalse(exhausted)
 
@@ -99,7 +102,8 @@ class TestParseQuota(unittest.TestCase):
         self.assertTrue(exhausted)
 
     def test_real_session_limit_message_detected(self):
-        # 真實撞限實測訊息(2026-07-15,Pro 訂閱):舊 regex 漏接的樣式
+        # Message observed from a real quota hit (2026-07-15, Pro subscription): a pattern
+        # the older regex used to miss
         line = json.dumps({"type": "assistant", "message": {"content": [
             {"type": "text",
              "text": "You've hit your session limit · resets 4am (Asia/Taipei)"}]}})
@@ -145,12 +149,12 @@ class TestRunSubprocess(unittest.TestCase):
             _py("import time; time.sleep(30)"), Path("."), stall_seconds=0.3)
         elapsed = time.monotonic() - start
         self.assertTrue(stalled)
-        self.assertNotEqual(rc, 0)          # 被殺 → 非零退出
-        self.assertLess(elapsed, 10)        # 沒有等滿 30 秒
+        self.assertNotEqual(rc, 0)          # Killed -> non-zero exit
+        self.assertLess(elapsed, 10)        # Did not wait out the full 30 seconds
 
     def test_watchdog_disabled_does_not_hang_on_quick_process(self):
         rc, out, stalled = run_subprocess(
-            _py("print('quick')"), Path("."), stall_seconds=0)  # 0 = 停用 watchdog
+            _py("print('quick')"), Path("."), stall_seconds=0)  # 0 = watchdog disabled
         self.assertEqual(rc, 0)
         self.assertFalse(stalled)
         self.assertIn("quick", out)
@@ -165,7 +169,7 @@ class TestRunSubprocess(unittest.TestCase):
 
     def test_echo_exception_does_not_break_collection(self):
         def bad_echo(_line):
-            raise RuntimeError("顯示層爆炸")
+            raise RuntimeError("display layer exploded")
         rc, out, stalled = run_subprocess(
             _py("print('still here')"), Path("."), stall_seconds=10, echo=bad_echo)
         self.assertEqual(rc, 0)
@@ -175,20 +179,22 @@ class TestRunSubprocess(unittest.TestCase):
 
 class TestFormatStreamEvent(unittest.TestCase):
     def test_assistant_text_and_tool_use(self):
+        # The assistant text is opaque upstream fixture data (Chinese kept on purpose to
+        # prove Unicode passthrough); it must render verbatim, never translated.
         line = json.dumps({"type": "assistant", "message": {"content": [
             {"type": "text", "text": "我先讀計畫檔"},
             {"type": "tool_use", "name": "Read",
              "input": {"file_path": "C:\\plans\\TEST_PLAN.md"}}]}})
         rendered = format_stream_event(line)
         self.assertIn("AI| 我先讀計畫檔", rendered)
-        self.assertIn("工具| Read C:\\plans\\TEST_PLAN.md", rendered)
+        self.assertIn("Tool| Read C:\\plans\\TEST_PLAN.md", rendered)
 
     def test_result_shows_output_tokens(self):
         line = json.dumps({"type": "result", "subtype": "success",
                            "duration_ms": 2551, "usage": {"output_tokens": 142115}})
         rendered = format_stream_event(line)
         self.assertIn("142115", rendered)
-        self.assertIn("結束", rendered)
+        self.assertIn("ended", rendered)
 
     def test_allowed_rate_limit_event_is_silent(self):
         line = json.dumps({"type": "rate_limit_event",
@@ -227,11 +233,11 @@ class TestRunTask(unittest.TestCase):
         adapter = ClaudeAdapter(make_cfg())
         requested_model = adapter.resolve_model("prime")
         result = adapter.run_task(
-            "提示", requested_model, "high", Path("/proj"))
+            "prompt", requested_model, "high", Path("/proj"))
         self.assertIsInstance(result, TaskResult)
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(result.quota_exhausted)
-        # prime → fable(內建對照);且命令帶上 alias 與 effort
+        # prime -> fable (built-in mapping); the command carries both the alias and the effort
         self.assertEqual(
             captured["cmd"][captured["cmd"].index("--model") + 1],
             requested_model)
@@ -255,7 +261,8 @@ class TestRunTask(unittest.TestCase):
         self.assertEqual(result.reset_at, datetime.fromtimestamp(ts, tz=timezone.utc))
 
     def test_stall_is_failure_not_quota(self):
-        # 停滯回傳的輸出即使含額度字樣,也一律當任務失敗、絕不誤判額度(2.5)
+        # Even if a stall's output contains quota-looking text, it's always a task failure,
+        # never mistaken for quota exhaustion (2.5)
         self.patch_run(lambda c, w, s, echo=None: (1, "rate limit exceeded\n", True))
         adapter = ClaudeAdapter(make_cfg())
         result = adapter.run_task(

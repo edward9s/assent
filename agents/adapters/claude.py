@@ -1,24 +1,30 @@
-"""claude CLI adapter:組命令、stream-json、watchdog、額度偵測。
+"""claude CLI adapter: builds the command, handles stream-json, the watchdog, and quota detection.
 
-技術事實見 workflow 專案 WORKFLOW_GUIDE.md 2.4;額度偵測策略見 2.5。
+Technical background: see the workflow project's WORKFLOW_GUIDE.md 2.4; quota detection
+strategy is covered in 2.5.
 
-首次真 CLI 探勘所得(fixture: tests/fixtures/stream_json_ok.txt,見工作日誌):
-- `claude -p ... --output-format stream-json` **必須同時給 `--verbose`**,否則 CLI
-  直接報 "requires --verbose" 並以非零退出。故本 adapter 一律注入 `--verbose`。
-  (WORKFLOW_GUIDE 2.4 / README 命令形未含此旗標,已列為規格疑義交使用者。)
-- stream-json 為每行一個 JSON 事件,實測出現的 type:`system`(init)、`assistant`、
-  `rate_limit_event`、`result`(最後一筆,含 `subtype`/`is_error`/`result` 文字)。
-- 額度資訊為**結構化事件** `rate_limit_event`,其 `rate_limit_info` 含
-  `status`(成功時為 "allowed")、`resetsAt`(五小時窗重置的 Unix 秒數)、
-  `rateLimitType`("five_hour")。這比 regex 掃文字可靠,故列為主要偵測來源;
-  額度耗盡時的實際 status 值本次未取得樣本(成功案例是 "allowed"),
-  `_BLOCKED_STATUSES` 與文字 regex 皆為 best-effort,待首次真實撞限時校正(見下方,鐵則允許)。
+Findings from the first live CLI probe (fixture: tests/fixtures/stream_json_ok.txt, recorded
+in the work log):
+- `claude -p ... --output-format stream-json` **must be paired with `--verbose`**, otherwise the
+  CLI exits non-zero with "requires --verbose". This adapter therefore always injects `--verbose`.
+  (WORKFLOW_GUIDE 2.4 / the README's command form omits this flag; flagged as a spec question for
+  the user.)
+- stream-json emits one JSON event per line; the `type` values observed in practice are `system`
+  (init), `assistant`, `rate_limit_event`, and `result` (the final line, carrying `subtype`/
+  `is_error`/the `result` text).
+- Quota information arrives as a **structured event**, `rate_limit_event`; its `rate_limit_info`
+  carries `status` ("allowed" on success), `resetsAt` (Unix seconds for when the five-hour window
+  resets), and `rateLimitType` ("five_hour"). This is more reliable than regex-scanning text, so
+  it is the primary detection source; no sample of the actual status value on quota exhaustion
+  was captured this round (the observed success case was "allowed"), so `_BLOCKED_STATUSES` and
+  the text regex are both best-effort pending calibration against a real exhaustion event (see
+  below; the ground rule permits this).
 
-實測校正(2026-07-15,Pro 訂閱、fable/high 真實撞限):
-- 額度耗盡時 CLI 的人類可讀訊息實測為
-  「You've hit your session limit · resets 4am (Asia/Taipei)」——不含
-  "usage limit"/"rate limit"/"limit reached" 任何一種舊 regex 樣式,
-  文字後備因此漏接。已把 "session limit" 與 "hit your ... limit" 補進 _QUOTA_TEXT_RE。
+Calibrated from a real event (2026-07-15, Pro subscription, fable/high actually hit the limit):
+- The CLI's human-readable message on quota exhaustion was observed to be
+  "You've hit your session limit · resets 4am (Asia/Taipei)" — it matches none of the older regex
+  patterns ("usage limit"/"rate limit"/"limit reached"), so the text fallback missed it. "session
+  limit" and "hit your ... limit" have since been added to `_QUOTA_TEXT_RE`.
 """
 from __future__ import annotations
 
@@ -37,12 +43,14 @@ from agents.adapters import Adapter, TaskResult
 if TYPE_CHECKING:
     from agents.config import Config
 
-# rate_limit_event.rate_limit_info.status 中代表「已被限流/耗盡」的值(best-effort;
-# 成功時實測為 "allowed",耗盡時的結構化 status 值仍未取得樣本,靠下方文字後備兜底,
-# 見檔頭 2026-07-15 校正)。
+# Values of rate_limit_event.rate_limit_info.status that mean "throttled/exhausted"
+# (best-effort; the observed success value is "allowed", no sample of the structured status on
+# exhaustion has been captured yet, so the text fallback below backs it up — see the
+# 2026-07-15 calibration note at the top of this file).
 _BLOCKED_STATUSES = {"rejected", "blocked", "exhausted", "throttled", "limited", "reached"}
-# 文字後備:僅比對「人類可讀字串」(result 文字、assistant 文字、非 JSON 的 stderr 行),
-# **不**掃原始 JSON,否則成功輸出裡的 "rate_limit_event"/"rateLimitType" 字樣會誤觸。
+# Text fallback: only matched against human-readable strings (result text, assistant text,
+# non-JSON stderr lines) — **never** scanned against raw JSON, otherwise successful output
+# containing the literal strings "rate_limit_event"/"rateLimitType" would false-positive.
 _QUOTA_TEXT_RE = re.compile(
     r"usage\s+limit|rate\s+limit|session\s+limit|limit\s+reached"
     r"|hit\s+your\s+[\w'’ ]{0,40}limit|quota\s+(?:exceeded|exhausted)"
@@ -54,18 +62,20 @@ _SENTINEL = object()
 
 def build_command(cfg: "Config", prompt: str, requested_model: str,
                   requested_effort: str | None) -> list[str]:
-    """組 claude CLI 命令;模型與 effort 都已由 engine 解析成實際值。"""
+    """Build the claude CLI command; both model and effort have already been resolved to
+    concrete values by the engine."""
     cmd = [cfg.claude_command, "-p", prompt, "--model", requested_model]
     if requested_effort:
         cmd += ["--effort", requested_effort]
-    # 解析所需的固定旗標(--verbose 為探勘實證的硬性需求);extra_args 原樣附加於末。
+    # Fixed flags required for parsing (--verbose is a hard requirement found by probing);
+    # extra_args is appended verbatim at the end.
     cmd += ["--output-format", "stream-json", "--verbose"]
     cmd += list(cfg.claude_extra_args)
     return cmd
 
 
 def _tool_brief(inp) -> str:
-    """從 tool_use 的 input 挑一個最有代表性的欄位,壓成單行短字串。"""
+    """Pick the most representative field from a tool_use's input and compact it to one line."""
     if not isinstance(inp, dict):
         return ""
     for key in ("file_path", "path", "command", "pattern", "description", "skill"):
@@ -77,11 +87,13 @@ def _tool_brief(inp) -> str:
 
 
 def format_stream_event(raw_line: str) -> str | None:
-    """把一行 stream-json 事件轉成給終端看的即時進度文字;None = 這行不顯示。
+    """Turn one stream-json event line into live progress text for the terminal;
+    None = don't show this line.
 
-    目的:讓使用者在 wflow run 期間同步看到執行 AI 在做什麼(說了什麼、用了哪些
-    工具、燒了多少 tokens),而不是黑箱等到 session 結束。只做顯示,不影響
-    parse_output_for_quota 的事後判定。
+    Purpose: let the user watch what the executing AI is doing during `agents run` (what it
+    said, which tools it used, how many tokens it burned) instead of waiting blind until the
+    session ends. Display only — it doesn't affect parse_output_for_quota's after-the-fact
+    verdict.
     """
     s = raw_line.strip()
     if not s:
@@ -93,10 +105,10 @@ def format_stream_event(raw_line: str) -> str | None:
         except (json.JSONDecodeError, ValueError):
             evt = None
     if not isinstance(evt, dict):
-        return f"  !| {s}"          # 非 JSON 行(多半是 stderr 錯誤文字),原樣顯示
+        return f"  !| {s}"          # Non-JSON line (usually stderr error text); shown verbatim
     etype = evt.get("type")
     if etype == "system" and evt.get("subtype") == "init":
-        return f"  --| session 開始(model={evt.get('model', '?')})"
+        return f"  --| session started (model={evt.get('model', '?')})"
     if etype == "assistant":
         out: list[str] = []
         msg = evt.get("message") or {}
@@ -108,34 +120,36 @@ def format_stream_event(raw_line: str) -> str | None:
                 out += [f"  AI| {ln}" for ln in text.splitlines() if ln.strip()]
             elif block.get("type") == "tool_use":
                 brief = _tool_brief(block.get("input"))
-                out.append(f"  工具| {block.get('name', '?')}"
+                out.append(f"  Tool| {block.get('name', '?')}"
                            + (f" {brief}" if brief else ""))
         return "\n".join(out) if out else None
     if etype == "rate_limit_event":
         info = evt.get("rate_limit_info") or {}
         status = str(info.get("status", "")).strip().lower()
         if status and status != "allowed":
-            return f"  額度| rate_limit status={status}"
+            return f"  Quota| rate_limit status={status}"
         return None
     if etype == "result":
-        parts = [f"session 結束({evt.get('subtype', '?')})"]
+        parts = [f"session ended ({evt.get('subtype', '?')})"]
         usage = evt.get("usage") or {}
         if isinstance(usage.get("output_tokens"), (int, float)):
-            parts.append(f"輸出 {usage['output_tokens']} tokens")
+            parts.append(f"output {usage['output_tokens']} tokens")
         if isinstance(evt.get("duration_ms"), (int, float)):
-            parts.append(f"{evt['duration_ms'] / 1000:.0f} 秒")
+            parts.append(f"{evt['duration_ms'] / 1000:.0f} sec")
         return "  --| " + ",".join(parts)
     return None
 
 
 def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
                    echo=None) -> tuple[int, str, bool]:
-    """跑子程序,逐行收集輸出;reader thread + queue 做 watchdog(2.4 標準解法)。
+    """Run the subprocess, collecting output line by line; a reader thread + queue implements
+    the watchdog (the standard approach from 2.4).
 
-    stall_seconds <= 0 -> 停用 watchdog(阻塞讀到 EOF)。
-    echo:每收到一行就呼叫的回呼(即時顯示用);它拋錯不影響收集與判定。
-    回傳 (returncode, 輸出全文, stalled)。stalled=True 表示逾時被殺。
-    stderr 併入 stdout,確保額度/錯誤訊息不漏接。
+    stall_seconds <= 0 -> watchdog disabled (blocking read to EOF).
+    echo: callback invoked for each line received (for live display); its own failures never
+    affect collection or the verdict.
+    Returns (returncode, full output text, stalled). stalled=True means it was killed on timeout.
+    stderr is merged into stdout so quota/error messages are never missed.
     """
     proc = subprocess.Popen(
         command, cwd=str(cwd),
@@ -173,11 +187,12 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
             if echo is not None:
                 try:
                     echo(item)
-                except Exception:   # 顯示層故障不得影響輸出收集與額度判定
-                    pass
+                except Exception:   # Display-layer failures must never affect output
+                    pass            # collection or quota detection
 
         proc.wait()
-        if stalled:  # 盡力收殘留已入列的輸出(不 join daemon thread,避免卡死)
+        if stalled:  # Best-effort drain of whatever is still queued (don't join the daemon
+                     # thread, to avoid hanging)
             while True:
                 try:
                     item = q.get_nowait()
@@ -193,11 +208,13 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
 
 
 def parse_output_for_quota(output: str) -> tuple[bool, datetime | None]:
-    """從 stream-json 輸出判定是否額度耗盡並解析重置時間(2.5 策略)。
+    """Determine quota exhaustion and parse the reset time from stream-json output
+    (the strategy from 2.5).
 
-    主要來源:結構化 rate_limit_event(status 屬 _BLOCKED_STATUSES -> 耗盡;
-    resetsAt Unix 秒 -> 重置時間)。後備:對人類可讀文字掃 _QUOTA_TEXT_RE。
-    回傳 (quota_exhausted, reset_at);reset_at 為 UTC aware datetime 或 None。
+    Primary source: the structured rate_limit_event (status in _BLOCKED_STATUSES -> exhausted;
+    resetsAt Unix seconds -> reset time). Fallback: scan human-readable text with
+    _QUOTA_TEXT_RE.
+    Returns (quota_exhausted, reset_at); reset_at is a UTC-aware datetime, or None.
     """
     exhausted = False
     reset_ts: float | None = None
@@ -235,7 +252,7 @@ def parse_output_for_quota(output: str) -> tuple[bool, datetime | None]:
                         if isinstance(text, str):
                             human_texts.append(text)
         else:
-            human_texts.append(s)  # 非 JSON 行(如 stderr 文字)
+            human_texts.append(s)  # Non-JSON line (e.g. stderr text)
 
     if not exhausted:
         for text in human_texts:
@@ -250,18 +267,18 @@ def parse_output_for_quota(output: str) -> tuple[bool, datetime | None]:
 
 
 class ClaudeAdapter(Adapter):
-    """claude CLI adapter;設定由 get_adapter 注入。"""
+    """claude CLI adapter; config is injected by get_adapter."""
 
     def __init__(self, cfg: "Config") -> None:
         self.cfg = cfg
 
     def resolve_model(self, model: str) -> str:
-        """把抽象檔位解析成 Claude CLI 實際接收的模型參數。"""
+        """Resolve the abstract tier into the model argument accepted by the Claude CLI."""
         alias = self.cfg.claude_models.get(model)
         if alias is None:
             raise AgentsError(
-                f"模型檔位 {model!r} 不在 [adapter.claude.models] 對照表中;"
-                f"請檢查計畫檔的建議模型或設定檔對照表")
+                f"model tier {model!r} is not in [adapter.claude.models]; "
+                f"check the plan file's suggested model or the config mapping")
         return alias
 
     def run_task(self, prompt: str, requested_model: str,
@@ -272,7 +289,7 @@ class ClaudeAdapter(Adapter):
         stall_seconds = self.cfg.stall_minutes * 60 if self.cfg.stall_minutes else 0
         returncode, output, stalled = run_subprocess(
             cmd, cwd, stall_seconds, echo=self._echo_line)
-        if stalled:  # 停滯是任務失敗,絕不誤判為額度(2.5)
+        if stalled:  # A stall is a task failure, never mistaken for quota exhaustion (2.5)
             return TaskResult(exit_code=returncode, output=output,
                               quota_exhausted=False, reset_at=None)
         exhausted, reset_at = parse_output_for_quota(output)
