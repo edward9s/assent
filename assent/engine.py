@@ -690,9 +690,10 @@ def _recover_or_ensure_clean(cfg: Config, now: Callable[[], datetime]) -> None:
     A hard power loss or a forced kill never reaches the Ctrl+C / quota / infrastructure
     interrupt handlers, so it leaves the worktree dirty with the task status and the wip
     checkpoint unwritten.  On the next run, if every uncommitted change is provably inside the
-    scope of the task ``next_task()`` would resume, that progress is gathered into a ``wip``
-    checkpoint and the run continues -- no AI session, zero tokens.  Every other dirty state
-    (a change outside that scope, or no resumable candidate at all) keeps today's fail-closed
+    scope of the task ``next_task()`` would resume -- or, failing that, of a single DONE task
+    the scheduler never checkpointed -- that progress is gathered into a ``wip`` checkpoint and
+    the run continues -- no AI session, zero tokens.  Every other dirty state (a change outside
+    that scope, ambiguous ownership, or no provable owner at all) keeps today's fail-closed
     behaviour: ``ensure_clean`` raises and the caller refuses to run rather than guessing
     attribution.
     """
@@ -704,36 +705,76 @@ def _recover_or_ensure_clean(cfg: Config, now: Callable[[], datetime]) -> None:
 def _try_recover_attributable_worktree(cfg: Config,
                                        now: Callable[[], datetime]) -> bool:
     """Return True only when the worktree was dirty and every change was provably attributable
-    to the resumable candidate task, having just committed that progress into a wip checkpoint.
+    to one task, having just committed that progress into a wip checkpoint.
 
-    A clean worktree, an unparsable plan, no resumable candidate, or any change outside the
-    candidate's scope all return False, leaving the caller's fail-closed ``ensure_clean`` to
-    decide.  Attribution reuses the same scope machinery that contains a running task's output
-    (``changes_outside_scope`` with an empty ``since_ref`` -> only the current uncommitted
-    changes), so the recovery can never claim work a task's scope would not have permitted.
+    Two owners can be proven, in this order: the task ``next_task()`` would resume, and -- only
+    when that candidate does not own the dirt -- a single DONE task the scheduler never got to
+    checkpoint (see ``_uncheckpointed_done_dirt_owner``).  A clean worktree, an unparsable plan,
+    or dirt no single task provably owns all return False, leaving the caller's fail-closed
+    ``ensure_clean`` to decide.  Attribution reuses the same scope machinery that contains a
+    running task's output (``changes_outside_scope`` with an empty ``since_ref`` -> only the
+    current uncommitted changes), so the recovery can never claim work a task's scope would not
+    have permitted.
     """
     if gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
         return False
     try:
-        selection = Plan.parse(cfg.tasks_dir).next_task()
+        plan = Plan.parse(cfg.tasks_dir)
     except AssentError:
         return False
-    if selection is None:
-        return False
-    candidate, _ = selection
-    outside = gitops.changes_outside_scope(
-        cfg.root, candidate.scope, excludes=_task_excludes(cfg, candidate))
-    if outside:
+    owner = _resumable_dirt_owner(cfg, plan) or _uncheckpointed_done_dirt_owner(cfg, plan)
+    if owner is None:
         return False
 
-    _mark_recovered_task(candidate, now)
+    _mark_recovered_task(owner, now)
     subject = _checkpoint_subject(
-        cfg, "wip", candidate,
+        cfg, "wip", owner,
         "recovered dirty worktree from an unclean exit, scope-verified")
     gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes)
     print(f"Recovered a dirty worktree from an unclean process exit; scope-verified "
-          f"against {candidate.id}, progress kept in a wip checkpoint.")
+          f"against {owner.id}, progress kept in a wip checkpoint.")
     return True
+
+
+def _resumable_dirt_owner(cfg: Config, plan: Plan) -> Task | None:
+    """The resumable candidate task, when its scope contains every uncommitted change."""
+    selection = plan.next_task()
+    if selection is None:
+        return None
+    candidate, _ = selection
+    if gitops.changes_outside_scope(
+            cfg.root, candidate.scope, excludes=_task_excludes(cfg, candidate)):
+        return None
+    return candidate
+
+
+def _uncheckpointed_done_dirt_owner(cfg: Config, plan: Plan) -> Task | None:
+    """The one DONE task that provably owns the dirt after a crash between the execution AI's
+    DONE mark and the scheduler's ``auto(...)`` checkpoint; None when ownership is not provable.
+
+    That crash leaves the produced work uncommitted while ``next_task()`` has already moved on
+    to the following TODO task, so the resumable-candidate path above must never be allowed to
+    claim it.  Eligibility needs both halves of the evidence: no ``auto(<folder>/<task>)``
+    checkpoint in this branch's history, and a scope containing every uncommitted path.  A
+    missing checkpoint alone proves nothing -- a DONE task whose changes all landed in an
+    earlier ``wip`` checkpoint legitimately has none -- so a second plausible owner, an existing
+    terminal checkpoint, out-of-scope dirt, or unreadable history all fail closed.
+    """
+    try:
+        history = gitops.commit_history(cfg.root)
+    except AssentError:
+        return None
+    subjects = {subject for _commit, _parents, subject in history}
+
+    owners = [
+        task for task in plan.tasks
+        if task.status == "DONE"
+        and not any(s.startswith(f"auto({cfg.tasks_name}/{task.id}): ")
+                    for s in subjects)
+        and not gitops.changes_outside_scope(
+            cfg.root, task.scope, excludes=_task_excludes(cfg, task))
+    ]
+    return owners[0] if len(owners) == 1 else None
 
 
 def _mark_recovered_task(task: Task, now: Callable[[], datetime]) -> None:
