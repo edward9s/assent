@@ -270,6 +270,85 @@ proof can remove it); it retains the source evidence, and skips archiving,
 for any folder whose source an unaccepted dependent still needs, the same
 upstream-first rule `clean` enforces.
 
+### Resolving one folder's conflict with `assent reconcile`
+
+`assent verify --batch` can only skip a conflicting folder; it cannot resolve
+it. `assent reconcile FOLDER` is the single-folder counterpart that lets a
+human resolve that conflict by editing files only, while Assent owns every Git
+operation around those edits. The whole sequence is:
+
+```text
+assent reconcile parallel01              # prepare the conflict in a worktree
+                                         # (edit the reported files by hand)
+assent reconcile --continue parallel01   # stage, commit, advance the source
+assent verify parallel01                 # optional, explicit, expensive
+assent accept parallel01                 # explicit human approval
+```
+
+**Start** requires a finished folder (every task `DONE` or `SKIP`), a clean
+main worktree, and a source folder with its own branch and worktree. It
+captures the integration target's current tip, creates the worktree
+`<project>.reconcile/<FOLDER>` next to the main worktree on the temporary
+branch `assent-reconcile/<FOLDER>` starting at the exact source tip, and merges
+the captured target tip into it without committing. Because the merge is built
+source-first, its first parent is the original source, so the source branch can
+later be fast-forwarded onto it — the source is never rewritten and **the
+integration target is never changed**. The main worktree and the folder's own
+source worktree stay clean throughout. If the two sides in fact merge without
+conflict, start says so, undoes the merge, removes what it created, and leaves
+the source untouched. If the source is already contained in the target, there
+is nothing to reconcile.
+
+**You edit, and run no Git commands.** Start prints the worktree path, the
+branch, both tips, and every conflicting file; resolve those files in that
+worktree only.
+
+**`--continue`** stages exactly the paths Git still reports as unmerged,
+validates the result (no remaining unmerged path, no leftover conflict marker
+or whitespace error per `git diff --cached --check`, and no edit outside the
+conflict-resolution scene), creates the merge commit, fast-forwards the source
+branch inside its own worktree, and then removes the temporary worktree and
+branch. It proves ownership of each managed resource again before deleting it —
+worktree of this repository, attached to the managed branch, `HEAD` at the
+proven commit, clean — so it can never widen the deletion. Because the source
+has really advanced, `--continue` deletes the receipts that were written
+against the old source identity: the folder receipt, and the batch receipt if
+any source identity it records is no longer current (a batch receipt is
+all-or-nothing). A batch receipt it cannot even parse is left in place for
+inspection rather than erased.
+
+**Reconciliation is not evidence and not approval.** `--continue` runs no
+focused task tests and no complete verification, and writes no receipt. Proving
+the resolved source is a later, explicitly human-started `assent verify FOLDER`
+— the expensive step, run against the then-current target — and approving it is
+a later `assent accept FOLDER`, which still requires a fresh, reproducible
+`PASSED` complete-verification receipt. If the target advanced after start, the
+captured merge is not rewritten; the drift is reported and that later `verify`
+stays authoritative.
+
+**Interruption and refusal** are recoverable and never destructive. There is no
+state file: a later run reads the worktree, the temporary branch, `HEAD`,
+`MERGE_HEAD`, and the merge parents to see how far the previous run got, so
+`--continue` can resume a merge an interrupted run already committed, or finish
+a fast-forward that was all that remained. When something does not match — the
+source branch moved independently, the managed path is not a worktree or is on
+another branch, a validation problem in the staged resolution — the run refuses
+and preserves the worktree, the branch, and every edit; nothing is committed and
+nothing is deleted.
+
+**`--abort`** discards the attempt: it removes only the managed worktree and
+temporary branch, and only after proving each is the resource it manages,
+refusing while the worktree still holds uncommitted changes rather than throwing
+away work. The source and the integration target are left unchanged.
+
+Reconcile is deliberately not an integration engine. It handles exactly one
+folder against the current integration target; it never resolves file content
+for you, never combines speculative peer folders, never runs an AI adapter, and
+never edits a task status. A conflict that appears only between two unaccepted
+sources while building a batch candidate is outside this command — that set
+still goes through `verify --batch`'s skip decision and then `assent rework` or
+`assent reject`.
+
 ## Parallel execution
 
 You can point N terminals at N different work folders, e.g. `assent run
@@ -476,6 +555,7 @@ derived from task-file facts, and Git is always enabled.
 | `assent report [FOLDER]`<br>`assent report parallel01` | Generates and displays the work folder's human-readable report `_report.md`. Accepts `--config PATH`. | **Zero** |
 | `assent verify <FOLDER>`<br>`assent verify parallel01` | Runs the complete verifier once for one folder's temporary integration candidate and refreshes the derived receipt; no target change and no AI session. Report status is `PASSED`/`FAILED`, `fresh`/`stale`. No `--all`. | **Zero** |
 | `assent accept <FOLDER>`<br>`assent accept parallel01` | Human approval for exactly one completed folder. Quickly rebuilds the candidate and publishes only an exact fresh `PASSED` receipt match; it does not run complete verification. Missing/stale receipt requires `assent verify`. No `--all`, `--push`, remote, pull, rebase, force, conflict resolution, or source deletion. | **Zero** |
+| `assent reconcile <FOLDER>`<br>`assent reconcile --continue parallel01` | Prepares one finished folder's source-versus-target conflict in the isolated worktree `<project>.reconcile/<FOLDER>` so a human can resolve the reported files by hand; `--continue` stages and validates that resolution, commits the merge, and fast-forwards the source branch; `--abort` discards only the proven managed worktree and branch. Never changes the target, resolves content, runs focused or complete verification, writes a receipt, or accepts. `FOLDER` is required; no `--all`. | **Zero** |
 | `assent clean [FOLDER]`<br>`assent clean parallel01` | Cleans up only worktrees and same-folder-prefix branches that are fully merged and clean; skips anything it cannot prove, never touches `.assent/`, and has no force option. Acts on all work folders when `FOLDER` is omitted. | **Zero** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | Human-adjudicated rejection: archives uncommitted changes, then force-deletes that folder's worktree and same-prefix branches (recording full tip hashes before deletion), and resets DONE/WIP/BLOCKED tasks to TODO with Git evidence kept in the r file. `FOLDER` is required; refuses while a run is in progress. | **Zero** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "review rejected"` | Non-destructively reopens a single task; keeps code by default, `--cascade` states downstream propagation explicitly. `--revert-code` creates a new reverse commit only when checkpoints form a contiguous tail. Updates the report on success, does not run automatically. Accepts `--config PATH`. | **Zero** |

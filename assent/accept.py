@@ -343,8 +343,9 @@ def _accept_locked(cfg: Config) -> int:
               "accept did not change the target. Conflicting file(s):")
         for path in conflict_paths:
             print(f"  - {path}")
-        print(f"Run `assent verify {folder}` to refresh the FAILED receipt after "
-              "resolving the source/target conflict")
+        print(f"Run `assent reconcile {folder}` to resolve the source-versus-"
+              "target conflict in an isolated worktree, then `assent verify "
+              f"{folder}` to earn a fresh receipt")
         return 1
     if gate_problem is not None:
         print(_refresh_message(folder, gate_problem))

@@ -193,6 +193,34 @@ upstream-first rule `clean` already enforces: it archives only a folder that
 is independently eligible and continues to retain the source evidence an
 unaccepted dependent still needs.
 
+## Manual reconciliation consensus (2026-07-27)
+
+Conflicts stay human decisions about content, but the Git mechanics around
+that decision are Assent's to own. `assent reconcile FOLDER` splits the two:
+the human edits only the conflicted files, and Assent performs every Git
+operation. Start merges a captured target tip into the exact folder source
+inside the dedicated worktree `<project>.reconcile/<FOLDER>` on the temporary
+branch `assent-reconcile/<FOLDER>`; the merge is built source-first so the
+source can be fast-forwarded onto it. The main worktree and the source
+worktree stay clean and the integration target is never changed. `--continue`
+stages the resolution, validates it, commits the merge, advances the source
+branch, and cleans up; `--abort` removes only resources it has re-proved it
+manages. There is no state file — the worktree, the temporary branch, `HEAD`,
+`MERGE_HEAD`, and the merge parents are the resumable state, so every
+interruption and refusal preserves the worktree, the branch, and every edit.
+
+The verification boundary does not move. `--continue` runs neither the focused
+task tests nor the complete verification and writes no receipt; because the
+source really advanced, it deletes the receipts written against the old source
+identity, a derived artifact that costs one `assent verify` to rebuild.
+`assent verify FOLDER` remains the human-controlled expensive step and
+`assent accept FOLDER` remains the explicit approval that still demands a
+fresh, reproducible `PASSED` complete-verification receipt. Reconcile is not
+an integration engine: exactly one folder against the current integration
+target, no automatic content resolution, and a batch-only conflict between two
+unaccepted sources stays with `verify --batch`'s skip decision and then
+`rework` or `reject`.
+
 ## Model and reasoning-investment consensus
 
 `model` and `effort` are orthogonal abstract tiers. A task's model is fixed
