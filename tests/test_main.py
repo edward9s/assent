@@ -109,11 +109,11 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 1)
         self.assertIn("命令列工作資料夾", out)
 
-    def test_plan_section_reports_dedicated_removal_error(self):
+    def test_removed_plan_section_rejected_as_unknown_key(self):
         config = self.write_config('[plan]\ntasks = "A"\n')
         code, out = self.run_main(["status", "A", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("[plan] 區塊已廢除", out)
+        self.assertIn("未知的頂層鍵", out)
 
     def test_run_without_folder_selects_unique_ongoing_folder(self):
         config = self.write_config()

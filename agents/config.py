@@ -162,14 +162,6 @@ def _load_data(path: str | Path) -> tuple[Path, dict]:
         except tomllib.TOMLDecodeError as e:
             raise AgentsError(f"設定檔不是有效的 TOML({path}):{e}") from e
 
-    if "git" in data:
-        raise AgentsError(
-            "設定檔 [git] 區塊已廢除:git 永遠啟用,請刪除該區塊")
-    if "plan" in data:
-        raise AgentsError(
-            "設定檔 [plan] 區塊已廢除:"
-            "工作資料夾改由命令列指定或自動推導,請刪除該區塊")
-
     unknown = sorted(set(data) - _TOP_LEVEL_KEYS)
     if unknown:
         raise AgentsError(

@@ -61,8 +61,8 @@ class TestLoadConfig(ConfigTestCase):
         with self.assertRaises(AgentsError):
             load_config(self.agents_dir / "agents.toml", "plan01")
 
-    def test_plan_section_reports_dedicated_removal_error(self):
-        with self.assertRaisesRegex(AgentsError, r"\[plan\].*已廢除"):
+    def test_removed_plan_section_rejected_as_unknown_key(self):
+        with self.assertRaisesRegex(AgentsError, "未知的頂層鍵"):
             load_config(self.write('[plan]\ntasks = "plan01"\n'), "plan01")
 
     def test_invalid_toml_raises(self):
@@ -73,8 +73,8 @@ class TestLoadConfig(ConfigTestCase):
         with self.assertRaisesRegex(AgentsError, "未知的頂層鍵"):
             load_config(self.write("[plann]\nx = 1\n"), "plan01")
 
-    def test_git_section_reports_dedicated_removal_error(self):
-        with self.assertRaisesRegex(AgentsError, r"\[git\].*已廢除"):
+    def test_removed_git_section_rejected_as_unknown_key(self):
+        with self.assertRaisesRegex(AgentsError, "未知的頂層鍵"):
             load_config(self.write("[git]\nenabled = false\n"), "plan01")
 
     def test_folder_name_with_space_rejected(self):
