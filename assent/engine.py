@@ -29,6 +29,7 @@ import shlex
 import subprocess
 import sys
 import time
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -108,6 +109,9 @@ _COUNTDOWN_SEGMENT = 60.0
 _DEFAULT_VERIFY_COMMAND = "python .assent/verify.py"
 _GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
 _ADAPTER_DIAGNOSTIC_LIMIT = 240
+_ASSIGNMENT_NAME_WIDTH = 26
+_ASSIGNMENT_ABSTRACT_WIDTH = 14
+_ASSIGNMENT_LINE_WIDTH = 78
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)([\"']?(?:api[_ -]?key|access[_ -]?token|token|password|secret|"
     r"authorization)[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;]+)")
@@ -392,6 +396,86 @@ def _resolve_requested_effort(cfg: Config, model: str,
     return cfg.adapter_settings(
         adapter_name or cfg.adapter_name).resolve_requested_effort(
         model, effort)
+
+
+def _display_width(text: str) -> int:
+    """Return terminal columns using the project's W/F CJK width rule."""
+    return sum(2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+               for char in text)
+
+
+def _truncate_display(text: str, width: int) -> str:
+    """Truncate a display field to ``width`` columns with one ellipsis."""
+    if width <= 0:
+        return ""
+    if _display_width(text) <= width:
+        return text
+    ellipsis = "…"
+    remaining = width - _display_width(ellipsis)
+    if remaining <= 0:
+        return ellipsis if width >= _display_width(ellipsis) else ""
+    kept: list[str] = []
+    used = 0
+    for char in text:
+        char_width = _display_width(char)
+        if used + char_width > remaining:
+            break
+        kept.append(char)
+        used += char_width
+    return "".join(kept) + ellipsis
+
+
+def _pad_display(text: str, width: int) -> str:
+    """Left-align a field to a fixed terminal-column width."""
+    text = _truncate_display(text, width)
+    return text + " " * max(0, width - _display_width(text))
+
+
+def _task_assignment_line(task: Task, session: _SessionIdentity) -> str:
+    """Render one assignment without allowing a long configured value to wrap."""
+    task_name = task.path.name[:-len(".e.toml")]
+    abstract = task.model
+    if session.effort is not None:
+        abstract += f"/{session.effort}"
+        if task.effort is None:
+            abstract += "*"
+    actual = session.requested_model
+    if session.requested_effort is not None:
+        actual += f"/{session.requested_effort}"
+
+    prefix = (f"  {_pad_display(task_name, _ASSIGNMENT_NAME_WIDTH)} "
+              f"{_pad_display(abstract, _ASSIGNMENT_ABSTRACT_WIDTH)} -> ")
+    remaining = max(0, _ASSIGNMENT_LINE_WIDTH - _display_width(prefix))
+    return prefix + _truncate_display(actual, remaining)
+
+
+def _resolve_task_assignments(
+        cfg: Config, plan: Plan
+        ) -> list[tuple[str, list[tuple[Task, _SessionIdentity]]]]:
+    """Resolve every task through the same identity path used by ``run``."""
+    blocks: list[tuple[str, list[tuple[Task, _SessionIdentity]]]] = []
+    for adapter_name in cfg.adapter_names:
+        adapter = get_adapter(adapter_name, cfg)
+        assignments = [
+            (task, _resolve_session(cfg, adapter, task, adapter_name))
+            for task in plan.tasks
+        ]
+        blocks.append((adapter_name, assignments))
+    return blocks
+
+
+def _print_task_assignments(
+        blocks: list[tuple[str, list[tuple[Task, _SessionIdentity]]]]) -> None:
+    """Print one complete assignment block per configured adapter."""
+    for adapter_name, assignments in blocks:
+        print(f"Task assignment (adapter = {adapter_name}):")
+        used_default = False
+        for task, session in assignments:
+            used_default = used_default or (
+                task.effort is None and session.effort is not None)
+            print(_task_assignment_line(task, session))
+        if used_default:
+            print("  (* effort filled from default_effort)")
 
 
 def _task_excludes(cfg: Config, task: Task) -> list[str]:
@@ -1546,6 +1630,11 @@ def check(cfg: Config) -> int:
     try:
         plan = Plan.parse(cfg.tasks_dir)
         print(f"Task-file format: OK ({len(plan.tasks)} tasks, dependencies acyclic)")
+        try:
+            _print_task_assignments(_resolve_task_assignments(cfg, plan))
+        except AssentError as e:
+            ok = False
+            print(f"Task assignment: FAIL ({e})")
     except AssentError as e:
         ok = False
         print(f"Task-file format: FAIL ({e})")

@@ -1820,6 +1820,88 @@ class TestQueries(EngineTestCase):
         self.assertIn("Folder dependencies: FAIL", out.getvalue())
         self.assertIn("unknown keys", out.getvalue())
 
+    def test_check_displays_resolved_assignment_and_default_marker(self):
+        self.write_task(1, slug="任務分配顯示", model="core")
+        self.write_task(2, slug="explicit", model="lite", effort="high",
+                        status="DONE")
+        cfg = self.build(adapter_name="codex", extra_config=(
+            '[adapter.codex]\ncommand = "python"\n'
+            '[adapter.codex.models]\n'
+            'core = "gpt-5.6-luna"\n'
+            'lite = "gpt-lite"\n'
+            '[adapter.codex.default_effort]\n'
+            'core = "high"\n'
+            'lite = "low"\n'
+            '[adapter.codex.efforts.core]\n'
+            'high = "max"\n'
+            '[adapter.codex.efforts.lite]\n'
+            'high = "max"\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 0)
+        text = out.getvalue()
+        self.assertIn("Task assignment (adapter = codex):", text)
+        self.assertIn("t001_任務分配顯示", text)
+        self.assertIn("core/high*", text)
+        self.assertIn("gpt-5.6-luna/max", text)
+        self.assertIn("lite/high", text)
+        self.assertIn("gpt-lite/max", text)
+        self.assertIn("(* effort filled from default_effort)", text)
+
+    def test_check_omits_actual_effort_when_no_effort_flag_is_resolved(self):
+        self.write_task(1, model="core")
+        cfg = self.build(adapter_name="codex", extra_config=(
+            '[adapter.codex]\ncommand = "python"\n'
+            '[adapter.codex.models]\ncore = "gpt-core"\n'
+            '[adapter.codex.default_effort]\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 0)
+        line = next(line for line in out.getvalue().splitlines()
+                    if "t001_task" in line)
+        self.assertRegex(line, r"core\s+-> gpt-core$")
+        self.assertNotIn("gpt-core/", line)
+        self.assertNotIn("effort filled from default_effort", out.getvalue())
+
+    def test_check_truncates_cjk_task_names_without_exceeding_line_width(self):
+        self.write_task(1, slug="這是一個非常非常長的任務名稱甲乙丙丁戊己庚辛壬癸",
+                        model="core", effort="low")
+        cfg = self.build(adapter_name="codex", extra_config=(
+            '[adapter.codex]\ncommand = "python"\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 0)
+        line = next(line for line in out.getvalue().splitlines()
+                    if line.startswith("  t001_"))
+        self.assertEqual(line.count("…"), 1)
+        self.assertLessEqual(engine._display_width(line), 78)
+
+    def test_check_displays_one_assignment_block_per_adapter(self):
+        self.write_task(1, model="core", effort="low")
+        (self.root / ".assent" / "assent.toml").write_text(
+            '[adapter]\nname = ["claude", "codex"]\n'
+            '[adapter.claude]\ncommand = "python"\n'
+            '[adapter.codex]\ncommand = "python"\n',
+            encoding="utf-8")
+        cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 0)
+        text = out.getvalue()
+        self.assertEqual(text.count("Task assignment (adapter = "), 2)
+        self.assertIn("Task assignment (adapter = claude):", text)
+        self.assertIn("Task assignment (adapter = codex):", text)
+        self.assertIn("opus/low", text)
+        self.assertIn("gpt-5.6-terra/low", text)
+
     def test_report_lists_checkpoints_and_blocked_summary(self):
         p1 = self.write_task(1)
         p2 = self.write_task(2, verify=_FAILV, title="會卡住")
