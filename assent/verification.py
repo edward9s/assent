@@ -69,6 +69,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verifier_digest(cfg: Config) -> str:
+    """Return the current main-tree verifier digest used by receipt gates."""
+    script = (cfg.assent_dir / "verify.py").resolve()
+    if not script.is_file():
+        raise AssentError(f"Verification script not found: {script}")
+    return _sha256(script)
+
+
 def _summary(*parts: str) -> str:
     """Normalize child diagnostics and bound receipt growth."""
     text = "\n".join(part.strip() for part in parts if part and part.strip())

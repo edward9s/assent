@@ -9,7 +9,6 @@ or commits.
 from __future__ import annotations
 
 import contextlib
-import enum
 import re
 import shutil
 import subprocess
@@ -479,16 +478,11 @@ def branch_tip(root: Path, branch: str) -> str:
 ACCEPT_TRAILER_FOLDER = "Assent-Folder"
 ACCEPT_TRAILER_SOURCE_BRANCH = "Assent-Source-Branch"
 ACCEPT_TRAILER_SOURCE_TIP = "Assent-Source-Tip"
+ACCEPT_TRAILER_VERIFIED_TREE = "Assent-Verified-Tree"
+ACCEPT_TRAILER_VERIFIER_SHA256 = "Assent-Verifier-SHA256"
 
-_FULL_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
-_EVIDENCE_FIELD = "\x1f"
-
-
-@dataclass(frozen=True)
-class AcceptEvidence:
-    folder: str
-    source_branch: str
-    source_tip: str
+_OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _validate_evidence_value(name: str, value: str) -> None:
@@ -504,108 +498,44 @@ def _validate_evidence_value(name: str, value: str) -> None:
 
 
 def build_accept_trailers(folder: str, source_branch: str,
-                          source_tip: str) -> str:
-    """Build the fixed three-line accept evidence block."""
+                          source_tip: str, verified_tree: str,
+                          verifier_sha256: str) -> str:
+    """Build passive, human-readable audit metadata for an accept merge."""
     _validate_evidence_value("folder", folder)
     _validate_evidence_value("source branch", source_branch)
     _validate_evidence_value("source tip", source_tip)
+    _validate_evidence_value("verified tree", verified_tree)
+    _validate_evidence_value("verifier digest", verifier_sha256)
     if not source_branch.startswith(f"{folder}/") or source_branch == f"{folder}/":
         raise AssentError(
             f"accept evidence source branch must belong to task folder {folder}")
-    if not _FULL_HASH_RE.fullmatch(source_tip):
+    if not _OBJECT_ID_RE.fullmatch(source_tip):
         raise AssentError(
-            "accept evidence source tip must be a 40-character lowercase hex hash")
+            "accept evidence source tip must be a 40- or 64-character lowercase "
+            "hexadecimal object id")
+    if not _OBJECT_ID_RE.fullmatch(verified_tree):
+        raise AssentError(
+            "accept evidence verified tree must be a 40- or 64-character lowercase "
+            "hexadecimal object id")
+    if not _SHA256_RE.fullmatch(verifier_sha256):
+        raise AssentError(
+            "accept evidence verifier digest must be a 64-character lowercase "
+            "hexadecimal SHA-256 digest")
     return (f"{ACCEPT_TRAILER_FOLDER}: {folder}\n"
             f"{ACCEPT_TRAILER_SOURCE_BRANCH}: {source_branch}\n"
-            f"{ACCEPT_TRAILER_SOURCE_TIP}: {source_tip}")
+            f"{ACCEPT_TRAILER_SOURCE_TIP}: {source_tip}\n"
+            f"{ACCEPT_TRAILER_VERIFIED_TREE}: {verified_tree}\n"
+            f"{ACCEPT_TRAILER_VERIFIER_SHA256}: {verifier_sha256}")
 
 
 def accept_commit_message(subject: str, folder: str, source_branch: str,
-                          source_tip: str) -> str:
-    """Compose a one-line subject and a canonical accept trailer block."""
+                          source_tip: str, verified_tree: str,
+                          verifier_sha256: str) -> str:
+    """Compose a one-line subject and passive accept audit metadata."""
     _validate_evidence_value("subject", subject)
-    return f"{subject}\n\n{build_accept_trailers(folder, source_branch, source_tip)}\n"
-
-
-def _accept_trailers(message: str) -> dict[str, str] | None:
-    """Parse unique, exactly formatted accept trailer lines."""
-    keys = (ACCEPT_TRAILER_FOLDER, ACCEPT_TRAILER_SOURCE_BRANCH,
-            ACCEPT_TRAILER_SOURCE_TIP)
-    found: dict[str, str] = {}
-    for line in message.splitlines():
-        for key in keys:
-            prefix = f"{key}: "
-            if line.startswith(f"{key}:"):
-                if key in found or not line.startswith(prefix):
-                    return None
-                found[key] = line[len(prefix):]
-    return found
-
-
-def parse_accept_evidence(message: str) -> AcceptEvidence | None:
-    """Parse complete internally consistent evidence from a commit message."""
-    trailers = _accept_trailers(message)
-    if trailers is None:
-        return None
-    folder = trailers.get(ACCEPT_TRAILER_FOLDER, "")
-    source_branch = trailers.get(ACCEPT_TRAILER_SOURCE_BRANCH, "")
-    source_tip = trailers.get(ACCEPT_TRAILER_SOURCE_TIP, "")
-    try:
-        build_accept_trailers(folder, source_branch, source_tip)
-    except AssentError:
-        return None
-    return AcceptEvidence(folder, source_branch, source_tip)
-
-
-class AcceptStatus(enum.Enum):
-    ACCEPTED = "accepted"
-    ABSENT = "absent"
-    UNCERTAIN = "uncertain"
-
-
-@dataclass(frozen=True)
-class AcceptResult:
-    status: AcceptStatus
-    evidence: AcceptEvidence | None = None
-
-
-def _validated_accept_evidence(folder: str, message: str,
-                               parents: Sequence[str]) -> AcceptEvidence | None:
-    evidence = parse_accept_evidence(message)
-    if evidence is None or evidence.folder != folder:
-        return None
-    if len(parents) != 2 or parents[1] != evidence.source_tip:
-        return None
-    return evidence
-
-
-def find_accept_evidence(root: Path, folder: str,
-                         ref: str = "HEAD") -> AcceptResult:
-    """Search a target's first-parent history for structurally valid evidence."""
-    _validate_evidence_value("folder", folder)
-    out = _git(root, "log", "--first-parent", "-z",
-               f"--format=%P{_EVIDENCE_FIELD}%B", ref)
-    for record in out.split("\0"):
-        if not record.strip():
-            continue
-        parent_text, separator, message = record.partition(_EVIDENCE_FIELD)
-        if not separator:
-            raise AssentError("unable to parse Git accept evidence history")
-        trailers = _accept_trailers(message)
-        if trailers is None:
-            # A malformed accept-looking trailer block is relevant only when it still
-            # contains the requested folder line.
-            if f"{ACCEPT_TRAILER_FOLDER}: {folder}" in message.splitlines():
-                return AcceptResult(AcceptStatus.UNCERTAIN)
-            continue
-        if trailers.get(ACCEPT_TRAILER_FOLDER) != folder:
-            continue
-        evidence = _validated_accept_evidence(
-            folder, message, parent_text.split())
-        if evidence is None:
-            return AcceptResult(AcceptStatus.UNCERTAIN)
-        return AcceptResult(AcceptStatus.ACCEPTED, evidence)
-    return AcceptResult(AcceptStatus.ABSENT)
+    trailers = build_accept_trailers(
+        folder, source_branch, source_tip, verified_tree, verifier_sha256)
+    return f"{subject}\n\n{trailers}\n"
 
 
 def _temporary_container(root: Path) -> Path:
@@ -711,6 +641,15 @@ def tree_of(root: Path, committish: str) -> str:
     """Return the full tree object id for a commit or tree-ish."""
     _validate_evidence_value("tree-ish", committish)
     return _git(root, "rev-parse", f"{committish}^{{tree}}").strip()
+
+
+def commit_parents(root: Path, committish: str = "HEAD") -> tuple[str, ...]:
+    """Return one commit's parent object ids without scanning repository history."""
+    snapshot = _commit_snapshot(root, committish)
+    fields = _git(root, "show", "-s", "--format=%P", snapshot).strip().split()
+    if not all(_OBJECT_ID_RE.fullmatch(parent) for parent in fields):
+        raise AssentError("unable to parse Git commit parents")
+    return tuple(fields)
 
 
 def object_type(root: Path, object_id: str) -> str:

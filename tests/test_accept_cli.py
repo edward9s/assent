@@ -4,6 +4,8 @@ Every fixture is a disposable local repository.  The tests invoke ``python -m
 assent accept`` rather than its implementation helpers, and make assertions on
 Git's observable refs, parents, messages, worktrees, and command exit codes.
 """
+import contextlib
+import io
 import os
 import shutil
 import subprocess
@@ -11,7 +13,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from assent import gitops
+from assent.accept import accept_folder
+from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
 
 
@@ -153,6 +159,8 @@ class AcceptCliLineEndingTests:
             "raise SystemExit(0 if Path('result with space 空白.txt').is_file() else 1)\n")
         source, branch, tip = self._make_source()
         before = self._head()
+        verified = self._cli("verify", self.folder)
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
 
         accepted = self._cli("accept", self.folder)
 
@@ -164,6 +172,8 @@ class AcceptCliLineEndingTests:
         self.assertIn(f"Assent-Folder: {self.folder}", message)
         self.assertIn(f"Assent-Source-Branch: {branch}", message)
         self.assertIn(f"Assent-Source-Tip: {tip}", message)
+        self.assertIn("Assent-Verified-Tree:", message)
+        self.assertIn("Assent-Verifier-SHA256:", message)
         self.assertEqual(self._git("branch", "--show-current"), "release")
         self.assertTrue(source.is_dir())
         self._assert_no_temporary_integration()
@@ -178,10 +188,10 @@ class AcceptCliLineEndingTests:
         self.assertFalse(source.exists())
         self.assertEqual(self._git("branch", "--list", branch), "")
         evidence_only = self._cli("accept", self.folder)
-        self.assertEqual(evidence_only.returncode, 0,
+        self.assertEqual(evidence_only.returncode, 1,
                          evidence_only.stdout + evidence_only.stderr)
         self.assertEqual(self._head(), after)
-        self.assertIn("already accepted and cleaned", evidence_only.stdout)
+        self.assertIn("no source worktree", evidence_only.stdout)
 
 
 class TestAcceptCliLf(AcceptCliLineEndingTests, AcceptCliCase):
@@ -256,28 +266,14 @@ class TestAcceptCliFailures(AcceptCliCase):
         self.assertEqual(self._head(), before)
         self._assert_no_temporary_integration()
 
-    def test_source_post_merge_and_conflict_failures_keep_recoverable_state(self) -> None:
+    def test_conflict_failure_keeps_recoverable_state(self) -> None:
         source, branch, tip = self._make_source()
-        before = self._head()
-        self._write_verify("raise SystemExit(1)\n")
-        result = self._cli("accept", self.folder)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("source verification failed", result.stdout)
-        self._assert_failed_preserves(before, source, branch, tip)
-
-        self._write_verify(
-            "from pathlib import Path\n"
-            "raise SystemExit(1 if '.integration' in str(Path.cwd()) else 0)\n")
-        result = self._cli("accept", self.folder)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("post-merge verification failed", result.stdout)
-        self._assert_failed_preserves(before, source, branch, tip)
-
-        self._write_verify("raise SystemExit(0)\n")
         (source / "README.txt").write_text("source\n", encoding="utf-8")
         self._git("add", "README.txt", cwd=source)
         self._git("commit", "-m", "source conflict", cwd=source)
         tip = self._git("rev-parse", branch)
+        verified = self._cli("verify", self.folder)
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
         (self.root / "README.txt").write_text("target\n", encoding="utf-8")
         self._git("add", "README.txt")
         self._git("commit", "-m", "target conflict")
@@ -297,6 +293,8 @@ class TestAcceptCliFailures(AcceptCliCase):
         (self.assent_dir / "dependent" / "_folder.toml").write_text(
             'after = ["base"]\n', encoding="utf-8", newline="\n")
         source, _, _ = self._make_source(folder="dependent", filename="dependent.txt")
+        verified = self._cli("verify", "dependent")
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
         accepted = self._cli("accept", "dependent")
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
         self.assertTrue(source.exists())
@@ -305,7 +303,7 @@ class TestAcceptCliFailures(AcceptCliCase):
         self._write_task(folder=absent)
         result = self._cli("accept", absent)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("no trustworthy accept evidence", result.stdout)
+        self.assertIn("no source worktree", result.stdout)
 
         forged = (
             "forged evidence\n\n"
@@ -319,53 +317,58 @@ class TestAcceptCliFailures(AcceptCliCase):
         self._git("commit", "-F", str(message_path))
         result = self._cli("accept", absent)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("no trustworthy accept evidence", result.stdout)
+        self.assertIn("no source worktree", result.stdout)
 
     def test_last_gate_branch_head_and_cleanliness_changes_refuse(self) -> None:
         source, branch, tip = self._make_source()
         before = self._head()
         self._git("branch", "other", before)
+        verified = self._cli("verify", self.folder)
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        cfg = load_config(self.config, self.folder)
+        real_commit_parents = gitops.commit_parents
 
-        def set_action(action: str) -> None:
-            root = repr(str(self.root))
-            self._write_verify(
-                "import pathlib, subprocess\n"
-                "if '.integration' in str(pathlib.Path.cwd()):\n"
-                f"    root = {root}\n"
-                f"    action = {action!r}\n"
-                "    if action == 'switch':\n"
-                "        subprocess.check_call(['git', '-C', root, 'switch', 'other'])\n"
-                "    elif action == 'move':\n"
-                "        pathlib.Path(root, 'concurrent.txt').write_text('move\\n', encoding='utf-8')\n"
-                "        subprocess.check_call(['git', '-C', root, 'add', 'concurrent.txt'])\n"
-                "        subprocess.check_call(['git', '-C', root, 'commit', '-m', 'concurrent move'])\n"
-                "    else:\n"
-                "        pathlib.Path(root, 'concurrent-dirty.txt').write_text('dirty\\n', encoding='utf-8')\n"
-                "raise SystemExit(0)\n")
+        def run_with_action(action: str) -> tuple[int, str]:
+            def mutate(candidate: Path, ref: str = "HEAD") -> tuple[str, ...]:
+                parents = real_commit_parents(candidate, ref)
+                if action == "switch":
+                    self._git("switch", "other")
+                elif action == "move":
+                    (self.root / "concurrent.txt").write_text(
+                        "move\n", encoding="utf-8")
+                    self._git("add", "concurrent.txt")
+                    self._git("commit", "-m", "concurrent move")
+                else:
+                    (self.root / "concurrent-dirty.txt").write_text(
+                        "dirty\n", encoding="utf-8")
+                return parents
 
-        set_action("switch")
-        result = self._cli("accept", self.folder)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("no longer on trunk", result.stdout)
+            output = io.StringIO()
+            with patch("assent.accept.gitops.commit_parents", side_effect=mutate):
+                with contextlib.redirect_stdout(output):
+                    code = accept_folder(cfg)
+            return code, output.getvalue()
+
+        code, output = run_with_action("switch")
+        self.assertEqual(code, 1)
+        self.assertIn("no longer on trunk", output)
         self.assertEqual(self._head("trunk"), before)
         self.assertEqual(self._head("other"), before)
         self.assertTrue(source.exists())
         self._assert_no_temporary_integration()
         self._git("switch", "trunk")
 
-        set_action("dirty")
-        result = self._cli("accept", self.folder)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("became dirty", result.stdout)
+        code, output = run_with_action("dirty")
+        self.assertEqual(code, 1)
+        self.assertIn("became dirty", output)
         self.assertEqual(self._head(), before)
         self.assertTrue(source.exists())
         self._assert_no_temporary_integration()
         (self.root / "concurrent-dirty.txt").unlink()
 
-        set_action("move")
-        result = self._cli("accept", self.folder)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("moved during accept", result.stdout)
+        code, output = run_with_action("move")
+        self.assertEqual(code, 1)
+        self.assertIn("moved during accept", output)
         self.assertNotEqual(self._head(), before)
         self.assertEqual(self._git("rev-parse", f"{self._head()}^"), before)
         self.assertEqual(self._git("rev-parse", branch), tip)
