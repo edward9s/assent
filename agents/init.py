@@ -3,7 +3,7 @@
 - .agents/agents.toml、instructions.md、format.md、verify.py、預設工作資料夾。
 - AGENTS.md:不存在 -> 建立專案範本;已存在 -> 只補一行 instructions 橋接。
   舊版「AI 工作體系」區塊會移除,其他專案內容不動。
-- .gitignore:排除整個 .agents/;AGENTS.md 保留在版控。
+- .gitignore:排除整個 .agents/;既有的 AGENTS.md 版控選擇不干涉。
 """
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ _BRIDGE_LINE = (
 )
 _DEFAULT_FOLDER = "plan01"
 _GITIGNORE_LINES = [".agents/"]
-_GITIGNORE_REMOVE_LINES = {"AGENTS.md", "/AGENTS.md"}
 
 
 def _template(name: str) -> str:
@@ -80,13 +79,10 @@ def _merge_agents_md(root: Path, made: list[str], skipped: list[str]) -> None:
 def _merge_gitignore(root: Path, made: list[str]) -> None:
     target = root / ".gitignore"
     existing = target.read_text(encoding="utf-8") if target.exists() else ""
-    original_lines = existing.splitlines()
-    lines = [line for line in original_lines
-             if line.strip() not in _GITIGNORE_REMOVE_LINES]
-    removed = len(original_lines) - len(lines)
+    lines = existing.splitlines()
     have = {line.strip() for line in lines}
     missing = [line for line in _GITIGNORE_LINES if line not in have]
-    if not missing and not removed:
+    if not missing:
         return
     if missing:
         if lines and lines[-1]:
@@ -96,12 +92,7 @@ def _merge_gitignore(root: Path, made: list[str]) -> None:
         lines.extend(missing)
     target.write_text("\n".join(lines) + ("\n" if lines else ""),
                       encoding="utf-8", newline="\n")
-    detail: list[str] = []
-    if missing:
-        detail.append(f"補 {len(missing)} 行")
-    if removed:
-        detail.append(f"移除 {removed} 行 AGENTS.md 排除規則")
-    made.append(f"{target}({';'.join(detail)})")
+    made.append(f"{target}(補 {len(missing)} 行)")
 
 
 def init(path: str | Path = ".") -> int:

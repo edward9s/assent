@@ -64,6 +64,8 @@ class E2ETestCase(unittest.TestCase):
         self._git("init")
         self._git("config", "user.name", "Test")
         self._git("config", "user.email", "test@example.com")
+        (self.root / ".gitignore").write_text(
+            _WORKTREE_GITIGNORE, encoding="utf-8")
         self.plan_dir = self.root / ".agents" / "plan01"
         self.plan_dir.mkdir(parents=True)
         (self.root / ".agents" / "agents.toml").write_text(
@@ -77,7 +79,7 @@ class E2ETestCase(unittest.TestCase):
         (self.root / ".agents" / "verify.py").write_text(
             "from pathlib import Path\n"
             "root = Path.cwd()\n"
-            "ok = (root / 'AGENTS.md').is_file() and not (root / '.agents').exists()\n"
+            "ok = not (root / '.agents').exists()\n"
             "raise SystemExit(0 if ok else 1)\n",
             encoding="utf-8")
 
@@ -97,10 +99,14 @@ class E2ETestCase(unittest.TestCase):
         self._git("add", "-A")
         self._git("commit", "-m", "init")
 
+    def execution_root(self, folder="plan01") -> Path:
+        candidate = gitops.worktree_path(self.root, folder)
+        return candidate if candidate.exists() else self.root
+
     def done_step(self, path, files=None):
         def step(prompt):
             for rel, content in (files or {}).items():
-                p = self.root / rel
+                p = self.execution_root() / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content, encoding="utf-8")
             set_status(path, "DONE")
@@ -114,7 +120,11 @@ class E2ETestCase(unittest.TestCase):
             return engine.run(self.cfg(), adapter=adapter, **kw)
 
     def subjects(self):
-        return self._git("log", "--pretty=%s").splitlines()
+        return self.git_at(self.execution_root(), "log", "--pretty=%s").splitlines()
+
+    def git_at(self, root, *args):
+        return subprocess.run(["git", *args], cwd=root, capture_output=True,
+                              encoding="utf-8", check=True).stdout
 
 
 class TestScenarios(E2ETestCase):
@@ -146,20 +156,23 @@ class TestScenarios(E2ETestCase):
         self.start()
 
         def first(prompt):
-            (self.root / "outside_tmp.py").write_text("x", encoding="utf-8")
+            (self.execution_root() / "outside_tmp.py").write_text(
+                "x", encoding="utf-8")
             set_status(p1, "DONE")
             return ok_result()
 
         def second(prompt):
             # 修正:把越界檔移到 scope 內名稱
-            (self.root / "outside_tmp.py").rename(self.root / "outside.py")
+            root = self.execution_root()
+            (root / "outside_tmp.py").rename(root / "outside.py")
             return ok_result()
 
         adapter = ScriptedAdapter([first, second])
         self.assertEqual(self.run_engine(adapter, once=True), 0)
         self.assertIn("原因", adapter.calls[1])
         self.assertEqual(parse_task_file(p1).status, "DONE")
-        self.assertIn("outside.py", self._git("ls-files"))
+        self.assertIn("outside.py", self.git_at(
+            self.execution_root(), "ls-files"))
 
     def test_blocked_gates_downstream_others_proceed(self):
         """BLOCKED 劇本:t001 重試用盡 -> 調度器標 BLOCKED + r 檔記錄;
@@ -170,7 +183,8 @@ class TestScenarios(E2ETestCase):
         self.start()
 
         def bad(prompt):
-            (self.root / "rogue.py").write_text("x", encoding="utf-8")
+            (self.execution_root() / "rogue.py").write_text(
+                "x", encoding="utf-8")
             set_status(p1, "DONE")
             return ok_result()
 
@@ -193,8 +207,9 @@ class TestScenarios(E2ETestCase):
         sleeps: list[float] = []
 
         def quota_step(prompt):
-            (self.root / "src").mkdir(exist_ok=True)
-            (self.root / "src" / "half.py").write_text("h", encoding="utf-8")
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "half.py").write_text("h", encoding="utf-8")
             return TaskResult(exit_code=1, output="", quota_exhausted=True,
                               reset_at=t0 + timedelta(minutes=5))
 
@@ -205,17 +220,15 @@ class TestScenarios(E2ETestCase):
         self.assertIn("接續", adapter.calls[1])
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(t001)") for s in subjects))
-        self.assertTrue(any(s.startswith("auto(t001)") for s in subjects))
         self.assertEqual(parse_task_file(p1).status, "DONE")
 
 
 class TestWorktreeScenarios(E2ETestCase):
-    def enable_worktree(self):
+    def configure_git_run(self):
         (self.root / ".gitignore").write_text(
             _WORKTREE_GITIGNORE, encoding="utf-8")
         (self.root / ".agents" / "agents.toml").write_text(
             '[plan]\ntasks = "plan01"\n'
-            '[git]\nworktree = true\n'
             '[run]\nretry_per_task = 1\n', encoding="utf-8")
 
     def isolated_done_step(self, adapter, path, files):
@@ -231,12 +244,8 @@ class TestWorktreeScenarios(E2ETestCase):
             return ok_result()
         return step
 
-    def git_at(self, root, *args):
-        return subprocess.run(["git", *args], cwd=root, capture_output=True,
-                              encoding="utf-8", check=True).stdout
-
     def test_run_isolated_from_main_tree_and_queries_use_worktree(self):
-        self.enable_worktree()
+        self.configure_git_run()
         verify = ('python -c "import pathlib,sys;sys.exit(0 if '
                   "pathlib.Path('src/ok.txt').is_file() else 1)\"")
         task = self.add_task(1, verify=verify)
@@ -255,6 +264,9 @@ class TestWorktreeScenarios(E2ETestCase):
         self.assertIn(str(task.resolve()), adapter.calls[0])
         self.assertIn(str((self.root / ".agents" / "instructions.md").resolve()),
                       adapter.calls[0])
+        self.assertIn("專案規則 AGENTS.md", adapter.calls[0])
+        self.assertNotIn(str((self.root / "AGENTS.md").resolve()),
+                         adapter.calls[0])
         self.assertEqual(parse_task_file(task).status, "DONE")
         self.assertEqual(self._git("status", "--porcelain"), "")
         self.assertEqual(self._git("branch", "--show-current").strip(), main_branch)
@@ -276,7 +288,7 @@ class TestWorktreeScenarios(E2ETestCase):
         self.assertIn("[", report)
 
     def test_default_verify_script_runs_inside_worktree(self):
-        self.enable_worktree()
+        self.configure_git_run()
         task = self.add_task(1, verify="python .agents/verify.py")
         self.start()
         adapter = ScriptedAdapter([])
@@ -289,7 +301,7 @@ class TestWorktreeScenarios(E2ETestCase):
                       adapter.calls[0])
 
     def test_tracked_task_folder_is_rejected_before_worktree_creation(self):
-        self.enable_worktree()
+        self.configure_git_run()
         task = self.add_task(1)
         self._git("add", "-f", str(task.relative_to(self.root)))
         self.start()
@@ -300,35 +312,35 @@ class TestWorktreeScenarios(E2ETestCase):
         self.assertEqual(adapter.calls, [])
         self.assertFalse(worktree.exists())
 
-    def test_missing_tracked_agents_md_is_rejected_before_worktree_creation(self):
-        self.enable_worktree()
-        self.add_task(1)
+    def test_ignored_agents_md_is_passed_as_main_absolute_path(self):
+        self.configure_git_run()
+        task = self.add_task(1, verify="python .agents/verify.py")
+        (self.root / ".gitignore").write_text(
+            ".agents/\nAGENTS.md\n", encoding="utf-8")
+        self.start()
+        worktree = gitops.worktree_path(self.root, "plan01")
+        adapter = ScriptedAdapter([])
+        adapter.steps.append(self.isolated_done_step(adapter, task, {}))
+
+        self.assertEqual(self.run_engine(adapter, once=True), 0)
+        self.assertFalse((worktree / "AGENTS.md").exists())
+        self.assertIn(str((self.root / "AGENTS.md").resolve()), adapter.calls[0])
+
+    def test_missing_agents_md_does_not_block_execution(self):
+        self.configure_git_run()
+        task = self.add_task(1)
         (self.root / "AGENTS.md").unlink()
         self.start()
         worktree = gitops.worktree_path(self.root, "plan01")
         adapter = ScriptedAdapter([])
+        adapter.steps.append(self.isolated_done_step(adapter, task, {}))
 
-        self.assertEqual(self.run_engine(adapter), 1)
-        self.assertEqual(adapter.calls, [])
-        self.assertFalse(worktree.exists())
-
-    def test_staged_only_agents_md_is_rejected_before_worktree_creation(self):
-        self.enable_worktree()
-        self.add_task(1)
-        (self.root / "AGENTS.md").unlink()
-        self.start()
-        (self.root / "AGENTS.md").write_text("尚未提交的專案規則\n",
-                                               encoding="utf-8")
-        self._git("add", "AGENTS.md")
-        worktree = gitops.worktree_path(self.root, "plan01")
-        adapter = ScriptedAdapter([])
-
-        self.assertEqual(self.run_engine(adapter), 1)
-        self.assertEqual(adapter.calls, [])
-        self.assertFalse(worktree.exists())
+        self.assertEqual(self.run_engine(adapter, once=True), 0)
+        self.assertTrue(worktree.exists())
+        self.assertIn("不存在就略過", adapter.calls[0])
 
     def test_two_folders_use_independent_worktrees_and_branches(self):
-        self.enable_worktree()
+        self.configure_git_run()
         task1 = self.add_task(1)
         plan2 = self.root / ".agents" / "plan02"
         plan2.mkdir()
@@ -359,7 +371,7 @@ class TestWorktreeScenarios(E2ETestCase):
         self.assertEqual(self._git("status", "--porcelain"), "")
 
     def test_busy_lock_refuses_before_creating_worktree(self):
-        self.enable_worktree()
+        self.configure_git_run()
         self.add_task(1)
         self.start()
         cfg = self.cfg()

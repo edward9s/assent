@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agents import AgentsError, engine
+from agents import AgentsError, engine, gitops
 from agents.adapters import Adapter, TaskResult
 from agents.config import load_config
 from agents.plan import append_entry, journal_path_for, parse_task_file, set_status
@@ -65,15 +65,28 @@ class EngineTestCase(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.worktrees_root = self.root.parent / f"{self.root.name}.worktrees"
+        self.addCleanup(shutil.rmtree, self.worktrees_root, ignore_errors=True)
         self._git("init")
         self._git("config", "user.name", "Test")
         self._git("config", "user.email", "test@example.com")
+        (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
+        (self.root / "AGENTS.md").write_text("專案規則\n", encoding="utf-8")
         self.plan_dir = self.root / ".agents" / "plan01"
         self.plan_dir.mkdir(parents=True)
 
     def _git(self, *args) -> str:
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True,
                               encoding="utf-8", check=True).stdout
+
+    def execution_root(self) -> Path:
+        candidate = gitops.worktree_path(self.root, "plan01")
+        return candidate if candidate.exists() else self.root
+
+    def _git_execution(self, *args) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=self.execution_root(), capture_output=True,
+            encoding="utf-8", check=True).stdout
 
     def build(self, retry=1, git_enabled=True):
         (self.root / ".agents" / "agents.toml").write_text(
@@ -99,13 +112,13 @@ class EngineTestCase(unittest.TestCase):
             return engine.run(cfg, **kw)
 
     def subjects(self) -> list[str]:
-        return self._git("log", "--pretty=%s").splitlines()
+        return self._git_execution("log", "--pretty=%s").splitlines()
 
     # AI 行為模擬
     def ai_done(self, task_path, files=None):
         def step(prompt):
             for rel, content in (files or {}).items():
-                p = self.root / rel
+                p = self.execution_root() / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content, encoding="utf-8")
             set_status(task_path, "DONE")
@@ -140,9 +153,10 @@ class TestRunSuccess(EngineTestCase):
             report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
             self.assertIn("t001  DONE", report)
             self.assertIn("t002  TODO", report)
-            return self.ai_done(p2)(prompt)
+            return self.ai_done(p2, {"src/two.py": "2"})(prompt)
 
-        adapter = ScriptedAdapter([self.ai_done(p1), second_task])
+        adapter = ScriptedAdapter([
+            self.ai_done(p1, {"src/one.py": "1"}), second_task])
         self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
         self.assertEqual(parse_task_file(p2).status, "DONE")
         autos = [s for s in self.subjects() if s.startswith("auto(")]
@@ -207,9 +221,9 @@ class TestRunSuccess(EngineTestCase):
         adapter = ScriptedAdapter([self.ai_done(p1)])
         self.run_quiet(cfg, once=True, adapter=adapter)
         prompt = adapter.calls[0][0]
-        self.assertIn(".agents/instructions.md", prompt)
-        self.assertIn(".agents/plan01/t001_task.toml", prompt)
-        self.assertIn(".agents/plan01/r001_task.toml", prompt)
+        self.assertIn(str(cfg.agents_dir / "instructions.md"), prompt)
+        self.assertIn(str(p1), prompt)
+        self.assertIn(str(p1.with_name("r001_task.toml")), prompt)
         self.assertIn(_OK, prompt)
 
     def test_worktree_default_verify_uses_main_script_and_worktree_cwd(self):
@@ -236,8 +250,9 @@ class TestAcceptanceGates(EngineTestCase):
         self.commit_all()
 
         def step(prompt):
-            (self.root / "src").mkdir(exist_ok=True)
-            (self.root / "src" / "half.py").write_text("x", encoding="utf-8")
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "half.py").write_text("x", encoding="utf-8")
             set_status(path, "BLOCKED")
             append_entry(journal_path_for(path), by="ai", event="blocked",
                          summary="卡在相依")
@@ -246,7 +261,7 @@ class TestAcceptanceGates(EngineTestCase):
         self.assertEqual(self.run_quiet(cfg, once=True,
                                         adapter=ScriptedAdapter([step])), 0)
         self.assertTrue(any("BLOCKED" in s for s in self.subjects()))
-        self.assertIn("src/half.py", self._git("ls-files"))
+        self.assertIn("src/half.py", self._git_execution("ls-files"))
 
     def test_status_not_updated_fails(self):
         path = self.write_task(1)
@@ -262,7 +277,8 @@ class TestAcceptanceGates(EngineTestCase):
         self.commit_all()
 
         def bad(prompt):
-            (self.root / "outside.py").write_text("x", encoding="utf-8")
+            (self.execution_root() / "outside.py").write_text(
+                "x", encoding="utf-8")
             set_status(path, "DONE")
             return ok_result()
 
@@ -270,7 +286,8 @@ class TestAcceptanceGates(EngineTestCase):
         self.run_quiet(cfg, once=True, adapter=adapter)
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
         self.assertIn("原因", adapter.calls[1][0])          # 重試提示含失敗原因
-        self.assertIn("outside.py", self._git("ls-files"))  # 產出不丟棄,收進檢查點
+        self.assertIn("outside.py", self._git_execution(
+            "ls-files"))  # 產出不丟棄,收進檢查點
         from agents.plan import read_entries
         entries = read_entries(journal_path_for(path))
         self.assertTrue(any(e["by"] == "scheduler" and e["event"] == "blocked"
@@ -286,8 +303,9 @@ class TestAcceptanceGates(EngineTestCase):
             return ok_result()
 
         def second(prompt):
-            (self.root / "src").mkdir(exist_ok=True)
-            (self.root / "src" / "ok.txt").write_text("y", encoding="utf-8")
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "ok.txt").write_text("y", encoding="utf-8")
             return ok_result()
 
         adapter = ScriptedAdapter([first, second])
@@ -338,8 +356,9 @@ class TestQuotaAndResume(EngineTestCase):
         sleeps: list[float] = []
 
         def quota_step(prompt):
-            (self.root / "src").mkdir(exist_ok=True)
-            (self.root / "src" / "partial.py").write_text("p", encoding="utf-8")
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text("p", encoding="utf-8")
             return TaskResult(exit_code=1, output="", quota_exhausted=True,
                               reset_at=reset)
 
@@ -351,7 +370,6 @@ class TestQuotaAndResume(EngineTestCase):
         self.assertIn("接續", adapter.calls[1][0])
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(t001)") for s in subjects))
-        self.assertTrue(any(s.startswith("auto(t001)") for s in subjects))
         from agents.plan import read_entries
         self.assertTrue(any(e["event"] == "quota"
                             for e in read_entries(journal_path_for(path))))
@@ -500,7 +518,8 @@ class TestSchedulingAndRefusals(EngineTestCase):
     def test_dirty_tree_refused(self):
         self.write_task(1)
         self.commit_all()
-        (self.root / "dirty.txt").write_text("x", encoding="utf-8")
+        worktree = gitops.ensure_worktree(self.root, "plan01")
+        (worktree / "dirty.txt").write_text("x", encoding="utf-8")
         cfg = self.build()
         self.assertEqual(self.run_quiet(cfg, adapter=ScriptedAdapter([])), 1)
 
@@ -590,7 +609,8 @@ class TestQueries(EngineTestCase):
             set_status(p2, "DONE")
             return ok_result()
 
-        adapter = ScriptedAdapter([self.ai_done(p1), fail_step])
+        adapter = ScriptedAdapter([
+            self.ai_done(p1, {"src/done.py": "ok"}), fail_step])
         self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
 
         from agents.plan import Plan
@@ -601,7 +621,7 @@ class TestQueries(EngineTestCase):
         self.assertIn("[", text)  # DONE 任務附檢查點 hash
         # _report.md 已寫出,但不進版控
         self.assertTrue((cfg.tasks_dir / "_report.md").is_file())
-        self.assertNotIn("_report.md", self._git("ls-files"))
+        self.assertNotIn("_report.md", self._git_execution("ls-files"))
 
 
 if __name__ == "__main__":

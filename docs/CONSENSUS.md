@@ -11,7 +11,7 @@
 讓每次任務只需載入「足以無歧義開工的最小上下文」。
 
 ```text
-專案規則   → AGENTS.md(root,工具自動載入的入口,進版控)
+專案規則   → AGENTS.md(root,工具自動載入的入口,是否進版控由專案決定)
 工作指示   → .agents/instructions.md(agents session 行為與跨專案共通規則)
 本次任務   → .agents/<工作資料夾>/tNNN_名稱.toml(任務檔,執行上自包含)
 目前狀態   → 任務檔的 status + git(任務檔即狀態,沒有另外的狀態檔)
@@ -48,17 +48,17 @@
 ## 位置慣例
 
 - `AGENTS.md` 必須留在 project root——agent 工具自動在 root 尋找指令檔,
-  位置本身就是功能。它只放專案規則與一行 agents 橋接,並且必須進版控,
-  讓每個 worktree 都取得對應分支的專案規則。
+  位置本身就是功能。它只放專案規則與一行 agents 橋接;進版控時使用
+  worktree 內的分支版本,未進版控時由調度器提示主樹絕對路徑。
 - agents session 行為與跨專案共通規則放在 `.agents/instructions.md`,不混入
   專案 AGENTS.md。其餘管理檔也全部收進 `.agents/`,root 保持乾淨。
 - 整個 `.agents/` 由 `.gitignore` 排除,只留在主工作樹;調度器用絕對路徑
   把 instructions、t/r 與預設驗收腳本交給 worktree session,不製造第二份真本。
 - 驗收腳本預設在主樹 `.agents/verify.py`,內容是專案自己的檢查命令;
-  worktree 模式從主樹載入腳本,但以 worktree 為 cwd 驗收隔離後的成果。
-- worktree 模式 fail-closed 要求 `AGENTS.md` 已追蹤,並拒絕任何已追蹤的
-  `.agents/` 檔案。若確實要把 `.agents/` 進版控,就必須關閉 worktree 模式。
-- 工作資料夾內的 `agents.lock` 保證同一資料夾一個 run；worktree 模式的路徑為
+  從主樹載入腳本,但以 worktree 為 cwd 驗收隔離後的成果。
+- Git 啟用時一律使用 worktree,沒有切換開關;這是安全平行處理多個工作資料夾
+  的必要條件。任何已追蹤的 `.agents/` 檔案都會 fail-closed,避免第二份真本。
+- 工作資料夾內的 `agents.lock` 保證同一資料夾一個 run；worktree 路徑為
   `<專案名>.worktrees/<資料夾>/`，可用位置參數指定工作資料夾。
 
 ## 品質標準(取代 token 數字 KPI)

@@ -131,7 +131,7 @@ class TestInit(MainTestCase):
         self.assertIn("## 專案附註\n\n必須保留。", text)
         self.assertEqual(text.count("<!-- agents-instructions -->"), 1)
 
-    def test_removes_agents_md_ignore_for_version_control(self):
+    def test_preserves_agents_md_ignore_choice(self):
         (self.root / ".gitignore").write_text(
             "cache/\nAGENTS.md\n.agents/\n", encoding="utf-8")
         run_init(self.root)
@@ -139,7 +139,7 @@ class TestInit(MainTestCase):
             encoding="utf-8").splitlines()
         self.assertIn("cache/", lines)
         self.assertIn(".agents/", lines)
-        self.assertNotIn("AGENTS.md", lines)
+        self.assertIn("AGENTS.md", lines)
 
     def test_missing_target_dir_fails(self):
         out = io.StringIO()

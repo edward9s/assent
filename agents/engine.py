@@ -32,7 +32,7 @@ from agents.plan import (Plan, Task, append_entry, parse_task_file,
 
 # 預設提示詞模板(可用 [prompt] template 覆寫;變數以字面替換,容忍模板內其他大括號)。
 _DEFAULT_PROMPT_TEMPLATE = (
-    "你是 agents 的執行 AI。先讀專案根目錄的 AGENTS.md(若存在),\n"
+    "你是 agents 的執行 AI。先讀專案規則 {agents_md_path},\n"
     "再讀 agents 工作指示 {instructions_path} 與任務檔 {task_path}。\n"
     "只執行任務 {task_id},不要碰其他任務檔。\n"
     "自行驗證時在目前工作樹執行:{verify_command}\n"
@@ -60,6 +60,7 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
                   resumed: bool = False) -> str:
     template = cfg.prompt_template or _DEFAULT_PROMPT_TEMPLATE
     text = (template
+            .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
             .replace("{instructions_path}",
                      cfg.rel(cfg.agents_dir / "instructions.md"))
             .replace("{task_path}", cfg.rel(task.path))
@@ -102,7 +103,7 @@ def _git_read(root, *args: str) -> str | None:
         result = subprocess.run(
             ["git", *args], cwd=str(root),
             capture_output=True, encoding="utf-8", errors="replace")
-    except FileNotFoundError:
+    except OSError:
         return None
     if result.returncode != 0:
         return None
@@ -110,7 +111,7 @@ def _git_read(root, *args: str) -> str | None:
 
 
 def _verify_command_for_prompt(cfg: Config, command: str) -> str:
-    """worktree 模式把預設驗收腳本展開成主樹絕對路徑。"""
+    """隔離執行時把預設驗收腳本展開成主樹絕對路徑。"""
     if cfg.source_root is None or command.strip() != _DEFAULT_VERIFY_COMMAND:
         return command
     parts = [sys.executable, str((cfg.agents_dir / "verify.py").resolve())]
@@ -118,13 +119,21 @@ def _verify_command_for_prompt(cfg: Config, command: str) -> str:
             else shlex.join(parts))
 
 
-def _worktree_configuration_errors(cfg: Config) -> list[str]:
-    """worktree 只納入專案 AGENTS.md,.agents 管理面必須留在主樹。"""
-    errors: list[str] = []
-    agents_md = cfg.git_rel(cfg.root / "AGENTS.md")
-    if not gitops.is_tracked(cfg.root, agents_md, ref="HEAD"):
-        errors.append("worktree 的 HEAD 缺少已追蹤的專案 AGENTS.md")
+def _agents_md_path_for_prompt(cfg: Config) -> str:
+    """選擇專案規則:優先分支版本,沒有時回退主工作樹絕對路徑。"""
+    candidate = cfg.root / "AGENTS.md"
+    if candidate.is_file():
+        return cfg.rel(candidate)
+    if cfg.source_root is not None:
+        source = cfg.source_root / "AGENTS.md"
+        if source.is_file():
+            return str(source.resolve())
+    return "AGENTS.md(若存在;不存在就略過)"
 
+
+def _worktree_configuration_errors(cfg: Config) -> list[str]:
+    """.agents 管理面必須留在主樹,不得產生 worktree 內的第二份真本。"""
+    errors: list[str] = []
     agents_path = cfg.git_rel(cfg.agents_dir)
     tracked = sorted(set(gitops.tracked_paths(cfg.root, agents_path))
                      | set(gitops.tracked_paths(cfg.root, agents_path,
@@ -132,7 +141,7 @@ def _worktree_configuration_errors(cfg: Config) -> list[str]:
     if tracked:
         shown = ", ".join(tracked[:5]) + (" ..." if len(tracked) > 5 else "")
         errors.append(f".agents 已有 Git 追蹤檔案:{shown}"
-                      "(worktree 模式下整個 .agents 必須留在主工作樹)")
+                      "(Git 啟用時整個 .agents 必須留在主工作樹)")
     return errors
 
 
@@ -167,7 +176,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
     """已持有工作資料夾鎖後的實際 run 主體。"""
-    if cfg.git_enabled and cfg.git_worktree and cfg.source_root is None:
+    if cfg.git_enabled and cfg.source_root is None:
         try:
             errors = _worktree_configuration_errors(cfg)
             if errors:
@@ -412,7 +421,7 @@ def _evaluate(cfg: Config, task: Task,
 def _run_verify(cfg: Config, command: str) -> int:
     """在目標工作樹執行 verify,退出碼 0 = 通過。
 
-    worktree 模式的預設腳本從主樹以絕對路徑載入,其餘命令維持原本的 shell
+    隔離執行的預設腳本從主樹以絕對路徑載入,其餘命令維持原本的 shell
     語意;兩者的 cwd 都是目前目標工作樹。
     """
     if cfg.source_root is not None and command.strip() == _DEFAULT_VERIFY_COMMAND:
@@ -644,8 +653,8 @@ def status(cfg: Config) -> int:
 
 
 def _query_git_root(cfg: Config) -> Path:
-    """status/report 若已有有效 worktree,改從隔離分支讀 git 資訊。"""
-    if not cfg.git_worktree or cfg.source_root is not None:
+    """Git 啟用且已有有效 worktree 時,改從隔離分支讀 git 資訊。"""
+    if not cfg.git_enabled or cfg.source_root is not None:
         return cfg.root
     candidate = gitops.worktree_path(cfg.root, cfg.tasks_name)
     top = _git_read(candidate, "rev-parse", "--show-toplevel")
@@ -683,7 +692,7 @@ def check(cfg: Config) -> int:
     inside = _git_read(cfg.root, "rev-parse", "--is-inside-work-tree")
     if inside == "true":
         print("git repo:OK")
-        if cfg.git_enabled and cfg.git_worktree:
+        if cfg.git_enabled:
             try:
                 errors = _worktree_configuration_errors(cfg)
             except AgentsError as e:

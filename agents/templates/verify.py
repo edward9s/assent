@@ -14,18 +14,13 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-# 驗收目標一律是調度器指定的 cwd;worktree 模式時腳本本體仍在主樹。
+# 驗收目標一律是調度器指定的 cwd;隔離執行時腳本本體仍在主樹。
 ROOT = Path.cwd().resolve()
 
 
 def fail(message: str) -> None:
     print(f"verify: FAIL - {message}")
     sys.exit(1)
-
-
-def require_file(rel: str) -> None:
-    if not (ROOT / rel).is_file():
-        fail(f"缺少 {rel}")
 
 
 def run(*cmd: str) -> None:
@@ -35,7 +30,6 @@ def run(*cmd: str) -> None:
 
 
 # --- 工作樹完整性檢查(保留) ---
-require_file("AGENTS.md")
 run("git", "diff", "--check")
 
 # --- 專案檢查(TODO: 依技術棧擇一或自行替換) ---

@@ -58,8 +58,7 @@ class Config:
     codex_default_effort: dict[str, str] = field(
         default_factory=lambda: dict(_DEFAULT_CODEX_EFFORT))
     prompt_template: str | None = None
-    git_worktree: bool = False
-    source_root: Path | None = None  # worktree 模式下原始主工作樹;不來自設定檔
+    source_root: Path | None = None  # 隔離執行時的原始主工作樹;不來自設定檔
 
     @property
     def branch_prefix(self) -> str:
@@ -194,7 +193,6 @@ def load_config(path: str | Path, folder: str | None = None) -> Config:
         tasks_dir=agents_dir / tasks_name,
         tasks_name=tasks_name,
         git_enabled=_typed(git, "[git]", "enabled", bool, True),
-        git_worktree=_typed(git, "[git]", "worktree", bool, False),
         stall_minutes=_typed(watchdog, "[watchdog]", "stall_minutes", int, 30),
         retry_per_task=_typed(run, "[run]", "retry_per_task", int, 1),
         quota_poll_minutes=_typed(run, "[run]", "quota_poll_minutes", int, 30),

@@ -69,7 +69,7 @@ pip install -e .
 agents init
 
 # 2. 填 AGENTS.md 的專案描述/硬限制、.agents/verify.py 的實際檢查命令
-#    AGENTS.md 要提交進 Git;整個 .agents/ 留在主工作樹,不提交
+#    AGENTS.md 可自行決定是否提交;整個 .agents/ 留在主工作樹,不提交
 
 # 3. 開 AI 會議產出任務檔(這一步是互動 session,見下方「使用循環」)
 
@@ -100,14 +100,18 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 
 可在 N 個終端各自指定不同的工作資料夾執行，例如 `agents run parallel01`、
 `agents run parallel02`。每個工作資料夾都有自己的 `agents.lock`，同一資料夾
-同時只允許一個 run；若在 `.agents/agents.toml` 開啟 `[git] worktree = true`，
-每個資料夾會使用 `<專案名>.worktrees/<資料夾>/` 的獨立 worktree。
+同時只允許一個 run；Git 啟用時,每個資料夾一律使用
+`<專案名>.worktrees/<資料夾>/` 的獨立 worktree,這是安全平行處理的基礎。
 
-版控邊界刻意簡單:`AGENTS.md` 是專案規則,必須進 Git 並跟著分支進入
-worktree;整個 `.agents/` 是 agents 管理面,由 `.gitignore` 排除並只留在主工作樹。
-調度器會在提示詞中提供 instructions、t/r 與預設驗收腳本的主樹絕對路徑;
-驗收腳本雖從主樹載入,執行 cwd 仍是 worktree。若 `AGENTS.md` 未被追蹤,
-或任何 `.agents/` 檔案已進 Git,調度器會在開 session 前 fail-closed 拒絕執行。
+版控邊界刻意簡單:`AGENTS.md` 是專案規則;有進 Git 時使用 worktree 內的
+分支版本,未進 Git 時由提示詞提供主樹絕對路徑。整個 `.agents/` 是 agents
+管理面,由 `.gitignore` 排除並只留在主工作樹。調度器同樣以絕對路徑提供
+instructions、t/r 與預設驗收腳本;驗收腳本雖從主樹載入,執行 cwd 仍是
+worktree。任何 `.agents/` 檔案已進 Git 時,調度器會在開 session 前
+fail-closed 拒絕執行,避免 worktree 出現第二份真本。
+
+AI 會議在主樹進行。從主樹可直接用 `git worktree list`、`git log <分支>` 與
+`git diff main...<分支>` 審查各 worktree 的 checkpoint,不必進入其目錄。
 
 平行執行的固有代價是額度共享，以及各分支 merge 回主線由人負責。
 

@@ -9,7 +9,7 @@
 
 ```text
 project/
-├── AGENTS.md                    # 專案規則(root,進版控;只留一行 agents 橋接)
+├── AGENTS.md                    # 專案規則(root;版控由專案決定;留一行 agents 橋接)
 └── .agents/
     ├── agents.toml              # 調度器設定:工作資料夾、adapter、檔位對照表
     ├── instructions.md          # agents session 指示與跨專案共通規則
@@ -34,24 +34,25 @@ project/
 - 任務編號在資料夾內**只增不改**:插入新任務用新號碼,不重編既有任務,
   deps 引用才不會斷。
 - **平行執行**:一個工作資料夾同一時間只允許一個 `run`,由該資料夾內的
-  `agents.lock` 鎖定；不同資料夾可在不同終端平行執行。開啟 worktree 模式後,
-  執行期使用 `<專案名>.worktrees/<資料夾>/`，位置參數可用
+  `agents.lock` 鎖定；不同資料夾可在不同終端平行執行。Git 啟用時一律使用
+  `<專案名>.worktrees/<資料夾>/` 的專屬 worktree，位置參數可用
   `agents run <資料夾>` 覆寫設定檔中的工作資料夾，並與 `--config` 正交。
 
 ### 專案規則與 agents 管理面
 
-`AGENTS.md` 是專案規則,必須進版控並跟著分支進入 worktree;其中只保留一行
-橋接,要求使用 agents 時讀取主工作樹的 `.agents/instructions.md`。專案特有限制
-不與 agents session 流程混在同一個受工具管理的區塊。
+`AGENTS.md` 是專案規則,其中只保留一行橋接,要求使用 agents 時讀取主工作樹的
+`.agents/instructions.md`。它若進版控,執行 AI 讀 worktree 內的分支版本;若未
+進版控,調度器改為提示主樹絕對路徑。專案特有限制不與 agents session 流程
+混在同一個受工具管理的區塊。
 
 整個 `.agents/` 是調度器管理面,預設由 `.gitignore` 排除且永遠留在主工作樹;
 worktree 不含 `.agents/`。調度器提示詞會把 instructions、t/r 與預設驗收腳本
 展開成主樹絕對路徑。`.agents/verify.py` 的腳本本體從主樹載入,但執行 cwd
-是 worktree,因此驗收目標仍是隔離工作樹。worktree 模式會 fail-closed 拒絕
-未追蹤的 `AGENTS.md` 或任何已進 Git 的 `.agents/` 檔案。
+是 worktree,因此驗收目標仍是隔離工作樹。任何已進 Git 的 `.agents/` 檔案
+都會 fail-closed,避免 worktree 產生第二份真本。
 
-`.agents/` 以主樹磁碟為唯一副本,備份由專案自行負責。若團隊或稽核需求必須追蹤
-`.agents/`,必須關閉 `[git] worktree`,避免主工作樹與 worktree 同時成為真本。
+`.agents/` 以主樹磁碟為唯一副本,備份由專案自行負責。Git 啟用時一律隔離到
+worktree,沒有切換開關;這是安全平行處理多個工作資料夾所必需的。
 
 ### adapter 沙箱的硬需求
 

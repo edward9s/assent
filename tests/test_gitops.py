@@ -10,8 +10,8 @@ from pathlib import Path
 from agents import AgentsError
 from agents.gitops import (
     changes_outside_scope, commit_all, commit_if_dirty, ensure_branch,
-    ensure_clean, ensure_worktree, head_ref, is_tracked, restore,
-    tracked_paths, worktree_path)
+    ensure_clean, ensure_worktree, head_ref, restore, tracked_paths,
+    worktree_path)
 
 
 def _run(root: Path, *args: str) -> None:
@@ -164,16 +164,15 @@ class TestTrackedPaths(GitTestCase):
         task.write_text("status = \"TODO\"\n", encoding="utf-8")
         _run(self.root, "add", str(task.relative_to(self.root)))
 
-        self.assertTrue(is_tracked(self.root, ".agents/plan01/t001_task.toml"))
-        self.assertFalse(is_tracked(
-            self.root, ".agents/plan01/t001_task.toml", ref="HEAD"))
-        self.assertFalse(is_tracked(self.root, ".agents/format.md"))
         self.assertEqual(tracked_paths(self.root, ".agents/plan01"),
                          [".agents/plan01/t001_task.toml"])
+        self.assertEqual(tracked_paths(
+            self.root, ".agents/plan01", ref="HEAD"), [])
 
         _run(self.root, "commit", "-m", "track task")
-        self.assertTrue(is_tracked(
-            self.root, ".agents/plan01/t001_task.toml", ref="HEAD"))
+        self.assertEqual(tracked_paths(
+            self.root, ".agents/plan01", ref="HEAD"),
+            [".agents/plan01/t001_task.toml"])
 
 
 class TestChangesOutsideScope(GitTestCase):

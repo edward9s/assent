@@ -5,8 +5,9 @@ tasks = "plan01"                  # 工作資料夾名稱(位於 .agents/ 內);
                                   # 同時是 git 分支前綴,計畫輪替時開新資料夾並改這裡
 
 [git]
-enabled = true                    # false 則不建分支、不 commit(不建議)
-worktree = false                  # true 則把程式碼、git、verify 隔離到專屬 worktree
+enabled = true                    # false 則不隔離、不建分支、不 commit(不建議)
+# Git 啟用時一律把程式碼、git 與驗收隔離到各工作資料夾的專屬 worktree;
+# 這是安全平行處理多個工作資料夾所必需的。
 
 [watchdog]
 stall_minutes = 30                # session 連續無輸出幾分鐘判定卡死;0 = 關閉
@@ -53,6 +54,6 @@ core  = "medium"
 lite  = "low"
 
 [prompt]
-# 可覆寫預設提示詞模板;可用變數:{instructions_path} {task_path}
+# 可覆寫預設提示詞模板;可用變數:{agents_md_path} {instructions_path} {task_path}
 # {journal_path} {verify_command} {task_id} {task_title}
 # template = """..."""
