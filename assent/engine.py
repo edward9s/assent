@@ -38,8 +38,10 @@ from typing import Callable, TextIO
 from assent import AssentError, gitops, lockfile, verification
 from assent.adapters import Adapter, get_adapter
 from assent.config import Config
-from assent.folderdeps import (find_unfinished_prerequisites,
-                               parse_folder_dependencies)
+from assent.folderdeps import (FolderBaseResolution,
+                               find_unfinished_prerequisites,
+                               parse_folder_dependencies,
+                               resolve_folder_base)
 from assent.plan import (Plan, Task, append_entry, parse_task_file,
                          read_entries, same_except_status, set_status)
 
@@ -304,6 +306,127 @@ def _worktree_configuration_errors(cfg: Config) -> list[str]:
     return errors
 
 
+@dataclass(frozen=True)
+class _StackState:
+    """Resolved base plus every direct upstream identity used to verify races."""
+
+    base: FolderBaseResolution
+    sources: tuple[gitops.FolderSourceSnapshot, ...]
+
+
+def _resolve_stack_state(cfg: Config) -> _StackState:
+    """Resolve a reproducible base and snapshot all direct upstream tips."""
+    base = resolve_folder_base(
+        cfg.root, cfg.tasks_dir, excludes=cfg.git_excludes)
+    dependencies = parse_folder_dependencies(cfg.tasks_dir)
+    sources = tuple(
+        gitops.resolve_folder_source(cfg.root, folder, cfg.git_excludes)
+        for folder in dependencies.after
+    )
+    if base.speculative_upstream is not None:
+        matching = next(
+            (source for source in sources
+             if source.folder == base.speculative_upstream.folder), None)
+        if matching is None or matching.tip != base.speculative_upstream.tip:
+            raise AssentError(
+                "upstream source changed while the stack base was being resolved")
+    return _StackState(base, sources)
+
+
+def _require_stack_ancestry(cfg: Config, state: _StackState,
+                            downstream_tip: str) -> None:
+    """Require the downstream tip to contain every current direct upstream."""
+    for source in state.sources:
+        if gitops.is_ancestor(cfg.root, source.tip, downstream_tip):
+            continue
+        raise AssentError(
+            f"stale stack for {cfg.tasks_name}: current upstream "
+            f"{source.folder} tip {source.tip} is not an ancestor of downstream "
+            f"tip {downstream_tip}; all existing work is preserved. Run `assent "
+            f"rework {cfg.tasks_name}` after deciding how to handle the upstream "
+            "change, or replan the dependency")
+
+
+def _prepare_worktree(cfg: Config) -> Config:
+    """Create or validate the folder worktree before any adapter is started."""
+    errors = _worktree_configuration_errors(cfg)
+    if errors:
+        detail = "\n".join(f"  - {error}" for error in errors)
+        raise AssentError(f"git worktree version-control layering error:\n{detail}")
+
+    state_before = _resolve_stack_state(cfg)
+    candidate = gitops.worktree_path(cfg.root, cfg.tasks_name)
+    existed_before = candidate.exists()
+    try:
+        root = gitops.ensure_worktree(
+            cfg.root, cfg.tasks_name, state_before.base.resolved_base)
+        worktree_cfg = cfg.for_worktree(root)
+        gitops.ensure_clean(worktree_cfg.root, worktree_cfg.git_excludes)
+
+        if existed_before:
+            branch = gitops.current_branch(worktree_cfg.root)
+            if not branch:
+                raise AssentError(
+                    f"existing worktree {root} is detached; refusing to switch or "
+                    "rewrite it automatically")
+            if not branch.startswith(worktree_cfg.branch_prefix):
+                raise AssentError(
+                    f"existing worktree {root} is on foreign branch {branch}; "
+                    f"expected prefix {worktree_cfg.branch_prefix}")
+        else:
+            branch = gitops.ensure_branch(
+                worktree_cfg.root, worktree_cfg.branch_prefix)
+
+        downstream_tip = gitops.commit_of(worktree_cfg.root, "HEAD")
+        if not branch.startswith(worktree_cfg.branch_prefix):
+            raise AssentError(
+                f"worktree branch {branch or '(detached)'} does not use required "
+                f"prefix {worktree_cfg.branch_prefix}")
+        if not existed_before and downstream_tip != state_before.base.resolved_base:
+            raise AssentError(
+                f"new worktree HEAD {downstream_tip} does not match resolved base "
+                f"{state_before.base.resolved_base}")
+
+        state_after = _resolve_stack_state(cfg)
+        tips_before = {source.folder: source.tip for source in state_before.sources}
+        tips_after = {source.folder: source.tip for source in state_after.sources}
+        if tips_after != tips_before:
+            changes = sorted(set(tips_before) | set(tips_after))
+            detail = ", ".join(
+                f"{folder}: {tips_before.get(folder, '(missing)')} -> "
+                f"{tips_after.get(folder, '(missing)')}"
+                for folder in changes
+                if tips_before.get(folder) != tips_after.get(folder))
+            raise AssentError(
+                "upstream source changed between stack resolution and worktree "
+                f"validation ({detail})")
+        _require_stack_ancestry(cfg, state_after, downstream_tip)
+
+        print(f"Isolated worktree: {root}")
+        print(f"Target snapshot: {state_after.base.target_snapshot}")
+        stacked = state_before.base.speculative_upstream
+        if stacked is None:
+            print("Stacked upstream: none")
+        else:
+            print(f"Stacked upstream: {stacked.folder} @ {stacked.tip}")
+        print(f"Work branch: {branch}")
+        return worktree_cfg
+    except BaseException as primary_error:
+        # Only a path absent before this call can belong to this setup attempt.
+        # Existing worktrees are never cleanup candidates, even when invalid.
+        if not existed_before and candidate.exists():
+            try:
+                gitops.cleanup_unstarted_worktree(
+                    cfg.root, cfg.tasks_name,
+                    state_before.base.resolved_base, cfg.branch_prefix)
+            except AssentError as cleanup_error:
+                raise AssentError(
+                    f"worktree setup failed ({primary_error}); cleanup was "
+                    "incomplete and resources were retained for recovery: "
+                    f"{cleanup_error}") from primary_error
+        raise
+
+
 # --------------------------------------------------------------------------- #
 # run: main loop
 # --------------------------------------------------------------------------- #
@@ -369,26 +492,23 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
     """The actual run body, after the task folder lock is held."""
-    if cfg.source_root is None:
-        try:
-            errors = _worktree_configuration_errors(cfg)
-            if errors:
-                print("git worktree version-control layering error:")
-                for error in errors:
-                    print(f"  - {error}")
-                return 1
-            root = gitops.ensure_worktree(cfg.root, cfg.tasks_name)
-            cfg = cfg.for_worktree(root)
-            print(f"Isolated worktree: {root}")
-        except AssentError as e:
-            print(f"git worktree setup failed: {e}")
-            return 1
-
     try:
-        Plan.parse(cfg.tasks_dir)  # early validation: any malformed task file refuses to run at zero tokens
+        # Validate the requested folder itself before stack discovery.  This
+        # preserves the task-file error as the primary zero-token diagnostic.
+        Plan.parse(cfg.tasks_dir)
     except AssentError as e:
         print(f"Failed to parse task folder: {e}")
         return 1
+
+    if cfg.source_root is None:
+        try:
+            cfg = _prepare_worktree(cfg)
+        except KeyboardInterrupt:
+            print("\nInterrupted during worktree setup; no AI session was started.")
+            return 130
+        except (AssentError, OSError) as e:
+            print(f"git worktree setup failed: {e}")
+            return 1
 
     if adapter is None:
         try:
@@ -399,8 +519,6 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
 
     try:
         gitops.ensure_clean(cfg.root, cfg.git_excludes)
-        branch = gitops.ensure_branch(cfg.root, cfg.branch_prefix)
-        print(f"Work branch: {branch}")
     except AssentError as e:
         print(f"git setup failed: {e}")
         return 1

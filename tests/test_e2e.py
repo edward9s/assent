@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from assent import engine
+from assent import AssentError, engine
 from assent import gitops
 from assent.adapters import Adapter, TaskResult
 from assent.config import load_config
@@ -310,6 +310,25 @@ class TestWorktreeScenarios(E2ETestCase):
             return ok_result()
         return step
 
+    def make_source(self, folder, start="HEAD"):
+        worktree = gitops.worktree_path(self.root, folder)
+        self._git("worktree", "add", "-b", f"{folder}/run",
+                  str(worktree), start)
+        (worktree / f"{folder}.txt").write_text(
+            f"{folder}\n", encoding="utf-8")
+        self.git_at(worktree, "add", "-A")
+        self.git_at(worktree, "commit", "-m", f"finish {folder}")
+        return worktree, self.git_at(
+            worktree, "rev-parse", "HEAD").strip()
+
+    def add_upstream_dependency(self, folder="upstream"):
+        upstream = self.root / ".assent" / folder
+        upstream.mkdir()
+        (upstream / "t001_task.e.toml").write_text(
+            task_text(status="DONE"), encoding="utf-8", newline="\n")
+        (self.plan_dir / "_folder.toml").write_text(
+            f'after = ["{folder}"]\n', encoding="utf-8")
+
     def test_run_isolated_from_main_tree_and_queries_use_worktree(self):
         self.configure_git_run()
         verify = ('python -c "import pathlib,sys;sys.exit(0 if '
@@ -354,6 +373,200 @@ class TestWorktreeScenarios(E2ETestCase):
         self.assertIn(f"Branch: {worktree_branch}", report)
         self.assertIn("t001  DONE", report)
         self.assertIn("[", report)
+
+    def test_first_downstream_run_starts_from_unaccepted_upstream_tip(self):
+        self.configure_git_run()
+        task = self.add_task(1)
+        self.add_upstream_dependency()
+        self.start()
+        _, upstream_tip = self.make_source("upstream")
+        adapter = ScriptedAdapter([])
+
+        def finish(prompt):
+            self.assertTrue((adapter.cwds[-1] / "upstream.txt").is_file())
+            return self.isolated_done_step(
+                adapter, task, {"src/downstream.py": "ok"})(prompt)
+
+        adapter.steps.append(finish)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch(
+                "assent.engine.verification.verify_folder_if_needed",
+                return_value=0):
+            self.assertEqual(engine.run(
+                self.cfg(), once=True, adapter=adapter), 0)
+
+        downstream = gitops.worktree_path(self.root, "plan01")
+        downstream_tip = self.git_at(downstream, "rev-parse", "HEAD").strip()
+        self.assertTrue(gitops.is_ancestor(
+            self.root, upstream_tip, downstream_tip))
+        self.assertIn(f"Stacked upstream: upstream @ {upstream_tip}",
+                      out.getvalue())
+        self.assertNotIn("accepted", out.getvalue().lower())
+
+    def test_accepted_unchanged_upstream_allows_existing_downstream_resume(self):
+        self.configure_git_run()
+        first = self.add_task(1)
+        second = self.add_task(2, deps=("t001",))
+        self.add_upstream_dependency()
+        self.start()
+        _, upstream_tip = self.make_source("upstream")
+        adapter = ScriptedAdapter([])
+        adapter.steps.append(self.isolated_done_step(
+            adapter, first, {"src/first.py": "first"}))
+        self.assertEqual(self.run_engine(adapter, once=True), 0)
+        downstream = gitops.worktree_path(self.root, "plan01")
+        branch_before = self.git_at(
+            downstream, "branch", "--show-current").strip()
+
+        self._git("merge", "--no-ff", "-m", "accept upstream", upstream_tip)
+        resumed = ScriptedAdapter([])
+        resumed.steps.append(self.isolated_done_step(
+            resumed, second, {"src/second.py": "second"}))
+
+        self.assertEqual(self.run_engine(resumed, once=True), 0)
+        self.assertEqual(self.git_at(
+            downstream, "branch", "--show-current").strip(), branch_before)
+        self.assertTrue((downstream / "src" / "first.py").is_file())
+        self.assertTrue((downstream / "src" / "second.py").is_file())
+
+    def test_advanced_upstream_refuses_existing_downstream_without_changes(self):
+        self.configure_git_run()
+        self.add_task(1)
+        self.add_upstream_dependency()
+        self.start()
+        upstream, old_tip = self.make_source("upstream")
+        downstream = gitops.ensure_worktree(
+            self.root, "plan01", old_tip)
+        branch = gitops.ensure_branch(downstream, "plan01/")
+        (downstream / "keep.txt").write_text("keep\n", encoding="utf-8")
+        self.git_at(downstream, "add", "-A")
+        self.git_at(downstream, "commit", "-m", "downstream work")
+        downstream_tip = self.git_at(downstream, "rev-parse", "HEAD").strip()
+        (upstream / "upstream.txt").write_text(
+            "advanced\n", encoding="utf-8")
+        self.git_at(upstream, "add", "-A")
+        self.git_at(upstream, "commit", "-m", "advance upstream")
+        adapter = ScriptedAdapter([])
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                self.cfg(), once=True, adapter=adapter), 1)
+
+        self.assertEqual(adapter.calls, [])
+        self.assertIn("stale stack", out.getvalue())
+        self.assertEqual(self.git_at(
+            downstream, "branch", "--show-current").strip(), branch)
+        self.assertEqual(self.git_at(
+            downstream, "rev-parse", "HEAD").strip(), downstream_tip)
+        self.assertEqual((downstream / "keep.txt").read_text(encoding="utf-8"),
+                         "keep\n")
+        self.assertEqual(self.git_at(downstream, "status", "--porcelain"), "")
+
+    def test_upstream_creation_race_cleans_only_new_downstream_resources(self):
+        self.configure_git_run()
+        self.add_task(1)
+        self.add_upstream_dependency()
+        self.start()
+        upstream, _ = self.make_source("upstream")
+        real_resolve = engine._resolve_stack_state
+        calls = 0
+
+        def advance_before_second_resolution(cfg):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                (upstream / "upstream.txt").write_text(
+                    "raced\n", encoding="utf-8")
+                self.git_at(upstream, "add", "-A")
+                self.git_at(upstream, "commit", "-m", "race upstream")
+            return real_resolve(cfg)
+
+        adapter = ScriptedAdapter([])
+        with mock.patch("assent.engine._resolve_stack_state",
+                        side_effect=advance_before_second_resolution):
+            self.assertEqual(self.run_engine(adapter, once=True), 1)
+
+        self.assertEqual(adapter.calls, [])
+        self.assertFalse(gitops.worktree_path(
+            self.root, "plan01").exists())
+        self.assertEqual(gitops.branches_with_prefix(
+            self.root, "plan01/"), [])
+        self.assertTrue(upstream.exists())
+        self.assertEqual(gitops.current_branch(upstream), "upstream/run")
+
+    def test_branch_creation_race_keeps_foreign_ref_and_cleans_new_path(self):
+        self.configure_git_run()
+        self.add_task(1)
+        self.start()
+        collision = "plan01/collision"
+        self._git("branch", collision, "HEAD")
+        fake_datetime = mock.Mock()
+        fake_datetime.now.return_value.strftime.return_value = "collision"
+        adapter = ScriptedAdapter([])
+
+        with mock.patch("assent.gitops.datetime", fake_datetime):
+            self.assertEqual(self.run_engine(adapter, once=True), 1)
+
+        self.assertEqual(adapter.calls, [])
+        self.assertFalse(gitops.worktree_path(
+            self.root, "plan01").exists())
+        self.assertEqual(gitops.branches_with_prefix(
+            self.root, "plan01/"), [collision])
+
+    def test_interrupt_during_new_setup_cleans_resources_before_returning_130(self):
+        self.configure_git_run()
+        self.add_task(1)
+        self.start()
+        real_resolve = engine._resolve_stack_state
+        calls = 0
+
+        def interrupt_second_resolution(cfg):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt
+            return real_resolve(cfg)
+
+        adapter = ScriptedAdapter([])
+        with mock.patch("assent.engine._resolve_stack_state",
+                        side_effect=interrupt_second_resolution):
+            self.assertEqual(self.run_engine(adapter, once=True), 130)
+
+        self.assertEqual(adapter.calls, [])
+        self.assertFalse(gitops.worktree_path(
+            self.root, "plan01").exists())
+        self.assertEqual(gitops.branches_with_prefix(
+            self.root, "plan01/"), [])
+
+    def test_cleanup_failure_retains_recoverable_new_resources(self):
+        self.configure_git_run()
+        self.add_task(1)
+        self.start()
+        real_resolve = engine._resolve_stack_state
+        calls = 0
+
+        def fail_second_resolution(cfg):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise AssentError("simulated race")
+            return real_resolve(cfg)
+
+        adapter = ScriptedAdapter([])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch(
+                "assent.engine._resolve_stack_state",
+                side_effect=fail_second_resolution), mock.patch(
+                    "assent.gitops.cleanup_unstarted_worktree",
+                    side_effect=AssentError("simulated cleanup failure")):
+            self.assertEqual(engine.run(
+                self.cfg(), once=True, adapter=adapter), 1)
+
+        self.assertEqual(adapter.calls, [])
+        self.assertTrue(gitops.worktree_path(
+            self.root, "plan01").exists())
+        self.assertIn("resources were retained for recovery", out.getvalue())
 
     def test_default_verify_script_runs_inside_worktree(self):
         self.configure_git_run()

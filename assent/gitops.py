@@ -131,8 +131,14 @@ def _is_repo_worktree(root: Path, path: Path) -> bool:
             == _resolved_git_path(root, root_common))
 
 
-def ensure_worktree(root: Path, folder: str) -> Path:
-    """Create or reuse a fixed-path, detached-HEAD git worktree."""
+def ensure_worktree(root: Path, folder: str,
+                    start_snapshot: str | None = None) -> Path:
+    """Create or reuse a fixed-path, detached-HEAD git worktree.
+
+    ``start_snapshot`` is resolved to an exact commit and is used only when
+    the worktree is first created.  Reusing an existing worktree never moves
+    its HEAD or changes its branch, even when a different snapshot is passed.
+    """
     root = root.resolve()
     path = worktree_path(root, folder)
     if path.exists():
@@ -143,8 +149,66 @@ def ensure_worktree(root: Path, folder: str) -> Path:
 
     # If the path was manually deleted, clear stale worktree metadata still held by the main repo.
     _git(root, "worktree", "prune")
-    _git(root, "worktree", "add", "--detach", str(path))
+    args = ["worktree", "add", "--detach", str(path)]
+    if start_snapshot is not None:
+        args.append(_commit_snapshot(root, start_snapshot))
+    _git(root, *args)
     return path
+
+
+def cleanup_unstarted_worktree(root: Path, folder: str,
+                               expected_tip: str,
+                               branch_prefix: str) -> None:
+    """Remove a newly created, still-unused folder worktree conservatively.
+
+    This is exclusively for setup failures before an AI session starts.  The
+    exact path, clean state, HEAD and branch ownership must all be provable.
+    Failure leaves the path/ref in place as recovery evidence rather than
+    widening cleanup or deleting uncertain resources.
+    """
+    primary = main_worktree(Path(root).resolve())
+    path = worktree_path(primary, folder)
+    snapshot = _commit_snapshot(primary, expected_tip)
+    if not path.exists():
+        return
+    if not path.is_dir() or not _is_repo_worktree(primary, path):
+        raise AssentError(
+            f"new worktree cleanup refused; recoverable path retained: {path}")
+
+    branch = current_branch(path)
+    head = commit_of(path, "HEAD")
+    if head != snapshot:
+        raise AssentError(
+            f"new worktree cleanup refused because HEAD moved from {snapshot} "
+            f"to {head}; recoverable path retained: {path}")
+    if branch and not branch.startswith(branch_prefix):
+        raise AssentError(
+            f"new worktree cleanup refused for foreign branch {branch}; "
+            f"recoverable path retained: {path}")
+    if not working_tree_status(path).is_clean:
+        raise AssentError(
+            f"new worktree cleanup refused because it is dirty; "
+            f"recoverable path retained: {path}")
+
+    removed = _run_git(primary, "worktree", "remove", str(path))
+    if removed.returncode != 0:
+        raise AssentError(
+            "new worktree cleanup was incomplete; recoverable path/ref retained: "
+            f"{path}{f', {branch}' if branch else ''} "
+            f"({removed.stderr.strip() or removed.stdout.strip() or 'unknown error'})")
+
+    if branch:
+        current_tip = branch_tip(primary, branch)
+        if current_tip != snapshot:
+            raise AssentError(
+                f"new worktree path was removed but branch {branch} moved to "
+                f"{current_tip}; recoverable ref retained")
+        deleted = _run_git(primary, "branch", "-D", branch)
+        if deleted.returncode != 0:
+            raise AssentError(
+                f"new worktree path was removed but recoverable ref {branch} "
+                "was retained because branch cleanup failed: "
+                f"{deleted.stderr.strip() or deleted.stdout.strip() or 'unknown error'}")
 
 
 def is_repo_worktree(root: Path, path: Path) -> bool:

@@ -10,7 +10,7 @@ from pathlib import Path
 from assent import AssentError
 from assent.gitops import (
     branches_with_prefix, changes_outside_scope, commit_all, commit_if_dirty,
-    ensure_branch,
+    cleanup_unstarted_worktree, ensure_branch,
     ensure_clean, ensure_worktree, head_ref, resolve_folder_source, restore, tracked_paths,
     worktree_path)
 
@@ -128,6 +128,50 @@ class TestEnsureWorktree(GitTestCase):
                         for line in listed.splitlines()
                         if line.startswith("worktree ")]
         self.assertEqual(listed_paths.count(first.resolve()), 1)
+
+    def test_explicit_start_snapshot_is_used_only_for_creation(self):
+        original = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout.strip()
+        (self.root / "base.txt").write_text("stack base\n", encoding="utf-8")
+        _run(self.root, "add", "-A")
+        _run(self.root, "commit", "-m", "stack base")
+        stack_base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout.strip()
+        _run(self.root, "reset", "--hard", original)
+
+        path = ensure_worktree(self.root, "parallel01", stack_base)
+        self.assertEqual(head_ref(path), stack_base)
+        self.assertTrue((path / "base.txt").is_file())
+
+        reused = ensure_worktree(self.root, "parallel01", original)
+        self.assertEqual(reused, path)
+        self.assertEqual(head_ref(reused), stack_base)
+
+    def test_cleanup_removes_only_clean_unstarted_resources(self):
+        snapshot = head_ref(self.root)
+        path = ensure_worktree(self.root, "parallel01", snapshot)
+        branch = ensure_branch(path, "parallel01/")
+
+        cleanup_unstarted_worktree(
+            self.root, "parallel01", snapshot, "parallel01/")
+
+        self.assertFalse(path.exists())
+        self.assertNotIn(branch, branches_with_prefix(self.root, "parallel01/"))
+
+    def test_cleanup_refuses_dirty_new_worktree_and_preserves_it(self):
+        snapshot = head_ref(self.root)
+        path = ensure_worktree(self.root, "parallel01", snapshot)
+        branch = ensure_branch(path, "parallel01/")
+        (path / "keep.txt").write_text("keep\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(AssentError, "dirty.*retained"):
+            cleanup_unstarted_worktree(
+                self.root, "parallel01", snapshot, "parallel01/")
+
+        self.assertTrue(path.exists())
+        self.assertIn(branch, branches_with_prefix(self.root, "parallel01/"))
 
     def test_prunes_stale_metadata_and_recreates_deleted_worktree(self):
         path = ensure_worktree(self.root, "parallel01")

@@ -252,6 +252,34 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(started, ["alpha", "beta"])
         self.assertEqual(first_poll_started_count[0], 2)
 
+    def test_jobs_two_never_starts_dependent_while_upstream_is_active(self):
+        upstream = self.make_folder("upstream")
+        downstream = self.make_folder("downstream", after=("upstream",))
+        independent = self.make_folder("independent")
+        tasks = {
+            "upstream": upstream,
+            "downstream": downstream,
+            "independent": independent,
+        }
+        started = []
+
+        def fake_start(_config, folder):
+            if folder == "downstream":
+                self.assertEqual(
+                    next(task for name, task in tasks.items()
+                         if name == "upstream").read_text(encoding="utf-8"),
+                    task_text("DONE"))
+            started.append(folder)
+            return FinishedProcess(tasks[folder])
+
+        with patch("assent.folder_scheduler._start_folder",
+                   side_effect=fake_start):
+            code = run_all(str(self.config), self.assent_dir, jobs=2)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(started[:2], ["independent", "upstream"])
+        self.assertEqual(started[2], "downstream")
+
     def test_recalculation_does_not_read_a_running_folders_partial_write(self):
         alpha = self.make_folder("alpha")
         beta = self.make_folder("beta")

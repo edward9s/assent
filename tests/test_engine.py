@@ -187,6 +187,16 @@ class TestRunSuccess(EngineTestCase):
             'after = ["base"]\n', encoding="utf-8")
         cfg = self.build()
         self.commit_all()
+        base_worktree = gitops.worktree_path(self.root, "base")
+        self._git("worktree", "add", "-b", "base/run",
+                  str(base_worktree), "HEAD")
+        (base_worktree / "base.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "-A"], cwd=base_worktree,
+            capture_output=True, encoding="utf-8", check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "finish base"], cwd=base_worktree,
+            capture_output=True, encoding="utf-8", check=True)
         adapter = ScriptedAdapter([self.ai_done(path, {"src/result.py": "ok"})])
 
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
