@@ -13,8 +13,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agents import engine
+from agents import gitops
 from agents.adapters import Adapter, TaskResult
 from agents.config import load_config
+from agents.lockfile import hold_lock
 from agents.plan import (append_entry, journal_path_for, parse_task_file,
                          set_status)
 
@@ -43,9 +45,11 @@ class ScriptedAdapter(Adapter):
     def __init__(self, steps):
         self.steps = list(steps)
         self.calls = []
+        self.cwds = []
 
     def run_task(self, prompt, model, effort, cwd):
         self.calls.append(prompt)
+        self.cwds.append(Path(cwd))
         step = self.steps.pop(0)
         return step(prompt) if callable(step) else step
 
@@ -54,6 +58,8 @@ class E2ETestCase(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.worktrees_root = self.root.parent / f"{self.root.name}.worktrees"
+        self.addCleanup(shutil.rmtree, self.worktrees_root, ignore_errors=True)
         self._git("init")
         self._git("config", "user.name", "Test")
         self._git("config", "user.email", "test@example.com")
@@ -189,6 +195,111 @@ class TestScenarios(E2ETestCase):
         self.assertTrue(any(s.startswith("wip(t001)") for s in subjects))
         self.assertTrue(any(s.startswith("auto(t001)") for s in subjects))
         self.assertEqual(parse_task_file(p1).status, "DONE")
+
+
+class TestWorktreeScenarios(E2ETestCase):
+    def enable_worktree(self):
+        (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
+        (self.root / ".agents" / "agents.toml").write_text(
+            '[plan]\ntasks = "plan01"\n'
+            '[git]\nworktree = true\n'
+            '[run]\nretry_per_task = 1\n', encoding="utf-8")
+
+    def isolated_done_step(self, adapter, path, files):
+        def step(prompt):
+            cwd = adapter.cwds[-1]
+            for rel, content in files.items():
+                target = cwd / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            set_status(path, "DONE")
+            append_entry(journal_path_for(path), by="ai", event="done",
+                         summary="完成")
+            return ok_result()
+        return step
+
+    def git_at(self, root, *args):
+        return subprocess.run(["git", *args], cwd=root, capture_output=True,
+                              encoding="utf-8", check=True).stdout
+
+    def test_run_isolated_from_main_tree_and_queries_use_worktree(self):
+        self.enable_worktree()
+        verify = ('python -c "import pathlib,sys;sys.exit(0 if '
+                  "pathlib.Path('src/ok.txt').is_file() else 1)\"")
+        task = self.add_task(1, verify=verify)
+        self.start()
+        main_branch = self._git("branch", "--show-current").strip()
+        main_head = self._git("rev-parse", "HEAD").strip()
+        adapter = ScriptedAdapter([])
+        adapter.steps.append(self.isolated_done_step(
+            adapter, task, {"src/ok.txt": "ok"}))
+
+        self.assertEqual(self.run_engine(adapter, once=True), 0)
+
+        cfg = self.cfg()
+        worktree = gitops.worktree_path(self.root, "plan01")
+        self.assertEqual(adapter.cwds, [worktree.resolve()])
+        self.assertIn(str(task.resolve()), adapter.calls[0])
+        self.assertEqual(parse_task_file(task).status, "DONE")
+        self.assertEqual(self._git("status", "--porcelain"), "")
+        self.assertEqual(self._git("branch", "--show-current").strip(), main_branch)
+        self.assertEqual(self._git("rev-parse", "HEAD").strip(), main_head)
+        worktree_branch = self.git_at(
+            worktree, "branch", "--show-current").strip()
+        self.assertTrue(worktree_branch.startswith("plan01/"))
+        self.assertNotIn("auto(t001)", self._git("log", "--pretty=%s"))
+        self.assertIn("auto(t001)", self.git_at(worktree, "log", "--pretty=%s"))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.status(cfg), 0)
+        self.assertIn(f"目前分支:{worktree_branch}", out.getvalue())
+        self.assertIn("auto(t001)", out.getvalue())
+        report = engine.render_report(cfg, engine.Plan.parse(cfg.tasks_dir))
+        self.assertIn(f"分支:{worktree_branch}", report)
+        self.assertIn("t001  DONE", report)
+        self.assertIn("[", report)
+
+    def test_two_folders_use_independent_worktrees_and_branches(self):
+        self.enable_worktree()
+        task1 = self.add_task(1)
+        plan2 = self.root / ".agents" / "plan02"
+        plan2.mkdir()
+        task2 = plan2 / "t001_task.toml"
+        task2.write_text(task_text(), encoding="utf-8", newline="\n")
+        self.start()
+
+        for folder, task, filename in (("plan01", task1, "one.py"),
+                                       ("plan02", task2, "two.py")):
+            adapter = ScriptedAdapter([])
+            adapter.steps.append(self.isolated_done_step(
+                adapter, task, {f"src/{filename}": folder}))
+            cfg = load_config(self.root / ".agents" / "agents.toml", folder=folder)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(engine.run(cfg, once=True, adapter=adapter), 0)
+
+        worktree1 = gitops.worktree_path(self.root, "plan01")
+        worktree2 = gitops.worktree_path(self.root, "plan02")
+        self.assertNotEqual(worktree1, worktree2)
+        self.assertTrue((worktree1 / "src" / "one.py").is_file())
+        self.assertFalse((worktree1 / "src" / "two.py").exists())
+        self.assertTrue((worktree2 / "src" / "two.py").is_file())
+        self.assertFalse((worktree2 / "src" / "one.py").exists())
+        self.assertTrue(self.git_at(
+            worktree1, "branch", "--show-current").strip().startswith("plan01/"))
+        self.assertTrue(self.git_at(
+            worktree2, "branch", "--show-current").strip().startswith("plan02/"))
+        self.assertEqual(self._git("status", "--porcelain"), "")
+
+    def test_busy_lock_refuses_before_creating_worktree(self):
+        self.enable_worktree()
+        self.add_task(1)
+        self.start()
+        cfg = self.cfg()
+        worktree = gitops.worktree_path(self.root, "plan01")
+        with hold_lock(cfg.tasks_dir, cfg.tasks_name):
+            self.assertEqual(self.run_engine(ScriptedAdapter([])), 1)
+        self.assertFalse(worktree.exists())
 
 
 if __name__ == "__main__":

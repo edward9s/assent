@@ -32,6 +32,7 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.tasks_dir, self.agents_dir.resolve() / "plan01")
         self.assertEqual(cfg.branch_prefix, "plan01/")
         self.assertTrue(cfg.git_enabled)
+        self.assertFalse(cfg.git_worktree)
         self.assertEqual(cfg.stall_minutes, 30)
         self.assertEqual(cfg.retry_per_task, 1)
         self.assertEqual(cfg.quota_poll_minutes, 30)
@@ -94,6 +95,12 @@ class TestLoadConfig(ConfigTestCase):
     def test_type_error_reported(self):
         with self.assertRaisesRegex(AgentsError, "型別錯誤"):
             load_config(self.write(_MINIMAL + "[watchdog]\nstall_minutes = \"x\"\n"))
+
+    def test_worktree_flag_loaded_and_type_checked(self):
+        cfg = load_config(self.write(_MINIMAL + "[git]\nworktree = true\n"))
+        self.assertTrue(cfg.git_worktree)
+        with self.assertRaisesRegex(AgentsError, "型別錯誤"):
+            load_config(self.write(_MINIMAL + '[git]\nworktree = "true"\n'))
 
     def test_negative_stall_rejected(self):
         with self.assertRaises(AgentsError):

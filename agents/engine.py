@@ -84,7 +84,8 @@ def _resolve_effort(cfg: Config, task: Task) -> str | None:
 def _task_excludes(cfg: Config, task: Task) -> list[str]:
     """該任務 scope 檢查的豁免清單:自己的 t 檔與 r 檔(status 更新與日誌是分內事)
     加上全域執行期產物。"""
-    return [cfg.rel(task.path), cfg.rel(task.journal_path), *cfg.git_excludes]
+    return [cfg.git_rel(task.path), cfg.git_rel(task.journal_path),
+            *cfg.git_excludes]
 
 
 def _git_read(root, *args: str) -> str | None:
@@ -131,6 +132,15 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
     """已持有工作資料夾鎖後的實際 run 主體。"""
+    if cfg.git_enabled and cfg.git_worktree and cfg.source_root is None:
+        try:
+            root = gitops.ensure_worktree(cfg.root, cfg.tasks_name)
+            cfg = cfg.for_worktree(root)
+            print(f"隔離 worktree:{root}")
+        except AgentsError as e:
+            print(f"git worktree 準備失敗:{e}")
+            return 1
+
     try:
         Plan.parse(cfg.tasks_dir)  # 早期驗證:任何任務檔壞格式,零 token 就拒跑
     except AgentsError as e:
@@ -434,8 +444,9 @@ def render_report(cfg: Config, plan: Plan,
         now = lambda: datetime.now(timezone.utc)  # noqa: E731
     counts = Counter(t.status for t in plan.tasks)
 
+    git_root = _query_git_root(cfg)
     checkpoints: dict[str, str] = {}
-    log = _git_read(cfg.root, "log", "--pretty=%h\t%s")
+    log = _git_read(git_root, "log", "--pretty=%h\t%s")
     if log:
         for line in log.splitlines():
             h, _, subject = line.partition("\t")
@@ -443,7 +454,7 @@ def render_report(cfg: Config, plan: Plan,
                 if t.id not in checkpoints and subject.startswith(f"auto({t.id})"):
                     checkpoints[t.id] = h
 
-    branch = _git_read(cfg.root, "branch", "--show-current") or "N/A"
+    branch = _git_read(git_root, "branch", "--show-current") or "N/A"
     stamp = now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
     lines = [
@@ -522,9 +533,10 @@ def status(cfg: Config) -> int:
           f"SKIP {counts.get('SKIP', 0)} / WIP {counts.get('WIP', 0)} / "
           f"TODO {counts.get('TODO', 0)}(共 {len(plan.tasks)})")
 
-    branch = _git_read(cfg.root, "branch", "--show-current")
+    git_root = _query_git_root(cfg)
+    branch = _git_read(git_root, "branch", "--show-current")
     print(f"目前分支:{branch or 'N/A'}")
-    last = _git_read(cfg.root, "log", "-1", "--grep=^auto(", "--pretty=%h %s")
+    last = _git_read(git_root, "log", "-1", "--grep=^auto(", "--pretty=%h %s")
     print(f"最後檢查點:{last or '(尚無 auto() commit)'}")
 
     selected = plan.next_task()
@@ -538,6 +550,17 @@ def status(cfg: Config) -> int:
     else:
         print("下一個任務:(無,全部 DONE/BLOCKED/SKIP)")
     return 0
+
+
+def _query_git_root(cfg: Config) -> Path:
+    """status/report 若已有有效 worktree,改從隔離分支讀 git 資訊。"""
+    if not cfg.git_worktree or cfg.source_root is not None:
+        return cfg.root
+    candidate = gitops.worktree_path(cfg.root, cfg.tasks_name)
+    top = _git_read(candidate, "rev-parse", "--show-toplevel")
+    if top and Path(top).resolve() == candidate.resolve():
+        return candidate
+    return cfg.root
 
 
 # --------------------------------------------------------------------------- #

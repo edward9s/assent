@@ -6,6 +6,7 @@ tasks = "plan01"                  # 工作資料夾名稱(位於 .agents/ 內);
 
 [git]
 enabled = true                    # false 則不建分支、不 commit(不建議)
+worktree = false                  # true 則把程式碼、git、verify 隔離到專屬 worktree
 
 [watchdog]
 stall_minutes = 30                # session 連續無輸出幾分鐘判定卡死;0 = 關閉

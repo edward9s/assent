@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from agents import AgentsError
@@ -58,26 +58,50 @@ class Config:
     codex_default_effort: dict[str, str] = field(
         default_factory=lambda: dict(_DEFAULT_CODEX_EFFORT))
     prompt_template: str | None = None
+    git_worktree: bool = False
+    source_root: Path | None = None  # worktree 模式下原始主工作樹;不來自設定檔
 
     @property
     def branch_prefix(self) -> str:
         return f"{self.tasks_name}/"
 
     def rel(self, path: Path) -> str:
-        """以專案根目錄為基準的相對路徑(/ 分隔),供 scope/排除清單用。"""
-        return path.resolve().relative_to(self.root.resolve()).as_posix()
+        """供提示詞使用的路徑;專案內用相對路徑,外部真本則用絕對路徑。"""
+        resolved = path.resolve()
+        try:
+            return resolved.relative_to(self.root.resolve()).as_posix()
+        except ValueError:
+            if self.source_root is not None:
+                resolved.relative_to(self.source_root.resolve())
+                return str(resolved)
+            raise
+
+    def git_rel(self, path: Path) -> str:
+        """把主樹或 worktree 內的路徑轉成 repo 相對路徑,供 git pathspec。"""
+        resolved = path.resolve()
+        roots = (self.root, self.source_root) if self.source_root else (self.root,)
+        for root in roots:
+            try:
+                return resolved.relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+        raise ValueError(f"路徑不在專案工作樹內:{resolved}")
+
+    def for_worktree(self, root: Path) -> "Config":
+        """派生只把程式碼/git 根目錄移入 worktree 的等效執行設定。"""
+        return replace(self, root=root.resolve(), source_root=self.root.resolve())
 
     @property
     def runtime_log_rel(self) -> str:
-        return self.rel(self.agents_dir / "agents.log")
+        return self.git_rel(self.agents_dir / "agents.log")
 
     @property
     def report_rel(self) -> str:
-        return self.rel(self.tasks_dir / "report.md")
+        return self.git_rel(self.tasks_dir / "report.md")
 
     @property
     def lockfile_rel(self) -> str:
-        return self.rel(self.tasks_dir / LOCK_NAME)
+        return self.git_rel(self.tasks_dir / LOCK_NAME)
 
     @property
     def git_excludes(self) -> tuple[str, ...]:
@@ -170,6 +194,7 @@ def load_config(path: str | Path, folder: str | None = None) -> Config:
         tasks_dir=agents_dir / tasks_name,
         tasks_name=tasks_name,
         git_enabled=_typed(git, "[git]", "enabled", bool, True),
+        git_worktree=_typed(git, "[git]", "worktree", bool, False),
         stall_minutes=_typed(watchdog, "[watchdog]", "stall_minutes", int, 30),
         retry_per_task=_typed(run, "[run]", "retry_per_task", int, 1),
         quota_poll_minutes=_typed(run, "[run]", "quota_poll_minutes", int, 30),
