@@ -127,11 +127,12 @@ batch) -> 人類審查 -> `accept` -> 可選的一般 Git 同步 -> `clean`。�
 verification receipt 從不會發布任何東西。
 
 打包 verifier 會檢查 working tree,也會檢查 candidate 的 `HEAD` 相對第一父提交的
-committed delta; root commit 沒有父提交時安全略過第二項。這能抓到已提交的尾端空白,
-不讀專案私有 verifier,也不呼叫 shell。新的 `assent init` 必須明示選擇平行
-unittest、pytest、npm test、Flutter test 或 custom argv 命令。打包 template 的每個
-專案測試範例都維持註解,產生的副本只啟用一個選項,因此空專案在選定測試不存在時
-不能回報 `verify: OK`。
+committed delta 是否殘留衝突標記; root commit 沒有父提交時安全略過第二項。只有
+空白差異時不阻擋驗證,包括換行格式、行尾空格或 tab,以及檔尾空白行;需要格式政策的
+專案應加入明確的 formatter 檢查。新的 `assent init` 必須明示選擇平行 unittest、
+pytest、npm test、Flutter test 或 custom argv 命令。打包 template 的每個專案測試
+範例都維持註解,產生的副本只啟用一個選項,因此空專案在選定測試不存在時不能回報
+`verify: OK`。
 
 重跑 `assent init` 永不取代既有 `.assent/verify.py`,已有 verifier 時提供 `--test`
 會拒絕。它會從打包契約刷新 `~/.assent/format.md` 與 `~/.assent/instructions.md`,

@@ -163,13 +163,15 @@ synchronization, if desired -> `clean`. A verification receipt alone never
 publishes anything.
 
 The packaged verifier checks the working tree and the candidate's committed
-delta against its first parent, safely skipping that second check for a root
-commit. This catches committed trailing whitespace without reading a project's
-private verifier or invoking a shell. Fresh `assent init` requires an explicit
-choice of parallel unittest, pytest, npm test, Flutter test, or a custom argv
-command. Every project-test example remains commented in the packaged template;
-the generated copy activates exactly one, so an empty project cannot report
-`verify: OK` without its selected test.
+delta against its first parent for leftover conflict markers, safely skipping
+that second check for a root commit. Whitespace-only differences, including line
+endings, trailing spaces or tabs, and blank lines at EOF, do not block
+verification; a project that requires formatting policy adds an explicit
+formatter check. Fresh `assent init` requires an explicit choice of parallel
+unittest, pytest, npm test, Flutter test, or a custom argv command. Every
+project-test example remains commented in the packaged template; the generated
+copy activates exactly one, so an empty project cannot report `verify: OK`
+without its selected test.
 
 Repeat `assent init` never replaces an existing `.assent/verify.py` and refuses
 `--test` when that verifier exists. It refreshes `~/.assent/format.md` and

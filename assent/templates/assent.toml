@@ -28,7 +28,7 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 [adapter]
 # One adapter name or a non-empty list of names. A list rotates in order and
 # wraps around; a single string has the same behavior as a one-item list.
-name = "claude"                   # "claude", "codex", or "antigravity"
+name = ["claude", "codex"]            # "claude", "codex", or "antigravity"
 
 [adapter.claude]
 command = "claude"

@@ -227,13 +227,13 @@ class TestPackagedVerifier(unittest.TestCase):
                               capture_output=True, encoding="utf-8",
                               errors="replace")
 
-    def test_committed_trailing_whitespace_fails_in_candidate_path_with_spaces(self):
+    def test_committed_trailing_whitespace_passes_in_candidate_path_with_spaces(self):
         (self.root / "base.txt").write_text("base\n", encoding="utf-8")
         self._commit("root")
         (self.root / "changed.txt").write_text("bad \n", encoding="utf-8")
         self._commit("trailing whitespace")
         result = self._run()
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_clean_committed_delta_and_root_commit_pass(self):
         (self.root / "base.txt").write_text("base\n", encoding="utf-8")
