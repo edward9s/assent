@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from assent import AssentError, gitops
 from assent.config import Config
 from assent.lockfile import LockBusy, LockMissing, probe_lock
 from assent.plan import Plan, append_entry, set_status
+
+RESETTABLE_STATUSES = ("DONE", "WIP", "BLOCKED")
 
 
 def _remove_empty_container(path: Path) -> None:
@@ -17,20 +20,20 @@ def _remove_empty_container(path: Path) -> None:
         pass
 
 
-def reject_folder(cfg: Config) -> int:
+def reject_folder(cfg: Config, confirm: Callable[[str], str] | None = None) -> int:
     """Archive, then force-remove the worktree and same-prefix branches, and reset tasks to TODO.
 
-    Returns 1 for a busy lock, missing lock, task-file precheck failure, or any Git
-    step failure. Task files must parse completely before any destructive Git
-    operation; task statuses are reset only after the entire Git scene has been
-    cleared successfully.
+    Returns 1 for a busy lock, missing lock, task-file precheck failure, a declined
+    confirmation, or any Git step failure. Task files must parse completely before
+    any destructive Git operation; task statuses are reset only after the entire
+    Git scene has been cleared successfully.
     """
     name = cfg.tasks_name
     path = gitops.worktree_path(cfg.root, name)
     _remove_empty_container(path)
     try:
         with probe_lock(cfg.tasks_dir, name):
-            return _reject_locked(cfg, path)
+            return _reject_locked(cfg, path, confirm)
     except LockBusy as e:
         print(f"{name}: reject aborted (a run is in progress): {e}")
         return 1
@@ -39,9 +42,37 @@ def reject_folder(cfg: Config) -> int:
         return 1
 
 
-def _reject_locked(cfg: Config, path: Path) -> int:
-    """With the lock held, precheck the task files first, then clear the Git scene,
-    and finally reset task statuses."""
+def _confirm_destructive(name: str, path: Path, branches: list[str],
+                         reset_candidates: list, confirm: Callable[[str], str] | None) -> bool:
+    """Print a preview of what reject is about to destroy and ask for interactive
+    confirmation. Anything other than exactly "y"/"Y", including EOF, declines."""
+    print(f"{name}: about to reject (destructive, cannot be undone):")
+    print(f"  worktree: {path}")
+    if branches:
+        print("  branches to delete:")
+        for branch in branches:
+            print(f"    {branch}")
+    else:
+        print("  branches to delete: none")
+    if reset_candidates:
+        print("  tasks to reset to TODO:")
+        for task in reset_candidates:
+            print(f"    {task.id}: {task.status}")
+    else:
+        print("  tasks to reset to TODO: none")
+
+    ask = confirm if confirm is not None else input
+    try:
+        answer = ask("Continue? [y/N]: ")
+    except EOFError:
+        answer = ""
+    return answer.strip().lower() == "y"
+
+
+def _reject_locked(cfg: Config, path: Path,
+                   confirm: Callable[[str], str] | None = None) -> int:
+    """With the lock held, precheck the task files first, confirm interactively,
+    then clear the Git scene, and finally reset task statuses."""
     root = cfg.root
     name = cfg.tasks_name
     try:
@@ -51,9 +82,14 @@ def _reject_locked(cfg: Config, path: Path) -> int:
               "Git scene unchanged")
         return 1
 
+    branches = gitops.branches_with_prefix(root, cfg.branch_prefix)
+    reset_candidates = [t for t in plan.tasks if t.status in RESETTABLE_STATUSES]
+    if not _confirm_destructive(name, path, branches, reset_candidates, confirm):
+        print(f"{name}: reject cancelled, no changes made")
+        return 1
+
     evidence: list[str] = []
     try:
-        branches = gitops.branches_with_prefix(root, cfg.branch_prefix)
         if path.exists():
             if not gitops.is_repo_worktree(root, path):
                 print(f"{name}: reject aborted (fixed path is not a valid "
@@ -100,7 +136,7 @@ def _reset_rejected_tasks(cfg: Config, plan: Plan,
         for task in plan.tasks:
             # SKIP is an explicit human decision to abandon; TODO is already
             # pending — reject does not override either.
-            if task.status not in ("DONE", "WIP", "BLOCKED"):
+            if task.status not in RESETTABLE_STATUSES:
                 continue
             set_status(task.path, "TODO")
             append_entry(
