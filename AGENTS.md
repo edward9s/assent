@@ -4,17 +4,22 @@
 
 assent — an AI plan format plus an automatic scheduler. Pure Python 3.11+
 (standard library only, tomllib), Windows-first and cross-platform. CLI
-subcommands: run / status / check / report / verify / clean / accept / reject /
-rework / init.
+subcommands: run / status / check / report / verify / clean / accept /
+reconcile / reject / rework / archive / init / doctor.
 Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
+
+This file governs development of the assent project itself. Rules followed
+while operating an assent-managed session live in
+`assent/templates/instructions.md`.
 
 ## Permanent constraints
 
 - Standard library only; introduce no third-party dependencies.
 - Windows compatibility comes first: use pathlib for paths, force utf-8 output,
   lock with msvcrt (fcntl on POSIX).
-- Test command: `python -m unittest discover -s tests`; every change must keep
-  the whole suite passing.
+- Full-project test command: `python .assent/verify.py`; every
+  integrated change must keep the whole suite passing. This states the required
+  integration outcome; it does not define session-level test execution policy.
 - Language policy (English is canonical, Traditional Chinese is a reader
   translation):
   - English is canonical for identifiers and public APIs, tracked

@@ -46,9 +46,19 @@ the `_assent.log` inside a work folder.
 - Do not modify files unrelated to the current task.
 - Reference shared specifications; do not copy them into each task file.
 - Keep conjecture, changed, verified, and unverified separately recorded.
-- Do not declare completion without passing the task's focused `verify` command;
-  pending must not be dressed up as completed. The scheduler performs the
-  complete candidate verification after the folder's AI sessions finish.
+- Do not declare scheduled-task completion without passing the task's focused
+  `verify` command; pending must not be dressed up as completed. Complete
+  candidate verification is a separate receipt-refresh stage governed by
+  configuration: `"auto"` runs it at folder closeout, while `"manual"` defers it
+  until a human explicitly invokes `assent verify`.
+- During interactive work, run the smallest relevant checks. Do not launch the
+  full project suite merely because files changed. Launch it only when the human
+  explicitly asks, when a scheduler-provided focused verify command itself
+  requires it, or when no narrower check can responsibly validate the requested
+  change and no later standard verification stage will do so; state that
+  necessity before starting it. In a human-driven `reconcile` -> `verify` flow,
+  resolve the requested conflict and leave `assent verify` for the human to
+  start after `assent reconcile --continue`.
 - Code, git, and test results are the final source of truth.
 - Never kill / Stop-Process any process the session did not itself start — your
   parent process chain leads straight to the scheduler, and killing the wrong
@@ -57,7 +67,8 @@ the `_assent.log` inside a work folder.
   batches, not to hunt down a process that "looks stuck". If an outer tool
   timeout may have left children running, do not run the command in parallel
   again and do not mark the task BLOCKED solely because of that timeout; the
-  scheduler's post-session verification is authoritative.
+  recorded adapter result and any configured or explicitly invoked
+  post-session verification are authoritative.
 - Keep session output economical: state the fact once, skip narrated
   tool-call preambles and restated plans, and quote a command or test
   failure as its shortest decisive line rather than a full transcript,
@@ -73,7 +84,8 @@ BLOCKED. The scheduler records the adapter event, keeps the work, and retries.
 Only after its tamper guard and fail-closed scope check pass may the scheduler
 accept a terminal task result; a self-marked BLOCKED then goes directly to its
 checkpoint without focused verification. Full candidate verification remains
-an unattended scheduler step after the folder is complete.
+separate from the AI task session: `"auto"` runs it unattended at folder
+closeout, while `"manual"` waits for a human to invoke `assent verify`.
 
 Cleanup is a separate guarded operation: `assent clean` must retain an
 upstream source while any dependent folder remains unaccepted, and skips when
