@@ -1,0 +1,188 @@
+"""全部工作資料夾調度的依賴順序、平行與卡住判定測試。"""
+import contextlib
+import io
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from agents.folder_scheduler import run_all
+from agents.plan import set_status
+
+
+def task_text(status: str) -> str:
+    return (
+        'title = "任務"\n'
+        'deps = []\n'
+        'model = "lite"\n'
+        f'status = "{status}"\n'
+        'scope = ["agents/"]\n'
+        'verify = "python -m unittest"\n'
+        'goal = "完成任務"\n'
+        'acceptance = "驗證通過"\n'
+    )
+
+
+class FinishedProcess:
+    """首次觀察時完成指定資料夾，取代真實 AI 子行程。"""
+
+    def __init__(self, task: Path, on_finish=None) -> None:
+        self.task = task
+        self.on_finish = on_finish
+        self.finished = False
+
+    def poll(self):
+        if not self.finished:
+            self.finished = True
+            set_status(self.task, "DONE")
+            if self.on_finish is not None:
+                self.on_finish()
+        return 0
+
+
+class FolderSchedulerTestCase(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.agents_dir = self.root / ".agents"
+        self.agents_dir.mkdir()
+        self.config = self.agents_dir / "agents.toml"
+        self.config.write_text("", encoding="utf-8")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def make_folder(self, name: str, status: str = "TODO",
+                    after: tuple[str, ...] = ()) -> Path:
+        folder = self.agents_dir / name
+        folder.mkdir()
+        task = folder / "t001_task.e.toml"
+        task.write_text(task_text(status), encoding="utf-8")
+        if after:
+            values = ", ".join(f'"{item}"' for item in after)
+            (folder / "_folder.toml").write_text(
+                f"after = [{values}]\n", encoding="utf-8")
+        return task
+
+
+class TestRunAll(FolderSchedulerTestCase):
+    def test_completion_unlocks_downstream_in_topological_order(self):
+        first = self.make_folder("first")
+        second = self.make_folder("second", after=("first",))
+        third = self.make_folder("third", after=("second",))
+        tasks = {"first": first, "second": second, "third": third}
+        started = []
+
+        def fake_start(_config, folder):
+            started.append(folder)
+            return FinishedProcess(tasks[folder])
+
+        with patch("agents.folder_scheduler._start_folder", side_effect=fake_start):
+            code = run_all(str(self.config), self.agents_dir)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(started, ["first", "second", "third"])
+
+    def test_jobs_two_starts_two_independent_folders_before_polling(self):
+        alpha = self.make_folder("alpha")
+        beta = self.make_folder("beta")
+        tasks = {"alpha": alpha, "beta": beta}
+        started = []
+        first_poll_started_count = []
+
+        def fake_start(_config, folder):
+            started.append(folder)
+            return FinishedProcess(
+                tasks[folder],
+                lambda: first_poll_started_count.append(len(started)))
+
+        with patch("agents.folder_scheduler._start_folder", side_effect=fake_start):
+            code = run_all(str(self.config), self.agents_dir, jobs=2)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(started, ["alpha", "beta"])
+        self.assertEqual(first_poll_started_count[0], 2)
+
+    def test_recalculation_does_not_read_a_running_folders_partial_write(self):
+        alpha = self.make_folder("alpha")
+        beta = self.make_folder("beta")
+
+        class WritingProcess:
+            def __init__(self):
+                self.poll_count = 0
+
+            def poll(self):
+                self.poll_count += 1
+                if self.poll_count == 1:
+                    beta.write_text("status = [\n", encoding="utf-8")
+                    return None
+                beta.write_text(task_text("DONE"), encoding="utf-8")
+                return 0
+
+        processes = {
+            "alpha": FinishedProcess(alpha),
+            "beta": WritingProcess(),
+        }
+        with patch("agents.folder_scheduler._start_folder",
+                   side_effect=lambda _config, folder: processes[folder]):
+            code = run_all(str(self.config), self.agents_dir, jobs=2)
+
+        self.assertEqual(code, 0)
+
+    def test_blocked_prerequisite_reports_complete_chain(self):
+        self.make_folder("base", "BLOCKED")
+        self.make_folder("middle", after=("base",))
+        self.make_folder("leaf", after=("middle",))
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out), patch(
+                "agents.folder_scheduler._start_folder") as start:
+            code = run_all(str(self.config), self.agents_dir)
+
+        self.assertEqual(code, 1)
+        self.assertIn("BLOCKED", out.getvalue())
+        self.assertIn("leaf -> middle -> base -> t001(BLOCKED)", out.getvalue())
+        start.assert_not_called()
+
+    def test_child_failure_stops_with_log_location(self):
+        self.make_folder("work")
+
+        class FailedProcess:
+            def poll(self):
+                return 7
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), patch(
+                "agents.folder_scheduler._start_folder",
+                return_value=FailedProcess()):
+            code = run_all(str(self.config), self.agents_dir)
+
+        self.assertEqual(code, 1)
+        self.assertIn("工作資料夾失敗:work(退出碼 7", out.getvalue())
+        self.assertIn("_agents.log", out.getvalue())
+
+    def test_keyboard_interrupt_is_forwarded_and_waits_for_child(self):
+        self.make_folder("work")
+
+        class InterruptedProcess:
+            def __init__(self):
+                self.waited = False
+
+            def poll(self):
+                raise KeyboardInterrupt
+
+            def wait(self):
+                self.waited = True
+                return 130
+
+        process = InterruptedProcess()
+        with patch("agents.folder_scheduler._start_folder",
+                   return_value=process), patch(
+                       "agents.folder_scheduler._send_interrupt") as send:
+            code = run_all(str(self.config), self.agents_dir)
+
+        self.assertEqual(code, 130)
+        send.assert_called_once_with(process)
+        self.assertTrue(process.waited)
+
+
+if __name__ == "__main__":
+    unittest.main()

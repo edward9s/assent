@@ -9,11 +9,23 @@ from agents import AgentsError, engine
 from agents.config import list_task_folders, load_config, validate_config
 from agents.folderdeps import (find_unfinished_prerequisites,
                                parse_folder_dependency_graph)
+from agents.folder_scheduler import run_all
 from agents.init import init as run_init
 from agents.plan import Plan
 from agents.terminal_log import terminal_logging
 
 _DEFAULT_CONFIG = ".agents/agents.toml"
+
+
+def _positive_int(value: str) -> int:
+    """解析大於零的命令列整數。"""
+    try:
+        number = int(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("必須是整數") from e
+    if number < 1:
+        raise argparse.ArgumentTypeError("必須大於 0")
+    return number
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -28,6 +40,10 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p = sub.add_parser("run", help="執行指定[工作資料夾]的任務直到全部 DONE/BLOCKED/SKIP")
     run_p.add_argument("--once", action="store_true", help="只執行下一個任務後停止")
     run_p.add_argument("--task", metavar="ID", help="指定執行單一任務(仍檢查前置)")
+    run_p.add_argument("--all", action="store_true", dest="all_folders",
+                       help="依資料夾依賴順序執行全部未完成工作資料夾")
+    run_p.add_argument("--jobs", type=_positive_int, metavar="N",
+                       help="--all 同時執行的資料夾數上限(預設:1)")
 
     status_p = sub.add_parser("status", help="顯示指定[工作資料夾]的進度統計與下一個任務(零 token)")
     check_p = sub.add_parser("check", help="驗證指定[工作資料夾]的任務檔格式、設定檔與環境(零 token;"
@@ -126,7 +142,16 @@ def _dispatch_check_all(config_path: str, agents_dir, folders: list[str]) -> int
 
 
 def _dispatch(argv: list[str]) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "run":
+        if args.all_folders and args.folder is not None:
+            parser.error("run 的 --all 與 FOLDER 不可同時使用")
+        if args.all_folders and (args.once or args.task is not None):
+            parser.error("run 的 --all 不可與 --once 或 --task 同時使用")
+        if not args.all_folders and args.jobs is not None:
+            parser.error("run 的 --jobs 只能與 --all 同時使用")
 
     if args.command == "init":
         return run_init(args.path)
@@ -138,6 +163,8 @@ def _dispatch(argv: list[str]) -> int:
         return 1
 
     folders = list_task_folders(agents_dir)
+    if args.command == "run" and args.all_folders:
+        return run_all(args.config, agents_dir, args.jobs or 1)
     if args.folder is None:
         if args.command == "run":
             folder = _select_run_folder(args.config, folders)

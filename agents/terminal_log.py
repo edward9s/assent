@@ -119,10 +119,12 @@ def _folder_from_argv(argv: list[str]) -> str | None:
     """從 run 的位置參數找工作資料夾,略過已知選項及其值。"""
     if not argv or argv[0] != "run":
         return None
+    if "--all" in argv:
+        return None
     idx = 1
     while idx < len(argv):
         arg = argv[idx]
-        if arg in ("--config", "--task"):
+        if arg in ("--config", "--task", "--jobs"):
             idx += 2
             continue
         if arg == "--once" or arg.startswith(("--config=", "--task=")):
@@ -146,7 +148,8 @@ def log_path_for_argv(argv: list[str]) -> Path:
     if not path.is_absolute():
         path = Path.cwd() / path
     path = path.resolve()
-    folder = _folder_from_argv(argv) or _folder_from_tasks(path.parent)
+    folder = (None if "--all" in argv else
+              _folder_from_argv(argv) or _folder_from_tasks(path.parent))
     parent = path.parent / folder if folder is not None else path.parent
     return parent / "_agents.log"
 

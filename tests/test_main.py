@@ -68,6 +68,27 @@ class TestDispatch(MainTestCase):
             ["run", "--config", str(self.root / "nope" / "agents.toml")])
         self.assertEqual(code, 1)
 
+    def test_run_all_and_folder_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
+                io.StringIO()):
+            main(["run", "work", "--all"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_run_jobs_requires_all_and_positive_number(self):
+        for argv in (["run", "--jobs", "2"],
+                     ["run", "--all", "--jobs", "0"]):
+            with self.subTest(argv=argv), self.assertRaises(
+                    SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2)
+
+    def test_run_all_dispatches_with_default_jobs(self):
+        config = self.write_config()
+        with patch("agents.__main__.run_all", return_value=0) as mocked:
+            code, _ = self.run_main(["run", "--all", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(mocked.call_args.args[2], 1)
+
     def test_all_plan_commands_accept_folder_override(self):
         config = self.write_config()
         agents_dir = config.parent

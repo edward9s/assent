@@ -58,6 +58,14 @@ class TestTerminalLogging(unittest.TestCase):
             ["run", "--task", "t001", "parallel02", f"--config={config}"]),
             expected)
 
+    def test_run_all_uses_parent_log_instead_of_a_folder_log(self):
+        config = self.write_config()
+        self.write_task("only")
+        expected = self.root.resolve() / ".agents" / "_agents.log"
+        self.assertEqual(log_path_for_argv(
+            ["run", "--all", "--jobs", "2", "--config", str(config)]),
+            expected)
+
     def test_missing_or_bad_config_falls_back_beside_config(self):
         config = self.root / ".agents" / "agents.toml"
         expected = self.root.resolve() / ".agents" / "_agents.log"
