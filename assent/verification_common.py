@@ -20,7 +20,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
 import sys
 import time
@@ -29,7 +28,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from assent import AssentError, gitops
+from assent import AssentError, gitops, pathops
 from assent.config import Config
 
 VERIFY_COMMAND = "python .assent/verify.py"
@@ -215,25 +214,6 @@ class ProvisionedLink:
         return self.kind == DIRECTORY_LINK
 
 
-def _is_link(path: Path) -> bool:
-    """True for a POSIX symlink, a Windows directory symlink, or a junction.
-
-    ``os.path.islink`` is False for a Windows junction, so the reparse tag is
-    checked as well.  ``st_reparse_tag`` exists only on Windows, and
-    ``IO_REPARSE_TAG_MOUNT_POINT`` only there too, hence the guarded lookups
-    rather than a platform test.
-    """
-    try:
-        info = os.lstat(path)
-    except OSError:
-        return False
-    if stat.S_ISLNK(info.st_mode):
-        return True
-    mount_point = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
-    return (mount_point is not None
-            and getattr(info, "st_reparse_tag", None) == mount_point)
-
-
 def _require_safe_relative(relative: str) -> None:
     """Refuse anything that is not a plain relative path inside the worktree."""
     parts = relative.split("/")
@@ -259,7 +239,7 @@ def _has_linked_parent(worktree: Path, relative: str) -> bool:
     current = worktree
     for part in parts:
         current = current / part
-        if _is_link(current):
+        if pathops.is_link(current):
             return True
     return False
 
@@ -306,7 +286,7 @@ def discover_worktree_links(worktree: Path) -> tuple[ProvisionedLink, ...]:
             continue
         _require_safe_relative(relative)
         path = worktree / relative
-        if _is_link(path):
+        if pathops.is_link(path):
             link = _classify_link(worktree, relative)
             (directories if link.is_directory else files).append(link)
         elif entry.endswith("/"):
@@ -401,12 +381,12 @@ def _create_file_link(destination: Path, target: Path) -> None:
 def _remove_link(destination: Path, kind: str) -> None:
     """Remove one mirrored link only; the target it points at is never touched.
 
-    A Windows junction and a Windows directory symlink are removed with
-    ``rmdir`` on the reparse point itself, a POSIX symlink and a Windows hard
-    link with ``unlink``.  No call descends into the target.
+    A directory link goes through the same non-traversing detachment Git
+    worktree removal uses; a mirrored file is a POSIX symlink or a Windows hard
+    link, which ``unlink`` removes.  No call descends into the target.
     """
-    if kind == DIRECTORY_LINK and os.name == "nt":
-        os.rmdir(destination)
+    if kind == DIRECTORY_LINK:
+        pathops.detach_directory_link(destination)
     else:
         os.unlink(destination)
 
@@ -422,7 +402,7 @@ def _create_parents(candidate: Path, relative: str) -> list[Path]:
     current = candidate
     for part in relative.split("/")[:-1]:
         current = current / part
-        if current.is_dir() and not _is_link(current):
+        if current.is_dir() and not pathops.is_link(current):
             continue
         if os.path.lexists(current):
             raise AssentError(

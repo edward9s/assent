@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from assent import AssentError
+from assent import AssentError, pathops
 
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -156,6 +156,46 @@ def ensure_worktree(root: Path, folder: str,
     return path
 
 
+def _detach_worktree_links(path: Path) -> tuple[Path, ...]:
+    """Empty an owned worktree of directory links before anything recurses into it.
+
+    Git's own ``worktree remove`` walks a Windows junction into whatever it
+    points at and deletes the contents it finds there, and the ``shutil.rmtree``
+    fallback is no safer, so every directory link is detached first -- one link
+    object at a time, never through its target.  Inventory or detachment failing
+    is a refusal, and the caller must then start neither Git nor the fallback: a
+    partial cleanup leaves external targets intact and a rerun finishes it,
+    because an already-detached link is simply absent from the next inventory.
+    """
+    links = pathops.inventory_directory_links(path)
+    for link in links:
+        try:
+            pathops.detach_directory_link(link)
+        except OSError as e:
+            raise AssentError(
+                f"unable to detach the directory link {link} inside {path}; "
+                f"nothing was removed through it: {e}") from e
+    return links
+
+
+def _ordinary_removal_will_proceed(path: Path) -> bool:
+    """Report whether an ordinary ``git worktree remove`` would reach the files.
+
+    Detaching links is a real deletion, so it must not happen for a worktree
+    Git is about to refuse: an unclean worktree stays retained in full, links
+    included, exactly as before.  Git checks cleanliness before it touches
+    anything, so skipping detachment here never lets a recursion start.  A
+    missing or unreadable worktree answers False and leaves the diagnostic to
+    Git.
+    """
+    if not path.is_dir():
+        return False
+    try:
+        return working_tree_status(path).is_clean
+    except AssentError:
+        return False
+
+
 def cleanup_unstarted_worktree(root: Path, folder: str,
                                expected_tip: str,
                                branch_prefix: str) -> None:
@@ -189,6 +229,13 @@ def cleanup_unstarted_worktree(root: Path, folder: str,
         raise AssentError(
             f"new worktree cleanup refused because it is dirty; "
             f"recoverable path retained: {path}")
+
+    try:
+        _detach_worktree_links(path)
+    except AssentError as e:
+        raise AssentError(
+            "new worktree cleanup refused because its directory links could not "
+            f"be detached; recoverable path retained: {path} ({e})") from e
 
     removed = _run_git(primary, "worktree", "remove", str(path))
     if removed.returncode != 0:
@@ -257,7 +304,16 @@ def merge_base(root: Path, first: str, second: str) -> str:
 
 
 def remove_worktree(root: Path, path: Path) -> None:
-    """Remove a worktree using Git's ordinary safeguards; deliberately no force option."""
+    """Remove a worktree using Git's ordinary safeguards; deliberately no force option.
+
+    Directory links are detached through :func:`_detach_worktree_links` before
+    Git starts, so the removal can never walk one into an external target.  A
+    worktree Git would refuse keeps its links untouched, and a refused
+    detachment stops the removal before Git is invoked at all.
+    """
+    path = Path(path)
+    if _ordinary_removal_will_proceed(path):
+        _detach_worktree_links(path)
     _git(root, "worktree", "remove", str(path))
 
 
@@ -828,12 +884,20 @@ def _cleanup_temporary_worktree(root: Path, path: Path,
     """Remove this call's temporary resources and report any incomplete cleanup."""
     problems: list[str] = []
     if path.exists():
-        removed = _run_git(root, "worktree", "remove", "--force", str(path))
-        if removed.returncode != 0:
-            try:
-                shutil.rmtree(path)
-            except OSError as e:
-                problems.append(f"unable to remove temporary path {path}: {e}")
+        # Neither the forced Git removal nor the fallback recursion may start
+        # until the link boundary has completed; a refusal here retains the
+        # path, which the check further down reports as incomplete cleanup.
+        try:
+            _detach_worktree_links(path)
+        except AssentError as e:
+            problems.append(str(e))
+        else:
+            removed = _run_git(root, "worktree", "remove", "--force", str(path))
+            if removed.returncode != 0:
+                try:
+                    shutil.rmtree(path)
+                except OSError as e:
+                    problems.append(f"unable to remove temporary path {path}: {e}")
     pruned = _run_git(root, "worktree", "prune")
     if pruned.returncode != 0:
         problems.append(
