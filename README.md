@@ -7,7 +7,7 @@
   散會條件 = `agents check` 通過。
 - **執行**:`agents run` 無人值守跑完全部任務——選任務、開 headless AI session、
   客觀驗收、git 檢查點、額度等待與續作,調度本身零 token。
-- **驗收**:人先讀程式生成的 `report.md`(零 token),只對要裁決的任務開 session。
+- **驗收**:人先讀程式生成的 `.agents/<工作資料夾>/_report.md`(零 token),只對要裁決的任務開 session。
 
 ## 設計原則
 
@@ -46,7 +46,7 @@
 - **格式契約**:`.agents/format.md`(`agents init` 會放進專案),
   規劃 AI 讀它產生任務檔,調度器解析器與它逐字對齊。
 - **session 過程即時可見**:AI 說的話(`AI|`)、用的工具(`工具|`)、token
-  用量(`--|`)同步印在終端,並留存於 `.agents/agents.log`。
+  用量(`--|`)同步印在終端,並留存於 `.agents/<工作資料夾>/_agents.log`。
 
 ## 安裝
 
@@ -78,6 +78,9 @@ agents check
 agents run --once
 agents run
 
+# 也可以用位置參數指定工作資料夾(與 --config 正交)
+agents run <資料夾>
+
 # 6. 隨時查看(另開終端、零 token)
 agents status
 agents report
@@ -88,8 +91,17 @@ agents report
 ```
 git log --oneline <資料夾名>/<run-id>   # 一任務一 commit,逐一查看
 git diff main...<資料夾名>/<run-id>     # 或看整體差異
-# 接受 → merge;不接受 → 對著 report.md 逐項裁決,叫 AI 改任務檔後續跑
+# 接受 → merge;不接受 → 對著 _report.md 逐項裁決,叫 AI 改任務檔後續跑
 ```
+
+## 平行執行
+
+可在 N 個終端各自指定不同的工作資料夾執行，例如 `agents run parallel01`、
+`agents run parallel02`。每個工作資料夾都有自己的 `agents.lock`，同一資料夾
+同時只允許一個 run；若在 `.agents/agents.toml` 開啟 `[git] worktree = true`，
+每個資料夾會使用 `<專案名>.worktrees/<資料夾>/` 的獨立 worktree。
+
+平行執行的固有代價是額度共享，以及各分支 merge 回主線由人負責。
 
 ## 使用循環(三幕)
 
@@ -107,7 +119,7 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 
 **第 3 幕:驗收小會議**(互動 session)
 
-先自己讀 `report.md`(它就是議程表:進度、BLOCKED 卡點、檢查點 hash),
+先自己讀 `_report.md`(它就是議程表:進度、BLOCKED 卡點、檢查點 hash),
 再對要裁決的任務開 session:
 
 ```text
@@ -128,7 +140,7 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 | `agents run --task t003` | 指定執行單一任務(仍檢查前置) | 同上,單一任務 |
 | `agents status` | 進度統計、下一個任務、分支與最後檢查點 | **零** |
 | `agents check` | 驗任務檔格式、依賴無循環、設定與環境 | **零** |
-| `agents report` | 生成並顯示人讀報告 report.md | **零** |
+| `agents report` | 生成並顯示人讀報告 _report.md | **零** |
 | `agents init` | 在專案生成 .agents 骨架與 AGENTS.md | **零** |
 
 所有指令(init 除外)接受 `--config <path>`(預設 `.agents/agents.toml`)。
@@ -156,7 +168,7 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 即驗收失敗(逐欄位與檢查點版本比對);check 每輪驗 deps 完整性與循環。
 
 **Q:BLOCKED 的任務會擋住全部進度嗎?**
-只擋以它為前置的任務;其他任務照常繼續。report.md 會列出所有卡點與最後日誌。
+只擋以它為前置的任務;其他任務照常繼續。_report.md 會列出所有卡點與最後日誌。
 
 **Q:如何接 Claude / Codex 以外的 AI CLI?**
 實作一個 adapter:`run_task(prompt, model, effort, cwd) -> TaskResult`

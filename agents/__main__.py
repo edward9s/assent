@@ -15,18 +15,18 @@ _DEFAULT_CONFIG = ".agents/agents.toml"
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agents",
-        description="AI 計畫格式 + 零 token 自動調度器:讀 .agents 工作資料夾、"
+        description="AI 計畫格式 + 自動調度器:讀 .agents 工作資料夾、"
                     "逐任務開 AI session、客觀驗收、自動 git 檢查點。",
     )
     sub = parser.add_subparsers(dest="command", required=True,
                                 metavar="{run,status,check,report,init}")
 
-    run_p = sub.add_parser("run", help="執行任務直到全部 DONE/BLOCKED/SKIP")
+    run_p = sub.add_parser("run", help="執行指定[工作資料夾]的任務直到全部 DONE/BLOCKED/SKIP")
     run_p.add_argument("--once", action="store_true", help="只執行下一個任務後停止")
     run_p.add_argument("--task", metavar="ID", help="指定執行單一任務(仍檢查前置)")
 
-    status_p = sub.add_parser("status", help="顯示進度統計與下一個任務(零 token)")
-    check_p = sub.add_parser("check", help="驗證任務檔格式、設定檔與環境(零 token;"
+    status_p = sub.add_parser("status", help="顯示指定[工作資料夾]的進度統計與下一個任務(零 token)")
+    check_p = sub.add_parser("check", help="驗證指定[工作資料夾]的任務檔格式、設定檔與環境(零 token;"
                                            "會議的散會條件)")
     report_p = sub.add_parser("report", help="生成人讀的執行報告 _report.md(零 token)")
 

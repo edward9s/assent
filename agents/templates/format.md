@@ -14,12 +14,13 @@ project/
     ├── agents.toml              # 調度器設定:工作資料夾、adapter、檔位對照表
     ├── format.md                # 本檔
     ├── verify.py                # 共用驗收腳本(任務檔 verify 欄位的預設選擇)
-    ├── agents.log               # 執行期終端輸出留存(不進版控)
     └── plan01/                  # 工作資料夾(名稱由會議決定,= git 分支前綴)
+        ├── agents.lock          # 該資料夾一 run 的檔案鎖
+        ├── _agents.log          # 該資料夾的執行期終端輸出(不進版控)
         ├── t001_骨架與測試基建.toml    # 任務檔(會議產出)
         ├── r001_骨架與測試基建.toml    # 日誌檔(執行後產生,與任務檔成對)
         ├── t002_額度偵測.toml
-        └── report.md            # 人讀報告(agents 自動生成,不進版控)
+        └── _report.md           # 人讀報告(agents 自動生成,不進版控)
 ```
 
 ## 工作資料夾
@@ -31,6 +32,25 @@ project/
   指過去;舊資料夾原地保留即是歸檔,預設不讀。
 - 任務編號在資料夾內**只增不改**:插入新任務用新號碼,不重編既有任務,
   deps 引用才不會斷。
+- **平行執行**:一個工作資料夾同一時間只允許一個 `run`,由該資料夾內的
+  `agents.lock` 鎖定；不同資料夾可在不同終端平行執行。開啟 worktree 模式後,
+  執行期使用 `<專案名>.worktrees/<資料夾>/`，位置參數可用
+  `agents run <資料夾>` 覆寫設定檔中的工作資料夾，並與 `--config` 正交。
+
+### .agents/ 的版控選擇
+
+`.agents/` 進不進版控是專案自己的選擇,調度器兩種模式都正確運作。預設不追蹤
+(`init` 的 `.gitignore` 排除整個 `.agents/`)是過程鷹架不留歷史的模型；選擇追蹤
+則可讓回退時狀態與程式碼原子一致,團隊或稽核需求可自行移除 `.gitignore` 該行。
+不追蹤時磁碟是唯一副本,備份由專案自行負責。`AGENTS.md` 是跨 AI 工具的專案規則,
+不在預設 ignore 之列。
+
+### adapter 沙箱的硬需求
+
+執行 AI 必須能寫入 `.agents/`,因為改自己任務檔的 status 與 append 自己的 r 檔是
+分內事。若 `.agents/` 被 gitignore 的專案使用 codex `workspace-write`,它會被劃成
+「專案外」唯讀,任務會全數假性 BLOCKED；此組合需使用 `danger-full-access`。
+執行 AI 也必須保持整潔:臨時探針或墊片用完即刪,尤其不得留下內嵌 git repo。
 
 ## 任務檔(tNNN_名稱.toml)
 
@@ -124,7 +144,7 @@ detail = '''
 2. 有 `WIP` 任務 -> 優先選它,帶「接續」提示續作(它是上次中斷的任務)。
 3. 否則取第一個 `TODO` 且所有 `deps` 皆為 `DONE` / `SKIP` 的任務。
 4. `BLOCKED` 只擋以它為前置的任務,其他任務照常執行。
-5. 全部任務皆 `DONE` / `BLOCKED` / `SKIP` 時結束,印總結並更新 report.md。
+5. 全部任務皆 `DONE` / `BLOCKED` / `SKIP` 時結束,印總結並更新工作資料夾內的 `_report.md`。
 
 ## 生命週期與驗收(客觀閘門)
 
@@ -153,20 +173,22 @@ detail = '''
 3. `agents check` 驗引用完整性:deps 指向存在的任務、無循環、id 不重複、
    欄位齊全——run 主迴圈每輪重新解析,壞檔 fail-loud。
 
-## report.md(驗收會議的議程表)
+## _report.md(驗收會議的議程表)
 
 `agents report`(或 run 收尾)把 t/r 檔與 git 資訊彙整成一頁純文字報告:
 進度統計、每任務一行(狀態 + 檢查點 commit)、BLOCKED/WIP 任務附最後一筆
 r 檔 summary。**彙整是機械工作,零 token**;AI 永遠不做「幫我總結整輪」這種事。
-report.md 是執行期產物:不進版控、不參與乾淨/scope 檢查,每次生成整檔重寫。
+_report.md 是執行期產物:不進版控、不參與乾淨/scope 檢查,每次生成整檔重寫。
 
 ## 會議規範
 
 - 開局會議:讀 AGENTS.md + 本檔,把共識逐步落成任務檔(草稿可以是散文,
   定稿必須是任務檔),散會條件 = `agents check` 通過。
-- 驗收會議:人先讀 report.md(零 token),只對要裁決的任務開 AI session,
+- 驗收會議:人先讀 `_report.md`(零 token),只對要裁決的任務開 AI session,
   指名「讀 tNNN/rNNN 與對應 commit」;裁決落實 = 改任務檔(status 改回 TODO、
-  補充說明、加新任務、標 SKIP),check 通過後再 run。
+  補充說明、加新任務、標 SKIP),若裁決回退某任務的檢查點(git revert),同一次會議
+  必須把該任務 status 改回 TODO 或標 SKIP,並檢視以它為前置的下游任務是否需要
+  連動重作；狀態與程式碼事實不一致即未完成,散會仍須 `agents check` 通過。
 - 跨計畫仍有效的決策沉澱進 AGENTS.md,不靠舊任務檔傳承。
 
 ## 冷啟動測試(計畫合格的品質標準)
