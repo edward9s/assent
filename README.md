@@ -1,8 +1,7 @@
 # agents — AI 計畫格式 + 零 token 自動調度器
 
 一套讓 AI 在長期專案中以最小上下文正確工作的檔案體系,加上讀懂這套體系、
-無人值守執行的調度器。前身:計畫檔驅動的 [workflow](https://github.com/edward9s/workflow)
-調度器與 .agents 記憶管理 kit,本專案把兩者合為一體。
+無人值守執行的調度器。
 
 - **規劃**:人與 AI 開會議 session,共識即時固化為 `.agents/` 裡的任務檔,
   散會條件 = `agents check` 通過。
@@ -167,5 +166,5 @@ git diff main...<資料夾名>/<run-id>     # 或看整體差異
 ## 專案狀態
 
 核心完成:TOML 任務/日誌格式、五個子命令、claude 與 codex adapter、
-160 個 unittest(無網路、無真實 CLI 也能跑)。設計依據的歷史紀錄見
-[docs/CONSENSUS.md](docs/CONSENSUS.md)。尚未實戰:真實計畫的端到端試跑。
+160 個 unittest(無網路、無真實 CLI 也能跑)。設計共識見
+[docs/CONSENSUS.md](docs/CONSENSUS.md)。
