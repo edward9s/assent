@@ -113,23 +113,34 @@ while operating an assent-managed session live in
 - A verification receipt is a deletable derived artifact, never an independent
   source of truth: source commits, the reconstructed integration tree, and the
   verification-script digest must reproduce it before it can authorize accept.
-- Complete verification mirrors only explicitly provisioned ignored root-level
-  directory links from the source worktrees that enter the candidate, never
-  arbitrary ignored content. Discovery is immediate children only -- Windows
-  junctions and directory symlinks, POSIX directory symlinks -- and a link is
-  mirrored at the same relative name and resolved target only when that
-  destination is absent from the candidate and Git-ignored there. Ordinary
-  ignored directories, files, nested links, `.assent`, build output, caches,
-  credentials, and editor state stay out. Several sources contribute their
-  union: one name resolving to one target is deduplicated, while conflicting
-  targets, an occupied destination, or a link that cannot be created refuse
-  before the verifier runs or any PASSED evidence is written. The mirror exists
-  for the verifier run alone; it is removed before the temporary worktree is,
-  so neither creating nor cleaning a candidate ever traverses, modifies, or
-  deletes a linked target, and the source worktree's own link and its target
-  survive success, failure, and interruption alike. Do not add `--force`, a
-  project `local_inputs` setting, a blanket `.gitignore` overlay, or copies of
-  ignored directory contents into Git.
+- Complete verification mirrors exactly two kinds of artifact from the source
+  worktrees that enter the candidate, never arbitrary ignored content:
+  explicitly provisioned ignored directory links -- Windows junctions and
+  directory symlinks, POSIX directory symlinks -- and ordinary ignored leaf
+  files that sit inside an otherwise tracked directory, such as a generated
+  `*.g.dart` beside its tracked source. Both may be at the root or nested below
+  tracked parents. Discovery uses Git's own ignore walk with whole ignored
+  trees collapsed, so ignored directory trees, build output, caches, editor
+  state, `.git`, `.assent`, and everything inside a discovered link's target
+  are pruned rather than enumerated, as is any file whose parent chain is not
+  part of the candidate's tracked tree. A directory is mirrored as a link to
+  the same resolved target and a file as a candidate-side link to the source
+  file (same-volume hard link on Windows, file symlink on POSIX); nothing is
+  copied and no hardlink twin is prepared by hand. Each destination must be
+  absent from the candidate and Git-ignored there; a provisioned artifact never
+  replaces or shadows tracked content. Several sources contribute their union:
+  one path resolving to one directory target, or to a file with one content
+  digest, is deduplicated, while conflicting targets, differing file contents,
+  a kind mismatch, an ancestor/descendant overlap, a dangling or unsupported
+  link, an occupied destination, an unsafe parent path, and a link that cannot
+  be created refuse before the verifier runs or any PASSED evidence is written.
+  The mirror exists for the verifier run alone; it is removed before the
+  temporary worktree is, deepest path first, followed by only the empty parents
+  provisioning created, so neither creating nor cleaning a candidate ever
+  traverses, modifies, or deletes a linked target, and the source worktree's own
+  links, files, and targets survive success, failure, and interruption alike.
+  Do not add `--force`, a project `local_inputs` setting, a blanket `.gitignore`
+  overlay, or copies of ignored directory contents into Git.
 - Cross-folder speculative execution stacks only on an explicitly declared
   `base`, so at most one not-yet-accepted upstream tip is ever in a stack. A
   folder that declares no `base` is cut from the integration target; the

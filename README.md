@@ -732,6 +732,35 @@ up. Only a hard kill (such as `taskkill /F`) or power loss can leave residue;
 assent has no automatic stale-candidate recovery. Remove residue manually with
 `git worktree remove --force <path>` and `git branch -D <branch>`.
 
+**Ignored inputs the candidate still needs**: `git worktree add` builds that
+candidate from tracked content, so ignored paths are absent from it. Complete
+verification therefore mirrors exactly two kinds of artifact from each source
+worktree that enters the candidate, at the root or nested below tracked
+parents: ignored directory links you provisioned yourself (Windows junctions
+and directory symlinks, POSIX directory symlinks), such as a nested
+`lib/l10n/arb`, and ordinary ignored leaf files sitting inside an otherwise
+tracked directory, such as a generated `lib/models/task.g.dart` beside its
+tracked source. A directory becomes a link to the same resolved target, a file
+becomes a candidate-side link to the source file (a same-volume hard link on
+Windows, a file symlink on POSIX). Nothing is copied, and you never prepare
+hardlink twins or convert a generated file to a symlink by hand.
+
+Everything else stays out. Whole ignored directory trees are pruned rather
+than walked, so `.git`, `.assent`, build output, caches, credentials, editor
+state, and every path inside a mirrored link's target are never enumerated, and
+neither is a file whose parent chain is not part of the candidate's tracked
+tree. A destination must be absent from the candidate and ignored there; a
+mirrored artifact never replaces or shadows tracked content. When several
+folders are verified as one candidate their artifacts are unioned — one path
+with one directory target, or one file content digest, is a single artifact,
+while conflicting targets, differing file contents, a kind mismatch, an
+overlap, a dangling link, or an occupied destination refuses before the
+verifier runs and before any `PASSED` receipt exists. The mirrors last only for
+that verifier run and are removed before the temporary worktree is, so your
+source worktree's links, generated files, and external targets survive a pass,
+a failure, and a Ctrl-C alike. There is no force flag and no project setting
+that widens this.
+
 **Parallel test execution**: choosing `unittest` during `assent init` activates
 the packaged helper `run_unittest_parallel()`, which runs each
 `tests/test_*.py` module in its own subprocess concurrently instead of one
