@@ -390,8 +390,18 @@ class AntigravityAdapter(Adapter):
         command = build_command(
             self.cfg, prompt, requested_model, requested_effort)
         stall_seconds = self.cfg.stall_minutes * 60 if self.cfg.stall_minutes else 0
-        returncode, output, stalled = run_subprocess(
-            command, cwd, stall_seconds, echo=self._echo_line)
+        log_path = log_file(self.cfg)
+        try:
+            returncode, output, stalled = run_subprocess(
+                command, cwd, stall_seconds, echo=self._echo_line,
+                heartbeat_path=log_path)
+        finally:
+            # Success, failure, stall-kill and interrupt all take this path: the per-run log
+            # may hold internal detail that must not linger on disk, and it is never read here.
+            try:
+                log_path.unlink()
+            except OSError:
+                pass
         kind = classify_output(returncode, stalled, output)
         return TaskResult(exit_code=returncode, output=output,
                           quota_exhausted=kind == "quota",

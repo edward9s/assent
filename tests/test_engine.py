@@ -645,7 +645,7 @@ class TestAntigravitySession(EngineTestCase):
         self.commit_all()
         commands: list[list[str]] = []
 
-        def fake(command, cwd, stall_seconds, echo=None):
+        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None):
             commands.append(command)
             (Path(cwd) / "src").mkdir(exist_ok=True)
             (Path(cwd) / "src" / "done.py").write_text("ok", encoding="utf-8")
@@ -701,6 +701,62 @@ class TestAntigravitySession(EngineTestCase):
         self.assertEqual(failure["agent"], "antigravity")
         # a classification never turns a non-zero exit into an accepted task
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
+
+    def test_quota_interrupt_then_resume_keeps_identity_everywhere(self):
+        """A quota round and its resume must resolve to the exact same requested_model /
+        requested_effort in the prompt, the CLI command, the terminal output, and both the
+        scheduler's quota journal entry and the execution AI's own done entry."""
+        path = self.write_task(1, model="prime", effort="low")
+        (self.root / ".assent" / "assent.toml").write_text(
+            '[adapter]\nname = "antigravity"\n', encoding="utf-8")
+        cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
+        self.commit_all()
+        t0 = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        sleeps: list[float] = []
+        calls: list[list[str]] = []
+
+        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None):
+            calls.append(command)
+            if len(calls) == 1:
+                return (1, "Error: Resource has been exhausted (e.g. check quota).", False)
+            (Path(cwd) / "src").mkdir(exist_ok=True)
+            (Path(cwd) / "src" / "done.py").write_text("ok", encoding="utf-8")
+            set_status(path, "DONE")
+            append_entry(journal_path_for(path), by="antigravity",
+                         requested_model=command[command.index("--model") + 1],
+                         requested_effort=command[command.index("--effort") + 1],
+                         event="done", summary="完成 (resumed)")
+            return (0, "done\n", False)
+
+        self.patch_session(fake)
+        adapter = self.adapter(cfg)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, once=True, adapter=adapter,
+                sleep=sleeps.append, now=lambda: t0), 0)
+
+        self.assertEqual(len(calls), 2)     # quota round, then one resumed round
+        terminal = out.getvalue()
+        for command in calls:
+            self.assertEqual(command[command.index("--model") + 1], "gemini-3.1-pro")
+            self.assertEqual(command[command.index("--effort") + 1], "low")
+        self.assertIn("gemini-3.1-pro", terminal)
+
+        resume_prompt = calls[1][calls[1].index("--print") + 1]
+        self.assertIn("resume", resume_prompt.lower())
+        self.assertIn('requested_model = "gemini-3.1-pro"', resume_prompt)
+        self.assertIn('requested_effort = "low"', resume_prompt)
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        quota_entry = next(e for e in entries if e["event"] == "quota")
+        done_entry = next(e for e in entries if e["event"] == "done")
+        self.assertEqual(quota_entry["requested_model"], "gemini-3.1-pro")
+        self.assertEqual(quota_entry["requested_effort"], "low")
+        self.assertEqual(done_entry["requested_model"], "gemini-3.1-pro")
+        self.assertEqual(done_entry["requested_effort"], "low")
+        self.assertEqual(parse_task_file(path).status, "DONE")
 
 
 class TestAcceptanceGates(EngineTestCase):

@@ -4,6 +4,14 @@ Every capability assertion is anchored to the recorded 1.1.5 evidence in
 tests/fixtures/agy_models_1.1.5.txt and tests/fixtures/agy_selection_1.1.5.toml, so a later
 CLI release that changes the contract fails here instead of failing during a paid run.
 """
+import _thread
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -13,9 +21,10 @@ from assent import AssentError
 from assent.adapters import InvocationRequest, TaskResult, get_adapter
 from assent.adapters.antigravity import (
     AntigravityAdapter, NAME, build_command, classify_output,
-    format_output_line, load_catalog, parse_models_catalog, parse_version,
-    recommended_effort, reserved_argument_errors,
+    format_output_line, load_catalog, log_file, parse_models_catalog,
+    parse_version, recommended_effort, reserved_argument_errors,
 )
+from assent.adapters.claude import run_subprocess
 from assent.config import Config
 from assent.plan import append_entry, read_entries
 
@@ -400,8 +409,9 @@ class TestRunTask(unittest.TestCase):
     def test_command_uses_resolved_values_and_reports_success(self):
         captured = {}
 
-        def fake(command, cwd, stall_seconds, echo=None):
-            captured.update(command=command, cwd=cwd, stall_seconds=stall_seconds)
+        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None):
+            captured.update(command=command, cwd=cwd, stall_seconds=stall_seconds,
+                            heartbeat_path=heartbeat_path)
             return 0, "finished\n", False
 
         self.patch_run(fake)
@@ -413,9 +423,40 @@ class TestRunTask(unittest.TestCase):
                          "gemini-3.6-flash")
         self.assertEqual(captured["cwd"], Path("/work"))
         self.assertEqual(captured["stall_seconds"], 30 * 60)
+        self.assertEqual(captured["heartbeat_path"], log_file(make_cfg()))
         self.assertEqual(result.exit_code, 0)
         self.assertIsNone(result.failure_kind)
         self.assertFalse(result.quota_exhausted)
+
+    def test_log_file_is_removed_after_success_failure_and_stall(self):
+        for outcome, fake_result in (
+                ("success", (0, "done\n", False)),
+                ("failure", (2, "Error: boom", False)),
+                ("stall", (1, "", True))):
+            with self.subTest(outcome=outcome):
+                cfg = make_cfg(tasks_name=f"plan01_{outcome}")
+                log_path = log_file(cfg)
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text("internal detail\n", encoding="utf-8")
+                self.patch_run(lambda *a, **k: fake_result)
+                adapter = AntigravityAdapter(cfg, catalog=catalog())
+                adapter.run_task("p", "gemini-3.1-pro", "high", Path("."))
+                self.assertFalse(log_path.exists())
+
+    def test_log_file_is_removed_even_when_interrupted(self):
+        cfg = make_cfg(tasks_name="plan01_interrupt")
+        log_path = log_file(cfg)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("secret\n", encoding="utf-8")
+
+        def fake(*a, **k):
+            raise KeyboardInterrupt
+
+        self.patch_run(fake)
+        adapter = AntigravityAdapter(cfg, catalog=catalog())
+        with self.assertRaises(KeyboardInterrupt):
+            adapter.run_task("p", "gemini-3.1-pro", "high", Path("."))
+        self.assertFalse(log_path.exists())
 
     def test_nonzero_exit_is_never_disguised_as_success(self):
         self.patch_run(lambda *a, **k: (2, "Error: transport closed", False))
@@ -483,6 +524,214 @@ class TestRegistrationAndJournal(unittest.TestCase):
         journal = Path(tempfile.mkdtemp()) / "t001_task.r.toml"
         with self.assertRaisesRegex(AssentError, "by is invalid"):
             append_entry(journal, by="nowhere", event="done", summary="x")
+
+
+# --------------------------------------------------------------------------- #
+# Real fake-CLI subprocess reliability (t003)
+#
+# Every test below spawns tests/fixtures/fake_agy.py as a genuine child process --
+# `sys.executable` in front of it, since a bare .py file is not directly executable on
+# Windows -- so the no-shell argv list, real stdout/stderr merge, watchdog timing and
+# process-kill mechanics of assent.adapters.claude.run_subprocess are exercised for real.
+# Nothing here touches the network, a real login or a real model: FAKE_AGY_SCENARIO
+# selects the outcome, so these tests are fully hermetic and deterministic.
+# --------------------------------------------------------------------------- #
+FAKE_AGY = FIXTURES / "fake_agy.py"
+
+
+def _fake_agy_command(prompt, *, model="gemini-3.1-pro", effort="high",
+                      log_path=None, print_timeout="1m", extra=()):
+    cmd = [sys.executable, str(FAKE_AGY), "--print", prompt, "--model", model]
+    if effort:
+        cmd += ["--effort", effort]
+    cmd += ["--mode", "accept-edits", "--print-timeout", print_timeout]
+    if log_path is not None:
+        cmd += ["--log-file", str(log_path)]
+    cmd += list(extra)
+    return cmd
+
+
+def _pid_running(pid: int) -> bool:
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True, text=True)
+        return str(pid) in result.stdout
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+class RealSubprocessTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def run_scenario(self, scenario, prompt="do the thing", *, stall_seconds=10,
+                     heartbeat_path=None, echo=None, env=None, **kw):
+        full_env = {"FAKE_AGY_SCENARIO": scenario, **(env or {})}
+        with mock.patch.dict(os.environ, full_env):
+            command = _fake_agy_command(prompt, **kw)
+            return run_subprocess(command, self.tmp, stall_seconds,
+                                  echo=echo, heartbeat_path=heartbeat_path)
+
+
+class TestFakeCLIClassification(RealSubprocessTestCase):
+    """Real, hermetic child-process runs of every outcome the adapter must classify."""
+
+    def test_success_is_not_a_failure(self):
+        rc, out, stalled = self.run_scenario("success")
+        self.assertEqual(rc, 0)
+        self.assertFalse(stalled)
+        self.assertIsNone(classify_output(rc, stalled, out))
+
+    def test_normal_reply_containing_quota_word_is_not_misread(self):
+        rc, out, stalled = self.run_scenario("success_with_quota_word")
+        self.assertEqual(rc, 0)
+        self.assertIn("quota", out.lower())
+        # exit 0 prose that merely mentions quota/limit is never itself a quota failure
+        self.assertIsNone(classify_output(rc, stalled, out))
+
+    def test_stderr_error_is_classified_nonzero(self):
+        rc, out, stalled = self.run_scenario("stderr_error")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("transport closed", out)
+        self.assertEqual(classify_output(rc, stalled, out), "nonzero")
+
+    def test_permission_soft_deny_is_classified(self):
+        rc, out, stalled = self.run_scenario("permission")
+        self.assertEqual(classify_output(rc, stalled, out), "permission")
+
+    def test_quota_signal_is_classified(self):
+        rc, out, stalled = self.run_scenario("quota")
+        self.assertEqual(classify_output(rc, stalled, out), "quota")
+
+    def test_unsupported_model_is_classified(self):
+        rc, out, stalled = self.run_scenario("unsupported_model")
+        self.assertEqual(classify_output(rc, stalled, out), "unsupported_model")
+
+    def test_print_timeout_text_is_classified_timeout_not_stall(self):
+        rc, out, stalled = self.run_scenario("print_timeout")
+        # AGY's own bound firing is a classified failure, never the assent watchdog kill
+        self.assertFalse(stalled)
+        self.assertEqual(classify_output(rc, stalled, out), "timeout")
+
+
+class TestFakeCLIUnicodeAndPrompt(RealSubprocessTestCase):
+    def test_unicode_whitespace_path_and_multiline_prompt_round_trip(self):
+        odd_dir = self.tmp / "工作 目錄 with spaces"
+        odd_dir.mkdir()
+        prompt = ("多行 prompt 第一行\n"
+                  'Second line with "quotes" and a tab\there\n'
+                  "第三行:percent %PATH%, amp &, pipe |, caret ^\n")
+        with mock.patch.dict(os.environ, {"FAKE_AGY_SCENARIO": "echo_roundtrip"}):
+            command = _fake_agy_command(prompt, extra=["--add-dir", str(odd_dir)])
+            rc, out, stalled = run_subprocess(command, odd_dir, stall_seconds=10)
+        self.assertEqual(rc, 0)
+        self.assertFalse(stalled)
+        self.assertIn(f"PROMPT_LEN={len(prompt)}", out)
+        self.assertIn(repr(prompt), out)
+        self.assertIn(repr(str(odd_dir)), out)
+
+
+class TestFakeCLILiveEcho(RealSubprocessTestCase):
+    def test_lines_arrive_incrementally_not_only_at_the_end(self):
+        timestamps: list[float] = []
+        rc, out, stalled = self.run_scenario(
+            "streaming", stall_seconds=10, echo=lambda line: timestamps.append(
+                time.monotonic()),
+            env={"FAKE_AGY_TICK_SECONDS": "0.15"})
+        self.assertEqual(rc, 0)
+        self.assertFalse(stalled)
+        self.assertEqual(len(timestamps), 3)
+        # if every line had only arrived once the process was already finished, the three
+        # timestamps would be clustered together instead of spread over ~0.3s
+        self.assertGreater(timestamps[-1] - timestamps[0], 0.2)
+
+
+class TestWatchdogHeartbeat(RealSubprocessTestCase):
+    """The behaviour that makes a print-mode CLI's own log file count as activity."""
+
+    def test_silent_but_alive_process_is_not_killed_when_heartbeat_is_fresh(self):
+        log_path = self.tmp / "agy.log"
+        rc, out, stalled = self.run_scenario(
+            "silent_alive", stall_seconds=0.6, heartbeat_path=log_path,
+            log_path=log_path,
+            env={"FAKE_AGY_TICKS": "5", "FAKE_AGY_TICK_SECONDS": "0.15"})
+        self.assertFalse(stalled)
+        self.assertEqual(rc, 0)
+        self.assertIn("Done after a long silent-but-alive stretch", out)
+
+    def test_same_silence_without_a_heartbeat_path_is_killed(self):
+        # No heartbeat_path given: behaves exactly like the pre-existing claude/codex
+        # watchdog, which only ever counted a stdout line as activity.
+        log_path = self.tmp / "agy.log"
+        rc, out, stalled = self.run_scenario(
+            "silent_alive", stall_seconds=0.3, heartbeat_path=None,
+            log_path=log_path,
+            env={"FAKE_AGY_TICKS": "5", "FAKE_AGY_TICK_SECONDS": "0.15"})
+        self.assertTrue(stalled)
+
+    def test_genuinely_silent_process_is_still_killed_with_a_heartbeat_path(self):
+        log_path = self.tmp / "agy.log"
+        start = time.monotonic()
+        rc, out, stalled = self.run_scenario(
+            "silent_dead", stall_seconds=0.4, heartbeat_path=log_path,
+            log_path=log_path, env={"FAKE_AGY_HANG_SECONDS": "30"})
+        elapsed = time.monotonic() - start
+        self.assertTrue(stalled)
+        self.assertLess(elapsed, 10)   # killed promptly, not left running the full 30s hang
+
+
+class TestPrintTimeoutAndWatchdogPrecedence(RealSubprocessTestCase):
+    def test_watchdog_disabled_never_produces_an_immediate_timeout(self):
+        rc, out, stalled = self.run_scenario("success", stall_seconds=0)
+        self.assertEqual(rc, 0)
+        self.assertFalse(stalled)
+
+    def test_agys_own_timeout_and_the_assent_watchdog_are_independent_signals(self):
+        # AGY's own bound firing is a classified failure, not a watchdog kill.
+        rc, out, stalled = self.run_scenario("print_timeout", stall_seconds=30)
+        self.assertFalse(stalled)
+        self.assertEqual(classify_output(rc, stalled, out), "timeout")
+
+        # A truly stuck process is the watchdog's own kill, whatever it did or didn't print.
+        rc2, out2, stalled2 = self.run_scenario(
+            "hang", stall_seconds=0.3, env={"FAKE_AGY_HANG_SECONDS": "30"})
+        self.assertTrue(stalled2)
+
+
+class TestRealChildInterruptCleanup(unittest.TestCase):
+    def test_keyboard_interrupt_kills_the_real_child_process(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        pidfile = tmp / "pid.txt"
+        env = {"FAKE_AGY_SCENARIO": "hang", "FAKE_AGY_PIDFILE": str(pidfile),
+              "FAKE_AGY_HANG_SECONDS": "30"}
+
+        def trigger():
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not pidfile.exists():
+                time.sleep(0.02)
+            time.sleep(0.1)   # small grace so the child is inside its sleep loop
+            _thread.interrupt_main()
+
+        timer = threading.Thread(target=trigger, daemon=True)
+        timer.start()
+        with mock.patch.dict(os.environ, env):
+            command = _fake_agy_command("go")
+            with self.assertRaises(KeyboardInterrupt):
+                run_subprocess(command, tmp, stall_seconds=5)
+        timer.join(timeout=2)
+
+        self.assertTrue(pidfile.exists(), "the child never started")
+        pid = int(pidfile.read_text().strip())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and _pid_running(pid):
+            time.sleep(0.1)
+        self.assertFalse(_pid_running(pid), "the child process was not cleaned up")
 
 
 if __name__ == "__main__":
