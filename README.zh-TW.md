@@ -345,8 +345,8 @@ checkpoints 構成目前分支的連續尾段才會建立新的反向 commit,絕
 
 Assent 透過可插式 adapter 支援不同的 AI CLI 工具。每份任務檔用抽象**檔位**
 (`prime`、`core` 或 `lite`) 替代具體模型名稱;adapter 的組態表會把該檔位轉成
-這次執行的實際 CLI 模型。同樣地,任務可要求抽象 **effort** 等級(`low`、
-`medium` 或 `high`),adapter 會轉成廠商的具體 CLI 值(如果支援的話)。
+這次執行的實際 CLI 模型。同樣地,任務可要求抽象 **effort** 等級(`heavy`、
+`normal` 或 `slight`),adapter 會轉成廠商的具體 CLI 值(如果支援的話)。
 
 ### 支援的 adapter
 
@@ -395,19 +395,19 @@ lite  = "gemini-3.5-flash" # Gemini 3.5 Flash — 高效
 
 # Antigravity 各檔位的 effort 翻譯。下面說明每個。
 [adapter.antigravity.default_effort]
-prime = "high"
-core  = "high"
-lite  = "high"
+prime = "heavy"
+core  = "heavy"
+lite  = "heavy"
 
 # Gemini 3.1 Pro 只支援 low 和 high effort,沒有 medium。
-# 為了品質,medium 翻譯上升為 high(絕不無聲降級)。
+# 為了品質,normal 翻譯上升為 high(絕不無聲降級)。
 [adapter.antigravity.efforts.prime]
-medium = "high"
+normal = "high"
 
-# Gemini 3.5 Flash 只支援 low 和 medium,沒有 high。Lite 檔位的 high
+# Gemini 3.5 Flash 只支援 low 和 medium,沒有 high。Lite 檔位的 heavy
 # 翻譯為 medium(這個家族的上限),在組態表裡可見,可覆寫。
 [adapter.antigravity.efforts.lite]
-high = "medium"
+heavy = "medium"
 ```
 
 ### 模型/effort 矩陣
@@ -419,30 +419,30 @@ high = "medium"
 
 | Effort | prime<br/>(Fable) | core<br/>(Opus) | lite<br/>(Sonnet) |
 |--------|---|---|---|
-| low | `--model fable` | `--model opus` | `--model sonnet` |
-| medium | `--model fable --effort medium` | `--model opus --effort medium` | `--model sonnet --effort medium` |
-| high | `--model fable --effort high` | `--model opus --effort high` | `--model sonnet --effort high` |
+| slight | `--model fable --effort low` | `--model opus --effort low` | `--model sonnet --effort low` |
+| normal | `--model fable --effort medium` | `--model opus --effort medium` | `--model sonnet --effort medium` |
+| heavy | `--model fable --effort high` | `--model opus --effort high` | `--model sonnet --effort high` |
 
 #### Codex adapter
 
 | Effort | prime<br/>(gpt-5.6-sol) | core<br/>(gpt-5.6-terra) | lite<br/>(gpt-5.6-luna) |
 |--------|---|---|---|
-| low | `--model gpt-5.6-sol` | `--model gpt-5.6-terra` | `--model gpt-5.6-luna` |
-| medium | `--model gpt-5.6-sol --effort medium` | `--model gpt-5.6-terra --effort medium` | `--model gpt-5.6-luna --effort medium` |
-| high | `--model gpt-5.6-sol --effort high` | `--model gpt-5.6-terra --effort high` | `--model gpt-5.6-luna --effort high` |
+| slight | `--model gpt-5.6-sol --effort low` | `--model gpt-5.6-terra --effort low` | `--model gpt-5.6-luna --effort low` |
+| normal | `--model gpt-5.6-sol --effort medium` | `--model gpt-5.6-terra --effort medium` | `--model gpt-5.6-luna --effort medium` |
+| heavy | `--model gpt-5.6-sol --effort high` | `--model gpt-5.6-terra --effort high` | `--model gpt-5.6-luna --effort high` |
 
 #### Antigravity adapter (1.1.5+)
 
 | Effort | prime<br/>(3.1 Pro) | core<br/>(3.6 Flash) | lite<br/>(3.5 Flash) |
 |--------|---|---|---|
-| low | `--model gemini-3.1-pro --effort low` | `--model gemini-3.6-flash --effort low` | `--model gemini-3.5-flash --effort low` |
-| medium | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort medium` | `--model gemini-3.5-flash --effort medium` |
-| high | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort high` | `--model gemini-3.5-flash --effort medium` |
+| slight | `--model gemini-3.1-pro --effort low` | `--model gemini-3.6-flash --effort low` | `--model gemini-3.5-flash --effort low` |
+| normal | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort medium` | `--model gemini-3.5-flash --effort medium` |
+| heavy | `--model gemini-3.1-pro --effort high` | `--model gemini-3.6-flash --effort high` | `--model gemini-3.5-flash --effort medium` |
 
 說明:
-- **Antigravity prime/medium**: Gemini 3.1 Pro 不支援 `medium`,故 assent 改選
+- **Antigravity prime/normal**: Gemini 3.1 Pro 不支援 `medium`,故 assent 改選
   `high`(品質優先對應)。這不是無聲回落—組態表裡清楚可見、可審計。
-- **Antigravity lite/high**: Gemini 3.5 Flash 沒有 `high` effort 等級,故 `high`
+- **Antigravity lite/heavy**: Gemini 3.5 Flash 沒有 `high` effort 等級,故 `heavy`
   轉成 `medium`(該家族的最大可用)。
 - **Antigravity 1.1.5 最低版**: 這是支援 `--effort`、穩定 model slug 及無人值班
   執行所需 headless 修正的版本。舊版在開啟 session 前會被拒。
@@ -463,7 +463,7 @@ Assent **不會**修改 `~/.gemini/antigravity-cli/settings.json`、執行登入
 ```toml
 title = "用高品質推理分析程式碼"
 model = "prime"
-effort = "high"
+effort = "heavy"
 status = "TODO"
 scope = ["src/", "tests/"]
 verify = "python -m pytest"
@@ -480,7 +480,7 @@ goal = "用 Gemini 3.1 Pro(最高品質)審查程式碼庫。"
 **在既有專案中切換 adapter**
 
 改 `[adapter]` name 只需一行。既有任務檔無需改動;它們仍用 `model = "prime"` 和
-`effort = "high"`,新 adapter 的組態表照樣轉譯。切換後,下一次 `assent check`
+`effort = "heavy"`,新 adapter 的組態表照樣轉譯。切換後,下一次 `assent check`
 會在任何 session 啟動前驗證新 adapter。
 
 ### 設定模型與 effort 翻譯
@@ -496,18 +496,19 @@ effort 的翻譯。查找順序永遠是:
 
 1. 檔位特定區段: `[adapter.<name>.efforts.<tier>]`
 2. 平面區段: `[adapter.<name>.efforts]`
-3. 恆等(直接送抽象值)
+3. 內建基準表:`heavy` → `high`、`normal` → `medium`、`slight` → `low`
+   (較高優先層缺少某個鍵時,每個抽象鍵都各自逐層退回平面表,再退回基準表)。
 
 範例:如果你的 Antigravity 設定有更新的 3.1 Pro 支援 medium,可移除品質優先對應:
 
 ```toml
 # 移除這行:
 # [adapter.antigravity.efforts.prime]
-# medium = "high"
+# normal = "high"
 
 # 或設為實際值:
 [adapter.antigravity.efforts.prime]
-medium = "medium"
+normal = "medium"
 ```
 
 ### 設定 Antigravity print timeout
@@ -571,17 +572,17 @@ assent run <FOLDER>  # 自動從 WIP 恢復
 
 **組態 preflight 錯誤後修正**
 
-別改任務檔的抽象檔位或 effort。只改 adapter 組態。例如 prime/medium 對應
+別改任務檔的抽象檔位或 effort。只改 adapter 組態。例如 prime/normal 對應
 到 high 但想改:
 
 ```toml
 # 之前
 [adapter.antigravity.efforts.prime]
-medium = "high"
+normal = "high"
 
-# 之後(如果 medium 現在支援)
+# 之後(如果 normal 現在支援)
 [adapter.antigravity.efforts.prime]
-medium = "medium"
+normal = "medium"
 ```
 
 修正組態後,無需改 `.assent/` 管理檔;`assent check` 會重新驗證,
@@ -595,7 +596,7 @@ medium = "medium"
   ——assent session 行為與跨專案共通規則;專案規則留在 `AGENTS.md`。
 - 設定檔範本:[assent/templates/assent.toml](assent/templates/assent.toml)
   ——adapter 選擇、抽象檔位(prime/core/lite)對照表、
-  抽象 effort(low/medium/high)的預設與 CLI 值翻譯、watchdog 與重試參數。
+  抽象 effort(heavy/normal/slight)的預設與 CLI 值翻譯、watchdog 與重試參數。
 
 ## 常見問題
 
