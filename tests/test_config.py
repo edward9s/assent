@@ -174,6 +174,73 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.prompt_template, "hi {task_id}")
 
 
+class TestAdapterSettings(ConfigTestCase):
+    def test_unknown_adapter_is_rejected_not_claude_fallback(self):
+        # A third adapter name must fail closed here, never silently inherit Claude's mapping.
+        cfg = load_config(self.write(_MINIMAL), "plan01")
+        self.assertEqual(cfg.adapter_settings("claude").models["prime"], "fable")
+        self.assertEqual(cfg.adapter_settings("codex").models["lite"],
+                         "gpt-5.6-luna")
+        with self.assertRaisesRegex(AssentError, "unknown adapter: 'antigravity'"):
+            cfg.adapter_settings("antigravity")
+
+    def test_settings_carry_vendor_specific_command_and_maps(self):
+        cfg = load_config(self.write(
+            '[adapter.codex]\ncommand = "codex.cmd"\n'
+            '[adapter.codex.efforts]\nlow = "minimal"\nmedium = "balanced"\n'
+            '[adapter.codex.efforts.lite]\nhigh = "max"\n'), "plan01")
+        codex = cfg.adapter_settings("codex")
+        self.assertEqual(codex.name, "codex")
+        self.assertEqual(codex.command, "codex.cmd")
+        self.assertEqual(codex.extra_args, ("--sandbox", "workspace-write"))
+        self.assertEqual(codex.resolve_model("prime"), "gpt-5.6-sol")
+        with self.assertRaisesRegex(AssentError,
+                                    r"\[adapter\.codex\.models\]"):
+            codex.resolve_model("nonexistent")
+
+    def test_resolve_effort_precedence_task_then_default_then_none(self):
+        cfg = load_config(self.write(
+            '[adapter.claude.default_effort]\n'
+            'prime = "high"\ncore = "medium"\n'), "plan01")
+        settings = cfg.adapter_settings("claude")
+        # task annotation wins over the tier default
+        self.assertEqual(settings.resolve_effort("low", "prime"), "low")
+        # tier default applies when the task omits effort
+        self.assertEqual(settings.resolve_effort(None, "prime"), "high")
+        self.assertEqual(settings.resolve_effort(None, "core"), "medium")
+        # no default for this tier -> None (no effort chosen)
+        self.assertIsNone(settings.resolve_effort(None, "lite"))
+
+    def test_empty_default_effort_chooses_no_effort(self):
+        cfg = load_config(self.write(
+            '[adapter.claude.default_effort]\n'), "plan01")
+        settings = cfg.adapter_settings("claude")
+        for model in ("prime", "core", "lite"):
+            self.assertIsNone(settings.resolve_effort(None, model))
+            # nothing chosen -> nothing translated, no invented CLI default
+            self.assertIsNone(settings.resolve_requested_effort(model, None))
+
+    def test_requested_effort_grid_tier_then_flat_then_identity(self):
+        cfg = load_config(self.write(
+            '[adapter.claude.efforts]\n'
+            'low = "minimal"\nmedium = "balanced"\n'   # no flat "high" -> identity
+            '[adapter.claude.efforts.lite]\nlow = "tiny"\n'), "plan01")
+        settings = cfg.adapter_settings("claude")
+        grid = {
+            ("prime", "low"): "minimal", ("prime", "medium"): "balanced",
+            ("prime", "high"): "high",
+            ("core", "low"): "minimal", ("core", "medium"): "balanced",
+            ("core", "high"): "high",
+            ("lite", "low"): "tiny",      # tier-specific beats flat
+            ("lite", "medium"): "balanced",
+            ("lite", "high"): "high",     # identity fallback
+        }
+        for (model, effort), expected in grid.items():
+            with self.subTest(model=model, effort=effort):
+                self.assertEqual(
+                    settings.resolve_requested_effort(model, effort), expected)
+
+
 class TestListTaskFolders(ConfigTestCase):
     def test_lists_only_visible_folders_containing_formal_task_files(self):
         for name, filename in (("beta", "t002_b.e.toml"),

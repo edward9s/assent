@@ -37,7 +37,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from assent import AssentError
 from assent.adapters import Adapter, TaskResult
 
 if TYPE_CHECKING:
@@ -271,15 +270,9 @@ class ClaudeAdapter(Adapter):
 
     def __init__(self, cfg: "Config") -> None:
         self.cfg = cfg
-
-    def resolve_model(self, model: str) -> str:
-        """Resolve the abstract tier into the model argument accepted by the Claude CLI."""
-        alias = self.cfg.claude_models.get(model)
-        if alias is None:
-            raise AssentError(
-                f"model tier {model!r} is not in [adapter.claude.models]; "
-                f"check the plan file's suggested model or the config mapping")
-        return alias
+        # Model resolution and the effort contract come from the shared typed settings so this
+        # adapter and the engine resolve invocations identically (base Adapter.resolve_model).
+        self.settings = cfg.adapter_settings("claude")
 
     def run_task(self, prompt: str, requested_model: str,
                  requested_effort: str | None,

@@ -38,6 +38,50 @@ _DEFAULT_CODEX_MODELS = {
 _DEFAULT_CODEX_EFFORT = {"prime": "high", "core": "medium", "lite": "low"}
 
 
+@dataclass(frozen=True)
+class AdapterSettings:
+    """One vendor adapter's resolved settings: command, tier -> model map, and effort contract.
+
+    Both resolution orders are fixed and live here so no caller has to branch on an adapter
+    name to resolve an invocation:
+    - abstract effort selection: task annotation > this adapter's tier default > unset;
+    - vendor effort translation: tier-specific > flat > identity.
+    An empty ``default_effort`` for a tier means no abstract effort is chosen, so no effort flag
+    is passed and no CLI default is invented.
+    """
+
+    name: str
+    command: str
+    extra_args: tuple[str, ...]
+    models: dict[str, str]
+    default_effort: dict[str, str]
+    efforts: dict[str, str]
+    tier_efforts: dict[str, dict[str, str]]
+
+    def resolve_model(self, model: str) -> str:
+        """Resolve the abstract tier into the concrete ``--model`` argument for this adapter."""
+        alias = self.models.get(model)
+        if alias is None:
+            raise AssentError(
+                f"model tier {model!r} is not in [adapter.{self.name}.models]; "
+                f"check the plan file's suggested model or the config mapping")
+        return alias
+
+    def resolve_effort(self, task_effort: str | None, model: str) -> str | None:
+        """Choose the abstract effort: the task annotation wins, else this tier's default, else None."""
+        if task_effort:
+            return task_effort
+        return self.default_effort.get(model)
+
+    def resolve_requested_effort(self, model: str,
+                                 effort: str | None) -> str | None:
+        """Translate the abstract effort to the actual CLI value by tier-specific > flat > identity."""
+        if effort is None:
+            return None
+        return self.tier_efforts.get(model, {}).get(
+            effort, self.efforts.get(effort, effort))
+
+
 @dataclass
 class Config:
     root: Path                     # Project root = parent of .assent
@@ -72,6 +116,32 @@ class Config:
     @property
     def branch_prefix(self) -> str:
         return f"{self.tasks_name}/"
+
+    def adapter_settings(self, name: str) -> AdapterSettings:
+        """Return one adapter's typed settings, fail-closed on an unknown name.
+
+        This is the single place a vendor name maps to its settings; the engine and the adapters
+        both go through it, so an unknown third adapter is rejected here rather than silently
+        inheriting Claude's mapping.
+        """
+        if name == "claude":
+            return AdapterSettings(
+                name="claude", command=self.claude_command,
+                extra_args=tuple(self.claude_extra_args),
+                models=self.claude_models,
+                default_effort=self.claude_default_effort,
+                efforts=self.claude_efforts,
+                tier_efforts=self.claude_tier_efforts)
+        if name == "codex":
+            return AdapterSettings(
+                name="codex", command=self.codex_command,
+                extra_args=tuple(self.codex_extra_args),
+                models=self.codex_models,
+                default_effort=self.codex_default_effort,
+                efforts=self.codex_efforts,
+                tier_efforts=self.codex_tier_efforts)
+        raise AssentError(
+            f"unknown adapter: {name!r} (built in: 'claude' / 'codex')")
 
     def rel(self, path: Path) -> str:
         """Path for use in prompts; relative inside the project, absolute for an external source of truth."""

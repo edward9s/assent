@@ -444,6 +444,77 @@ class TestRunSuccess(EngineTestCase):
         self.assertFalse((self.root / "verified.txt").exists())
 
 
+class TestInvocationResolution(EngineTestCase):
+    def test_resolved_effort_is_consistent_across_prompt_call_label_journal(self):
+        # One resolved abstract/concrete pair must appear identically in the prompt
+        # placeholders, the adapter call, the terminal label, and the scheduler journal.
+        p1 = self.write_task(1, model="lite", effort="high")
+        cfg = self.build(extra_config=
+            '[adapter.claude.efforts.lite]\nhigh = "max"\n')
+        self.commit_all()
+        adapter = ScriptedAdapter([self.ai_done(p1)])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            engine.run(cfg, once=True, adapter=adapter)
+
+        prompt, requested_model, requested_effort = adapter.calls[0]
+        self.assertEqual(requested_model, "lite")
+        self.assertEqual(requested_effort, "max")            # concrete CLI value
+        self.assertIn('abstract effort = "high"', prompt)    # abstract kept distinct
+        self.assertIn('requested_effort = "max"', prompt)
+        self.assertIn("effort(abstract)=high", out.getvalue())
+        self.assertIn("requested_effort(actual)=max", out.getvalue())
+
+        from assent.plan import read_entries
+        done = next(e for e in read_entries(journal_path_for(p1))
+                    if e["by"] == "claude")
+        self.assertEqual(done["requested_model"], "lite")
+
+    def test_unknown_adapter_run_is_rejected_without_claude_fallback(self):
+        self.write_task(1)
+        cfg = self.build(adapter_name="antigravity")
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = engine.run(cfg)   # no injected adapter -> get_adapter must refuse
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown adapter: 'antigravity'", out.getvalue())
+
+    def test_unknown_adapter_check_reports_fail_and_skips_cli_probe(self):
+        self.write_task(1)
+        cfg = self.build(adapter_name="antigravity")
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = engine.check(cfg)
+        self.assertEqual(rc, 1)
+        self.assertIn("adapter: FAIL", out.getvalue())
+        self.assertIn("unknown adapter: 'antigravity'", out.getvalue())
+        # the CLI probe is adapter-provided, so an unresolved adapter emits no CLI line
+        self.assertNotIn("CLI:", out.getvalue())
+
+    def test_check_cli_probe_uses_current_adapter_command(self):
+        # codex adapter with a runnable command (python) must be probed as codex, not claude
+        self.write_task(1)
+        cfg = self.build(adapter_name="codex", extra_config=
+            '[adapter.codex]\ncommand = "python"\n')
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 0)
+        self.assertIn("codex CLI: OK", out.getvalue())
+
+    def test_check_cli_probe_reports_missing_executable(self):
+        self.write_task(1)
+        cfg = self.build(adapter_name="codex", extra_config=
+            '[adapter.codex]\ncommand = "definitely-not-a-real-cli-xyz"\n')
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.check(cfg), 1)
+        self.assertIn("codex CLI: FAIL (executable not found", out.getvalue())
+
+
 class TestAcceptanceGates(EngineTestCase):
     def test_self_blocked_committed_without_verify(self):
         # verify is an always-failing command: self-marked BLOCKED skips verify so it passes
