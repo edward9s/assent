@@ -9,9 +9,9 @@
 ```text
 AGENTS.md            永久規則（root，工具自動載入的入口）
 .agents/CURRENT.md   現況快照（每次結束重寫）
-.agents/tasks/       當前任務契約 + 完成歸檔
+.agents/tasks/       當前任務契約
 .agents/logs/        歷史證據（append-only，預設不讀）
-scripts/verify.sh    完成的機器證明
+scripts/verify.py    完成的機器證明
 ```
 
 設計原理見 `docs/CONSENSUS.md`，完整範例見 `docs/MANUAL.md`。
@@ -27,13 +27,13 @@ scripts/verify.sh    完成的機器證明
 ```text
 AGENTS.md
 .agents/
-scripts/verify.sh
+scripts/verify.py
 ```
 
 或使用附帶腳本：
 
 ```bash
-./init.sh /path/to/your/project
+python init.py /path/to/your/project
 ```
 
 （腳本只複製，不覆蓋既有檔案；`docs/` 與本 README 不會被複製。）
@@ -45,7 +45,7 @@ scripts/verify.sh
 | 檔案 | 要填的內容 |
 |---|---|
 | `AGENTS.md` | 專案一句話描述、永久硬限制 |
-| `scripts/verify.sh` | 你的實際檢查命令（lint、test、format） |
+| `scripts/verify.py` | 你的實際檢查命令（lint、test、format） |
 | `.agents/CURRENT.md` | 專案**目前的真實狀態**（最重要的一步） |
 | `.agents/tasks/ACTIVE.md` | 第一個要做的任務 |
 
@@ -88,15 +88,15 @@ AI 若能不追問就答對 → 初始化完成。
 
 AI 依 `AGENTS.md` 的 Completion protocol 執行七步，關鍵是：
 
-- 跑 `scripts/verify.sh`，逐項核對驗收條件
+- 跑 `python scripts/verify.py`，逐項核對驗收條件
 - **重寫** `.agents/CURRENT.md`（現在式，刪過時內容），不是追加
 - 詳細過程追加到 `.agents/logs/YYYY-MM.md`
 - 未驗證項目如實標註 pending，不得寫成完成
 
 ### 任務切換
 
-ACTIVE 完成 → 移入 `.agents/tasks/completed/`，
-重點結論回寫 CURRENT，再建新的 ACTIVE.md。
+ACTIVE 完成 → 重點結論回寫 CURRENT，再以新任務重寫 ACTIVE.md。
+舊任務的完整記錄已在 logs/ 與 git 歷史，不另做歸檔。
 
 ### 人工抽查（每隔幾個 session，約 2 分鐘）
 
@@ -123,7 +123,7 @@ ACTIVE 完成 → 移入 `.agents/tasks/completed/`，
    混淆這兩者，CURRENT 最終會退化成另一份無法閱讀的日誌。
 
 3. **文字說明意圖，測試證明正確。**
-   完成 = verify.sh exit 0 + 驗收條件逐項通過，不是「看起來完成了」。
+   完成 = verify.py exit 0 + 驗收條件逐項通過，不是「看起來完成了」。
 
 ---
 
@@ -146,7 +146,7 @@ ACTIVE 完成 → 移入 `.agents/tasks/completed/`，
 A：agent 工具自動在 project root 尋找指令檔，位置本身就是功能。
 移進子目錄後工具不會自動載入，違反零記憶冷啟動的初衷。
 
-**Q：verify.sh 為什麼放 scripts/ 而非 .agents/？**
+**Q：verify.py 為什麼放 scripts/ 而非 .agents/？**
 A：它驗證的是專案正確性，不是 AI 專屬資源，CI 和你自己也會用。
 
 **Q：logs 會不會無限膨脹？**

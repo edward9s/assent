@@ -13,7 +13,7 @@
 目前狀態   → .agents/CURRENT.md
 本次任務   → .agents/tasks/ACTIVE.md
 歷史證據   → .agents/logs/（分卷，預設不讀）
-正確性證明 → scripts/verify.sh
+正確性證明 → scripts/verify.py
 ```
 
 ## 四條核心原則
@@ -37,7 +37,7 @@
 
 4. **測試證明正確**
    文字說明意圖，測試證明正確。
-   完成條件 = verify.sh exit 0 + 驗收條件逐項核對，不靠長篇叮嚀。
+   完成條件 = verify.py exit 0 + 驗收條件逐項核對，不靠長篇叮嚀。
    摘要只寫可驗證事實，明確區分：已修改 / 已驗證 / 未驗證 / 已知失敗 / 推測。
    程式寫好 ≠ 任務完成；pending 不得包裝成 completed。
 
@@ -46,7 +46,7 @@
 - `AGENTS.md` 必須留在 project root——agent 工具自動在 root 尋找指令檔，
   位置本身就是功能。它變薄，只做「規則 + 路由」。
 - 其餘 AI 工作檔收進 `.agents/`，root 保持乾淨。
-- `verify.sh` 留在 `scripts/`——它驗證專案正確性，非 AI 專屬，CI 也會用。
+- `verify.py` 留在 `scripts/`——它驗證專案正確性，非 AI 專屬，CI 也會用。
 
 ## 品質標準（取代 token 數字 KPI）
 
@@ -80,7 +80,7 @@ token 預算（AGENTS 300–800、CURRENT 300–700、ACTIVE 500–1,500）
 ## 一句話定案
 
 > 用 AGENTS 管規則、CURRENT 管現在、ACTIVE 管本次、LOG 管歷史、
-> verify.sh 管真假；預設只讀前三者，結束時驗證、重寫狀態、細節歸檔。
+> verify.py 管真假；預設只讀前三者，結束時驗證、重寫狀態、細節歸檔。
 >
 > 文件負責讓 AI 快速接手，Git 和測試負責保證事實，
 > 人工負責防止快照失真——三者缺一，省下的 tokens 都會以返工的形式加倍還回去。

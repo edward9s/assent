@@ -10,12 +10,11 @@ project/
 ├── .agents/
 │   ├── CURRENT.md             # 現況快照，每次結束重寫
 │   ├── tasks/
-│   │   ├── ACTIVE.md          # 當前任務契約
-│   │   └── completed/         # 完成任務歸檔
+│   │   └── ACTIVE.md          # 當前任務契約
 │   └── logs/
 │       └── 2026-07.md         # 按月分卷，append-only，預設不讀
 └── scripts/
-    └── verify.sh              # 完成的機器證明（CI 共用）
+    └── verify.py              # 完成的機器證明（CI 共用）
 ```
 
 按痛點才增加：`.agents/decisions/`（ADR）、`.agents/architecture/`。
@@ -40,7 +39,7 @@ project/
 3. `.agents/tasks/ACTIVE.md`
 4. 任務直接涉及的原始碼與測試
 
-預設不讀：`.agents/logs/`、`.agents/tasks/completed/`、已歸檔文件。
+預設不讀：`.agents/logs/`、已歸檔文件。
 
 例外（才可讀歷史）：
 - 正在除錯且問題反覆發生
@@ -68,7 +67,7 @@ project/
 任務結束前，依序執行：
 
 1. `git diff --stat` 檢視修改範圍。
-2. 執行 `scripts/verify.sh`。
+2. 執行 `python scripts/verify.py`。
 3. 逐項對照 ACTIVE 的驗收條件。
 4. 更新 `.agents/tasks/ACTIVE.md`。
 5. 重寫 `.agents/CURRENT.md`（只反映現在有效狀態，不得追加堆積）。
@@ -142,7 +141,7 @@ Last verified commit: `a13c9e2`
 
 ## Acceptance criteria
 
-- `scripts/verify.sh` exit 0
+- `python scripts/verify.py` exit 0
 - （新增測試要求）
 - （人工驗證項目，逐項列出）
 
@@ -161,8 +160,8 @@ Last verified commit: `a13c9e2`
 （共用知識用引用，不複製）
 ```
 
-任務完成後：移入 `.agents/tasks/completed/`，重點結論回寫 CURRENT，
-再建立新的 ACTIVE.md。
+任務完成後：重點結論回寫 CURRENT，再以新任務重寫 ACTIVE.md；
+舊任務的完整記錄已在 logs/ 與 git 歷史，不另做歸檔。
 
 ---
 
@@ -191,22 +190,35 @@ Conclusion:
 
 ---
 
-## 5. `scripts/verify.sh` 範本
+## 5. `scripts/verify.py` 範本
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+```python
+#!/usr/bin/env python3
+import subprocess
+import sys
+from pathlib import Path
 
-test -f .agents/CURRENT.md
-test -f .agents/tasks/ACTIVE.md
+ROOT = Path(__file__).resolve().parent.parent
 
-git diff --check
-dart format --output=none --set-exit-if-changed .
-flutter analyze
-flutter test
+
+def run(*cmd):
+    if subprocess.run(cmd, cwd=ROOT).returncode != 0:
+        sys.exit(1)
+
+
+for rel in (".agents/CURRENT.md", ".agents/tasks/ACTIVE.md"):
+    if not (ROOT / rel).is_file():
+        sys.exit(f"缺少 {rel}")
+
+run("git", "diff", "--check")
+run("dart", "format", "--output=none", "--set-exit-if-changed", ".")
+run("flutter", "analyze")
+run("flutter", "test")
 
 # 專案有其他硬限制時逐步加入：
-# ./scripts/check_database_migrations.sh
+# run(sys.executable, "scripts/check_database_migrations.py")
+
+print("verify: OK")
 ```
 
 無法自動化的人工測試，在 ACTIVE 或 CURRENT 中逐項記錄

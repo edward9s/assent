@@ -14,7 +14,7 @@
 3. `.agents/tasks/ACTIVE.md`
 4. 任務直接涉及的原始碼與測試
 
-預設不讀：`.agents/logs/`、`.agents/tasks/completed/`、已歸檔文件。
+預設不讀：`.agents/logs/`、已歸檔文件。
 
 例外（才可讀歷史）：
 
@@ -45,7 +45,7 @@
 任務結束前，依序執行：
 
 1. `git diff --stat` 檢視修改範圍。
-2. 執行 `scripts/verify.sh`。
+2. 執行 `python scripts/verify.py`。
 3. 逐項對照 `.agents/tasks/ACTIVE.md` 的驗收條件。
 4. 更新 `.agents/tasks/ACTIVE.md`。
 5. 重寫 `.agents/CURRENT.md`：只反映現在有效狀態，刪除過時內容，

@@ -22,7 +22,7 @@
 
 ## Acceptance criteria
 
-- `scripts/verify.sh` exit 0
+- `python scripts/verify.py` exit 0
 <!-- TODO: 新增測試要求、人工驗證項目，逐項列出 -->
 
 ## Current findings
@@ -40,6 +40,6 @@
 <!-- 共用知識用標題錨點引用，不複製進本檔 -->
 
 <!--
-完成後：本檔移入 .agents/tasks/completed/（可改名為描述性檔名），
-重點結論回寫 CURRENT.md，再建立新的 ACTIVE.md。
+完成後：重點結論回寫 CURRENT.md，再以新任務重寫本檔；
+舊任務的完整記錄已在 logs/ 與 git 歷史。
 -->
