@@ -82,9 +82,9 @@ def ensure_clean(root: Path, excludes: Sequence[str] = ()) -> None:
     if lines:
         detail = "\n".join(f"  - {_describe_change(ln)}" for ln in lines)
         raise AgentsError(
-            # 保留「工作樹不乾淨」原文子字串:agents/clean.py(t007/t008 範圍)仍以此
-            # 子字串比對是否為乾淨度例外,不在本任務改動範圍內,故訊息維持雙語。
-            "Working tree is not clean (工作樹不乾淨), cannot continue (please commit "
+            # clean.py matches the leading "Working tree is not clean" substring
+            # to recognise this as a cleanliness exception; keep that prefix intact.
+            "Working tree is not clean, cannot continue (please commit "
             f"these changes first, or add files that should not be tracked to "
             f".gitignore):\n{detail}")
 
