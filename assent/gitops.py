@@ -335,6 +335,21 @@ def tracked_paths(root: Path, path: str, ref: str | None = None) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def ignored_entries(root: Path) -> list[str]:
+    """List the ignored paths of a worktree, with whole ignored trees collapsed.
+
+    ``--directory`` reports a wholly ignored directory as a single ``name/``
+    entry instead of walking it, so a linked, cached, or generated tree costs
+    one line rather than a full traversal, and an ignored leaf file that sits
+    inside an otherwise tracked directory is still listed on its own.  Entries
+    are returned with forward slashes; a directory entry keeps its trailing
+    slash, which is how a caller tells the two kinds apart.
+    """
+    out = _git(root, "ls-files", "-z", "--others", "--ignored",
+               "--exclude-standard", "--directory")
+    return [_normalize(entry) for entry in out.split("\0") if entry]
+
+
 def is_path_ignored(root: Path, relative: str,
                     directory: bool = False) -> bool:
     """Report whether Git ignores ``relative`` inside ``root``.
