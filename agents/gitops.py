@@ -193,6 +193,11 @@ def commit_of(root: Path, ref: str) -> str:
     return _git(root, "rev-parse", ref).strip()
 
 
+def commit_message(root: Path, ref: str = "HEAD") -> str:
+    """回傳指定 commit 的完整訊息，供辨識可續作的持久 checkpoint。"""
+    return _git(root, "show", "-s", "--format=%B", ref).rstrip("\r\n")
+
+
 def commit_history(
         root: Path, ref: str = "HEAD",
 ) -> list[tuple[str, tuple[str, ...], str]]:

@@ -631,6 +631,77 @@ class TestRework(unittest.TestCase):
         self.assertEqual(self._status(task), "DONE")
         self.assertFalse(task.with_name("t001_task.r.toml").exists())
 
+    def test_revert_journal_interruption_resumes_without_second_revert(self) -> None:
+        task = self._write_task(1, "DONE")
+        worktree, _ = self._worktree()
+        (worktree / "成果.txt").write_text("完成\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 完成成果")
+
+        with patch("agents.rework.append_entry",
+                   side_effect=OSError("模擬日誌中斷")):
+            first_code, first_output = self._run(
+                revert_code=True, reason="重新設計")
+        revert_checkpoint = _git(worktree, "rev-parse", "HEAD")
+
+        second_code, second_output = self._run(
+            revert_code=True, reason="重新設計")
+
+        self.assertEqual(first_code, 1, first_output)
+        self.assertEqual(second_code, 0, second_output)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"),
+                         revert_checkpoint)
+        self.assertEqual(self._status(task), "TODO")
+        entries = read_entries(task.with_name("t001_task.r.toml"))
+        self.assertEqual(len(entries), 1)
+        self.assertIn(
+            f"反向 checkpoint: {revert_checkpoint}", entries[0]["detail"])
+        report = (self.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        self.assertIn("TODO", report)
+        self.assertIn("續作未完成的反向 checkpoint", second_output)
+
+    def test_revert_status_interruption_resumes_cascade_without_second_revert(
+            self) -> None:
+        target = self._write_task(1, "DONE")
+        downstream = self._write_task(2, "BLOCKED", (1,))
+        worktree, _ = self._worktree()
+        (worktree / "目標.txt").write_text("目標\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): 目標成果")
+        (worktree / "下游.txt").write_text("下游\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t002): 下游成果")
+        real_set_status = set_status
+        calls = 0
+
+        def interrupt_target(path, status):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("模擬狀態中斷")
+            return real_set_status(path, status)
+
+        with patch("agents.rework.set_status", side_effect=interrupt_target):
+            first_code, first_output = self._run(
+                cascade=True, revert_code=True, reason="一起重做")
+        revert_checkpoint = _git(worktree, "rev-parse", "HEAD")
+        second_code, second_output = self._run(
+            cascade=True, revert_code=True, reason="一起重做")
+
+        self.assertEqual(first_code, 1, first_output)
+        self.assertEqual(second_code, 0, second_output)
+        self.assertEqual(_git(worktree, "rev-parse", "HEAD"),
+                         revert_checkpoint)
+        self.assertEqual(self._status(target), "TODO")
+        self.assertEqual(self._status(downstream), "TODO")
+        for task in (target, downstream):
+            entries = read_entries(task.with_name(
+                task.name.replace(".e.toml", ".r.toml")))
+            self.assertEqual(len(entries), 1)
+            self.assertIn(
+                f"反向 checkpoint: {revert_checkpoint}",
+                entries[0]["detail"])
+        report = (self.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        self.assertGreaterEqual(report.count("TODO"), 2)
+        self.assertIn("續作未完成的反向 checkpoint", second_output)
+
     def test_revert_code_never_runs_forbidden_git_commands(self) -> None:
         self._write_task(1, "DONE")
         worktree, _ = self._worktree()
