@@ -1,4 +1,4 @@
-# assent — an AI plan format plus an automatic scheduler
+# assent — an AI plan format + an automatic scheduler
 
 *[Traditional Chinese reader edition](README.zh-TW.md)*
 
