@@ -92,19 +92,27 @@ and account environments; Assent does not create a container or VM sandbox.
 
 ## Task session closeout (when scheduled by assent)
 
-1. Self-check against the task file's acceptance item by item, and run the
+1. Closeout must complete synchronously within this same turn: do not defer
+   the status update or r-file entry until after any background work
+   finishes, and do not use a scheduled wakeup or background notification to
+   wait on tests — a headless session terminates the moment the turn ends, so
+   a deferred closeout will never happen. Verification runs only the
+   scheduler-provided focused verify command, in the foreground and
+   synchronously; it does not run the full suite — full verification belongs
+   to the scheduler's folder-closeout stage.
+2. Self-check against the task file's acceptance item by item, and run the
    verification command the scheduler provides to confirm exit code 0.
-2. Change the status of **your own task file** to DONE or BLOCKED — only this
+3. Change the status of **your own task file** to DONE or BLOCKED — only this
    one line of the whole task file may be changed, and no other task file is
    touched.
-3. Append one `[[entry]]` to the end of the r file at the absolute path the
+4. Append one `[[entry]]` to the end of the r file at the absolute path the
    scheduler provides: time, the prompt-specified `by = "claude"`, `by = "codex"`,
    or `by = "antigravity"`, requested_model, event, summary (a verifiable fact,
    one sentence), detail (process notes); when the prompt's requested_effort has
    a value, it must be written too. requested_model and requested_effort are the
    values actually passed to the AI CLI this run, not the model or reasoning
    investment the service ultimately adopts or reports.
-4. Do not run git commit — the checkpoint is the scheduler's job.
+5. Do not run git commit — the checkpoint is the scheduler's job.
 
 ## Meeting session closeout (when interactive)
 
