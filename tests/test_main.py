@@ -7,6 +7,7 @@ goals, acceptance text, rework reasons) used to prove that non-English data
 passes through the CLI verbatim rather than being translated as output."""
 import contextlib
 import io
+import importlib.metadata
 import os
 import re
 import shutil
@@ -62,6 +63,19 @@ class MainTestCase(unittest.TestCase):
 
 
 class TestDispatch(MainTestCase):
+    def test_version_reports_installed_distribution_from_empty_directory(self):
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = str(_PROJECT_ROOT)
+        result = subprocess.run(
+            [sys.executable, "-m", "assent", "--version"],
+            cwd=self.root, capture_output=True, text=True,
+            encoding="utf-8", env=environment)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            result.stdout, f"assent {importlib.metadata.version('assent')}\n")
+        self.assertEqual(result.stderr, "")
+        self.assertFalse((self.root / ".assent").exists())
+
     def test_help_exits_zero(self):
         with self.assertRaises(SystemExit) as ctx:
             with contextlib.redirect_stdout(io.StringIO()):

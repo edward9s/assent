@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import _thread
 import argparse
+import importlib.metadata
 import os
 import signal
 import sys
@@ -50,6 +51,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description="An AI plan format plus an automatic scheduler: reads "
                     ".assent work folders, opens an AI session per task, "
                     "checks acceptance objectively, and auto-checkpoints git.",
+    )
+    parser.add_argument(
+        "--version", action="version",
+        version=f"%(prog)s {importlib.metadata.version('assent')}",
+        help="Show the installed assent distribution version and exit",
     )
     sub = parser.add_subparsers(dest="command", required=True,
                                 metavar="{run,status,check,report,verify,clean,accept,reject,rework,archive,init,doctor}")
@@ -494,14 +500,18 @@ def _start_stdin_stop_watcher() -> threading.Thread | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    actual_argv = list(sys.argv[1:] if argv is None else argv)
     _install_break_handler()
-    _start_stdin_stop_watcher()
+    # The stop channel is for scheduler-spawned `run` children.  Keep it out
+    # of in-process dispatch and commands that exit during argument parsing.
+    if (argv is None and actual_argv[:1] == ["run"]
+            and "-h" not in actual_argv and "--help" not in actual_argv):
+        _start_stdin_stop_watcher()
     # On Windows, stdout/stderr default to the system code page when
     # redirected to a pipe/file, which mangles non-ASCII output.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
-    actual_argv = list(sys.argv[1:] if argv is None else argv)
     with terminal_logging(actual_argv):
         return _dispatch(actual_argv)
 
