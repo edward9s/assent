@@ -6,8 +6,8 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from agents import AgentsError
-from agents.plan import (Plan, append_entry, journal_path_for, parse_task_file,
+from assent import AssentError
+from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
                          read_entries, same_except_status, set_status)
 
 _OK = 'python -c "raise SystemExit(0)"'
@@ -84,65 +84,65 @@ class TestParseTaskFile(PlanTestCase):
         for name in ("t42_x.e.toml", "task001_x.e.toml", "t001.e.toml",
                      "t001_x.md"):
             path = self.write(name, task_text())
-            with self.assertRaises(AgentsError):
+            with self.assertRaises(AssentError):
                 parse_task_file(path)
 
     def test_retired_task_file_rejected_with_migration_error(self):
         path = self.write("t001_demo.toml", task_text())
-        with self.assertRaisesRegex(AgentsError, "Legacy task file.*retired.*move"):
+        with self.assertRaisesRegex(AssentError, "Legacy task file.*retired.*move"):
             parse_task_file(path)
 
     def test_journal_file_rejected_before_parsing_fields(self):
         path = self.write("t001_demo.r.toml", "[[entry]]\n")
-        with self.assertRaisesRegex(AgentsError, "Journal file.*must not be parsed as a task file"):
+        with self.assertRaisesRegex(AssentError, "Journal file.*must not be parsed as a task file"):
             parse_task_file(path)
 
     def test_missing_required_fields_rejected(self):
         for key in ("title", "deps", "model", "status", "scope", "verify",
                     "goal", "acceptance"):
             path = self.write("t001_x.e.toml", task_text(drop=(key,)))
-            with self.assertRaisesRegex(AgentsError, key):
+            with self.assertRaisesRegex(AssentError, key):
                 parse_task_file(path)
 
     def test_unknown_key_rejected(self):
         path = self.write("t001_x.e.toml", task_text(extra_line='oops = "x"'))
-        with self.assertRaisesRegex(AgentsError, "undefined fields"):
+        with self.assertRaisesRegex(AssentError, "undefined fields"):
             parse_task_file(path)
 
     def test_invalid_toml_rejected(self):
         path = self.write("t001_x.e.toml", "title = [unclosed\n")
-        with self.assertRaisesRegex(AgentsError, "TOML"):
+        with self.assertRaisesRegex(AssentError, "TOML"):
             parse_task_file(path)
 
     def test_brand_model_name_rejected(self):
         # Tiers are a strict enum: a task file must never write a vendor model name
         path = self.write("t001_x.e.toml", task_text(model="fable"))
-        with self.assertRaisesRegex(AgentsError, "tier"):
+        with self.assertRaisesRegex(AssentError, "tier"):
             parse_task_file(path)
 
     def test_bad_status_rejected(self):
         path = self.write("t001_x.e.toml", task_text(status="DOING"))
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             parse_task_file(path)
 
     def test_bad_effort_rejected(self):
         path = self.write("t001_x.e.toml", task_text(effort="max"))
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             parse_task_file(path)
 
     def test_empty_scope_fail_closed(self):
         path = self.write("t001_x.e.toml", task_text(scope=()))
-        with self.assertRaisesRegex(AgentsError, "fail-closed"):
+        with self.assertRaisesRegex(AssentError, "fail-closed"):
             parse_task_file(path)
 
     def test_bad_dep_id_rejected(self):
         path = self.write("t002_x.e.toml", task_text(deps=("W1",)))
-        with self.assertRaisesRegex(AgentsError, "tNNN"):
+        with self.assertRaisesRegex(AssentError, "tNNN"):
             parse_task_file(path)
 
     def test_self_dependency_rejected(self):
         path = self.write("t001_x.e.toml", task_text(deps=("t001",)))
-        with self.assertRaisesRegex(AgentsError, "must not depend on itself"):
+        with self.assertRaisesRegex(AssentError, "must not depend on itself"):
             parse_task_file(path)
 
 
@@ -189,43 +189,43 @@ class TestPlanParse(PlanTestCase):
         self.write("t001_a.r.toml", task_text())
         self.write("t002_b.e.toml", task_text(deps=("t001",)))
         self.write("t002_b.r.toml", task_text())
-        with self.assertRaisesRegex(AgentsError, "cycle"):
+        with self.assertRaisesRegex(AssentError, "cycle"):
             Plan.parse(self.dir)
 
     def test_empty_folder_rejected(self):
-        with self.assertRaisesRegex(AgentsError, "no task files"):
+        with self.assertRaisesRegex(AssentError, "no task files"):
             Plan.parse(self.dir)
 
     def test_missing_folder_rejected(self):
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             Plan.parse(self.dir / "nope")
 
     def test_duplicate_id_rejected(self):
         self.write("t001_a.e.toml", task_text())
         self.write("t001_b.e.toml", task_text())
-        with self.assertRaisesRegex(AgentsError, "Duplicate task id"):
+        with self.assertRaisesRegex(AssentError, "Duplicate task id"):
             Plan.parse(self.dir)
 
     def test_retired_task_residue_rejected_even_with_formal_task(self):
         self.write("t001_a.e.toml", task_text())
         self.write("t001_a.toml", task_text())
-        with self.assertRaisesRegex(AgentsError, "retired legacy task files.*move"):
+        with self.assertRaisesRegex(AssentError, "retired legacy task files.*move"):
             Plan.parse(self.dir)
 
     def test_only_retired_task_residue_rejected_instead_of_ignored(self):
         self.write("t001_a.toml", task_text())
-        with self.assertRaisesRegex(AgentsError, "retired legacy task files.*move"):
+        with self.assertRaisesRegex(AssentError, "retired legacy task files.*move"):
             Plan.parse(self.dir)
 
     def test_unknown_dep_rejected(self):
         self.write("t001_a.e.toml", task_text(deps=("t009",)))
-        with self.assertRaisesRegex(AgentsError, "depends on a task that does not exist"):
+        with self.assertRaisesRegex(AssentError, "depends on a task that does not exist"):
             Plan.parse(self.dir)
 
     def test_dependency_cycle_rejected(self):
         self.write("t001_a.e.toml", task_text(deps=("t002",)))
         self.write("t002_b.e.toml", task_text(deps=("t001",)))
-        with self.assertRaisesRegex(AgentsError, "cycle"):
+        with self.assertRaisesRegex(AssentError, "cycle"):
             Plan.parse(self.dir)
 
 
@@ -306,12 +306,12 @@ class TestSetStatus(PlanTestCase):
                 f'verify = {json.dumps(_OK)}\n'
                 'acceptance = """\n- ok\n"""\n')
         path = self.write("t001_x.e.toml", text)
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             set_status(path, "DONE")
 
     def test_invalid_status_value_rejected(self):
         path = self.write("t001_x.e.toml", task_text())
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             set_status(path, "DOING")
 
 
@@ -377,7 +377,7 @@ class TestJournal(PlanTestCase):
             tomllib.load(f)  # only needs to still be valid TOML
 
     def test_new_entry_rejects_legacy_ai_identity(self):
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             append_entry(self.dir / "t001_x.r.toml", by="ai", event="done",
                          summary="s")
 
@@ -392,12 +392,12 @@ class TestJournal(PlanTestCase):
         self.assertNotIn("requested_model", entries[0])
 
     def test_bad_by_rejected(self):
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             append_entry(self.dir / "t001_x.r.toml", by="human", event="e",
                          summary="s")
 
     def test_empty_requested_effort_rejected(self):
-        with self.assertRaisesRegex(AgentsError, "requested_effort"):
+        with self.assertRaisesRegex(AssentError, "requested_effort"):
             append_entry(self.dir / "t001_x.r.toml", by="codex", event="done",
                          summary="s", requested_effort=" ")
 
@@ -405,11 +405,11 @@ class TestJournal(PlanTestCase):
         self.assertEqual(read_entries(self.dir / "t009_x.r.toml"), [])
 
     def test_journal_path_for_rejects_retired_task_file(self):
-        with self.assertRaisesRegex(AgentsError, r"must be tNNN_name\.e\.toml"):
+        with self.assertRaisesRegex(AssentError, r"must be tNNN_name\.e\.toml"):
             journal_path_for(Path("a/t001_x.toml"))
 
     def test_journal_path_for_rejects_journal_file(self):
-        with self.assertRaisesRegex(AgentsError, r"must be tNNN_name\.e\.toml"):
+        with self.assertRaisesRegex(AssentError, r"must be tNNN_name\.e\.toml"):
             journal_path_for(Path("a/t001_x.r.toml"))
 
     def test_formal_journal_path_for_removes_execution_marker(self):

@@ -2,7 +2,7 @@
 
 All Git commands run with cwd=project root, and the return code is checked before use;
 a missing git binary gets a clear error message instead of a traceback. `excludes` is a
-list of relative paths for runtime artifacts (_agents.log, _report.md, etc.): they are
+list of relative paths for runtime artifacts (_assent.log, _report.md, etc.): they are
 never input or checkpoint content, so they never take part in clean checks, scope checks,
 or commits.
 """
@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
-from agents import AgentsError
+from assent import AssentError
 
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -25,13 +25,13 @@ def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess:
             ["git", "-c", "core.quotepath=false", *args], cwd=root,
             capture_output=True, encoding="utf-8", errors="replace")
     except FileNotFoundError as e:
-        raise AgentsError("git executable not found; confirm git is installed and on PATH") from e
+        raise AssentError("git executable not found; confirm git is installed and on PATH") from e
 
 
 def _git(root: Path, *args: str) -> str:
     result = _run_git(root, *args)
     if result.returncode != 0:
-        raise AgentsError(
+        raise AssentError(
             f"git {' '.join(args)} failed (exit code {result.returncode}): "
             f"{result.stderr.strip() or result.stdout.strip()}")
     return result.stdout
@@ -76,12 +76,12 @@ def _meaningful_status_lines(output: str, excludes: Sequence[str]) -> list[str]:
 
 
 def ensure_clean(root: Path, excludes: Sequence[str] = ()) -> None:
-    """Working tree is not clean (including untracked files) -> raise AgentsError."""
+    """Working tree is not clean (including untracked files) -> raise AssentError."""
     out = _git(root, "status", "--porcelain")
     lines = _meaningful_status_lines(out, excludes)
     if lines:
         detail = "\n".join(f"  - {_describe_change(ln)}" for ln in lines)
-        raise AgentsError(
+        raise AssentError(
             # clean.py matches the leading "Working tree is not clean" substring
             # to recognise this as a cleanliness exception; keep that prefix intact.
             "Working tree is not clean, cannot continue (please commit "
@@ -133,7 +133,7 @@ def ensure_worktree(root: Path, folder: str) -> Path:
     if path.exists():
         if path.is_dir() and _is_repo_worktree(root, path):
             return path
-        raise AgentsError(
+        raise AssentError(
             f"worktree path already exists but is not a valid worktree of this repo: {path}")
 
     # If the path was manually deleted, clear stale worktree metadata still held by the main repo.
@@ -168,7 +168,7 @@ def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
         return True
     if result.returncode == 1:
         return False
-    raise AgentsError(
+    raise AssentError(
         "git merge-base --is-ancestor "
         f"{ancestor} {descendant} failed (exit code {result.returncode}): "
         f"{result.stderr.strip() or result.stdout.strip()}")
@@ -214,7 +214,7 @@ def commit_history(
     if values and values[-1] == "":
         values.pop()
     if len(values) % 3:
-        raise AgentsError("unable to parse Git history format")
+        raise AssentError("unable to parse Git history format")
 
     history: list[tuple[str, tuple[str, ...], str]] = []
     for index in range(0, len(values), 3):
@@ -222,7 +222,7 @@ def commit_history(
         parents = tuple(values[index + 1].split())
         subject = values[index + 2]
         if not commit or "\n" in commit or "\r" in commit:
-            raise AgentsError("unable to parse Git history format")
+            raise AssentError("unable to parse Git history format")
         history.append((commit, parents, subject))
     return history
 
@@ -230,7 +230,7 @@ def commit_history(
 def revert_no_commit(root: Path, commits: Sequence[str]) -> None:
     """Reverse-apply commits in input order, without creating a commit yet."""
     if not commits:
-        raise AgentsError("no commits to revert")
+        raise AssentError("no commits to revert")
     _git(root, "revert", "--no-commit", *commits)
 
 
@@ -297,7 +297,7 @@ def changes_outside_scope(root: Path, scope: list[str],
 def _pathspec_excludes(root: Path, excludes: Sequence[str]) -> list[str]:
     """Filter the exclude list down to entries safe to write into a :(exclude) pathspec.
 
-    Entries already covered by .gitignore (e.g. a project where the whole .agents/ is
+    Entries already covered by .gitignore (e.g. a project where the whole .assent/ is
     untracked) would never be added anyway, and naming an ignored path in a pathspec makes
     ``git add`` refuse with exit code 1 — check-ignore exit code 0 = ignored -> drop it;
     1 = not ignored, 128 = error -> keep it (keeping error cases is the conservative choice:

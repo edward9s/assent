@@ -1,6 +1,6 @@
 """Folder-level scheduling for ``run --all``.
 
-A single work folder is still handled by a spawned ``agents run <folder>``
+A single work folder is still handled by a spawned ``assent run <folder>``
 child process; this module is only responsible for dependency unlocking, the
 concurrency cap, per-line output, and interrupt forwarding.
 """
@@ -16,9 +16,9 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from agents import AgentsError
-from agents.folderdeps import parse_folder_dependency_graph
-from agents.plan import Plan
+from assent import AssentError
+from assent.folderdeps import parse_folder_dependency_graph
+from assent.plan import Plan
 
 _POLL_SECONDS = 0.05
 _GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
@@ -31,9 +31,9 @@ _INTERRUPT_RETURNCODES = (130, 3221225786)
 
 
 def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
-    """Start an isolated child process equivalent to ``agents run <folder>``."""
+    """Start an isolated child process equivalent to ``assent run <folder>``."""
     command = [
-        sys.executable, "-m", "agents", "run", folder,
+        sys.executable, "-m", "assent", "run", folder,
         "--config", str(Path(config_path).resolve()),
     ]
     kwargs = {
@@ -76,7 +76,7 @@ def _start_output_reader(
     reader = threading.Thread(
         target=_read_folder_output,
         args=(folder, stream, output),
-        name=f"agents-output-{folder}",
+        name=f"assent-output-{folder}",
         daemon=True,
     )
     reader.start()
@@ -115,10 +115,10 @@ def _finish_folder_output(
     _drain_output(output)
 
 
-def _folder_plans(agents_dir: Path, folders: list[str]) -> dict[str, Plan]:
+def _folder_plans(assent_dir: Path, folders: list[str]) -> dict[str, Plan]:
     """Reparse every formal task file; any bad file refuses to continue
     scheduling."""
-    return {folder: Plan.parse(agents_dir / folder) for folder in folders}
+    return {folder: Plan.parse(assent_dir / folder) for folder in folders}
 
 
 def _is_complete(plan: Plan) -> bool:
@@ -195,10 +195,10 @@ def _interrupt_and_wait(
     _drain_output(output)
 
 
-def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
+def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
     """Run every unfinished work folder in folder-dependency order."""
-    agents_dir = Path(agents_dir)
-    if not (agents_dir.parent / ".git").exists():
+    assent_dir = Path(assent_dir)
+    if not (assent_dir.parent / ".git").exists():
         print(_GIT_REQUIRED_MESSAGE)
         return 1
     active: dict[str, subprocess.Popen] = {}
@@ -209,15 +209,15 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
     try:
         while True:
             try:
-                graph = parse_folder_dependency_graph(agents_dir)
+                graph = parse_folder_dependency_graph(assent_dir)
                 if not graph:
                     print("No work folder with a task file found.")
                     return 1
                 inactive = [folder for folder in graph if folder not in active]
                 # Another child process may be writing its own task file;
                 # only reparse folders that are not currently running.
-                plans = _folder_plans(agents_dir, inactive)
-            except AgentsError as e:
+                plans = _folder_plans(assent_dir, inactive)
+            except AssentError as e:
                 print(f"Folder scheduling failed: {e}")
                 return 1
 
@@ -274,7 +274,7 @@ def run_all(config_path: str, agents_dir: str | Path, jobs: int = 1) -> int:
                     print(f"Work folder interrupted: {folder} (exit code {returncode})")
                     interrupted = True
                 else:
-                    log_path = agents_dir / folder / "_agents.log"
+                    log_path = assent_dir / folder / "_assent.log"
                     print(f"Work folder failed: {folder} (exit code {returncode}; "
                           f"see {log_path} for details)")
                     failure = True

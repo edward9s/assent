@@ -3,27 +3,32 @@
 *[English](../CONSENSUS.md)*
 
 > 本檔為 [../CONSENSUS.md](../CONSENSUS.md) 的正體中文(台灣用語)翻譯。內容若
-> 與英文版不一致,以英文版為準。翻譯所依版本:`0.1.0`(2026-07-19)。
+> 與英文版不一致,以英文版為準。翻譯所依版本:`92e1e39` (2026-07-20)。
 
 > 源自三輪討論(Claude Fable × GPT-5.6)的共識,隨架構演進持續更新。
 > 目標:在「輸出品質可信可靠」與「極致節省 tokens」之間取得最穩健的平衡。
-> 現行格式的唯一契約是 `.agents/format.md`(源碼在
-> `agents/templates/format.md`);本檔記錄格式背後的設計原則。本檔是專案的
+> 現行格式的唯一契約是 `.assent/format.md`(源碼在
+> `assent/templates/format.md`);本檔記錄格式背後的設計原則。本檔是專案的
 > 非規範性設計理念說明,不是可執行的任務格式契約本身——那份契約僅為
-> `agents/templates/format.md`。
+> `assent/templates/format.md`。
 
 ## 核心思想
+
+產品命名空間是 `assent`,管理面是 `.assent/`。這取代原有的
+`agents`/`.agents` 契約。這是破壞性變更:`assent init` 會拒絕舊的
+`.agents` 目錄,也拒絕 `.agents/` 與 `.assent/` 並存的歧義狀態,因此遷移
+必須由人明確決定。不提供相容別名,也不會自動合併。
 
 不是讓 AI 聰明地從幾千行中挑出相關內容,而是把上下文分層,
 讓每次任務只需載入「足以無歧義開工的最小上下文」。
 
 ```text
 專案規則   → AGENTS.md(root,工具自動載入的入口,是否進版控由專案決定)
-工作指示   → .agents/instructions.md(agents session 行為與跨專案共通規則)
-本次任務   → .agents/<工作資料夾>/tNNN_名稱.toml(任務檔,執行上自包含)
+工作指示   → .assent/instructions.md(assent session 行為與跨專案共通規則)
+本次任務   → .assent/<工作資料夾>/tNNN_name.toml(任務檔,執行上自包含)
 目前狀態   → 任務檔的 status + git(任務檔即狀態,沒有另外的狀態檔)
-歷史證據   → rNNN_名稱.toml(一任務一檔日誌,append-only,預設不讀)
-正確性證明 → 任務檔的 verify 命令(預設 .agents/verify.py)
+歷史證據   → rNNN_name.toml(一任務一檔日誌,append-only,預設不讀)
+正確性證明 → 任務檔的 verify 命令(預設 .assent/verify.py)
 ```
 
 ## 四條核心原則
@@ -55,18 +60,18 @@
 ## 位置慣例
 
 - `AGENTS.md` 必須留在 project root——agent 工具自動在 root 尋找指令檔,
-  位置本身就是功能。它只放專案規則與一行 agents 橋接;進版控時使用
+  位置本身就是功能。它只放專案規則與一行 assent 橋接;進版控時使用
   worktree 內的分支版本,未進版控時由調度器提示主樹絕對路徑。
-- agents session 行為與跨專案共通規則放在 `.agents/instructions.md`,不混入
-  專案 AGENTS.md。其餘管理檔也全部收進 `.agents/`,root 保持乾淨。
-- 整個 `.agents/` 由 `.gitignore` 排除,只留在主工作樹;調度器用絕對路徑
+- assent session 行為與跨專案共通規則放在 `.assent/instructions.md`,不混入
+  專案 AGENTS.md。其餘管理檔也全部收進 `.assent/`,root 保持乾淨。
+- 整個 `.assent/` 由 `.gitignore` 排除,只留在主工作樹;調度器用絕對路徑
   把 instructions、t/r 與預設驗收腳本交給 worktree session,不製造第二份真本。
-- 驗收腳本預設在主樹 `.agents/verify.py`,內容是專案自己的檢查命令;
+- 驗收腳本預設在主樹 `.assent/verify.py`,內容是專案自己的檢查命令;
   從主樹載入腳本,但以 worktree 為 cwd 驗收隔離後的成果。
 - Git 永遠啟用並一律使用 worktree,不得以切換開關或無 Git 降級模式取代;
-  這是安全平行處理多個工作資料夾的必要條件。任何已追蹤的 `.agents/` 檔案
+  這是安全平行處理多個工作資料夾的必要條件。任何已追蹤的 `.assent/` 檔案
   都會 fail-closed,避免第二份真本。
-- 工作資料夾內的 `agents.lock` 保證同一資料夾一個 run;worktree 路徑為
+- 工作資料夾內的 `assent.lock` 保證同一資料夾一個 run;worktree 路徑為
   `<專案名>.worktrees/<資料夾>/`,可用位置參數指定工作資料夾。
 
 ## 資料夾依賴共識
@@ -96,7 +101,7 @@ effort 分成選擇與翻譯兩步:任務明寫值優先於 `default_effort[mode
 任一 `TODO` 任務檔,
 能否不問問題就正確說出目標、可改動範圍、驗收條件、下一步?
 能 → 計畫定稿;不能 → 任務檔資訊不足。
-機器側等價物:`agents check` 通過——這也是規劃會議的散會條件。
+機器側等價物:`assent check` 通過——這也是規劃會議的散會條件。
 
 這套架構消除的是「每次重讀全部歷史」的 O(n) 成長:調度、驗收、報告
 全部是純 Python 本地作業,零 token;實際成本只剩每個任務 session
@@ -105,17 +110,17 @@ effort 分成選擇與翻譯兩步:任務明寫值優先於 `default_effort[mode
 ## 維護紀律
 
 - AI 交接最容易在 session 尾聲、上下文快滿時鬆掉 → 收尾協定寫死在
-  `.agents/instructions.md`,且不靠自覺:調度器的結構比對讓「放寬自己的驗收」
+  `.assent/instructions.md`,且不靠自覺:調度器的結構比對讓「放寬自己的驗收」
   直接判失敗,scope 豁免只有任務自己的 t 檔與 r 檔。
 - 人的角色只剩審查與裁決:讀 `_report.md`(零 token),只對要裁決的任務
   開 session 下指令;人不手改檔案,改檔一律由 AI 依指示執行。
 - 執行 AI 燒過 tokens 的產出絕不丟棄:額度中斷收 wip 檢查點續作;
   驗收失敗不還原、帶原因重試;重試用盡連同成果 commit 進 BLOCKED
   檢查點交人類裁決。
-- 合併後的 worktree 與分支清理由 `agents clean` 機械執行;安全條件必須由機器
-  證明,人不手動執行 Git 清理。駁回整個資料夾的實作亦由 `agents reject`
+- 合併後的 worktree 與分支清理由 `assent clean` 機械執行;安全條件必須由機器
+  證明,人不手動執行 Git 清理。駁回整個資料夾的實作亦由 `assent reject`
   機械執行(封存、強刪、任務改回 TODO、r 檔留痕),同樣不手動操作 Git。
-- 單一任務的驗收重做由 `agents rework <FOLDER> <TASK>` 機械執行。預設保留
+- 單一任務的驗收重做由 `assent rework <FOLDER> <TASK>` 機械執行。預設保留
   程式碼,下游連動必須明示;反向程式碼只接受可證明為連續分支尾段的 checkpoints,
   並建立新 commit 而不改寫歷史。操作只更新狀態與報告,不自動啟動 AI。
 
@@ -131,7 +136,7 @@ effort 分成選擇與翻譯兩步:任務明寫值優先於 `default_effort[mode
 
 ## 一句話定案
 
-> 用 AGENTS 管專案規則、instructions 管 agents 行為、任務檔管本次與現在、
+> 用 AGENTS 管專案規則、instructions 管 assent 行為、任務檔管本次與現在、
 > r 檔管歷史、verify 管真假;執行 session 預設只讀 AGENTS + instructions +
 > 自己的任務檔,結束時客觀驗收、
 > 精準寫回、細節歸檔。

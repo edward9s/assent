@@ -1,6 +1,6 @@
-# agents scheduler configuration. The work folder is stated explicitly on the
+# assent scheduler configuration. The work folder is stated explicitly on the
 # command line or derived from current task-file state.
-# All relative paths are based on the project root (= the parent of .agents).
+# All relative paths are based on the project root (= the parent of .assent).
 
 [watchdog]
 stall_minutes = 30                # minutes of no session output before it is judged stalled; 0 = off
@@ -41,7 +41,7 @@ lite  = "medium"
 [adapter.codex]
 command = "codex"
 # Extra arguments passed to the Codex CLI; the default permits writing to the
-# system temp directory and the main-tree `.agents/`.
+# system temp directory and the main-tree `.assent/`.
 # See "Hard requirements for the adapter sandbox" in format.md for the permission
 # needs and the limits when tightening.
 extra_args = ["--sandbox", "danger-full-access"]

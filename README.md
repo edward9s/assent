@@ -1,4 +1,4 @@
-# agents — an AI plan format plus an automatic scheduler
+# assent — an AI plan format plus an automatic scheduler
 
 *[Traditional Chinese reader edition](README.zh-TW.md)*
 
@@ -7,13 +7,13 @@ with minimal context, plus a scheduler that understands that system and runs
 it unattended.
 
 - **Planning**: a human and an AI hold a meeting session; consensus is
-  immediately fixed into task files under `.agents/`, and adjournment =
-  `agents check` passes.
-- **Execution**: `agents run` finishes every task unattended — picking a
+  immediately fixed into task files under `.assent/`, and adjournment =
+  `assent check` passes.
+- **Execution**: `assent run` finishes every task unattended — picking a
   task, opening a headless AI session, objectively reviewing the result,
   committing a git checkpoint, waiting out quota exhaustion and resuming —
   the scheduler loop itself burns zero tokens.
-- **Review**: a human reads the program-generated `.agents/<work
+- **Review**: a human reads the program-generated `.assent/<work
   folder>/_report.md` (zero tokens), and opens a session only for the tasks
   that need a decision.
 
@@ -21,7 +21,7 @@ it unattended.
 
 1. **Minimize token consumption while keeping output quality trustworthy.**
    Scheduling, review, and reporting are all local, pure-Python work; every AI
-   session's required reading is only the project `AGENTS.md` + the agents
+   session's required reading is only the project `AGENTS.md` + the assent
    working instructions + its own task file.
 2. **Stay flexible, less is more.** Zero third-party dependencies (standard
    library only); the task file itself is the state — no database, no hidden
@@ -40,7 +40,7 @@ it unattended.
 ```text
               ┌────────────────────────────────────────────┐
               │           main loop (zero tokens)           │
- .agents/     │  1. Scan work folders, pick a task: resume  │
+ .assent/     │  1. Scan work folders, pick a task: resume  │
  work folder ─▶     WIP first, otherwise the first TODO      │
  (tNNN_name   │     whose upstreams are all DONE/SKIP        │──▶ executing AI
   .e.toml)    │  2. Read that task's tier/effort, open a     │
@@ -62,15 +62,15 @@ it unattended.
 - **The task file is the state**: each task is one `tNNN_name.e.toml` file
   (status, dependencies, tier, scope, verify, acceptance conditions); its log
   is the same-stem `tNNN_name.r.toml` (append-only, not read by default).
-  After a handled interruption records WIP, running `agents run` resumes that
+  After a handled interruption records WIP, running `assent run` resumes that
   task. An abrupt process or host failure can instead leave a dirty worktree;
   the scheduler then refuses to guess until you review and checkpoint it.
-- **Format contract**: `.agents/format.md` (installed by `agents init`) is
+- **Format contract**: `.assent/format.md` (installed by `assent init`) is
   what a planning AI reads to produce task files, and what the scheduler's
   parser is aligned with byte-for-byte.
 - **The session is visible live**: what the AI says (`AI|`), the tools it
   uses (`Tool|`), and token usage (`--|`) print to the terminal in real time
-  and are kept in `.agents/<work folder>/_agents.log`.
+  and are kept in `.assent/<work folder>/_assent.log`.
 
 ## Installation
 
@@ -78,11 +78,11 @@ Python 3.11+, git, and a logged-in Claude Code CLI (`claude`) or Codex CLI
 (`codex`).
 
 ```
-cd <your agents project directory>
+cd <your assent project directory>
 pip install -e .
 ```
 
-Verify: run `agents --help` from any directory. Zero third-party
+Verify: run `assent --help` from any directory. Zero third-party
 dependencies — nothing else gets downloaded.
 
 ## Quick start
@@ -90,81 +90,91 @@ dependencies — nothing else gets downloaded.
 ```
 # 0. cd into the target project root (must be a git repo)
 
-# 1. Generate the .agents skeleton and AGENTS.md
+# 1. Generate the .assent skeleton and AGENTS.md
 #    (an existing AGENTS.md only gets one bridge line appended; nothing
 #    else in it is overwritten)
-agents init
+assent init
 
 # 2. Fill in AGENTS.md's project description/hard constraints and
-#    .agents/verify.py's actual check commands
+#    .assent/verify.py's actual check commands
 #    Whether AGENTS.md is committed is up to the project;
-#    the whole .agents/ stays in the main worktree and is not committed
+#    the whole .assent/ stays in the main worktree and is not committed
 
 # 3. Hold an AI meeting to produce task files (an interactive session; see
 #    "Usage loop" below)
 
 # 4. Validate the plan and environment (zero tokens; passing = the meeting
 #    can adjourn)
-agents check
+assent check
 
 # 5. Try one task, confirm it's correct, then run everything unattended
 #    (can run overnight)
-agents run --once
-agents run
+assent run --once
+assent run
 
 # The work folder can also be given as a positional argument
 # (orthogonal to --config)
-agents run <FOLDER>
+assent run <FOLDER>
 
 # Run every incomplete folder in dependency order, at most 2 folders at once
-agents run --all --jobs 2
+assent run --all --jobs 2
 
 # 6. Check in any time (a separate terminal, zero tokens)
-agents status
-agents report
-agents clean [FOLDER]
+assent status
+assent report
+assent clean [FOLDER]
 
 # When a review meeting orders a single task redone (keeps code by default;
 # does not run automatically)
-agents rework <FOLDER> <TASK> [--cascade] [--reason TEXT]
+assent rework <FOLDER> <TASK> [--cascade] [--reason TEXT]
 
 # When a review meeting rejects an entire folder's implementation
 # (archives it, force-deletes it, resets tasks to TODO)
-agents reject <FOLDER>
+assent reject <FOLDER>
 ```
+
+### Migration from the former `agents` contract
+
+The package, import namespace, CLI, and management directory changed from
+`agents`/`.agents` to `assent`/`.assent`. This is a breaking namespace and
+path change. `assent init` fails closed when it finds an old `.agents`
+directory, and also refuses when `.agents` and `.assent` coexist; migrate or
+remove the legacy management state explicitly after reviewing which source is
+authoritative. No compatibility alias is provided, and the old directory is
+never merged automatically.
 
 Human review after a run finishes:
 
 ```
 git log --oneline <folder name>/<run-id>   # one commit per task, review one by one
 git diff main...<folder name>/<run-id>     # or look at the overall diff
-# Accept → merge; reject a single task → agents rework <folder> <task>
+# Accept → merge; reject a single task → assent rework <folder> <task>
 # There is downstream work already started → add --cascade
 # Confirmed you want the code reverted → add --revert-code
-# Reject the whole folder's implementation → agents reject <folder>
+# Reject the whole folder's implementation → assent reject <folder>
 ```
 
 `rework` immediately updates `_report.md` on success, but does not print the
 full report or start an AI; only after the human confirms the reopened TODO
 and its blast radius are correct should they explicitly run
-`agents run <FOLDER>`.
+`assent run <FOLDER>`.
 
 ## Parallel execution
 
-You can point N terminals at N different work folders, e.g. `agents run
-parallel01`, `agents run parallel02`; or let the scheduler arrange parallel
-execution across folder dependencies with `agents run --all --jobs N`. `run
+You can point N terminals at N different work folders, e.g. `assent run
+parallel01`, `assent run parallel02`; or let the scheduler arrange parallel
+execution across folder dependencies with `assent run --all --jobs N`. `run
 --all` stays a single foreground terminal and prefixes each subprocess's
 messages live as `[work folder] message`; during parallel execution the
 prefix identifies each line's source.
 
 The parent terminal shows the prefixed messages above; the root
-`.agents/_agents.log` only keeps the startup header and per-folder start/
-finish/failure scheduling summaries. Each work folder's own `_agents.log` is
+`.assent/_assent.log` only keeps the startup header and per-folder start/
+finish/failure scheduling summaries. Each work folder's own `_assent.log` is
 kept by its subprocess with the full raw output, without the parent's
 prefix, and is never written twice. Each folder's own tasks and logs
 separately use the `tNNN_name.e.toml` and `tNNN_name.r.toml` filenames.
-Every work folder has its own `agents.lock`, so only one run at a time is
+Every work folder has its own `assent.lock`, so only one run at a time is
 allowed per folder; Git is always enabled, and every folder always gets its
 own worktree at `<project name>.worktrees/<folder>/` — this is the
 foundation of safe parallel processing.
@@ -172,11 +182,11 @@ foundation of safe parallel processing.
 The version-control boundary is deliberately simple: `AGENTS.md` is the
 project rules; when tracked, the worktree's branch version is used, and when
 not tracked, the prompt supplies the main-tree absolute path. The whole
-`.agents/` is the agents management plane, excluded via `.gitignore` and
+`.assent/` is the assent management plane, excluded via `.gitignore` and
 kept only in the main worktree. The scheduler likewise supplies
 instructions, t/r files, and the default verification script as absolute
 paths; the verification script is loaded from the main tree but its
-execution cwd is still the worktree. Whenever any `.agents/` file has
+execution cwd is still the worktree. Whenever any `.assent/` file has
 entered Git, the scheduler fails closed before opening a session, to prevent
 the worktree from ending up with a second source of truth.
 
@@ -193,17 +203,17 @@ branches back into the main line is a human responsibility.
 **Act 1: planning meeting** (interactive session)
 
 ```text
-Let's start planning. Please read AGENTS.md, .agents/instructions.md, and
-.agents/format.md, then discuss the following goal with me and progressively
-write the consensus into task files under .agents/<work folder>/:
+Let's start planning. Please read AGENTS.md, .assent/instructions.md, and
+.assent/format.md, then discuss the following goal with me and progressively
+write the consensus into task files under .assent/<work folder>/:
 <your goal>
 ```
 
 Every consensus reached during the meeting is immediately fixed into a task
-file; before adjourning, run `agents check` — not passing means the meeting
+file; before adjourning, run `assent check` — not passing means the meeting
 isn't done.
 
-**Act 2: unattended execution**: `agents run`, then go to sleep.
+**Act 2: unattended execution**: `assent run`, then go to sleep.
 
 **Act 3: review meeting** (interactive session)
 
@@ -212,13 +222,13 @@ sticking points, checkpoint hashes), then open a session only for the tasks
 that need a decision:
 
 ```text
-Please read .agents/<folder>/t003_xxx.e.toml, t003_xxx.r.toml, and the diff
+Please read .assent/<folder>/t003_xxx.e.toml, t003_xxx.r.toml, and the diff
 of the commit auto(<folder>/t003) at <hash>, explain the sticking point, and
 propose a fix.
 ```
 
 Carrying out the decision means the AI edits the task file (status back to
-TODO, added clarification, new tasks, marked SKIP); once `agents check`
+TODO, added clarification, new tasks, marked SKIP); once `assent check`
 passes, go back to Act 2. Loop until everything is DONE → merge. A new round
 of planning = just open a new work folder; an old folder can keep taking
 part in dependency resolution via `_folder.toml`'s `after`. A folder's
@@ -228,20 +238,20 @@ task is DONE/SKIP.
 ## Command reference
 
 The full form of `run`, `status`, `check`, and `report` is
-`agents <command> [options] [FOLDER]`. `FOLDER` may be stated explicitly;
+`assent <command> [options] [FOLDER]`. `FOLDER` may be stated explicitly;
 when omitted, `run` derives the single runnable folder from current task
 state and `_folder.toml`'s `after` upstreams, and refuses on ambiguity.
 `status`, `check`, and `report` act on all folders when `FOLDER` is omitted.
 `--config PATH` selects the config file, defaulting to
-`.agents/agents.toml`; the config file no longer maintains a work-folder
+`.assent/assent.toml`; the config file no longer maintains a work-folder
 pointer. The two are orthogonal — use either alone or together, e.g.
-`agents status --config configs/night.toml parallel01`.
+`assent status --config configs/night.toml parallel01`.
 
-`agents clean [FOLDER]` only deletes worktrees and branches that are fully
+`assent clean [FOLDER]` only deletes worktrees and branches that are fully
 merged and clean; when it cannot prove that, it skips the folder. It never
-touches `.agents/`, has no force option, and is unrelated to `git clean`.
+touches `.assent/`, has no force option, and is unrelated to `git clean`.
 
-`agents reject <FOLDER>` is the explicit human-adjudicated rejection action,
+`assent reject <FOLDER>` is the explicit human-adjudicated rejection action,
 kept separate from routine cleanup: it first archives uncommitted changes as
 a wip commit, prints each branch's full tip hash as evidence (recoverable by
 hash only within git's gc grace period), then force-deletes that folder's
@@ -250,7 +260,7 @@ TODO, and leaves a `rejected` record with full Git evidence in the r file
 (SKIP is not overturned). `FOLDER` is required and cannot act on all
 folders; it refuses while a run is in progress.
 
-`agents rework <FOLDER> <TASK>` is the non-destructive reopening of a single
+`assent rework <FOLDER> <TASK>` is the non-destructive reopening of a single
 task. By default it keeps all code and only resets the target status to
 TODO; downstream tasks that have started or completed require an explicit
 `--cascade` to be reverted along with it. `--reason TEXT` preserves the
@@ -267,15 +277,15 @@ derived from task-file facts, and Git is always enabled.
 
 | Command and a representative invocation | Options and effect | Token cost |
 |---|---|---|
-| `agents run [FOLDER]`<br>`agents run parallel01` | Runs a work folder until every task is DONE/BLOCKED/SKIP. Omitting `FOLDER` derives the single runnable folder; `--once` stops after the next task; `--task ID` runs a single task while still checking its upstreams, e.g. `agents run --task t003 parallel01`. | Only spent while an AI session runs; `--once` or `--task` run at most one task |
-| `agents run --all`<br>`agents run --all --jobs 2` | Runs every incomplete folder in `_folder.toml` dependency order; `--jobs N` caps how many folders run at once (default 1), with the parent terminal live-tagging each subprocess's output as `[folder] message`. Cannot combine with `FOLDER`, `--once`, or `--task`. | Only spent while an AI session runs |
-| `agents status [FOLDER]`<br>`agents status parallel01` | Shows progress statistics, the next task, the branch, and the last checkpoint. Accepts `--config PATH`. | **Zero** |
-| `agents check [FOLDER]`<br>`agents check --config .agents/agents.toml parallel01` | Validates task-file format, dependency-cycle freedom, config, and environment; this is the planning meeting's adjournment condition. Accepts `--config PATH`. | **Zero** |
-| `agents report [FOLDER]`<br>`agents report parallel01` | Generates and displays the work folder's human-readable report `_report.md`. Accepts `--config PATH`. | **Zero** |
-| `agents clean [FOLDER]`<br>`agents clean parallel01` | Cleans up only worktrees and same-folder-prefix branches that are fully merged and clean; skips anything it cannot prove, never touches `.agents/`, and has no force option. Acts on all work folders when `FOLDER` is omitted. | **Zero** |
-| `agents reject <FOLDER>`<br>`agents reject parallel01` | Human-adjudicated rejection: archives uncommitted changes, then force-deletes that folder's worktree and same-prefix branches (recording full tip hashes before deletion), and resets DONE/WIP/BLOCKED tasks to TODO with Git evidence kept in the r file. `FOLDER` is required; refuses while a run is in progress. | **Zero** |
-| `agents rework <FOLDER> <TASK>`<br>`agents rework parallel01 t003 --cascade --reason "review rejected"` | Non-destructively reopens a single task; keeps code by default, `--cascade` states downstream propagation explicitly. `--revert-code` creates a new reverse commit only when checkpoints form a contiguous tail. Updates the report on success, does not run automatically. Accepts `--config PATH`. | **Zero** |
-| `agents init`<br>`agents init --path C:\work\my-project` | Generates the `.agents` skeleton and `AGENTS.md` in the target project; `--path DIR` defaults to the current directory. Does not accept `FOLDER` or `--config`. | **Zero** |
+| `assent run [FOLDER]`<br>`assent run parallel01` | Runs a work folder until every task is DONE/BLOCKED/SKIP. Omitting `FOLDER` derives the single runnable folder; `--once` stops after the next task; `--task ID` runs a single task while still checking its upstreams, e.g. `assent run --task t003 parallel01`. | Only spent while an AI session runs; `--once` or `--task` run at most one task |
+| `assent run --all`<br>`assent run --all --jobs 2` | Runs every incomplete folder in `_folder.toml` dependency order; `--jobs N` caps how many folders run at once (default 1), with the parent terminal live-tagging each subprocess's output as `[folder] message`. Cannot combine with `FOLDER`, `--once`, or `--task`. | Only spent while an AI session runs |
+| `assent status [FOLDER]`<br>`assent status parallel01` | Shows progress statistics, the next task, the branch, and the last checkpoint. Accepts `--config PATH`. | **Zero** |
+| `assent check [FOLDER]`<br>`assent check --config .assent/assent.toml parallel01` | Validates task-file format, dependency-cycle freedom, config, and environment; this is the planning meeting's adjournment condition. Accepts `--config PATH`. | **Zero** |
+| `assent report [FOLDER]`<br>`assent report parallel01` | Generates and displays the work folder's human-readable report `_report.md`. Accepts `--config PATH`. | **Zero** |
+| `assent clean [FOLDER]`<br>`assent clean parallel01` | Cleans up only worktrees and same-folder-prefix branches that are fully merged and clean; skips anything it cannot prove, never touches `.assent/`, and has no force option. Acts on all work folders when `FOLDER` is omitted. | **Zero** |
+| `assent reject <FOLDER>`<br>`assent reject parallel01` | Human-adjudicated rejection: archives uncommitted changes, then force-deletes that folder's worktree and same-prefix branches (recording full tip hashes before deletion), and resets DONE/WIP/BLOCKED tasks to TODO with Git evidence kept in the r file. `FOLDER` is required; refuses while a run is in progress. | **Zero** |
+| `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "review rejected"` | Non-destructively reopens a single task; keeps code by default, `--cascade` states downstream propagation explicitly. `--revert-code` creates a new reverse commit only when checkpoints form a contiguous tail. Updates the report on success, does not run automatically. Accepts `--config PATH`. | **Zero** |
+| `assent init`<br>`assent init --path C:\work\my-project` | Generates the `.assent` skeleton and `AGENTS.md` in the target project; `--path DIR` defaults to the current directory. Does not accept `FOLDER` or `--config`. | **Zero** |
 
 Each subcommand's `-h`/`--help` shows that layer's actual syntax; there is
 no top-level `--config` or other global option that applies to every
@@ -283,12 +293,12 @@ subcommand.
 
 ## Plan format and config files
 
-- Full format contract: [agents/templates/format.md](agents/templates/format.md)
-  (copied into a project's `.agents/format.md` by `agents init`).
-- Working-instructions template: [agents/templates/instructions.md](agents/templates/instructions.md)
-  — agents session behavior and cross-project common rules; project rules
+- Full format contract: [assent/templates/format.md](assent/templates/format.md)
+  (copied into a project's `.assent/format.md` by `assent init`).
+- Working-instructions template: [assent/templates/instructions.md](assent/templates/instructions.md)
+  — assent session behavior and cross-project common rules; project rules
   stay in `AGENTS.md`.
-- Config template: [agents/templates/agents.toml](agents/templates/agents.toml)
+- Config template: [assent/templates/assent.toml](assent/templates/assent.toml)
   — adapter selection, the abstract tier (prime/core/lite) mapping table,
   abstract effort (low/medium/high) defaults and CLI-value translation,
   watchdog, and retry parameters.
@@ -302,7 +312,7 @@ tools.
 
 **Q: What if I lose power or crash midway?**
 Inspect the isolated worktree first. If the interruption was handled and the
-task was left at WIP, `agents run` resumes it with a "continue" prompt. An
+task was left at WIP, `assent run` resumes it with a "continue" prompt. An
 abrupt failure can leave uncommitted changes; in that case the scheduler
 refuses the dirty worktree instead of guessing, so review and checkpoint the
 changes before rerunning.

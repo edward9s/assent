@@ -1,7 +1,7 @@
-"""Mirror ``agents run``'s terminal output into the current task folder.
+"""Mirror ``assent run``'s terminal output into the current task folder.
 
 The terminal keeps native output (colors and cursor repositioning included), while the
-task folder's ``_agents.log`` keeps portable, immediately-flushed plain text. Errors can
+task folder's ``_assent.log`` keeps portable, immediately-flushed plain text. Errors can
 happen before config is even loaded, so this module reads config itself on a best-effort
 basis, without depending on config.py and without raising outward.
 """
@@ -15,8 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator, TextIO
 
-from agents.config import list_task_folders
-from agents.plan import Plan
+from assent.config import list_task_folders
+from assent.plan import Plan
 
 _ANSI_RE = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])")
@@ -30,7 +30,7 @@ _EMOJI_RE = re.compile(
     "]",
 )
 
-_DEFAULT_CONFIG = ".agents/agents.toml"
+_DEFAULT_CONFIG = ".assent/assent.toml"
 _FOLDER_RE = re.compile(r"^[^\s/\\]+$")
 
 
@@ -102,12 +102,12 @@ def _valid_folder(value: object) -> str | None:
     return value
 
 
-def _folder_from_tasks(agents_dir: Path) -> str | None:
+def _folder_from_tasks(assent_dir: Path) -> str | None:
     """Best-effort derive the single ongoing task folder; any error is treated as unknown."""
     try:
         ongoing = []
-        for folder in list_task_folders(agents_dir):
-            plan = Plan.parse(agents_dir / folder)
+        for folder in list_task_folders(assent_dir):
+            plan = Plan.parse(assent_dir / folder)
             if any(task.status in ("TODO", "WIP") for task in plan.tasks):
                 ongoing.append(folder)
         return ongoing[0] if len(ongoing) == 1 else None
@@ -138,8 +138,8 @@ def _folder_from_argv(argv: list[str]) -> str | None:
     return None
 
 
-def log_path_for_argv(argv: list[str]) -> Path:
-    """Best-effort determine the task folder log path, falling back to beside the config file on failure."""
+def _config_path_for_argv(argv: list[str]) -> Path:
+    """Resolve the configured management file without loading or validating it."""
     config = _DEFAULT_CONFIG
     for idx, arg in enumerate(argv):
         if arg == "--config" and idx + 1 < len(argv):
@@ -149,11 +149,16 @@ def log_path_for_argv(argv: list[str]) -> Path:
     path = Path(config).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
-    path = path.resolve()
+    return path.resolve()
+
+
+def log_path_for_argv(argv: list[str]) -> Path:
+    """Best-effort determine the task folder log path, falling back to beside the config file on failure."""
+    path = _config_path_for_argv(argv)
     folder = (None if "--all" in argv else
               _folder_from_argv(argv) or _folder_from_tasks(path.parent))
     parent = path.parent / folder if folder is not None else path.parent
-    return parent / "_agents.log"
+    return parent / "_assent.log"
 
 
 @contextmanager
@@ -163,17 +168,27 @@ def terminal_logging(argv: list[str]) -> Iterator[Path]:
     if not argv or argv[0] != "run":
         yield log_path
         return
+    config_path = _config_path_for_argv(argv)
+    management_dir = config_path.parent
+    # These old-brand names are compatibility-detection data. Logging starts
+    # before config validation, so it must avoid writing either into a legacy
+    # installation or beside one and accidentally creating competing truths.
+    if (management_dir.name == ".agents"
+            or (management_dir.name == ".assent"
+                and (management_dir.parent / ".agents").exists())):
+        yield log_path
+        return
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w", encoding="utf-8", buffering=1, newline="\n") as log:
         sink = _LogSink(log)
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout = TeeTextIO(old_stdout, sink)
         sys.stderr = TeeTextIO(old_stderr, sink)
-        command = "agents" + (" " + " ".join(argv) if argv else "")
+        command = "assent" + (" " + " ".join(argv) if argv else "")
         stamp = datetime.now().astimezone().isoformat(timespec="seconds")
         sink.write(
             "\n\n============================================================\n"
-            f"AGENTS START | {stamp}\n"
+            f"ASSENT START | {stamp}\n"
             f"COMMAND      | {command}\n"
             "============================================================\n"
         )

@@ -15,10 +15,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agents import AgentsError, engine, gitops
-from agents.adapters import Adapter, TaskResult
-from agents.config import load_config
-from agents.plan import append_entry, journal_path_for, parse_task_file, set_status
+from assent import AssentError, engine, gitops
+from assent.adapters import Adapter, TaskResult
+from assent.config import load_config
+from assent.plan import append_entry, journal_path_for, parse_task_file, set_status
 
 _OK = 'python -c "raise SystemExit(0)"'
 _FAILV = 'python -c "raise SystemExit(3)"'
@@ -80,9 +80,9 @@ class EngineTestCase(unittest.TestCase):
         self._git("init")
         self._git("config", "user.name", "Test")
         self._git("config", "user.email", "test@example.com")
-        (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text(".assent/\n", encoding="utf-8")
         (self.root / "AGENTS.md").write_text("專案規則\n", encoding="utf-8")
-        self.plan_dir = self.root / ".agents" / "plan01"
+        self.plan_dir = self.root / ".assent" / "plan01"
         self.plan_dir.mkdir(parents=True)
 
     def _git(self, *args) -> str:
@@ -102,14 +102,14 @@ class EngineTestCase(unittest.TestCase):
               extra_config=""):
         prompt = (f'[prompt]\ntemplate = {json.dumps(prompt_template)}\n'
                   if prompt_template is not None else "")
-        (self.root / ".agents" / "agents.toml").write_text(
+        (self.root / ".assent" / "assent.toml").write_text(
             f"[run]\nretry_per_task = {retry}\n"
             f'[adapter]\nname = "{adapter_name}"\n'
             '[adapter.claude]\ncommand = "python"\n'
             + extra_config
             + prompt,
             encoding="utf-8")
-        return load_config(self.root / ".agents" / "agents.toml", "plan01")
+        return load_config(self.root / ".assent" / "assent.toml", "plan01")
 
     def write_task(self, num, slug="task", **kw) -> Path:
         path = self.plan_dir / f"t{num:03d}_{slug}.e.toml"
@@ -146,7 +146,7 @@ class EngineTestCase(unittest.TestCase):
 class TestRunSuccess(EngineTestCase):
     def test_unfinished_folder_prerequisite_refuses_before_lock(self):
         self.write_task(1)
-        base = self.root / ".agents" / "base"
+        base = self.root / ".assent" / "base"
         base.mkdir()
         for index, status in enumerate(("TODO", "WIP", "BLOCKED", "DONE"), 1):
             (base / f"t{index:03d}_task.e.toml").write_text(
@@ -159,7 +159,7 @@ class TestRunSuccess(EngineTestCase):
 
         for options in ({"once": True}, {"task_id": "t001"}):
             with self.subTest(options=options), mock.patch(
-                    "agents.engine.lockfile.hold_lock") as hold_lock:
+                    "assent.engine.lockfile.hold_lock") as hold_lock:
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     result = engine.run(cfg, adapter=adapter, **options)
@@ -172,7 +172,7 @@ class TestRunSuccess(EngineTestCase):
 
     def test_done_and_skip_folder_prerequisite_allows_run(self):
         path = self.write_task(1)
-        base = self.root / ".agents" / "base"
+        base = self.root / ".assent" / "base"
         base.mkdir()
         for index, status in enumerate(("DONE", "SKIP"), 1):
             (base / f"t{index:03d}_task.e.toml").write_text(
@@ -219,10 +219,10 @@ class TestRunSuccess(EngineTestCase):
                        if s.startswith("auto(plan01/t001): "))
         self.assertNotIn("Co-Authored-By", subject)
         self.assertNotIn("Generated with", subject)
-        # working tree clean apart from _report.md and agents.lock (runtime artifacts)
+        # working tree clean apart from _report.md and assent.lock (runtime artifacts)
         porcelain = [ln for ln in self._git("status", "--porcelain").splitlines()
                      if ln.strip() and "_report.md" not in ln
-                     and "agents.lock" not in ln]
+                     and "assent.lock" not in ln]
         self.assertEqual(porcelain, [])
 
     def test_two_tasks_run_to_completion(self):
@@ -359,7 +359,7 @@ class TestRunSuccess(EngineTestCase):
         adapter = ScriptedAdapter([self.ai_done(p1)])
         self.run_quiet(cfg, once=True, adapter=adapter)
         prompt = adapter.calls[0][0]
-        self.assertIn(str(cfg.agents_dir / "instructions.md"), prompt)
+        self.assertIn(str(cfg.assent_dir / "instructions.md"), prompt)
         self.assertIn(str(p1), prompt)
         self.assertIn(str(p1.with_name("t001_task.r.toml")), prompt)
         self.assertIn(_OK, prompt)
@@ -416,13 +416,13 @@ class TestRunSuccess(EngineTestCase):
         cfg = self.build()
         worktree = self.root / "isolated"
         worktree.mkdir()
-        (cfg.agents_dir / "verify.py").write_text(
+        (cfg.assent_dir / "verify.py").write_text(
             "from pathlib import Path\n"
             "Path('verified.txt').write_text('ok', encoding='utf-8')\n",
             encoding="utf-8")
 
         self.assertEqual(engine._run_verify(
-            cfg.for_worktree(worktree), "python .agents/verify.py"), 0)
+            cfg.for_worktree(worktree), "python .assent/verify.py"), 0)
         self.assertEqual((worktree / "verified.txt").read_text(encoding="utf-8"),
                          "ok")
         self.assertFalse((self.root / "verified.txt").exists())
@@ -476,7 +476,7 @@ class TestAcceptanceGates(EngineTestCase):
         self.assertIn("Reason:", adapter.calls[1][0])       # retry prompt carries the failure reason
         self.assertIn("outside.py", self._git_execution(
             "ls-files"))  # output not discarded, gathered into the checkpoint
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         blocked = next(e for e in entries if e["by"] == "scheduler"
                        and e["event"] == "blocked")
@@ -517,7 +517,7 @@ class TestAcceptanceGates(EngineTestCase):
 
         self.run_quiet(cfg, once=True, adapter=ScriptedAdapter([tamper]))
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         self.assertTrue(any("fields other than status" in e["summary"]
                             for e in entries if e["by"] == "scheduler"))
@@ -589,7 +589,7 @@ class TestQuotaAndResume(EngineTestCase):
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(plan01/t001): ")
                             for s in subjects))
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         quota = next(e for e in entries if e["event"] == "quota")
         self.assertEqual(quota["agent"], "claude")
@@ -620,7 +620,7 @@ class TestInterruptedTaskResume(EngineTestCase):
         self.assertEqual(self.run_quiet(
             cfg, once=True, adapter=ScriptedAdapter([interrupted])), 130)
         self.assertEqual(parse_task_file(path).status, "WIP")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         interrupt = next(e for e in entries
                          if e["by"] == "scheduler"
@@ -635,18 +635,18 @@ class TestInterruptedTaskResume(EngineTestCase):
         self.assertIn("resume", adapter.calls[0][0])
         self.assertEqual(parse_task_file(path).status, "DONE")
 
-    def test_agents_error_marks_current_task_wip_and_keeps_exit_code(self):
+    def test_assent_error_marks_current_task_wip_and_keeps_exit_code(self):
         path = self.write_task(1)
         cfg = self.build()
         self.commit_all()
 
         def failed(prompt):
-            raise AgentsError("連線中斷")
+            raise AssentError("連線中斷")
 
         self.assertEqual(self.run_quiet(
             cfg, once=True, adapter=ScriptedAdapter([failed])), 1)
         self.assertEqual(parse_task_file(path).status, "WIP")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         self.assertTrue(any(e["event"] == "interrupt"
                             and "infrastructure error" in e["summary"]
@@ -681,7 +681,7 @@ class TestInterruptedTaskResume(EngineTestCase):
             cfg, once=True, adapter=ScriptedAdapter([quota]),
             sleep=interrupt_sleep), 130)
         self.assertEqual(parse_task_file(path).status, "WIP")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         events = [e["event"] for e in read_entries(journal_path_for(path))]
         self.assertIn("quota", events)
         self.assertIn("interrupt", events)
@@ -711,9 +711,9 @@ class TestInterruptedTaskResume(EngineTestCase):
 class TestSchedulingAndRefusals(EngineTestCase):
     def test_run_and_check_refuse_root_without_own_git_marker(self):
         nested_root = self.root / "not-repo"
-        nested_plan = nested_root / ".agents" / "plan01"
+        nested_plan = nested_root / ".assent" / "plan01"
         nested_plan.mkdir(parents=True)
-        config = nested_root / ".agents" / "agents.toml"
+        config = nested_root / ".assent" / "assent.toml"
         config.write_text("", encoding="utf-8")
         cfg = load_config(config, "plan01")
         adapter = ScriptedAdapter([])
@@ -730,7 +730,7 @@ class TestSchedulingAndRefusals(EngineTestCase):
                     out.getvalue())
 
         self.assertEqual(adapter.calls, [])
-        self.assertFalse((nested_plan / "agents.lock").exists())
+        self.assertFalse((nested_plan / "assent.lock").exists())
 
     def test_blocked_gates_downstream_but_others_run(self):
         p1 = self.write_task(1, verify=_FAILV)
@@ -896,7 +896,7 @@ class TestQueries(EngineTestCase):
             self.ai_done(p1, {"src/done.py": "ok"}), fail_step])
         self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
 
-        from agents.plan import Plan
+        from assent.plan import Plan
         text = engine.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("t001  DONE", text)
         self.assertIn("t002  BLOCKED", text)
@@ -909,7 +909,7 @@ class TestQueries(EngineTestCase):
     def test_report_isolates_namespaced_checkpoints(self):
         self.write_task(1, status="DONE", title="目前一")
         self.write_task(3, status="DONE", title="目前三")
-        other_dir = self.root / ".agents" / "plan010"
+        other_dir = self.root / ".assent" / "plan010"
         other_dir.mkdir()
         (other_dir / "t001_other.e.toml").write_text(
             task_text(status="DONE", title="其他一"), encoding="utf-8",
@@ -919,7 +919,7 @@ class TestQueries(EngineTestCase):
             newline="\n")
         cfg = self.build()
         other_cfg = load_config(
-            self.root / ".agents" / "agents.toml", folder="plan010")
+            self.root / ".assent" / "assent.toml", folder="plan010")
         self.commit_all()
 
         def checkpoint(subject):
@@ -957,7 +957,7 @@ class TestQueries(EngineTestCase):
             'by = "ai"\nevent = "blocked"\nsummary = "舊日誌仍可讀"\n',
             encoding="utf-8")
         cfg = self.build()
-        from agents.plan import Plan
+        from assent.plan import Plan
         text = engine.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("last journal (ai): 舊日誌仍可讀", text)
 

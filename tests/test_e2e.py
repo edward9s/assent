@@ -18,16 +18,16 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agents import engine
-from agents import gitops
-from agents.adapters import Adapter, TaskResult
-from agents.config import load_config
-from agents.lockfile import hold_lock
-from agents.plan import (append_entry, journal_path_for, parse_task_file,
+from assent import engine
+from assent import gitops
+from assent.adapters import Adapter, TaskResult
+from assent.config import load_config
+from assent.lockfile import hold_lock
+from assent.plan import (append_entry, journal_path_for, parse_task_file,
                          set_status)
 
 _OK = 'python -c "raise SystemExit(0)"'
-_WORKTREE_GITIGNORE = ".agents/\n"
+_WORKTREE_GITIGNORE = ".assent/\n"
 
 
 def task_text(*, title="任務", deps=(), status="TODO",
@@ -72,20 +72,20 @@ class E2ETestCase(unittest.TestCase):
         self._git("config", "user.email", "test@example.com")
         (self.root / ".gitignore").write_text(
             _WORKTREE_GITIGNORE, encoding="utf-8")
-        self.plan_dir = self.root / ".agents" / "plan01"
+        self.plan_dir = self.root / ".assent" / "plan01"
         self.plan_dir.mkdir(parents=True)
-        (self.root / ".agents" / "agents.toml").write_text(
+        (self.root / ".assent" / "assent.toml").write_text(
             '[run]\nretry_per_task = 1\n',
             encoding="utf-8")
         (self.root / "AGENTS.md").write_text("專案規則\n", encoding="utf-8")
-        (self.root / ".agents" / "instructions.md").write_text(
-            "agents 工作指示\n", encoding="utf-8")
-        (self.root / ".agents" / "format.md").write_text(
+        (self.root / ".assent" / "instructions.md").write_text(
+            "assent 工作指示\n", encoding="utf-8")
+        (self.root / ".assent" / "format.md").write_text(
             "計畫格式\n", encoding="utf-8")
-        (self.root / ".agents" / "verify.py").write_text(
+        (self.root / ".assent" / "verify.py").write_text(
             "from pathlib import Path\n"
             "root = Path.cwd()\n"
-            "ok = not (root / '.agents').exists()\n"
+            "ok = not (root / '.assent').exists()\n"
             "raise SystemExit(0 if ok else 1)\n",
             encoding="utf-8")
 
@@ -94,7 +94,7 @@ class E2ETestCase(unittest.TestCase):
                               encoding="utf-8", check=True).stdout
 
     def cfg(self):
-        return load_config(self.root / ".agents" / "agents.toml", "plan01")
+        return load_config(self.root / ".assent" / "assent.toml", "plan01")
 
     def add_task(self, num, **kw) -> Path:
         path = self.plan_dir / f"t{num:03d}_task.e.toml"
@@ -170,7 +170,7 @@ class TestScenarios(E2ETestCase):
             self.assertEqual(parse_task_file(p).status, "DONE")
         porcelain = [ln for ln in self._git("status", "--porcelain").splitlines()
                      if ln.strip() and "_report.md" not in ln
-                     and "agents.lock" not in ln]
+                     and "assent.lock" not in ln]
         self.assertEqual(porcelain, [])
 
     def test_fail_retry_then_pass(self):
@@ -221,7 +221,7 @@ class TestScenarios(E2ETestCase):
         self.assertEqual(parse_task_file(p1).status, "BLOCKED")
         self.assertEqual(parse_task_file(p2).status, "TODO")
         self.assertEqual(parse_task_file(p3).status, "DONE")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         self.assertTrue(any(e["event"] == "blocked"
                             for e in read_entries(journal_path_for(p1))))
 
@@ -250,7 +250,7 @@ class TestScenarios(E2ETestCase):
         self.assertTrue(any(s.startswith("wip(plan01/t001): ")
                             for s in subjects))
         self.assertEqual(parse_task_file(p1).status, "DONE")
-        from agents.plan import read_entries
+        from assent.plan import read_entries
         events = [e["event"] for e in read_entries(journal_path_for(p1))]
         self.assertNotIn("session", events)
 
@@ -259,7 +259,7 @@ class TestWorktreeScenarios(E2ETestCase):
     def configure_git_run(self):
         (self.root / ".gitignore").write_text(
             _WORKTREE_GITIGNORE, encoding="utf-8")
-        (self.root / ".agents" / "agents.toml").write_text(
+        (self.root / ".assent" / "assent.toml").write_text(
             '[run]\nretry_per_task = 1\n', encoding="utf-8")
 
     def isolated_done_step(self, adapter, path, files):
@@ -293,7 +293,7 @@ class TestWorktreeScenarios(E2ETestCase):
         worktree = gitops.worktree_path(self.root, "plan01")
         self.assertEqual(adapter.cwds, [worktree.resolve()])
         self.assertIn(str(task.resolve()), adapter.calls[0])
-        self.assertIn(str((self.root / ".agents" / "instructions.md").resolve()),
+        self.assertIn(str((self.root / ".assent" / "instructions.md").resolve()),
                       adapter.calls[0])
         self.assertIn("project rules AGENTS.md", adapter.calls[0])
         self.assertNotIn(str((self.root / "AGENTS.md").resolve()),
@@ -322,7 +322,7 @@ class TestWorktreeScenarios(E2ETestCase):
 
     def test_default_verify_script_runs_inside_worktree(self):
         self.configure_git_run()
-        task = self.add_task(1, verify="python .agents/verify.py")
+        task = self.add_task(1, verify="python .assent/verify.py")
         self.start()
         adapter = ScriptedAdapter([])
         adapter.steps.append(self.isolated_done_step(
@@ -330,7 +330,7 @@ class TestWorktreeScenarios(E2ETestCase):
 
         self.assertEqual(self.run_engine(adapter, once=True), 0)
         self.assertEqual(parse_task_file(task).status, "DONE")
-        self.assertIn(str((self.root / ".agents" / "verify.py").resolve()),
+        self.assertIn(str((self.root / ".assent" / "verify.py").resolve()),
                       adapter.calls[0])
 
     def test_tracked_task_folder_is_rejected_before_worktree_creation(self):
@@ -347,9 +347,9 @@ class TestWorktreeScenarios(E2ETestCase):
 
     def test_ignored_agents_md_is_passed_as_main_absolute_path(self):
         self.configure_git_run()
-        task = self.add_task(1, verify="python .agents/verify.py")
+        task = self.add_task(1, verify="python .assent/verify.py")
         (self.root / ".gitignore").write_text(
-            ".agents/\nAGENTS.md\n", encoding="utf-8")
+            ".assent/\nAGENTS.md\n", encoding="utf-8")
         self.start()
         worktree = gitops.worktree_path(self.root, "plan01")
         adapter = ScriptedAdapter([])
@@ -375,7 +375,7 @@ class TestWorktreeScenarios(E2ETestCase):
     def test_two_folders_use_independent_worktrees_and_branches(self):
         self.configure_git_run()
         task1 = self.add_task(1)
-        plan2 = self.root / ".agents" / "plan02"
+        plan2 = self.root / ".assent" / "plan02"
         plan2.mkdir()
         task2 = plan2 / "t001_task.e.toml"
         task2.write_text(task_text(), encoding="utf-8", newline="\n")
@@ -386,7 +386,7 @@ class TestWorktreeScenarios(E2ETestCase):
             adapter = ScriptedAdapter([])
             adapter.steps.append(self.isolated_done_step(
                 adapter, task, {f"src/{filename}": folder}))
-            cfg = load_config(self.root / ".agents" / "agents.toml", folder=folder)
+            cfg = load_config(self.root / ".assent" / "assent.toml", folder=folder)
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(engine.run(cfg, once=True, adapter=adapter), 0)
 

@@ -14,9 +14,9 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from agents import AgentsError
-from agents.config import _validate_tasks_name, list_task_folders
-from agents.plan import Plan
+from assent import AssentError
+from assent.config import _validate_tasks_name, list_task_folders
+from assent.plan import Plan
 
 _FOLDER_CONFIG_NAME = "_folder.toml"
 _KNOWN_KEYS = {"after"}
@@ -62,12 +62,12 @@ def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
     """Parse and validate a task folder's ``_folder.toml``.
 
     A referenced task folder must be a folder with a formal task file under
-    the same ``.agents`` directory. A missing ``_folder.toml`` yields an
+    the same ``.assent`` directory. A missing ``_folder.toml`` yields an
     empty ``after``.
     """
     tasks_dir = Path(tasks_dir)
     if not tasks_dir.is_dir():
-        raise AgentsError(f"Task folder not found: {tasks_dir}")
+        raise AssentError(f"Task folder not found: {tasks_dir}")
 
     name = tasks_dir.name
     _validate_tasks_name(name, "Task folder name")
@@ -79,32 +79,32 @@ def parse_folder_dependencies(tasks_dir: str | Path) -> FolderDependencies:
         with open(path, "rb") as f:
             data = tomllib.load(f)
     except OSError as e:
-        raise AgentsError(f"Cannot read folder dependency file {path}: {e}") from e
+        raise AssentError(f"Cannot read folder dependency file {path}: {e}") from e
     except tomllib.TOMLDecodeError as e:
-        raise AgentsError(
+        raise AssentError(
             f"Folder dependency file {path} is not valid TOML: {e}") from e
 
     unknown = sorted(set(data) - _KNOWN_KEYS)
     if unknown:
-        raise AgentsError(
+        raise AssentError(
             f"Folder dependency file {path} has unknown keys: {', '.join(unknown)}"
             f" (valid keys: {', '.join(sorted(_KNOWN_KEYS))})")
     if "after" not in data:
-        raise AgentsError(
+        raise AssentError(
             f"Folder dependency file {path} is missing after"
             " (write after = [] explicitly even with no prerequisite folders)")
 
     after = data["after"]
     if not isinstance(after, list) or not all(isinstance(item, str) for item in after):
-        raise AgentsError(f"Folder dependency file {path} field after must be an array of strings")
+        raise AssentError(f"Folder dependency file {path} field after must be an array of strings")
 
     available = set(list_task_folders(tasks_dir.parent))
     for dependency in after:
         _validate_tasks_name(dependency, f"Folder {name}'s after element")
         if dependency == name:
-            raise AgentsError(f"Folder {name}'s after must not depend on itself")
+            raise AssentError(f"Folder {name}'s after must not depend on itself")
         if dependency not in available:
-            raise AgentsError(
+            raise AssentError(
                 f"Folder {name}'s after references a task folder that does not exist"
                 f" or has no task files: {dependency}")
 
@@ -116,7 +116,7 @@ def infer_folder_completion(tasks_dir: str | Path) -> FolderCompletion:
     """Parse the task files on the spot and infer whether the folder is entirely ``DONE`` or ``SKIP``."""
     try:
         plan = Plan.parse(Path(tasks_dir))
-    except AgentsError as e:
+    except AssentError as e:
         return FolderCompletion(False, f"Cannot infer folder completion: {e}")
 
     unfinished = [
@@ -155,12 +155,12 @@ def find_unfinished_prerequisites(
 
 
 def parse_folder_dependency_graph(
-        agents_dir: str | Path) -> dict[str, FolderDependencies]:
+        assent_dir: str | Path) -> dict[str, FolderDependencies]:
     """Parse the ``after`` graph for every task folder and check for cycles."""
-    agents_dir = Path(agents_dir)
+    assent_dir = Path(assent_dir)
     dependencies = {
-        name: parse_folder_dependencies(agents_dir / name)
-        for name in list_task_folders(agents_dir)
+        name: parse_folder_dependencies(assent_dir / name)
+        for name in list_task_folders(assent_dir)
     }
     _ensure_acyclic(dependencies)
     return dependencies
@@ -175,7 +175,7 @@ def _ensure_acyclic(dependencies: dict[str, FolderDependencies]) -> None:
             return
         if state.get(node) == 1:
             cycle = " -> ".join(chain[chain.index(node):] + [node])
-            raise AgentsError(f"Folder dependencies form a cycle: {cycle}")
+            raise AssentError(f"Folder dependencies form a cycle: {cycle}")
         state[node] = 1
         for dependency in dependencies[node].after:
             visit(dependency, chain + [node])

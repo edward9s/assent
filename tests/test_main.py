@@ -1,5 +1,5 @@
 """CLI entry point and init tests. ``run`` tees to the work folder's
-_agents.log, so tests always chdir into a temporary directory to avoid
+_assent.log, so tests always chdir into a temporary directory to avoid
 dirtying the test process's own working directory.
 
 Chinese literals that remain are deliberate user-authored data (task titles,
@@ -17,8 +17,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agents.__main__ import main
-from agents.init import init as run_init
+from assent.__main__ import main
+from assent.init import init as run_init
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _HAN_CHAR_RE = re.compile(r"[一-鿿]")
@@ -39,20 +39,20 @@ class MainTestCase(unittest.TestCase):
         return code, out.getvalue()
 
     def write_config(self, text="") -> Path:
-        config = self.root / ".agents" / "agents.toml"
+        config = self.root / ".assent" / "assent.toml"
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(text, encoding="utf-8")
         return config
 
     def write_task(self, folder: str, status: str = "TODO") -> Path:
-        path = self.root / ".agents" / folder / "t001_task.e.toml"
+        path = self.root / ".assent" / folder / "t001_task.e.toml"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             'title = "任務"\n'
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
-            'scope = ["agents/"]\n'
+            'scope = ["assent/"]\n'
             'verify = "python -m unittest"\n'
             'goal = "完成任務"\n'
             'acceptance = "驗證通過"\n',
@@ -76,7 +76,7 @@ class TestDispatch(MainTestCase):
                 env = dict(os.environ)
                 env["PYTHONPATH"] = str(_PROJECT_ROOT)
                 result = subprocess.run(
-                    [sys.executable, "-m", "agents", *argv],
+                    [sys.executable, "-m", "assent", *argv],
                     cwd=self.root, capture_output=True, text=True,
                     encoding="utf-8", env=env)
                 self.assertEqual(result.returncode, 0)
@@ -86,11 +86,11 @@ class TestDispatch(MainTestCase):
         code, out = self.run_main(["status"])
         self.assertEqual(code, 1)
         self.assertIn("Config error", out)
-        self.assertIn("agents init", out)
+        self.assertIn("assent init", out)
 
     def test_run_missing_config_reports_error(self):
         code, out = self.run_main(
-            ["run", "--config", str(self.root / "nope" / "agents.toml")])
+            ["run", "--config", str(self.root / "nope" / "assent.toml")])
         self.assertEqual(code, 1)
 
     def test_run_all_and_folder_are_mutually_exclusive(self):
@@ -109,28 +109,28 @@ class TestDispatch(MainTestCase):
 
     def test_run_all_dispatches_with_default_jobs(self):
         config = self.write_config()
-        with patch("agents.__main__.run_all", return_value=0) as mocked:
+        with patch("assent.__main__.run_all", return_value=0) as mocked:
             code, _ = self.run_main(["run", "--all", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[2], 1)
 
     def test_all_plan_commands_accept_folder_override(self):
         config = self.write_config()
-        agents_dir = config.parent
+        assent_dir = config.parent
         commands = (("run", "run"), ("status", "status"),
                     ("check", "check"), ("report", "report"))
         for command, engine_name in commands:
             with self.subTest(command=command), patch(
-                    f"agents.__main__.engine.{engine_name}", return_value=0) as mocked:
+                    f"assent.__main__.engine.{engine_name}", return_value=0) as mocked:
                 code, _ = self.run_main([command, "B", "--config", str(config)])
                 self.assertEqual(code, 0)
                 cfg = mocked.call_args.args[0]
                 self.assertEqual(cfg.tasks_name, "B")
-                self.assertEqual(cfg.tasks_dir, agents_dir.resolve() / "B")
+                self.assertEqual(cfg.tasks_dir, assent_dir.resolve() / "B")
 
     def test_clean_accepts_folder_override_and_config_option(self):
         config = self.write_config()
-        with patch("agents.__main__.clean_folders", return_value=0) as mocked:
+        with patch("assent.__main__.clean_folders", return_value=0) as mocked:
             code, _ = self.run_main(["clean", "B", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]], ["B"])
@@ -139,7 +139,7 @@ class TestDispatch(MainTestCase):
         config = self.write_config()
         self.write_task("beta")
         self.write_task("alpha")
-        with patch("agents.__main__.clean_folders", return_value=0) as mocked:
+        with patch("assent.__main__.clean_folders", return_value=0) as mocked:
             code, _ = self.run_main(["clean", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]],
@@ -159,7 +159,7 @@ class TestDispatch(MainTestCase):
 
     def test_reject_dispatches_to_reject_folder(self):
         config = self.write_config()
-        with patch("agents.__main__.reject_folder", return_value=0) as mocked:
+        with patch("assent.__main__.reject_folder", return_value=0) as mocked:
             code, _ = self.run_main(["reject", "B", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "B")
@@ -170,7 +170,7 @@ class TestDispatch(MainTestCase):
             main(["rework", "-h"])
         self.assertEqual(ctx.exception.code, 0)
         text = output.getvalue()
-        self.assertIn("agents rework", text)
+        self.assertIn("assent rework", text)
         self.assertIn("FOLDER TASK", text)
         for option in ("--cascade", "--revert-code", "--reason", "--config"):
             self.assertIn(option, text)
@@ -189,7 +189,7 @@ class TestDispatch(MainTestCase):
 
     def test_rework_dispatches_all_values_without_rewriting_exit_code(self):
         config = self.write_config()
-        with patch("agents.__main__.rework_task", side_effect=[0, 1]) as mocked:
+        with patch("assent.__main__.rework_task", side_effect=[0, 1]) as mocked:
             codes = [self.run_main([
                 "rework", "B", "t003", "--cascade", "--revert-code",
                 "--reason", "驗收不符", "--config", str(config)])[0]
@@ -206,7 +206,7 @@ class TestDispatch(MainTestCase):
 
     def test_rework_configuration_error_returns_one_without_dispatch(self):
         config = self.write_config()
-        with patch("agents.__main__.rework_task") as mocked:
+        with patch("assent.__main__.rework_task") as mocked:
             code, out = self.run_main([
                 "rework", "bad/name", "t001", "--config", str(config)])
         self.assertEqual(code, 1)
@@ -229,7 +229,7 @@ class TestDispatch(MainTestCase):
         config = self.write_config()
         self.write_task("active", "TODO")
         self.write_task("archive", "DONE")
-        with patch("agents.__main__.engine.run", return_value=0) as mocked:
+        with patch("assent.__main__.engine.run", return_value=0) as mocked:
             code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertIn(
@@ -245,7 +245,7 @@ class TestDispatch(MainTestCase):
             'after = ["base"]\n', encoding="utf-8")
         self.write_task("ready", "TODO")
 
-        with patch("agents.__main__.engine.run", return_value=0) as mocked:
+        with patch("assent.__main__.engine.run", return_value=0) as mocked:
             code, out = self.run_main(["run", "--config", str(config)])
 
         self.assertEqual(code, 0)
@@ -259,7 +259,7 @@ class TestDispatch(MainTestCase):
         (config.parent / "waiting" / "_folder.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
 
-        with patch("agents.__main__.engine.run") as mocked:
+        with patch("assent.__main__.engine.run") as mocked:
             code, out = self.run_main(["run", "--config", str(config)])
 
         self.assertEqual(code, 1)
@@ -273,11 +273,11 @@ class TestDispatch(MainTestCase):
                                ("multiple", [("one", "TODO"),
                                              ("two", "WIP")])):
             with self.subTest(case=case):
-                shutil.rmtree(self.root / ".agents", ignore_errors=True)
+                shutil.rmtree(self.root / ".assent", ignore_errors=True)
                 config = self.write_config()
                 for folder, status in statuses:
                     self.write_task(folder, status)
-                with patch("agents.__main__.engine.run") as mocked:
+                with patch("assent.__main__.engine.run") as mocked:
                     code, out = self.run_main(
                         ["run", "--config", str(config)])
                 self.assertEqual(code, 1)
@@ -298,7 +298,7 @@ class TestDispatch(MainTestCase):
         self.write_task("alpha")
         for command in ("status", "check", "report"):
             with self.subTest(command=command), patch(
-                    f"agents.__main__.engine.{command}", return_value=0) as mocked:
+                    f"assent.__main__.engine.{command}", return_value=0) as mocked:
                 code, _ = self.run_main([command, "--config", str(config)])
                 self.assertEqual(code, 0)
                 self.assertEqual(
@@ -309,7 +309,7 @@ class TestDispatch(MainTestCase):
         config = self.write_config()
         self.write_task("alpha")
         self.write_task("beta")
-        with patch("agents.__main__.engine.check", side_effect=[0, 1]) as mocked:
+        with patch("assent.__main__.engine.check", side_effect=[0, 1]) as mocked:
             code, _ = self.run_main(["check", "--config", str(config)])
         self.assertEqual(code, 1)
         self.assertEqual(mocked.call_count, 2)
@@ -322,7 +322,7 @@ class TestDispatch(MainTestCase):
         }
         for name, declarations in cases.items():
             with self.subTest(name=name):
-                shutil.rmtree(self.root / ".agents", ignore_errors=True)
+                shutil.rmtree(self.root / ".assent", ignore_errors=True)
                 config = self.write_config()
                 self.write_task("alpha")
                 (config.parent / "alpha" / "_folder.toml").write_text(
@@ -331,7 +331,7 @@ class TestDispatch(MainTestCase):
                     self.write_task("beta")
                     (config.parent / "beta" / "_folder.toml").write_text(
                         declarations[1], encoding="utf-8")
-                with patch("agents.__main__.engine.check", return_value=0):
+                with patch("assent.__main__.engine.check", return_value=0):
                     code, out = self.run_main(
                         ["check", "--config", str(config)])
                 self.assertEqual(code, 1)
@@ -347,46 +347,51 @@ class TestInit(MainTestCase):
     def test_creates_skeleton(self):
         code, out = self.run_main(["init"])
         self.assertEqual(code, 0)
-        for rel in (".agents/agents.toml", ".agents/format.md",
-                    ".agents/instructions.md", ".agents/verify.py",
+        for rel in (".assent/assent.toml", ".assent/format.md",
+                    ".assent/instructions.md", ".assent/verify.py",
                     "AGENTS.md", ".gitignore"):
             self.assertTrue((self.root / rel).is_file(), rel)
         # Work folders are not pre-created: their name is decided by a
         # planning meeting based on the task, so pre-creating one would mislead.
-        subdirs = [p for p in (self.root / ".agents").iterdir() if p.is_dir()]
+        subdirs = [p for p in (self.root / ".assent").iterdir() if p.is_dir()]
         self.assertEqual(subdirs, [])
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
         lines = gitignore.splitlines()
-        self.assertIn(".agents/", lines)
+        self.assertIn(".assent/", lines)
         self.assertNotIn("AGENTS.md", lines)
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertEqual(agents_md.count("<!-- agents-instructions -->"), 1)
+        self.assertEqual(agents_md.count("<!-- assent-instructions -->"), 1)
         self.assertNotIn("## AI 工作體系", agents_md)
-        config = (self.root / ".agents" / "agents.toml").read_text(
+        config = (self.root / ".assent" / "assent.toml").read_text(
             encoding="utf-8")
         self.assertNotIn("[git]", config)
         self.assertNotIn("[plan]", config)
+        # These old-brand names are negative assertions for fresh-init output.
+        self.assertFalse((self.root / ".agents").exists())
+        self.assertEqual(
+            [path for path in self.root.rglob("*")
+             if path.name.startswith("agents.")], [])
 
     def test_idempotent_no_overwrite_no_duplicates(self):
         run_init(self.root)
-        (self.root / ".agents" / "agents.toml").write_text(
+        (self.root / ".assent" / "assent.toml").write_text(
             '[run]\nretry_per_task = 7\n# custom\n', encoding="utf-8")
-        (self.root / ".agents" / "instructions.md").write_text(
+        (self.root / ".assent" / "instructions.md").write_text(
             "本機自訂指示\n", encoding="utf-8")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(run_init(self.root), 0)
         # Does not overwrite the existing config.
-        self.assertIn("custom", (self.root / ".agents" / "agents.toml")
+        self.assertIn("custom", (self.root / ".assent" / "assent.toml")
                       .read_text(encoding="utf-8"))
         # gitignore entries are not duplicated on re-run.
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
-        self.assertEqual(gitignore.splitlines().count(".agents/"), 1)
+        self.assertEqual(gitignore.splitlines().count(".assent/"), 1)
         # An existing file is not overwritten, and the AGENTS.md bridge is not duplicated.
-        self.assertEqual((self.root / ".agents" / "instructions.md")
+        self.assertEqual((self.root / ".assent" / "instructions.md")
                          .read_text(encoding="utf-8"), "本機自訂指示\n")
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertEqual(agents_md.count("<!-- agents-instructions -->"), 1)
+        self.assertEqual(agents_md.count("<!-- assent-instructions -->"), 1)
 
     def test_adds_one_bridge_line_to_existing_agents_md(self):
         (self.root / "AGENTS.md").write_text(
@@ -396,7 +401,7 @@ class TestInit(MainTestCase):
         self.assertTrue(text.startswith("# 我的專案"))
         self.assertIn("既有規則。", text)
         self.assertNotIn("## AI 工作體系", text)
-        self.assertEqual(text.count("<!-- agents-instructions -->"), 1)
+        self.assertEqual(text.count("<!-- assent-instructions -->"), 1)
 
     def test_migrates_legacy_section_without_touching_later_project_section(self):
         (self.root / "AGENTS.md").write_text(
@@ -407,17 +412,46 @@ class TestInit(MainTestCase):
         text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertNotIn("舊 agents 內容", text)
         self.assertIn("## 專案附註\n\n必須保留。", text)
-        self.assertEqual(text.count("<!-- agents-instructions -->"), 1)
+        self.assertEqual(text.count("<!-- assent-instructions -->"), 1)
 
-    def test_preserves_agents_md_ignore_choice(self):
+    def test_preserves_legacy_ignore_line_and_agents_md_ignore_choice(self):
         (self.root / ".gitignore").write_text(
             "cache/\nAGENTS.md\n.agents/\n", encoding="utf-8")
         run_init(self.root)
         lines = (self.root / ".gitignore").read_text(
             encoding="utf-8").splitlines()
         self.assertIn("cache/", lines)
-        self.assertIn(".agents/", lines)
+        self.assertIn(".agents/", lines)  # Preserved legacy user-authored ignore data.
+        self.assertIn(".assent/", lines)
         self.assertIn("AGENTS.md", lines)
+
+    def test_legacy_agents_installation_is_refused_before_writing(self):
+        # This old-brand directory and file are intentional legacy-installation fixtures.
+        legacy_dir = self.root / ".agents"
+        legacy_dir.mkdir()
+        (legacy_dir / "agents.toml").write_text("legacy", encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(run_init(self.root), 1)
+        self.assertIn("Legacy .agents management directory detected", out.getvalue())
+        self.assertFalse((self.root / ".assent").exists())
+        self.assertFalse((self.root / "AGENTS.md").exists())
+        self.assertFalse((self.root / ".gitignore").exists())
+
+    def test_dual_management_directories_are_refused_without_changes(self):
+        # The old-brand directory is intentional ambiguous-installation fixture data.
+        legacy_dir = self.root / ".agents"
+        legacy_dir.mkdir()
+        assent_dir = self.root / ".assent"
+        assent_dir.mkdir()
+        sentinel = assent_dir / "keep.txt"
+        sentinel.write_text("unchanged", encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(run_init(self.root), 1)
+        self.assertIn("Ambiguous management state", out.getvalue())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged")
+        self.assertFalse((assent_dir / "assent.toml").exists())
 
     def test_missing_target_dir_fails(self):
         out = io.StringIO()
@@ -432,7 +466,7 @@ class TestInit(MainTestCase):
             self.assertEqual(run_init(target), 1)
         self.assertIn("This project has no git repository yet; run git init first",
                       out.getvalue())
-        self.assertFalse((target / ".agents").exists())
+        self.assertFalse((target / ".assent").exists())
 
 
 if __name__ == "__main__":

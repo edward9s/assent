@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agents import AgentsError
+from assent import AssentError
 
 _FORMAL_FILENAME_RE = re.compile(r"^t(\d{3})_(.+)\.e\.toml$")
 _RETIRED_FILENAME_RE = re.compile(r"^t\d{3}_.+\.toml$")
@@ -55,12 +55,12 @@ class Task:
 
 def _require_str(data: dict, path: Path, key: str, *, allow_empty: bool = False) -> str:
     if key not in data:
-        raise AgentsError(f"Task file {path.name} is missing required field: {key}")
+        raise AssentError(f"Task file {path.name} is missing required field: {key}")
     val = data[key]
     if not isinstance(val, str):
-        raise AgentsError(f"Task file {path.name} field {key} must be a string")
+        raise AssentError(f"Task file {path.name} field {key} must be a string")
     if not allow_empty and not val.strip():
-        raise AgentsError(f"Task file {path.name} field {key} must not be empty")
+        raise AssentError(f"Task file {path.name} field {key} must not be empty")
     return val
 
 
@@ -69,18 +69,18 @@ def _optional_str(data: dict, path: Path, key: str) -> str:
         return ""
     val = data[key]
     if not isinstance(val, str):
-        raise AgentsError(f"Task file {path.name} field {key} must be a string")
+        raise AssentError(f"Task file {path.name} field {key} must be a string")
     return val
 
 
 def _str_list(data: dict, path: Path, key: str) -> list[str]:
     if key not in data:
-        raise AgentsError(f"Task file {path.name} is missing required field: {key}"
+        raise AssentError(f"Task file {path.name} is missing required field: {key}"
                           f" (write [] explicitly even when there is no "
                           f"{'dependency' if key == 'deps' else 'restriction'})")
     val = data[key]
     if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
-        raise AgentsError(f"Task file {path.name} field {key} must be an array of strings")
+        raise AssentError(f"Task file {path.name} field {key} must be an array of strings")
     return [x.strip() for x in val if x.strip()]
 
 
@@ -88,7 +88,7 @@ def journal_path_for(task_path: Path) -> Path:
     """Formal task file path -> the matching .r.toml journal path with the same stem."""
     name = task_path.name
     if _FORMAL_FILENAME_RE.match(name) is None:
-        raise AgentsError(
+        raise AssentError(
             f"Cannot derive a journal path from a non-task-file path: {name}"
             " (must be tNNN_name.e.toml)")
     journal_name = name[:-len(".e.toml")] + ".r.toml"
@@ -105,15 +105,15 @@ def _is_retired_task_filename(name: str) -> bool:
 def parse_task_file(path: Path) -> Task:
     """Parse a single task file; any format problem raises a clear error (fail-closed)."""
     if path.name.endswith(".r.toml"):
-        raise AgentsError(
+        raise AssentError(
             f"Journal file {path.name} must not be parsed as a task file"
             " (journal files use the tNNN_name.r.toml format)")
     if _is_retired_task_filename(path.name):
-        raise AgentsError(
+        raise AssentError(
             f"Legacy task file {path.name} is retired; move it to tNNN_name.e.toml")
     m = _FORMAL_FILENAME_RE.match(path.name)
     if m is None:
-        raise AgentsError(
+        raise AssentError(
             f"Task filename does not follow the naming rule: {path.name}"
             " (must be tNNN_name.e.toml, NNN a three-digit number)")
     task_id = f"t{m.group(1)}"
@@ -122,46 +122,46 @@ def parse_task_file(path: Path) -> Task:
         with open(path, "rb") as f:
             data = tomllib.load(f)
     except OSError as e:
-        raise AgentsError(f"Cannot read task file {path}: {e}") from e
+        raise AssentError(f"Cannot read task file {path}: {e}") from e
     except tomllib.TOMLDecodeError as e:
-        raise AgentsError(f"Task file {path.name} is not valid TOML: {e}") from e
+        raise AssentError(f"Task file {path.name} is not valid TOML: {e}") from e
 
     unknown = sorted(set(data) - _KNOWN_KEYS)
     if unknown:
-        raise AgentsError(
+        raise AssentError(
             f"Task file {path.name} has undefined fields: {', '.join(unknown)}"
             f" (valid fields: {', '.join(sorted(_KNOWN_KEYS))})")
 
     status = _require_str(data, path, "status").strip()
     if status not in _STATUS_VALUES:
-        raise AgentsError(
+        raise AssentError(
             f"Task file {path.name} has status = {status!r}, which is invalid"
             f" ({' / '.join(sorted(_STATUS_VALUES))})")
 
     model = _require_str(data, path, "model").strip().lower()
     if model not in _MODEL_TIERS:
-        raise AgentsError(
+        raise AssentError(
             f"Task file {path.name} has model = {model!r}, not a valid tier"
             " (prime / core / lite; do not write a vendor model name, the mapping"
-            " lives in agents.toml)")
+            " lives in assent.toml)")
 
     effort_raw = _optional_str(data, path, "effort").strip().lower()
     if effort_raw and effort_raw not in _EFFORT_LEVELS:
-        raise AgentsError(
+        raise AssentError(
             f"Task file {path.name} has effort = {effort_raw!r}, which is invalid"
-            " (low / medium / high, or omit it to use the agents.toml default)")
+            " (low / medium / high, or omit it to use the assent.toml default)")
 
     deps = _str_list(data, path, "deps")
     for dep in deps:
         if not _ID_RE.match(dep):
-            raise AgentsError(
+            raise AssentError(
                 f"Task file {path.name} has an invalid task id in deps: {dep!r} (must be tNNN)")
         if dep == task_id:
-            raise AgentsError(f"Task file {path.name} must not depend on itself in deps")
+            raise AssentError(f"Task file {path.name} must not depend on itself in deps")
 
     scope = _str_list(data, path, "scope")
     if not scope:
-        raise AgentsError(
+        raise AssentError(
             f"Task file {path.name} has an empty scope: the scope check is fail-closed"
             " (undeclared = every change counts as out of scope), list the allowed"
             " paths explicitly")
@@ -195,7 +195,7 @@ class Plan:
     def parse(cls, tasks_dir: Path) -> "Plan":
         tasks_dir = Path(tasks_dir)
         if not tasks_dir.is_dir():
-            raise AgentsError(
+            raise AssentError(
                 f"Task folder not found: {tasks_dir}"
                 " (wrong command-line argument, or did the folder change"
                 " after auto-derivation?)")
@@ -203,13 +203,13 @@ class Plan:
         retired = sorted(p.name for p in entries
                          if _is_retired_task_filename(p.name))
         if retired:
-            raise AgentsError(
+            raise AssentError(
                 "Task folder still has retired legacy task files: "
                 f"{', '.join(retired)}; move them to tNNN_name.e.toml first")
         files = sorted(p for p in entries
                        if _FORMAL_FILENAME_RE.match(p.name))
         if not files:
-            raise AgentsError(
+            raise AssentError(
                 f"Task folder {tasks_dir} has no task files (tNNN_name.e.toml);"
                 " run an AI planning session first to produce a plan")
 
@@ -218,7 +218,7 @@ class Plan:
         for path in files:
             task = parse_task_file(path)
             if task.id in seen:
-                raise AgentsError(
+                raise AssentError(
                     f"Duplicate task id: {task.id} ({seen[task.id]} and {path.name})")
             seen[task.id] = path.name
             tasks.append(task)
@@ -227,7 +227,7 @@ class Plan:
         for task in tasks:
             for dep in task.deps:
                 if dep not in ids:
-                    raise AgentsError(
+                    raise AssentError(
                         f"Task {task.id} depends on a task that does not exist: {dep}"
                         " (was the file renamed or deleted? deps refer to the"
                         " filename prefix)")
@@ -244,7 +244,7 @@ class Plan:
                 return
             if state.get(node) == 1:
                 cycle = " -> ".join(chain[chain.index(node):] + [node])
-                raise AgentsError(f"Task dependencies form a cycle: {cycle}")
+                raise AssentError(f"Task dependencies form a cycle: {cycle}")
             state[node] = 1
             for dep in deps_by_id.get(node, []):
                 visit(dep, chain + [node])
@@ -276,12 +276,12 @@ def set_status(path: Path, new_status: str) -> None:
     """Precisely replace the status line in a task file, leaving other bytes untouched;
     re-parse and validate after writing."""
     if new_status not in _STATUS_VALUES:
-        raise AgentsError(f"Invalid status: {new_status!r}")
+        raise AssentError(f"Invalid status: {new_status!r}")
     try:
         with open(path, encoding="utf-8", newline="") as f:
             text = f.read()
     except OSError as e:
-        raise AgentsError(f"Cannot read task file {path}: {e}") from e
+        raise AssentError(f"Cannot read task file {path}: {e}") from e
 
     lines = text.splitlines(keepends=True)
     for i, line in enumerate(lines):
@@ -292,7 +292,7 @@ def set_status(path: Path, new_status: str) -> None:
             lines[i] = f"{m.group(1)}{new_status}{m.group(3)}{eol}"
             break
     else:
-        raise AgentsError(f"Task file {path.name} has no status line to write back")
+        raise AssentError(f"Task file {path.name} has no status line to write back")
 
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write("".join(lines))
@@ -302,7 +302,7 @@ def set_status(path: Path, new_status: str) -> None:
     with open(path, "rb") as f:
         data = tomllib.load(f)
     if data.get("status") != new_status:
-        raise AgentsError(
+        raise AssentError(
             f"Task file {path.name} failed validation after the status writeback"
             " (a disguised status line?); inspect the file manually")
 
@@ -350,14 +350,14 @@ def append_entry(journal: Path, *, by: str, event: str, summary: str,
     adapter.
     """
     if by not in _ENTRY_BY:
-        raise AgentsError(
+        raise AssentError(
             f"Journal field by is invalid: {by!r} (codex / claude / scheduler)")
     if agent is not None and agent not in _ENTRY_AGENT:
-        raise AgentsError(f"Journal field agent is invalid: {agent!r} (codex / claude)")
+        raise AssentError(f"Journal field agent is invalid: {agent!r} (codex / claude)")
     if requested_model is not None and not requested_model.strip():
-        raise AgentsError("Journal field requested_model must not be an empty string")
+        raise AssentError("Journal field requested_model must not be an empty string")
     if requested_effort is not None and not requested_effort.strip():
-        raise AgentsError("Journal field requested_effort must not be an empty string")
+        raise AssentError("Journal field requested_effort must not be an empty string")
     if time_str is None:
         time_str = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -394,7 +394,7 @@ def append_entry(journal: Path, *, by: str, event: str, summary: str,
         try:
             tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
-            raise AgentsError(
+            raise AssentError(
                 f"Journal file {journal.name} is not valid TOML after appending: {e}") from e
 
 
@@ -407,6 +407,6 @@ def read_entries(journal: Path) -> list[dict]:
         try:
             data = tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
-            raise AgentsError(f"Journal file {journal.name} is not valid TOML: {e}") from e
+            raise AssentError(f"Journal file {journal.name} is not valid TOML: {e}") from e
     entries = data.get("entry", [])
     return entries if isinstance(entries, list) else []

@@ -8,11 +8,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agents import AgentsError, gitops
-from agents.config import load_config
-from agents.lockfile import hold_lock
-from agents.plan import read_entries, set_status
-from agents.rework import rework_task
+from assent import AssentError, gitops
+from assent.config import load_config
+from assent.lockfile import hold_lock
+from assent.plan import read_entries, set_status
+from assent.rework import rework_task
 
 
 def _git(root: Path, *args: str) -> str:
@@ -31,17 +31,17 @@ class TestRework(unittest.TestCase):
         _git(self.root, "init")
         _git(self.root, "config", "user.name", "Test")
         _git(self.root, "config", "user.email", "test@example.com")
-        (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text(".assent/\n", encoding="utf-8")
         (self.root / "README.md").write_text("起點\n", encoding="utf-8")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "init")
 
         self.folder = "plan01"
-        self.tasks_dir = self.root / ".agents" / self.folder
+        self.tasks_dir = self.root / ".assent" / self.folder
         self.tasks_dir.mkdir(parents=True)
-        self.config_path = self.root / ".agents" / "agents.toml"
+        self.config_path = self.root / ".assent" / "assent.toml"
         self.config_path.write_text("", encoding="utf-8")
-        (self.tasks_dir / "agents.lock").write_text(
+        (self.tasks_dir / "assent.lock").write_text(
             'folder = "plan01"\n', encoding="utf-8")
         self.cfg = load_config(self.config_path, self.folder)
         self.container = self.root.parent / f"{self.root.name}.worktrees"
@@ -61,7 +61,7 @@ class TestRework(unittest.TestCase):
             f'deps = [{dependencies}]\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
-            'scope = ["agents/"]\n'
+            'scope = ["assent/"]\n'
             'verify = "python -m unittest"\n'
             'goal = "完成任務"\n'
             'acceptance = "驗證通過"\n',
@@ -87,9 +87,9 @@ class TestRework(unittest.TestCase):
         return path, branch
 
     def test_clean_reject_and_rework_modules_remain_separate(self) -> None:
-        import agents.clean as clean_module
-        import agents.reject as reject_module
-        import agents.rework as rework_module
+        import assent.clean as clean_module
+        import assent.reject as reject_module
+        import assent.rework as rework_module
 
         self.assertFalse(hasattr(clean_module, "reject_folder"))
         self.assertFalse(hasattr(clean_module, "rework_task"))
@@ -146,7 +146,7 @@ class TestRework(unittest.TestCase):
         report = self.tasks_dir / "_report.md"
         report.write_text("舊報告\n", encoding="utf-8")
 
-        with patch("agents.rework.write_report",
+        with patch("assent.rework.write_report",
                    side_effect=PermissionError("報告檔被鎖定")):
             code, output = self._run()
 
@@ -158,7 +158,7 @@ class TestRework(unittest.TestCase):
     def test_failed_rework_does_not_generate_new_report(self) -> None:
         self._write_task(1, "TODO")
 
-        with patch("agents.rework.write_report") as mocked:
+        with patch("assent.rework.write_report") as mocked:
             code, _ = self._run()
 
         self.assertEqual(code, 1)
@@ -268,8 +268,8 @@ class TestRework(unittest.TestCase):
         worktree, _ = self._worktree()
         (worktree / "未提交成果.txt").write_text("保留\n", encoding="utf-8")
 
-        with patch("agents.rework.gitops.commit_if_dirty",
-                   side_effect=AgentsError("模擬封存失敗")):
+        with patch("assent.rework.gitops.commit_if_dirty",
+                   side_effect=AssentError("模擬封存失敗")):
             code, output = self._run()
 
         self.assertEqual(code, 1)
@@ -308,7 +308,7 @@ class TestRework(unittest.TestCase):
         task = self._write_task(1, "DONE")
         with hold_lock(self.tasks_dir, self.folder):
             busy_code, busy_output = self._run()
-        (self.tasks_dir / "agents.lock").unlink()
+        (self.tasks_dir / "assent.lock").unlink()
 
         missing_code, missing_output = self._run()
 
@@ -316,13 +316,13 @@ class TestRework(unittest.TestCase):
         self.assertEqual(missing_code, 1)
         self.assertEqual(self._status(task), "DONE")
         self.assertIn("a run is in progress", busy_output)
-        self.assertIn("has no existing agents.lock", missing_output)
+        self.assertIn("has no existing assent.lock", missing_output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
 
     def test_partial_journal_write_can_be_retried_without_duplicates(self) -> None:
         target = self._write_task(1, "DONE")
         downstream = self._write_task(2, "BLOCKED", (1,))
-        from agents.plan import append_entry as real_append_entry
+        from assent.plan import append_entry as real_append_entry
 
         calls = 0
 
@@ -333,7 +333,7 @@ class TestRework(unittest.TestCase):
                 raise OSError("模擬日誌中斷")
             return real_append_entry(*args, **kwargs)
 
-        with patch("agents.rework.append_entry", side_effect=interrupt_second):
+        with patch("assent.rework.append_entry", side_effect=interrupt_second):
             first_code, _ = self._run(cascade=True)
         second_code, _ = self._run(cascade=True)
 
@@ -360,7 +360,7 @@ class TestRework(unittest.TestCase):
                 raise OSError("模擬狀態中斷")
             return real_set_status(path, status)
 
-        with patch("agents.rework.set_status", side_effect=interrupt_second):
+        with patch("assent.rework.set_status", side_effect=interrupt_second):
             first_code, _ = self._run(cascade=True)
         self.assertEqual(self._status(target), "DONE")
         second_code, _ = self._run(cascade=True)
@@ -377,7 +377,7 @@ class TestRework(unittest.TestCase):
         self._write_task(1, "DONE")
         helper_names = ("restore", "remove_worktree", "delete_branch",
                         "delete_branch_force")
-        patches = [patch(f"agents.rework.gitops.{name}")
+        patches = [patch(f"assent.rework.gitops.{name}")
                    for name in helper_names]
         mocks = [item.start() for item in patches]
         self.addCleanup(lambda: [item.stop() for item in patches])
@@ -603,7 +603,7 @@ class TestRework(unittest.TestCase):
         def conflict(path, commits):
             return real_revert(path, [conflicting])
 
-        with patch("agents.rework.gitops.revert_no_commit",
+        with patch("assent.rework.gitops.revert_no_commit",
                    side_effect=conflict):
             code, output = self._run(revert_code=True)
 
@@ -624,10 +624,10 @@ class TestRework(unittest.TestCase):
         def conflict(path, commits):
             return real_revert(path, [conflicting])
 
-        with patch("agents.rework.gitops.revert_no_commit",
+        with patch("assent.rework.gitops.revert_no_commit",
                    side_effect=conflict), patch(
-                       "agents.rework.gitops.abort_revert",
-                       side_effect=AgentsError("模擬 abort 失敗")):
+                       "assent.rework.gitops.abort_revert",
+                       side_effect=AssentError("模擬 abort 失敗")):
             code, output = self._run(revert_code=True)
 
         self.assertEqual(code, 1)
@@ -642,7 +642,7 @@ class TestRework(unittest.TestCase):
         (worktree / "成果.txt").write_text("完成\n", encoding="utf-8")
         gitops.commit_all(worktree, "auto(plan01/t001): 完成成果")
 
-        with patch("agents.rework.append_entry",
+        with patch("assent.rework.append_entry",
                    side_effect=OSError("模擬日誌中斷")):
             first_code, first_output = self._run(
                 revert_code=True, reason="重新設計")
@@ -669,13 +669,13 @@ class TestRework(unittest.TestCase):
         worktree, _ = self._worktree()
         (worktree / "成果.txt").write_text("完成\n", encoding="utf-8")
         gitops.commit_all(worktree, "auto(plan01/t001): 完成成果")
-        from agents.plan import append_entry as real_append_entry
+        from assent.plan import append_entry as real_append_entry
 
         def persist_then_fail(*args, **kwargs):
             real_append_entry(*args, **kwargs)
             raise OSError("模擬寫入成功後驗證失敗")
 
-        with patch("agents.rework.append_entry", side_effect=persist_then_fail):
+        with patch("assent.rework.append_entry", side_effect=persist_then_fail):
             first_code, first_output = self._run(
                 revert_code=True, reason="重新設計")
         revert_checkpoint = _git(worktree, "rev-parse", "HEAD")
@@ -715,7 +715,7 @@ class TestRework(unittest.TestCase):
                 raise OSError("模擬狀態中斷")
             return real_set_status(path, status)
 
-        with patch("agents.rework.set_status", side_effect=interrupt_target):
+        with patch("assent.rework.set_status", side_effect=interrupt_target):
             first_code, first_output = self._run(
                 cascade=True, revert_code=True, reason="一起重做")
         revert_checkpoint = _git(worktree, "rev-parse", "HEAD")
@@ -751,7 +751,7 @@ class TestRework(unittest.TestCase):
             calls.append(args)
             return real_run(root, *args)
 
-        with patch("agents.gitops._run_git", side_effect=recording):
+        with patch("assent.gitops._run_git", side_effect=recording):
             code, _ = self._run(revert_code=True)
 
         self.assertEqual(code, 0)

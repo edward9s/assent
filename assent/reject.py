@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agents import AgentsError, gitops
-from agents.config import Config
-from agents.lockfile import LockBusy, LockMissing, probe_lock
-from agents.plan import Plan, append_entry, set_status
+from assent import AssentError, gitops
+from assent.config import Config
+from assent.lockfile import LockBusy, LockMissing, probe_lock
+from assent.plan import Plan, append_entry, set_status
 
 
 def _remove_empty_container(path: Path) -> None:
@@ -34,7 +34,7 @@ def reject_folder(cfg: Config) -> int:
     except LockBusy as e:
         print(f"{name}: reject aborted (a run is in progress): {e}")
         return 1
-    except (LockMissing, AgentsError) as e:
+    except (LockMissing, AssentError) as e:
         print(f"{name}: reject aborted ({e})")
         return 1
 
@@ -46,7 +46,7 @@ def _reject_locked(cfg: Config, path: Path) -> int:
     name = cfg.tasks_name
     try:
         plan = Plan.parse(cfg.tasks_dir)
-    except AgentsError as e:
+    except AssentError as e:
         print(f"{name}: reject aborted (task files could not be parsed: {e}), "
               "Git scene unchanged")
         return 1
@@ -83,7 +83,7 @@ def _reject_locked(cfg: Config, path: Path) -> int:
             evidence.append(f"branch {branch} tip {tip}")
             print(f"  branch {branch} (tip {tip}): deleted (recoverable by hash "
                   "only within the gc grace period)")
-    except AgentsError as e:
+    except AssentError as e:
         print(f"{name}: reject aborted (Git step failed: {e}), task files not reset")
         return 1
     return _reset_rejected_tasks(cfg, plan, evidence)
@@ -110,10 +110,10 @@ def _reset_rejected_tasks(cfg: Config, plan: Plan,
                 detail=detail)
             print(f"  task {task.id}: {task.status} -> TODO")
             reset += 1
-    except (AgentsError, OSError) as e:
-        print(f"{name}: task-file reset interrupted ({e}), rerun agents reject {name}")
+    except (AssentError, OSError) as e:
+        print(f"{name}: task-file reset interrupted ({e}), rerun assent reject {name}")
         return 1
     print(f"{name}: reject complete ({reset} task(s) reset to TODO). "
-          "Revise task files as needed then rerun with agents run; agents report "
+          "Revise task files as needed then rerun with assent run; assent report "
           "can refresh the report.")
     return 0

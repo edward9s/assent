@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agents import AgentsError
-from agents.folderdeps import (find_unfinished_prerequisites,
+from assent import AssentError
+from assent.folderdeps import (find_unfinished_prerequisites,
                                infer_folder_completion,
                                parse_folder_dependencies,
                                parse_folder_dependency_graph)
@@ -36,12 +36,12 @@ def task_text(status: str = "TODO") -> str:
 class FolderDepsTestCase(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
-        self.agents_dir = self.root / ".agents"
-        self.agents_dir.mkdir()
+        self.assent_dir = self.root / ".assent"
+        self.assent_dir.mkdir()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def make_folder(self, name: str, *statuses: str) -> Path:
-        folder = self.agents_dir / name
+        folder = self.assent_dir / name
         folder.mkdir()
         for index, status in enumerate(statuses, 1):
             (folder / f"t{index:03d}_task.e.toml").write_text(
@@ -75,7 +75,7 @@ class TestParseFolderDependencies(FolderDepsTestCase):
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
             'after = []\nbefore = ["other"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AgentsError, r"unknown keys.*valid keys: after"):
+        with self.assertRaisesRegex(AssentError, r"unknown keys.*valid keys: after"):
             parse_folder_dependencies(folder)
 
     def test_after_must_be_string_array(self):
@@ -83,37 +83,37 @@ class TestParseFolderDependencies(FolderDepsTestCase):
         for value in ('"first"', '["first", 2]'):
             (folder / "_folder.toml").write_text(
                 f"after = {value}\n", encoding="utf-8")
-            with self.assertRaisesRegex(AgentsError, "array of strings"):
+            with self.assertRaisesRegex(AssentError, "array of strings"):
                 parse_folder_dependencies(folder)
 
     def test_self_dependency_rejected(self):
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
             'after = ["work"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AgentsError, "must not depend on itself"):
+        with self.assertRaisesRegex(AssentError, "must not depend on itself"):
             parse_folder_dependencies(folder)
 
     def test_invalid_dependency_name_rejected(self):
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
             'after = ["bad/name"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AgentsError, "not a valid task folder name"):
+        with self.assertRaisesRegex(AssentError, "not a valid task folder name"):
             parse_folder_dependencies(folder)
 
     def test_missing_folder_rejected(self):
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
             'after = ["missing"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AgentsError, "does not exist"):
+        with self.assertRaisesRegex(AssentError, "does not exist"):
             parse_folder_dependencies(folder)
 
     def test_folder_without_tasks_rejected(self):
-        empty = self.agents_dir / "empty"
+        empty = self.assent_dir / "empty"
         empty.mkdir()
         folder = self.make_folder("work", "TODO")
         (folder / "_folder.toml").write_text(
             'after = ["empty"]\n', encoding="utf-8")
-        with self.assertRaisesRegex(AgentsError, "no task files"):
+        with self.assertRaisesRegex(AssentError, "no task files"):
             parse_folder_dependencies(folder)
 
     def test_folder_config_is_not_treated_as_task(self):
@@ -175,7 +175,7 @@ class TestFolderDependencyGraph(FolderDepsTestCase):
         second = self.make_folder("second", "TODO")
         (second / "_folder.toml").write_text(
             'after = ["first"]\n', encoding="utf-8")
-        graph = parse_folder_dependency_graph(self.agents_dir)
+        graph = parse_folder_dependency_graph(self.assent_dir)
         self.assertEqual(graph["second"].after, ["first"])
 
     def test_cycle_reports_complete_path(self):
@@ -189,8 +189,8 @@ class TestFolderDependencyGraph(FolderDepsTestCase):
         (third / "_folder.toml").write_text(
             'after = ["first"]\n', encoding="utf-8")
         with self.assertRaisesRegex(
-                AgentsError, "first -> second -> third -> first"):
-            parse_folder_dependency_graph(self.agents_dir)
+                AssentError, "first -> second -> third -> first"):
+            parse_folder_dependency_graph(self.assent_dir)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
-"""Loading agents.toml, and enumerating and validating task folders.
+"""Loading assent.toml, and enumerating and validating task folders.
 
-- agents.toml lives inside the project's .agents/; the project root is the
-  parent directory of .agents.
+- assent.toml lives inside the project's .assent/; the project root is the
+  parent directory of .assent.
 - The task folder name is supplied by the caller; the git branch prefix is
   that name plus "/".
 - Fields not supplied fall back to defaults; an unknown top-level key is
@@ -14,8 +14,8 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from agents import AgentsError
-from agents.lockfile import LOCK_NAME
+from assent import AssentError
+from assent.lockfile import LOCK_NAME
 
 _TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt"}
 _MODEL_TIERS = {"prime", "core", "lite"}
@@ -40,9 +40,9 @@ _DEFAULT_CODEX_EFFORT = {"prime": "high", "core": "medium", "lite": "low"}
 
 @dataclass
 class Config:
-    root: Path                     # Project root = parent of .agents
-    agents_dir: Path               # .agents directory (= where the config file lives)
-    tasks_dir: Path                # Task folder (.agents/<tasks>)
+    root: Path                     # Project root = parent of .assent
+    assent_dir: Path               # .assent directory (= where the config file lives)
+    tasks_dir: Path                # Task folder (.assent/<tasks>)
     tasks_name: str                # Task folder name (= git branch prefix stem)
     stall_minutes: int = 30        # 0 = watchdog disabled
     retry_per_task: int = 1
@@ -101,7 +101,7 @@ class Config:
 
     @property
     def runtime_log_rel(self) -> str:
-        return self.git_rel(self.tasks_dir / "_agents.log")
+        return self.git_rel(self.tasks_dir / "_assent.log")
 
     @property
     def report_rel(self) -> str:
@@ -120,7 +120,7 @@ class Config:
 def _section(data: dict, name: str) -> dict:
     val = data.get(name, {})
     if not isinstance(val, dict):
-        raise AgentsError(f"Config [{name}] must be a table, not a scalar")
+        raise AssentError(f"Config [{name}] must be a table, not a scalar")
     return val
 
 
@@ -129,7 +129,7 @@ def _typed(section: dict, owner: str, key: str, typ: type, default):
         return default
     val = section[key]
     if not isinstance(val, typ) or (typ is not bool and isinstance(val, bool)):
-        raise AgentsError(f"Config {owner}.{key} has the wrong type: expected {typ.__name__}")
+        raise AssentError(f"Config {owner}.{key} has the wrong type: expected {typ.__name__}")
     return val
 
 
@@ -138,7 +138,7 @@ def _str_list(section: dict, owner: str, key: str, default: list[str]) -> list[s
     if val is None:
         return list(default)
     if not all(isinstance(x, str) for x in val):
-        raise AgentsError(f"Config {owner}.{key} must have all-string elements")
+        raise AssentError(f"Config {owner}.{key} must have all-string elements")
     return list(val)
 
 
@@ -147,7 +147,7 @@ def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> di
     if val is None:
         return dict(default)
     if not all(isinstance(v, str) for v in val.values()):
-        raise AgentsError(f"Config [{owner}.{key}] must have all-string values")
+        raise AssentError(f"Config [{owner}.{key}] must have all-string values")
     return dict(val)
 
 
@@ -163,18 +163,18 @@ def _effort_maps(section: dict, owner: str
     for key, value in raw.items():
         if isinstance(value, dict):
             if key not in _MODEL_TIERS:
-                raise AgentsError(
+                raise AssentError(
                     f"Config [{owner}.efforts] section {key!r} is invalid"
                     f" ({'/'.join(sorted(_MODEL_TIERS))})")
             tier_values: dict[str, str] = {}
             block = f"[{owner}.efforts.{key}]"
             for effort, requested in value.items():
                 if effort not in _EFFORT_LEVELS:
-                    raise AgentsError(
+                    raise AssentError(
                         f"Config {block} key {effort!r} is not a valid effort"
                         f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
                 if not isinstance(requested, str) or not requested.strip():
-                    raise AgentsError(
+                    raise AssentError(
                         f"Config {block} {effort} must be a non-empty string")
                 tier_values[effort] = requested
             by_tier[key] = tier_values
@@ -182,11 +182,11 @@ def _effort_maps(section: dict, owner: str
 
         block = f"[{owner}.efforts]"
         if key not in _EFFORT_LEVELS:
-            raise AgentsError(
+            raise AssentError(
                 f"Config {block} key {key!r} is not a valid effort"
                 f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
         if not isinstance(value, str) or not value.strip():
-            raise AgentsError(f"Config {block} {key} must be a non-empty string")
+            raise AssentError(f"Config {block} {key} must be a non-empty string")
         flat[key] = value
     return flat, by_tier
 
@@ -194,28 +194,54 @@ def _effort_maps(section: dict, owner: str
 def _validate_tasks_name(tasks_name: str, owner: str) -> None:
     """Validate a task folder name so it is safe to use as a git branch prefix."""
     if not _FOLDER_RE.match(tasks_name) or tasks_name[0] in "-.":
-        raise AgentsError(
+        raise AssentError(
             f"{owner} = {tasks_name!r} is not a valid task folder name"
             " (no whitespace or path separators, must not start with - or .;"
             " it also becomes the git branch prefix)")
 
 
+# Spelled out wherever a legacy installation blocks startup, because assent
+# ships no automatic migration: the operator performs these renames by hand.
+_MIGRATION_STEPS = (
+    "rename .agents/ to .assent/, .agents/agents.toml to assent.toml,"
+    " .agents/agents.lock to assent.lock,"
+    " and every .agents/<folder>/_agents.log to _assent.log"
+)
+
+
 def _load_data(path: str | Path) -> tuple[Path, dict]:
     """Read and validate the config content that does not depend on a task folder."""
-    path = Path(path)
+    path = Path(path).resolve()
+    management_dir = path.parent
+    # Old-brand paths below are compatibility-detection data only; loading
+    # them would revive a second management contract.
+    if management_dir.name == ".agents":
+        raise AssentError(
+            f"Legacy .agents management directory is not supported: {management_dir}; "
+            f"migrate it explicitly before running assent ({_MIGRATION_STEPS})")
+    if management_dir.name == ".assent":
+        legacy_dir = management_dir.parent / ".agents"
+        if legacy_dir.exists():
+            if management_dir.exists():
+                raise AssentError(
+                    f"Ambiguous management state: both {legacy_dir} and "
+                    f"{management_dir} exist; resolve the legacy installation first")
+            raise AssentError(
+                f"Legacy .agents management directory detected: {legacy_dir}; "
+                f"migrate it explicitly before running assent ({_MIGRATION_STEPS})")
     if not path.is_file():
-        raise AgentsError(
+        raise AssentError(
             f"Config file not found: {path}"
-            " (not initialized yet? run agents init in the project root)")
+            " (not initialized yet? run assent init in the project root)")
     with open(path, "rb") as f:
         try:
             data = tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
-            raise AgentsError(f"Config file is not valid TOML ({path}): {e}") from e
+            raise AssentError(f"Config file is not valid TOML ({path}): {e}") from e
 
     unknown = sorted(set(data) - _TOP_LEVEL_KEYS)
     if unknown:
-        raise AgentsError(
+        raise AssentError(
             f"Config file has unknown top-level keys: {', '.join(unknown)}"
             f" (valid keys: {', '.join(sorted(_TOP_LEVEL_KEYS))})")
 
@@ -223,18 +249,18 @@ def _load_data(path: str | Path) -> tuple[Path, dict]:
 
 
 def validate_config(path: str | Path) -> Path:
-    """Validate the config file and return the ``.agents`` directory it lives in."""
+    """Validate the config file and return the ``.assent`` directory it lives in."""
     resolved, _ = _load_data(path)
     return resolved.parent
 
 
-def list_task_folders(agents_dir: str | Path) -> list[str]:
+def list_task_folders(assent_dir: str | Path) -> list[str]:
     """List task folders that contain a formal task file, sorted lexicographically."""
-    agents_dir = Path(agents_dir)
-    if not agents_dir.is_dir():
+    assent_dir = Path(assent_dir)
+    if not assent_dir.is_dir():
         return []
     folders = []
-    for entry in agents_dir.iterdir():
+    for entry in assent_dir.iterdir():
         if (not entry.is_dir() or entry.name == "__pycache__"
                 or entry.name.startswith("_")):
             continue
@@ -249,8 +275,8 @@ def load_config(path: str | Path, folder: str) -> Config:
     resolved, data = _load_data(path)
     _validate_tasks_name(folder, "Command-line task folder")
 
-    agents_dir = resolved.parent
-    root = agents_dir.parent
+    assent_dir = resolved.parent
+    root = assent_dir.parent
 
     tasks_name = folder
 
@@ -267,8 +293,8 @@ def load_config(path: str | Path, folder: str) -> Config:
 
     cfg = Config(
         root=root,
-        agents_dir=agents_dir,
-        tasks_dir=agents_dir / tasks_name,
+        assent_dir=assent_dir,
+        tasks_dir=assent_dir / tasks_name,
         tasks_name=tasks_name,
         stall_minutes=_typed(watchdog, "[watchdog]", "stall_minutes", int, 30),
         retry_per_task=_typed(run, "[run]", "retry_per_task", int, 1),
@@ -295,17 +321,17 @@ def load_config(path: str | Path, folder: str) -> Config:
     )
 
     if cfg.stall_minutes < 0:
-        raise AgentsError("[watchdog] stall_minutes must not be negative (0 = disabled)")
+        raise AssentError("[watchdog] stall_minutes must not be negative (0 = disabled)")
     if cfg.retry_per_task < 0:
-        raise AgentsError("[run] retry_per_task must not be negative")
+        raise AssentError("[run] retry_per_task must not be negative")
     if cfg.quota_poll_minutes < 1:
-        raise AgentsError("[run] quota_poll_minutes must be at least 1")
+        raise AssentError("[run] quota_poll_minutes must be at least 1")
     for owner, efforts in (
             ("adapter.claude", cfg.claude_default_effort),
             ("adapter.codex", cfg.codex_default_effort)):
         for model, eff in efforts.items():
             if eff not in _EFFORT_LEVELS:
-                raise AgentsError(
+                raise AssentError(
                     f"[{owner}.default_effort] {model} = {eff!r} is not a valid effort"
                     f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
     return cfg

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agents.terminal_log import (
+from assent.terminal_log import (
     log_path_for_argv, sanitize_log_text, terminal_logging,
 )
 
@@ -24,20 +24,20 @@ class TestTerminalLogging(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def write_config(self, text=""):
-        config = self.root / ".agents" / "agents.toml"
+        config = self.root / ".assent" / "assent.toml"
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(text, encoding="utf-8")
         return config
 
     def write_task(self, folder="plan01", status="TODO"):
-        task = self.root / ".agents" / folder / "t001_task.e.toml"
+        task = self.root / ".assent" / folder / "t001_task.e.toml"
         task.parent.mkdir(parents=True, exist_ok=True)
         task.write_text(
             'title = "task"\n'
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
-            'scope = ["agents/"]\n'
+            'scope = ["assent/"]\n'
             'verify = "python -m unittest"\n'
             'goal = "done"\n'
             'acceptance = "passed"\n', encoding="utf-8")
@@ -46,14 +46,14 @@ class TestTerminalLogging(unittest.TestCase):
     def test_unique_ongoing_folder_selects_log_path(self):
         config = self.write_config()
         self.write_task()
-        expected = self.root.resolve() / ".agents" / "plan01" / "_agents.log"
+        expected = self.root.resolve() / ".assent" / "plan01" / "_assent.log"
         self.assertEqual(log_path_for_argv(
             ["run", "--config", str(config)]),
             expected)
 
     def test_config_option_and_folder_override_select_log_path(self):
         config = self.write_config()
-        expected = self.root.resolve() / ".agents" / "parallel02" / "_agents.log"
+        expected = self.root.resolve() / ".assent" / "parallel02" / "_assent.log"
         self.assertEqual(log_path_for_argv(
             ["run", "--task", "t001", "parallel02", f"--config={config}"]),
             expected)
@@ -61,14 +61,14 @@ class TestTerminalLogging(unittest.TestCase):
     def test_run_all_uses_parent_log_instead_of_a_folder_log(self):
         config = self.write_config()
         self.write_task("only")
-        expected = self.root.resolve() / ".agents" / "_agents.log"
+        expected = self.root.resolve() / ".assent" / "_assent.log"
         self.assertEqual(log_path_for_argv(
             ["run", "--all", "--jobs", "2", "--config", str(config)]),
             expected)
 
     def test_missing_or_bad_config_falls_back_beside_config(self):
-        config = self.root / ".agents" / "agents.toml"
-        expected = self.root.resolve() / ".agents" / "_agents.log"
+        config = self.root / ".assent" / "assent.toml"
+        expected = self.root.resolve() / ".assent" / "_assent.log"
         self.assertEqual(log_path_for_argv(["run", "--config", str(config)]),
                          expected)
         self.write_config("[plan\ntasks =")
@@ -92,8 +92,8 @@ class TestTerminalLogging(unittest.TestCase):
                 self.assertIn("AI| hello ", during)
                 self.assertIn("error", during)
         logged = path.read_text(encoding="utf-8")
-        self.assertIn("AGENTS START", logged)
-        self.assertIn("COMMAND      | agents run", logged)
+        self.assertIn("ASSENT START", logged)
+        self.assertIn("COMMAND      | assent run", logged)
         self.assertNotIn("\x1b", logged)
         self.assertNotIn(chr(0x1F680), logged)
         self.assertIn("AI| hello " + chr(0x1F680), terminal_out.getvalue())
@@ -123,7 +123,7 @@ class TestTerminalLogging(unittest.TestCase):
     def test_non_run_commands_do_not_create_or_change_log(self):
         config = self.write_config()
         self.write_task()
-        log_path = self.root / ".agents" / "plan01" / "_agents.log"
+        log_path = self.root / ".assent" / "plan01" / "_assent.log"
         for command in ("status", "check", "report", "init"):
             with terminal_logging([command, "--config", str(config)]):
                 print(f"{command} output")
@@ -135,6 +135,16 @@ class TestTerminalLogging(unittest.TestCase):
             with terminal_logging([command, "--config", str(config)]):
                 print(f"{command} output")
         self.assertEqual(log_path.read_text(encoding="utf-8"), "existing run session")
+
+    def test_legacy_management_path_is_refused_without_creating_a_log(self):
+        # This old-brand path is intentional legacy-installation fixture data.
+        legacy_config = self.root / ".agents" / "agents.toml"
+        legacy_config.parent.mkdir()
+        legacy_config.write_text("", encoding="utf-8")
+        with terminal_logging(["run", "--config", str(legacy_config)]) as path:
+            print("config validation will refuse this installation")
+        self.assertFalse(path.exists())
+        self.assertFalse((self.root / ".assent").exists())
 
 
 if __name__ == "__main__":

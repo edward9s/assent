@@ -11,7 +11,7 @@ output the execution AI has already burned tokens to produce.**
 - scope check is fail-closed: parsing a task file forces scope to be non-empty, so the
   batch parse at the start of a run is a zero-token refuse-to-run gate.
 
-Acceptance defences added by agents (the format contract's "defence rules"):
+Acceptance defences added by assent (the format contract's "defence rules"):
 - The only legal change the execution AI may make to its own task file is the status line;
   at acceptance time the checkpoint version and the on-disk version are compared field by
   field, and any other tampered field (loosened scope, swapped verify, changed deps) fails
@@ -33,19 +33,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, TextIO
 
-from agents import AgentsError, gitops, lockfile
-from agents.adapters import Adapter, get_adapter
-from agents.config import Config
-from agents.folderdeps import (find_unfinished_prerequisites,
+from assent import AssentError, gitops, lockfile
+from assent.adapters import Adapter, get_adapter
+from assent.config import Config
+from assent.folderdeps import (find_unfinished_prerequisites,
                                parse_folder_dependencies)
-from agents.plan import (Plan, Task, append_entry, parse_task_file,
+from assent.plan import (Plan, Task, append_entry, parse_task_file,
                          read_entries, same_except_status, set_status)
 
 # Default prompt template (overridable via [prompt] template; variables are substituted
 # literally, tolerating other braces inside the template).
 _DEFAULT_PROMPT_TEMPLATE = (
-    "You are the agents execution AI. First read the project rules {agents_md_path},\n"
-    "then read the agents working instructions {instructions_path} and the task file {task_path}.\n"
+    "You are the assent execution AI. First read the project rules {agents_md_path},\n"
+    "then read the assent working instructions {instructions_path} and the task file {task_path}.\n"
     "Run only task {task_id}; do not touch other task files.\n"
     "This run's journal identity is by = \"{agent}\", requested_model = \"{requested_model}\".\n"
     "requested_model is the --model value passed to the AI CLI this run.\n"
@@ -71,7 +71,7 @@ _RESUME_SUFFIX = ("\nThe previous run of this task was interrupted (quota exhaus
 
 _QUOTA_BUFFER = timedelta(minutes=2)  # reset time + buffer, to avoid being blocked again right at the edge
 _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
-_DEFAULT_VERIFY_COMMAND = "python .agents/verify.py"
+_DEFAULT_VERIFY_COMMAND = "python .assent/verify.py"
 _GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
 
 
@@ -101,7 +101,7 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
     text = (template
             .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
             .replace("{instructions_path}",
-                     cfg.rel(cfg.agents_dir / "instructions.md"))
+                     cfg.rel(cfg.assent_dir / "instructions.md"))
             .replace("{task_path}", cfg.rel(task.path))
             .replace("{journal_path}", cfg.rel(task.journal_path))
             .replace("{verify_command}",
@@ -194,7 +194,7 @@ def _verify_command_for_prompt(cfg: Config, command: str) -> str:
     """When running isolated, expand the default verify script to the main tree's absolute path."""
     if cfg.source_root is None or command.strip() != _DEFAULT_VERIFY_COMMAND:
         return command
-    parts = [sys.executable, str((cfg.agents_dir / "verify.py").resolve())]
+    parts = [sys.executable, str((cfg.assent_dir / "verify.py").resolve())]
     return (subprocess.list2cmdline(parts) if sys.platform == "win32"
             else shlex.join(parts))
 
@@ -213,17 +213,17 @@ def _agents_md_path_for_prompt(cfg: Config) -> str:
 
 
 def _worktree_configuration_errors(cfg: Config) -> list[str]:
-    """The .agents management surface must stay in the main tree; it must not produce a
+    """The .assent management surface must stay in the main tree; it must not produce a
     second real copy inside a worktree."""
     errors: list[str] = []
-    agents_path = cfg.git_rel(cfg.agents_dir)
-    tracked = sorted(set(gitops.tracked_paths(cfg.root, agents_path))
-                     | set(gitops.tracked_paths(cfg.root, agents_path,
+    assent_path = cfg.git_rel(cfg.assent_dir)
+    tracked = sorted(set(gitops.tracked_paths(cfg.root, assent_path))
+                     | set(gitops.tracked_paths(cfg.root, assent_path,
                                                 ref="HEAD")))
     if tracked:
         shown = ", ".join(tracked[:5]) + (" ..." if len(tracked) > 5 else "")
-        errors.append(f".agents already has Git-tracked files: {shown}"
-                      " (with Git enabled the whole .agents must stay in the main working tree)")
+        errors.append(f".assent already has Git-tracked files: {shown}"
+                      " (with Git enabled the whole .assent must stay in the main working tree)")
     return errors
 
 
@@ -245,7 +245,7 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     """
     try:
         unfinished = find_unfinished_prerequisites(cfg.tasks_dir)
-    except AgentsError as e:
+    except AssentError as e:
         print(f"Prerequisite folder gate: FAIL ({e})")
         return 1
     if unfinished:
@@ -287,20 +287,20 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             root = gitops.ensure_worktree(cfg.root, cfg.tasks_name)
             cfg = cfg.for_worktree(root)
             print(f"Isolated worktree: {root}")
-        except AgentsError as e:
+        except AssentError as e:
             print(f"git worktree setup failed: {e}")
             return 1
 
     try:
         Plan.parse(cfg.tasks_dir)  # early validation: any malformed task file refuses to run at zero tokens
-    except AgentsError as e:
+    except AssentError as e:
         print(f"Failed to parse task folder: {e}")
         return 1
 
     if adapter is None:
         try:
             adapter = get_adapter(cfg.adapter_name, cfg)
-        except AgentsError as e:
+        except AssentError as e:
             print(str(e))
             return 1
 
@@ -308,7 +308,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         gitops.ensure_clean(cfg.root, cfg.git_excludes)
         branch = gitops.ensure_branch(cfg.root, cfg.branch_prefix)
         print(f"Work branch: {branch}")
-    except AgentsError as e:
+    except AssentError as e:
         print(f"git setup failed: {e}")
         return 1
 
@@ -366,12 +366,12 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 else f"wip({cfg.tasks_name}): user interrupt, progress kept")
             if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
                 print("Progress gathered into a wip checkpoint (git revert it yourself if unsatisfied).")
-        except AgentsError as e:
+        except AssentError as e:
             print(f"wip checkpoint failed: {e} (working tree left as is, nothing discarded)")
         _try_write_report(cfg)
         print("Interrupted.")
         return 130
-    except AgentsError as e:
+    except AssentError as e:
         print(f"Run aborted (infrastructure error): {e}")
         if (current_task is not None and current_session is not None
                 and current_session.identity is not None):
@@ -386,7 +386,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 else f"wip({cfg.tasks_name}): infrastructure error abort, progress kept")
             if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
                 print("Progress gathered into a wip checkpoint.")
-        except AgentsError:
+        except AssentError:
             pass
         _try_write_report(cfg)
         return 1
@@ -519,7 +519,7 @@ def _evaluate(cfg: Config, task: Task,
     """
     try:
         fresh = parse_task_file(task.path)
-    except AgentsError as e:
+    except AssentError as e:
         return "fail", f"Re-parsing the task file failed (the execution AI may have broken it): {e}"
 
     # status check
@@ -561,7 +561,7 @@ def _run_verify(cfg: Config, command: str) -> int:
     """
     if cfg.source_root is not None and command.strip() == _DEFAULT_VERIFY_COMMAND:
         result = subprocess.run(
-            [sys.executable, str((cfg.agents_dir / "verify.py").resolve())],
+            [sys.executable, str((cfg.assent_dir / "verify.py").resolve())],
             cwd=str(cfg.root), capture_output=True, encoding="utf-8",
             errors="replace")
     else:
@@ -640,7 +640,7 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
     remaining = seconds
 
     # terminal_log.TeeTextIO provides a terminal-only channel: the countdown is a transient
-    # UI and should not be written to _agents.log every second. A test/plain TextIO falls
+    # UI and should not be written to _assent.log every second. A test/plain TextIO falls
     # back to write.
     terminal_only = getattr(stream, "write_terminal_only", None)
 
@@ -701,7 +701,7 @@ def render_report(cfg: Config, plan: Plan,
     stamp = now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
     lines = [
-        "Run report (_report.md; auto-generated by agents, do not edit by hand; regenerate: agents report)",
+        "Run report (_report.md; auto-generated by assent, do not edit by hand; regenerate: assent report)",
         "=" * 60,
         f"Plan folder: {cfg.tasks_name}",
         f"Generated at: {stamp}",
@@ -754,7 +754,7 @@ def report(cfg: Config) -> int:
     """Subcommand: generate _report.md and print it to the terminal (zero tokens)."""
     try:
         plan = Plan.parse(cfg.tasks_dir)
-    except AgentsError as e:
+    except AssentError as e:
         print(f"Failed to parse task folder: {e}")
         return 1
     text = render_report(cfg, plan)
@@ -770,7 +770,7 @@ def report(cfg: Config) -> int:
 def status(cfg: Config) -> int:
     try:
         plan = Plan.parse(cfg.tasks_dir)
-    except AgentsError as e:
+    except AssentError as e:
         print(f"Failed to parse task folder: {e}")
         return 1
 
@@ -823,7 +823,7 @@ def check(cfg: Config) -> int:
         return 1
 
     ok = True
-    print(f"Config: OK ({cfg.agents_dir / 'agents.toml'} loaded, "
+    print(f"Config: OK ({cfg.assent_dir / 'assent.toml'} loaded, "
           f"task folder = {cfg.tasks_name})")
 
     # Task folder and task-file format (parsing is the full check: required fields, tiers,
@@ -831,7 +831,7 @@ def check(cfg: Config) -> int:
     try:
         plan = Plan.parse(cfg.tasks_dir)
         print(f"Task-file format: OK ({len(plan.tasks)} tasks, dependencies acyclic)")
-    except AgentsError as e:
+    except AssentError as e:
         ok = False
         print(f"Task-file format: FAIL ({e})")
 
@@ -841,7 +841,7 @@ def check(cfg: Config) -> int:
         dependencies = parse_folder_dependencies(cfg.tasks_dir)
         after = ", ".join(dependencies.after) or "none"
         print(f"Folder dependencies: OK (after = {after})")
-    except AgentsError as e:
+    except AssentError as e:
         ok = False
         print(f"Folder dependencies: FAIL ({e})")
 
@@ -849,7 +849,7 @@ def check(cfg: Config) -> int:
     try:
         get_adapter(cfg.adapter_name, cfg)
         print(f"adapter: OK ({cfg.adapter_name})")
-    except AgentsError as e:
+    except AssentError as e:
         ok = False
         print(f"adapter: FAIL ({e})")
 
@@ -859,7 +859,7 @@ def check(cfg: Config) -> int:
         print("git repo: OK")
         try:
             errors = _worktree_configuration_errors(cfg)
-        except AgentsError as e:
+        except AssentError as e:
             errors = [str(e)]
         if errors:
             ok = False

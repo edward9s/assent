@@ -1,4 +1,4 @@
-"""Task-folder file lock: only one agents run may operate on a given task folder at a time.
+"""Task-folder file lock: only one assent run may operate on a given task folder at a time.
 
 When a run starts, it acquires an OS-level "non-blocking exclusive lock" on the task folder
 (msvcrt on Windows, fcntl on POSIX), held for the process's lifetime. The lock's lifetime is
@@ -6,7 +6,7 @@ tied to the file handle: however the process terminates (crash / kill / Ctrl+C),
 releases it automatically — so there is no stale lock, no PID-reuse problem, and no manual
 cleanup needed. This is exactly why a "PID lock file + liveness check" scheme was not used.
 
-The lock file is <tasks_dir>/agents.lock; it stays on disk and is never deleted (deleting it
+The lock file is <tasks_dir>/assent.lock; it stays on disk and is never deleted (deleting it
 would introduce a race). Its contents are only PID, start time, and folder name for
 diagnostics — never used to decide anything.
 
@@ -24,9 +24,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from agents import AgentsError
+from assent import AssentError
 
-LOCK_NAME = "agents.lock"
+LOCK_NAME = "assent.lock"
 
 # Windows msvcrt.locking is a mandatory lock: it blocks even a "read" of that region by
 # others. The lock is placed at a high byte offset far from the content, and content is
@@ -72,11 +72,11 @@ else:
             pass
 
 
-class LockBusy(AgentsError):
+class LockBusy(AssentError):
     """The task folder is already held by another run; the message includes the holder's PID and folder name."""
 
 
-class LockMissing(AgentsError):
+class LockMissing(AssentError):
     """The lock file does not exist; a caller that must not create it cannot safely acquire the same lock."""
 
 
@@ -122,13 +122,13 @@ def _busy_message(tasks_name: str, diag: dict) -> str:
         if hhmm:
             detail += f", started at {hhmm}"
         detail += ")"
-    return (f"Another agents run is already processing task folder {tasks_name}{detail}. "
+    return (f"Another assent run is already processing task folder {tasks_name}{detail}. "
             "Only one run may operate on a task folder at a time.")
 
 
 @contextlib.contextmanager
 def hold_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
-    """Acquire an OS-level non-blocking exclusive lock on <tasks_dir>/agents.lock, held until the with block exits.
+    """Acquire an OS-level non-blocking exclusive lock on <tasks_dir>/assent.lock, held until the with block exits.
 
     If the lock cannot be acquired: read the lock file's diagnostic content and raise
     LockBusy (message includes the holder's PID and folder name); the caller fails with
@@ -159,9 +159,9 @@ def hold_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
 
 @contextlib.contextmanager
 def probe_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
-    """Acquire an existing task-folder lock without ever creating or rewriting ``agents.lock``.
+    """Acquire an existing task-folder lock without ever creating or rewriting ``assent.lock``.
 
-    ``clean`` must use the same lock as ``run``, yet must never touch ``.agents/`` plan
+    ``clean`` must use the same lock as ``run``, yet must never touch ``.assent/`` plan
     archival. If the lock file did not exist and were created then deleted, a race would open
     between unlocking and deleting; so this refuses conservatively instead, and the caller
     skips cleanup. A folder that has run ``run`` normally already has a lock file.
@@ -173,9 +173,9 @@ def probe_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
     except FileNotFoundError as e:
         raise LockMissing(
             f"Task folder {tasks_name} has no existing {LOCK_NAME}; "
-            "cannot prove it is unlocked without modifying .agents") from e
+            "cannot prove it is unlocked without modifying .assent") from e
     except OSError as e:
-        raise AgentsError(f"Unable to open lock file for task folder {tasks_name}: {e}") from e
+        raise AssentError(f"Unable to open lock file for task folder {tasks_name}: {e}") from e
 
     handle = os.fdopen(descriptor, "r+b")
     try:

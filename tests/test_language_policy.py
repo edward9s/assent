@@ -12,7 +12,7 @@ import tokenize
 import unittest
 from pathlib import Path
 
-from agents.init import init as run_init
+from assent.init import init as run_init
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,7 +66,66 @@ def _markdown_targets(text: str) -> set[str]:
     }
 
 
+def _tracked_old_brand_matches() -> list[tuple[str, int, str]]:
+    """Return tracked old-brand spellings, with path and one-based line number."""
+    result = subprocess.run(
+        ["git", "grep", "-n", "-I", "-i", "-E",
+         r"(^|[^[:alnum:]_])agents([^[:alnum:]_]|$)"],
+        cwd=ROOT, check=False, capture_output=True, text=True, encoding="utf-8",
+    )
+    if result.returncode not in (0, 1):
+        raise AssertionError(result.stderr)
+    matches = []
+    for record in result.stdout.splitlines():
+        path, line, text = record.split(":", 2)
+        matches.append((path, int(line), text))
+    return matches
+
+
+def _is_audited_old_brand_exception(path: str, text: str) -> bool:
+    """Allow only documented conventional, migration, fixture, and history data."""
+    if path == "tests/fixtures/stream_json_ok.txt":
+        return True  # Verbatim external-protocol fixture.
+    if "AGENTS" in text and ".agents" not in text:
+        return True  # The standard agent-tool instruction filename.
+    if path.startswith("docs/") or path in {"README.md", "README.zh-TW.md"}:
+        return any(marker in text for marker in (
+            "former `agents`", "`agents`/`.agents`", "old `.agents`", "legacy `.agents`",
+            "`.agents` and `.assent`", "`.agents` 目錄", "`.agents` 與 `.assent`",
+            "`.agents/`", "從原有的 `agents`", "套件、import 命名空間、CLI 與管理目錄",
+        ))
+    if path.startswith("assent/"):
+        return ".agents" in text or "agents-instructions" in text
+    if path == ".gitignore":
+        return ".agents/" in text  # Legacy path kept ignored during migration.
+    if path == "tests/test_language_policy.py":
+        return True  # This audit's patterns and its narrow exception definitions.
+    if path.startswith("tests/"):
+        return ".agents" in text or "agents.toml" in text or "agents." in text \
+            or "舊 agents 內容" in text
+    return False
+
+
 class LanguagePolicyTests(unittest.TestCase):
+    def test_tracked_old_brand_audit_has_only_narrow_exceptions(self):
+        """Current product text must not regain the former package or path names."""
+        unexpected = [
+            f"{path}:{line}: {text}"
+            for path, line, text in _tracked_old_brand_matches()
+            if not _is_audited_old_brand_exception(path, text)
+        ]
+        self.assertEqual(unexpected, [])
+
+    def test_package_metadata_and_templates_use_only_assent(self):
+        self.assertTrue((ROOT / "assent").is_dir())
+        self.assertFalse((ROOT / "agents").exists())
+        self.assertIn('name = "assent"', _read(Path("pyproject.toml")))
+        self.assertIn('assent = "assent.__main__:main"', _read(Path("pyproject.toml")))
+        for path in (ROOT / "assent/templates").iterdir():
+            if path.is_file() and path.name != "AGENTS.md":
+                with self.subTest(path=path):
+                    self.assertNotIn(".agents", path.read_text(encoding="utf-8"))
+
     def test_canonical_documents_contain_no_han_characters(self):
         paths = [Path("AGENTS.md"), Path("README.md")]
         paths.extend(
@@ -76,7 +135,7 @@ class LanguagePolicyTests(unittest.TestCase):
         )
         paths.extend(
             path.relative_to(ROOT)
-            for path in (ROOT / "agents/templates").glob("*.md")
+            for path in (ROOT / "assent/templates").glob("*.md")
         )
         for path in paths:
             with self.subTest(path=path):
@@ -85,10 +144,10 @@ class LanguagePolicyTests(unittest.TestCase):
     def test_runtime_product_files_contain_no_han_characters(self):
         paths = [
             path.relative_to(ROOT)
-            for path in (ROOT / "agents").rglob("*.py")
+            for path in (ROOT / "assent").rglob("*.py")
         ]
         paths.extend([
-            Path("agents/templates/agents.toml"),
+            Path("assent/templates/assent.toml"),
             Path("pyproject.toml"),
             Path(".gitignore"),
         ])
@@ -151,16 +210,16 @@ class LanguagePolicyTests(unittest.TestCase):
                 )
 
     def test_session_rules_have_one_packaged_name_and_fresh_init_path(self):
-        self.assertTrue((ROOT / "agents/templates/instructions.md").is_file())
+        self.assertTrue((ROOT / "assent/templates/instructions.md").is_file())
         instruction_templates = [
             path.relative_to(ROOT)
-            for path in (ROOT / "agents/templates").rglob("instructions.md")
+            for path in (ROOT / "assent/templates").rglob("instructions.md")
         ]
         self.assertEqual(
-            instruction_templates, [Path("agents/templates/instructions.md")]
+            instruction_templates, [Path("assent/templates/instructions.md")]
         )
         template_names = {
-            path.name for path in (ROOT / "agents/templates").iterdir()
+            path.name for path in (ROOT / "assent/templates").iterdir()
         }
         self.assertIn("AGENTS.md", template_names)
         self.assertNotIn("agents.md", template_names)
@@ -170,11 +229,11 @@ class LanguagePolicyTests(unittest.TestCase):
         )
         documentation.extend(
             path.relative_to(ROOT)
-            for path in (ROOT / "agents/templates").glob("*.md")
+            for path in (ROOT / "assent/templates").glob("*.md")
         )
         for path in documentation:
             with self.subTest(path=path):
-                self.assertNotIn(".agents/agents.md", _read(path))
+                self.assertNotIn(".assent/agents.md", _read(path))
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -183,8 +242,8 @@ class LanguagePolicyTests(unittest.TestCase):
             )
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(run_init(root), 0)
-            self.assertTrue((root / ".agents/instructions.md").is_file())
-            self.assertFalse((root / ".agents/agents.md").exists())
+            self.assertTrue((root / ".assent/instructions.md").is_file())
+            self.assertFalse((root / ".assent/agents.md").exists())
 
 
 if __name__ == "__main__":

@@ -1,14 +1,14 @@
-"""agents init: generate the .agents skeleton and the AGENTS.md bridge notice
+"""assent init: generate the .assent skeleton and the AGENTS.md bridge notice
 in a target project.
 
-- .agents/agents.toml, instructions.md, format.md, verify.py. Work folders are
+- .assent/assent.toml, instructions.md, format.md, verify.py. Work folders are
   not pre-created: their names are decided by a planning meeting based on the
   task at hand.
 - AGENTS.md: create the project template if it does not exist; if it already
   exists, only append the one-line instructions bridge. The legacy
   "AI working system" section is removed; the rest of the project's content is
   left untouched.
-- .gitignore: excludes the whole .agents/; does not interfere with an existing
+- .gitignore: excludes the whole .assent/; does not interfere with an existing
   AGENTS.md version-control choice.
 """
 from __future__ import annotations
@@ -16,20 +16,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from agents import AgentsError
+from assent import AssentError
 
 _TEMPLATES = Path(__file__).resolve().parent / "templates"
-# Heading of the section that older, pre-English releases of `agents init`
+# Heading of the section that older, pre-English releases of the former CLI
 # wrote into a project's AGENTS.md. It is legacy-detection data, not user-facing
 # prose, so the historical characters are kept as escapes and removed on re-init.
 _LEGACY_SECTION_MARKER = "## AI \u5de5\u4f5c\u9ad4\u7cfb(.agents)"
-_BRIDGE_MARKER = "<!-- agents-instructions -->"
+_LEGACY_BRIDGE_MARKER = "<!-- agents-instructions -->"
+_BRIDGE_MARKER = "<!-- assent-instructions -->"
 _BRIDGE_LINE = (
-    "- When using agents, first read `.agents/instructions.md` in the "
+    "- When using assent, first read `.assent/instructions.md` in the "
     "project's main worktree; a worktree session uses the absolute path the "
     f"scheduler provides. {_BRIDGE_MARKER}"
 )
-_GITIGNORE_LINES = [".agents/"]
+_GITIGNORE_LINES = [".assent/"]
 
 
 def _template(name: str) -> str:
@@ -37,7 +38,7 @@ def _template(name: str) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except OSError as e:
-        raise AgentsError(
+        raise AssentError(
             f"Cannot read built-in template {name}: {e} (broken install?)") from e
 
 
@@ -51,7 +52,7 @@ def _create(path: Path, content: str, made: list[str], skipped: list[str]) -> No
 
 
 def _remove_legacy_section(text: str) -> str:
-    """Remove the legacy agents-generated level-2 section, keeping any
+    """Remove the legacy scheduler-generated level-2 section, keeping any
     project-owned level-2 section that follows it."""
     start = text.find(_LEGACY_SECTION_MARKER)
     if start < 0:
@@ -69,6 +70,12 @@ def _remove_legacy_section(text: str) -> str:
     return before + (("\n\n" + after) if after else "") + "\n"
 
 
+def _remove_legacy_bridge(text: str) -> str:
+    """Remove the former product bridge while preserving all project-owned lines."""
+    lines = text.splitlines(keepends=True)
+    return "".join(line for line in lines if _LEGACY_BRIDGE_MARKER not in line)
+
+
 def _merge_agents_md(root: Path, made: list[str], skipped: list[str]) -> None:
     target = root / "AGENTS.md"
     template = _template("AGENTS.md")
@@ -76,7 +83,7 @@ def _merge_agents_md(root: Path, made: list[str], skipped: list[str]) -> None:
         _create(target, template, made, skipped)
         return
     existing = target.read_text(encoding="utf-8")
-    updated = _remove_legacy_section(existing)
+    updated = _remove_legacy_bridge(_remove_legacy_section(existing))
     if _BRIDGE_MARKER not in updated:
         updated = updated.rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
     if updated == existing:
@@ -98,7 +105,7 @@ def _merge_gitignore(root: Path, made: list[str]) -> None:
         if lines and lines[-1]:
             lines.append("")
         if lines:
-            lines.append("# agents management surface and runtime output")
+            lines.append("# assent management surface and runtime output")
         lines.extend(missing)
     target.write_text("\n".join(lines) + ("\n" if lines else ""),
                       encoding="utf-8", newline="\n")
@@ -114,14 +121,27 @@ def init(path: str | Path = ".") -> int:
         print("This project has no git repository yet; run git init first")
         return 1
 
-    agents_dir = root / ".agents"
+    assent_dir = root / ".assent"
+    # The old directory name is compatibility-detection data only. Automatic
+    # migration could choose between competing truths incorrectly, so init
+    # refuses before writing anything and leaves migration to the user.
+    legacy_agents_dir = root / ".agents"
+    if legacy_agents_dir.exists():
+        if assent_dir.exists():
+            print(f"Ambiguous management state: both {legacy_agents_dir} and "
+                  f"{assent_dir} exist; resolve the legacy installation first")
+        else:
+            print(f"Legacy .agents management directory detected: "
+                  f"{legacy_agents_dir}; migrate it explicitly to .assent "
+                  "before running assent init")
+        return 1
     made: list[str] = []
     skipped: list[str] = []
 
-    _create(agents_dir / "agents.toml", _template("agents.toml"), made, skipped)
-    _create(agents_dir / "instructions.md", _template("instructions.md"), made, skipped)
-    _create(agents_dir / "format.md", _template("format.md"), made, skipped)
-    _create(agents_dir / "verify.py", _template("verify.py"), made, skipped)
+    _create(assent_dir / "assent.toml", _template("assent.toml"), made, skipped)
+    _create(assent_dir / "instructions.md", _template("instructions.md"), made, skipped)
+    _create(assent_dir / "format.md", _template("format.md"), made, skipped)
+    _create(assent_dir / "verify.py", _template("verify.py"), made, skipped)
     _merge_agents_md(root, made, skipped)
     _merge_gitignore(root, made)
 
@@ -133,11 +153,11 @@ def init(path: str | Path = ".") -> int:
     print()
     print("Next steps:")
     print("  1. Fill in AGENTS.md's project description and hard constraints, "
-          "and the real check commands in .agents/verify.py")
-    print("  2. Start an AI meeting: read .agents/instructions.md and begin an "
-          "agents planning meeting")
+          "and the real check commands in .assent/verify.py")
+    print("  2. Start an AI meeting: read .assent/instructions.md and begin an "
+          "assent planning meeting")
     print("  3. The meeting names a work folder for the task at hand (e.g. "
-          ".agents/loginfix01/) and produces task files inside it "
-          "(format in .agents/format.md)")
-    print("  4. Once agents check passes, run agents run")
+          ".assent/loginfix01/) and produces task files inside it "
+          "(format in .assent/format.md)")
+    print("  4. Once assent check passes, run assent run")
     return 0

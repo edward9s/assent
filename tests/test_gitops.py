@@ -7,8 +7,8 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from agents import AgentsError
-from agents.gitops import (
+from assent import AssentError
+from assent.gitops import (
     branches_with_prefix, changes_outside_scope, commit_all, commit_if_dirty,
     ensure_branch,
     ensure_clean, ensure_worktree, head_ref, restore, tracked_paths,
@@ -40,27 +40,27 @@ class TestEnsureClean(GitTestCase):
 
     def test_dirty_repo_raises(self):
         (self.root / "new.txt").write_text("x", encoding="utf-8")
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             ensure_clean(self.root)
 
     def test_modified_tracked_file_raises(self):
         (self.root / "README.md").write_text("changed\n", encoding="utf-8")
-        with self.assertRaises(AgentsError):
+        with self.assertRaises(AssentError):
             ensure_clean(self.root)
 
     def test_excluded_runtime_artifacts_are_ignored(self):
-        # .agents needs an already-tracked file first, or porcelain lists the whole
+        # .assent needs an already-tracked file first, or porcelain lists the whole
         # untracked directory instead of individual files.
-        (self.root / ".agents").mkdir()
-        (self.root / ".agents" / "agents.toml").write_text("x", encoding="utf-8")
+        (self.root / ".assent").mkdir()
+        (self.root / ".assent" / "assent.toml").write_text("x", encoding="utf-8")
         _run(self.root, "add", "-A")
-        _run(self.root, "commit", "-m", "track agents dir")
-        (self.root / ".agents" / "agents.log").write_text("live", encoding="utf-8")
-        ensure_clean(self.root, excludes=(".agents/agents.log",))
+        _run(self.root, "commit", "-m", "track management dir")
+        (self.root / ".assent" / "assent.log").write_text("live", encoding="utf-8")
+        ensure_clean(self.root, excludes=(".assent/assent.log",))
 
     def test_without_excludes_runtime_log_counts_as_dirty(self):
-        (self.root / "agents.log").write_text("live", encoding="utf-8")
-        with self.assertRaises(AgentsError):
+        (self.root / "assent.log").write_text("live", encoding="utf-8")
+        with self.assertRaises(AssentError):
             ensure_clean(self.root)
 
 
@@ -142,7 +142,7 @@ class TestEnsureWorktree(GitTestCase):
         path.mkdir(parents=True)
         (path / "keep.txt").write_text("do not overwrite\n", encoding="utf-8")
 
-        with self.assertRaisesRegex(AgentsError, "not a valid worktree of this repo"):
+        with self.assertRaisesRegex(AssentError, "not a valid worktree of this repo"):
             ensure_worktree(self.root, "parallel01")
         self.assertEqual((path / "keep.txt").read_text(encoding="utf-8"),
                          "do not overwrite\n")
@@ -168,28 +168,28 @@ class TestEnsureWorktree(GitTestCase):
 
 class TestTrackedPaths(GitTestCase):
     def test_exact_file_and_directory_queries(self):
-        folder = self.root / ".agents" / "plan01"
+        folder = self.root / ".assent" / "plan01"
         folder.mkdir(parents=True)
         task = folder / "t001_task.e.toml"
         task.write_text("status = \"TODO\"\n", encoding="utf-8")
         _run(self.root, "add", str(task.relative_to(self.root)))
 
-        self.assertEqual(tracked_paths(self.root, ".agents/plan01"),
-                         [".agents/plan01/t001_task.e.toml"])
+        self.assertEqual(tracked_paths(self.root, ".assent/plan01"),
+                         [".assent/plan01/t001_task.e.toml"])
         self.assertEqual(tracked_paths(
-            self.root, ".agents/plan01", ref="HEAD"), [])
+            self.root, ".assent/plan01", ref="HEAD"), [])
 
         _run(self.root, "commit", "-m", "track task")
         self.assertEqual(tracked_paths(
-            self.root, ".agents/plan01", ref="HEAD"),
-            [".agents/plan01/t001_task.e.toml"])
+            self.root, ".assent/plan01", ref="HEAD"),
+            [".assent/plan01/t001_task.e.toml"])
 
 
 class TestChangesOutsideScope(GitTestCase):
     def test_excluded_paths_are_never_a_scope_violation(self):
-        (self.root / "agents.log").write_text("AI output", encoding="utf-8")
+        (self.root / "assent.log").write_text("AI output", encoding="utf-8")
         self.assertEqual(
-            changes_outside_scope(self.root, [], excludes=("agents.log",)), [])
+            changes_outside_scope(self.root, [], excludes=("assent.log",)), [])
 
     def test_new_file_in_scope_not_flagged(self):
         (self.root / "tests").mkdir()
@@ -270,16 +270,16 @@ class TestCommitAll(GitTestCase):
         self.assertEqual(log, "auto(W2): message check")
 
     def test_excludes_inside_gitignored_dir_do_not_crash(self):
-        # Regression: when the whole .agents/ is gitignored, naming an ignored path in the
+        # Regression: when the whole .assent/ is gitignored, naming an ignored path in the
         # exclude pathspec makes git add exit 1 (found via dogfooding); filtering must let
         # commit succeed normally.
-        (self.root / ".gitignore").write_text(".agents/\n", encoding="utf-8")
-        agents_dir = self.root / ".agents"
-        agents_dir.mkdir()
-        (agents_dir / "agents.log").write_text("log", encoding="utf-8")
+        (self.root / ".gitignore").write_text(".assent/\n", encoding="utf-8")
+        assent_dir = self.root / ".assent"
+        assent_dir.mkdir()
+        (assent_dir / "assent.log").write_text("log", encoding="utf-8")
         (self.root / "new.txt").write_text("x", encoding="utf-8")
         commit_all(self.root, "auto(t001): must not fail due to an ignored exclude entry",
-                   excludes=(".agents/agents.log", ".agents/plan01/_report.md"))
+                   excludes=(".assent/assent.log", ".assent/plan01/_report.md"))
         status = subprocess.run(
             ["git", "status", "--porcelain"], cwd=self.root,
             capture_output=True, encoding="utf-8", check=True).stdout
@@ -337,9 +337,9 @@ class TestCommitIfDirty(GitTestCase):
 
     def test_excluded_artifact_alone_does_not_create_commit(self):
         before = head_ref(self.root)
-        (self.root / "agents.log").write_text("AI output", encoding="utf-8")
+        (self.root / "assent.log").write_text("AI output", encoding="utf-8")
         self.assertFalse(commit_if_dirty(self.root, "should not exist",
-                                         excludes=("agents.log",)))
+                                         excludes=("assent.log",)))
         self.assertEqual(head_ref(self.root), before)
 
 
@@ -376,7 +376,7 @@ class TestRestore(GitTestCase):
 
 class TestGitMissing(unittest.TestCase):
     def test_missing_git_raises_workflow_error(self):
-        import agents.gitops as gitops
+        import assent.gitops as gitops
         original = gitops.subprocess.run
 
         def fake_run(cmd, **kwargs):
@@ -384,7 +384,7 @@ class TestGitMissing(unittest.TestCase):
 
         gitops.subprocess.run = fake_run
         try:
-            with self.assertRaises(AgentsError):
+            with self.assertRaises(AssentError):
                 ensure_clean(Path("."))
         finally:
             gitops.subprocess.run = original

@@ -2,10 +2,10 @@
 
 ## Project
 
-agents — an AI plan format plus an automatic scheduler. Pure Python 3.11+
+assent — an AI plan format plus an automatic scheduler. Pure Python 3.11+
 (standard library only, tomllib), Windows-first and cross-platform. CLI
 subcommands: run / status / check / report / clean / reject / rework / init.
-Source lives in `agents/`, tests in `tests/` (unittest, not pytest).
+Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
 
 ## Permanent constraints
 
@@ -27,7 +27,7 @@ Source lives in `agents/`, tests in `tests/` (unittest, not pytest).
     logs, upstream CLI raw output, and intentional Unicode or external-protocol
     fixtures stay verbatim and are not translated as data.
   - Do not place English and Chinese canonical contracts side by side in a
-    generated `.agents/`; there is exactly one executable English contract.
+    generated `.assent/`; there is exactly one executable English contract.
 - Comments must not rely on internal codes only the author understands in the
   moment (such as session labels `W1`/`W5`); use self-describing "date + what
   was done" statements so that the author six months later, and future readers,
@@ -51,4 +51,4 @@ Source lives in `agents/`, tests in `tests/` (unittest, not pytest).
   adapter must not silently ignore or up/down-shift an effort a task states
   explicitly. Vendor-specific effort values belong to configuration mappings
   (peers of the models table) and must not be hardcoded in adapter code.
-- When using agents, first read `.agents/instructions.md` in the project's main worktree; a worktree session uses the absolute path the scheduler provides. <!-- agents-instructions -->
+- When using assent, first read `.assent/instructions.md` in the project's main worktree; a worktree session uses the absolute path the scheduler provides. <!-- assent-instructions -->
