@@ -113,6 +113,18 @@ container 或 VM sandbox。
 的完整依賴圖驗證都採 fail-closed:前置未完成、引用不存在、解析失敗或循環
 一律拒絕繼續。
 
+`after` 也選出可重現的 worktree base。下游最多只能堆疊在零個或恰一個
+尚未接受的 upstream 上;多個時拒絕,不把它變成隱含的 integration engine。
+操作順序是 `run A` -> `run B` 堆疊在 A 上 -> combined verification -> 人類
+`accept A` -> 人類 `accept B`。若 source tip、integration tree、verifier digest
+仍相同,combined candidate 的 receipt 可重用,因此 accept 是快速證據檢查,
+不重跑完整 suite。A 前進後,B 會 stale 但成果保留;應 rework/reject B 或開新
+資料夾,不重寫 stack history。同檔案修改也採一般 Git 整合:能自動合併時由
+exact-tree verification 覆蓋,conflict 則 target 不變交由人工作裁決。Assent
+不自動 rebase、解衝突或 push。清理採 upstream-first:直接 dependent 在接受且
+有機械證據證明整合並乾淨前都保留 source evidence;之後才可清除多餘成果,
+不另設狀態資料庫。
+
 ## 模型與推理投入共識
 
 `model` 與 `effort` 是正交的抽象檔位。任務的 model 固定使用

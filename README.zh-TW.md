@@ -151,6 +151,28 @@ verify failure 或 conflict 不會推進 target。Assent 不自動解衝突、pu
 force push,也不宣稱 integration lock 能阻止外部 Git 寫入;accept 期間不要在同一
 主工作樹執行會寫入的 Git 命令。lock 只保證 Assent accept 彼此串行。
 
+### 有界的樂觀堆疊
+
+下游資料夾的 `_folder.toml` 設為 `after = ["A"]` 後,`after` 同時控制
+scheduler 解鎖與 Git worktree base。沒有未接受 upstream 時從目前 target
+建立;恰有一個時可從該 upstream 的 current tip 建立。多個未接受 upstream
+會 fail closed,必須先處理依賴或重新規劃後才可啟動下游。
+
+例如:`run A` -> `run B` 堆疊在 A 上 -> combined verification -> 人類
+`accept A` -> 人類 `accept B`。B 可在 A 尚未接受時建立 receipt;A 進入 target
+後,若 source tip、integration tree、verifier digest 仍相同即可重用,`accept`
+不重跑完整 suite。若 A 前進,B 會 stale 但成果保留;可 rework/reject B,或開
+新資料夾重新規劃,Assent 不重寫 stack history。
+
+A 與 B 修改同一檔案也遵守同一規則。Git 能自動合併時由 exact-tree verification
+證明結果;Git conflict 則 target 不變,交由人工作裁決。Assent 不自動 rebase、
+解衝突或 push。
+
+清理採 upstream-first 且以證據為準。直接 dependent 尚未完成、接受、乾淨、存在,
+或無法證明已整合時都保留 source;`assent clean A` 會拒絕並說明原因。全部
+dependent 都接受且可證明整合並乾淨後,再用 `assent clean` 先清 upstream、後清
+dependent;不要手動刪 worktree 或 branch。
+
 ## 平行執行
 
 可在 N 個終端各自指定不同的工作資料夾執行,例如 `assent run parallel01`、

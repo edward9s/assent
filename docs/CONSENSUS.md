@@ -149,6 +149,22 @@ formal task file in it, complete only when all are `DONE` or `SKIP`. Both
 fail-closed: an incomplete upstream, a reference to something nonexistent, a
 parse failure, or a cycle all refuse to continue.
 
+The `after` declaration also selects the reproducible worktree base. A
+downstream may stack on zero or exactly one not-yet-accepted upstream; more
+than one is refused rather than becoming an implicit integration engine. The
+operational sequence is `run A` -> `run B` stacked on A -> combined
+verification -> human `accept A` -> human `accept B`. A matching receipt can
+be reused when its source tip, integration tree, and verifier digest still
+match, so accept remains a fast evidence check rather than a full-suite rerun.
+If A advances, B is stale but its work is retained; rework/reject B or open a
+new folder instead of rewriting stack history. Same-file edits use ordinary
+Git integration: exact-tree verification covers an automatic merge, while a
+conflict leaves the target unchanged for human resolution. Assent never
+rebases, resolves conflicts, or pushes. Cleanup is upstream-first: direct
+dependents retain source evidence until accepted and mechanically proven
+integrated and clean, after which clean may remove redundant artifacts without
+a separate state database.
+
 ## Model and reasoning-investment consensus
 
 `model` and `effort` are orthogonal abstract tiers. A task's model is fixed
