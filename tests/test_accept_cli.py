@@ -421,5 +421,61 @@ class TestAcceptCliFailures(AcceptCliCase):
         self._assert_no_temporary_integration()
 
 
+class TestAcceptAllCli(AcceptCliCase):
+    """CLI argument-combination and end-to-end coverage for ``accept --all``.
+
+    Ordering, verify-then-accept interleaving, fail-closed chain stop, and
+    idempotent rerun are covered directly against ``accept_all`` in
+    tests/test_accept_all.py; this class only proves the CLI wiring: the
+    three FOLDER/--all combinations, and one real subprocess round trip.
+    """
+
+    def _cli_all(self) -> subprocess.CompletedProcess:
+        args = [sys.executable, "-m", "assent", "accept", "--all",
+                "--config", str(self.config)]
+        return subprocess.run(args, cwd=self.root, capture_output=True,
+                              encoding="utf-8", errors="replace", env=self.env)
+
+    def test_folder_and_all_combinations_match_behavior_contract(self) -> None:
+        neither = self._cli("accept")
+        self.assertEqual(neither.returncode, 2, neither.stdout + neither.stderr)
+
+        both = subprocess.run(
+            [sys.executable, "-m", "assent", "accept", self.folder, "--all",
+             "--config", str(self.config)],
+            cwd=self.root, capture_output=True, encoding="utf-8",
+            errors="replace", env=self.env)
+        self.assertEqual(both.returncode, 2, both.stdout + both.stderr)
+
+        folder_only = self._cli("accept", self.folder)
+        self.assertEqual(folder_only.returncode, 1,
+                         folder_only.stdout + folder_only.stderr)
+        self.assertIn("no source worktree", folder_only.stdout)
+
+        # self.folder is already DONE (setUp) but has no source yet, so --all
+        # dispatches and fails closed on that same folder instead of being
+        # rejected by argument parsing.
+        all_only = self._cli_all()
+        self.assertEqual(all_only.returncode, 1, all_only.stdout + all_only.stderr)
+        self.assertIn(f"failed:    {self.folder}", all_only.stdout)
+
+    def test_accept_all_publishes_every_finished_folder_via_real_cli(self) -> None:
+        second = "second"
+        self._write_task(folder=second)
+        self._make_source()
+        self._make_source(folder=second)
+
+        result = self._cli_all()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        subjects = self._git("log", "--format=%s", "--reverse").splitlines()
+        accept_subjects = [s for s in subjects if s.startswith("accept(")]
+        self.assertEqual(accept_subjects, [
+            f"accept({second}): integrate into trunk",
+            f"accept({self.folder}): integrate into trunk",
+        ])
+        self.assertIn("accept --all: summary", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

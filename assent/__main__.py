@@ -8,7 +8,7 @@ import sys
 from collections import Counter
 
 from assent import AssentError, engine
-from assent.accept import accept_folder
+from assent.accept import accept_all, accept_folder
 from assent.clean import clean_folders
 from assent.config import list_task_folders, load_config, validate_config
 from assent.doctor import doctor as run_doctor
@@ -80,10 +80,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     accept_p = sub.add_parser(
         "accept", help="Transactionally integrate one reviewed, finished folder "
-                       "into the main worktree's current branch")
+                       "into the main worktree's current branch, or every "
+                       "finished folder with --all")
     accept_p.add_argument(
-        "folder", metavar="FOLDER",
-        help="The reviewed work folder to accept (required; exactly one folder)")
+        "folder", nargs="?", metavar="FOLDER",
+        help="The reviewed work folder to accept (omit only with --all)")
+    accept_p.add_argument(
+        "--all", action="store_true", dest="all_folders",
+        help="Accept every finished work folder in folder-dependency order, "
+             "refreshing any stale verification receipt first (sequential only)")
     accept_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
         help=f"Config file location (default: {_DEFAULT_CONFIG})")
@@ -241,6 +246,12 @@ def _dispatch(argv: list[str]) -> int:
         if not args.all_folders and args.jobs is not None:
             parser.error("run's --jobs can only be used with --all")
 
+    if args.command == "accept":
+        if args.all_folders and args.folder is not None:
+            parser.error("accept's --all and FOLDER cannot be used together")
+        if not args.all_folders and args.folder is None:
+            parser.error("accept requires FOLDER or --all")
+
     if args.command == "init":
         return run_init(args.path)
 
@@ -256,6 +267,8 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "run" and args.all_folders:
         return run_all(args.config, assent_dir, args.jobs or 1)
     if args.command == "accept":
+        if args.all_folders:
+            return accept_all(args.config, assent_dir)
         try:
             cfg = load_config(args.config, args.folder)
         except AssentError as e:
