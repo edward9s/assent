@@ -458,7 +458,7 @@ def render_report(cfg: Config, plan: Plan,
     stamp = now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
     lines = [
-        "執行報告(agents 自動生成,勿手動編輯;重新生成:agents report)",
+        "執行報告(_report.md;agents 自動生成,勿手動編輯;重新生成:agents report)",
         "=" * 60,
         f"計畫資料夾:{cfg.tasks_name}",
         f"產生時間:{stamp}",
@@ -489,8 +489,8 @@ def render_report(cfg: Config, plan: Plan,
 
 def write_report(cfg: Config, plan: Plan,
                  now: Callable[[], datetime] | None = None) -> Path:
-    """把報告寫到工作資料夾的 report.md(執行期產物,不進版控)。"""
-    path = cfg.tasks_dir / "report.md"
+    """把報告寫到工作資料夾的 _report.md(執行期產物,不進版控)。"""
+    path = cfg.tasks_dir / "_report.md"
     path.write_text(render_report(cfg, plan, now), encoding="utf-8")
     return path
 
@@ -504,7 +504,7 @@ def _try_write_report(cfg: Config) -> None:
 
 
 def report(cfg: Config) -> int:
-    """子命令:生成 report.md 並印到終端(零 token)。"""
+    """子命令:生成 _report.md 並印到終端(零 token)。"""
     try:
         plan = Plan.parse(cfg.tasks_dir)
     except AgentsError as e:

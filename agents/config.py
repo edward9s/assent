@@ -97,7 +97,7 @@ class Config:
 
     @property
     def report_rel(self) -> str:
-        return self.git_rel(self.tasks_dir / "report.md")
+        return self.git_rel(self.tasks_dir / "_report.md")
 
     @property
     def lockfile_rel(self) -> str:

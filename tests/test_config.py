@@ -44,10 +44,10 @@ class TestLoadConfig(ConfigTestCase):
     def test_runtime_artifact_paths(self):
         cfg = load_config(self.write(_MINIMAL))
         self.assertEqual(cfg.runtime_log_rel, ".agents/plan01/_agents.log")
-        self.assertEqual(cfg.report_rel, ".agents/plan01/report.md")
+        self.assertEqual(cfg.report_rel, ".agents/plan01/_report.md")
         self.assertEqual(cfg.lockfile_rel, ".agents/plan01/agents.lock")
         self.assertEqual(cfg.git_excludes,
-                         (".agents/plan01/_agents.log", ".agents/plan01/report.md",
+                         (".agents/plan01/_agents.log", ".agents/plan01/_report.md",
                          ".agents/plan01/agents.lock"))
 
     def test_folder_override_updates_all_derived_paths(self):
@@ -56,7 +56,7 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.tasks_dir, self.agents_dir.resolve() / "parallel02")
         self.assertEqual(cfg.branch_prefix, "parallel02/")
         self.assertEqual(cfg.runtime_log_rel, ".agents/parallel02/_agents.log")
-        self.assertEqual(cfg.report_rel, ".agents/parallel02/report.md")
+        self.assertEqual(cfg.report_rel, ".agents/parallel02/_report.md")
         self.assertEqual(cfg.lockfile_rel, ".agents/parallel02/agents.lock")
 
     def test_missing_file_raises(self):

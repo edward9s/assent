@@ -139,7 +139,7 @@ class TestPlanParse(PlanTestCase):
         self.write("t001_a.toml", task_text())
         self.write("r001_a.toml", "[[entry]]\ntime = \"x\"\nby = \"ai\"\n"
                                   "event = \"note\"\nsummary = \"s\"\n")
-        self.write("report.md", "報告")
+        self.write("_report.md", "報告")
         plan = Plan.parse(self.dir)
         self.assertEqual(len(plan.tasks), 1)
 

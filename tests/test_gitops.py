@@ -243,7 +243,7 @@ class TestCommitAll(GitTestCase):
         (agents_dir / "agents.log").write_text("log", encoding="utf-8")
         (self.root / "new.txt").write_text("x", encoding="utf-8")
         commit_all(self.root, "auto(t001): 不應因 ignored 排除項而失敗",
-                   excludes=(".agents/agents.log", ".agents/plan01/report.md"))
+                   excludes=(".agents/agents.log", ".agents/plan01/_report.md"))
         status = subprocess.run(
             ["git", "status", "--porcelain"], cwd=self.root,
             capture_output=True, encoding="utf-8", check=True).stdout

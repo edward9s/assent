@@ -123,9 +123,9 @@ class TestRunSuccess(EngineTestCase):
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertTrue(any(s.startswith("auto(t001)") for s in self.subjects()))
-        # 工作樹除 report.md、agents.lock(執行期產物)外乾淨
+        # 工作樹除 _report.md、agents.lock(執行期產物)外乾淨
         porcelain = [ln for ln in self._git("status", "--porcelain").splitlines()
-                     if ln.strip() and "report.md" not in ln
+                     if ln.strip() and "_report.md" not in ln
                      and "agents.lock" not in ln]
         self.assertEqual(porcelain, [])
 
@@ -441,9 +441,9 @@ class TestQueries(EngineTestCase):
         self.assertIn("t002  BLOCKED", text)
         self.assertIn("最後日誌(scheduler)", text)
         self.assertIn("[", text)  # DONE 任務附檢查點 hash
-        # report.md 已寫出,但不進版控
-        self.assertTrue((cfg.tasks_dir / "report.md").is_file())
-        self.assertNotIn("report.md", self._git("ls-files"))
+        # _report.md 已寫出,但不進版控
+        self.assertTrue((cfg.tasks_dir / "_report.md").is_file())
+        self.assertNotIn("_report.md", self._git("ls-files"))
 
 
 if __name__ == "__main__":

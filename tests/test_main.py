@@ -83,7 +83,7 @@ class TestInit(MainTestCase):
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
         self.assertIn(".agents/", gitignore.splitlines())
         self.assertNotIn(".agents/agents.log", gitignore.splitlines())
-        self.assertNotIn(".agents/*/report.md", gitignore.splitlines())
+        self.assertNotIn(".agents/*/_report.md", gitignore.splitlines())
 
     def test_idempotent_no_overwrite_no_duplicates(self):
         run_init(self.root)

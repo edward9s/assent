@@ -28,7 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
     status_p = sub.add_parser("status", help="顯示進度統計與下一個任務(零 token)")
     check_p = sub.add_parser("check", help="驗證任務檔格式、設定檔與環境(零 token;"
                                            "會議的散會條件)")
-    report_p = sub.add_parser("report", help="生成人讀的執行報告 report.md(零 token)")
+    report_p = sub.add_parser("report", help="生成人讀的執行報告 _report.md(零 token)")
 
     init_p = sub.add_parser("init", help="在專案生成 .agents 骨架與 AGENTS.md")
     init_p.add_argument("--path", default=".", metavar="DIR",
