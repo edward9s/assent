@@ -262,6 +262,27 @@ everything is identity, and existing config needs no migration. Vendor-specific
 values live only in the translation table, and may not be written into a task
 file or `default_effort`.
 
+### Planning for session cost
+
+A task-file author already knows things a zero-memory executing AI must
+discover on its own: which files house the change, which symbols it
+touches, and how the task should be tiered. Encoding that knowledge up
+front turns an executing AI's search into a lookup instead of an
+investigation, and the cost of guessing wrong is not one extra tool call —
+a failed `verify` restarts a whole session under [Lifecycle and review].
+
+- When the meeting already knows the concrete files or symbols a task
+  touches, name them in `behavior` or `notes` (not just the `scope`
+  prefix); leave discovery to the executing AI only for what the meeting
+  genuinely does not know yet.
+- Default new tasks to `core` or `lite`; reserve `prime` for the cases the
+  tier table actually names — architecture design and cross-module
+  contracts — not for routine implementation or documentation sync.
+- Write `acceptance` so it is decidable in one pass, without a follow-up
+  question to a human: an ambiguous condition does not just cost a
+  clarification, it costs a full retried session before the ambiguity even
+  surfaces.
+
 ### Status semantics
 
 | Status | Meaning |
