@@ -148,6 +148,26 @@ class TestRunSuccess(EngineTestCase):
         autos = [s for s in self.subjects() if s.startswith("auto(")]
         self.assertEqual(len(autos), 2)
 
+    def test_report_write_failure_does_not_change_successful_task_result(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        adapter = ScriptedAdapter([self.ai_done(path, {"src/a.py": "x"})])
+
+        with mock.patch.object(
+                engine, "write_report", side_effect=PermissionError("報告檔被鎖定")):
+            self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertTrue(any(s.startswith("auto(t001)") for s in self.subjects()))
+
+    def test_try_write_report_does_not_swallow_process_control_exceptions(self):
+        cfg = self.build(git_enabled=False)
+        self.write_task(1)
+        with mock.patch.object(engine, "write_report", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                engine._try_write_report(cfg)
+
     def test_report_updates_after_scheduler_blocked_before_next_task(self):
         p1 = self.write_task(1)
         p2 = self.write_task(2)

@@ -537,7 +537,9 @@ def _try_write_report(cfg: Config) -> None:
     """run 收尾時盡力更新 report;報告失敗絕不影響主流程的結果與退出碼。"""
     try:
         write_report(cfg, Plan.parse(cfg.tasks_dir))
-    except AgentsError:
+    # 這是明確的盡力而為隔離邊界:包含權限、檔案鎖與內容解析等
+    # 任何一般錯誤都不得掩蓋任務結果;KeyboardInterrupt/SystemExit 仍照常傳播。
+    except Exception:
         pass
 
 
