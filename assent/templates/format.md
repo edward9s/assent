@@ -144,20 +144,21 @@ running multiple work folders in parallel safe.
 
 ### Bounded optimistic stacking and cleanup
 
-`after` is both the scheduler prerequisite and the Git base declaration. A
-folder with no unaccepted upstream starts from the current target; exactly one
-unaccepted upstream may provide the current tip as its base. More than one
-unaccepted upstream fails closed rather than creating an implicit integration
-engine. If that upstream advances, the downstream stack is stale; preserve its
-source and use explicit rework/reject or a new folder instead of rewriting
-history.
+The definitions of `after` and `base`, and the rules for choosing a base, are
+in [Work-folder dependencies and completion](#work-folder-dependencies-and-completion).
+Optimistic stacking is bounded: at most one unaccepted upstream may be in a
+downstream stack. More than one unaccepted upstream fails closed rather than
+creating an implicit integration engine. If an upstream advances, the
+downstream stack is stale; preserve its source and use explicit rework/reject
+or a new folder instead of rewriting history.
 
-The operational sequence is `run A`, `run B` with `after = ["A"]`, combined
-verification, `accept A`, then `accept B`. A matching receipt may be reused
-after A is accepted, and accept does not rerun the complete suite. Same-file
-changes use ordinary Git integration: exact-tree verification covers an
-automatic merge, while a conflict leaves the target unchanged for human
-resolution. Assent does not rebase, resolve conflicts, or push.
+The operational sequence is `run A`, `run B` stacked on A under the dependency
+contract above, combined verification, `accept A`, then `accept B`. A matching
+receipt may be reused after A is accepted, and accept does not rerun the
+complete suite. Same-file changes use ordinary Git integration: exact-tree
+verification covers an automatic merge, while a conflict leaves the target
+unchanged for human resolution. Assent does not rebase, resolve conflicts, or
+push.
 
 Cleanup is upstream-first. `assent clean` retains source evidence while any
 direct dependent is unfinished, unaccepted, dirty, missing, or lacks proof of
@@ -168,11 +169,31 @@ branches, and do not add a cleanup state database.
 ### Work-folder dependencies and completion
 
 Each work folder containing a formal task file may hold a `_folder.toml`, whose
-content may only declare the `after` string array of direct upstream folders:
+content declares the `after` string array of direct upstream folders and may
+optionally declare one `base` upstream:
 
 ```toml
-after = ["bootstrap01"]
+after = ["bootstrap01", "docs01"]
+base = "bootstrap01"
 ```
+
+`after` means "must finish before me"; `base` means "my files are built on
+this one". A non-`base` `after` entry provides ordering only: it provides no
+file content and no same-file conflict protection. The downstream worktree is
+a complete checkout of the `base` commit, so the downstream receives only the
+files present on that base branch. When `base` is omitted, assent derives it
+automatically when there are zero or one unaccepted upstreams; with more than
+one unaccepted upstream and no declared `base`, assent refuses execution, and
+declaring `base` is one way to resolve that ambiguity.
+
+Planning discipline: `base` must point to the upstream whose file content the
+downstream needs. Decide this by comparing the downstream task's `scope` and
+`behavior` with each upstream task's `scope` and `behavior` for the files and
+symbols they touch. When a downstream declares `base`, its task file must state
+in `behavior` or `notes` which files or symbols it inherits from that base.
+`assent verify --batch` combines every completed folder in dependency order
+into one candidate and runs the full verification, so a wrong base selection
+surfaces as a failure before `accept`.
 
 No `_folder.toml` means `after = []`; if the file exists, `after` must be
 written explicitly, and every name must be a folder under the same `.assent/`
