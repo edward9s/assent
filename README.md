@@ -547,7 +547,8 @@ validates the result (no remaining unmerged path, no leftover conflict marker
 or whitespace error per `git diff --cached --check`, and no edit outside the
 conflict-resolution scene), creates the merge commit, fast-forwards the source
 branch inside its own worktree, and then removes the temporary worktree and
-branch. It proves ownership of each managed resource again before deleting it —
+branch through the same link-safe cleanup boundary. It proves ownership of each
+managed resource again before deleting it —
 worktree of this repository, attached to the managed branch, `HEAD` at the
 proven commit, clean — so it can never widen the deletion. Because the source
 has really advanced, `--continue` deletes the receipts that were written
@@ -576,7 +577,8 @@ and preserves the worktree, the branch, and every edit; nothing is committed and
 nothing is deleted.
 
 **`--abort`** discards the attempt: it removes only the managed worktree and
-temporary branch, and only after proving each is the resource it manages,
+temporary branch through the link-safe cleanup boundary, and only after proving
+each is the resource it manages,
 refusing while the worktree still holds uncommitted changes rather than throwing
 away work. The source and the integration target are left unchanged.
 
@@ -729,8 +731,20 @@ example `python <main-worktree>/.assent/verify.py`; do not run it from the
 source worktree as if that were the integration candidate. Cleanup runs in a
 `finally` block, so normal completion, a Python exception, and Ctrl-C clean it
 up. Only a hard kill (such as `taskkill /F`) or power loss can leave residue;
-assent has no automatic stale-candidate recovery. Remove residue manually with
-`git worktree remove --force <path>` and `git branch -D <branch>`.
+assent has no automatic stale-candidate recovery. Do not manually run a raw
+Git worktree-removal command or recursive deletion against residue. Preserve
+the exact candidate path and branch as recovery evidence and use the owning
+Assent recovery/retry path, which re-proves ownership, inventories directory
+links and other directory reparse points, and detaches each link object before
+recursive removal. If that proof cannot be completed, the path, branch, and
+external target remain in place.
+
+**Linked-target cleanup warning:** Assent detaches each directory-link object
+before any recursive Git or filesystem removal and never traverses its resolved
+target. External link targets survive success, refusal, failure, interruption,
+and retry. This applies to `clean`, `archive`, `reject`, reconciliation,
+setup-failure cleanup, and temporary verification candidates; deleting a link
+object is not deleting anything through its resolved path.
 
 **Ignored inputs the candidate still needs**: `git worktree add` builds that
 candidate from tracked content, so ignored paths are absent from it. Complete
@@ -912,7 +926,7 @@ derived from task-file facts, and Git is always enabled.
 | `assent reconcile <FOLDER>`<br>`assent reconcile --continue parallel01` | Prepares one finished folder's source-versus-target conflict in the isolated worktree `<project>.reconcile/<FOLDER>` so a human can resolve the reported files by hand; `--continue` stages and validates that resolution, commits the merge, and fast-forwards the source branch; `--abort` discards only the proven managed worktree and branch. Never changes the target, resolves content, runs focused or complete verification, writes a receipt, or accepts. `FOLDER` is required; no `--all`. | **Zero** |
 | `assent clean [FOLDER ...]`<br>`assent clean A B`<br>`assent clean A ...` | Cleans up only worktrees and same-folder-prefix branches that are fully merged and clean; skips anything it cannot prove, never touches `.assent/`, and has no force option. Takes one folder, several, or the literal `...` remainder, and acts on all work folders when none is named; several folders are cleaned in one upstream-first pass. | **Zero** |
 | `assent archive <FOLDER ...>`<br>`assent archive --all`<br>`assent archive --restore FOLDER` | Retires finished folders: contains `clean`, then compresses the plan into `_archive/` and registers it in the roster. Named folders keep single-folder `archive`'s contract — every one is attempted and an ineligible one exits nonzero — while `--all` skips an ineligible folder without failing. `--restore` reverses exactly one archive and takes neither `--all` nor `...`. | **Zero** |
-| `assent reject <FOLDER>`<br>`assent reject parallel01` | Human-adjudicated rejection: archives uncommitted changes, then force-deletes that folder's worktree and same-prefix branches (recording full tip hashes before deletion), and resets DONE/WIP/BLOCKED tasks to TODO with Git evidence kept in the r file. `FOLDER` is required; refuses while a run is in progress. | **Zero** |
+| `assent reject <FOLDER>`<br>`assent reject parallel01` | Human-adjudicated rejection: archives uncommitted changes, removes that folder's worktree through the link-safe cleanup boundary, then force-deletes same-prefix branches (recording full tip hashes before deletion), and resets DONE/WIP/BLOCKED tasks to TODO with Git evidence kept in the r file. `FOLDER` is required; refuses while a run is in progress. | **Zero** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "review rejected"` | Non-destructively reopens a single task; keeps code by default, `--cascade` states downstream propagation explicitly. `--revert-code` creates a new reverse commit only when checkpoints form a contiguous tail. Updates the report on success, does not run automatically. Accepts `--config PATH`. | **Zero** |
 | `assent init --test CHOICE`<br>`assent init --path C:\work\my-project --test pytest` | Installs the user home `~/.assent` (shared settings plus the `instructions.md` and `format.md` contracts) and the project's `.assent/verify.py`, `AGENTS.md` bridge line, and `.gitignore` entry, after selecting exactly one real project test: parallel unittest, pytest, npm test, Flutter test, or custom argv. Without `--test`, fresh init shows a numbered menu. Repeat init does not prompt, preserves an existing verifier, refreshes both user-home contracts, and merges only missing active config defaults. An old project copy of a contract is removed only when it matches the packaged text exactly; a project `assent.toml` is preserved as an override and reported. Invalid input/TOML refuses before any managed file changes. | **Zero** |
 | `assent doctor`<br>`assent doctor` | Diagnoses the machine environment (Python version, git, adapter CLIs, temp directory writability); needs no `FOLDER` or `--config`, and runs without an existing `.assent/` project. | **Zero** |

@@ -154,7 +154,11 @@ rewrote with CRLF still counts as the same contract.
   there are the archive itself), has no `--force`, and is unrelated to
   `git clean` — it deletes nothing untracked or unmerged. It also refuses to
   clean an upstream source while an unaccepted dependent folder still needs
-  that source.
+  that source. Before recursive removal of an eligible worktree, Assent
+  inventories directory links and other directory reparse points without
+  entering them, then detaches each recognized link object itself; an
+  unsupported reparse point is a refusal that retains the worktree and never
+  removes through a resolved target.
 - **Archive**: `assent archive <FOLDER...>` (or `--all`) one-way retires
   finished folders; named folders must all archive or the command fails, while
   `--all` skips an ineligible folder. It strictly contains `clean` (clean never archives in
@@ -170,7 +174,10 @@ rewrote with CRLF still counts as the same contract.
   reverses one archive: it extracts the zip back to the live directory,
   deregisters the folder, and deletes the zip. A downstream folder's `after`
   reference resolves an archived upstream through the roster, so no
-  `_folder.toml` edit is needed once its upstream is archived.
+  `_folder.toml` edit is needed once its upstream is archived. Source
+  worktree removal uses the same non-traversing link boundary before any
+  recursive remover; archive refusal, failure, interruption, and retry leave
+  external link targets untouched.
 - **Acceptance**: `assent accept <FOLDER>` records explicit human approval by
   integrating one completed folder, while `assent accept A B` publishes only an
   exact selected batch covered by a fresh matching batch receipt. Direct and
@@ -192,15 +199,17 @@ rewrote with CRLF still counts as the same contract.
   gates are specified in "Review, acceptance, and cleanup lifecycle" below.
 - **Rejection**: `assent reject <FOLDER>` is an explicit human-adjudicated
   rejection, kept separate from routine cleanup: after archiving uncommitted
-  changes it force-deletes that folder's worktree and same-prefix branches
-  (recording full tip hashes before deletion), reverts DONE/WIP/BLOCKED tasks
-  back to TODO, and leaves a `rejected` record in the r file with full Git
-  evidence (SKIP is not overturned). `FOLDER` is required; it refuses while a
-  run is in progress. Before touching Git state it also resolves the folder
-  dependency graph for direct dependents: an unaccepted direct dependent
-  defaults to refusing and lists it, proceeding only after an explicit human
-  confirmation to accept stranding it; a dependent whose own run lock is
-  currently busy always refuses without prompting.
+  changes it removes that folder's worktree through the non-traversing link
+  boundary, then force-deletes same-prefix branches (recording full tip hashes
+  before deletion), reverts DONE/WIP/BLOCKED tasks back to TODO, and leaves a
+  `rejected` record in the r file with full Git evidence (SKIP is not
+  overturned). `FOLDER` is required; it refuses while a run is in progress.
+  Before touching Git state it also resolves the folder dependency graph for
+  direct dependents: an unaccepted direct dependent defaults to refusing and
+  lists it, proceeding only after an explicit human confirmation to accept
+  stranding it; a dependent whose own run lock is currently busy always refuses
+  without prompting. If link inventory or detachment fails, rejection retains
+  the worktree and external target for a guarded retry.
 - **Rework**: `assent rework <FOLDER> <TASK>` non-destructively reopens a single
   task, keeping the code by default and only reverting the target back to TODO;
   downstream propagation requires an explicit `--cascade`. `--revert-code`
@@ -257,8 +266,12 @@ push.
 Cleanup is upstream-first. `assent clean` retains source evidence while any
 direct dependent is unfinished, unaccepted, dirty, missing, or lacks proof of
 integration; once all direct dependents are accepted and proven integrated and
-clean, machine proof permits cleanup. Never manually delete worktrees or
-branches, and do not add a cleanup state database.
+clean, machine proof permits cleanup. Every Assent-owned cleanup first detaches
+directory-link objects and refuses an unprovable directory reparse point before
+any recursive Git or filesystem removal; the resolved target is never traversed.
+External link targets survive success, refusal, failure, interruption, and
+retry. Never manually delete worktrees or branches, and do not add a cleanup
+state database.
 
 ### Work-folder dependencies and completion
 
@@ -685,9 +698,12 @@ none is named. Several folders are cleaned in one upstream-first pass with every
 folder's own evidence rule unchanged. Each folder must be able to acquire the existing `assent.lock`, have a
 fully clean worktree, and have all same-prefix branches and detached HEADs
 merged into the main tree's current HEAD, before it first removes the worktree
-with ordinary protection and then deletes branches with `git branch -d`. Any
-insufficient proof keeps it and states the reason; there is no force-delete
-option, and it never touches `.assent/`.
+with ordinary protection and then deletes branches with `git branch -d`. Before
+that recursive worktree removal it inventories every directory link and
+directory reparse point without entering it, detaches each recognized link
+object, and refuses an unsupported reparse point; a failed proof keeps the
+worktree and target intact. Any insufficient proof keeps it and states the reason; there is no
+force-delete option, and it never touches `.assent/`.
 
 `assent archive <FOLDER>` (or `--all`) one-way retires a finished folder: it
 strictly contains `clean` -- reusing its mechanical proof and removal for any
@@ -721,7 +737,11 @@ exists or no archive exists. The two archived file bodies carry separate
 responsibilities: the zip under `.assent/_archive/` exists only to serve
 `--restore` and may be deleted or moved elsewhere at any time, losing only the
 ability to restore, while `.assent/_archived.toml` is the sole basis for
-dependency resolution and must be kept.
+dependency resolution and must be kept. The source removal inherits the
+non-traversing cleanup boundary: Assent detaches each directory-link object
+before any recursive removal and never deletes through its resolved target, so
+external targets survive archive success, refusal, failure, interruption, and
+retry.
 
 `assent reject <FOLDER>` lets a review meeting reject a whole folder's
 implementation: after acquiring the same `assent.lock`, it first fully parses
@@ -731,13 +751,15 @@ command without prompting; otherwise any dependent not yet provably accepted
 defaults to refusing and is listed, and proceeding past it requires an
 explicit human confirmation to accept stranding it. It then stashes
 uncommitted changes as a wip commit, records each branch's full tip hash as
-evidence, then force-removes the worktree, deletes same-prefix branches with
-`git branch -D`, and finally reverts DONE/WIP/BLOCKED tasks back to TODO and
-appends a `rejected` record with full Git evidence, plus the confirmed
+evidence, then removes the worktree through the non-traversing link boundary,
+deletes same-prefix branches with `git branch -D`, and finally reverts
+DONE/WIP/BLOCKED tasks back to TODO and appends a `rejected` record with full
+Git evidence, plus the confirmed
 would-be-stranded dependent list when there was one, to the r file. The
 status reset is intrinsic to rejection, not an exception to routine cleanup;
-if any Git step fails it does not enter the task-file reset, and rerunning
-the same command finishes the job.
+if link inventory/detachment or any other Git step fails it does not enter the
+task-file reset, and rerunning the same command uses the guarded boundary again
+without touching an external target.
 
 `assent rework <FOLDER> <TASK>` lets a review meeting reopen a single task; both
 positional arguments are required, with no omission-derivation, `--all`, or
@@ -851,9 +873,13 @@ candidate as the verifier's cwd while it exists and run the verifier script
 from the main worktree, such as `python <main-worktree>/.assent/verify.py`.
 Cleanup runs in a `finally` block, covering normal completion, Python
 exceptions, and Ctrl-C. Only a hard kill, such as `taskkill /F`, or power loss
-can leave residue; Assent has no automatic stale-candidate recovery. Remove
-residue manually with `git worktree remove --force <path>` and `git branch -D
-<branch>`.
+can leave residue; Assent has no automatic stale-candidate recovery. Do not
+manually run a raw Git worktree-removal command or recursive deletion against
+that residue. Preserve the exact candidate path and branch as recovery
+evidence, and have the owning Assent recovery/retry path re-prove their
+identity, inventory directory links and other directory reparse points, and
+detach each link object before it removes anything recursively. If that proof
+cannot be completed, the path, branch, and external target remain in place.
 
 That candidate is built by `git worktree add`, so untracked and ignored paths
 are absent from it. Complete verification therefore mirrors, and mirrors only,
@@ -884,7 +910,10 @@ before the verifier runs and before any `PASSED` evidence exists. The mirrors
 live only for the verifier run and are removed before the temporary worktree
 is, deepest path first, so neither creating nor cleaning a candidate ever
 traverses, modifies, or deletes a linked target, and the source worktree's own
-links and files survive success, failure, and interruption. Provision a
+links and files survive success, failure, and interruption. Assent detaches each
+directory-link object before any recursive Git or filesystem removal and never
+traverses its resolved target. External link targets survive success, refusal,
+failure, interruption, and retry. Provision a
 directory link yourself, next to the source worktree, when a private package
 directory or a large asset tree must stay out of Git; there is no project
 setting and no force flag that widens any of this.
@@ -965,9 +994,12 @@ source worktrees stay clean, and the integration target is never changed.
 that leaves an unmerged path, a conflict marker or whitespace error, or an
 edit outside the conflict-resolution scene, then commits the merge,
 fast-forwards the source branch, and removes the managed worktree and branch
-after re-proving ownership of each. `--abort` discards the attempt, removing
-only those same proven resources and refusing while uncommitted changes
-remain. There is no state file: the worktree, the temporary branch, `HEAD`,
+through the non-traversing cleanup boundary after re-proving ownership of each.
+`--abort` discards the attempt, using that same boundary to remove only those
+proven resources and refusing while uncommitted changes remain. A directory
+link object is detached before recursive removal, never through its resolved
+target; refusal, failure, interruption, and retry leave that target intact.
+There is no state file: the worktree, the temporary branch, `HEAD`,
 `MERGE_HEAD`, and the merge parents say how far an interrupted run got, so
 `--continue` resumes, and any mismatch refuses while preserving the worktree,
 the branch, and every edit.
@@ -1061,6 +1093,13 @@ human.
   provably inside the scope of the resumable candidate task: provable ->
   gathered into a `wip` checkpoint and the run continues, no AI session;
   otherwise -> fail-closed, `run` refuses and hands the state to a human.
+- If setup fails after Assent creates a new worktree, only that exact,
+  still-owned path and branch are cleanup candidates. Assent re-proves the
+  clean checkout, expected `HEAD`, and branch ownership, detaches every
+  directory-link object before recursive removal, and retains the path and
+  ref as recovery evidence if any proof or detachment fails. The external
+  target is never traversed or modified, and a later Assent retry repeats the
+  guarded cleanup.
 - The executing AI never runs git commit — the checkpoint is created by the
   scheduler.
 

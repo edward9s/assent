@@ -586,8 +586,16 @@ receipt stale,應在無人值守驗證時執行 `assent verify <FOLDER>` 後再�
 cwd,並從主工作樹執行 verifier,例如 `python <main-worktree>/.assent/verify.py`;
 不要把 source worktree 當成整合候選。清理在 `finally` 中進行,所以正常結束、
 Python 例外與 Ctrl-C 都會清除;只有硬殺(例如 `taskkill /F`)或斷電可能留下
-殘留。assent 沒有自動回收殘留的機制;請自行執行
-`git worktree remove --force <path>` 與 `git branch -D <branch>` 清除。
+殘留。assent 沒有自動回收殘留的機制。
+不要手動對殘留執行 raw Git worktree 移除或遞迴刪除;保留確切的 candidate
+路徑與分支作為 recovery 證據,交由 Assent 的 recovery/retry 路徑重新證明
+ownership、盤點目錄連結與其他目錄 reparse point,並先解除每個連結物件再進行
+遞迴移除。若無法完成證明,路徑、分支與外部目標都留在原處。
+
+**連結目標清理警告:** Assent 在任何遞迴 Git 或檔案系統移除前,都會先解除每個
+目錄連結物件,絕不沿解析後的目標路徑走訪。外部連結目標在成功、拒絕、失敗、
+中斷與重試後都存活。這適用於 `clean`、`archive`、`reject`、reconcile、設定失敗
+清理與臨時 verification candidate;刪除連結物件不等於沿解析後的路徑刪除內容。
 
 **候選仍需要的被忽略輸入**:`git worktree add` 只用被追蹤的內容建出候選,
 被忽略的路徑因此不在其中。完整驗證只會從每個進入候選的 source worktree
