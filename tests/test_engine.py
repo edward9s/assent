@@ -509,14 +509,14 @@ class TestAcceptanceGates(EngineTestCase):
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
         self.assertEqual(parse_task_file(path).status, "DONE")
 
-    def test_tampered_task_file_detected(self):
+    def test_tampered_self_blocked_task_file_retries_then_scheduler_blocks(self):
         path = self.write_task(1)
         cfg = self.build(retry=0)
         self.commit_all()
 
         def tamper(prompt):
-            # execution AI loosens its own scope + verify, and self-marks DONE
-            path.write_text(task_text(status="DONE", scope=("src/", "secret/"),
+            # execution AI loosens its own scope + verify, and self-marks BLOCKED
+            path.write_text(task_text(status="BLOCKED", scope=("src/", "secret/"),
                                       verify="echo ok"),
                             encoding="utf-8", newline="\n")
             return ok_result()
@@ -527,6 +527,59 @@ class TestAcceptanceGates(EngineTestCase):
         entries = read_entries(journal_path_for(path))
         self.assertTrue(any("fields other than status" in e["summary"]
                             for e in entries if e["by"] == "scheduler"))
+        self.assertFalse(any(
+            subject == "auto(plan01/t001): BLOCKED (execution AI self-marked)"
+            for subject in self.subjects()))
+
+    def test_malformed_self_blocked_task_retries_before_handoff(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=1)
+        self.commit_all()
+
+        def malformed(prompt):
+            path.write_text('status = "BLOCKED"\nnot valid toml = [\n',
+                            encoding="utf-8", newline="\n")
+            return ok_result()
+
+        def repaired(prompt):
+            self.assertIn("Re-parsing the task file failed", prompt)
+            path.write_text(task_text(status="BLOCKED"), encoding="utf-8",
+                            newline="\n")
+            return ok_result()
+
+        adapter = ScriptedAdapter([malformed, repaired])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        self.assertFalse(journal_path_for(path).exists())
+
+    def test_self_blocked_checks_scope_across_wip_checkpoint(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0)
+        self.commit_all()
+
+        def quota_with_rogue_file(prompt):
+            (self.execution_root() / "rogue.py").write_text(
+                "kept", encoding="utf-8")
+            return TaskResult(exit_code=1, output="", quota_exhausted=True,
+                              reset_at=None)
+
+        def blocked(prompt):
+            set_status(path, "BLOCKED")
+            return ok_result()
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, sleep=lambda _: None,
+            adapter=ScriptedAdapter([quota_with_rogue_file, blocked])), 0)
+        self.assertFalse(any(
+            subject == "auto(plan01/t001): BLOCKED (execution AI self-marked)"
+            for subject in self.subjects()))
+        from assent.plan import read_entries
+        scheduler_blocked = next(
+            entry for entry in read_entries(journal_path_for(path))
+            if entry["by"] == "scheduler" and entry["event"] == "blocked")
+        self.assertIn("Changes outside scope appeared: rogue.py",
+                      scheduler_blocked["summary"])
 
     def test_retry_zero_blocks_after_single_attempt(self):
         path = self.write_task(1, verify=_FAILV)
@@ -642,9 +695,9 @@ class TestAdapterProcessOutcomes(EngineTestCase):
         blocked = next(e for e in entries if e["event"] == "blocked")
         self.assertIn("exit code 4", blocked["summary"])
 
-    def test_nonzero_self_blocked_is_handed_off_after_safety_inspection(self):
+    def test_nonzero_self_blocked_retries_then_scheduler_blocks(self):
         path = self.write_task(1)
-        cfg = self.build(retry=1)
+        cfg = self.build(retry=0)
         self.commit_all()
 
         def blocked(prompt):
@@ -661,7 +714,7 @@ class TestAdapterProcessOutcomes(EngineTestCase):
             rc = engine.run(cfg, once=True, adapter=ScriptedAdapter([blocked]))
         self.assertEqual(rc, 0)
         self.assertIn("exit code 9", out.getvalue())
-        self.assertTrue(any(
+        self.assertFalse(any(
             subject == "auto(plan01/t001): BLOCKED (execution AI self-marked)"
             for subject in self.subjects()))
 
@@ -669,6 +722,10 @@ class TestAdapterProcessOutcomes(EngineTestCase):
         failure = next(e for e in read_entries(journal_path_for(path))
                        if e["event"] == "adapter_exit")
         self.assertEqual(failure["exit_code"], 9)
+        scheduler_blocked = next(e for e in read_entries(journal_path_for(path))
+                                 if e["by"] == "scheduler"
+                                 and e["event"] == "blocked")
+        self.assertIn("exit code 9", scheduler_blocked["summary"])
 
     def test_nonzero_self_blocked_with_scope_violation_fails_closed(self):
         path = self.write_task(1)

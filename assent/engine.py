@@ -573,19 +573,14 @@ def _process_task(cfg: Config, task: Task, adapter: Adapter,
                 task, session, result.exit_code, result.stalled, reason, now)
             print(f"  Adapter failure: {reason}")
 
-            # A failed subprocess cannot authorize DONE or run verification, but safety
-            # inspection still runs against its preserved changes.  A clean self-BLOCKED
-            # result is the one terminal exception: it is handed to a human with the adapter
-            # exit evidence intact.
-            fresh, safety_reason = _inspect_task_safety(
+            # A failed subprocess cannot authorize either terminal result or run
+            # verification.  Safety inspection still runs against its preserved changes so
+            # that a later scheduler BLOCKED record retains every material failure reason.
+            _fresh, safety_reason = _inspect_task_safety(
                 cfg, task, start_ref)
             if safety_reason:
                 reason = f"{reason}; safety inspection failed: {safety_reason}"
-            if (fresh is not None and fresh.status == "BLOCKED"
-                    and safety_reason is None):
-                outcome = "self_blocked"
-            else:
-                outcome = "fail"
+            outcome = "fail"
         else:
             outcome, reason = _evaluate(cfg, task, start_ref)
         if outcome == "done":
