@@ -193,6 +193,46 @@ def commit_of(root: Path, ref: str) -> str:
     return _git(root, "rev-parse", ref).strip()
 
 
+def commit_message(root: Path, ref: str = "HEAD") -> str:
+    """回傳指定 commit 的完整訊息，供辨識可續作的持久 checkpoint。"""
+    return _git(root, "show", "-s", "--format=%B", ref).rstrip("\r\n")
+
+
+def commit_history(
+        root: Path, ref: str = "HEAD",
+) -> list[tuple[str, tuple[str, ...], str]]:
+    """沿第一親代列出 commit hash、親代與主旨，無法解析時保守失敗。"""
+    out = _git(root, "log", "--first-parent", "-z",
+               "--format=%H%x00%P%x00%s", ref)
+    values = out.split("\0")
+    if values and values[-1] == "":
+        values.pop()
+    if len(values) % 3:
+        raise AgentsError("Git 歷史格式無法解析")
+
+    history: list[tuple[str, tuple[str, ...], str]] = []
+    for index in range(0, len(values), 3):
+        commit = values[index].strip()
+        parents = tuple(values[index + 1].split())
+        subject = values[index + 2]
+        if not commit or "\n" in commit or "\r" in commit:
+            raise AgentsError("Git 歷史格式無法解析")
+        history.append((commit, parents, subject))
+    return history
+
+
+def revert_no_commit(root: Path, commits: Sequence[str]) -> None:
+    """依輸入順序反向套用 commits，但先不建立 commit。"""
+    if not commits:
+        raise AgentsError("沒有可反向套用的 commit")
+    _git(root, "revert", "--no-commit", *commits)
+
+
+def abort_revert(root: Path) -> None:
+    """中止進行中的 git revert，回到該次操作開始前。"""
+    _git(root, "revert", "--abort")
+
+
 def tracked_paths(root: Path, path: str, ref: str | None = None) -> list[str]:
     """列出指定路徑下的索引檔案;有 ref 時改查該 commit/ref。"""
     normalized = _normalize(path)

@@ -1,4 +1,4 @@
-"""CLI 進入點:argparse 子命令 run / status / check / report / clean / reject / init。"""
+"""CLI 進入點:argparse 子命令 run/status/check/report/clean/reject/rework/init。"""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,7 @@ from agents.folder_scheduler import run_all
 from agents.init import init as run_init
 from agents.plan import Plan
 from agents.reject import reject_folder
+from agents.rework import rework_task
 from agents.terminal_log import terminal_logging
 
 _DEFAULT_CONFIG = ".agents/agents.toml"
@@ -38,7 +39,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     "逐任務開 AI session、客觀驗收、自動 git 檢查點。",
     )
     sub = parser.add_subparsers(dest="command", required=True,
-                                metavar="{run,status,check,report,clean,reject,init}")
+                                metavar="{run,status,check,report,clean,reject,rework,init}")
 
     run_p = sub.add_parser("run", help="執行指定[工作資料夾]的任務直到全部 DONE/BLOCKED/SKIP")
     run_p.add_argument("--once", action="store_true", help="只執行下一個任務後停止")
@@ -59,6 +60,27 @@ def _build_parser() -> argparse.ArgumentParser:
     reject_p.add_argument("folder", metavar="FOLDER",
                           help="要駁回的工作資料夾(必填,不可作用於全部資料夾)")
     reject_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
+                          help=f"設定檔位置(預設:{_DEFAULT_CONFIG})")
+
+    rework_p = sub.add_parser(
+        "rework", help="人工裁決重開單一任務，預設保留程式碼且不自動執行",
+        description=(
+            "預設保留程式碼，只把指定任務改回 TODO；--cascade 明示連動下游。"
+            "--revert-code 僅在 checkpoints 是連續分支尾段時，以新 commit "
+            "反向程式碼。命令只更新狀態與報告，不會自動執行 run。"))
+    rework_p.add_argument("folder", metavar="FOLDER",
+                          help="包含目標任務的工作資料夾(必填)")
+    rework_p.add_argument("task", metavar="TASK",
+                          help="要重開的精確任務 id，例如 t003(必填)")
+    rework_p.add_argument(
+        "--cascade", action="store_true",
+        help="明示一併把已開始或已完成的下游任務改回 TODO")
+    rework_p.add_argument(
+        "--revert-code", action="store_true",
+        help="僅在 checkpoints 是連續分支尾段時，以新 commit 反向程式碼")
+    rework_p.add_argument("--reason", default="", metavar="TEXT",
+                          help="寫入重開日誌的人工裁決理由")
+    rework_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                           help=f"設定檔位置(預設:{_DEFAULT_CONFIG})")
 
     init_p = sub.add_parser("init", help="在專案生成 .agents 骨架與 AGENTS.md")
@@ -182,6 +204,15 @@ def _dispatch(argv: list[str]) -> int:
             print(f"設定檔錯誤:{e}")
             return 1
         return reject_folder(cfg)
+    if args.command == "rework":
+        try:
+            cfg = load_config(args.config, args.folder)
+        except AgentsError as e:
+            print(f"設定檔錯誤:{e}")
+            return 1
+        return rework_task(
+            cfg, args.task, cascade=args.cascade,
+            reason=args.reason, revert_code=args.revert_code)
     folders = list_task_folders(agents_dir)
     if args.command == "clean":
         selected = folders if args.folder is None else [args.folder]

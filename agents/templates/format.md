@@ -51,6 +51,10 @@ project/
   完整 tip hash 存證),並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔留下含
   完整 Git 存證的 `rejected` 記錄(SKIP 不推翻)。`FOLDER` 必填;run 進行中
   拒絕。
+- **重開**:`agents rework <FOLDER> <TASK>` 非破壞性重開單一任務，預設保留
+  程式碼並只把目標改回 TODO；下游連動必須明示 `--cascade`。`--revert-code`
+  只在 checkpoints 構成目前分支連續尾段時建立新的反向 commit，不改寫歷史。
+  成功後更新報告，但不自動執行 `run`。
 
 ### 專案規則與 agents 管理面
 
@@ -258,6 +262,13 @@ summary = "額度耗盡,保留進度等待重置後接續"
 存證的 `rejected` 記錄。狀態重置是駁回的本分,不是常規清理的例外;任何
 Git 步驟失敗都不進入任務檔重置,重跑同一命令即可續完。
 
+`agents rework <FOLDER> <TASK>` 供驗收會議重開單一任務，兩個位置參數皆必填，
+不提供省略推導、`--all` 或 `--once`。預設保留程式碼並只重開目標；已開始或
+已完成的下游會阻擋操作，除非明示 `--cascade` 一併改回 TODO。`--reason TEXT`
+保存裁決理由。`--revert-code` 僅在所有相關 checkpoints 形成目前分支的連續尾段
+時，以新 commit 反向程式碼；無法證明就 fail-closed，絕不改寫歷史。成功後以
+更新後計畫重生 `_report.md`，不印整份報告、不啟動 AI，也不自動執行 `run`。
+
 任一資料夾內:有 `WIP` 任務 -> 優先選它,帶「接續」提示續作;否則取第一個
 `TODO` 且所有 `deps` 皆為 `DONE` / `SKIP` 的任務。`BLOCKED` 只擋以它為前置
 的任務,其他任務照常執行。全部任務皆 `DONE` / `BLOCKED` / `SKIP` 時結束,
@@ -293,7 +304,7 @@ Git 步驟失敗都不進入任務檔重置,重跑同一命令即可續完。
 
 ## _report.md(驗收會議的議程表)
 
-`agents report`(或 run 收尾)把 t/r 檔與 git 資訊彙整成一頁純文字報告:
+`agents report`(或 run 收尾、rework 成功後)把 t/r 檔與 git 資訊彙整成一頁純文字報告:
 進度統計、每任務一行(狀態 + 檢查點 commit)、BLOCKED/WIP 任務附最後一筆
 r 檔 summary。**彙整是機械工作,零 token**;AI 永遠不做「幫我總結整輪」這種事。
 檢查點 commit 只接受與目前工作資料夾及任務 id 完整相符的
@@ -308,11 +319,10 @@ _report.md 是執行期產物:不進版控、不參與乾淨/scope 檢查,每次
 - 驗收會議:人先讀 `_report.md`(零 token),只對要裁決的任務開 AI session,
   指名「讀 tNNN 的 `.e.toml` 任務檔、共同主幹 `.r.toml` 日誌與
   `auto(<工作資料夾>/tNNN)` 對應 commit」;
-  裁決落實 =
-  改任務檔(status 改回 TODO、
-  補充說明、加新任務、標 SKIP),若裁決回退某任務的檢查點(git revert),同一次會議
-  必須把該任務 status 改回 TODO 或標 SKIP,並檢視以它為前置的下游任務是否需要
-  連動重作；狀態與程式碼事實不一致即未完成,散會仍須 `agents check` 通過。
+  單一任務需重做時使用 `agents rework <FOLDER> <TASK>`，需要連動下游就明示
+  `--cascade`；只有確認要反向且符合連續尾段預檢時才加 `--revert-code`。命令不會
+  自動 run，人先檢查更新後報告，再明示續跑。新增任務、補充說明或標 SKIP 仍由
+  AI 依裁決修改；狀態與程式碼事實不一致即未完成，散會仍須 `agents check` 通過。
 - 專案特有且跨計畫仍有效的決策沉澱進 AGENTS.md,不靠已結案任務檔傳承;
   跨專案共通的 agents 規則則更新 instructions 範本。
 
