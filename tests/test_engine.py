@@ -1,5 +1,9 @@
-"""engine 測試:注入 ScriptedAdapter + 假 sleep/now,在臨時 repo 驗證
-選任務 -> 驗收 -> 寫回的全部分支。真實 CLI 一律不碰。"""
+"""engine tests: inject a ScriptedAdapter + fake sleep/now, and in a temporary repo verify
+all branches of select task -> acceptance -> write-back. The real CLI is never touched.
+
+Chinese literals that remain are deliberate user/upstream passthrough data (task titles,
+notes, journal summaries, AGENTS.md content) used to prove that non-English data flows
+through verbatim."""
 import contextlib
 import io
 import json
@@ -62,7 +66,7 @@ class ScriptedAdapter(Adapter):
     def run_task(self, prompt, model, effort, cwd):
         self.calls.append((prompt, model, effort))
         if not self.steps:
-            raise AssertionError("adapter 被呼叫的次數超出劇本")
+            raise AssertionError("adapter called more times than the script allows")
         step = self.steps.pop(0)
         return step(prompt) if callable(step) else step
 
@@ -123,7 +127,7 @@ class EngineTestCase(unittest.TestCase):
     def subjects(self) -> list[str]:
         return self._git_execution("log", "--pretty=%s").splitlines()
 
-    # AI 行為模擬
+    # AI behavior simulation
     def ai_done(self, task_path, files=None, *, by="claude",
                 requested_model="lite"):
         def step(prompt):
@@ -215,7 +219,7 @@ class TestRunSuccess(EngineTestCase):
                        if s.startswith("auto(plan01/t001): "))
         self.assertNotIn("Co-Authored-By", subject)
         self.assertNotIn("Generated with", subject)
-        # 工作樹除 _report.md、agents.lock(執行期產物)外乾淨
+        # working tree clean apart from _report.md and agents.lock (runtime artifacts)
         porcelain = [ln for ln in self._git("status", "--porcelain").splitlines()
                      if ln.strip() and "_report.md" not in ln
                      and "agents.lock" not in ln]
@@ -247,7 +251,7 @@ class TestRunSuccess(EngineTestCase):
         adapter = ScriptedAdapter([self.ai_done(path, {"src/a.py": "x"})])
 
         with mock.patch.object(
-                engine, "write_report", side_effect=PermissionError("報告檔被鎖定")):
+                engine, "write_report", side_effect=PermissionError("report file locked")):
             self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
 
         self.assertEqual(parse_task_file(path).status, "DONE")
@@ -288,7 +292,7 @@ class TestRunSuccess(EngineTestCase):
         self.assertEqual(adapter.calls[0][2], "minimal")
 
     def test_effort_default_applied_per_tier(self):
-        p1 = self.write_task(1, model="lite")  # 內建 lite 預設 medium
+        p1 = self.write_task(1, model="lite")  # built-in lite default is medium
         cfg = self.build(extra_config=
             '[adapter.claude.efforts]\nmedium = "balanced"\n')
         self.commit_all()
@@ -308,8 +312,8 @@ class TestRunSuccess(EngineTestCase):
         with contextlib.redirect_stdout(out):
             engine.run(cfg, once=True, adapter=adapter)
         self.assertIsNone(adapter.calls[0][2])
-        self.assertIn("effort(抽象)=未指定", out.getvalue())
-        self.assertIn("requested_effort(實際)=CLI 預設", out.getvalue())
+        self.assertIn("effort(abstract)=unspecified", out.getvalue())
+        self.assertIn("requested_effort(actual)=CLI default", out.getvalue())
 
     def test_effort_translation_uses_tier_then_flat_then_identity(self):
         cfg = self.build(extra_config=
@@ -361,7 +365,7 @@ class TestRunSuccess(EngineTestCase):
         self.assertIn(_OK, prompt)
         self.assertIn('by = "claude"', prompt)
         self.assertIn('requested_model = "lite"', prompt)
-        self.assertIn('抽象 effort = "medium"', prompt)
+        self.assertIn('abstract effort = "medium"', prompt)
         self.assertIn('requested_effort = "medium"', prompt)
 
     def test_codex_prompt_uses_resolved_cli_model(self):
@@ -405,8 +409,8 @@ class TestRunSuccess(EngineTestCase):
         with contextlib.redirect_stdout(out):
             engine.run(cfg, once=True,
                        adapter=ScriptedAdapter([self.ai_done(p1)]))
-        self.assertIn("effort(抽象)=high", out.getvalue())
-        self.assertIn("requested_effort(實際)=max", out.getvalue())
+        self.assertIn("effort(abstract)=high", out.getvalue())
+        self.assertIn("requested_effort(actual)=max", out.getvalue())
 
     def test_worktree_default_verify_uses_main_script_and_worktree_cwd(self):
         cfg = self.build()
@@ -426,7 +430,8 @@ class TestRunSuccess(EngineTestCase):
 
 class TestAcceptanceGates(EngineTestCase):
     def test_self_blocked_committed_without_verify(self):
-        # verify 是必失敗命令:自標 BLOCKED 免驗才會過(有實作才驗)
+        # verify is an always-failing command: self-marked BLOCKED skips verify so it passes
+        # (verify only runs when there is an implementation)
         path = self.write_task(1, verify=_FAILV)
         cfg = self.build()
         self.commit_all()
@@ -452,7 +457,7 @@ class TestAcceptanceGates(EngineTestCase):
         self.commit_all()
         adapter = ScriptedAdapter([lambda p: ok_result()])
         self.run_quiet(cfg, once=True, adapter=adapter)
-        self.assertEqual(parse_task_file(path).status, "BLOCKED")  # 調度器標
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")  # marked by scheduler
 
     def test_scope_violation_retry_then_blocked_keeps_output(self):
         path = self.write_task(1)
@@ -468,9 +473,9 @@ class TestAcceptanceGates(EngineTestCase):
         adapter = ScriptedAdapter([bad, lambda p: ok_result()])
         self.run_quiet(cfg, once=True, adapter=adapter)
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
-        self.assertIn("原因", adapter.calls[1][0])          # 重試提示含失敗原因
+        self.assertIn("Reason:", adapter.calls[1][0])       # retry prompt carries the failure reason
         self.assertIn("outside.py", self._git_execution(
-            "ls-files"))  # 產出不丟棄,收進檢查點
+            "ls-files"))  # output not discarded, gathered into the checkpoint
         from agents.plan import read_entries
         entries = read_entries(journal_path_for(path))
         blocked = next(e for e in entries if e["by"] == "scheduler"
@@ -504,7 +509,7 @@ class TestAcceptanceGates(EngineTestCase):
         self.commit_all()
 
         def tamper(prompt):
-            # 執行 AI 放寬自己的 scope + verify,並自標 DONE
+            # execution AI loosens its own scope + verify, and self-marks DONE
             path.write_text(task_text(status="DONE", scope=("src/", "secret/"),
                                       verify="echo ok"),
                             encoding="utf-8", newline="\n")
@@ -514,8 +519,8 @@ class TestAcceptanceGates(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
         from agents.plan import read_entries
         entries = read_entries(journal_path_for(path))
-        self.assertTrue(any("欄位" in e["summary"] for e in entries
-                            if e["by"] == "scheduler"))
+        self.assertTrue(any("fields other than status" in e["summary"]
+                            for e in entries if e["by"] == "scheduler"))
 
     def test_retry_zero_blocks_after_single_attempt(self):
         path = self.write_task(1, verify=_FAILV)
@@ -554,7 +559,7 @@ class TestAcceptanceGates(EngineTestCase):
         self.assertEqual(self.run_quiet(
             cfg, once=True, adapter=ScriptedAdapter([step])), 0)
         self.assertTrue(any(
-            s == "auto(plan01/t001): BLOCKED(執行 AI 自標)"
+            s == "auto(plan01/t001): BLOCKED (execution AI self-marked)"
             for s in self.subjects()))
 
 
@@ -578,8 +583,8 @@ class TestQuotaAndResume(EngineTestCase):
         rc = self.run_quiet(cfg, once=True, adapter=adapter,
                             sleep=sleeps.append, now=lambda: t0)
         self.assertEqual(rc, 0)
-        self.assertAlmostEqual(sum(sleeps), (5 + 2) * 60, delta=1)  # +2 分鐘緩衝
-        self.assertIn("接續", adapter.calls[1][0])
+        self.assertAlmostEqual(sum(sleeps), (5 + 2) * 60, delta=1)  # +2 minute buffer
+        self.assertIn("resume", adapter.calls[1][0])
         self.assertEqual(adapter.resolve_calls, ["lite", "lite"])
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(plan01/t001): ")
@@ -598,7 +603,7 @@ class TestQuotaAndResume(EngineTestCase):
         self.commit_all()
         adapter = ScriptedAdapter([self.ai_done(path)])
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
-        self.assertIn("接續", adapter.calls[0][0])
+        self.assertIn("resume", adapter.calls[0][0])
         self.assertEqual(parse_task_file(path).status, "DONE")
 
 
@@ -620,14 +625,14 @@ class TestInterruptedTaskResume(EngineTestCase):
         interrupt = next(e for e in entries
                          if e["by"] == "scheduler"
                          and e["event"] == "interrupt"
-                         and "使用者中斷" in e["summary"])
+                         and "User interrupt" in e["summary"])
         self.assertEqual(interrupt["agent"], "claude")
         self.assertEqual(interrupt["requested_model"], "lite")
         self.assertEqual(interrupt["requested_effort"], "medium")
 
         adapter = ScriptedAdapter([self.ai_done(path)])
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
-        self.assertIn("接續", adapter.calls[0][0])
+        self.assertIn("resume", adapter.calls[0][0])
         self.assertEqual(parse_task_file(path).status, "DONE")
 
     def test_agents_error_marks_current_task_wip_and_keeps_exit_code(self):
@@ -644,7 +649,7 @@ class TestInterruptedTaskResume(EngineTestCase):
         from agents.plan import read_entries
         entries = read_entries(journal_path_for(path))
         self.assertTrue(any(e["event"] == "interrupt"
-                            and "基礎設施錯誤" in e["summary"]
+                            and "infrastructure error" in e["summary"]
                             for e in entries))
 
     def test_interrupted_self_blocked_task_is_not_overwritten(self):
@@ -721,7 +726,8 @@ class TestSchedulingAndRefusals(EngineTestCase):
                 with contextlib.redirect_stdout(out):
                     self.assertEqual(operation(), 1)
                 self.assertIn(
-                    "本專案尚未初始化 git,請先執行 git init", out.getvalue())
+                    "This project has no git repository yet; run git init first",
+                    out.getvalue())
 
         self.assertEqual(adapter.calls, [])
         self.assertFalse((nested_plan / "agents.lock").exists())
@@ -740,8 +746,8 @@ class TestSchedulingAndRefusals(EngineTestCase):
         adapter = ScriptedAdapter([fail_step, self.ai_done(p3)])
         self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
         self.assertEqual(parse_task_file(p1).status, "BLOCKED")
-        self.assertEqual(parse_task_file(p2).status, "TODO")   # 被前置擋住
-        self.assertEqual(parse_task_file(p3).status, "DONE")   # 無依賴照跑
+        self.assertEqual(parse_task_file(p2).status, "TODO")   # blocked by prerequisite
+        self.assertEqual(parse_task_file(p3).status, "DONE")   # no deps, runs anyway
 
     def test_task_flag_rejects_unmet_deps(self):
         self.write_task(1)
@@ -812,7 +818,7 @@ class TestQuotaMath(EngineTestCase):
     def test_countdown_non_tty_single_line(self):
         stream = io.StringIO()  # isatty() False
         sleeps: list[float] = []
-        engine._countdown(90, "額度重置", sleeps.append, stream=stream)
+        engine._countdown(90, "Quota reset", sleeps.append, stream=stream)
         self.assertEqual(sleeps, [90])
         self.assertEqual(stream.getvalue().count("\n"), 1)
         self.assertNotIn("\r", stream.getvalue())
@@ -824,7 +830,7 @@ class TestQuotaMath(EngineTestCase):
 
         stream = Tty()
         sleeps: list[float] = []
-        engine._countdown(3, "額度重置", sleeps.append, stream=stream)
+        engine._countdown(3, "Quota reset", sleeps.append, stream=stream)
         out = stream.getvalue()
         self.assertEqual(sum(sleeps), 3)
         self.assertGreaterEqual(out.count("\r"), 3)
@@ -848,11 +854,11 @@ class TestQueries(EngineTestCase):
     def test_check_passes_on_valid_setup(self):
         self.write_task(1)
         cfg = self.build()
-        self.commit_all()  # claude command = python,--version 必然可執行
+        self.commit_all()  # claude command = python, so --version is always runnable
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.check(cfg), 0)
-        self.assertIn("結果:通過", out.getvalue())
+        self.assertIn("Result: passed", out.getvalue())
 
     def test_check_fails_on_dependency_cycle(self):
         self.write_task(1, deps=("t002",))
@@ -873,7 +879,7 @@ class TestQueries(EngineTestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.check(cfg), 1)
-        self.assertIn("資料夾依賴:FAIL", out.getvalue())
+        self.assertIn("Folder dependencies: FAIL", out.getvalue())
         self.assertIn("unknown keys", out.getvalue())
 
     def test_report_lists_checkpoints_and_blocked_summary(self):
@@ -894,9 +900,9 @@ class TestQueries(EngineTestCase):
         text = engine.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("t001  DONE", text)
         self.assertIn("t002  BLOCKED", text)
-        self.assertIn("最後日誌(scheduler)", text)
-        self.assertIn("[", text)  # DONE 任務附檢查點 hash
-        # _report.md 已寫出,但不進版控
+        self.assertIn("last journal (scheduler)", text)
+        self.assertIn("[", text)  # DONE task carries a checkpoint hash
+        # _report.md written out, but not version-controlled
         self.assertTrue((cfg.tasks_dir / "_report.md").is_file())
         self.assertNotIn("_report.md", self._git_execution("ls-files"))
 
@@ -922,8 +928,8 @@ class TestQueries(EngineTestCase):
 
         other_t1 = checkpoint("auto(plan010/t001): 其他一")
         other_t3 = checkpoint("auto(plan010/t003): 其他三")
-        legacy_t3 = checkpoint("auto(t003): 舊格式歸屬不明")
-        wrong_id = checkpoint("auto(plan01/t0010): 任務 id 僅為前綴")
+        legacy_t3 = checkpoint("auto(t003): legacy format, ownership unclear")
+        wrong_id = checkpoint("auto(plan01/t0010): task id is only a prefix")
         current_t1 = checkpoint("auto(plan01/t001): 目前一")
         current_t3 = checkpoint("auto(plan01/t003): 目前三")
 
@@ -941,7 +947,7 @@ class TestQueries(EngineTestCase):
         self.assertIn(f"t003  DONE     其他三  [{other_t3}]", other)
         self.assertNotIn(current_t1, other)
         self.assertNotIn(current_t3, other)
-        self.assertIn("進度:DONE 2 / BLOCKED 0 / WIP 0 / TODO 0 / SKIP 0(共 2)",
+        self.assertIn("Progress: DONE 2 / BLOCKED 0 / WIP 0 / TODO 0 / SKIP 0 (2 total)",
                       current)
 
     def test_report_reads_legacy_ai_entry_without_identity_fields(self):
@@ -953,7 +959,7 @@ class TestQueries(EngineTestCase):
         cfg = self.build()
         from agents.plan import Plan
         text = engine.render_report(cfg, Plan.parse(cfg.tasks_dir))
-        self.assertIn("最後日誌(ai):舊日誌仍可讀", text)
+        self.assertIn("last journal (ai): 舊日誌仍可讀", text)
 
 
 if __name__ == "__main__":
