@@ -229,6 +229,47 @@ provably integrated; `assent clean A` refuses and explains why. After every
 dependent is accepted and provably integrated and clean, clean upstream and
 then dependent with `assent clean`; never manually delete worktrees or branches.
 
+### Interactive conflict skipping in `verify --batch`
+
+A conflict-free `assent verify --batch` stays fully unattended. Building the
+batch candidate is where a source conflict is discovered, and it is never
+treated as a verification failure: every queued folder's merge is still
+attempted, so one folder conflicting does not stop a later, independent
+folder from being tried too. When one or more folders conflict, `verify
+--batch` reports every conflicting folder with its conflicting path(s),
+reports every folder queued `after` a conflicting one as excluded with it
+(transitively, rather than verified without the upstream it depends on), and
+then asks a single `[Y/n]` question offering to skip that whole excluded set
+and verify only the remaining, still-mergeable folders.
+
+- **Yes** (an empty answer or `y`/`yes`): runs one full verification over the
+  smaller subset and records only those verified folders in the batch
+  receipt; every skipped folder is left out entirely, not attempted.
+- **No, an unrecognized answer, or EOF** (a non-interactive caller with no one
+  to ask): `verify --batch` stops before running the full verifier and writes
+  no receipt, same as any other refusal.
+- **Every queued folder conflicts**: there is nothing independent left to
+  offer, so the batch refuses outright without asking.
+
+Skipping is not resolving, rebasing, accepting, or deleting anything — the
+target and every source folder, skipped or merged, are left exactly as they
+were. The conflicting folder's own source still needs a human decision
+through `assent rework` or `assent reject` before it can rejoin a batch.
+
+`assent accept --all` publishes exactly the receipt's own folders in one
+atomic ref update, then reports — in that same run — every other finished
+folder the receipt does not cover (one that finished too late to be built
+into the batch, or that the batch was built without) without verifying or
+accepting them: there is no second prompt and no same-run fallback to the
+folder-by-folder path for that leftover set. Run `assent verify --batch`
+again to build the next batch over what remains.
+
+`assent archive --all` only archives a folder that is independently eligible
+(complete, and either its source is already gone or `clean`'s own mechanical
+proof can remove it); it retains the source evidence, and skips archiving,
+for any folder whose source an unaccepted dependent still needs, the same
+upstream-first rule `clean` enforces.
+
 ## Parallel execution
 
 You can point N terminals at N different work folders, e.g. `assent run

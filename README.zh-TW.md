@@ -183,6 +183,42 @@ A 與 B 修改同一檔案也遵守同一規則。Git 能自動合併時由 exac
 dependent 都接受且可證明整合並乾淨後,再用 `assent clean` 先清 upstream、後清
 dependent;不要手動刪 worktree 或 branch。
 
+### `verify --batch` 的互動式衝突略過
+
+沒有 conflict 的 `assent verify --batch` 維持完全無人值守。建置批次候選時
+才會發現 source conflict,而這從不算作驗證失敗:每個排入佇列的資料夾仍會
+被嘗試合併,因此一個資料夾發生 conflict 不會阻止之後、彼此獨立的資料夾
+也被嘗試。一旦有一個以上資料夾 conflict,`verify --batch` 會回報每個
+conflict 資料夾及其衝突路徑,並回報每個排在某個 conflict 資料夾 `after`
+之後而被一併排除的資料夾(遞移計算,而非在缺少其宣告 upstream 的情況下
+仍驗證它),接著只問一次 `[Y/n]`:是否略過整組被排除者,改為只驗證其餘
+仍可合併的資料夾。
+
+- **是**(空白回答或 `y`/`yes`):對較小子集執行一次完整驗證,批次 receipt
+  只記錄這些已驗證的資料夾;每個被略過的資料夾完全不會被嘗試。
+- **否、無法辨識的回答,或 EOF**(無人可回答的非互動呼叫者):
+  `verify --batch` 會在執行完整驗證前停止,且不寫入 receipt,與其他任何
+  拒絕情形相同。
+- **整批全部 conflict**:已沒有獨立可提供的資料夾,批次會直接拒絕,
+  不會提問。
+
+略過不是解決、rebase、接受或刪除任何東西——target 與每個 source
+資料夾,不論被略過或已合併,都維持原樣不變。conflict 資料夾自身的
+source 仍需經過明確的人工 `assent rework` 或 `assent reject`,才能
+重新加入未來的批次。
+
+`assent accept --all` 只在一次原子 ref 更新中發佈 receipt 涵蓋的確切
+資料夾,並在同一次執行內回報 receipt 未涵蓋的其餘已完成資料夾(可能是
+太晚完成而沒被納入批次,也可能是建置批次時就沒包含它),既不驗證也不
+接受它們:不會有第二次提問,也不會有同一次執行內轉回逐資料夾路徑的
+fallback。之後可再次執行 `assent verify --batch`,對剩餘部分建置下一個
+批次。
+
+`assent archive --all` 只封存獨立符合資格的資料夾(已完成,且其 source
+已經不存在,或 `clean` 本身的機械證明可以移除它);對於任何 source 仍被
+未接受 dependent 需要的資料夾,它會保留該證據並跳過封存,與 `clean` 所
+強制的 upstream-first 規則相同。
+
 ## 平行執行
 
 可在 N 個終端各自指定不同的工作資料夾執行,例如 `assent run parallel01`、
