@@ -55,8 +55,12 @@ def _build_parser() -> argparse.ArgumentParser:
                                 metavar="{run,status,check,report,verify,clean,accept,reject,rework,archive,init,doctor}")
 
     run_p = sub.add_parser(
-        "run", help="Run the tasks in the given [FOLDER] until all are "
+        "run", help="Run one or more folders in order until all are "
                     "DONE/BLOCKED/SKIP")
+    run_p.add_argument(
+        "folders", nargs="*", metavar="FOLDER",
+        help="Work folders to run in the stated order; omit to select one "
+             "automatically")
     run_p.add_argument("--once", action="store_true",
                        help="Run only the next task, then stop")
     run_p.add_argument("--task", metavar="ID",
@@ -178,12 +182,15 @@ def _build_parser() -> argparse.ArgumentParser:
                        "adapter CLIs, temp directory); needs no existing "
                        ".assent/ project")
 
-    for p in (run_p, status_p, check_p, report_p, clean_p):
+    for p in (status_p, check_p, report_p, clean_p):
         p.add_argument(
             "folder", nargs="?", metavar="FOLDER",
-            help="The work folder; run derives it automatically if omitted, "
-                 "other commands act on all folders")
+            help="The work folder; omit to act on all folders")
         p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
+                       help=f"Config file location (default: {_DEFAULT_CONFIG})")
+    # ``run`` has its own ordered positional list and still accepts the same
+    # config option as the other plan commands.
+    run_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                        help=f"Config file location (default: {_DEFAULT_CONFIG})")
     return parser
 
@@ -273,15 +280,33 @@ def _dispatch_check_all(config_path: str, assent_dir, folders: list[str]) -> int
     return 0 if graph_ok and checks_ok else 1
 
 
+def _dispatch_run_folders(
+        config_path: str, folders: list[str], *, once: bool,
+        task_id: str | None) -> int:
+    """Run explicitly named folders in order, stopping on the first failure."""
+    for folder in folders:
+        try:
+            cfg = load_config(config_path, folder)
+        except AssentError as e:
+            print(f"Config error: {e}")
+            return 1
+        result = engine.run(cfg, once=once, task_id=task_id)
+        if result != 0:
+            return result
+    return 0
+
+
 def _dispatch(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
     if args.command == "run":
-        if args.all_folders and args.folder is not None:
-            parser.error("run's --all and FOLDER cannot be used together")
+        if len(args.folders) != len(set(args.folders)):
+            parser.error("run does not allow duplicate FOLDER names")
         if args.all_folders and (args.once or args.task is not None):
             parser.error("run's --all cannot be used with --once or --task")
+        if len(args.folders) > 1 and (args.once or args.task is not None):
+            parser.error("run's --once and --task each require at most one FOLDER")
         if not args.all_folders and args.jobs is not None:
             parser.error("run's --jobs can only be used with --all")
 
@@ -322,8 +347,16 @@ def _dispatch(argv: list[str]) -> int:
         print(f"Config error: {e}")
         return 1
 
-    if args.command == "run" and args.all_folders:
-        return run_all(args.config, assent_dir, args.jobs or 1)
+    if args.command == "run":
+        if args.folders:
+            result = _dispatch_run_folders(
+                args.config, args.folders, once=args.once, task_id=args.task)
+            if result != 0:
+                return result
+        if args.all_folders:
+            return run_all(args.config, assent_dir, args.jobs or 1)
+        if args.folders:
+            return 0
     if args.command == "accept":
         if args.all_folders:
             return accept_all(args.config, assent_dir)
@@ -386,12 +419,12 @@ def _dispatch(argv: list[str]) -> int:
                 print(f"Config error: {e}")
                 return 1
         return clean_folders(configs)
-    if args.folder is None:
-        if args.command == "run":
-            folder = _select_run_folder(args.config, folders)
-            if folder is None:
-                return 1
-        elif args.command == "check":
+    if args.command == "run":
+        folder = _select_run_folder(args.config, folders)
+        if folder is None:
+            return 1
+    elif args.folder is None:
+        if args.command == "check":
             return _dispatch_check_all(args.config, assent_dir, folders)
         else:
             return _dispatch_all(args.command, args.config, folders)
@@ -495,13 +528,20 @@ def _start_stdin_stop_watcher() -> threading.Thread | None:
 
 def main(argv: list[str] | None = None) -> int:
     _install_break_handler()
-    _start_stdin_stop_watcher()
+    actual_argv = list(sys.argv[1:] if argv is None else argv)
+    # The stop channel belongs to a real scheduler-spawned ``run`` process.
+    # ``main(argv)`` is also the in-process CLI entry point used by tests and
+    # library callers; starting a watcher there would let the caller's closed
+    # stdin interrupt unrelated dispatch.  Help should likewise remain a
+    # normal parser operation even when it inherits the scheduler environment.
+    if (argv is None and actual_argv and actual_argv[0] == "run"
+            and "--help" not in actual_argv and "-h" not in actual_argv):
+        _start_stdin_stop_watcher()
     # On Windows, stdout/stderr default to the system code page when
     # redirected to a pipe/file, which mangles non-ASCII output.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
-    actual_argv = list(sys.argv[1:] if argv is None else argv)
     with terminal_logging(actual_argv):
         return _dispatch(actual_argv)
 

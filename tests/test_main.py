@@ -94,11 +94,14 @@ class TestDispatch(MainTestCase):
             ["run", "--config", str(self.root / "nope" / "assent.toml")])
         self.assertEqual(code, 1)
 
-    def test_run_all_and_folder_are_mutually_exclusive(self):
-        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
-                io.StringIO()):
-            main(["run", "work", "--all"])
-        self.assertEqual(ctx.exception.code, 2)
+    def test_run_all_accepts_an_explicit_prefix(self):
+        config = self.write_config()
+        with patch("assent.__main__.engine.run", return_value=0), patch(
+                "assent.__main__.run_all", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["run", "work", "--all", "--config", str(config)])
+        self.assertEqual(code, 0)
+        mocked.assert_called_once()
 
     def test_run_jobs_requires_all_and_positive_number(self):
         for argv in (["run", "--jobs", "2"],
@@ -114,6 +117,60 @@ class TestDispatch(MainTestCase):
             code, _ = self.run_main(["run", "--all", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[2], 1)
+
+    def test_run_named_folders_dispatch_in_given_order(self):
+        config = self.write_config()
+        with patch("assent.__main__.engine.run", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["run", "first", "second", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [call.args[0].tasks_name for call in mocked.call_args_list],
+            ["first", "second"])
+
+    def test_run_named_folders_stops_after_first_failure(self):
+        config = self.write_config()
+        with patch("assent.__main__.engine.run", side_effect=[1, 0]) as mocked:
+            code, _ = self.run_main(
+                ["run", "first", "second", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [call.args[0].tasks_name for call in mocked.call_args_list],
+            ["first"])
+
+    def test_run_named_folders_with_all_runs_remainder_once(self):
+        config = self.write_config()
+        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
+                patch("assent.__main__.run_all", return_value=0) as all_mock:
+            code, _ = self.run_main([
+                "run", "first", "second", "--all", "--jobs", "3",
+                "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [call.args[0].tasks_name for call in run_mock.call_args_list],
+            ["first", "second"])
+        all_mock.assert_called_once_with(str(config), config.parent.resolve(), 3)
+
+    def test_run_named_folders_rejects_duplicates(self):
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
+                io.StringIO()):
+            main(["run", "first", "first"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_run_named_folders_rejects_single_folder_options(self):
+        cases = (
+            ["run", "first", "second", "--once"],
+            ["run", "first", "second", "--task", "t001"],
+            ["run", "first", "--jobs", "2"],
+            ["run", "first", "second", "--jobs", "2"],
+            ["run", "first", "--all", "--once"],
+            ["run", "first", "--all", "--task", "t001"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv), self.assertRaises(
+                    SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+                main(argv)
+            self.assertEqual(ctx.exception.code, 2)
 
     def test_all_plan_commands_accept_folder_override(self):
         config = self.write_config()
