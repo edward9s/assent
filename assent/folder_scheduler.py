@@ -183,7 +183,7 @@ def _blocking_chains(
 
 def _print_stuck(graph, plans: dict[str, Plan], archived: set[str]) -> None:
     """List every unfinished folder and why it cannot be unlocked."""
-    print("Cannot continue: the remaining work folders are all unlockable "
+    print("Cannot continue: no remaining work folder is runnable "
           "because of a BLOCKED task:")
     for folder in graph:
         if _is_complete(plans[folder]):
