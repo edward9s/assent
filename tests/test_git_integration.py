@@ -9,20 +9,21 @@ from unittest import mock
 from assent import AssentError
 from assent import gitops
 from assent.gitops import (
-    AcceptStatus,
     accept_commit_message,
     branch_tip,
     build_accept_trailers,
+    commit_parents,
     commit_of,
-    find_accept_evidence,
     folder_branches,
     folder_worktree,
     is_ancestor,
     main_worktree,
-    parse_accept_evidence,
+    merge_no_ff,
+    object_type,
     require_current_branch,
     temporary_integration_worktree,
     temporary_source_worktree,
+    tree_of,
     unique_folder_branch,
     working_tree_status,
 )
@@ -73,10 +74,6 @@ class GitRepositoryCase(unittest.TestCase):
         tip = commit_of(self.root, "HEAD")
         _git(self.root, "checkout", "trunk")
         return tip
-
-    def _merge_with_message(self, tip: str, message: str) -> None:
-        _git(self.root, "merge", "--no-ff", "-m", message, tip)
-
 
 class TestRepositoryFacts(GitRepositoryCase):
     def test_main_worktree_from_main_and_linked_worktree(self) -> None:
@@ -141,91 +138,49 @@ class TestRepositoryFacts(GitRepositoryCase):
             is_ancestor(self.root, "missing-commit", "HEAD")
 
 
-class TestAcceptEvidence(GitRepositoryCase):
-    def test_build_and_parse_evidence(self) -> None:
-        text = build_accept_trailers("plan01", "plan01/run", "a" * 40)
-        evidence = parse_accept_evidence(f"accept plan01\n\n{text}\n")
-        self.assertEqual(evidence.folder, "plan01")
-        self.assertEqual(evidence.source_branch, "plan01/run")
-        self.assertEqual(evidence.source_tip, "a" * 40)
+class TestPassiveAcceptMetadata(GitRepositoryCase):
+    def test_builder_emits_readable_passive_metadata_for_both_object_id_sizes(self) -> None:
+        text = build_accept_trailers(
+            "plan01", "plan01/run", "a" * 40, "b" * 64, "c" * 64)
+        self.assertEqual(text.splitlines(), [
+            "Assent-Folder: plan01",
+            "Assent-Source-Branch: plan01/run",
+            f"Assent-Source-Tip: {'a' * 40}",
+            f"Assent-Verified-Tree: {'b' * 64}",
+            f"Assent-Verifier-SHA256: {'c' * 64}",
+        ])
 
-    def test_creation_rejects_empty_controls_and_wrong_branch(self) -> None:
+    def test_builder_rejects_empty_controls_and_invalid_values(self) -> None:
+        good_values = ("plan01", "plan01/run", "a" * 40, "b" * 40, "c" * 64)
         bad_values = (
-            ("", "plan01/run", "a" * 40),
-            ("plan01\nAssent-Source-Tip: " + "b" * 40,
-             "plan01/run", "a" * 40),
-            ("plan01", "plan01/run\rmalicious", "a" * 40),
-            ("plan01", "other/run", "a" * 40),
-            ("plan01", "plan01/run", "short"),
+            ("", *good_values[1:]),
+            ("plan01\nAssent-Source-Tip: " + "b" * 40, *good_values[1:]),
+            ("plan01", "plan01/run\rmalicious", *good_values[2:]),
+            (*good_values[:2], "a" * 40 + "\t", *good_values[3:]),
+            (*good_values[:3], "short", good_values[4]),
+            (*good_values[:4], "short"),
+            ("plan01", "other/run", *good_values[2:]),
         )
         for values in bad_values:
             with self.subTest(values=values), self.assertRaises(AssentError):
                 build_accept_trailers(*values)
         with self.assertRaises(AssentError):
-            accept_commit_message("subject\nbody", "plan01", "plan01/run", "a" * 40)
+            accept_commit_message("subject\nbody", *good_values)
 
-    def test_parser_rejects_incomplete_duplicate_and_other_folder_branch(self) -> None:
-        incomplete = "Assent-Folder: plan01\nAssent-Source-Branch: plan01/run\n"
-        duplicate = (build_accept_trailers("plan01", "plan01/run", "a" * 40)
-                     + "\nAssent-Folder: plan01\n")
-        other = ("Assent-Folder: plan01\nAssent-Source-Branch: other/run\n"
-                 f"Assent-Source-Tip: {'a' * 40}\n")
-        self.assertIsNone(parse_accept_evidence(incomplete))
-        self.assertIsNone(parse_accept_evidence(duplicate))
-        self.assertIsNone(parse_accept_evidence(other))
-
-    def test_real_two_parent_merge_is_accepted_after_branch_deletion(self) -> None:
-        tip = self._source()
+    def test_no_ff_merge_keeps_parents_and_tree_with_passive_metadata(self) -> None:
+        source_tip = self._source()
+        source_tree = tree_of(self.root, source_tip)
         message = accept_commit_message(
-            "accept: integrate plan01", "plan01", "plan01/run", tip)
-        self._merge_with_message(tip, message)
-        _git(self.root, "branch", "-D", "plan01/run")
-        result = find_accept_evidence(self.root, "plan01")
-        self.assertEqual(result.status, AcceptStatus.ACCEPTED)
-        self.assertEqual(result.evidence.source_tip, tip)
+            "accept: integrate plan01", "plan01", "plan01/run", source_tip,
+            source_tree, "d" * 64)
 
-    def test_plain_commit_with_forged_trailers_is_uncertain(self) -> None:
-        tip = self._source()
-        (self.root / "note.txt").write_text("not a merge", encoding="utf-8")
-        _git(self.root, "add", "-A")
-        _git(self.root, "commit", "-m", accept_commit_message(
-            "document trailers", "plan01", "plan01/run", tip))
-        self.assertEqual(
-            find_accept_evidence(self.root, "plan01").status,
-            AcceptStatus.UNCERTAIN)
+        outcome = merge_no_ff(self.root, source_tip, message)
 
-    def test_wrong_second_parent_is_uncertain(self) -> None:
-        tip = self._source()
-        message = accept_commit_message(
-            "false parent", "plan01", "plan01/run", self.initial)
-        self._merge_with_message(tip, message)
-        self.assertEqual(
-            find_accept_evidence(self.root, "plan01").status,
-            AcceptStatus.UNCERTAIN)
-
-    def test_other_folder_branch_and_nonexistent_tip_are_uncertain(self) -> None:
-        tip = self._source("other/run")
-        other_message = (
-            "merge\n\nAssent-Folder: plan01\nAssent-Source-Branch: other/run\n"
-            f"Assent-Source-Tip: {tip}\n")
-        self._merge_with_message(tip, other_message)
-        self.assertEqual(
-            find_accept_evidence(self.root, "plan01").status,
-            AcceptStatus.UNCERTAIN)
-
-        _git(self.root, "reset", "--hard", self.initial)
-        (self.root / "fake.txt").write_text("fake", encoding="utf-8")
-        _git(self.root, "add", "-A")
-        _git(self.root, "commit", "-m", accept_commit_message(
-            "fake tip", "plan01", "plan01/run", "0" * 40))
-        self.assertEqual(
-            find_accept_evidence(self.root, "plan01").status,
-            AcceptStatus.UNCERTAIN)
-
-    def test_absent_when_history_has_no_folder_evidence(self) -> None:
-        self.assertEqual(
-            find_accept_evidence(self.root, "plan01").status,
-            AcceptStatus.ABSENT)
+        merge_tip = commit_of(self.root, "HEAD")
+        self.assertTrue(outcome.ok)
+        self.assertEqual(commit_parents(self.root), (self.initial, source_tip))
+        self.assertEqual(tree_of(self.root, merge_tip), source_tree)
+        self.assertEqual(object_type(self.root, merge_tip), "commit")
 
 
 class TestTemporaryWorktrees(GitRepositoryCase):
