@@ -1,11 +1,16 @@
 """Tests for loading and validating assent.toml."""
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from assent import AssentError
-from assent.config import _ADAPTER_NAMES, list_task_folders, load_config
+from assent.config import (BUILTIN_LAYER, PROJECT_LAYER, USER_LAYER,
+                           _ADAPTER_NAMES, list_task_folders, load_config,
+                           validate_config)
+from assent.user_home import ASSENT_HOME_ENV, user_assent_dir, user_config_path
 
 _MINIMAL = ""
 
@@ -16,11 +21,30 @@ class ConfigTestCase(unittest.TestCase):
         self.assent_dir = self.root / ".assent"
         self.assent_dir.mkdir()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        # The user layer is redirected into a temp directory for every test in this
+        # file: nothing here may read or write the developer's real ~/.assent.
+        self.user_home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.user_home, ignore_errors=True)
+        self.user_dir = self.user_home / ".assent"
+        self.user_dir.mkdir()
+        env = mock.patch.dict(os.environ, {ASSENT_HOME_ENV: str(self.user_dir)})
+        env.start()
+        self.addCleanup(env.stop)
 
     def write(self, text: str) -> Path:
         path = self.assent_dir / "assent.toml"
         path.write_text(text, encoding="utf-8")
         return path
+
+    def write_user(self, text: str) -> Path:
+        path = self.user_dir / "assent.toml"
+        path.write_text(text, encoding="utf-8")
+        return path.resolve()
+
+    @property
+    def project_config(self) -> Path:
+        """The project config path, which the caller supplies whether or not it exists."""
+        return self.assent_dir / "assent.toml"
 
 
 class TestLoadConfig(ConfigTestCase):
@@ -287,6 +311,193 @@ class TestLoadConfig(ConfigTestCase):
         with self.assertRaisesRegex(AssentError, "wrong type"):
             load_config(self.write(
                 "[verification]\nreceipt_refresh = true\n"), "plan01")
+
+
+class TestUserHomePath(unittest.TestCase):
+    def test_environment_override_wins_over_the_real_home(self):
+        with mock.patch.dict(os.environ, {ASSENT_HOME_ENV: "/tmp/elsewhere"}):
+            self.assertEqual(user_assent_dir(), Path("/tmp/elsewhere"))
+            self.assertEqual(user_config_path(),
+                             Path("/tmp/elsewhere") / "assent.toml")
+
+    def test_unset_or_empty_override_falls_back_to_the_canonical_home(self):
+        # Path computation only; the real home directory is never read or written.
+        for value in (None, ""):
+            with self.subTest(value=value):
+                env = dict(os.environ)
+                if value is None:
+                    env.pop(ASSENT_HOME_ENV, None)
+                else:
+                    env[ASSENT_HOME_ENV] = value
+                with mock.patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(user_assent_dir(), Path.home() / ".assent")
+                    self.assertEqual(user_config_path(),
+                                     Path.home() / ".assent" / "assent.toml")
+
+
+class TestLayeredConfig(ConfigTestCase):
+    def test_user_config_alone_loads_and_still_locates_the_project(self):
+        user = self.write_user(
+            '[adapter]\nname = "codex"\n'
+            '[adapter.codex]\ncommand = "codex.cmd"\n'
+            '[watchdog]\nstall_minutes = 7\n')
+        cfg = load_config(self.project_config, "plan01")
+        self.assertEqual(cfg.adapter_name, "codex")
+        self.assertEqual(cfg.codex_command, "codex.cmd")
+        self.assertEqual(cfg.stall_minutes, 7)
+        # the missing project file is the project locator, not an error
+        self.assertEqual(cfg.root, self.root.resolve())
+        self.assertEqual(cfg.assent_dir, self.assent_dir.resolve())
+        self.assertEqual(cfg.tasks_dir, self.assent_dir.resolve() / "plan01")
+        self.assertEqual([source.layer for source in cfg.sources],
+                         [BUILTIN_LAYER, USER_LAYER])
+        self.assertEqual([source.path for source in cfg.sources], [None, user])
+        self.assertEqual(validate_config(self.project_config),
+                         self.assent_dir.resolve())
+
+    def test_legacy_project_config_alone_still_loads(self):
+        project = self.write('[run]\nretry_per_task = 4\n')
+        cfg = load_config(project, "plan01")
+        self.assertEqual(cfg.retry_per_task, 4)
+        self.assertEqual([source.layer for source in cfg.sources],
+                         [BUILTIN_LAYER, PROJECT_LAYER])
+        self.assertEqual([source.path for source in cfg.sources],
+                         [None, project.resolve()])
+
+    def test_combined_layers_keep_user_values_and_take_project_overrides(self):
+        user = self.write_user(
+            '[watchdog]\nstall_minutes = 7\n'
+            '[run]\nretry_per_task = 3\nquota_poll_minutes = 45\n')
+        project = self.write('[run]\nretry_per_task = 5\n')
+        cfg = load_config(project, "plan01")
+        self.assertEqual(cfg.stall_minutes, 7)          # user-only key survives
+        self.assertEqual(cfg.quota_poll_minutes, 45)    # sibling key untouched
+        self.assertEqual(cfg.retry_per_task, 5)         # project override wins
+        self.assertEqual(cfg.rotation_poll_minutes, 1)  # built-in default remains
+        self.assertEqual([source.layer for source in cfg.sources],
+                         [BUILTIN_LAYER, USER_LAYER, PROJECT_LAYER])
+        self.assertEqual([source.path for source in cfg.sources],
+                         [None, user, project.resolve()])
+
+    def test_neither_layer_present_refuses_with_an_init_instruction(self):
+        with self.assertRaises(AssentError) as raised:
+            load_config(self.project_config, "plan01")
+        message = str(raised.exception)
+        self.assertIn(str(user_config_path()), message)
+        self.assertIn(str(self.project_config.resolve()), message)
+        self.assertIn("assent init", message)
+
+    def test_partial_nested_project_override_wins_only_for_its_stated_keys(self):
+        self.write_user(
+            '[adapter.claude.models]\n'
+            'prime = "user-prime"\ncore = "user-core"\nlite = "user-lite"\n'
+            '[adapter.claude.default_effort]\nprime = "slight"\ncore = "slight"\n'
+            '[adapter.claude.efforts.lite]\nheavy = "user-heavy"\nnormal = "user-normal"\n')
+        cfg = load_config(self.write(
+            '[adapter.claude.models]\ncore = "project-core"\n'
+            '[adapter.claude.default_effort]\ncore = "normal"\n'
+            '[adapter.claude.efforts.lite]\nheavy = "project-heavy"\n'), "plan01")
+        self.assertEqual(cfg.claude_models,
+                         {"prime": "user-prime", "core": "project-core",
+                          "lite": "user-lite"})
+        self.assertEqual(cfg.claude_default_effort,
+                         {"prime": "slight", "core": "normal", "lite": "normal"})
+        self.assertEqual(cfg.claude_tier_efforts,
+                         {"lite": {"heavy": "project-heavy",
+                                   "normal": "user-normal"}})
+
+    def test_arrays_replace_rather_than_concatenate(self):
+        self.write_user(
+            '[adapter]\nname = ["claude", "codex", "antigravity"]\n'
+            '[adapter.claude]\nextra_args = ["--user-a", "--user-b"]\n')
+        cfg = load_config(self.write(
+            '[adapter]\nname = ["codex"]\n'
+            '[adapter.claude]\nextra_args = ["--project-only"]\n'), "plan01")
+        self.assertEqual(cfg.adapter_names, ("codex",))
+        self.assertEqual(cfg.adapter_name, "codex")
+        self.assertEqual(cfg.claude_extra_args, ["--project-only"])
+
+    def test_malformed_user_file_fails_with_its_own_path(self):
+        user = self.write_user("[run\nretry_per_task =")
+        self.write('[run]\nretry_per_task = 2\n')
+        with self.assertRaises(AssentError) as raised:
+            load_config(self.project_config, "plan01")
+        message = str(raised.exception)
+        self.assertIn("User config file is not valid TOML", message)
+        self.assertIn(str(user), message)
+        self.assertNotIn(str(self.project_config.resolve()), message)
+
+    def test_malformed_project_file_fails_with_its_own_path(self):
+        user = self.write_user('[run]\nretry_per_task = 2\n')
+        project = self.write("[run\nretry_per_task =")
+        with self.assertRaises(AssentError) as raised:
+            load_config(project, "plan01")
+        message = str(raised.exception)
+        self.assertIn("Project config file is not valid TOML", message)
+        self.assertIn(str(project.resolve()), message)
+        self.assertNotIn(str(user), message)
+
+    def test_unknown_top_level_key_names_the_layer_that_states_it(self):
+        user = self.write_user("[plann]\nx = 1\n")
+        self.write(_MINIMAL)
+        with self.assertRaises(AssentError) as raised:
+            load_config(self.project_config, "plan01")
+        self.assertIn("User config file", str(raised.exception))
+        self.assertIn(str(user), str(raised.exception))
+
+        self.write_user(_MINIMAL)
+        project = self.write("[plann]\nx = 1\n")
+        with self.assertRaises(AssentError) as raised:
+            load_config(project, "plan01")
+        self.assertIn("Project config file", str(raised.exception))
+        self.assertIn(str(project.resolve()), str(raised.exception))
+
+    def test_incompatible_structures_across_layers_name_both_files(self):
+        user = self.write_user('[adapter]\nname = "claude"\n')
+        project = self.write('[adapter.name]\nprime = "claude"\n')
+        with self.assertRaisesRegex(AssentError, r"adapter\.name.*incompatible"):
+            load_config(project, "plan01")
+        with self.assertRaises(AssentError) as raised:
+            load_config(project, "plan01")
+        self.assertIn(str(user), str(raised.exception))
+        self.assertIn(str(project.resolve()), str(raised.exception))
+
+    def test_provenance_names_the_layer_of_each_effective_setting(self):
+        self.write_user(
+            '[adapter]\nname = ["claude", "codex"]\n'
+            '[adapter.claude.models]\nprime = "user-prime"\ncore = "user-core"\n'
+            '[adapter.claude.default_effort]\nprime = "slight"\ncore = "slight"\n'
+            '[adapter.claude.efforts.lite]\nheavy = "user-heavy"\nnormal = "user-normal"\n')
+        cfg = load_config(self.write(
+            '[adapter.claude.models]\ncore = "project-core"\n'
+            '[adapter.claude.default_effort]\ncore = "normal"\n'
+            '[adapter.claude.efforts.lite]\nheavy = "project-heavy"\n'), "plan01")
+        expected = {
+            "adapter.name": USER_LAYER,                        # adapter selection
+            "adapter.claude.models.prime": USER_LAYER,         # model mappings
+            "adapter.claude.models.core": PROJECT_LAYER,
+            "adapter.claude.default_effort.prime": USER_LAYER,  # default efforts
+            "adapter.claude.default_effort.core": PROJECT_LAYER,
+            "adapter.claude.efforts.lite.normal": USER_LAYER,   # nested effort mappings
+            "adapter.claude.efforts.lite.heavy": PROJECT_LAYER,
+            # nothing states these, so the built-in default is the value in effect
+            "adapter.codex.command": BUILTIN_LAYER,
+            "watchdog.stall_minutes": BUILTIN_LAYER,
+        }
+        for key, layer in expected.items():
+            with self.subTest(key=key):
+                self.assertEqual(cfg.source_of(key), layer)
+
+    def test_single_layer_provenance_and_default_source_chain(self):
+        cfg = load_config(self.write(
+            '[adapter]\nname = "codex"\n'
+            '[adapter.codex.models]\nprime = "project-prime"\n'), "plan01")
+        self.assertEqual(cfg.source_of("adapter.name"), PROJECT_LAYER)
+        self.assertEqual(cfg.source_of("adapter.codex.models.prime"), PROJECT_LAYER)
+        self.assertEqual(cfg.source_of("adapter.claude.models.prime"), BUILTIN_LAYER)
+        # a worktree copy keeps the same answer about where a setting came from
+        self.assertEqual(cfg.for_worktree(self.root).source_of("adapter.name"),
+                         PROJECT_LAYER)
 
 
 class TestAdapterSettings(ConfigTestCase):
