@@ -1,4 +1,4 @@
-"""單一任務非破壞性重開與下游相依連動測試。"""
+"""Tests for non-destructive reopen of a single task and its downstream-dependency cascade."""
 import contextlib
 import io
 import shutil
@@ -23,7 +23,7 @@ def _git(root: Path, *args: str) -> str:
 
 
 class TestRework(unittest.TestCase):
-    """以真實暫存 repo 驗證重開操作不破壞任何 Git 成果。"""
+    """Verify with a real temporary repo that reopening destroys no Git output."""
 
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp())
@@ -73,7 +73,7 @@ class TestRework(unittest.TestCase):
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.startswith("status"):
                 return line.split('"')[1]
-        raise AssertionError(f"{path} 沒有 status 行")
+        raise AssertionError(f"{path} has no status line")
 
     def _run(self, task_id: str = "t001", **kwargs) -> tuple[int, str]:
         output = io.StringIO()
@@ -110,9 +110,9 @@ class TestRework(unittest.TestCase):
                     self.tasks_dir / "t001_task.r.toml")[-1]
                 self.assertEqual(entry["by"], "scheduler")
                 self.assertEqual(entry["event"], "rework_requested")
-                self.assertIn(f"原狀態: {status}", entry["detail"])
+                self.assertIn(f"original status: {status}", entry["detail"])
                 self.assertIn(f"HEAD: {head}", entry["detail"])
-                self.assertIn("reason: 人工要求重做", entry["detail"])
+                self.assertIn("reason: manual rework requested", entry["detail"])
 
     def test_exact_id_and_todo_are_rejected_without_mutation(self) -> None:
         task = self._write_task(1, "TODO")
@@ -124,8 +124,8 @@ class TestRework(unittest.TestCase):
         self.assertEqual(todo_code, 1)
         self.assertEqual(self._status(task), "TODO")
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
-        self.assertIn("找不到精確任務 id:T001", missing_output)
-        self.assertIn("無須重開", todo_output)
+        self.assertIn("exact task id not found: T001", missing_output)
+        self.assertIn("no rework needed", todo_output)
 
     def test_success_refreshes_report_with_target_and_cascade_statuses(self) -> None:
         target = self._write_task(1, "DONE")
@@ -153,7 +153,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(self._status(task), "TODO")
         self.assertEqual(report.read_text(encoding="utf-8"), "舊報告\n")
-        self.assertIn("任務已重開，但報告更新失敗", output)
+        self.assertIn("task reopened, but report update failed", output)
 
     def test_failed_rework_does_not_generate_new_report(self) -> None:
         self._write_task(1, "TODO")
@@ -201,8 +201,8 @@ class TestRework(unittest.TestCase):
             entries = read_entries(
                 self.tasks_dir / f"t{number:03d}_task.r.toml")
             self.assertEqual(len(entries), 1)
-            self.assertIn(f"原狀態: {original}", entries[0]["detail"])
-            self.assertIn("cascade 範圍: t002, t003, t004, t005, t006",
+            self.assertIn(f"original status: {original}", entries[0]["detail"])
+            self.assertIn("cascade scope: t002, t003, t004, t005, t006",
                           entries[0]["detail"])
             self.assertIn("reason: 規格需要重做", entries[0]["detail"])
         self.assertFalse((self.tasks_dir / "t005_task.r.toml").exists())
@@ -224,7 +224,7 @@ class TestRework(unittest.TestCase):
         self.assertTrue((worktree / "未提交成果.txt").is_file())
         self.assertEqual(_git(worktree, "branch", "--show-current"), branch)
         self.assertIn(prior, _git(worktree, "rev-list", "HEAD"))
-        self.assertIn("人工 rework 前封存",
+        self.assertIn("manual rework pre-archive",
                       _git(worktree, "log", "-1", "--pretty=%s"))
         entry = read_entries(task.with_name("t001_task.r.toml"))[-1]
         self.assertIn(f"HEAD: {current}", entry["detail"])
@@ -239,7 +239,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(self._status(task), "TODO")
         self.assertFalse(self.container.exists())
         self.assertEqual(_git(self.root, "rev-parse", "HEAD"), main_head)
-        self.assertIn("只重開管理狀態", output)
+        self.assertIn("only reopening management state", output)
 
     def test_fake_worktree_and_wrong_branch_fail_closed(self) -> None:
         task = self._write_task(1, "DONE")
@@ -251,7 +251,7 @@ class TestRework(unittest.TestCase):
 
         self.assertEqual(fake_code, 1)
         self.assertEqual(self._status(task), "DONE")
-        self.assertIn("不是本 repo 的有效 worktree", fake_output)
+        self.assertIn("is not a valid worktree of this repo", fake_output)
         shutil.rmtree(fake)
         worktree, _ = self._worktree("other/")
 
@@ -260,7 +260,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(branch_code, 1)
         self.assertEqual(self._status(task), "DONE")
         self.assertTrue(worktree.exists())
-        self.assertIn("非本資料夾分支", branch_output)
+        self.assertIn("on a branch outside this folder", branch_output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
 
     def test_checkpoint_failure_does_not_touch_status_or_journal(self) -> None:
@@ -292,7 +292,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(bad_journal_code, 1)
         self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
         self.assertEqual(self._status(task), "DONE")
-        self.assertIn("管理面預檢失敗", bad_journal_output)
+        self.assertIn("management-plane precheck failed", bad_journal_output)
         journal.unlink()
         with task.open("a", encoding="utf-8") as stream:
             stream.write('unknown = "錯誤"\n')
@@ -302,7 +302,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(bad_task_code, 1)
         self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
         self.assertTrue(dirty.is_file())
-        self.assertIn("任務檔無法解析", bad_task_output)
+        self.assertIn("task files could not be parsed", bad_task_output)
 
     def test_busy_and_missing_lock_fail_closed(self) -> None:
         task = self._write_task(1, "DONE")
@@ -315,7 +315,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(busy_code, 1)
         self.assertEqual(missing_code, 1)
         self.assertEqual(self._status(task), "DONE")
-        self.assertIn("run 進行中", busy_output)
+        self.assertIn("a run is in progress", busy_output)
         self.assertIn("has no existing agents.lock", missing_output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
 
@@ -406,12 +406,12 @@ class TestRework(unittest.TestCase):
         self.assertIn(original, _git(worktree, "rev-list", "HEAD"))
         self.assertEqual(
             _git(worktree, "log", "-1", "--pretty=%s"),
-            "rework(plan01/t001): 撤銷 task 成果")
+            "rework(plan01/t001): revert task output")
         entry = read_entries(task.with_name("t001_task.r.toml"))[-1]
-        self.assertIn(f"操作前 HEAD: {original}", entry["detail"])
-        self.assertIn(f"反向 checkpoint: {checkpoint}", entry["detail"])
-        self.assertIn(f"被撤銷 hashes: {original}", entry["detail"])
-        self.assertIn("反向 cascade 集合: 未啟用", entry["detail"])
+        self.assertIn(f"HEAD before operation: {original}", entry["detail"])
+        self.assertIn(f"revert checkpoint: {checkpoint}", entry["detail"])
+        self.assertIn(f"reverted hashes: {original}", entry["detail"])
+        self.assertIn("reverted cascade set: disabled", entry["detail"])
         self.assertIn(f"  - {original}", output)
 
     def test_revert_code_reverses_multiple_tasks_newest_first(self) -> None:
@@ -439,9 +439,9 @@ class TestRework(unittest.TestCase):
         self.assertFalse(second.exists())
         entry = read_entries(target.with_name("t001_task.r.toml"))[-1]
         self.assertIn(
-            f"被撤銷 hashes: {newest}, {middle}, {oldest}",
+            f"reverted hashes: {newest}, {middle}, {oldest}",
             entry["detail"])
-        self.assertIn("反向 cascade 集合: t001, t002", entry["detail"])
+        self.assertIn("reverted cascade set: t001, t002", entry["detail"])
 
     def test_revert_code_rejects_dirty_missing_and_bad_branches(self) -> None:
         task = self._write_task(1, "DONE")
@@ -454,9 +454,9 @@ class TestRework(unittest.TestCase):
 
         self.assertEqual((missing_code, detached_code, wrong_code), (1, 1, 1))
         self.assertEqual(self._status(task), "DONE")
-        self.assertIn("worktree 不存在", missing_output)
+        self.assertIn("worktree does not exist", missing_output)
         self.assertIn("detached HEAD", detached_output)
-        self.assertIn("非本資料夾分支", wrong_output)
+        self.assertIn("on a branch outside this folder", wrong_output)
         self.assertFalse(task.with_name("t001_task.r.toml").exists())
 
     def test_revert_code_dirty_is_rejected_without_checkpoint(self) -> None:
@@ -494,8 +494,10 @@ class TestRework(unittest.TestCase):
         gap_code, gap_output = self._run(revert_code=True)
 
         self.assertEqual((none_code, gap_code), (1, 1))
-        self.assertIn("沒有可自動撤銷的程式碼檢查點", none_output)
-        self.assertIn("未形成可安全撤銷的連續尾段", gap_output)
+        self.assertIn("no code checkpoint available for automatic reversion",
+                      none_output)
+        self.assertIn("does not form a safely revertible continuous tail",
+                      gap_output)
         self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
         self.assertEqual(self._status(task), "DONE")
         self.assertFalse(task.with_name("t001_task.r.toml").exists())
@@ -516,8 +518,10 @@ class TestRework(unittest.TestCase):
         legacy_code, legacy_output = self._run(revert_code=True)
 
         self.assertEqual((other_code, legacy_code), (1, 1))
-        self.assertIn("未形成可安全撤銷的連續尾段", other_output)
-        self.assertIn("未形成可安全撤銷的連續尾段", legacy_output)
+        self.assertIn("does not form a safely revertible continuous tail",
+                      other_output)
+        self.assertIn("does not form a safely revertible continuous tail",
+                      legacy_output)
         self.assertNotEqual(other_head, legacy_head)
         self.assertEqual(_git(worktree, "rev-parse", "HEAD"), legacy_head)
         self.assertEqual(self._status(task), "DONE")
@@ -536,7 +540,7 @@ class TestRework(unittest.TestCase):
         code, output = self._run(revert_code=True)
 
         self.assertEqual(code, 1)
-        self.assertIn("請明示 cascade:t002", output)
+        self.assertIn("specify cascade: t002", output)
         self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
         self.assertEqual(self._status(target), "DONE")
         self.assertEqual(self._status(downstream), "DONE")
@@ -554,7 +558,8 @@ class TestRework(unittest.TestCase):
         second_code, output = self._run(revert_code=True)
 
         self.assertEqual((first_code, second_code), (0, 1))
-        self.assertIn("沒有可自動撤銷的程式碼檢查點", output)
+        self.assertIn("no code checkpoint available for automatic reversion",
+                      output)
         self.assertEqual(_git(worktree, "rev-parse", "HEAD"), before)
         self.assertEqual(self._status(task), "DONE")
 
@@ -603,7 +608,7 @@ class TestRework(unittest.TestCase):
             code, output = self._run(revert_code=True)
 
         self.assertEqual(code, 1)
-        self.assertIn("已中止並還原", output)
+        self.assertIn("aborted and restored", output)
         self.assertEqual(_git(worktree, "rev-parse", "HEAD"), original)
         self.assertEqual(_git(worktree, "status", "--porcelain"), "")
         self.assertEqual(
@@ -626,8 +631,8 @@ class TestRework(unittest.TestCase):
             code, output = self._run(revert_code=True)
 
         self.assertEqual(code, 1)
-        self.assertIn("git revert --abort 亦失敗", output)
-        self.assertIn(f"必須人工處理:{worktree}", output)
+        self.assertIn("git revert --abort also failed", output)
+        self.assertIn(f"manual intervention required: {worktree}", output)
         self.assertEqual(self._status(task), "DONE")
         self.assertFalse(task.with_name("t001_task.r.toml").exists())
 
@@ -654,10 +659,10 @@ class TestRework(unittest.TestCase):
         entries = read_entries(task.with_name("t001_task.r.toml"))
         self.assertEqual(len(entries), 1)
         self.assertIn(
-            f"反向 checkpoint: {revert_checkpoint}", entries[0]["detail"])
+            f"revert checkpoint: {revert_checkpoint}", entries[0]["detail"])
         report = (self.tasks_dir / "_report.md").read_text(encoding="utf-8")
         self.assertIn("TODO", report)
-        self.assertIn("續作未完成的反向 checkpoint", second_output)
+        self.assertIn("resuming an incomplete revert checkpoint", second_output)
 
     def test_revert_journal_persisted_before_error_finishes_report(self) -> None:
         task = self._write_task(1, "DONE")
@@ -685,11 +690,11 @@ class TestRework(unittest.TestCase):
         entries = read_entries(task.with_name("t001_task.r.toml"))
         self.assertEqual(len(entries), 1)
         self.assertIn(
-            f"反向 checkpoint: {revert_checkpoint}", entries[0]["detail"])
+            f"revert checkpoint: {revert_checkpoint}", entries[0]["detail"])
         report = (self.tasks_dir / "_report.md").read_text(encoding="utf-8")
         self.assertIn("TODO", report)
-        self.assertIn("管理資料已完整落盤", first_output)
-        self.assertIn("繼續更新報告", second_output)
+        self.assertIn("management data is fully persisted", first_output)
+        self.assertIn("continuing to update the report", second_output)
 
     def test_revert_status_interruption_resumes_cascade_without_second_revert(
             self) -> None:
@@ -728,11 +733,11 @@ class TestRework(unittest.TestCase):
                 task.name.replace(".e.toml", ".r.toml")))
             self.assertEqual(len(entries), 1)
             self.assertIn(
-                f"反向 checkpoint: {revert_checkpoint}",
+                f"revert checkpoint: {revert_checkpoint}",
                 entries[0]["detail"])
         report = (self.tasks_dir / "_report.md").read_text(encoding="utf-8")
         self.assertGreaterEqual(report.count("TODO"), 2)
-        self.assertIn("續作未完成的反向 checkpoint", second_output)
+        self.assertIn("resuming an incomplete revert checkpoint", second_output)
 
     def test_revert_code_never_runs_forbidden_git_commands(self) -> None:
         self._write_task(1, "DONE")
