@@ -75,9 +75,12 @@ pip install -e .
 ```
 # 0. cd 到目標專案根目錄(需為 git repo)
 
-# 1. 生成 .assent 骨架與 AGENTS.md
-#    (既有 AGENTS.md 只補一行 assent 橋接,其他內容不覆蓋)
-assent init
+# 1. 生成 .assent 骨架與 AGENTS.md,先選擇真正的專案測試
+#    (可互動選平行 unittest、pytest、npm test、Flutter test 或 custom argv;
+#     script 可用 --test,例如)
+assent init --test unittest
+#    custom 命令可寫成: assent init --test "custom:python -m unittest"
+#    重跑 init 不提問:保留 verify.py,刷新共同契約,補入遺漏的設定預設值
 
 # 2. 填 AGENTS.md 的專案描述/硬限制、.assent/verify.py 的實際檢查命令
 #    AGENTS.md 可自行決定是否提交;整個 .assent/ 留在主工作樹,不提交
@@ -377,9 +380,16 @@ verifier;`assent accept --all` 則依 fresh batch release,或 batch evidence 缺
 
 打包的 `.assent/verify.py` 同時檢查 candidate working tree 與 candidate `HEAD` 相對
 第一父提交的 committed delta,因此能抓到單純 `git diff --check` 看不到的已提交尾端
-空白。`assent init` 不會覆寫既有 verifier;要同步時請人工把 template 的檢查移植到
-既有檔案。verifier digest 改變會使舊 receipt stale,應在無人值守驗證時執行
-`assent verify <FOLDER>` 後再請人接受。
+空白。新的 `assent init` 會選擇真正的專案測試:平行 unittest、pytest、npm test、
+Flutter test 或 custom 命令,並把它安全地渲染成 argv。打包 template 內的所有專案
+測試範例都維持註解,只有新專案副本啟用選中的一個;測試尚不存在時,新的 verifier
+會失敗而不會從空骨架回報 `verify: OK`。
+
+重跑初始化時,`assent init` 永不覆寫既有 verifier,已有 verifier 時提供 `--test`
+會拒絕。它會用打包版本取代 `.assent/format.md` 與 `.assent/instructions.md`,並從
+打包的 `assent.toml` 補入遺漏的 active 設定,不改既有或自訂值。無效 TOML 或輸入
+會在四個受管 `.assent` 檔案改動前拒絕。verifier digest 改變會使舊 receipt stale,
+應在無人值守驗證時執行 `assent verify <FOLDER>` 後再請人接受。
 
 **自己重跑驗證**:任務的 focused `verify` 命令記錄在該任務
 `tNNN_name.e.toml` 的 `verify` 欄位,可在該工作資料夾的隔離 worktree
@@ -398,14 +408,14 @@ Python 例外與 Ctrl-C 都會清除;只有硬殺(例如 `taskkill /F`)或斷電
 殘留。assent 沒有自動回收殘留的機制;請自行執行
 `git worktree remove --force <path>` 與 `git branch -D <branch>` 清除。
 
-**平行執行測試**:打包的 `.assent/verify.py` template 提供
-`run_unittest_parallel()`,預設以註解停用;啟用後會把 `tests/test_*.py`
-底下每個模組各自丟進獨立 subprocess 平行執行,而非單一行程依序跑完整套件,
-因此總耗時約等於最慢那個模組,而非全部加總。之所以用行程隔離而非執行緒,
+**平行執行測試**:在 `assent init` 選 `unittest` 會啟用打包的
+`run_unittest_parallel()`,把 `tests/test_*.py` 底下每個模組各自丟進獨立
+subprocess 平行執行,而非單一行程依序跑完整套件。打包 template 會把這個以及
+pytest、npm、Flutter 範例都留在註解中,直到選定一個。之所以用行程隔離而非執行緒,
 是因為 unittest 模組會改動行程層級的全域狀態(`os.chdir`、`os.environ`),
 共用同一個直譯器會讓模組間互相汙染。並發數預設是 `min(模組數, CPU 數)`,
-可用 `ASSENT_VERIFY_JOBS` 覆寫。修改 `.assent/verify.py` 啟用它會改變
-verifier digest,使既有 receipt 過期一次;重跑 `assent verify <FOLDER>`
+可用 `ASSENT_VERIFY_JOBS` 覆寫。選擇命令會改變產生的 verifier digest,使既有 receipt
+過期一次;重跑 `assent verify <FOLDER>`
 即可換發。
 
 worktree 是變更隔離、衝突管理、稽核與復原邊界,不是安全 sandbox。`danger-full-access`
@@ -506,7 +516,7 @@ checkpoints 構成目前分支的連續尾段才會建立新的反向 commit,絕
 | `assent clean [FOLDER]`<br>`assent clean parallel01` | 只清理已完全併入且乾淨的 worktree 與同資料夾前綴分支;任何證明不足就跳過,不碰 `.assent/`,且沒有強制選項。省略 `FOLDER` 時作用於全部工作資料夾。 | **零** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | 人工裁決駁回:封存未提交變更後強制刪除該資料夾的 worktree 與同前綴分支(刪除前以完整 tip hash 存證),並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔保存 Git 存證。`FOLDER` 必填;run 進行中拒絕。 | **零** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "驗收不符"` | 非破壞性重開單一任務;預設保留程式碼,`--cascade` 明示連動下游。`--revert-code` 僅在 checkpoints 是連續分支尾段時建立新反向 commit。成功後更新報告,不自動執行 run。接受 `--config PATH`。 | **零** |
-| `assent init`<br>`assent init --path C:\work\my-project` | 在目標專案生成 `.assent` 骨架與 `AGENTS.md`;`--path DIR` 預設為目前目錄。它不接受 `FOLDER` 或 `--config`。 | **零** |
+| `assent init --test CHOICE`<br>`assent init --path C:\work\my-project --test pytest` | 在目標專案生成 `.assent` 骨架並精確選一個真正的專案測試:平行 unittest、pytest、npm test、Flutter test 或 custom argv。新鮮 init 省略 `--test` 時顯示編號選單;重跑不提問、保留既有 verifier、刷新 `format.md` 與 `instructions.md`,並補入遺漏的 active 設定。無效輸入/TOML 會在受管 `.assent` 檔案改動前拒絕。 | **零** |
 | `assent doctor`<br>`assent doctor` | 診斷機器環境(Python 版本、git、adapter CLIs、temp 目錄可寫性);不需要 `FOLDER` 或 `--config`,也不需要既有的 `.assent/` 專案就能執行。 | **零** |
 | `assent --version` | 印出 `assent` 加上已安裝的 distribution 版本後離開;不需要專案或子命令即可執行。 | **零** |
 
@@ -783,12 +793,14 @@ normal = "medium"
 ## 計畫格式與設定檔
 
 - 格式契約全文:[assent/templates/format.md](assent/templates/format.md)
-  (`assent init` 會複製到專案的 `.assent/format.md`)。
+  (新專案由 `assent init` 複製,成功重跑時刷新)。
 - 工作指示範本:[assent/templates/instructions.md](assent/templates/instructions.md)
-  ——assent session 行為與跨專案共通規則;專案規則留在 `AGENTS.md`。
+  ——assent session 行為與跨專案共通規則;新鮮 init 複製、成功重跑時刷新;
+  專案規則留在 `AGENTS.md`。
 - 設定檔範本:[assent/templates/assent.toml](assent/templates/assent.toml)
   ——adapter 選擇、抽象檔位(prime/core/lite)對照表、
   抽象 effort(heavy/normal/slight)的預設與 CLI 值翻譯、watchdog 與重試參數。
+  新鮮 init 複製;重跑只補遺漏的 active table/key path,保留既有及自訂值。
 
 ### 使用專案媒體檔的任務
 

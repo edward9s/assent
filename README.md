@@ -92,10 +92,13 @@ third-party dependencies — nothing else gets downloaded.
 ```
 # 0. cd into the target project root (must be a git repo)
 
-# 1. Generate the .assent skeleton and AGENTS.md
-#    (an existing AGENTS.md only gets one bridge line appended; nothing
-#    else in it is overwritten)
-assent init
+# 1. Generate the .assent skeleton and AGENTS.md, selecting the real project
+#    test interactively (or use --test in scripts, for example):
+assent init --test unittest
+#    Choices are parallel unittest, pytest, npm test, Flutter test, or a
+#    custom argv command such as: assent init --test "custom:python -m unittest"
+#    Repeat init does not prompt: it preserves verify.py, refreshes the shared
+#    format/instructions contracts, and upgrades missing config defaults.
 
 # 2. Fill in AGENTS.md's project description/hard constraints and
 #    .assent/verify.py's actual check commands
@@ -476,9 +479,20 @@ intentional sequential verify-then-accept mode.
 
 The packaged `.assent/verify.py` checks both the candidate working tree and the
 committed delta from `HEAD` to its first parent. This catches committed
-trailing whitespace that plain `git diff --check` cannot see. `assent init`
-never overwrites an existing verifier; copy the template's checks into that
-project manually when synchronizing. A verifier digest change makes old
+trailing whitespace that plain `git diff --check` cannot see. Fresh `assent init`
+asks which real project test to enable: parallel unittest, pytest, npm test,
+Flutter test, or a custom command rendered as argv. The packaged template keeps
+all of those project-test examples commented, while the new project copy
+activates exactly the selected command. A fresh verifier therefore fails when
+the selected test is absent instead of reporting `verify: OK` from an empty
+skeleton.
+
+On repeat initialization, `assent init` never overwrites an existing verifier
+and refuses `--test` when one is already present. It does replace
+`.assent/format.md` and `.assent/instructions.md` with the packaged contracts,
+and merges missing active settings from the packaged `assent.toml` without
+changing existing or custom values. Invalid TOML or input is refused before any
+of the four managed `.assent` files changes. A verifier digest change makes old
 receipts stale, so refresh them with `assent verify <FOLDER>` during unattended
 verification before asking a human to accept.
 
@@ -503,17 +517,17 @@ up. Only a hard kill (such as `taskkill /F`) or power loss can leave residue;
 assent has no automatic stale-candidate recovery. Remove residue manually with
 `git worktree remove --force <path>` and `git branch -D <branch>`.
 
-**Parallel test execution**: the packaged `.assent/verify.py` template
-provides `run_unittest_parallel()`, commented out by default, which runs each
+**Parallel test execution**: choosing `unittest` during `assent init` activates
+the packaged helper `run_unittest_parallel()`, which runs each
 `tests/test_*.py` module in its own subprocess concurrently instead of one
-process running the whole suite serially, so total wall time is roughly the
-slowest module's time rather than the sum of all of them. Process isolation
-is deliberate: unittest modules mutate process-global state (`os.chdir`,
-`os.environ`), so sharing one interpreter across modules would let them
-corrupt each other. Concurrency defaults to `min(module count, CPU count)`;
-set `ASSENT_VERIFY_JOBS` to override it. Opting in by editing
-`.assent/verify.py` changes the verifier digest, so it expires existing
-receipts once; rerun `assent verify <FOLDER>` to reissue them.
+process running the whole suite serially. The packaged template leaves this
+and the pytest, npm, and Flutter examples commented until one choice is made.
+Process isolation is deliberate: unittest modules mutate process-global state
+(`os.chdir`, `os.environ`), so sharing one interpreter across modules would let
+them corrupt each other. Concurrency defaults to `min(module count, CPU count)`;
+set `ASSENT_VERIFY_JOBS` to override it. Selecting a command changes the
+generated verifier digest, so it expires existing receipts once; rerun
+`assent verify <FOLDER>` to reissue them.
 
 A worktree is a change-isolation, conflict-management, audit, and recovery
 boundary, not a security sandbox. `danger-full-access` or `bypassPermissions`
@@ -644,7 +658,7 @@ derived from task-file facts, and Git is always enabled.
 | `assent clean [FOLDER]`<br>`assent clean parallel01` | Cleans up only worktrees and same-folder-prefix branches that are fully merged and clean; skips anything it cannot prove, never touches `.assent/`, and has no force option. Acts on all work folders when `FOLDER` is omitted. | **Zero** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | Human-adjudicated rejection: archives uncommitted changes, then force-deletes that folder's worktree and same-prefix branches (recording full tip hashes before deletion), and resets DONE/WIP/BLOCKED tasks to TODO with Git evidence kept in the r file. `FOLDER` is required; refuses while a run is in progress. | **Zero** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "review rejected"` | Non-destructively reopens a single task; keeps code by default, `--cascade` states downstream propagation explicitly. `--revert-code` creates a new reverse commit only when checkpoints form a contiguous tail. Updates the report on success, does not run automatically. Accepts `--config PATH`. | **Zero** |
-| `assent init`<br>`assent init --path C:\work\my-project` | Generates the `.assent` skeleton and `AGENTS.md` in the target project; `--path DIR` defaults to the current directory. Does not accept `FOLDER` or `--config`. | **Zero** |
+| `assent init --test CHOICE`<br>`assent init --path C:\work\my-project --test pytest` | Generates a fresh `.assent` skeleton after selecting exactly one real project test: parallel unittest, pytest, npm test, Flutter test, or custom argv. Without `--test`, fresh init shows a numbered menu. Repeat init does not prompt, preserves an existing verifier, refreshes `format.md` and `instructions.md`, and merges missing active config defaults. Invalid input/TOML refuses before managed `.assent` files change. | **Zero** |
 | `assent doctor`<br>`assent doctor` | Diagnoses the machine environment (Python version, git, adapter CLIs, temp directory writability); needs no `FOLDER` or `--config`, and runs without an existing `.assent/` project. | **Zero** |
 | `assent --version` | Prints `assent` followed by the installed distribution version and exits; works without a project or subcommand. | **Zero** |
 
@@ -952,14 +966,16 @@ needed; `assent check` will re-validate and `assent run` will retry.
 ## Plan format and config files
 
 - Full format contract: [assent/templates/format.md](assent/templates/format.md)
-  (copied into a project's `.assent/format.md` by `assent init`).
+  (copied into a new project and refreshed on successful repeat `assent init`).
 - Working-instructions template: [assent/templates/instructions.md](assent/templates/instructions.md)
-  — assent session behavior and cross-project common rules; project rules
-  stay in `AGENTS.md`.
+  — assent session behavior and cross-project common rules; copied on fresh
+  init and refreshed on successful repeat init; project rules stay in
+  `AGENTS.md`.
 - Config template: [assent/templates/assent.toml](assent/templates/assent.toml)
   — adapter selection, the abstract tier (prime/core/lite) mapping table,
   abstract effort (heavy/normal/slight) defaults and CLI-value translation,
-  watchdog, and retry parameters.
+  watchdog, and retry parameters. Fresh init copies it; repeat init adds only
+  missing active table/key paths and preserves existing and custom values.
 
 ### Tasks that use project media
 

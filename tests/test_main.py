@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -654,7 +655,7 @@ class TestInit(MainTestCase):
                        capture_output=True)
 
     def test_creates_skeleton(self):
-        code, out = self.run_main(["init"])
+        code, out = self.run_main(["init", "--test", "unittest"])
         self.assertEqual(code, 0)
         for rel in (".assent/assent.toml", ".assent/format.md",
                     ".assent/instructions.md", ".assent/verify.py",
@@ -674,40 +675,168 @@ class TestInit(MainTestCase):
             encoding="utf-8")
         self.assertNotIn("[git]", config)
         self.assertNotIn("[plan]", config)
+        verifier = (self.root / ".assent" / "verify.py").read_text(
+            encoding="utf-8")
+        self.assertIn("\nrun_unittest_parallel()\n", verifier)
+        self.assertIn("\n# run(\"pytest\")\n", verifier)
+        self.assertIn("\n# run(\"npm\", \"test\")\n", verifier)
+        self.assertIn("\n# run(\"flutter\", \"test\")\n", verifier)
+        self.assertIn("Created:", out)
+
+    def test_builtin_test_choices_activate_only_the_selected_command(self):
+        choices = {
+            "unittest": "run_unittest_parallel()",
+            "pytest": 'run("pytest")',
+            "npm": 'run("npm", "test")',
+            "flutter": 'run("flutter", "test")',
+        }
+        for choice, active in choices.items():
+            with self.subTest(choice=choice):
+                root = self.root / choice
+                root.mkdir()
+                subprocess.run(["git", "init"], cwd=root, check=True,
+                               capture_output=True)
+                self.assertEqual(run_init(root, test=choice), 0)
+                verifier = (root / ".assent" / "verify.py").read_text(
+                    encoding="utf-8")
+                self.assertIn(f"\n{active}\n", verifier)
+                for other in choices.values():
+                    if other != active:
+                        self.assertIn(f"\n# {other}\n", verifier)
+
+    def test_cli_without_test_shows_menu_and_uses_the_selected_choice(self):
+        with patch("builtins.input", return_value="2"):
+            code, output = self.run_main(["init"])
+        self.assertEqual(code, 0)
+        self.assertIn("1. Parallel unittest", output)
+        self.assertIn("5. Custom command", output)
+        verifier = (self.root / ".assent" / "verify.py").read_text(
+            encoding="utf-8")
+        self.assertIn('\nrun("pytest")\n', verifier)
+
+    def test_custom_test_choice_is_quoted_as_argv(self):
+        self.assertEqual(
+            run_init(self.root, test=["custom", "python", "-m", "unittest",
+                                      "tests/special case"]), 0)
+        verifier = (self.root / ".assent" / "verify.py").read_text(
+            encoding="utf-8")
+        self.assertIn(
+            'run("python", "-m", "unittest", "tests/special case")', verifier)
+        self.assertNotIn("os.system", verifier)
+
+    def test_invalid_selection_and_eof_leave_a_fresh_project_untouched(self):
+        invalid_out = io.StringIO()
+        with contextlib.redirect_stdout(invalid_out):
+            self.assertEqual(run_init(self.root, test="not-a-choice"), 1)
+        self.assertIn("Refused:", invalid_out.getvalue())
+        self.assertFalse((self.root / ".assent").exists())
+
+        with patch("builtins.input", side_effect=EOFError), contextlib.redirect_stdout(
+                io.StringIO()):
+            self.assertEqual(run_init(self.root, test=None), 1)
+        self.assertFalse((self.root / ".assent").exists())
+
+    def test_empty_git_project_verifier_fails_until_tests_exist(self):
+        self.assertEqual(run_init(self.root, test="unittest"), 0)
+        result = subprocess.run(
+            [sys.executable, ".assent/verify.py"], cwd=self.root,
+            capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("verify: OK", result.stdout)
 
     def test_idempotent_no_overwrite_no_duplicates(self):
-        run_init(self.root)
+        run_init(self.root, test="unittest")
         (self.root / ".assent" / "assent.toml").write_text(
-            '[run]\nretry_per_task = 7\n# custom\n', encoding="utf-8")
+            '[run]\nretry_per_task = 7\ncustom_setting = "keep"\n',
+            encoding="utf-8")
         (self.root / ".assent" / "instructions.md").write_text(
             "本機自訂指示\n", encoding="utf-8")
+        (self.root / ".assent" / "format.md").write_text(
+            "old format\n", encoding="utf-8")
+        verifier_before = (self.root / ".assent" / "verify.py").read_bytes()
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with patch("builtins.input", side_effect=AssertionError("prompted")), \
+                contextlib.redirect_stdout(out):
             self.assertEqual(run_init(self.root), 0)
-        # Does not overwrite the existing config.
-        self.assertIn("custom", (self.root / ".assent" / "assent.toml")
-                      .read_text(encoding="utf-8"))
+        config_text = (self.root / ".assent" / "assent.toml").read_text(
+            encoding="utf-8")
+        config = tomllib.loads(config_text)
+        self.assertEqual(config["run"]["retry_per_task"], 7)
+        self.assertEqual(config["run"]["custom_setting"], "keep")
+        self.assertIn("quota_poll_minutes", config["run"])
+        self.assertIn("watchdog", config)
+        self.assertEqual(tomllib.loads(config_text), tomllib.loads(
+            (self.root / ".assent" / "assent.toml").read_text(encoding="utf-8")))
+        config_after_first_upgrade = (self.root / ".assent" / "assent.toml").read_bytes()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root), 0)
+        self.assertEqual(
+            (self.root / ".assent" / "assent.toml").read_bytes(),
+            config_after_first_upgrade)
+        self.assertEqual(
+            (self.root / ".assent" / "format.md").read_text(encoding="utf-8"),
+            (_PROJECT_ROOT / "assent/templates/format.md").read_text(encoding="utf-8"))
+        self.assertEqual(
+            (self.root / ".assent" / "instructions.md").read_text(encoding="utf-8"),
+            (_PROJECT_ROOT / "assent/templates/instructions.md").read_text(encoding="utf-8"))
+        self.assertEqual(verifier_before,
+                         (self.root / ".assent" / "verify.py").read_bytes())
+        self.assertIn("Updated:", out.getvalue())
+        self.assertIn("Preserved:", out.getvalue())
         # gitignore entries are not duplicated on re-run.
         gitignore = (self.root / ".gitignore").read_text(encoding="utf-8")
         self.assertEqual(gitignore.splitlines().count(".assent/"), 1)
-        # An existing file is not overwritten, and the AGENTS.md bridge is not duplicated.
-        self.assertEqual((self.root / ".assent" / "instructions.md")
-                         .read_text(encoding="utf-8"), "本機自訂指示\n")
+        # The managed contracts refresh, while the AGENTS.md bridge is not duplicated.
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertEqual(agents_md.count("<!-- assent-instructions -->"), 1)
 
     def test_init_does_not_overwrite_existing_verifier(self):
-        run_init(self.root)
+        run_init(self.root, test="unittest")
         verifier = self.root / ".assent" / "verify.py"
         custom = "# project-specific verifier\n"
         verifier.write_text(custom, encoding="utf-8")
-        self.assertEqual(run_init(self.root), 0)
+        with patch("builtins.input", side_effect=AssertionError("prompted")):
+            self.assertEqual(run_init(self.root), 0)
         self.assertEqual(verifier.read_text(encoding="utf-8"), custom)
+
+    def test_test_option_refuses_when_verifier_already_exists(self):
+        run_init(self.root, test="unittest")
+        verifier = self.root / ".assent" / "verify.py"
+        before = {path: path.read_bytes() for path in (
+            verifier, self.root / ".assent/format.md",
+            self.root / ".assent/instructions.md",
+            self.root / ".assent/assent.toml")}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root, test="pytest"), 1)
+        self.assertIn("refusing --test", output.getvalue())
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_invalid_existing_toml_does_not_partially_upgrade_managed_files(self):
+        run_init(self.root, test="unittest")
+        managed = (
+            self.root / ".assent/verify.py",
+            self.root / ".assent/format.md",
+            self.root / ".assent/instructions.md",
+            self.root / ".assent/assent.toml",
+        )
+        before = {path: path.read_bytes() for path in managed}
+        (self.root / ".assent/assent.toml").write_text(
+            "[run\ninvalid", encoding="utf-8")
+        before[self.root / ".assent/assent.toml"] = (
+            self.root / ".assent/assent.toml").read_bytes()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root), 1)
+        self.assertIn("not valid TOML", output.getvalue())
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
 
     def test_adds_one_bridge_line_to_existing_agents_md(self):
         (self.root / "AGENTS.md").write_text(
             "# 我的專案\n\n既有規則。\n", encoding="utf-8")
-        run_init(self.root)
+        run_init(self.root, test="unittest")
         text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# 我的專案"))
         self.assertIn("既有規則。", text)
@@ -716,7 +845,7 @@ class TestInit(MainTestCase):
     def test_preserves_existing_ignore_lines_and_agents_md_ignore_choice(self):
         (self.root / ".gitignore").write_text(
             "cache/\nAGENTS.md\n", encoding="utf-8")
-        run_init(self.root)
+        run_init(self.root, test="unittest")
         lines = (self.root / ".gitignore").read_text(
             encoding="utf-8").splitlines()
         self.assertIn("cache/", lines)
@@ -733,7 +862,7 @@ class TestInit(MainTestCase):
         target.mkdir()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(run_init(target), 1)
+            self.assertEqual(run_init(target, test="unittest"), 1)
         self.assertIn("This project has no git repository yet; run git init first",
                       out.getvalue())
         self.assertFalse((target / ".assent").exists())

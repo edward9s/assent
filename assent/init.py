@@ -1,18 +1,20 @@
-"""assent init: generate the .assent skeleton and the AGENTS.md bridge notice
-in a target project.
+"""Generate and safely upgrade the managed files in a project ``.assent``.
 
-- .assent/assent.toml, instructions.md, format.md, verify.py. Work folders are
-  not pre-created: their names are decided by a planning meeting based on the
-  task at hand.
-- AGENTS.md: create the project template if it does not exist; if it already
-  exists, only append the one-line instructions bridge and leave the rest of
-  the project's content untouched.
-- .gitignore: excludes the whole .assent/; does not interfere with an existing
-  AGENTS.md version-control choice.
+Fresh projects choose one real project test before the skeleton is written.
+Repeat initialization preserves the project-specific verifier, refreshes the
+shared contracts, and adds only missing active settings from the packaged
+configuration template.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+import json
 from pathlib import Path
+import re
+import shlex
+import tomllib
+from collections import defaultdict
+from collections.abc import Sequence
 
 from assent import AssentError
 
@@ -24,63 +26,478 @@ _BRIDGE_LINE = (
     f"scheduler provides. {_BRIDGE_MARKER}"
 )
 _GITIGNORE_LINES = [".assent/"]
+_DIRECT_API_DEFAULT = object()
+
+
+@dataclass(frozen=True)
+class _TestSelection:
+    """The one project-test line activated in a generated verifier."""
+
+    label: str
+    verifier_line: str
+
+
+_BUILTIN_TESTS = {
+    "unittest": _TestSelection(
+        "parallel unittest", "run_unittest_parallel()"),
+    "pytest": _TestSelection("pytest", 'run("pytest")'),
+    "npm": _TestSelection("npm test", 'run("npm", "test")'),
+    "flutter": _TestSelection("Flutter test", 'run("flutter", "test")'),
+}
+_BUILTIN_ALIASES = {
+    "1": "unittest",
+    "parallel-unittest": "unittest",
+    "parallel unittest": "unittest",
+    "unittest-parallel": "unittest",
+    "parallel_unittest": "unittest",
+    "python-unittest": "unittest",
+    "python unittest": "unittest",
+    "2": "pytest",
+    "3": "npm",
+    "npm-test": "npm",
+    "npm test": "npm",
+    "4": "flutter",
+    "flutter-test": "flutter",
+    "flutter test": "flutter",
+}
+_CUSTOM_ALIASES = {"5", "custom", "custom-command", "custom command"}
+_MENU = (
+    ("1", "Parallel unittest (run_unittest_parallel())"),
+    ("2", "pytest (run(\"pytest\"))"),
+    ("3", "npm test (run(\"npm\", \"test\"))"),
+    ("4", "Flutter test (run(\"flutter\", \"test\"))"),
+    ("5", "Custom command (argv passed to run(...))"),
+)
 
 
 def _template(name: str) -> str:
     path = _TEMPLATES / name
     try:
         return path.read_text(encoding="utf-8")
-    except OSError as e:
+    except (OSError, UnicodeError) as e:
         raise AssentError(
             f"Cannot read built-in template {name}: {e} (broken install?)") from e
 
 
-def _create(path: Path, content: str, made: list[str], skipped: list[str]) -> None:
+def _read_file(path: Path, description: str) -> str:
+    if path.exists() and not path.is_file():
+        raise AssentError(f"{description} is not a file: {path}")
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as e:
+        raise AssentError(f"Cannot read {description} {path}: {e}") from e
+
+
+def _normalise_choice(value: str) -> str:
+    return " ".join(value.strip().casefold().replace("_", "-").split())
+
+
+def _custom_selection(command: str | Sequence[str]) -> _TestSelection:
+    """Parse a command into argv and render it without shell execution."""
+    if isinstance(command, str):
+        if not command.strip():
+            raise AssentError("custom test command is empty")
+        try:
+            argv = shlex.split(command, posix=True)
+        except ValueError as e:
+            raise AssentError(
+                f"custom test command is malformed: {e}") from e
+    else:
+        argv = list(command)
+
+    if not argv or not isinstance(argv[0], str) or not argv[0].strip():
+        raise AssentError("custom test command is empty")
+    for argument in argv:
+        if not isinstance(argument, str) or any(
+                ord(char) < 0x20 or ord(char) == 0x7F
+                for char in argument):
+            raise AssentError(
+                "custom test command contains a control character")
+
+    rendered = ", ".join(json.dumps(argument, ensure_ascii=False)
+                          for argument in argv)
+    return _TestSelection("custom command", f"run({rendered})")
+
+
+def _selection_from_values(values: Sequence[str]) -> _TestSelection:
+    if not values:
+        raise AssentError(
+            "invalid test selection; choose 1-5, unittest, pytest, npm, "
+            "flutter, or custom:<command>")
+    if not all(isinstance(value, str) for value in values):
+        raise AssentError("test selection values must be strings")
+
+    first = values[0]
+    normalised = _normalise_choice(first)
+    builtin = _BUILTIN_ALIASES.get(normalised, normalised)
+    if builtin in _BUILTIN_TESTS:
+        if len(values) != 1:
+            raise AssentError(
+                f"test selection {first!r} does not accept a command")
+        return _BUILTIN_TESTS[builtin]
+
+    if normalised in _CUSTOM_ALIASES:
+        if len(values) == 1:
+            raise AssentError(
+                "custom test selection requires a command; use "
+                "--test custom:<command>")
+        command_values = values[1:]
+        if len(command_values) == 1:
+            return _custom_selection(command_values[0])
+        return _custom_selection(command_values)
+
+    for prefix in ("custom:", "custom="):
+        if normalised.startswith(prefix):
+            command_text = first.strip()[len(prefix):]
+            if len(values) > 1:
+                command_text = " ".join((command_text, *values[1:]))
+            return _custom_selection(command_text)
+
+    # A multi-value form is a direct argv custom command.  A quoted command
+    # line is also accepted for convenience, but a lone unknown word is an
+    # invalid choice rather than silently becoming a custom test.
+    if len(values) > 1:
+        return _custom_selection(values)
+    if any(char.isspace() for char in first.strip()):
+        return _custom_selection(first)
+    raise AssentError(
+        f"invalid test selection {first!r}; choose 1-5, unittest, pytest, "
+        "npm, flutter, or custom:<command>")
+
+
+def _interactive_selection() -> _TestSelection:
+    print("Choose the project's test command before assent writes its skeleton:")
+    for number, description in _MENU:
+        print(f"  {number}. {description}")
+    try:
+        choice = input("Test choice [1-5]: ").strip()
+    except (EOFError, KeyboardInterrupt) as e:
+        raise AssentError("test selection cancelled or reached EOF") from e
+
+    if _normalise_choice(choice) in _CUSTOM_ALIASES:
+        try:
+            command = input("Custom test command: ")
+        except (EOFError, KeyboardInterrupt) as e:
+            raise AssentError("custom test command cancelled or reached EOF") from e
+        return _custom_selection(command)
+    return _selection_from_values([choice])
+
+
+def _resolve_selection(test: str | Sequence[str] | None) -> _TestSelection:
+    if test is None:
+        return _interactive_selection()
+    if isinstance(test, str):
+        return _selection_from_values([test])
+    return _selection_from_values(test)
+
+
+def _render_verifier(template: str, selection: _TestSelection) -> str:
+    """Activate exactly one commented project-test example in the template."""
+    markers = (
+        "# run_unittest_parallel()",
+        '# run("pytest")',
+        '# run("npm", "test")',
+        '# run("flutter", "test")',
+    )
+    active_markers = [marker for marker in markers if marker in template]
+    if len(active_markers) != len(markers):
+        raise AssentError(
+            "built-in verifier template is missing a project-test example")
+    marker = {
+        "parallel unittest": "# run_unittest_parallel()",
+        "pytest": '# run("pytest")',
+        "npm test": '# run("npm", "test")',
+        "Flutter test": '# run("flutter", "test")',
+    }.get(selection.label)
+    if marker is None:
+        # A custom command has no fixed marker; it replaces the Python unittest
+        # example, leaving every other packaged example commented.
+        marker = "# run_unittest_parallel()"
+    if template.count(marker) != 1:
+        raise AssentError(
+            f"built-in verifier template has an ambiguous test example: {marker}")
+    return template.replace(marker, selection.verifier_line, 1)
+
+
+def _plan_file(path: Path, content: str, description: str
+               ) -> tuple[str, str]:
+    """Return the outcome for a managed file without changing it."""
     if path.exists():
-        skipped.append(str(path))
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8", newline="\n")
-    made.append(str(path))
+        existing = _read_file(path, description)
+        if existing == content:
+            return "preserved", f"{path} (already current)"
+        return "updated", str(path)
+    return "created", str(path)
 
 
-def _merge_agents_md(root: Path, made: list[str], skipped: list[str]) -> None:
+def _split_toml_path(raw: str) -> tuple[str, ...]:
+    """Split a simple TOML dotted key/header path without a third party parser."""
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in raw.strip():
+        if quote == '"':
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quote = None
+            continue
+        if quote == "'":
+            current.append(char)
+            if char == "'":
+                quote = None
+            continue
+        if char in ('"', "'"):
+            quote = char
+            current.append(char)
+        elif char == ".":
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if quote is not None:
+        raise AssentError(f"invalid TOML key path: {raw!r}")
+    parts.append("".join(current).strip())
+
+    result: list[str] = []
+    for part in parts:
+        if not part:
+            raise AssentError(f"invalid TOML key path: {raw!r}")
+        if part[0] == part[-1] == '"':
+            try:
+                value = json.loads(part)
+            except json.JSONDecodeError as e:
+                raise AssentError(f"invalid TOML key path: {raw!r}") from e
+        elif part[0] == part[-1] == "'":
+            value = part[1:-1].replace("''", "'")
+        else:
+            value = part
+        result.append(value)
+    return tuple(result)
+
+
+def _assignment_key(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or stripped.startswith("["):
+        return None
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(stripped):
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quote = None
+        elif quote == "'":
+            if char == "'":
+                quote = None
+        elif char in ('"', "'"):
+            quote = char
+        elif char == "=":
+            lhs = stripped[:index].strip()
+            return lhs or None
+    return None
+
+
+def _template_config_entries(text: str) -> list[tuple[tuple[str, ...], str]]:
+    """List active template assignments as (table path, source line)."""
+    current: tuple[str, ...] = ()
+    entries: list[tuple[tuple[str, ...], str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("["):
+            match = re.match(r"^\[([^\[].*?)\]\s*(?:#.*)?$", stripped)
+            if not match:
+                raise AssentError(
+                    f"built-in config template has an invalid table: {line}")
+            current = _split_toml_path(match.group(1))
+            continue
+        key = _assignment_key(line)
+        if key is not None:
+            entries.append((current + _split_toml_path(key), line.strip()))
+    return entries
+
+
+def _header_path(line: str) -> tuple[str, ...] | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or stripped.startswith("[["):
+        return None
+    match = re.match(r"^\[([^\[].*?)\]\s*(?:#.*)?$", stripped)
+    if not match:
+        return None
+    return _split_toml_path(match.group(1))
+
+
+def _lookup(data: object, path: tuple[str, ...]) -> bool:
+    current = data
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return False
+        current = current[key]
+    return True
+
+
+def _format_toml_key(key: str) -> str:
+    if re.match(r"^[A-Za-z0-9_-]+$", key):
+        return key
+    return json.dumps(key, ensure_ascii=False)
+
+
+def _merge_config(existing: str, template: str) -> tuple[str, int]:
+    """Add missing active template settings while retaining existing TOML text."""
+    try:
+        existing_data = tomllib.loads(existing)
+    except tomllib.TOMLDecodeError as e:
+        raise AssentError(f"existing assent.toml is not valid TOML: {e}") from e
+    try:
+        tomllib.loads(template)
+    except tomllib.TOMLDecodeError as e:
+        raise AssentError(f"built-in assent.toml is not valid TOML: {e}") from e
+
+    template_entries = _template_config_entries(template)
+    missing: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    for full_path, source_line in template_entries:
+        if not _lookup(existing_data, full_path):
+            missing[full_path[:-1]].append(source_line)
+    if not missing:
+        return existing, 0
+
+    lines = existing.splitlines()
+    headers: list[tuple[int, tuple[str, ...]]] = []
+    for index, line in enumerate(lines):
+        path = _header_path(line)
+        if path is not None:
+            headers.append((index, path))
+    header_positions = {path: index for index, path in headers}
+
+    template_table_order: dict[tuple[str, ...], int] = {}
+    for entry_index, (full_path, _source_line) in enumerate(template_entries):
+        template_table_order.setdefault(full_path[:-1], entry_index)
+
+    insertions: dict[int, list[tuple[tuple[int, int], list[str]]]] = defaultdict(list)
+    for table, values in missing.items():
+        if table in header_positions:
+            insert_at = next(
+                (index for index, _path in headers
+                 if index > header_positions[table]),
+                len(lines),
+            )
+            order = (0, header_positions[table])
+            insertions[insert_at].append((order, values))
+            continue
+
+        descendants = [
+            index for index, path in headers
+            if len(path) > len(table) and path[:len(table)] == table
+        ]
+        insert_at = min(descendants, default=len(lines))
+        block = [
+            "[" + ".".join(_format_toml_key(key) for key in table) + "]",
+            *values,
+        ]
+        order = (1, template_table_order.get(table, len(template_entries)))
+        insertions[insert_at].append((order, block))
+
+    for index in sorted(insertions, reverse=True):
+        block: list[str] = []
+        for _order, group in sorted(insertions[index], key=lambda item: item[0]):
+            if block and block[-1] != "":
+                block.append("")
+            block.extend(group)
+        if index > 0 and lines[index - 1].strip() and block and block[0] != "":
+            block = [""] + block
+        lines[index:index] = block
+
+    merged = "\n".join(lines) + "\n"
+    try:
+        tomllib.loads(merged)
+    except tomllib.TOMLDecodeError as e:
+        raise AssentError(f"the merged assent.toml is not valid TOML: {e}") from e
+    return merged, sum(len(values) for values in missing.values())
+
+
+def _plan_agents(root: Path) -> tuple[str, str]:
     target = root / "AGENTS.md"
-    template = _template("AGENTS.md")
     if not target.exists():
-        _create(target, template, made, skipped)
-        return
-    existing = target.read_text(encoding="utf-8")
+        return "created", str(target)
+    existing = _read_file(target, "AGENTS.md")
     updated = existing
     if _BRIDGE_MARKER not in updated:
         updated = updated.rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
     if updated == existing:
-        skipped.append(f"{target} (already has the instructions bridge)")
-        return
-    target.write_text(updated, encoding="utf-8", newline="\n")
-    made.append(f"{target} (updated the instructions bridge)")
+        return "preserved", f"{target} (instructions bridge already present)"
+    return "updated", str(target)
 
 
-def _merge_gitignore(root: Path, made: list[str]) -> None:
+def _agents_content(root: Path) -> str:
+    target = root / "AGENTS.md"
+    if not target.exists():
+        return _template("AGENTS.md")
+    existing = _read_file(target, "AGENTS.md")
+    if _BRIDGE_MARKER in existing:
+        return existing
+    return existing.rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
+
+
+def _plan_gitignore(root: Path) -> tuple[str, str]:
     target = root / ".gitignore"
-    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    if target.exists() and not target.is_file():
+        raise AssentError(f".gitignore is not a file: {target}")
+    existing = _read_file(target, ".gitignore") if target.exists() else ""
     lines = existing.splitlines()
     have = {line.strip() for line in lines}
     missing = [line for line in _GITIGNORE_LINES if line not in have]
     if not missing:
-        return
-    if missing:
-        if lines and lines[-1]:
-            lines.append("")
-        if lines:
-            lines.append("# assent management surface and runtime output")
-        lines.extend(missing)
-    target.write_text("\n".join(lines) + ("\n" if lines else ""),
-                      encoding="utf-8", newline="\n")
-    made.append(f"{target} ({len(missing)} line(s) added)")
+        return "preserved", f"{target} (assent entry already present)"
+    updated = list(lines)
+    if updated and updated[-1]:
+        updated.append("")
+    if updated:
+        updated.append("# assent management surface and runtime output")
+    updated.extend(missing)
+    return "updated" if target.exists() else "created", str(target)
 
 
-def init(path: str | Path = ".") -> int:
+def _gitignore_content(root: Path) -> str:
+    target = root / ".gitignore"
+    existing = _read_file(target, ".gitignore") if target.exists() else ""
+    lines = existing.splitlines()
+    have = {line.strip() for line in lines}
+    missing = [line for line in _GITIGNORE_LINES if line not in have]
+    if not missing:
+        return existing
+    if lines and lines[-1]:
+        lines.append("")
+    if lines:
+        lines.append("# assent management surface and runtime output")
+    lines.extend(missing)
+    return "\n".join(lines) + "\n"
+
+
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(content, encoding="utf-8", newline="\n")
+    except OSError as e:
+        raise AssentError(f"Cannot write {path}: {e}") from e
+
+
+def init(path: str | Path = ".",
+         test: str | Sequence[str] | None | object = _DIRECT_API_DEFAULT) -> int:
+    """Initialize or upgrade a Git project, returning a CLI-style exit code."""
+    # The command-line dispatcher passes ``None`` when --test is omitted and
+    # therefore gets the required interactive menu.  Keep direct library calls
+    # made by older integrations deterministic instead of unexpectedly reading
+    # their stdin; callers that want the menu can pass ``test=None`` explicitly.
+    direct_api_default = test is _DIRECT_API_DEFAULT
     root = Path(path).resolve()
     if not root.is_dir():
         print(f"Error: directory does not exist: {root}")
@@ -90,29 +507,81 @@ def init(path: str | Path = ".") -> int:
         return 1
 
     assent_dir = root / ".assent"
-    made: list[str] = []
-    skipped: list[str] = []
+    verifier = assent_dir / "verify.py"
+    try:
+        verifier_exists = verifier.exists()
+        if verifier_exists and test is not None and not direct_api_default:
+            raise AssentError(
+                "refusing --test because .assent/verify.py already exists; "
+                "repeat init preserves the existing project verifier")
 
-    _create(assent_dir / "assent.toml", _template("assent.toml"), made, skipped)
-    _create(assent_dir / "instructions.md", _template("instructions.md"), made, skipped)
-    _create(assent_dir / "format.md", _template("format.md"), made, skipped)
-    _create(assent_dir / "verify.py", _template("verify.py"), made, skipped)
-    _merge_agents_md(root, made, skipped)
-    _merge_gitignore(root, made)
+        verify_template = _template("verify.py")
+        if verifier_exists:
+            if not verifier.is_file():
+                raise AssentError(f".assent/verify.py is not a file: {verifier}")
+            verifier_plan = ("preserved", f"{verifier} (project verifier preserved)")
+            verifier_content = _read_file(verifier, ".assent/verify.py")
+        else:
+            selection = (_BUILTIN_TESTS["unittest"] if direct_api_default
+                         else _resolve_selection(test))
+            verifier_plan = ("created", f"{verifier} ({selection.label} selected)")
+            verifier_content = _render_verifier(verify_template, selection)
 
-    for item in made:
-        print(f"Created: {item}")
-    for item in skipped:
-        print(f"Skipped (already exists): {item}")
+        format_path = assent_dir / "format.md"
+        instructions_path = assent_dir / "instructions.md"
+        config_path = assent_dir / "assent.toml"
+        format_template = _template("format.md")
+        instructions_template = _template("instructions.md")
+        config_template = _template("assent.toml")
+
+        format_content = format_template
+        format_state = _plan_file(format_path, format_content, ".assent/format.md")
+        instructions_content = instructions_template
+        instructions_state = _plan_file(
+            instructions_path, instructions_content, ".assent/instructions.md")
+
+        if config_path.exists():
+            config_existing = _read_file(config_path, ".assent/assent.toml")
+            config_content, added = _merge_config(config_existing, config_template)
+            config_state = (
+                "updated", f"{config_path} (added {added} packaged setting(s))"
+            ) if added else ("preserved", f"{config_path} (settings preserved)")
+        else:
+            config_content = config_template
+            config_state = ("created", str(config_path))
+
+        agents_state = _plan_agents(root)
+        agents_content = _agents_content(root)
+        gitignore_state = _plan_gitignore(root)
+        gitignore_content = _gitignore_content(root)
+
+        # Every validation and merge above happens before the first write.  In
+        # particular, a bad selection or TOML file cannot leave half a
+        # skeleton behind.
+        plans = [
+            (verifier, verifier_content, verifier_plan),
+            (format_path, format_content, format_state),
+            (instructions_path, instructions_content, instructions_state),
+            (config_path, config_content, config_state),
+            (root / "AGENTS.md", agents_content, agents_state),
+            (root / ".gitignore", gitignore_content, gitignore_state),
+        ]
+        for target, content, (state, description) in plans:
+            if state == "preserved":
+                print(f"Preserved: {description}")
+                continue
+            _write(target, content)
+            print(f"{state.title()}: {description}")
+    except (AssentError, OSError) as e:
+        print(f"Refused: {e}")
+        return 1
 
     print()
     print("Next steps:")
-    print("  1. Fill in AGENTS.md's project description and hard constraints, "
-          "and the real check commands in .assent/verify.py")
-    print("  2. Start an AI meeting: read .assent/instructions.md and begin an "
+    print("  1. Add the selected project's tests and keep the generated "
+          ".assent/verify.py check enabled")
+    print("  2. Fill in AGENTS.md's project description and hard constraints")
+    print("  3. Start an AI meeting: read .assent/instructions.md and begin an "
           "assent planning meeting")
-    print("  3. The meeting names a work folder for the task at hand (e.g. "
-          ".assent/loginfix01/) and produces task files inside it "
-          "(format in .assent/format.md)")
     print("  4. Once assent check passes, run assent run")
     return 0

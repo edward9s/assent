@@ -47,6 +47,28 @@ class RunUnittestParallelCase(unittest.TestCase):
         self.tests_dir = self.root / "tests"
         self.tests_dir.mkdir()
 
+    def test_packaged_project_test_examples_are_all_commented(self) -> None:
+        lines = {
+            line.strip() for line in TEMPLATE.read_text(encoding="utf-8").splitlines()
+        }
+        examples = (
+            "run_unittest_parallel()",
+            'run("pytest")',
+            'run("npm", "test")',
+            'run("flutter", "test")',
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertIn(f"# {example}", lines)
+                self.assertNotIn(example, lines)
+
+    def test_no_unittest_modules_fails_instead_of_reporting_success(self) -> None:
+        self._commit("empty test fixture")
+        result = self._run()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no test_*.py modules found", result.stdout)
+        self.assertNotIn("verify: OK", result.stdout)
+
     def _write_module(self, name: str, source: str) -> None:
         (self.tests_dir / f"{name}.py").write_text(source, encoding="utf-8")
 

@@ -216,9 +216,15 @@ def _build_parser() -> argparse.ArgumentParser:
                           help=f"Config file location (default: {_DEFAULT_CONFIG})")
 
     init_p = sub.add_parser(
-        "init", help="Generate the .assent skeleton and AGENTS.md in a project")
+        "init", help="Generate or upgrade the .assent skeleton and managed project files")
     init_p.add_argument("--path", default=".", metavar="DIR",
                         help="Target project root directory (default: current directory)")
+    init_p.add_argument(
+        "--test", nargs="+", metavar="CHOICE",
+        help=("Select the project test non-interactively: 1/unittest, 2/pytest, "
+              "3/npm, 4/flutter, or 5/custom followed by an argv command; "
+              "custom:<command> also accepts one quoted command. Omit it on "
+              "fresh init for the numbered menu; repeat init does not prompt"))
 
     sub.add_parser(
         "doctor", help="Diagnose the machine environment (Python, git, "
@@ -391,7 +397,7 @@ def _dispatch(argv: list[str]) -> int:
             parser.error("archive requires FOLDER or --all")
 
     if args.command == "init":
-        return run_init(args.path)
+        return run_init(args.path, args.test)
 
     if args.command == "doctor":
         return run_doctor()
