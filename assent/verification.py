@@ -21,6 +21,7 @@ from pathlib import Path
 
 from assent import AssentError, gitops
 from assent.config import Config
+from assent.folderdeps import infer_folder_completion, parse_folder_dependencies
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 
@@ -56,6 +57,15 @@ class VerificationReceipt:
 def receipt_path(cfg: Config) -> Path:
     """Return the explicitly selected folder's derived receipt path."""
     return cfg.tasks_dir / RECEIPT_NAME
+
+
+def _invalidate_receipt(path: Path) -> None:
+    """Remove stale derived evidence before starting a replacement run."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        raise AssentError(
+            f"Unable to invalidate old verification receipt {path}: {e}") from e
 
 
 def _sha256(path: Path) -> str:
@@ -243,6 +253,45 @@ def _source_snapshot(cfg: Config, main: Path) -> tuple[str, str, Path | None]:
     return branch, gitops.branch_tip(main, branch), worktree
 
 
+def _stack_sources(cfg: Config, target_tip: str,
+                   downstream_tip: str) -> tuple[gitops.FolderSourceSnapshot, ...]:
+    """Snapshot direct upstreams and prove the downstream contains each one.
+
+    Only direct dependencies participate here.  An unrelated malformed folder
+    must not invalidate this folder's receipt, while every declared upstream is
+    required to be complete and to retain one clean, attached source identity.
+    At most one source may still be absent from the integration target.
+    """
+    dependencies = parse_folder_dependencies(cfg.tasks_dir)
+    sources: list[gitops.FolderSourceSnapshot] = []
+    unaccepted: list[gitops.FolderSourceSnapshot] = []
+    for folder in dependencies.after:
+        completion = infer_folder_completion(cfg.assent_dir / folder)
+        if not completion.complete:
+            raise AssentError(
+                f"upstream folder {folder} is incomplete: {completion.reason}")
+        source = gitops.resolve_folder_source(
+            cfg.root, folder, cfg.git_excludes)
+        sources.append(source)
+        if not gitops.is_ancestor(cfg.root, source.tip, target_tip):
+            unaccepted.append(source)
+        if not gitops.is_ancestor(cfg.root, source.tip, downstream_tip):
+            raise AssentError(
+                f"stale stack for {cfg.tasks_name}: current upstream {folder} tip "
+                f"{source.tip} is not an ancestor of downstream tip "
+                f"{downstream_tip}; the downstream source and existing receipt "
+                f"were preserved. Run `assent rework {cfg.tasks_name}` after "
+                "deciding how to handle the upstream change, or replan the "
+                "dependency")
+    if len(unaccepted) > 1:
+        detail = ", ".join(
+            f"{source.folder} ({source.tip})" for source in unaccepted)
+        raise AssentError(
+            "multiple unaccepted upstream folders cannot form one speculative "
+            f"verification candidate: {detail}")
+    return tuple(sources)
+
+
 def _new_receipt(*, status: str, source_tip: str, target_tip: str,
                  integration_tree: str, digest: str, exit_code: int,
                  failure_summary: str = "") -> VerificationReceipt:
@@ -313,19 +362,16 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
     path = receipt_path(cfg)
     main = gitops.main_worktree(cfg.root)
     # A malformed cache is evidence of an unsafe state, not permission to
-    # erase it.  Validate it before candidate construction or invalidation;
-    # an explicit refresh still replaces every valid receipt below.
+    # erase it.  Stack preflight below also happens before invalidation so an
+    # upstream drift keeps the old receipt available for audit.
     if path.exists():
         read_receipt(path, main)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as e:
-        raise AssentError(f"Unable to invalidate old verification receipt {path}: {e}") from e
 
     plan = Plan.parse(cfg.tasks_dir)
     unfinished = [f"{task.id}={task.status}" for task in plan.tasks
                   if task.status not in _COMPLETE_STATUSES]
     if unfinished:
+        _invalidate_receipt(path)
         raise AssentError(
             "folder is not complete; every task must be DONE or SKIP "
             f"({', '.join(unfinished)})")
@@ -339,6 +385,8 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
     if not script.is_file():
         raise AssentError(f"Verification script not found: {script}")
     digest = _sha256(script)
+    upstream_sources = _stack_sources(cfg, target_tip, source_tip)
+    _invalidate_receipt(path)
 
     candidate_tree = gitops.tree_of(main, target_tip)
     result: subprocess.CompletedProcess[str] | None = None
@@ -394,6 +442,13 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
     if source_worktree is not None and not gitops.working_tree_status(
             source_worktree, cfg.git_excludes).is_clean:
         changed.append("source worktree became dirty")
+    try:
+        current_upstreams = _stack_sources(cfg, target_tip, source_tip)
+    except AssentError as e:
+        changed.append(f"upstream stack changed: {e}")
+    else:
+        if current_upstreams != upstream_sources:
+            changed.append("upstream source identity changed")
     if _sha256(script) != digest:
         changed.append("verification script changed")
     if changed:
@@ -443,6 +498,7 @@ def _receipt_matches_current_candidate_locked(cfg: Config) -> bool:
     _source_branch, source_tip, _worktree = _source_snapshot(cfg, main)
     if source_tip != receipt.source_tip:
         return False
+    _stack_sources(cfg, target_tip, source_tip)
     tree, outcome = _candidate_tree(
         main, cfg.tasks_name, target_tip, source_tip)
     return outcome.ok and tree == receipt.integration_tree

@@ -188,6 +188,32 @@ pushes, or claims that its integration lock can stop unrelated external Git
 writers. Do not run Git commands that write the same main worktree during
 `accept`; the lock only serializes Assent accept operations.
 
+### Bounded optimistic stacking
+
+Set a downstream folder's `_folder.toml` to `after = ["A"]` to make `after`
+control both scheduler unlock and the Git worktree base. With no unaccepted
+upstream, a folder starts from the current target; with exactly one, it may
+start from that upstream's current tip. Multiple unaccepted upstreams fail
+closed, so resolve all but one upstream or replan before starting downstream.
+
+For example: `run A` -> `run B` stacked on A -> combined verification ->
+human `accept A` -> human `accept B`. B's receipt may be created before A is
+accepted and reused after A enters the target when source tip, integration
+tree, and verifier digest still match; `accept` does not rerun the complete
+suite. If A advances, B is stale but its work is retained: rework or reject B,
+or open a new folder and replan it. Assent never rewrites stack history.
+
+The same rule applies when A and B edit the same file. Git may merge changes
+automatically and exact-tree verification proves the result; a conflict leaves
+the target unchanged for human resolution. Assent does not automatically
+rebase, resolve conflicts, or push.
+
+Cleanup is upstream-first and evidence-based. Source evidence is retained
+while a direct dependent is unfinished, unaccepted, dirty, missing, or not
+provably integrated; `assent clean A` refuses and explains why. After every
+dependent is accepted and provably integrated and clean, clean upstream and
+then dependent with `assent clean`; never manually delete worktrees or branches.
+
 ## Parallel execution
 
 You can point N terminals at N different work folders, e.g. `assent run

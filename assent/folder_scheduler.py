@@ -16,8 +16,9 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from assent import AssentError
-from assent.folderdeps import parse_folder_dependency_graph
+from assent import AssentError, gitops
+from assent.config import load_config
+from assent.folderdeps import parse_folder_dependency_graph, resolve_folder_base
 from assent.plan import Plan
 
 _POLL_SECONDS = 0.05
@@ -161,6 +162,33 @@ def _print_stuck(graph, plans: dict[str, Plan]) -> None:
             print(f"  - {chain}")
 
 
+def _has_usable_git(root: Path) -> bool:
+    """Distinguish a real repository from a test or damaged ``.git`` marker."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, check=False)
+    return result.returncode == 0
+
+
+def _stack_launch_decision(config_path: str, folder: str) -> tuple[str | None, str | None]:
+    """Return an auditable launch decision or a fail-closed refusal reason."""
+    try:
+        cfg = load_config(config_path, folder)
+        base = resolve_folder_base(cfg.root, cfg.tasks_dir, excludes=cfg.git_excludes)
+        candidate = gitops.worktree_path(cfg.root, cfg.tasks_name)
+    except AssentError as e:
+        return None, str(e)
+    upstream = base.speculative_upstream
+    reuse = "reuse" if candidate.exists() else "create"
+    if upstream is None:
+        return (f"Stack decision: {folder}: base target main {base.target_snapshot}; "
+                f"no unaccepted upstream; worktree {reuse}."), None
+    return (f"Stack decision: {folder}: base {base.resolved_base} from unaccepted "
+            f"upstream {upstream.folder} @ {upstream.tip}; target main "
+            f"{base.target_snapshot}; worktree {reuse}."), None
+
+
 def _send_interrupt(process: subprocess.Popen) -> None:
     """Forward the user's interrupt only to this call's own child process group."""
     if process.poll() is not None:
@@ -235,6 +263,14 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
             ]
             while not failure and runnable and len(active) < jobs:
                 folder = runnable.pop(0)
+                if _has_usable_git(assent_dir.parent):
+                    decision, refusal = _stack_launch_decision(config_path, folder)
+                    if refusal is not None:
+                        print(f"Work folder refused: {folder} ({refusal})")
+                        attempted.add(folder)
+                        failure = True
+                        break
+                    print(decision)
                 try:
                     process = _start_folder(config_path, folder)
                     active[folder] = process

@@ -111,6 +111,29 @@ own responsibility. Git is always enabled and always isolated into a worktree,
 not to be replaced by a toggle or a git-less degraded mode; this is what makes
 running multiple work folders in parallel safe.
 
+### Bounded optimistic stacking and cleanup
+
+`after` is both the scheduler prerequisite and the Git base declaration. A
+folder with no unaccepted upstream starts from the current target; exactly one
+unaccepted upstream may provide the current tip as its base. More than one
+unaccepted upstream fails closed rather than creating an implicit integration
+engine. If that upstream advances, the downstream stack is stale; preserve its
+source and use explicit rework/reject or a new folder instead of rewriting
+history.
+
+The operational sequence is `run A`, `run B` with `after = ["A"]`, combined
+verification, `accept A`, then `accept B`. A matching receipt may be reused
+after A is accepted, and accept does not rerun the complete suite. Same-file
+changes use ordinary Git integration: exact-tree verification covers an
+automatic merge, while a conflict leaves the target unchanged for human
+resolution. Assent does not rebase, resolve conflicts, or push.
+
+Cleanup is upstream-first. `assent clean` retains source evidence while any
+direct dependent is unfinished, unaccepted, dirty, missing, or lacks proof of
+integration; once all direct dependents are accepted and proven integrated and
+clean, machine proof permits cleanup. Never manually delete worktrees or
+branches, and do not add a cleanup state database.
+
 ### Work-folder dependencies and completion
 
 Each work folder containing a formal task file may hold a `_folder.toml`, whose

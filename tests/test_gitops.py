@@ -10,8 +10,8 @@ from pathlib import Path
 from assent import AssentError
 from assent.gitops import (
     branches_with_prefix, changes_outside_scope, commit_all, commit_if_dirty,
-    ensure_branch,
-    ensure_clean, ensure_worktree, head_ref, restore, tracked_paths,
+    cleanup_unstarted_worktree, ensure_branch,
+    ensure_clean, ensure_worktree, head_ref, resolve_folder_source, restore, tracked_paths,
     worktree_path)
 
 
@@ -129,6 +129,50 @@ class TestEnsureWorktree(GitTestCase):
                         if line.startswith("worktree ")]
         self.assertEqual(listed_paths.count(first.resolve()), 1)
 
+    def test_explicit_start_snapshot_is_used_only_for_creation(self):
+        original = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout.strip()
+        (self.root / "base.txt").write_text("stack base\n", encoding="utf-8")
+        _run(self.root, "add", "-A")
+        _run(self.root, "commit", "-m", "stack base")
+        stack_base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout.strip()
+        _run(self.root, "reset", "--hard", original)
+
+        path = ensure_worktree(self.root, "parallel01", stack_base)
+        self.assertEqual(head_ref(path), stack_base)
+        self.assertTrue((path / "base.txt").is_file())
+
+        reused = ensure_worktree(self.root, "parallel01", original)
+        self.assertEqual(reused, path)
+        self.assertEqual(head_ref(reused), stack_base)
+
+    def test_cleanup_removes_only_clean_unstarted_resources(self):
+        snapshot = head_ref(self.root)
+        path = ensure_worktree(self.root, "parallel01", snapshot)
+        branch = ensure_branch(path, "parallel01/")
+
+        cleanup_unstarted_worktree(
+            self.root, "parallel01", snapshot, "parallel01/")
+
+        self.assertFalse(path.exists())
+        self.assertNotIn(branch, branches_with_prefix(self.root, "parallel01/"))
+
+    def test_cleanup_refuses_dirty_new_worktree_and_preserves_it(self):
+        snapshot = head_ref(self.root)
+        path = ensure_worktree(self.root, "parallel01", snapshot)
+        branch = ensure_branch(path, "parallel01/")
+        (path / "keep.txt").write_text("keep\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(AssentError, "dirty.*retained"):
+            cleanup_unstarted_worktree(
+                self.root, "parallel01", snapshot, "parallel01/")
+
+        self.assertTrue(path.exists())
+        self.assertIn(branch, branches_with_prefix(self.root, "parallel01/"))
+
     def test_prunes_stale_metadata_and_recreates_deleted_worktree(self):
         path = ensure_worktree(self.root, "parallel01")
         shutil.rmtree(path)
@@ -164,6 +208,69 @@ class TestEnsureWorktree(GitTestCase):
         self.assertEqual(current_main, main_branch)
         self.assertEqual((self.root / "README.md").read_text(encoding="utf-8"),
                          "init\n")
+
+
+class TestResolveFolderSource(GitTestCase):
+    def tearDown(self) -> None:
+        container = self.root.parent / f"{self.root.name}.worktrees"
+        if container.exists():
+            for path in container.iterdir():
+                if (path / ".git").is_file():
+                    _run(self.root, "worktree", "remove", "--force", str(path))
+                else:
+                    shutil.rmtree(path)
+            container.rmdir()
+        _run(self.root, "worktree", "prune")
+        super().tearDown()
+
+    def make_source(self, folder: str = "upstream") -> Path:
+        path = worktree_path(self.root, folder)
+        _run(self.root, "worktree", "add", "-b", f"{folder}/run", str(path), "HEAD")
+        (path / f"{folder}.txt").write_text("source\n", encoding="utf-8")
+        _run(path, "add", "-A")
+        _run(path, "commit", "-m", f"finish {folder}")
+        return path
+
+    def test_returns_exact_clean_attached_source_identity(self):
+        path = self.make_source()
+
+        source = resolve_folder_source(self.root, "upstream")
+
+        self.assertEqual(source.folder, "upstream")
+        self.assertEqual(source.branch, "upstream/run")
+        self.assertEqual(source.worktree, path.resolve())
+        self.assertEqual(source.tip, subprocess.run(
+            ["git", "rev-parse", "upstream/run"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout.strip())
+
+    def test_missing_fixed_worktree_is_refused(self):
+        _run(self.root, "branch", "upstream/run", "HEAD")
+        with self.assertRaisesRegex(AssentError, "no valid fixed source worktree"):
+            resolve_folder_source(self.root, "upstream")
+
+    def test_ambiguous_branches_are_refused(self):
+        self.make_source()
+        _run(self.root, "branch", "upstream/other", "HEAD")
+        with self.assertRaisesRegex(AssentError, "ambiguous source branches"):
+            resolve_folder_source(self.root, "upstream")
+
+    def test_dirty_source_is_refused(self):
+        path = self.make_source()
+        (path / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "source worktree .* is dirty"):
+            resolve_folder_source(self.root, "upstream")
+
+    def test_detached_source_is_refused(self):
+        path = self.make_source()
+        _run(path, "checkout", "--detach")
+        with self.assertRaisesRegex(AssentError, "source worktree .* is detached"):
+            resolve_folder_source(self.root, "upstream")
+
+    def test_foreign_source_branch_is_refused(self):
+        path = self.make_source()
+        _run(path, "checkout", "-b", "foreign")
+        with self.assertRaisesRegex(AssentError, "foreign branch foreign"):
+            resolve_folder_source(self.root, "upstream")
 
 
 class TestTrackedPaths(GitTestCase):

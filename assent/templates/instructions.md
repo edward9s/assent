@@ -65,6 +65,16 @@ Cleanup is a separate guarded operation: `assent clean` must retain an
 upstream source while any dependent folder remains unaccepted, and skips when
 its merged-and-clean proof is insufficient.
 
+Folder `after` is bounded optimistic stacking: it controls both readiness and
+the worktree base. Zero or one unaccepted upstream is allowed; multiple
+unaccepted upstreams fail closed. If an upstream advances, preserve the
+downstream result but treat its stack as stale and use rework/reject or a new
+folder. Verify the combined candidate before accepting upstream then
+dependent; matching receipts can be reused, and accept does not rerun the
+complete suite. Conflicts are human decisions. Cleanup is upstream-first and
+must retain source evidence until direct dependents are accepted and proven
+integrated.
+
 The worktree is a change-isolation, conflict-management, audit, and recovery
 boundary, not a security sandbox. With `danger-full-access` or
 `bypassPermissions`, an AI can still access resources available to its OS

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -96,11 +97,15 @@ class AcceptReceiptCase(unittest.TestCase):
             f"raise SystemExit({0 if passes else 7})\n",
             encoding="utf-8")
 
-    def _make_source(self, folder: str, filename: str | None = None
+    def _make_source(self, folder: str, filename: str | None = None,
+                     base_ref: str | None = None
                      ) -> tuple[Path, str]:
         branch = f"{folder}/run"
         path = self.parent / f"{self.root.name}.worktrees" / folder
-        self._git("worktree", "add", "-b", branch, str(path))
+        args = ["worktree", "add", "-b", branch, str(path)]
+        if base_ref is not None:
+            args.append(base_ref)
+        self._git(*args)
         (path / (filename or f"{folder}.txt")).write_text(
             f"{folder}\n", encoding="utf-8")
         self._git("add", "-A", cwd=path)
@@ -255,6 +260,9 @@ class TestDependencyGate(AcceptReceiptCase):
         self._write_task(base)
         base_source, base_branch = self._make_source(base)
         self._git("merge", "--no-ff", "-m", "accept base manually", base_branch)
+        self._git("worktree", "remove", str(self.source))
+        self._git("branch", "-D", self.branch)
+        self.source, self.branch = self._make_source(self.folder)
         (self.tasks_dir / "_folder.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
 
@@ -279,6 +287,139 @@ class TestDependencyGate(AcceptReceiptCase):
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertIn("current tip", refused.stdout)
         self.assertIn("not in target", refused.stdout)
+
+
+class TestStackedReceiptLifecycle(AcceptReceiptCase):
+    upstream = "upstream"
+    downstream = "downstream"
+
+    def _make_stack(self) -> tuple[Path, str, Path, str]:
+        shared = self.root / "shared.txt"
+        shared.write_text(
+            "upstream section\nneutral section\ndownstream section\n",
+            encoding="utf-8")
+        self._git("add", "shared.txt")
+        self._git("commit", "-m", "add shared baseline")
+
+        self._write_task(self.upstream)
+        upstream_source, upstream_branch = self._make_source(self.upstream)
+        (upstream_source / "shared.txt").write_text(
+            "upstream result\nneutral section\ndownstream section\n",
+            encoding="utf-8")
+        self._git("add", "shared.txt", cwd=upstream_source)
+        self._git("commit", "-m", "finish upstream shared section",
+                  cwd=upstream_source)
+
+        self._write_task(self.downstream)
+        downstream_tasks = self.assent_dir / self.downstream
+        (downstream_tasks / "_folder.toml").write_text(
+            f'after = ["{self.upstream}"]\n', encoding="utf-8")
+        downstream_source, downstream_branch = self._make_source(
+            self.downstream, base_ref=upstream_branch)
+        (downstream_source / "shared.txt").write_text(
+            "upstream result\nneutral section\ndownstream result\n",
+            encoding="utf-8")
+        self._git("add", "shared.txt", cwd=downstream_source)
+        self._git("commit", "-m", "finish downstream shared section",
+                  cwd=downstream_source)
+        return (upstream_source, upstream_branch,
+                downstream_source, downstream_branch)
+
+    def _receipt(self) -> tuple[bytes, dict[str, object]]:
+        path = self.assent_dir / self.downstream / "_verification.toml"
+        raw = path.read_bytes()
+        return raw, tomllib.loads(raw.decode("utf-8"))
+
+    def test_combined_receipt_precedes_upstream_accept_and_is_reused_in_order(
+            self) -> None:
+        (_upstream_source, upstream_branch,
+         downstream_source, downstream_branch) = self._make_stack()
+        target_before = self._head()
+
+        self._verify_passes(self.downstream)
+        receipt_raw, receipt = self._receipt()
+        self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
+        self.assertEqual(receipt["status"], "PASSED")
+        self.assertEqual(receipt["source_tip"], self._head(downstream_branch))
+        self.assertNotEqual(receipt["target_tip"], self._head(upstream_branch))
+
+        refused = self._cli("accept", self.downstream)
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("not in target", refused.stdout)
+        self.assertEqual(self._head(), target_before)
+        self.assertEqual(self._receipt()[0], receipt_raw)
+        self.assertTrue(downstream_source.is_dir())
+
+        self._verify_passes(self.upstream)
+        accepted_upstream = self._cli("accept", self.upstream)
+        self.assertEqual(
+            accepted_upstream.returncode, 0,
+            accepted_upstream.stdout + accepted_upstream.stderr)
+        target_with_upstream = self._head()
+        self.assertTrue(gitops.is_ancestor(
+            self.root, self._head(upstream_branch), target_with_upstream))
+
+        accepted_downstream = self._cli("accept", self.downstream)
+        self.assertEqual(
+            accepted_downstream.returncode, 0,
+            accepted_downstream.stdout + accepted_downstream.stderr)
+        self.assertEqual(self.counter.read_text(encoding="utf-8"), "2")
+        self.assertEqual(
+            self._git("rev-parse", "HEAD^{tree}"), receipt["integration_tree"])
+        self.assertEqual(
+            (self.root / "shared.txt").read_text(encoding="utf-8"),
+            "upstream result\nneutral section\ndownstream result\n")
+
+    def test_upstream_tip_drift_refuses_refresh_and_preserves_old_receipt(self) -> None:
+        upstream_source, _upstream_branch, downstream_source, _branch = (
+            self._make_stack())
+        self._verify_passes(self.downstream)
+        receipt_raw, _receipt = self._receipt()
+        target_before = self._head()
+
+        (upstream_source / "later.txt").write_text("later\n", encoding="utf-8")
+        self._git("add", "later.txt", cwd=upstream_source)
+        self._git("commit", "-m", "advance upstream after downstream verification",
+                  cwd=upstream_source)
+
+        refreshed = self._cli("verify", self.downstream)
+        self.assertEqual(refreshed.returncode, 1, refreshed.stdout + refreshed.stderr)
+        self.assertIn("stale stack", refreshed.stdout)
+        self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
+        self.assertEqual(self._receipt()[0], receipt_raw)
+        self.assertEqual(self._head(), target_before)
+        self.assertTrue(downstream_source.is_dir())
+
+        accepted = self._cli("accept", self.downstream)
+        self.assertEqual(accepted.returncode, 1, accepted.stdout + accepted.stderr)
+        self.assertIn("not in target", accepted.stdout)
+        self.assertEqual(self._head(), target_before)
+        self.assertEqual(self._receipt()[0], receipt_raw)
+
+    def test_same_line_target_conflict_lists_file_and_preserves_everything(self) -> None:
+        (_upstream_source, _upstream_branch,
+         downstream_source, _downstream_branch) = self._make_stack()
+        self._verify_passes(self.downstream)
+        receipt_raw, _receipt = self._receipt()
+        self._verify_passes(self.upstream)
+        accepted_upstream = self._cli("accept", self.upstream)
+        self.assertEqual(accepted_upstream.returncode, 0)
+
+        (self.root / "shared.txt").write_text(
+            "upstream result\nneutral section\ntarget concurrent result\n",
+            encoding="utf-8")
+        self._git("add", "shared.txt")
+        self._git("commit", "-m", "concurrent target edits downstream line")
+        target_before = self._head()
+
+        accepted = self._cli("accept", self.downstream)
+        self.assertEqual(accepted.returncode, 1, accepted.stdout + accepted.stderr)
+        self.assertIn("Conflicting file(s)", accepted.stdout)
+        self.assertIn("shared.txt", accepted.stdout)
+        self.assertEqual(self._head(), target_before)
+        self.assertEqual(self._receipt()[0], receipt_raw)
+        self.assertTrue(downstream_source.is_dir())
+        self.assertEqual(self.counter.read_text(encoding="utf-8"), "2")
 
 
 if __name__ == "__main__":

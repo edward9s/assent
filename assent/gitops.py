@@ -131,8 +131,14 @@ def _is_repo_worktree(root: Path, path: Path) -> bool:
             == _resolved_git_path(root, root_common))
 
 
-def ensure_worktree(root: Path, folder: str) -> Path:
-    """Create or reuse a fixed-path, detached-HEAD git worktree."""
+def ensure_worktree(root: Path, folder: str,
+                    start_snapshot: str | None = None) -> Path:
+    """Create or reuse a fixed-path, detached-HEAD git worktree.
+
+    ``start_snapshot`` is resolved to an exact commit and is used only when
+    the worktree is first created.  Reusing an existing worktree never moves
+    its HEAD or changes its branch, even when a different snapshot is passed.
+    """
     root = root.resolve()
     path = worktree_path(root, folder)
     if path.exists():
@@ -143,8 +149,66 @@ def ensure_worktree(root: Path, folder: str) -> Path:
 
     # If the path was manually deleted, clear stale worktree metadata still held by the main repo.
     _git(root, "worktree", "prune")
-    _git(root, "worktree", "add", "--detach", str(path))
+    args = ["worktree", "add", "--detach", str(path)]
+    if start_snapshot is not None:
+        args.append(_commit_snapshot(root, start_snapshot))
+    _git(root, *args)
     return path
+
+
+def cleanup_unstarted_worktree(root: Path, folder: str,
+                               expected_tip: str,
+                               branch_prefix: str) -> None:
+    """Remove a newly created, still-unused folder worktree conservatively.
+
+    This is exclusively for setup failures before an AI session starts.  The
+    exact path, clean state, HEAD and branch ownership must all be provable.
+    Failure leaves the path/ref in place as recovery evidence rather than
+    widening cleanup or deleting uncertain resources.
+    """
+    primary = main_worktree(Path(root).resolve())
+    path = worktree_path(primary, folder)
+    snapshot = _commit_snapshot(primary, expected_tip)
+    if not path.exists():
+        return
+    if not path.is_dir() or not _is_repo_worktree(primary, path):
+        raise AssentError(
+            f"new worktree cleanup refused; recoverable path retained: {path}")
+
+    branch = current_branch(path)
+    head = commit_of(path, "HEAD")
+    if head != snapshot:
+        raise AssentError(
+            f"new worktree cleanup refused because HEAD moved from {snapshot} "
+            f"to {head}; recoverable path retained: {path}")
+    if branch and not branch.startswith(branch_prefix):
+        raise AssentError(
+            f"new worktree cleanup refused for foreign branch {branch}; "
+            f"recoverable path retained: {path}")
+    if not working_tree_status(path).is_clean:
+        raise AssentError(
+            f"new worktree cleanup refused because it is dirty; "
+            f"recoverable path retained: {path}")
+
+    removed = _run_git(primary, "worktree", "remove", str(path))
+    if removed.returncode != 0:
+        raise AssentError(
+            "new worktree cleanup was incomplete; recoverable path/ref retained: "
+            f"{path}{f', {branch}' if branch else ''} "
+            f"({removed.stderr.strip() or removed.stdout.strip() or 'unknown error'})")
+
+    if branch:
+        current_tip = branch_tip(primary, branch)
+        if current_tip != snapshot:
+            raise AssentError(
+                f"new worktree path was removed but branch {branch} moved to "
+                f"{current_tip}; recoverable ref retained")
+        deleted = _run_git(primary, "branch", "-D", branch)
+        if deleted.returncode != 0:
+            raise AssentError(
+                f"new worktree path was removed but recoverable ref {branch} "
+                "was retained because branch cleanup failed: "
+                f"{deleted.stderr.strip() or deleted.stdout.strip() or 'unknown error'}")
 
 
 def is_repo_worktree(root: Path, path: Path) -> bool:
@@ -177,6 +241,19 @@ def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
         "git merge-base --is-ancestor "
         f"{ancestor} {descendant} failed (exit code {result.returncode}): "
         f"{result.stderr.strip() or result.stdout.strip()}")
+
+
+def merge_base(root: Path, first: str, second: str) -> str:
+    """Return the unique best common ancestor of two commits."""
+    bases = [line.strip() for line in _git(
+        root, "merge-base", "--all", first, second).splitlines()
+             if line.strip()]
+    if len(bases) != 1:
+        detail = ", ".join(bases) if bases else "none"
+        raise AssentError(
+            f"git merge-base found {len(bases)} best common ancestors for "
+            f"{first} and {second}: {detail}")
+    return bases[0]
 
 
 def remove_worktree(root: Path, path: Path) -> None:
@@ -472,6 +549,62 @@ def unique_folder_branch(root: Path, folder: str) -> str | None:
 def branch_tip(root: Path, branch: str) -> str:
     """Return the full commit hash at a branch tip."""
     return commit_of(root, branch)
+
+
+@dataclass(frozen=True)
+class FolderSourceSnapshot:
+    """Immutable identity of a folder's sole clean, attached source."""
+
+    folder: str
+    branch: str
+    worktree: Path
+    tip: str
+
+
+def resolve_folder_source(
+        root: Path, folder: str,
+        excludes: Sequence[str] = ()) -> FolderSourceSnapshot:
+    """Resolve a folder's current source without guessing from historical metadata.
+
+    Speculative stacking needs stronger evidence than ordinary cleanup discovery:
+    the fixed worktree must exist, be clean and attached to the folder's one and
+    only local branch.  Reading the tip twice detects a branch that moves during
+    resolution instead of returning a mixed snapshot.
+    """
+    primary = main_worktree(Path(root).resolve())
+    branches = folder_branches(primary, folder)
+    if not branches:
+        raise AssentError(
+            f"upstream folder {folder} has no {folder}/* source branch")
+    if len(branches) != 1:
+        raise AssentError(
+            f"upstream folder {folder} has ambiguous source branches: "
+            f"{', '.join(branches)}")
+    branch = branches[0]
+
+    worktree = folder_worktree(primary, folder)
+    if worktree is None:
+        raise AssentError(
+            f"upstream folder {folder} has no valid fixed source worktree")
+    attached = current_branch(worktree)
+    if not attached:
+        raise AssentError(
+            f"upstream folder {folder} source worktree {worktree} is detached")
+    if attached != branch:
+        raise AssentError(
+            f"upstream folder {folder} source worktree {worktree} is on foreign "
+            f"branch {attached}; expected {branch}")
+    if not working_tree_status(worktree, excludes).is_clean:
+        raise AssentError(
+            f"upstream folder {folder} source worktree {worktree} is dirty")
+
+    tip = branch_tip(primary, branch)
+    worktree_tip = commit_of(worktree, "HEAD")
+    confirmed_tip = branch_tip(primary, branch)
+    if worktree_tip != tip or confirmed_tip != tip:
+        raise AssentError(
+            f"upstream folder {folder} source changed while its tip was being resolved")
+    return FolderSourceSnapshot(folder, branch, worktree, tip)
 
 
 # Machine-readable evidence recorded on an accept merge.
