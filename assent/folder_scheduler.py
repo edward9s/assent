@@ -18,7 +18,9 @@ from typing import TextIO
 
 from assent import AssentError, gitops
 from assent.config import load_config
-from assent.folderdeps import parse_folder_dependency_graph, resolve_folder_base
+from assent.folderdeps import (_archived_folder_names, is_upstream_complete,
+                               parse_folder_dependency_graph,
+                               resolve_folder_base)
 from assent.plan import Plan
 
 _POLL_SECONDS = 0.05
@@ -130,7 +132,9 @@ def _has_ongoing(plan: Plan) -> bool:
     return any(task.status in ("TODO", "WIP") for task in plan.tasks)
 
 
-def _blocking_chains(folder: str, graph, plans: dict[str, Plan]) -> list[str]:
+def _blocking_chains(
+        folder: str, graph, plans: dict[str, Plan],
+        archived: set[str]) -> list[str]:
     """List the stuck chains that lead from a folder all the way to a
     BLOCKED task."""
     plan = plans[folder]
@@ -139,9 +143,11 @@ def _blocking_chains(folder: str, graph, plans: dict[str, Plan]) -> list[str]:
         for task in plan.tasks if task.status == "BLOCKED"
     ]
     for dependency in graph[folder].after:
-        if _is_complete(plans[dependency]):
+        # An archived upstream is complete and is not a live graph node, so it
+        # can neither block nor be recursed into.
+        if is_upstream_complete(dependency, plans, archived):
             continue
-        for chain in _blocking_chains(dependency, graph, plans):
+        for chain in _blocking_chains(dependency, graph, plans, archived):
             chains.append(f"{folder} -> {chain}")
     if not chains:
         statuses = ", ".join(
@@ -151,14 +157,14 @@ def _blocking_chains(folder: str, graph, plans: dict[str, Plan]) -> list[str]:
     return chains
 
 
-def _print_stuck(graph, plans: dict[str, Plan]) -> None:
+def _print_stuck(graph, plans: dict[str, Plan], archived: set[str]) -> None:
     """List every unfinished folder and why it cannot be unlocked."""
     print("Cannot continue: the remaining work folders are all unlockable "
           "because of a BLOCKED task:")
     for folder in graph:
         if _is_complete(plans[folder]):
             continue
-        for chain in _blocking_chains(folder, graph, plans):
+        for chain in _blocking_chains(folder, graph, plans, archived):
             print(f"  - {chain}")
 
 
@@ -245,22 +251,30 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
                 # Another child process may be writing its own task file;
                 # only reparse folders that are not currently running.
                 plans = _folder_plans(assent_dir, inactive)
+                # An archived upstream is gone from the live plans but still
+                # resolvable through the roster; read it once per iteration and
+                # judge every after-name through the shared completion
+                # predicate so an archived name resolves instead of raising a
+                # KeyError, and an unresolved name fails closed here.
+                archived = _archived_folder_names(assent_dir)
+
+                if not active and all(
+                        _is_complete(plan) for plan in plans.values()):
+                    print("All work folders are complete (DONE/SKIP).")
+                    return 0
+
+                runnable = [
+                    folder for folder, dependencies in graph.items()
+                    if folder not in active
+                    and folder not in attempted
+                    and _has_ongoing(plans[folder])
+                    and all(name not in active
+                            and is_upstream_complete(name, plans, archived)
+                            for name in dependencies.after)
+                ]
             except AssentError as e:
                 print(f"Folder scheduling failed: {e}")
                 return 1
-
-            if not active and all(_is_complete(plan) for plan in plans.values()):
-                print("All work folders are complete (DONE/SKIP).")
-                return 0
-
-            runnable = [
-                folder for folder, dependencies in graph.items()
-                if folder not in active
-                and folder not in attempted
-                and _has_ongoing(plans[folder])
-                and all(name not in active and _is_complete(plans[name])
-                        for name in dependencies.after)
-            ]
             while not failure and runnable and len(active) < jobs:
                 folder = runnable.pop(0)
                 if _has_usable_git(assent_dir.parent):
@@ -286,7 +300,7 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
             if not active:
                 if failure:
                     return 1
-                _print_stuck(graph, plans)
+                _print_stuck(graph, plans, archived)
                 return 1
 
             completed: list[tuple[str, int]] = []

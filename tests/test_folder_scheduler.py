@@ -90,6 +90,16 @@ class FolderSchedulerTestCase(unittest.TestCase):
                 f"after = [{values}]\n", encoding="utf-8")
         return task
 
+    def archive_roster(self, *folders: str) -> None:
+        """Register folders in the archive roster as if they had been archived
+        (their live directories intentionally do not exist)."""
+        entries = "".join(
+            f'[[archived]]\nfolder = "{name}"\n'
+            f'archived_at = "2026-01-01T00:00:00Z"\n\n'
+            for name in folders)
+        (self.assent_dir / "_archived.toml").write_text(
+            entries, encoding="utf-8")
+
 
 class TestRunAll(FolderSchedulerTestCase):
     def test_child_uses_utf8_merged_text_pipe_and_process_group(self):
@@ -231,6 +241,42 @@ class TestRunAll(FolderSchedulerTestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(started, ["first", "second", "third"])
+
+    def test_after_referencing_archived_upstream_schedules_downstream(self):
+        # Reproduces the incident: the live upstream was archived, so its name
+        # survives only in the roster while a live downstream still depends on
+        # it.  run --all's inline runnable check used to do plans[name] and
+        # raise KeyError; the roster-aware predicate must instead treat the
+        # archived upstream as complete and schedule the downstream.
+        downstream = self.make_folder("downstream", after=("upstream_archived",))
+        self.archive_roster("upstream_archived")
+        started = []
+
+        def fake_start(_config, folder):
+            started.append(folder)
+            return FinishedProcess(downstream)
+
+        with patch("assent.folder_scheduler._start_folder",
+                   side_effect=fake_start):
+            code = run_all(str(self.config), self.assent_dir)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(started, ["downstream"])
+
+    def test_after_referencing_unknown_name_fails_closed_with_clear_error(self):
+        # A name in neither the live folders nor the roster is refused with a
+        # clear scheduling error naming it, not a traceback, and starts nothing.
+        self.make_folder("downstream", after=("ghost",))
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out), patch(
+                "assent.folder_scheduler._start_folder") as start:
+            code = run_all(str(self.config), self.assent_dir)
+
+        self.assertEqual(code, 1)
+        self.assertIn("Folder scheduling failed", out.getvalue())
+        self.assertIn("ghost", out.getvalue())
+        start.assert_not_called()
 
     def test_real_git_launch_prints_resolved_stack_decision_before_child(self):
         task = self.make_folder("downstream")
