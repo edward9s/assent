@@ -15,7 +15,7 @@ from assent.gitops import (
     cleanup_unstarted_worktree, ensure_branch,
     ensure_clean, ensure_worktree, head_ref, resolve_folder_source, restore, tracked_paths,
     worktree_path)
-from tests.test_verification import make_directory_link
+from tests.link_support import cleanup_worktree, make_directory_link, safe_rmtree
 
 
 def _run(root: Path, *args: str) -> None:
@@ -34,7 +34,7 @@ class GitTestCase(unittest.TestCase):
         _run(self.root, "commit", "-m", "init")
 
     def tearDown(self) -> None:
-        shutil.rmtree(self.root, ignore_errors=True)
+        safe_rmtree(self.root)
 
 
 class TestEnsureClean(GitTestCase):
@@ -102,10 +102,12 @@ class TestEnsureWorktree(GitTestCase):
         container = self.root.parent / f"{self.root.name}.worktrees"
         if container.exists():
             for path in container.iterdir():
-                if (path / ".git").is_file():
-                    _run(self.root, "worktree", "remove", "--force", str(path))
+                if pathops.is_link(path):
+                    safe_rmtree(path)
+                elif (path / ".git").is_file():
+                    cleanup_worktree(self.root, path)
                 else:
-                    shutil.rmtree(path)
+                    safe_rmtree(path)
             container.rmdir()
         _run(self.root, "worktree", "prune")
         super().tearDown()
@@ -174,7 +176,7 @@ class TestEnsureWorktree(GitTestCase):
         path = ensure_worktree(self.root, "parallel01", snapshot)
         branch = ensure_branch(path, "parallel01/")
         target = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, target, True)
+        self.addCleanup(safe_rmtree, target)
         (target / "sentinel.txt").write_text("keep\n", encoding="utf-8")
         make_directory_link(path / "pkg", target)
 
@@ -203,7 +205,7 @@ class TestEnsureWorktree(GitTestCase):
 
     def test_prunes_stale_metadata_and_recreates_deleted_worktree(self):
         path = ensure_worktree(self.root, "parallel01")
-        shutil.rmtree(path)
+        safe_rmtree(path)
 
         rebuilt = ensure_worktree(self.root, "parallel01")
         self.assertEqual(rebuilt, path)
@@ -245,9 +247,7 @@ class TestNonTraversingInventory(GitTestCase):
         container = self.root.parent / f"{self.root.name}.worktrees"
         if container.exists():
             for path in container.iterdir():
-                for link in pathops.inventory_directory_links(path):
-                    pathops.detach_directory_link(link)
-                _run(self.root, "worktree", "remove", "--force", str(path))
+                cleanup_worktree(self.root, path)
             container.rmdir()
         _run(self.root, "worktree", "prune")
         super().tearDown()
@@ -259,7 +259,7 @@ class TestNonTraversingInventory(GitTestCase):
 
     def test_a_linked_root_is_refused_instead_of_resolved(self):
         target = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, target, True)
+        self.addCleanup(safe_rmtree, target)
         (target / "sentinel.txt").write_text("keep\n", encoding="utf-8")
         link = self.root / "linked root"
         make_directory_link(link, target)
@@ -293,7 +293,7 @@ class TestNonTraversingInventory(GitTestCase):
         path = ensure_worktree(self.root, "parallel01", snapshot)
         ensure_branch(path, "parallel01/")
         target = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, target, True)
+        self.addCleanup(safe_rmtree, target)
         (target / "sentinel.txt").write_text("keep\n", encoding="utf-8")
         make_directory_link(path / "pkg", target)
 
@@ -313,10 +313,12 @@ class TestResolveFolderSource(GitTestCase):
         container = self.root.parent / f"{self.root.name}.worktrees"
         if container.exists():
             for path in container.iterdir():
-                if (path / ".git").is_file():
-                    _run(self.root, "worktree", "remove", "--force", str(path))
+                if pathops.is_link(path):
+                    safe_rmtree(path)
+                elif (path / ".git").is_file():
+                    cleanup_worktree(self.root, path)
                 else:
-                    shutil.rmtree(path)
+                    safe_rmtree(path)
             container.rmdir()
         _run(self.root, "worktree", "prune")
         super().tearDown()
@@ -563,7 +565,7 @@ class TestHeadRef(GitTestCase):
             _run(empty, "init")
             self.assertIsNone(head_ref(empty))
         finally:
-            shutil.rmtree(empty, ignore_errors=True)
+            safe_rmtree(empty)
 
 
 class TestRestore(GitTestCase):

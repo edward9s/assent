@@ -167,14 +167,20 @@ def _detach_worktree_links(path: Path) -> tuple[Path, ...]:
     partial cleanup leaves external targets intact and a rerun finishes it,
     because an already-detached link is simply absent from the next inventory.
     """
-    links = pathops.inventory_directory_links(path)
+    try:
+        links = pathops.inventory_directory_links(path)
+    except (AssentError, OSError) as e:
+        raise AssentError(
+            f"unable to inventory directory links in worktree {path}; "
+            f"linked target content was not touched: {e}") from e
     for link in links:
         try:
             pathops.detach_directory_link(link)
         except OSError as e:
             raise AssentError(
                 f"unable to detach the directory link {link} inside {path}; "
-                f"nothing was removed through it: {e}") from e
+                f"linked target content was not touched (nothing was removed "
+                f"through it): {e}") from e
     return links
 
 
@@ -185,15 +191,19 @@ def _ordinary_removal_will_proceed(path: Path) -> bool:
     Git is about to refuse: an unclean worktree stays retained in full, links
     included, exactly as before.  Git checks cleanliness before it touches
     anything, so skipping detachment here never lets a recursion start.  A
-    missing or unreadable worktree answers False and leaves the diagnostic to
-    Git.
+    missing worktree answers False and leaves the diagnostic to Git.  An
+    unreadable worktree is a fail-closed refusal because Git must not be asked
+    to decide whether it can safely recurse.
     """
     if not path.is_dir():
         return False
     try:
         return working_tree_status(path).is_clean
-    except AssentError:
-        return False
+    except AssentError as e:
+        raise AssentError(
+            f"refusing to remove worktree {path}: its cleanliness could not be "
+            f"established before link detachment; linked target content was not "
+            f"touched: {e}") from e
 
 
 def cleanup_unstarted_worktree(root: Path, folder: str,
@@ -883,6 +893,7 @@ def _cleanup_temporary_worktree(root: Path, path: Path,
                                 branch: str | None = None) -> None:
     """Remove this call's temporary resources and report any incomplete cleanup."""
     problems: list[str] = []
+    removal_blocked = False
     if path.exists():
         # Neither the forced Git removal nor the fallback recursion may start
         # until the link boundary has completed; a refusal here retains the
@@ -891,6 +902,7 @@ def _cleanup_temporary_worktree(root: Path, path: Path,
             _detach_worktree_links(path)
         except AssentError as e:
             problems.append(str(e))
+            removal_blocked = True
         else:
             removed = _run_git(root, "worktree", "remove", "--force", str(path))
             if removed.returncode != 0:
@@ -898,24 +910,30 @@ def _cleanup_temporary_worktree(root: Path, path: Path,
                     shutil.rmtree(path)
                 except OSError as e:
                     problems.append(f"unable to remove temporary path {path}: {e}")
-    pruned = _run_git(root, "worktree", "prune")
-    if pruned.returncode != 0:
-        problems.append(
-            "git worktree prune failed: "
-            f"{pruned.stderr.strip() or pruned.stdout.strip() or 'unknown error'}")
-    if branch is not None:
-        exists = _run_git(root, "show-ref", "--verify", "--quiet",
-                          f"refs/heads/{branch}")
-        if exists.returncode == 0:
-            deleted = _run_git(root, "branch", "-D", branch)
-            if deleted.returncode != 0:
-                problems.append(
-                    f"unable to delete temporary branch {branch}: "
-                    f"{deleted.stderr.strip() or deleted.stdout.strip() or 'unknown error'}")
-        elif exists.returncode not in (1,):
-            problems.append(f"unable to inspect temporary branch {branch}")
+            if path.exists():
+                removal_blocked = True
+                problems.append(f"temporary worktree path remains: {path}")
+    if not removal_blocked:
+        pruned = _run_git(root, "worktree", "prune")
+        if pruned.returncode != 0:
+            problems.append(
+                "git worktree prune failed: "
+                f"{pruned.stderr.strip() or pruned.stdout.strip() or 'unknown error'}")
+        if branch is not None:
+            exists = _run_git(root, "show-ref", "--verify", "--quiet",
+                              f"refs/heads/{branch}")
+            if exists.returncode == 0:
+                deleted = _run_git(root, "branch", "-D", branch)
+                if deleted.returncode != 0:
+                    problems.append(
+                        f"unable to delete temporary branch {branch}: "
+                        f"{deleted.stderr.strip() or deleted.stdout.strip() or 'unknown error'}")
+            elif exists.returncode not in (1,):
+                problems.append(f"unable to inspect temporary branch {branch}")
     if path.exists():
-        problems.append(f"temporary worktree path remains: {path}")
+        if not any(problem == f"temporary worktree path remains: {path}"
+                   for problem in problems):
+            problems.append(f"temporary worktree path remains: {path}")
     with contextlib.suppress(OSError):
         _temporary_container(root).rmdir()
     if problems:

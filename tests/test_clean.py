@@ -1,6 +1,7 @@
 """Tests for the clean subcommand: verify every safety proof and action order against
 a real Git repo."""
 import contextlib
+import hashlib
 import io
 import json
 import shutil
@@ -10,11 +11,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import AssentError, gitops
+from assent import AssentError, gitops, pathops
 from assent import clean as clean_mod
 from assent.clean import clean_folder, clean_folders
 from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
+from tests.link_support import make_directory_link, safe_rmtree
 
 
 _VERIFY = 'python -c "raise SystemExit(0)"'
@@ -44,7 +46,7 @@ def _git(root: Path, *args: str) -> str:
 class TestClean(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.addCleanup(safe_rmtree, self.root)
         _git(self.root, "init")
         _git(self.root, "config", "user.name", "Test")
         _git(self.root, "config", "user.email", "test@example.com")
@@ -67,7 +69,7 @@ class TestClean(unittest.TestCase):
         self.addCleanup(self._cleanup_worktrees)
 
     def _cleanup_worktrees(self) -> None:
-        shutil.rmtree(self.container, ignore_errors=True)
+        safe_rmtree(self.container)
         subprocess.run(["git", "worktree", "prune"], cwd=self.root,
                        capture_output=True)
 
@@ -119,6 +121,43 @@ class TestClean(unittest.TestCase):
             gitops.commit_all(worktree, f"finish {folder}")
         return worktree, branch
 
+    def _linked_merged_source(self) -> tuple[Path, str, list[tuple[str, str]]]:
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\nassets/\nlib/l10n/arb/\n", encoding="utf-8")
+        (self.root / "lib" / "l10n").mkdir(parents=True)
+        (self.root / "lib" / "l10n" / "app_en.arb").write_text(
+            "{}\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore", "lib/l10n/app_en.arb")
+        _git(self.root, "commit", "-m", "provision ignored cleanup targets")
+
+        targets = {
+            "pkg": {"sentinel.txt": "pkg sentinel\n"},
+            "assets": {"sentinel.txt": "assets sentinel\n"},
+            "lib/l10n/arb": {"app.arb": '{"keep": true}\n'},
+        }
+        for directory, contents in targets.items():
+            for relative, content in contents.items():
+                target = self.root / directory / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+        before = self._target_inventory(targets)
+
+        worktree, branch = self._worktree_branch(commit=True)
+        make_directory_link(worktree / "pkg", self.root / "pkg")
+        make_directory_link(worktree / "assets", self.root / "assets")
+        make_directory_link(
+            worktree / "lib" / "l10n" / "arb", self.root / "lib" / "l10n" / "arb")
+        _git(self.root, "merge", "--no-ff", branch, "-m", "accept linked source")
+        return worktree, branch, before
+
+    def _target_inventory(self, targets: dict[str, dict[str, str]]) -> list[tuple[str, str]]:
+        return sorted(
+            (str(path.relative_to(self.root)).replace("\\", "/"),
+             hashlib.sha256(path.read_bytes()).hexdigest())
+            for directory in targets
+            for path in (self.root / directory).rglob("*")
+            if path.is_file())
+
     def test_clean_merged_worktree_and_all_prefixed_branches(self) -> None:
         worktree, branch = self._worktree_branch(commit=True)
         _git(self.root, "merge", "--ff-only", branch)
@@ -134,6 +173,51 @@ class TestClean(unittest.TestCase):
         self.assertIn("cleaned (worktree", output)
         self.assertIn(f"branch {branch}: cleaned", output)
         self.assertIn(f"branch {self.folder}/older: cleaned", output)
+
+    def test_clean_detaches_main_tree_links_without_changing_targets(self) -> None:
+        worktree, branch, before = self._linked_merged_source()
+
+        code, output = self._run_clean()
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(worktree.exists())
+        self.assertNotIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"))
+        self.assertEqual(self._target_inventory({
+            "pkg": {"sentinel.txt": ""},
+            "assets": {"sentinel.txt": ""},
+            "lib/l10n/arb": {"app.arb": ""},
+        }), before)
+
+    def test_clean_detachment_failure_is_retryable_and_fail_closed(self) -> None:
+        worktree, branch, before = self._linked_merged_source()
+
+        with patch.object(pathops, "detach_directory_link",
+                          side_effect=OSError("simulated detachment failure")):
+            code, output = self._run_clean()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("linked target content was not touched", output)
+        self.assertTrue(worktree.exists())
+        self.assertIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"))
+        self.assertEqual(self._target_inventory({
+            "pkg": {"sentinel.txt": ""},
+            "assets": {"sentinel.txt": ""},
+            "lib/l10n/arb": {"app.arb": ""},
+        }), before)
+
+        code, output = self._run_clean()
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(worktree.exists())
+        self.assertEqual(gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"), [])
+        self.assertEqual(self._target_inventory({
+            "pkg": {"sentinel.txt": ""},
+            "assets": {"sentinel.txt": ""},
+            "lib/l10n/arb": {"app.arb": ""},
+        }), before)
 
     def test_container_with_other_worktree_is_retained(self) -> None:
         worktree, branch = self._worktree_branch(commit=True)

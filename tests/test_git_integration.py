@@ -30,7 +30,7 @@ from assent.gitops import (
 )
 from assent.verification_common import (ProvisionedLink,
                                         provisioned_candidate_links)
-from tests.test_verification import make_directory_link
+from tests.link_support import cleanup_worktree, make_directory_link, safe_rmtree
 
 
 def _git(root: Path, *args: str) -> str:
@@ -65,10 +65,8 @@ class GitRepositoryCase(unittest.TestCase):
                     continue
                 path = Path(line.removeprefix("worktree "))
                 if path.resolve() != self.root.resolve():
-                    subprocess.run(
-                        ["git", "worktree", "remove", "--force", str(path)],
-                        cwd=self.root, capture_output=True)
-        shutil.rmtree(self.parent, ignore_errors=True)
+                    cleanup_worktree(self.root, path)
+        safe_rmtree(self.parent)
 
     def _source(self, branch: str = "plan01/run") -> str:
         _git(self.root, "checkout", "-b", branch)
@@ -253,6 +251,37 @@ class TestTemporaryWorktrees(GitRepositoryCase):
             self.root, "for-each-ref", "--format=%(refname:short)",
             "refs/heads/").splitlines())
         self.assertEqual(self._metadata_paths(), [self.root.resolve()])
+
+    def test_detachment_failure_retains_temporary_branch_until_retry(self) -> None:
+        (self.root / ".gitignore").write_text("pkg/\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "ignore temporary link")
+        snapshot = commit_of(self.root, "HEAD")
+        target = self.parent / "temporary target"
+        target.mkdir()
+        (target / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+
+        with mock.patch.object(
+                pathops, "detach_directory_link",
+                side_effect=OSError("simulated detachment refusal")):
+            with self.assertRaisesRegex(AssentError, "cleanup was incomplete"):
+                with temporary_integration_worktree(
+                        self.root, "plan01", snapshot) as (path, branch):
+                    make_directory_link(path / "pkg", target)
+
+        self.assertTrue(path.exists())
+        self.assertIn(branch, _git(
+            self.root, "for-each-ref", "--format=%(refname:short)",
+            "refs/heads/").splitlines())
+        self.assertTrue((target / "sentinel.txt").is_file())
+
+        gitops._cleanup_temporary_worktree(self.root, path, branch)
+
+        self.assertFalse(path.exists())
+        self.assertNotIn(branch, _git(
+            self.root, "for-each-ref", "--format=%(refname:short)",
+            "refs/heads/").splitlines())
+        self.assertTrue((target / "sentinel.txt").is_file())
 
     def test_a_mirrored_link_is_removed_before_the_candidate_worktree(self) -> None:
         """Candidate cleanup must never reach an external linked target.
@@ -477,9 +506,7 @@ class TestNonTraversingWorktreeRemoval(GitRepositoryCase):
                 self.assertTrue((path / "pkg" / "sentinel.txt").is_file())
                 self.assertEqual(
                     self._contents(root_target, nested_target), before)
-                for link in pathops.inventory_directory_links(path):
-                    pathops.detach_directory_link(link)
-                _git(self.root, "worktree", "remove", "--force", str(path))
+                cleanup_worktree(self.root, path)
 
 
 if __name__ == "__main__":
