@@ -4,8 +4,8 @@ CLAUDE.md
 .anthropic/
 
 # agents 執行期產物
-.agents/agents.log
-.agents/*/report.md
+.agents/
+AGENTS.md
 
 # Python
 __pycache__/
