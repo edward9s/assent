@@ -219,6 +219,69 @@ fallback。之後可再次執行 `assent verify --batch`,對剩餘部分建置�
 未接受 dependent 需要的資料夾,它會保留該證據並跳過封存,與 `clean` 所
 強制的 upstream-first 規則相同。
 
+### 用 `assent reconcile` 解決單一資料夾的衝突
+
+`assent verify --batch` 只能略過發生 conflict 的資料夾,無法解決它。
+`assent reconcile FOLDER` 是對應的單一資料夾指令:人類只編輯衝突檔案,
+Assent 則負責這些編輯周圍的每一個 Git 操作。完整順序是:
+
+```text
+assent reconcile parallel01              # 在 worktree 中準備好衝突
+                                         # (人工編輯被回報的檔案)
+assent reconcile --continue parallel01   # 加入索引、提交、推進 source
+assent verify parallel01                 # 選用、明確、昂貴
+assent accept parallel01                 # 明確的人類批准
+```
+
+**start** 要求資料夾已完成(每個任務為 `DONE` 或 `SKIP`)、主 worktree 乾淨,
+且 source 有自己的分支與 worktree。它會擷取整合 target 目前的 tip,在主
+worktree 旁建立 worktree `<project>.reconcile/<FOLDER>`,置於從 source tip
+起始的臨時分支 `assent-reconcile/<FOLDER>`,並把擷取到的 target tip 合併
+進來但不提交。由於這個 merge 以 source 為先建立,其第一 parent 就是原本的
+source,所以之後 source 分支可以被 fast-forward 到它上面——source 從不被
+改寫,而**整合 target 從不被改變**。過程中主 worktree 與該資料夾自己的
+source worktree 都維持乾淨。若兩邊其實可以自動合併,start 會說明、撤銷該
+merge、移除它建立的資源,並讓 source 維持原狀。若 source 已包含於 target,
+就沒有需要 reconcile 的東西。
+
+**你只編輯,不執行任何 Git 指令。** start 會印出 worktree 路徑、分支、
+雙方 tip 與每個衝突檔案;只在那個 worktree 內解決這些檔案。
+
+**`--continue`** 只把 Git 仍回報為 unmerged 的路徑加入索引,並驗證結果
+(沒有殘留 unmerged 路徑、依 `git diff --cached --check` 沒有殘留衝突標記
+或空白錯誤、也沒有衝突解決範圍以外的編輯),接著建立 merge commit、在
+source 自己的 worktree 內 fast-forward source 分支,然後移除臨時 worktree
+與分支。刪除前它會重新證明每個受管資源的身分——是本 repository 的
+worktree、附著於受管分支、`HEAD` 為已證明的 commit、且乾淨——因此絕不會
+擴大刪除範圍。由於 source 確實前進了,`--continue` 會刪除依舊 source 身分
+寫成的 receipt:資料夾 receipt,以及當批次 receipt 記錄的任一 source 身分
+已不再成立時的批次 receipt(批次 receipt 本質上是全有全無)。連讀都讀不了
+的批次 receipt 會原地保留供檢查,而不是被抹除。
+
+**Reconcile 不是證據,也不是批准。** `--continue` 不執行聚焦任務測試,也
+不執行完整驗證,更不寫 receipt。證明解決後的 source 是之後由人明確啟動的
+`assent verify FOLDER`——那個昂貴步驟,對當下的 target 執行;批准則是之後的
+`assent accept FOLDER`,它仍要求一份 fresh、可重現的 `PASSED` 完整驗證
+receipt。若 target 在 start 之後前進,擷取到的 merge 不會被改寫;drift 會被
+回報,而之後那次 `verify` 才是權威。
+
+**中斷與拒絕**都可復原,且從不具破壞性。沒有狀態檔:之後的執行會讀取
+worktree、臨時分支、`HEAD`、`MERGE_HEAD` 與 merge parents,判斷前一次執行
+走到哪裡,因此 `--continue` 能接續某次中斷執行已提交的 merge,或補完只差
+的 fast-forward。一旦有不相符之處——source 分支獨立移動、受管路徑不是
+worktree 或位於別的分支、已加入索引的解決有驗證問題——該次執行會拒絕並保留
+worktree、分支與每一筆編輯;不提交任何東西,也不刪除任何東西。
+
+**`--abort`** 放棄這次嘗試:它只移除受管的 worktree 與臨時分支,且只在證明
+各自確實是它所管理的資源之後才移除;當 worktree 仍有未提交變更時它會拒絕,
+而不是丟棄成果。source 與整合 target 都維持不變。
+
+Reconcile 刻意不是整合引擎。它只處理單一資料夾對當前整合 target;它從不替
+你解決檔案內容、從不合併投機性的同儕資料夾、從不執行 AI adapter,也從不改
+任務狀態。只在建置批次 candidate 時、於兩個未被接受的 source 之間出現的
+conflict 不屬於本指令——那組仍走 `verify --batch` 的略過決定,再由
+`assent rework` 或 `assent reject` 處理。
+
 ## 平行執行
 
 可在 N 個終端各自指定不同的工作資料夾執行,例如 `assent run parallel01`、
@@ -376,6 +439,7 @@ checkpoints 構成目前分支的連續尾段才會建立新的反向 commit,絕
 | `assent report [FOLDER]`<br>`assent report parallel01` | 生成並顯示工作資料夾內的人讀報告 `_report.md`。接受 `--config PATH`。 | **零** |
 | `assent verify <FOLDER>`<br>`assent verify parallel01` | 對單一資料夾的臨時 integration candidate 執行一次完整 verifier 並刷新 derived receipt;不改 target、不開 AI session。報告顯示 `PASSED`/`FAILED`、`fresh`/`stale`;沒有 `--all`。 | **零** |
 | `assent accept <FOLDER>`<br>`assent accept parallel01` | 人類批准單一已完成資料夾。快速重建 candidate,只在完全比對 fresh `PASSED` receipt 時發布;不執行完整驗證。missing/stale receipt 要先 `assent verify`;沒有 `--all`、`--push`、remote、pull、rebase、force、自動解衝突或刪 source。 | **零** |
+| `assent reconcile <FOLDER>`<br>`assent reconcile --continue parallel01` | 在隔離 worktree `<project>.reconcile/<FOLDER>` 內準備單一已完成資料夾的 source 對 target conflict,讓人工編輯被回報的檔案;`--continue` 把該解決加入索引並驗證、提交 merge、fast-forward source 分支;`--abort` 只丟棄已證明的受管 worktree 與分支。從不改 target、不解決內容、不執行聚焦或完整驗證、不寫 receipt、也不接受。`FOLDER` 必填;沒有 `--all`。 | **零** |
 | `assent clean [FOLDER]`<br>`assent clean parallel01` | 只清理已完全併入且乾淨的 worktree 與同資料夾前綴分支;任何證明不足就跳過,不碰 `.assent/`,且沒有強制選項。省略 `FOLDER` 時作用於全部工作資料夾。 | **零** |
 | `assent reject <FOLDER>`<br>`assent reject parallel01` | 人工裁決駁回:封存未提交變更後強制刪除該資料夾的 worktree 與同前綴分支(刪除前以完整 tip hash 存證),並把 DONE/WIP/BLOCKED 任務改回 TODO、r 檔保存 Git 存證。`FOLDER` 必填;run 進行中拒絕。 | **零** |
 | `assent rework <FOLDER> <TASK>`<br>`assent rework parallel01 t003 --cascade --reason "驗收不符"` | 非破壞性重開單一任務;預設保留程式碼,`--cascade` 明示連動下游。`--revert-code` 僅在 checkpoints 是連續分支尾段時建立新反向 commit。成功後更新報告,不自動執行 run。接受 `--config PATH`。 | **零** |
