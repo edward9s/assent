@@ -55,10 +55,18 @@ Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
   Git integration; do not add a second per-task `review` state alongside task
   execution status.
 - Expensive full-project verification belongs to unattended `run` / `verify`,
-  not the interactive acceptance decision. `accept` may publish only an exact
-  integration tree covered by a fresh, reproducible verification receipt and
-  must refuse stale or missing evidence instead of silently starting a long
-  test run.
+  not the interactive acceptance decision. Human approval is the explicit
+  `assent accept` action plus the resulting Git integration. Direct
+  `accept FOLDER` and selected `accept A B` never start verification; unless a
+  source is already integrated by ancestry as an idempotent no-op, they require
+  a fresh receipt that exactly matches the source, reconstructed integration
+  tree, and verification-script digest. `accept --all` intentionally has two
+  modes: a fresh PASSED batch receipt is replayed and released atomically
+  without new verification, while absent or expired batch evidence uses the
+  sequential per-folder `verify_folder_if_needed` step before each
+  not-already-integrated accept, stops on the first failure, and preserves
+  earlier publications. A malformed batch receipt refuses rather than falling
+  back. Exact receipt replay and the human approval boundary remain mandatory.
 - A verification receipt is a deletable derived artifact, never an independent
   source of truth: source commits, the reconstructed integration tree, and the
   verification-script digest must reproduce it before it can authorize accept.
