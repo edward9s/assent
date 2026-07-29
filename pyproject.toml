@@ -1,17 +1,41 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "assent"
 version = "0.1.0a1"
 description = "AI plan format + automatic scheduler"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
+authors = [
+    { name = "edward9s" },
+]
+keywords = ["ai", "automation", "cli", "planning", "scheduler"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development",
+]
+dependencies = []
 
 [project.scripts]
 assent = "assent.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/edward9s/assent"
+Repository = "https://github.com/edward9s/assent.git"
+Issues = "https://github.com/edward9s/assent/issues"
 
 [tool.setuptools.packages.find]
 include = ["assent*"]

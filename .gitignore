@@ -10,6 +10,7 @@ CLAUDE.md
 __pycache__/
 *.egg-info/
 build/
+dist/
 
 # OS / editor
 .DS_Store

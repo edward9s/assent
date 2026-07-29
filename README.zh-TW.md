@@ -64,12 +64,17 @@
 Python 3.11+、git、已登入的 Claude Code CLI(`claude`)或 Codex CLI(`codex`)。
 
 ```
-cd <assent 專案目錄>
-pip install -e .
+python -m pip install assent
 ```
 
 驗證:任何目錄執行 `assent --version`;它會印出已安裝套件的版本。
 `assent --help` 會顯示頂層 CLI 說明。零第三方依賴,不會下載任何外部套件。
+
+若要從原始碼 checkout 進行開發:
+
+```
+python -m pip install -e .
+```
 
 ## 檔案放在哪裡
 

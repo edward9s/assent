@@ -81,13 +81,18 @@ Python 3.11+, git, and a logged-in Claude Code CLI (`claude`) or Codex CLI
 (`codex`).
 
 ```
-cd <your assent project directory>
-pip install -e .
+python -m pip install assent
 ```
 
 Verify: run `assent --version` from any directory; it prints the installed
 distribution version. `assent --help` shows the top-level CLI help. Zero
 third-party dependencies — nothing else gets downloaded.
+
+For development from a source checkout:
+
+```
+python -m pip install -e .
+```
 
 ## Where files live
 
