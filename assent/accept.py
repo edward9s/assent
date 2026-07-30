@@ -189,6 +189,19 @@ def _accept_locked(cfg: Config) -> int:
     if receipt.verify_script_sha256 != current_digest:
         print(_refresh_message(folder, "the verification script changed"))
         return 1
+    # Shared inputs are evidence like the source, target, and verifier are: a
+    # changed profile, declared target, or target content means the receipt no
+    # longer describes what would be tested.  Accept never repairs a link or
+    # invokes AI to make this pass; it refuses and asks for a fresh verify.
+    try:
+        current_shared = verification.current_shared_inputs(cfg)
+    except AssentError as e:
+        print(_refresh_message(folder, str(e)))
+        return 1
+    if receipt.shared_inputs_sha256 != current_shared:
+        print(_refresh_message(
+            folder, "the reviewed shared inputs changed since verification"))
+        return 1
 
     message = accept_merge_message(
         target_branch, folder, source_branch, source_tip,

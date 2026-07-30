@@ -544,6 +544,131 @@ def target_problem(main: Path, relative: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Shared-input evidence bound into a receipt
+# --------------------------------------------------------------------------- #
+def _entry_kind(path: Path, info: os.stat_result) -> str:
+    if pathops.is_link_stat(info):
+        return "link"
+    if pathops.is_reparse_point(info):
+        raise AssentError(
+            f"refusing to snapshot the shared target content at {path}: it is a "
+            "reparse point assent cannot classify, so it is left unread rather "
+            "than walked into")
+    if stat.S_ISDIR(info.st_mode):
+        return "dir"
+    if stat.S_ISREG(info.st_mode):
+        return "file"
+    raise AssentError(
+        f"refusing to snapshot the shared target content at {path}: it is "
+        "neither an ordinary file, an ordinary directory, nor a representable "
+        f"link (mode {stat.S_IFMT(info.st_mode):#o})")
+
+
+def _link_identity(path: Path) -> str:
+    """A link's own target text, or a refusal when it cannot be represented.
+
+    Only the link object is read.  A Windows junction is not a symlink to
+    Python, so ``os.readlink`` is tried and an unreadable link is refused rather
+    than resolved -- resolving it is exactly the traversal this must not do.
+    """
+    try:
+        return os.readlink(path).replace("\\", "/")
+    except OSError as e:
+        raise AssentError(
+            f"refusing to snapshot the shared target content at {path}: its "
+            f"link target cannot be represented without following it ({e})"
+        ) from e
+
+
+def snapshot_target(main: Path, relative: str) -> str:
+    """Digest one declared shared directory through a bounded, safe traversal.
+
+    Ordinary directories are descended, ordinary files are hashed by content,
+    and a link is recorded by its own target text without ever being followed --
+    so nothing outside the declared target is read, and a nested link that
+    escapes it changes the digest instead of widening the walk.  Any shape that
+    cannot be represented unambiguously -- an unclassifiable reparse point, an
+    unreadable link, a device or socket -- refuses rather than being skipped.
+    """
+    root = Path(main) / relative
+    digest = hashlib.sha256()
+    digest.update(b"assent-shared-target-v1\n")
+    digest.update(relative.encode("utf-8"))
+    digest.update(b"\n")
+    pending = [("", root)]
+    while pending:
+        prefix, current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                names = sorted(entry.name for entry in entries)
+        except OSError as e:
+            raise AssentError(
+                f"Unable to read the shared target directory {current}: {e}") from e
+        for name in names:
+            path = current / name
+            key = f"{prefix}{name}"
+            if "/" in name or name in ("", ".", ".."):  # pragma: no cover
+                raise AssentError(
+                    f"refusing to snapshot the shared target content at {path}: "
+                    f"{name!r} is not a representable entry name")
+            try:
+                info = os.lstat(path)
+            except OSError as e:
+                raise AssentError(
+                    f"Unable to inspect {path} while snapshotting the shared "
+                    f"target {relative}: {e}") from e
+            kind = _entry_kind(path, info)
+            digest.update(key.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(kind.encode("utf-8"))
+            digest.update(b"\0")
+            if kind == "link":
+                digest.update(_link_identity(path).encode("utf-8"))
+            elif kind == "file":
+                content = _digest_of(path)
+                if content == ABSENT:       # pragma: no cover - raced removal
+                    raise AssentError(
+                        f"Unable to read {path} while snapshotting the shared "
+                        f"target {relative}")
+                digest.update(content.encode("utf-8"))
+            else:
+                pending.append((f"{key}/", path))
+            digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def shared_inputs_digest(main: Path,
+                         contracts: Sequence[tuple[str, Contract]]) -> str:
+    """One deterministic digest of every shared input a verification depended on.
+
+    It covers, in the caller's own contributing order, each source's folder name
+    and selected profile fingerprint, that profile's normalized declared paths,
+    the exact resolved primary-worktree target of each one, and a content
+    snapshot of that target.  REVIEWED-NONE contributes an explicit empty-profile
+    line, so "reviewed to need nothing" is evidence and is never confused with
+    UNKNOWN, which has no digest at all because it may not reach a receipt.
+    """
+    digest = hashlib.sha256()
+    digest.update(b"assent-shared-inputs-v1\n")
+    snapshots: dict[str, str] = {}
+    for folder, contract in contracts:
+        if not contract.settled:
+            raise AssentError(
+                f"refusing to record shared-input evidence for {folder}: its "
+                f"shared-path contract is {contract.state}, not a reviewed answer")
+        fingerprint = contract.profile.fingerprint if contract.profile else ""
+        digest.update(f"{folder}\0{contract.state}\0{fingerprint}\n"
+                      .encode("utf-8"))
+        for relative in contract.paths:
+            if relative not in snapshots:
+                snapshots[relative] = snapshot_target(main, relative)
+            digest.update(
+                f"{relative}\0{_link_target(main, relative).as_posix()}\0"
+                f"{snapshots[relative]}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
+# --------------------------------------------------------------------------- #
 # Classification
 # --------------------------------------------------------------------------- #
 def has_review_subject(worktree: Path) -> bool:
@@ -772,6 +897,41 @@ def reconcile(main: Path, worktree: Path, contract: Contract, *,
         contract.profile.fingerprint if contract.profile else "", wanted)
     write_manifest(main, manifest)
     return created, detached
+
+
+def prepare_sources(main: Path,
+                    sources: Sequence[tuple[str, Path | None]]
+                    ) -> tuple[tuple[str, Contract], ...]:
+    """Classify and reconcile every source a verification is about to depend on.
+
+    This is the one gate every verification entry point goes through -- single
+    folder, exact selected batch, dynamic batch, localization prefix, chained
+    ``run --verify``, and ``--focus``.  Each contributing live source worktree is
+    classified against the local manifest and its Assent-owned declared links are
+    reconciled, so a missing one is recreated rather than silently depended on
+    from a previous ``run``.  UNKNOWN, STALE, an ordinary destination, a foreign
+    link, and an invalid profile all refuse here, before any verifier command
+    exists, and the refusal names the zero-AI remedy.
+
+    The returned contracts, in the caller's order, are what
+    ``shared_inputs_digest`` binds into the receipt.
+    """
+    main = Path(main)
+    prepared: list[tuple[str, Contract]] = []
+    with hold_manifest_lock(main):
+        manifest = read_manifest(main)
+        for folder, worktree in sources:
+            if worktree is None:
+                continue
+            contract = classify(main, worktree, manifest)
+            if not contract.settled:
+                raise AssentError(
+                    f"refusing to verify: the shared-path contract for "
+                    f"{folder} ({worktree}) is {contract.state}. "
+                    f"{closeout_refusal(contract) or 'Run `' + REVIEW_COMMAND + '`'}")
+            reconcile(main, worktree, contract, manifest=manifest)
+            prepared.append((folder, contract))
+    return tuple(prepared)
 
 
 def prepare_worktree(main: Path, worktree: Path, *,

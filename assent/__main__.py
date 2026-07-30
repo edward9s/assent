@@ -29,6 +29,7 @@ from assent.folderdeps import (find_unfinished_prerequisites,
                                parse_folder_dependency_graph)
 from assent.folder_scheduler import run_all
 from assent.init import init as run_init
+from assent.main import add_shared_paths_command, shared_paths_review
 from assent.plan import Plan
 from assent.reconcile import (reconcile_abort, reconcile_continue,
                               reconcile_start)
@@ -307,6 +308,10 @@ def _build_parser() -> argparse.ArgumentParser:
               "3/npm, 4/flutter, or 5/custom followed by an argv command; "
               "custom:<command> also accepts one quoted command. Omit it on "
               "fresh init for the numbered menu; repeat init does not prompt"))
+
+    # The only sanctioned writer of the local shared-path manifest.  It needs no
+    # .assent project config: it acts on the Git worktree it is run in.
+    add_shared_paths_command(sub)
 
     sub.add_parser(
         "doctor", help="Diagnose the machine environment (Python, git, "
@@ -629,6 +634,16 @@ def _dispatch(argv: list[str]) -> int:
 
     if args.command == "doctor":
         return run_doctor()
+
+    # `shared-paths` acts on the Git worktree it runs in and writes only the
+    # primary worktree's local manifest, so it deliberately skips the .assent
+    # project config gate below: a source worktree carries no .assent at all.
+    if args.command == "shared-paths":
+        try:
+            return shared_paths_review(args.path, args.watch, args.none)
+        except AssentError as e:
+            print(f"shared-paths review: failed ({e})")
+            return 1
 
     try:
         assent_dir = validate_config(args.config)
