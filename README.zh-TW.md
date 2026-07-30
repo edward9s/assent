@@ -342,12 +342,19 @@ receipt、direct accept、單一 `archive`),兩個以上走 exact selected batch
 | `assent run A ... --verify` | 展開後的 exact selection 當成一個 batch |
 | `assent run --all --verify` | 全專案的動態 batch |
 | `assent run ... --verify` | 全專案的動態 batch |
+| `assent run A --once --verify`<br>`assent run A --task t003 --verify` | A 的 folder receipt,但僅限該次受限執行讓 A 變成完成時 |
 
 單獨的 `...` 是全專案請求,因此剛好落在 `--all` 使用的同一個動態 batch,而不是
 把 scheduler 之後可能還會擴充的集合凍結起來;帶明示前綴的 `...` 則仍是 exact
 expanded selection,驗證的正是它所執行的那些資料夾。驗證的 exit code 就是這道
-命令的 exit code。`--verify` 不能與刻意在資料夾收尾前停止的 `--once`、`--task`
-併用;它屬於呼叫層級的請求,不理會設定中的 `receipt_refresh` 政策。
+命令的 exit code。
+
+`--once`、`--task` 可以與 `--verify` 併用。它們恰好只選出一個資料夾,receipt 的
+範圍因此毫無歧義,但它們在單一任務後就停止:所以只有在該次受限執行讓所選資料夾
+變成完成(每個任務都是 `DONE` 或 `SKIP`)時才驗證。資料夾未完成則此請求失敗且不
+寫下 receipt;這道拒絕會指出未完成的任務 id 與狀態,並且發生在建立任何整合
+candidate、啟動任何完整驗證器之前,所以它是失敗,而不是安靜地跳過。`--verify`
+屬於呼叫層級的請求,不理會設定中的 `receipt_refresh` 政策。
 
 #### 多資料夾的 `clean` 與 `archive`
 
@@ -725,7 +732,7 @@ checkpoints 構成目前分支的連續尾段才會建立新的反向 commit,絕
 |---|---|---|
 | `assent run [FOLDER]`<br>`assent run parallel01` | 執行工作資料夾,直到任務全為 DONE/BLOCKED/SKIP。省略 `FOLDER` 時推導唯一可執行資料夾;`--once` 只執行下一個任務後停止;`--task ID` 指定單一任務且仍檢查前置,例如 `assent run --task t003 parallel01`。 | 僅執行 AI session 時消耗;`--once` 或 `--task` 最多執行單一任務 |
 | `assent run A B`<br>`assent run A B --all`<br>`assent run A B ...` | 只依序執行 A、B,第一個失敗就停止。加 `--all` 時,再依依賴順序執行其餘未完成資料夾;字面 `...` 則是把其餘每個資料夾接在後面,整批在開跑前先定格成一個選擇。`...` 與 `--all` 不可併用,兩種形式也都不暗中驗證或接受。 | 僅執行 AI session 時消耗 |
-| `assent run --all --verify`<br>`assent run A B --verify` | 先執行,只有在 exit code 為零時,才執行與選擇一致的完整驗證:一個資料夾寫 folder receipt,明示的多資料夾選擇寫該 selected batch,`--all` 或單獨的 `...` 則是全專案 batch。驗證的 exit code 就是這道命令的 exit code;不可與 `--once`、`--task` 併用。 | 僅執行 AI session 時消耗;驗證本身為**零** |
+| `assent run --all --verify`<br>`assent run A B --verify` | 先執行,只有在 exit code 為零時,才執行與選擇一致的完整驗證:一個資料夾寫 folder receipt,明示的多資料夾選擇寫該 selected batch,`--all` 或單獨的 `...` 則是全專案 batch。驗證的 exit code 就是這道命令的 exit code。與 `--once`、`--task` 併用時,只有在該次受限執行讓所選資料夾變成完成時才驗證;資料夾未完成則此請求失敗且不寫下 receipt。 | 僅執行 AI session 時消耗;驗證本身為**零** |
 | `assent run --all`<br>`assent run --all --jobs 2` | 依 `_folder.toml` 的資料夾依賴順序執行全部未完成資料夾;`--jobs N` 限制同時執行的資料夾數(預設 1),家長終端以 `[工作資料夾] 訊息` 即時標示各子行程輸出。 | 僅執行 AI session 時消耗 |
 | `assent status [FOLDER]`<br>`assent status parallel01` | 顯示進度統計、下一個任務、分支與最後檢查點。接受 `--config PATH`。 | **零** |
 | `assent check [FOLDER]`<br>`assent check --config .assent/assent.toml parallel01` | 驗證任務檔格式、依賴無循環、設定與環境,是規劃會議的散會條件。接受 `--config PATH`。 | **零** |

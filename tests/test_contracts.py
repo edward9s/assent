@@ -120,6 +120,60 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(document="README.zh-TW.md", phrase=phrase):
                 self.assertIn(phrase, compact)
 
+    def test_limited_run_verification_is_conditional_in_every_document(self):
+        """`--verify` with `--once`/`--task` is gated, never blanket-refused."""
+        install_global_contracts(self)
+        english = {
+            "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
+                encoding="utf-8"),
+            "format.md": contracts.installed_contract_text("format.md"),
+            "instructions.md": contracts.installed_contract_text(
+                "instructions.md"),
+            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+                encoding="utf-8"),
+            "docs/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        required = (
+            "verifies only when that limited run left the single selected "
+            "folder complete",
+            "an incomplete folder fails the request without writing a receipt",
+        )
+        # The old blanket refusal must not come back anywhere; `...` staying
+        # incompatible with the two selectors is a separate, still-true rule.
+        forbidden = (
+            "`--verify` cannot be combined with `--once`",
+            "`--verify` is refused with `--once`",
+            "refuse the flag",
+            "incompatible with `--once`",
+        )
+        for name, text in english.items():
+            compact = " ".join(text.split())
+            for phrase in required:
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+            for phrase in forbidden:
+                with self.subTest(document=name, forbidden=phrase):
+                    self.assertNotIn(phrase, compact)
+
+        chinese = {
+            "README.zh-TW.md": (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+                encoding="utf-8"),
+            "docs/zh-TW/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        for name, text in chinese.items():
+            compact = "".join(text.split())
+            for phrase in ("只有在該次受限執行讓所選資料夾變成完成時才驗證",
+                           "資料夾未完成則此請求失敗且不寫下receipt"):
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+            with self.subTest(document=name, forbidden="blanket refusal"):
+                self.assertNotIn("不可與`--once`、`--task`併用", compact)
+                self.assertNotIn("不能與刻意在資料夾收尾前停止的", compact)
+
     def test_reader_recovery_never_recommends_raw_recursive_worktree_removal(self):
         paths = (
             _PROJECT_ROOT / "AGENTS.md",
