@@ -432,6 +432,12 @@ still extend; an explicit prefix plus `...` stays an exact expanded selection
 and is verified as exactly the folders it ran. The verification's exit code
 becomes the command's exit code.
 
+Under the default manual receipt-refresh policy, a completed folder run first
+reports that its per-folder receipt is deferred. With `--verify`, that closeout
+also says the run-level verification follows in the same invocation, so it does
+not tell the user to start the verification command again; the exact selected
+or dynamic path in the table is the handoff that follows.
+
 `--once` and `--task` may be combined with `--verify`. They select exactly one
 folder, so the receipt scope is unambiguous, but they stop after a single task:
 the request therefore verifies only when that limited run left the single
@@ -474,6 +480,17 @@ set. It never changes the target ref and never accepts a folder. If a failed
 request is bisected to a passing prefix, the command still returns failure and
 that prefix cannot authorize the original selected acceptance.
 
+Selected verification labels this path `verify selected`, not `verify --batch`.
+If candidate construction conflicts, it says first that the full verifier did
+not run, names the conflicting folder and paths, and records that no receipt was
+written and the target and selected source refs were left unchanged. A
+source-versus-target conflict points directly to `assent reconcile <FOLDER>`.
+For a peer-only conflict, the diagnostic names the compatible selected prefix
+ahead of the conflicting folder and recommends `assent verify` and `assent
+accept` for that prefix before `assent reconcile <FOLDER>` against the advanced
+target; `assent rework <FOLDER> <TASK>` and `assent reject <FOLDER>` remain
+explicit alternatives.
+
 `assent verify <FOLDER> --focus` is different: it runs the distinct DONE-task
 verification commands in that folder's source worktree. It creates no
 integration candidate or receipt, and even a passing result cannot authorize
@@ -512,8 +529,10 @@ and verify only the remaining, still-mergeable folders.
 
 Skipping is not resolving, rebasing, accepting, or deleting anything — the
 target and every source folder, skipped or merged, are left exactly as they
-were. The conflicting folder's own source still needs a human decision
-through `assent rework` or `assent reject` before it can rejoin a batch.
+were. For a peer-only conflict, the compatible work ahead of the conflicting
+folder can be verified and accepted first so the target advances before that
+folder is reconciled; `assent rework` and `assent reject` remain explicit
+alternatives for reopening or dropping it.
 
 `assent accept --all` has two deliberate modes. With a fresh PASSED batch
 receipt, it publishes exactly the receipt's own folders in one atomic ref
@@ -612,8 +631,10 @@ folder against the current integration target; it never resolves file content
 for you, never combines speculative peer folders, never runs an AI adapter, and
 never edits a task status. A conflict that appears only between two unaccepted
 sources while building a batch candidate is outside this command — that set
-still goes through `verify --batch`'s skip decision and then `assent rework` or
-`assent reject`.
+still goes through `verify --batch`'s skip decision. If compatible work is ahead
+of the peer-only conflict, verify and accept that work first, then reconcile the
+conflicting folder against the advanced target; `assent rework` and `assent
+reject` remain explicit alternatives.
 
 ## Parallel execution
 
@@ -705,9 +726,10 @@ isn't done.
 session runs only its focused `verify`. Whether folder completion also builds
 a temporary integration candidate and runs the full `.assent/verify.py`
 outside the AI session depends on `assent.toml`'s `[verification]`
-`receipt_refresh`: the default `"manual"` leaves that to an explicit
-`assent verify [--batch]` afterward; `"auto"` runs it at closeout as soon as
-every task in the folder is done.
+`receipt_refresh`: the default `"manual"` leaves the per-folder receipt to an
+explicit `assent verify` path afterward; `run --verify` performs its selected
+or dynamic run-level verification as the immediate handoff, while `"auto"`
+runs the folder refresh at closeout as soon as every task in the folder is done.
 
 `assent verify <FOLDER>` refreshes that complete verification receipt with zero
 tokens and no AI session; `assent verify --batch` does the same for every

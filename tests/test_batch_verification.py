@@ -319,6 +319,8 @@ class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
         code, output = self.run_selected("child", "parent")
 
         self.assertEqual(code, 0, output)
+        self.assertIn("verify selected: merging", output)
+        self.assertNotIn("verify --batch:", output)
         self.assertIn("merging 2 folder(s) in dependency order: parent, child",
                       output)
         receipt = self.read_batch_receipt()
@@ -362,7 +364,19 @@ class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
 
         self.assertEqual(code, 1)
         self.assertIn("exact selected set conflicts", output)
+        self.assertIn("verify selected:", output)
+        self.assertNotIn("verify --batch:", output)
+        self.assertIn("full verifier did not run", output)
         self.assertIn("shared.txt", output)
+        self.assertIn("no receipt was written", output)
+        self.assertIn("target ref", output)
+        self.assertIn("every selected source ref", output)
+        self.assertIn("compatible selected prefix ahead of bb: aa", output)
+        self.assertIn("assent verify aa", output)
+        self.assertIn("assent accept aa", output)
+        self.assertIn("assent reconcile bb", output)
+        self.assertIn("assent rework <FOLDER> <TASK>", output)
+        self.assertIn("assent reject bb", output)
         ask.assert_not_called()
         verifier.assert_not_called()
         self.assertFalse(self.receipt_path().exists())
@@ -371,6 +385,44 @@ class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
         self.assertEqual(branch_tips, {
             branch: _git(self.root, "rev-parse", branch)
             for branch in branch_tips
+        })
+
+    def test_selected_target_conflict_points_to_reconcile_without_verifying(self) -> None:
+        (self.root / "shared.txt").write_text("base\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "shared base")
+        self.make_source("aa")
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+        (self.root / "shared.txt").write_text("from trunk\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "advance trunk")
+
+        target_tip = self.head()
+        refs_before = {
+            ref: self.head(ref)
+            for ref in _git(self.root, "for-each-ref", "--format=%(refname)",
+                            "refs/heads/").splitlines()
+        }
+        with mock.patch("assent.batch_verification.confirm_on_terminal") as ask, \
+                mock.patch("assent.batch_verification.run_full_verifier") as verifier:
+            code, output = self.run_selected("aa", "bb")
+
+        self.assertEqual(code, 1)
+        self.assertIn("verify selected:", output)
+        self.assertNotIn("verify --batch:", output)
+        self.assertIn("full verifier did not run", output)
+        self.assertIn("bb", output)
+        self.assertIn("shared.txt", output)
+        self.assertIn("bb conflicts with the integration target on its own", output)
+        self.assertIn("assent reconcile bb", output)
+        self.assertNotIn("compatible selected prefix", output)
+        self.assertIn("no receipt was written", output)
+        ask.assert_not_called()
+        verifier.assert_not_called()
+        self.assertFalse(self.receipt_path().exists())
+        self.assertEqual(self.head(), target_tip)
+        self.assertEqual(refs_before, {
+            ref: self.head(ref) for ref in refs_before
         })
 
     def test_selected_no_bisect_records_the_requested_set(self) -> None:

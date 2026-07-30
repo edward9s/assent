@@ -358,6 +358,11 @@ receipt、direct accept、單一 `archive`),兩個以上走 exact selected batch
 expanded selection,驗證的正是它所執行的那些資料夾。驗證的 exit code 就是這道
 命令的 exit code。
 
+在預設的 manual receipt-refresh 政策下,完成資料夾的 run 收尾會先說明 per-folder
+receipt 延後。若這次呼叫有 `--verify`,收尾訊息會說明同一次呼叫接下來要做的是
+run-level verification,不會再叫使用者重新啟動已經正在進行的驗證命令;表格中的
+exact selected 或動態路徑就是這個交接。
+
 `--once`、`--task` 可以與 `--verify` 併用。它們恰好只選出一個資料夾,receipt 的
 範圍因此毫無歧義,但它們在單一任務後就停止:所以只有在該次受限執行讓所選資料夾
 變成完成(每個任務都是 `DONE` 或 `SKIP`)時才驗證。資料夾未完成則此請求失敗且不
@@ -391,6 +396,16 @@ receipt。selected merge conflict 會拒絕,不跳過也不縮小集合;它不�
 也不接受資料夾。若失敗要求被 bisect 成通過 prefix,命令仍回傳失敗,該 prefix
 不能授權原本的 selected acceptance。
 
+這條 exact selected 路徑的標籤是 `verify selected`,不是 `verify --batch`;
+後者保留給動態發現及其互動式衝突略過政策。若 candidate 建置發生衝突,訊息會
+先說明完整 verifier 尚未執行,列出衝突資料夾與路徑,並說明沒有寫入 receipt、
+target 與 selected source ref 都維持不變。若資料夾單獨對 target 就衝突,直接
+指向 `assent reconcile <FOLDER>`。若只是 peer-only conflict,則列出衝突資料夾
+前方相容的 selected prefix,建議先對該 prefix 執行 `assent verify` 再
+`assent accept`,讓 target 前進後再以 `assent reconcile <FOLDER>` 對進階後的
+target 處理;`assent rework <FOLDER> <TASK>` 與 `assent reject <FOLDER>` 仍是
+明確的替代方案。
+
 `assent verify <FOLDER> --focus` 則不同:它在該資料夾的 source worktree 執行
 distinct DONE-task verification commands,不建立 integration candidate、不寫 receipt,
 即使通過也不能授權接受。成功的 exact selected verification 之後,人類審查可執行
@@ -422,9 +437,9 @@ conflict 資料夾及其衝突路徑,並回報每個排在某個 conflict 資料
   不會提問。
 
 略過不是解決、rebase、接受或刪除任何東西——target 與每個 source
-資料夾,不論被略過或已合併,都維持原樣不變。conflict 資料夾自身的
-source 仍需經過明確的人工 `assent rework` 或 `assent reject`,才能
-重新加入未來的批次。
+資料夾,不論被略過或已合併,都維持原樣不變。若是 peer-only conflict,可先驗證並
+接受衝突資料夾前方相容的工作,讓 target 前進後再處理該資料夾;`assent rework`
+與 `assent reject` 仍是重新開啟或捨棄它的明確替代方案。
 
 `assent accept --all` 有兩種刻意區分的模式。fresh PASSED batch receipt 時,只在
 一次原子 ref 更新中發佈 receipt 涵蓋的確切資料夾,並在同一次執行內回報 receipt
@@ -499,8 +514,9 @@ worktree、分支與每一筆編輯;不提交任何東西,也不刪除任何東�
 Reconcile 刻意不是整合引擎。它只處理單一資料夾對當前整合 target;它從不替
 你解決檔案內容、從不合併投機性的同儕資料夾、從不執行 AI adapter,也從不改
 任務狀態。只在建置批次 candidate 時、於兩個未被接受的 source 之間出現的
-conflict 不屬於本指令——那組仍走 `verify --batch` 的略過決定,再由
-`assent rework` 或 `assent reject` 處理。
+conflict 不屬於本指令——那組仍走 `verify --batch` 的略過決定。若 peer-only
+conflict 前方已有相容工作,先驗證並接受該工作,再對 target 前進後的衝突資料夾
+reconcile;`assent rework` 與 `assent reject` 仍是明確替代方案。
 
 ## 平行執行
 
@@ -569,8 +585,9 @@ AI 會議在主樹進行。從主樹可直接用 `git worktree list`、`git log 
 **第 2 幕:無人值守執行**:`assent run`,去睡覺。每個 task session 只跑該任務的
 focused verify;資料夾完成後是否還在 AI session 外建立臨時 integration candidate
 並執行完整 `.assent/verify.py`,取決於 `assent.toml`「[verification]」的
-`receipt_refresh`:預設 `"manual"` 把這一步留給之後顯式的
-`assent verify [--batch]`;`"auto"` 則在資料夾全部任務完成時的 run 收尾就執行。
+`receipt_refresh`:預設 `"manual"` 把 per-folder receipt 留給之後顯式的
+`assent verify` 路徑;`run --verify` 會把 selected 或動態的 run-level verification
+當成同一次呼叫的立即交接;`"auto"` 則在資料夾全部任務完成時的 run 收尾就執行。
 
 `assent verify <FOLDER>` 是零 token、可離席執行的完整驗證 receipt refresh,不改
 target、不開 AI session;`assent verify --batch` 則對每個已完成、尚未整合的資料夾

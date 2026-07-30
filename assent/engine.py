@@ -460,7 +460,8 @@ def _prepare_worktree(cfg: Config) -> Config:
 def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         adapter: Adapter | None = None,
         sleep: Callable[[float], None] | None = None,
-        now: Callable[[], datetime] | None = None) -> int:
+        now: Callable[[], datetime] | None = None,
+        run_level_verify: bool = False) -> int:
     """Run tasks until all are DONE/BLOCKED/SKIP (or only one with once/task_id). Returns the
     process exit code.
 
@@ -524,11 +525,19 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         if cfg.receipt_refresh == "auto":
             result = verification.verify_folder_if_needed(cfg)
         else:
-            # Default policy: a batch workflow verifies once with an explicit
-            # `assent verify [--batch]`, so per-folder refreshes here would
-            # mostly expire before acceptance anyway.
-            print(f"verify {cfg.tasks_name}: receipt refresh deferred (default); "
-                  "run `assent verify [--batch]` before accepting")
+            # Manual policy deliberately defers this per-folder receipt.  When
+            # the invoking CLI already requested run-level verification, its
+            # selected or dynamic candidate follows immediately after this
+            # closeout and is the next step the user should see.
+            if run_level_verify:
+                print(f"verify {cfg.tasks_name}: receipt refresh deferred "
+                      "(default) for the per-folder receipt under manual "
+                      "policy; run-level verification follows this invocation")
+            else:
+                print(f"verify {cfg.tasks_name}: receipt refresh deferred "
+                      "(default) for the per-folder receipt under manual "
+                      "policy; run "
+                      "`assent verify [--batch]` before accepting")
         try_write_report(cfg)
     return result
 

@@ -692,6 +692,11 @@ or any full verifier starts; it is a failure, not a silent skip. As an
 invocation-level request `--verify` verifies regardless of the configured
 `receipt_refresh` policy.
 
+Under the default manual receipt-refresh policy, successful run closeout defers
+the per-folder receipt. If `--verify` was requested, that closeout identifies
+the run-level verification that follows in the same invocation instead of
+telling the user to start that verification command again.
+
 `assent verify FOLDER --focus` is the distinct focused mode and requires one
 folder. It runs each distinct `verify` command belonging to a `DONE` task in
 that folder's source worktree. It creates no integration candidate and writes
@@ -711,6 +716,19 @@ same selected batch, expanded over the finished folders; cardinality still
 chooses the path, so an expansion down to one folder is the single-folder
 receipt refresh and rejects `--no-bisect` exactly as `assent verify FOLDER`
 does.
+
+The exact selected path is labeled `verify selected`, not `verify --batch`;
+`verify --batch` is reserved for dynamic discovery and its interactive
+conflict-skip policy. If exact candidate construction conflicts, the diagnostic
+first states that the full verifier did not run, identifies the conflicting
+folder and paths, and states that no receipt was written and the target and
+selected source refs were left unchanged. A folder that conflicts with the
+target on its own is directed to `assent reconcile <FOLDER>`. A peer-only
+conflict names the compatible selected prefix ahead of the conflicting folder
+and recommends verifying and accepting that prefix before reconciling the
+conflicting folder against the advanced target; `assent rework <FOLDER> <TASK>`
+and `assent reject <FOLDER>` remain explicit alternatives. The exact request
+never asks to skip or silently shrinks its set.
 
 When `status`, `check`, and `report` state `FOLDER` explicitly they act only on
 that folder, and act on all folders when it is omitted. `check` additionally
@@ -948,7 +966,10 @@ Who starts that second stage is a project policy, `receipt_refresh` in
 `assent.toml`'s `[verification]` section. Under the default `"manual"`, run
 closeout does not verify at all; it prints the deferral and the receipt comes
 only from an explicit `assent verify [--batch]`, so a batch of folders costs one
-full verification instead of one per folder. Under `"auto"`, run closeout
+full verification instead of one per folder. When the invocation is
+`assent run --verify`, the deferral is specifically for the per-folder receipt
+and the run-level selected or dynamic verification follows immediately, so the
+closeout does not repeat the command as advice. Under `"auto"`, run closeout
 refreshes the receipt itself once every task in the folder is complete. The
 policy changes nothing else: the focused per-task `verify` always runs. Direct
 and selected `accept` still never start complete verification and require a
@@ -1002,9 +1023,10 @@ before running the full verifier and writes no receipt, the same as any other
 refusal. When every queued folder conflicts there is nothing independent left
 to offer, so the batch refuses outright without asking. Skipping is not
 resolving, rebasing, accepting, or deleting anything -- the target and every
-source folder, skipped or merged, are left exactly as they were, and the
-conflicting folder's own source still needs a human decision through `assent
-rework` or `assent reject` before it can rejoin a batch.
+source folder, skipped or merged, are left exactly as they were. For a peer-only
+conflict, compatible work ahead of the conflicting folder can be verified and
+accepted first so the target advances before that folder is reconciled;
+`assent rework` and `assent reject` remain explicit alternatives.
 
 Skipping is not resolution, and `assent reconcile <FOLDER>` is the separate,
 single-folder way a human resolves one source-versus-target conflict. The
@@ -1042,7 +1064,10 @@ handles exactly one folder against the current integration target: it never
 resolves file content, never combines speculative peer folders, never runs an
 AI adapter, and never edits a task status, so a conflict that exists only
 between two unaccepted sources in a batch candidate stays with `verify
---batch`'s skip decision and then `rework` or `reject`.
+--batch`'s skip decision. When compatible work is already ahead of a peer-only
+conflict, verify and accept that work first, then reconcile the conflicting
+folder against the advanced target; `rework` or `reject` remain explicit
+alternatives.
 
 On failure, `verify --batch` bisects the chain by default to the first
 folder whose merge turns the full verification red, at most

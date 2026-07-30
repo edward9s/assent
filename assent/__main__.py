@@ -490,7 +490,7 @@ def _dispatch_check_all(config_path: str, assent_dir, folders: list[str]) -> int
 
 def _dispatch_run_folders(
         config_path: str, folders: list[str], *, once: bool,
-        task_id: str | None) -> int:
+        task_id: str | None, run_level_verify: bool = False) -> int:
     """Run explicitly named folders in order, stopping on the first failure."""
     for folder in folders:
         try:
@@ -498,7 +498,9 @@ def _dispatch_run_folders(
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
-        result = engine.run(cfg, once=once, task_id=task_id)
+        result = engine.run(
+            cfg, once=once, task_id=task_id,
+            run_level_verify=run_level_verify)
         if result != 0:
             return result
     return 0
@@ -682,7 +684,8 @@ def _dispatch(argv: list[str]) -> int:
             assent_dir=assent_dir, selection=selection)
         if args.folders:
             result = _dispatch_run_folders(
-                args.config, args.folders, once=args.once, task_id=args.task)
+                args.config, args.folders, once=args.once, task_id=args.task,
+                run_level_verify=args.verify)
             if result != 0:
                 return result
         if scheduled is not None:
@@ -693,7 +696,8 @@ def _dispatch(argv: list[str]) -> int:
             # dependency order: `...` selects folders, it does not switch the
             # command over to the whole-project scheduler.
             return closeout(_dispatch_run_folders(
-                args.config, scheduled, once=False, task_id=None))
+                args.config, scheduled, once=False, task_id=None,
+                run_level_verify=args.verify))
         if args.all_folders:
             return closeout(run_all(args.config, assent_dir, args.jobs or 1))
         if args.folders:
@@ -828,7 +832,8 @@ def _dispatch(argv: list[str]) -> int:
         # The automatically selected folder is one folder, so `--verify` gives it
         # the same folder receipt an explicitly named one would get.
         return _close_run(
-            engine.run(cfg, once=args.once, task_id=args.task),
+            engine.run(cfg, once=args.once, task_id=args.task,
+                       run_level_verify=args.verify),
             verify=args.verify, config_path=args.config, assent_dir=assent_dir,
             selection=[folder])
     if args.command == "status":

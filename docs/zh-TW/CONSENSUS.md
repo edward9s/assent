@@ -104,6 +104,11 @@ lock、receipt 或 Git 資格;省略資料夾、`--all`、`--batch` 與單獨的
 candidate 之前的關卡,會指出未完成的任務 id 與狀態,並且發生在任何整合 candidate
 或完整驗證器之前。作為呼叫層級的請求,`--verify` 不理會設定中的 receipt 刷新政策。
 
+在預設的 manual receipt-refresh 政策下,run 收尾延後的是 per-folder receipt;若這次
+呼叫要求了 `--verify`,收尾會指出同一次呼叫接下來的 run-level verification,不會
+叫使用者重新啟動那道已經要執行的命令。這樣交接仍然只有一個 invocation 與一個
+選擇集合。
+
 多資料夾的 `clean A B` 在一趟 upstream-first 流程裡清理,每個資料夾的證據規則
 不變。多資料夾的 `archive A B` 遵守的是單一資料夾 `archive` 的契約而非 `--all`
 的:每個被指名的資料夾都會嘗試,只是不合格也算被拒絕、以非零 exit code 結束,
@@ -221,6 +226,15 @@ verification 覆蓋,conflict 則 target 不變交由人工作裁決。Assent 不
 
 ## 批次衝突略過共識(2026-07-26)
 
+Exact selected verification 的輸出標籤是 `verify selected`;`verify --batch` 只保留
+給動態發現與互動式衝突略過決策。Exact selected 的 candidate 建置若發生衝突,
+會在任何恢復建議前說明完整 verifier 尚未執行,列出衝突資料夾與路徑,並說明沒有
+寫入 receipt、target 與 selected source ref 都維持不變。若資料夾單獨就與 target
+衝突,直接指向 `assent reconcile <FOLDER>`;若只是 peer-only conflict,會列出衝突
+資料夾前方相容的 selected prefix,建議先驗證並接受該 prefix,等 target 前進後再
+針對衝突資料夾 reconcile。`rework` 與 `reject` 仍是明確替代方案。Exact
+selection 絕不提問略過,也不縮小集合。
+
 `verify --batch` 從不自行解決 source conflict;它只做一次決定:是否改為
 證明一個較小的批次,而非完全不證明。建置批次候選時,無論較早出現的
 conflict 為何,都仍會依序嘗試合併每個排入佇列的資料夾,因此一個資料夾
@@ -232,9 +246,10 @@ conflict 的資料夾與其遞移排在其 `after` 之後的下游一併蒐集�
 「否」、無法辨識的回答、或 EOF 一律 fail-closed,不證明任何東西。若整批
 都沒有獨立可提供的資料夾,批次會直接拒絕,不會提問。
 
-略過刻意不是任何形式的解決:它不改變 target 或任何 source(不論被略過
-或已合併),conflict 資料夾自身的 source 仍須經過明確的人工 `rework` 或
-`reject` 才能重新加入未來的批次。`accept --all` 有兩種不同模式:fresh PASSED
+略過刻意不是任何形式的解決:它不改變 target 或任何 source(不論被略過或已合併)。
+若是 peer-only conflict,可先驗證並接受衝突資料夾前方相容的工作,讓 target 前進
+後再處理該資料夾;`rework` 與 `reject` 仍是重新開啟或捨棄它的明確替代方案。
+`accept --all` 有兩種不同模式:fresh PASSED
 batch receipt 的 release 路徑只在一次原子 ref 更新中發佈 receipt 涵蓋的確切
 資料夾,其餘被排除的已完成資料夾只回報,同一次執行不驗證或接受它們。沒有 receipt,
 或 evidence 已過期/不是 PASSED 時,刻意的逐資料夾路徑會逐一驗證並接受,第一次
@@ -261,8 +276,9 @@ derived artifact,重建的代價只是一次 `assent verify`。`assent verify FO
 仍是由人控制的昂貴步驟,`assent accept FOLDER` 仍是明確批准,並且仍要求一份
 fresh、可重現的 `PASSED` 完整驗證 receipt。Reconcile 不是整合引擎:只處理單一
 資料夾對當前整合 target、不自動解決內容;兩個未被接受 source 之間、只在批次中
-出現的 conflict 仍留給 `verify --batch` 的略過決定,再由 `rework` 或 `reject`
-處理。
+出現的 conflict 仍留給動態 `verify --batch` 的略過決定。若 peer-only conflict
+前方已有相容工作,先驗證並接受該工作,再對 target 前進後的衝突資料夾 reconcile;
+`rework` 或 `reject` 仍是明確替代方案。
 
 ## 模型與推理投入共識
 

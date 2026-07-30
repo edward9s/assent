@@ -730,7 +730,7 @@ class TestRunVerifyChaining(MainTestCase):
     def test_exact_multiple_folders_verify_as_that_selected_batch(self):
         self.write_task("alpha", "DONE")
         self.write_task("beta", "DONE")
-        with patch("assent.__main__.engine.run", return_value=0), \
+        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
                 self.only("verify_selected_batch") as batch:
             code, _ = self.run_main(
                 ["run", "alpha", "beta", "--verify", "--config",
@@ -738,6 +738,26 @@ class TestRunVerifyChaining(MainTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(batch.call_args.args,
                          (str(self.config), self.assent_dir, ["alpha", "beta"]))
+        self.assertEqual(
+            [call.kwargs["run_level_verify"] for call in run_mock.call_args_list],
+            [True, True])
+
+    def test_exact_run_verify_manual_closeout_hands_off_to_selected_verification(self):
+        self.write_task("alpha", "DONE")
+        self.write_task("beta", "DONE")
+        (self.root / ".git").mkdir()
+        with patch("assent.engine._run_locked", return_value=0), \
+                patch("assent.engine.try_write_report"), \
+                patch("assent.__main__.verify_selected_batch", return_value=0) as batch:
+            code, out = self.run_main(
+                ["run", "alpha", "beta", "--verify", "--config",
+                 str(self.config)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("per-folder receipt"), 2)
+        self.assertEqual(out.count("run-level verification follows this invocation"), 2)
+        self.assertNotIn("assent verify [--batch]", out)
+        self.assertEqual(batch.call_args.args[2], ["alpha", "beta"])
 
     def test_remainder_verifies_the_pre_expanded_set_once(self):
         for folder in ("alpha", "beta", "gamma"):

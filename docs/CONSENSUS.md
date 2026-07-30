@@ -126,6 +126,10 @@ A nonzero run is returned as-is and certifies nothing; otherwise the
 verification matches the selection — one folder as a folder receipt, an exact
 multi-folder selection as that selected batch, and `--all` or a bare `...` as
 the whole-project dynamic batch — and its exit code becomes the command's.
+Under the default manual receipt-refresh policy, run closeout defers the
+per-folder receipt; when `--verify` was requested, it identifies the run-level
+verification that follows instead of telling the user to start that command
+again. The handoff therefore remains one invocation with one selection.
 `--once` and `--task` are allowed too: they select exactly one folder, so the
 request verifies only when that limited run left the single selected folder
 complete, and an incomplete folder fails the request without writing a receipt. The refusal comes
@@ -292,6 +296,19 @@ a separate state database.
 
 ## Batch conflict-skip consensus (2026-07-26)
 
+Exact selected verification is reported as `verify selected`, while
+`verify --batch` is reserved for dynamic discovery and its one interactive
+conflict-skip decision. An exact selected conflict is fail-closed: candidate
+construction states before any recovery advice that the full verifier did not
+run, names the conflicting folder and paths, and states that no receipt was
+written and the target and selected source refs were unchanged. A conflict with
+the target on its own points to `assent reconcile <FOLDER>`. A peer-only
+conflict names the compatible selected prefix ahead of the conflicting folder
+and recommends verifying and accepting that prefix before reconciling the
+conflicting folder against the advanced target; `rework` and `reject` remain
+explicit alternatives. The exact request never asks to skip or shrinks its
+set.
+
 `verify --batch` never resolves a source conflict itself; it only decides,
 once, whether to certify a smaller batch instead of none. Building the batch
 candidate merges every queued folder in turn regardless of an earlier
@@ -306,9 +323,10 @@ answer, or EOF is fail-closed and certifies nothing. A batch with nothing
 independent left to offer refuses outright without asking.
 
 Skipping is deliberately not a form of resolution: it changes nothing about
-the target or any source, conflicting or merged, and the conflicting
-folder's own source still requires an explicit human `rework` or `reject`
-before it can rejoin a future batch. `accept --all` has two distinct modes:
+the target or any source, conflicting or merged. For a peer-only conflict, the
+compatible work ahead of the conflicting folder may be verified and accepted
+first so the target advances before that folder is reconciled; `rework` and
+`reject` remain explicit alternatives. `accept --all` has two distinct modes:
 with a fresh PASSED batch receipt its release path publishes only the exact
 receipt folders in one atomic ref update and only reports every other finished
 folder left out; it does not verify or accept those leftovers in the same run.
@@ -345,8 +363,10 @@ identity, a derived artifact that costs one `assent verify` to rebuild.
 fresh, reproducible `PASSED` complete-verification receipt. Reconcile is not
 an integration engine: exactly one folder against the current integration
 target, no automatic content resolution, and a batch-only conflict between two
-unaccepted sources stays with `verify --batch`'s skip decision and then
-`rework` or `reject`.
+unaccepted sources stays with the dynamic `verify --batch` skip decision. When
+compatible work is already ahead of a peer-only conflict, verify and accept
+that work first, then reconcile the conflicting folder against the advanced
+target; `rework` or `reject` remain explicit alternatives.
 
 ## Model and reasoning-investment consensus
 
