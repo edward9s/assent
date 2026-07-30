@@ -302,6 +302,15 @@ A 與 B 修改同一檔案也遵守同一規則。Git 能自動合併時由 exac
 再把其餘未完成資料夾交給正常的依賴排序 `--all` scheduler;兩者都不會暗中
 建立完整 integration candidate 或接受任何東西。
 
+每次明示的資料夾選擇都會在 dispatch 前完整稽核。每個寫出的名稱,包括
+`...` 前的明示前綴,都必須解析為現存 `.assent/` 目錄,且其中至少有一份正式的
+`tNNN_name.e.toml` 任務檔。只要有任何名稱 unresolved,Assent 會一次列出完整的
+未解析集合並以非零結束,在第一個被選資料夾執行、驗證、發布、清理或封存以前就
+停止;也不會建立缺少的資料夾、lock 或資料夾 log。這只是 identity 檢查:任務完成度、
+依賴是否 ready、lock、receipt、Git 狀態與其他資格仍由各命令自己的 gate 決定。
+省略資料夾、`--all`、`--batch` 與單獨的 `...` 保留原本的發現契約。`archive
+--restore FOLDER` 與已辨識的 archive crash-resume 狀態則可以刻意沒有 live 目錄。
+
 #### `...` remainder selector
 
 字面 ASCII token `...` 是 `run`、`verify`、`accept`、`clean`、`archive` 共用的

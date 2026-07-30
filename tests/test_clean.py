@@ -392,6 +392,24 @@ class TestClean(unittest.TestCase):
             self.root, f"{self.folder}/"))
         self.assertIn("without modifying .assent", output)
 
+    def test_selected_missing_folder_is_refused_before_cleanup(self) -> None:
+        missing = load_config(self.config_path, "missing")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            direct_code = clean_folder(missing)
+        self.assertEqual(direct_code, 1)
+        self.assertIn("unresolved", output.getvalue())
+        self.assertFalse(missing.tasks_dir.exists())
+
+        output = io.StringIO()
+        with patch("assent.clean.clean_folder",
+                   side_effect=AssertionError("cleanup started")), \
+                contextlib.redirect_stdout(output):
+            batch_code = clean_folders([self.cfg, missing])
+        self.assertEqual(batch_code, 1)
+        self.assertIn("missing", output.getvalue())
+        self.assertFalse(missing.tasks_dir.exists())
+
     def test_clean_detached_unmerged_head_is_retained(self) -> None:
         worktree = gitops.ensure_worktree(self.root, self.folder)
         (worktree / "detached_result.txt").write_text("do not discard\n", encoding="utf-8")

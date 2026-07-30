@@ -110,6 +110,17 @@ folder is the single-folder path, two or more the exact selected batch, and
 selected acceptance still demands evidence for exactly the expanded set without
 verifying anything.
 
+The identity boundary is fail-closed before operation eligibility begins. Every
+explicitly named live folder, including each name before a final `...`, must be
+found by the existing discovery rule: a directory under `.assent/` containing
+at least one formal `tNNN_name.e.toml` task file. If any stated name is
+unresolved, Assent reports the complete unresolved set and dispatches none of
+the selected folders, so it cannot create a missing folder or let an earlier
+selection run, verify, publish, clean, or archive first. This check does not
+preflight status, dependencies, locks, receipts, or Git eligibility. Omitted,
+`--all`, `--batch`, and bare `...` remain dynamic discovery paths; archive
+restore and recognized archive recovery may resume with no live directory.
+
 `assent run --verify` chains complete verification onto a successful run only.
 A nonzero run is returned as-is and certifies nothing; otherwise the
 verification matches the selection — one folder as a folder receipt, an exact

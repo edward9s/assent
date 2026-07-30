@@ -13,6 +13,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from assent import AssentError
 from assent.config import load_config
 from assent.gitops import git_common_dir
 from assent.lockfile import (
@@ -91,6 +92,13 @@ class TestHoldLock(unittest.TestCase):
         msg = str(ctx.exception)
         self.assertIn("parallel01", msg)
         self.assertIn(str(proc.pid), msg)
+
+    def test_missing_folder_is_not_created_for_a_lock(self):
+        missing = self.root / ".assent" / "missing"
+        with self.assertRaises(AssentError):
+            with hold_lock(missing, "missing"):
+                pass
+        self.assertFalse(missing.exists())
 
     def test_reacquire_after_release(self):
         """After the lock-holding process exits, the lock can be reacquired immediately with no cleanup."""

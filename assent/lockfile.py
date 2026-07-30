@@ -137,7 +137,9 @@ def hold_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
     the diagnostic content is written back into the lock file.
     """
     tasks_dir = Path(tasks_dir)
-    tasks_dir.mkdir(parents=True, exist_ok=True)
+    if not tasks_dir.is_dir():
+        raise AssentError(
+            f"Task folder directory does not exist: {tasks_dir}")
     path = tasks_dir / LOCK_NAME
     # O_CREAT but not O_TRUNC: create the file if missing without truncating existing content
     # (truncating would destroy the holder's diagnostics). Binary mode: locking needs to seek

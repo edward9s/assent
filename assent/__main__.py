@@ -17,10 +17,10 @@ from pathlib import Path
 from assent import AssentError, contracts, engine, inspection
 from assent.accept import accept_folder
 from assent.adapters.process import wake_stop_waiters
-from assent.archive import (archive_all, archive_folder, archive_selected,
-                            restore_folder)
+from assent.archive import (archive_all, archive_folder, archive_recovery_names,
+                            archive_selected, restore_folder)
 from assent.batch_accept import accept_all, accept_selected_batch
-from assent.clean import clean_folders
+from assent.clean import clean_folders, validate_live_folder_selection
 from assent.config import list_task_folders, load_config, validate_config
 from assent.doctor import doctor as run_doctor
 from assent.folderdeps import (find_unfinished_prerequisites,
@@ -396,6 +396,13 @@ def _expand_remainder(command: str, explicit: list[str], assent_dir: Path, *,
     return expanded
 
 
+def _validate_explicit_folders(assent_dir: Path, folders: list[str], *,
+                               recognized: list[str] | set[str] = ()) -> bool:
+    """Run the shared identity gate for a non-empty explicit folder prefix."""
+    return (not folders or validate_live_folder_selection(
+        assent_dir, folders, recognized=recognized))
+
+
 def _status_summary(plan: Plan) -> str:
     counts = Counter(task.status for task in plan.tasks)
     return (f"DONE {counts.get('DONE', 0)} / "
@@ -625,6 +632,24 @@ def _dispatch(argv: list[str]) -> int:
         assent_dir = validate_config(args.config)
     except AssentError as e:
         print(f"Config error: {e}")
+        return 1
+
+    # This is the common identity gate.  It runs before any selected command
+    # operation, while dynamic discovery paths retain their own contracts.
+    explicit: list[str] = []
+    recognized: list[str] | set[str] = ()
+    if args.command == "run":
+        explicit = args.folders
+    elif args.command in ("accept", "verify", "clean"):
+        explicit = args.folder
+    elif args.command in ("status", "check", "report",
+                          "reconcile", "reject", "rework"):
+        explicit = [args.folder] if args.folder is not None else []
+    elif args.command == "archive" and not args.restore:
+        explicit = args.folder
+        recognized = archive_recovery_names(assent_dir, explicit)
+    if not _validate_explicit_folders(
+            assent_dir, explicit, recognized=recognized):
         return 1
 
     if args.command == "run":

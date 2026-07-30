@@ -60,6 +60,13 @@ while operating an assent-managed session live in
   refuses and retains the managed path for an Assent-owned retry.
 - The fail-closed scope check is a safety floor; its meaning must not be
   relaxed.
+- Every explicitly named live work-folder selection is audited in full before
+  dispatch: each stated name, including a prefix before `...`, must resolve to
+  an existing `.assent/` directory containing a formal `tNNN_name.e.toml` task
+  file. Any unresolved name reports with the complete unresolved set and
+  prevents every selected operation from starting; dynamic discovery modes keep
+  their own contracts, and archive restore/recovery remains allowed to resume
+  with an intentionally absent live directory.
 - git is always required; no disable switch or git-less degraded mode may be
   introduced.
 - Do not introduce a hand-maintained "current folder" pointer; the work folder

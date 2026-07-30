@@ -56,6 +56,7 @@ class TestTerminalLogging(unittest.TestCase):
 
     def test_config_option_and_folder_override_select_log_path(self):
         config = self.write_config()
+        self.write_task("parallel02")
         expected = self.root.resolve() / ".assent" / "parallel02" / "_assent.log"
         self.assertEqual(log_path_for_argv(
             ["run", "--task", "t001", "parallel02", f"--config={config}"]),
@@ -68,6 +69,19 @@ class TestTerminalLogging(unittest.TestCase):
         self.assertEqual(log_path_for_argv(
             ["run", "--all", "--jobs", "2", "--config", str(config)]),
             expected)
+
+    def test_unresolved_explicit_folder_uses_management_log(self):
+        config = self.write_config()
+        expected = self.root.resolve() / ".assent" / "_assent.log"
+        for command in ("run", "verify"):
+            with self.subTest(command=command):
+                argv = [command, "AA01", "--config", str(config)]
+                self.assertEqual(log_path_for_argv(argv), expected)
+                with terminal_logging(argv) as path:
+                    print("selection refused")
+                self.assertEqual(path, expected)
+                self.assertFalse(
+                    (self.root / ".assent" / "AA01").exists())
 
     def test_missing_or_bad_config_falls_back_beside_config(self):
         config = self.root / ".assent" / "assent.toml"

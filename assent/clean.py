@@ -1,16 +1,62 @@
 """Safely clean up worktrees and merged branches that are provably redundant for a task folder."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import ExitStack
 from pathlib import Path
 
 from assent import AssentError, gitops
-from assent.config import Config
+from assent.config import Config, list_task_folders, validate_tasks_name
 from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
 from assent.folderdeps import direct_dependents, parse_folder_dependency_graph
 from assent.lockfile import (LockBusy, LockMissing, hold_integration_lock,
                              probe_lock)
 from assent.plan import Plan
+
+
+def validate_live_folder_selection(
+        assent_dir: str | Path, folders: Sequence[str], *,
+        recognized: Sequence[str] = ()) -> bool:
+    """Prove that every selected name is a discovered live work folder.
+
+    This is an identity check only.  It deliberately does not parse task files,
+    inspect completion, acquire locks, or inspect Git.  ``recognized`` is for a
+    command such as archive whose crash-resume roster can authorize a name even
+    after its live directory has been removed.
+    """
+    assent_dir = Path(assent_dir)
+    try:
+        live = set(list_task_folders(assent_dir))
+    except (AssentError, OSError) as e:
+        print(f"Folder selection refused; live-folder discovery failed: {e}")
+        return False
+
+    recognized_names = set(recognized)
+    unresolved: list[str] = []
+    syntax_errors: list[str] = []
+    seen: set[str] = set()
+    for folder in folders:
+        try:
+            validate_tasks_name(folder, "Command-line task folder")
+        except AssentError as e:
+            label = repr(folder)
+            if label not in seen:
+                unresolved.append(label)
+                seen.add(label)
+                syntax_errors.append(str(e))
+            continue
+        if folder not in live and folder not in recognized_names:
+            if folder not in seen:
+                unresolved.append(folder)
+                seen.add(folder)
+
+    if unresolved:
+        print("Folder selection refused; unresolved work folder(s): "
+              + ", ".join(unresolved))
+        for error in syntax_errors:
+            print(f"  {error}")
+        return False
+    return True
 
 
 def has_cleanup_target(cfg: Config) -> bool:
@@ -59,6 +105,8 @@ def _print_retained_branches(branches: list[str], unmerged: set[str]) -> None:
 def clean_folder(cfg: Config) -> int:
     """Clean one folder; return 1 when evidence is invalid or an action fails."""
     name = cfg.tasks_name
+    if not validate_live_folder_selection(cfg.assent_dir, [name]):
+        return 1
     path = gitops.worktree_path(cfg.root, name)
     try:
         # Keep the same integration-then-folder lock order as accept.  The
@@ -266,6 +314,9 @@ def clean_folders(configs: list[Config]) -> int:
     """Clean folders upstream-first; one item's result does not block unrelated items."""
     if not configs:
         return 0
+    if not validate_live_folder_selection(
+            configs[0].assent_dir, [cfg.tasks_name for cfg in configs]):
+        return 1
     try:
         graph = parse_folder_dependency_graph(configs[0].assent_dir)
     except AssentError as e:
