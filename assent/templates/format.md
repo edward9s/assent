@@ -145,7 +145,15 @@ rewrote with CRLF still counts as the same contract.
   discover". It is a remainder operator, not an alias for `--all`, and cannot be
   combined with it; the expansion is snapshotted before anything is mutated, and
   cardinality still decides between the single-folder and the exact selected
-  batch path.
+  batch path. Every explicit live-folder name is audited before dispatch,
+  including the prefix before `...`: it must be an existing `.assent/` directory
+  containing at least one formal `tNNN_name.e.toml` task file. If any stated name
+  is unresolved, the complete unresolved set is reported and no selected folder
+  is operated on, so a missing folder cannot be created as a side effect. This
+  identity gate does not preflight completion or other command eligibility;
+  omitted, `--all`, `--batch`, and bare `...` discovery keep their own contracts.
+  `archive --restore FOLDER` and a recognized archive recovery state may
+  intentionally have no live task directory.
 - **Cleanup**: `assent clean [FOLDER ...]` handles only the fixed-location redundant
   worktrees and `<folder>/*` branches; it may remove one only after proving that
   the folder is not locked, the worktree is clean, and the worktree and branch
@@ -636,6 +644,19 @@ stops at the first configuration or run failure. `assent run A B --all` first
 runs that explicit sequence and, only if it succeeds, runs the remaining
 incomplete folders in folder-dependency order through the `--all` scheduler.
 Neither form verifies or accepts a folder implicitly.
+
+Before either explicit sequence starts, Assent audits every stated name as a
+live work-folder identity. A name resolves only when the existing folder
+discovery finds its directory and at least one formal `tNNN_name.e.toml` task
+file. If one or more names are unresolved, all of them are reported together
+and the command returns nonzero before the first selected folder is dispatched;
+this audit includes an explicit prefix before `...`. It does not check task
+status, dependency readiness, locks, receipts, or Git state, which remain the
+operation's own gates. The same boundary applies to explicit `status`, `check`,
+`report`, `verify`, `clean`, `accept`, `reconcile`, `reject`, `rework`, and live
+`archive` selections; omitted and dynamic discovery modes retain their existing
+contracts. Archive restore and recognized archive crash-resume states may use a
+missing live directory.
 
 The literal token `...`, given once as the last positional argument, is the
 remainder selector shared by `run`, `verify`, `accept`, `clean`, and `archive`:

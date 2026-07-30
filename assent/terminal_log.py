@@ -120,11 +120,11 @@ def _folder_from_tasks(assent_dir: Path) -> str | None:
         return None
 
 
-def _folder_from_argv(argv: list[str]) -> str | None:
-    """Find a run/verify folder argument, skipping known options and values."""
+def _folder_from_argv(argv: list[str], assent_dir: Path) -> str | None:
+    """Find a discovered run/verify folder argument, skipping options and values."""
     if not argv or argv[0] not in ("run", "verify"):
         return None
-    if "--all" in argv:
+    if "--all" in argv or "--batch" in argv:
         return None
     idx = 1
     while idx < len(argv):
@@ -136,9 +136,35 @@ def _folder_from_argv(argv: list[str]) -> str | None:
             idx += 1
             continue
         if not arg.startswith("-"):
-            return _valid_folder(arg)
+            folder = _valid_folder(arg)
+            if folder is None:
+                return None
+            try:
+                return folder if folder in set(list_task_folders(assent_dir)) else None
+            except Exception:
+                return None
         idx += 1
     return None
+
+
+def _has_folder_argument(argv: list[str]) -> bool:
+    """Whether run/verify contains a positional value that could name a folder."""
+    if not argv or argv[0] not in ("run", "verify"):
+        return False
+    idx = 1
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg in ("--config", "--task", "--jobs"):
+            idx += 2
+            continue
+        if arg in ("--once", "--batch") or arg.startswith(
+                ("--config=", "--task=")):
+            idx += 1
+            continue
+        if not arg.startswith("-"):
+            return True
+        idx += 1
+    return False
 
 
 def _config_path_for_argv(argv: list[str]) -> Path:
@@ -162,8 +188,12 @@ def _config_path_for_argv(argv: list[str]) -> Path:
 def log_path_for_argv(argv: list[str]) -> Path:
     """Best-effort determine the task folder log path, falling back to beside the config file on failure."""
     path = _config_path_for_argv(argv)
-    folder = (None if "--all" in argv else
-              _folder_from_argv(argv) or _folder_from_tasks(path.parent))
+    explicit = _has_folder_argument(argv)
+    folder = _folder_from_argv(argv, path.parent)
+    if (folder is None and not explicit
+            and "--all" not in argv and "--batch" not in argv
+            and "..." not in argv):
+        folder = _folder_from_tasks(path.parent)
     parent = path.parent / folder if folder is not None else path.parent
     return parent / "_assent.log"
 

@@ -524,6 +524,27 @@ class TestArchive(unittest.TestCase):
         self.assertTrue(_zip_path(self.assent_dir, self.folder).exists())
         self.assertFalse(_zip_path(self.assent_dir, "plan02").exists())
 
+    def test_selected_archive_audits_all_names_before_first_archive(self) -> None:
+        output = io.StringIO()
+        with patch("assent.archive._archive_one",
+                   side_effect=AssertionError("archive started")) as archive_one, \
+                contextlib.redirect_stdout(output):
+            code = archive_selected(
+                str(self.config_path), [self.folder, "missing", "also_missing"])
+
+        self.assertEqual(code, 1)
+        archive_one.assert_not_called()
+        self.assertIn("missing, also_missing", output.getvalue())
+        self.assertFalse(_zip_path(self.assent_dir, self.folder).exists())
+        self.assertFalse((self.assent_dir / "missing").exists())
+
+    def test_direct_archive_of_missing_folder_is_controlled(self) -> None:
+        missing = load_config(self.config_path, "missing")
+        code, output = self._archive(missing)
+        self.assertEqual(code, 1)
+        self.assertIn("unresolved", output)
+        self.assertFalse(missing.tasks_dir.exists())
+
     def test_selected_archive_files_every_eligible_folder(self) -> None:
         self._folder("plan02")
 

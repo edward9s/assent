@@ -36,8 +36,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from assent import AssentError, gitops
-from assent.clean import clean_locked, has_cleanup_target
-from assent.config import Config, list_task_folders, load_config
+from assent.clean import (clean_locked, has_cleanup_target,
+                          validate_live_folder_selection)
+from assent.config import (Config, list_task_folders, load_config,
+                           validate_config, validate_tasks_name)
 from assent.folderdeps import infer_folder_completion
 from assent.lockfile import (LOCK_NAME, LockBusy, hold_lock,
                              hold_integration_lock)
@@ -107,6 +109,31 @@ def read_roster(assent_dir: str | Path) -> list[dict]:
                 f"Archive roster {path} entry {folder!r} is missing a string archived_at")
         entries.append(dict(item))
     return entries
+
+
+def archive_recovery_names(assent_dir: str | Path,
+                           folders: Sequence[str]) -> set[str]:
+    """Return selected names recognized by archive recovery artifacts.
+
+    A malformed roster is left for the archive operation to report.  It must
+    not make a valid live folder fail the identity gate before that existing
+    archive diagnostic can run.
+    """
+    assent_dir = Path(assent_dir)
+    try:
+        recognized = {
+            entry["folder"] for entry in read_roster(assent_dir)
+        }
+    except AssentError:
+        recognized = set()
+    for folder in folders:
+        try:
+            validate_tasks_name(folder, "Command-line task folder")
+        except AssentError:
+            continue
+        if _zip_path(assent_dir, folder).is_file():
+            recognized.add(folder)
+    return recognized
 
 
 def _write_roster(assent_dir: Path, entries: list[dict]) -> None:
@@ -340,6 +367,10 @@ def _print_result(name: str, result: ArchiveResult) -> None:
 
 def archive_folder(cfg: Config) -> int:
     """Archive one explicitly named folder; refuse (exit 1) on any unmet precondition."""
+    if not validate_live_folder_selection(
+            cfg.assent_dir, [cfg.tasks_name],
+            recognized=archive_recovery_names(cfg.assent_dir, [cfg.tasks_name])):
+        return 1
     result = _archive_one(cfg)
     return 0 if result.status == "archived" else 1
 
@@ -353,6 +384,16 @@ def archive_selected(config_path: str, folders: Sequence[str]) -> int:
     skip.  Every selected folder is attempted, so one refusal does not hide the
     state of the rest.
     """
+    try:
+        assent_dir = validate_config(config_path)
+    except AssentError as e:
+        print(f"archive selection refused (config error: {e})")
+        return 1
+    if not validate_live_folder_selection(
+            assent_dir, folders,
+            recognized=archive_recovery_names(assent_dir, folders)):
+        return 1
+
     archived: list[str] = []
     refused: list[str] = []
     for index, folder in enumerate(folders):

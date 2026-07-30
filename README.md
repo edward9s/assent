@@ -365,6 +365,18 @@ explicit sequence, then hands every remaining incomplete folder to the normal
 dependency-ordered `--all` scheduler. Neither command verifies a full
 integration candidate or accepts anything as a hidden side effect.
 
+Every explicit folder selection is audited before dispatch. Each stated name,
+including an explicit prefix before `...`, must resolve to an existing
+`.assent/` directory containing at least one formal `tNNN_name.e.toml` task
+file. If any name is unresolved, Assent reports the complete unresolved set and
+returns nonzero before the first selected folder runs, verifies, publishes,
+cleans, or archives; it also does not create the missing folder, lock, or
+per-folder log. This is an identity check only: task completion, dependency
+readiness, locks, receipts, Git state, and other eligibility remain each
+command's own gates. Omitted folders, `--all`, `--batch`, and a bare `...` keep
+their existing discovery contracts. `archive --restore FOLDER` and recognized
+archive crash-resume states may intentionally have no live directory.
+
 #### The `...` remainder selector
 
 The literal ASCII token `...` is a final positional argument shared by `run`,

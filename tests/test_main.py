@@ -127,6 +127,48 @@ class TestDispatch(MainTestCase):
             ["run", "--config", str(self.root / "nope" / "assent.toml")])
         self.assertEqual(code, 1)
 
+    def test_explicit_selection_audits_every_name_before_dispatch(self):
+        config = self.write_config()
+        self.write_task("AA01", "DONE")
+        cases = (
+            (["run", "AA01", "BB01"], "assent.__main__.engine.run"),
+            (["verify", "AA01", "BB01"],
+             "assent.__main__.verify_selected_batch"),
+            (["accept", "AA01", "BB01"],
+             "assent.__main__.accept_selected_batch"),
+            (["clean", "AA01", "BB01"], "assent.__main__.clean_folders"),
+            (["archive", "AA01", "BB01"],
+             "assent.__main__.archive_selected"),
+            (["status", "BB01"], "assent.__main__.inspection.status"),
+            (["check", "BB01"], "assent.__main__.inspection.check"),
+            (["report", "BB01"], "assent.__main__.inspection.report"),
+            (["reconcile", "BB01"], "assent.__main__.reconcile_start"),
+            (["reject", "BB01"], "assent.__main__.reject_folder"),
+            (["rework", "BB01", "t001"], "assent.__main__.rework_task"),
+        )
+        for argv, target in cases:
+            with self.subTest(argv=argv), patch(target) as operation:
+                code, out = self.run_main(
+                    [*argv, "--config", str(config)])
+            self.assertEqual(code, 1)
+            self.assertIn("BB01", out)
+            self.assertIn("unresolved", out)
+            operation.assert_not_called()
+        self.assertFalse((self.root / ".assent" / "BB01").exists())
+        self.assertFalse(
+            (self.root / ".assent" / "_archive" / "BB01.zip").exists())
+
+    def test_explicit_selection_reports_all_unresolved_names_in_order(self):
+        config = self.write_config()
+        code, output = self.run_main([
+            "run", "MISSING02", "MISSING01", "MISSING03", "--config",
+            str(config)])
+        self.assertEqual(code, 1)
+        self.assertIn("MISSING02, MISSING01", output)
+        self.assertFalse((self.root / ".assent" / "MISSING01").exists())
+        self.assertFalse((self.root / ".assent" / "MISSING02").exists())
+        self.assertFalse((self.root / ".assent" / "MISSING03").exists())
+
     def test_run_refuses_before_dispatch_when_a_global_contract_is_broken(self):
         config = self.write_config()
         self.write_task("plan01")
@@ -168,6 +210,7 @@ class TestDispatch(MainTestCase):
 
     def test_run_all_accepts_an_explicit_prefix(self):
         config = self.write_config()
+        self.write_task("work")
         with patch("assent.__main__.engine.run", return_value=0), patch(
                 "assent.__main__.run_all", return_value=0) as mocked:
             code, _ = self.run_main(
@@ -192,6 +235,8 @@ class TestDispatch(MainTestCase):
 
     def test_run_named_folders_dispatch_in_given_order(self):
         config = self.write_config()
+        self.write_task("first")
+        self.write_task("second")
         with patch("assent.__main__.engine.run", return_value=0) as mocked:
             code, _ = self.run_main(
                 ["run", "first", "second", "--config", str(config)])
@@ -202,6 +247,8 @@ class TestDispatch(MainTestCase):
 
     def test_run_named_folders_stops_after_first_failure(self):
         config = self.write_config()
+        self.write_task("first")
+        self.write_task("second")
         with patch("assent.__main__.engine.run", side_effect=[1, 0]) as mocked:
             code, _ = self.run_main(
                 ["run", "first", "second", "--config", str(config)])
@@ -212,6 +259,8 @@ class TestDispatch(MainTestCase):
 
     def test_run_named_folders_with_all_runs_remainder_once(self):
         config = self.write_config()
+        self.write_task("first")
+        self.write_task("second")
         with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
                 patch("assent.__main__.run_all", return_value=0) as all_mock:
             code, _ = self.run_main([
@@ -247,6 +296,7 @@ class TestDispatch(MainTestCase):
     def test_all_plan_commands_accept_folder_override(self):
         config = self.write_config()
         assent_dir = config.parent
+        self.write_task("B")
         commands = (("run", "engine"), ("status", "inspection"),
                     ("check", "inspection"), ("report", "inspection"))
         for command, owner in commands:
@@ -260,6 +310,7 @@ class TestDispatch(MainTestCase):
 
     def test_clean_accepts_folder_override_and_config_option(self):
         config = self.write_config()
+        self.write_task("B")
         with patch("assent.__main__.clean_folders", return_value=0) as mocked:
             code, _ = self.run_main(["clean", "B", "--config", str(config)])
         self.assertEqual(code, 0)
@@ -293,6 +344,7 @@ class TestDispatch(MainTestCase):
 
     def test_accept_dispatches_explicit_folder(self):
         config = self.write_config()
+        self.write_task("reviewed", "DONE")
         with patch("assent.__main__.accept_folder", return_value=0) as mocked:
             code, _ = self.run_main(
                 ["accept", "reviewed", "--config", str(config)])
@@ -301,6 +353,8 @@ class TestDispatch(MainTestCase):
 
     def test_accept_dispatches_two_or_more_folders_as_selected_batch(self):
         config = self.write_config()
+        self.write_task("child", "DONE")
+        self.write_task("parent", "DONE")
         with patch("assent.__main__.accept_selected_batch", return_value=0) as mocked:
             code, _ = self.run_main(
                 ["accept", "child", "parent", "--config", str(config)])
@@ -321,6 +375,7 @@ class TestDispatch(MainTestCase):
 
     def test_verify_dispatches_explicit_folder_and_preserves_exit_code(self):
         config = self.write_config()
+        self.write_task("reviewed", "DONE")
         with patch("assent.__main__.verify_folder", side_effect=[0, 1]) as mocked:
             codes = [self.run_main(
                 ["verify", "reviewed", "--config", str(config)])[0]
@@ -331,6 +386,8 @@ class TestDispatch(MainTestCase):
 
     def test_verify_dispatches_exact_selected_batch_and_focus(self):
         config = self.write_config()
+        self.write_task("later", "DONE")
+        self.write_task("earlier", "DONE")
         with patch("assent.__main__.verify_selected_batch", return_value=0) as batch:
             code, _ = self.run_main([
                 "verify", "later", "earlier", "--no-bisect",
@@ -341,6 +398,7 @@ class TestDispatch(MainTestCase):
         self.assertEqual(batch.call_args.args[2], ["later", "earlier"])
         self.assertFalse(batch.call_args.args[3])
 
+        self.write_task("reviewed", "DONE")
         with patch("assent.__main__.engine.verify_focused", return_value=0) as focus:
             code, _ = self.run_main([
                 "verify", "reviewed", "--focus", "--config", str(config)])
@@ -371,6 +429,7 @@ class TestDispatch(MainTestCase):
 
     def test_verify_interrupt_returns_130(self):
         config = self.write_config()
+        self.write_task("reviewed", "DONE")
         with patch("assent.__main__.verify_folder", side_effect=KeyboardInterrupt):
             code, out = self.run_main(
                 ["verify", "reviewed", "--config", str(config)])
@@ -391,6 +450,7 @@ class TestDispatch(MainTestCase):
 
     def test_reject_dispatches_to_reject_folder(self):
         config = self.write_config()
+        self.write_task("B")
         with patch("assent.__main__.reject_folder", return_value=0) as mocked:
             code, _ = self.run_main(["reject", "B", "--config", str(config)])
         self.assertEqual(code, 0)
@@ -398,6 +458,7 @@ class TestDispatch(MainTestCase):
 
     def test_reconcile_routes_each_form_to_its_own_lifecycle(self):
         config = self.write_config()
+        self.write_task("stuck", "DONE")
         forms = (([], "reconcile_start"),
                  (["--continue"], "reconcile_continue"),
                  (["--abort"], "reconcile_abort"))
@@ -444,7 +505,7 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main(
                 ["reconcile", "bad/name", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("Config error", out)
+        self.assertIn("Folder selection refused", out)
         mocked.assert_not_called()
 
     def test_rework_help_shows_only_formal_syntax_and_options(self):
@@ -472,6 +533,7 @@ class TestDispatch(MainTestCase):
 
     def test_rework_dispatches_all_values_without_rewriting_exit_code(self):
         config = self.write_config()
+        self.write_task("B")
         with patch("assent.__main__.rework_task", side_effect=[0, 1]) as mocked:
             codes = [self.run_main([
                 "rework", "B", "t003", "--cascade", "--revert-code",
@@ -493,7 +555,7 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main([
                 "rework", "bad/name", "t001", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("Config error", out)
+        self.assertIn("Folder selection refused", out)
         mocked.assert_not_called()
 
     def test_invalid_folder_override_reports_error(self):
@@ -657,6 +719,7 @@ class TestRunVerifyChaining(MainTestCase):
         self.assertEqual(folder.call_args.args[0].tasks_name, "active")
 
     def test_one_explicit_folder_verifies_that_folder(self):
+        self.write_task("alpha", "DONE")
         with patch("assent.__main__.engine.run", return_value=0), \
                 self.only("verify_folder") as folder:
             code, _ = self.run_main(
@@ -665,6 +728,8 @@ class TestRunVerifyChaining(MainTestCase):
         self.assertEqual(folder.call_args.args[0].tasks_name, "alpha")
 
     def test_exact_multiple_folders_verify_as_that_selected_batch(self):
+        self.write_task("alpha", "DONE")
+        self.write_task("beta", "DONE")
         with patch("assent.__main__.engine.run", return_value=0), \
                 self.only("verify_selected_batch") as batch:
             code, _ = self.run_main(
@@ -697,6 +762,7 @@ class TestRunVerifyChaining(MainTestCase):
                          (str(self.config), self.assent_dir))
 
     def test_all_and_an_explicit_prefix_with_all_use_the_whole_project_batch(self):
+        self.write_task("alpha", "TODO")
         for argv in (["run", "--all", "--verify"],
                      ["run", "alpha", "--all", "--verify"]):
             with self.subTest(argv=argv):
@@ -711,6 +777,7 @@ class TestRunVerifyChaining(MainTestCase):
 
     def test_a_failing_run_is_preserved_and_verifies_nothing(self):
         self.write_task("alpha")
+        self.write_task("beta", "DONE")
         cases = (["run", "alpha", "--verify"], ["run", "alpha", "beta", "--verify"],
                  ["run", "...", "--verify"], ["run", "--verify"],
                  ["run", "alpha", "--once", "--verify"],
@@ -738,6 +805,7 @@ class TestRunVerifyChaining(MainTestCase):
         self.assertEqual(code, 1)
 
     def test_verification_failure_becomes_the_exit_code_of_a_successful_run(self):
+        self.write_task("alpha", "DONE")
         with patch("assent.__main__.engine.run", return_value=0), \
                 self.only("verify_folder", result=1):
             code, _ = self.run_main(
@@ -745,6 +813,7 @@ class TestRunVerifyChaining(MainTestCase):
         self.assertEqual(code, 1)
 
     def test_a_run_without_verify_never_verifies(self):
+        self.write_task("alpha")
         with patch("assent.__main__.engine.run", return_value=0), \
                 patch("assent.__main__.verify_folder",
                       side_effect=AssertionError("verified without --verify")):
@@ -769,6 +838,7 @@ class TestRunVerifyChaining(MainTestCase):
 
     def test_once_and_task_verify_the_single_selected_folder(self):
         """A limited run selects one folder, so it earns a folder receipt."""
+        self.write_task("alpha", "DONE")
         self.write_task("active", "TODO")
         cases = ((["run", "alpha", "--once", "--verify"], "alpha"),
                  (["run", "alpha", "--task", "t001", "--verify"], "alpha"),
@@ -832,6 +902,7 @@ class TestRunVerifyChaining(MainTestCase):
                     (self.assent_dir / "alpha" / "_verification.toml").exists())
 
     def test_verification_failure_of_a_limited_run_becomes_the_exit_code(self):
+        self.write_task("alpha", "TODO")
         for argv in (["run", "alpha", "--once", "--verify"],
                      ["run", "alpha", "--task", "t001", "--verify"]):
             with self.subTest(argv=argv):

@@ -87,6 +87,14 @@ target ref,也不接受任何資料夾。
 exact selection:一個資料夾走單一資料夾路徑,兩個以上走 exact selected batch,而
 selected acceptance 仍要求恰好涵蓋展開後集合的證據,且不驗證任何東西。
 
+identity boundary 在進入命令自己的資格判斷以前就 fail-closed。每個明示的 live 資料夾,
+包括最後 `...` 前的每個名稱,都必須符合既有發現規則:它是 `.assent/` 下的現存目錄,
+而且至少含有一份正式 `tNNN_name.e.toml` 任務檔。只要有任一名稱 unresolved,Assent
+就一次列出完整未解析集合,不 dispatch 任何被選資料夾,所以不會建立缺少的資料夾,
+也不會讓較早的選擇先執行、驗證、發布、清理或封存。這項檢查不預先判斷狀態、依賴、
+lock、receipt 或 Git 資格;省略資料夾、`--all`、`--batch` 與單獨的 `...` 仍是動態
+發現路徑,而 archive restore 與已辨識的 archive recovery 可以在沒有 live 目錄時續作。
+
 `assent run --verify` 只在 run 成功時接上完整驗證。失敗的 run 原樣回傳、不背書
 任何東西;成功時驗證範圍與選擇一致 —— 一個資料夾寫 folder receipt,明示的多
 資料夾選擇寫該 selected batch,`--all` 或單獨的 `...` 則是全專案的動態 batch ——
