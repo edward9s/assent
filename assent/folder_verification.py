@@ -63,13 +63,17 @@ class VerificationReceipt:
     target_tip: str
     integration_tree: str
     verify_script_sha256: str
-    #: Digest of every reviewed shared input this verification depended on --
-    #: the selected profiles and the exact content of their declared targets.
-    shared_inputs_sha256: str
     verify_command: str
     exit_code: int
     completed_at: str
     failure_summary: str
+    #: Digest of every reviewed shared input this verification depended on --
+    #: the selected profiles and the exact content of their declared targets.
+    #: The empty default is what a receipt written before this schema carried,
+    #: and it is never a usable value: validation refuses it on the way in and
+    #: on the way out, so an absent digest is stale evidence, not an assumed
+    #: empty one.
+    shared_inputs_sha256: str = ""
 
 
 def receipt_path(cfg: Config) -> Path:
@@ -461,9 +465,9 @@ def _current_shared_inputs(
     contracts: list[tuple[str, shared_paths.Contract]] = []
     manifest = shared_paths.read_manifest(main)
     for folder, tree in sources:
-        if tree is None:
-            continue
-        contract = shared_paths.classify(main, tree, manifest)
+        # A vanished source worktree falls back to the primary worktree, exactly
+        # as ``prepare_sources`` did when the receipt was written.
+        contract = shared_paths.classify(main, tree or main, manifest)
         if not contract.settled:
             raise AssentError(
                 f"the shared-path contract for {folder} is {contract.state}; "

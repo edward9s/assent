@@ -31,7 +31,7 @@ import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from assent import AssentError, gitops, verification
+from assent import AssentError, gitops, shared_paths, verification
 from assent.config import Config
 from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
@@ -98,6 +98,35 @@ def _require_source(cfg: Config, main: Path) -> tuple[str, str, Path]:
     return branch, tip, worktree
 
 
+def _shared_contract(managed: _Managed, worktree: Path,
+                     label: str) -> shared_paths.Contract | None:
+    """Classify the finished source snapshot, or refuse before any managed resource.
+
+    The reconciliation worktree is another consumer of the reviewed manifest, so
+    the answer has to exist before ``git worktree add`` or the merge starts:
+    UNKNOWN, STALE, a malformed or ambiguous manifest and an invalid profile all
+    stop here, with the zero-AI review as the remedy.  Reconciliation never
+    invokes AI and never guesses a profile of its own.
+    """
+    try:
+        contract = shared_paths.classify(managed.main, worktree)
+    except AssentError as e:
+        print(f"{label}: refused, {e}. Nothing was created.")
+        return None
+    if not contract.settled:
+        print(f"{label}: refused, {shared_paths.closeout_refusal(contract)}. "
+              "Nothing was created.")
+        return None
+    return contract
+
+
+def _release_shared_paths(managed: _Managed) -> None:
+    """Detach the reconciliation worktree's assent-created links and forget them."""
+    detached = shared_paths.release(managed.main, managed.path)
+    for relative in detached:
+        print(f"  shared path detached: {relative}")
+
+
 def _remove_managed(managed: _Managed, expected_head: str) -> None:
     """Remove the managed worktree and branch, proving ownership of each first.
 
@@ -126,6 +155,10 @@ def _remove_managed(managed: _Managed, expected_head: str) -> None:
             raise AssentError(
                 f"refusing to remove {managed.path}: it still holds uncommitted "
                 "changes")
+        # Ownership is proven above; only now are the link objects assent itself
+        # recorded detached, because Git must never be handed a tree that still
+        # contains a directory link.
+        _release_shared_paths(managed)
         gitops.remove_worktree(managed.main, managed.path)
         _remove_empty_container(managed.path)
         print(f"  reconciliation worktree removed: {managed.path}")
@@ -141,6 +174,11 @@ def _remove_managed(managed: _Managed, expected_head: str) -> None:
         # printed first so the ref stays recoverable.
         gitops.delete_branch_force(managed.main, managed.branch)
         print(f"  temporary branch removed: {managed.branch} (was {tip})")
+
+    if not managed.path.exists():
+        # A worktree that is gone cannot hold a link, so discarding its stale
+        # application record costs one existence check and no traversal.
+        _release_shared_paths(managed)
 
 
 def _stage_resolution(worktree: Path) -> str | None:
@@ -301,9 +339,13 @@ def _start(cfg: Config) -> int:
     target_tip = gitops.commit_of(managed.main, "HEAD")
 
     try:
-        source_branch, source_tip, _worktree = _require_source(cfg, managed.main)
+        source_branch, source_tip, worktree = _require_source(cfg, managed.main)
     except AssentError as e:
         print(f"{label}: refused, {e}")
+        return 1
+
+    contract = _shared_contract(managed, worktree, label)
+    if contract is None:
         return 1
 
     if gitops.is_ancestor(managed.main, source_tip, target_tip):
@@ -325,6 +367,19 @@ def _start(cfg: Config) -> int:
 
     gitops.add_worktree_branch(
         managed.main, managed.branch, managed.path, source_tip)
+    # The declared shared inputs exist before the merge does: a resolution is
+    # edited and later verified in this worktree, so it must look like a real
+    # source worktree.  REVIEWED-NONE creates nothing at all.
+    try:
+        with shared_paths.hold_manifest_lock(managed.main):
+            created, _detached = shared_paths.reconcile(
+                managed.main, managed.path, contract)
+    except AssentError as e:
+        raise AssentError(
+            f"{e}. The reconciliation worktree {managed.path} was kept; run "
+            f"`assent reconcile --abort {folder}` to discard it") from e
+    for relative in created:
+        print(f"  shared path provisioned: {relative}")
     try:
         outcome = gitops.merge_no_commit(managed.path, target_tip)
     except AssentError as e:
@@ -429,6 +484,16 @@ def _continue(cfg: Config) -> int:
               f"{attached or 'a detached HEAD'}, not the managed branch "
               f"{managed.branch}; nothing was deleted.")
         return 1
+    # A resumed reconciliation is revalidated, never silently repaired: the
+    # profile it was provisioned from must still exist and every recorded link
+    # must still point at the primary worktree's same relative directory.  A
+    # mismatch refuses with the conflict and every human edit preserved.
+    problem = shared_paths.application_problem(managed.main, managed.path)
+    if problem:
+        print(f"{label}: refused, {problem}. The reconciliation worktree "
+              f"{managed.path} and every edit were preserved; assent does not "
+              "repair a shared-path link behind your back.")
+        return 1
 
     pending = gitops.merge_head(managed.path)
     head = gitops.commit_of(managed.path, "HEAD")
@@ -519,6 +584,7 @@ def _abort(cfg: Config) -> int:
                   "rather than force-removed.")
             return 1
         head = gitops.commit_of(managed.path, "HEAD")
+        _release_shared_paths(managed)
         gitops.remove_worktree(managed.main, managed.path)
         _remove_empty_container(managed.path)
         print(f"{label}: reconciliation worktree removed: {managed.path} "
@@ -533,6 +599,7 @@ def _abort(cfg: Config) -> int:
         print(f"{label}: temporary branch removed: {managed.branch} "
               f"(was {tip}; recoverable by that hash)")
 
+    _release_shared_paths(managed)
     print(f"{label}: done. The source and the integration target were not "
           "changed.")
     return 0

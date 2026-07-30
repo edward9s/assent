@@ -666,6 +666,29 @@ focused 檢查,之後就會在候選中被剪除。若完整驗證真的失敗�
 符號會先正規化,只回報 verifier 輸出自己指名的目錄,而單一資料夾、selected、
 動態 batch 與定位執行都會把它記進各自存放 failure summary 的 receipt。
 
+**已審閱的共享被忽略目錄**:手動佈建連結只是備援。一個專案真正共享哪些被忽略
+目錄,是 Assent 只審閱一次、之後就快取在主 worktree 那份未被追蹤、永不提交的
+`.assent/manifest.toml` 裡的決定。`[shared_paths]` 以整份 profile 保存——宣告的
+目錄、判定何時該重新考慮的精確被追蹤相依/建置檔 `watch`,以及那些檔案加上倉庫
+被追蹤 Git-ignore 規則的指紋——並以指紋為鍵保留,因此相依結構不同的兩個分支各自
+保有自己的答案,不會互相覆蓋。source 快照因而處於 `UNKNOWN`(尚無答案)、
+`REVIEWED-NONE`(相符且 `paths = []` 的 profile:這是真正的答案,之後的 session
+不建立任何連結,也不附加 AI 探查指示)、`REVIEWED-PATHS`(Assent 在你的任務開始前
+自行把每個宣告目錄佈建為指向主 worktree 相同相對路徑的 junction 或目錄符號連結),
+或 `STALE`——被 watch 的檔案變動、宣告目標消失、型別改變或不再被忽略,或某則
+`Ignored input diagnosis:` 指名了 profile 未宣告的目錄。相符但互相矛盾的 profile
+一律 fail closed。
+
+`assent shared-paths review --path DIR --watch FILE`(或 `--none --watch FILE`)
+是唯一的寫入者。它先驗證每個值,取得一個專案本地鎖,再以原子方式取代整個檔案,
+因此並行嘗試會被拒絕,中斷後留下的要嘛是先前完整的 manifest,要嘛是完整的新版。
+`UNKNOWN` 與 `STALE` 會在下一個已排程 session 附加一則有界的審閱指示,並在契約
+settled 之前擋住該任務 closeout;指紋沒變則完全不花成本。每一條 verify 入口——單一
+資料夾、selected 與動態 batch、定位前綴、`run --verify` 與 `--focus`——都會在任何
+verifier 開始前分類 source 並調和其連結,`assent reconcile` 在建立受管資源前也一樣。
+folder 與 batch receipt 會記錄 `shared_inputs_sha256`,涵蓋選定 profile 與每個宣告
+目標在 verifier 前後的有界快照,acceptance 則在推進 ref 之前再次核對。
+
 **平行執行測試**:在 `assent init` 選 `unittest` 會啟用打包的
 `run_unittest_parallel()`,把 `tests/test_*.py` 底下每個模組各自丟進獨立
 subprocess 平行執行,而非單一行程依序跑完整套件。打包 template 會把這個以及

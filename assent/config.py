@@ -325,7 +325,8 @@ class Config:
     def git_excludes(self) -> tuple[str, ...]:
         """Runtime artifacts: excluded from the clean check, scope check, and checkpoint commit."""
         return (self.runtime_log_rel, self.report_rel, self.lockfile_rel,
-                self.verification_receipt_rel)
+                self.verification_receipt_rel,
+                self.shared_paths_manifest_rel, self.shared_paths_lock_rel)
 
 
 def _section(data: dict, name: str) -> dict:

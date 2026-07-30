@@ -141,6 +141,22 @@ contributing source worktree 實體持有的被忽略目錄底下的路徑,證�
 分隔符號先正規化,且不列舉任何被忽略的樹。不新增複製 fallback、`local_inputs`
 設定或 force 旗標。
 
+哪些被忽略目錄是共享的,是審閱出來的決定,不是推論。沒有任何檔案系統規則能證明
+某個被忽略目錄在語意上是必要的,因此這個答案只審閱一次,快取在主 worktree 那份
+未被追蹤的 `.assent/manifest.toml`——它是本機執行記憶,不是專案來源,永不提交,
+也不複製進任何 worktree。`[shared_paths]` 以指紋為鍵保留整份 profile(宣告路徑、
+精確的被追蹤 `watch` 檔,以及那些檔案加上被追蹤 Git-ignore 規則的摘要),使並行
+分支不會讓快取來回擺盪。source 快照為 `UNKNOWN`、`REVIEWED-NONE`(相符且
+`paths = []` 的 profile 就是答案,絕不因為它是空的而再次觸發審閱)、
+`REVIEWED-PATHS`(Assent 自行佈建精確的 junction 或目錄符號連結)或 `STALE`;
+相符但互相矛盾的 profile 一律 fail closed。`assent shared-paths review` 是唯一的
+寫入者,先驗證再變更,持有一個專案本地鎖,並以原子方式取代檔案。`UNKNOWN` 與
+`STALE` 會為下一個已排程 session 附加一則有界的審閱指示,在 settled 之前拒絕其
+closeout。每一條驗證入口與 `assent reconcile` 都在候選、verifier 或受管 worktree
+出現之前先分類並調和,folder 與 batch receipt 綁定一個在 verifier 前後各取一次
+快照的 `shared_inputs_sha256`,acceptance 在推進 ref 之前再次核對,且絕不為了讓它
+通過而修復任何連結。
+
 receipt 是 derived artifact,不凌駕 Git。target tip 改變但重建後 integration tree
 完全相同仍可接受;內容改變就 stale。直接與 selected acceptance 遇到 missing、
 malformed、stale 或 mismatch evidence 時會拒絕,不自行啟動驗證。passive merge

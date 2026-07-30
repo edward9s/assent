@@ -52,6 +52,11 @@ UNKNOWN = "UNKNOWN"
 REVIEWED_NONE = "REVIEWED-NONE"
 REVIEWED_PATHS = "REVIEWED-PATHS"
 STALE = "STALE"
+# A repository that ignores no directory at all has nothing anyone could declare
+# as a shared input.  That is not an unanswered question, so it neither charges a
+# session for a review nor refuses a verification; it is still its own identity
+# in the shared-input digest, distinct from a reviewed empty answer.
+NO_SUBJECT = "NO-SHARED-INPUT"
 
 ABSENT = "absent"                       # a watched path that is not there at all
 _EXCLUDED_ROOTS = (".git", ".assent")
@@ -133,7 +138,8 @@ class Contract:
 
     @property
     def settled(self) -> bool:
-        return self.state in (REVIEWED_NONE, REVIEWED_PATHS)
+        """True when nothing is left to decide before real work may start."""
+        return self.state in (REVIEWED_NONE, REVIEWED_PATHS, NO_SUBJECT)
 
 
 # --------------------------------------------------------------------------- #
@@ -672,11 +678,14 @@ def shared_inputs_digest(main: Path,
 # Classification
 # --------------------------------------------------------------------------- #
 def has_review_subject(worktree: Path) -> bool:
-    """True when the source snapshot actually holds an ignored directory.
+    """True when the worktree actually holds an ignored directory.
 
     A repository that ignores no directory at all has no shared input anyone
     could declare, so an absent manifest there is not an unanswered question and
     no session is asked to discover that.  ``.git`` and ``.assent`` never count.
+    The question is always asked of the *primary* worktree: that is where a
+    shared input really lives, and a fresh source checkout legitimately has none
+    of them yet -- which is precisely what a review exists to fix.
     """
     try:
         entries = gitops.ignored_entries(Path(worktree))
@@ -729,9 +738,14 @@ def classify(main: Path, worktree: Path,
         evidence = tuple(
             change for profile in manifest.profiles
             for change in changed_watch_evidence(profile, digests))
-        state = STALE if manifest.profiles else UNKNOWN
+        if manifest.profiles:
+            state = STALE
+        elif has_review_subject(main):
+            state = UNKNOWN
+        else:
+            state = NO_SUBJECT
         return Contract(state, None, digests, prior, tuple(dict.fromkeys(evidence)),
-                        needs_review=state == STALE or has_review_subject(worktree))
+                        needs_review=state in (STALE, UNKNOWN))
 
     profile = matches[0]
     problems = tuple(
@@ -827,12 +841,14 @@ def _detach_one(main: Path, worktree: Path, relative: str) -> bool:
 
 
 def _record_application(manifest: Manifest, worktree: Path,
-                        fingerprint: str, paths: Sequence[str]) -> Manifest:
-    """Replace this worktree's application record, dropping vanished worktrees.
+                        fingerprint: str, paths: Sequence[str]) -> bool:
+    """Replace this worktree's application record; True when anything changed.
 
     A recorded worktree that no longer exists cannot hold a link to reconcile,
     so its stale record is discarded on sight -- by a single existence check,
-    never by traversing anything.
+    never by traversing anything.  Reporting whether the records actually moved
+    is what keeps a repository with nothing to apply from being handed a
+    manifest file it never needed.
     """
     key = _worktree_key(worktree)
     kept = tuple(
@@ -840,8 +856,11 @@ def _record_application(manifest: Manifest, worktree: Path,
         if application.worktree != key
         and Path(application.worktree).is_dir())
     record = Application(key, fingerprint, tuple(paths))
-    manifest.applications = kept + ((record,) if paths else ())
-    return manifest
+    updated = kept + ((record,) if paths else ())
+    if updated == manifest.applications:
+        return False
+    manifest.applications = updated
+    return True
 
 
 def _worktree_key(worktree: Path) -> str:
@@ -892,11 +911,65 @@ def reconcile(main: Path, worktree: Path, contract: Contract, *,
     detached = tuple(relative for relative in previous
                      if relative not in wanted
                      and _detach_one(main, worktree, relative))
-    _record_application(
-        manifest, worktree,
-        contract.profile.fingerprint if contract.profile else "", wanted)
-    write_manifest(main, manifest)
+    if _record_application(
+            manifest, worktree,
+            contract.profile.fingerprint if contract.profile else "", wanted):
+        write_manifest(main, manifest)
     return created, detached
+
+
+def application_problem(main: Path, worktree: Path, *,
+                        manifest: Manifest | None = None) -> str:
+    """Why a recorded application no longer holds, or ``""`` when it still does.
+
+    A resumed managed worktree -- a reconciliation being continued, above all --
+    is revalidated rather than silently repaired: the profile it was provisioned
+    from must still be in the manifest and every recorded path must still be a
+    link to the primary worktree's same relative directory.  A worktree assent
+    never provisioned has no record and so no problem.
+    """
+    manifest = read_manifest(main) if manifest is None else manifest
+    key = _worktree_key(worktree)
+    record = next((application for application in manifest.applications
+                   if application.worktree == key), None)
+    if record is None:
+        return ""
+    if not any(profile.fingerprint == record.fingerprint
+               for profile in manifest.profiles):
+        return (f"the shared-path profile {record.fingerprint[:12]} recorded for "
+                f"{worktree} is no longer in {manifest_path(main)}")
+    for relative in record.paths:
+        target = _link_target(main, relative)
+        if not _resolves_to(Path(worktree) / relative, target):
+            return (f"the shared path {relative} in {worktree} is no longer a "
+                    f"link to {target}")
+    return ""
+
+
+def release(main: Path, worktree: Path) -> tuple[str, ...]:
+    """Detach every link assent recorded for one worktree and drop the record.
+
+    This is what a managed worktree's disposal calls before Git or any recursive
+    remover is allowed near it.  Only a link object proven to point at the
+    primary worktree's same relative directory is detached; an ordinary
+    directory, a foreign link and an already-removed path are left exactly as
+    found, and no target is ever traversed.
+    """
+    main = Path(main)
+    key = _worktree_key(worktree)
+    with hold_manifest_lock(main):
+        manifest = read_manifest(main)
+        record = next((application for application in manifest.applications
+                       if application.worktree == key), None)
+        if record is None:
+            return ()
+        detached = tuple(relative for relative in record.paths
+                         if _detach_one(main, worktree, relative))
+        manifest.applications = tuple(
+            application for application in manifest.applications
+            if application.worktree != key)
+        write_manifest(main, manifest)
+    return detached
 
 
 def prepare_sources(main: Path,
@@ -921,15 +994,17 @@ def prepare_sources(main: Path,
     with hold_manifest_lock(main):
         manifest = read_manifest(main)
         for folder, worktree in sources:
-            if worktree is None:
-                continue
-            contract = classify(main, worktree, manifest)
+            # A folder whose source worktree is gone has no snapshot of its own,
+            # so it is classified against the primary worktree -- the same
+            # receipt-backed fallback acceptance already uses.  Doing it here
+            # rather than skipping keeps a later freshness check comparable.
+            contract = classify(main, worktree or main, manifest)
             if not contract.settled:
                 raise AssentError(
                     f"refusing to verify: the shared-path contract for "
                     f"{folder} ({worktree}) is {contract.state}. "
                     f"{closeout_refusal(contract) or 'Run `' + REVIEW_COMMAND + '`'}")
-            reconcile(main, worktree, contract, manifest=manifest)
+            reconcile(main, worktree or main, contract, manifest=manifest)
             prepared.append((folder, contract))
     return tuple(prepared)
 

@@ -38,7 +38,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, TextIO
 
-from assent import AssentError, contracts, gitops, lockfile, verification
+from assent import (AssentError, contracts, gitops, lockfile, shared_paths,
+                    verification)
 from assent.adapters import Adapter, get_adapter
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      stop_wake_requested)
@@ -176,6 +177,36 @@ class _BillingAbort(Exception):
 # --------------------------------------------------------------------------- #
 # Prompt / small helpers
 # --------------------------------------------------------------------------- #
+def _diagnosed_shared_inputs(cfg: Config) -> tuple[str, ...]:
+    """Directories a stored full-verifier diagnosis proved this folder needs.
+
+    No generic rule can infer that an ignored directory is semantically
+    required, so a complete verifier that already failed on one is the evidence
+    that invalidates a profile which does not declare it.  A missing or
+    unreadable receipt simply contributes nothing.
+    """
+    try:
+        receipt = verification.read_verification_receipt(
+            verification.receipt_path(cfg), gitops.main_worktree(cfg.root))
+    except AssentError:
+        return ()
+    return verification.diagnosed_ignored_directories(receipt.failure_summary)
+
+
+def _shared_paths_contract(cfg: Config) -> "shared_paths.Contract | None":
+    """This source worktree's shared-path contract, or None when it is unreadable.
+
+    Both the bounded review clause and the closeout gate ask the same question of
+    the same snapshot, so they ask it here.  A manifest that cannot be read at
+    all is reported as unknown to the caller rather than raised: the surrounding
+    session decision has its own refusal path.
+    """
+    try:
+        return shared_paths.classify(gitops.main_worktree(cfg.root), cfg.root)
+    except AssentError:
+        return None
+
+
 def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
                   session: SessionIdentity, resumed: bool = False) -> str:
     template = cfg.prompt_template or _DEFAULT_PROMPT_TEMPLATE
@@ -192,6 +223,9 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
             .replace("{requested_model}", session.requested_model)
             .replace("{effort}", session.effort or "")
             .replace("{requested_effort}", session.requested_effort or ""))
+    contract = _shared_paths_contract(cfg)
+    if contract is not None:
+        text += shared_paths.review_clause(contract)
     if resumed:
         text += _RESUME_SUFFIX
     else:
@@ -429,6 +463,13 @@ def _prepare_worktree(cfg: Config) -> Config:
                 f"validation ({detail})")
         _require_stack_ancestry(cfg, state_after, downstream_tip)
 
+        # REVIEWED-PATHS provisions every declared missing link before any
+        # adapter starts; REVIEWED-NONE starts with no links and no extra AI
+        # instructions, and UNKNOWN or STALE touches the filesystem not at all.
+        contract = shared_paths.prepare_worktree(
+            gitops.main_worktree(cfg.root), worktree_cfg.root,
+            required_evidence=_diagnosed_shared_inputs(cfg))
+        print(shared_paths.describe(contract))
         print(f"Isolated worktree: {root}")
         print(f"Target snapshot: {state_after.base.target_snapshot}")
         stacked = state_before.base.speculative_upstream
@@ -1130,6 +1171,14 @@ def _evaluate(cfg: Config, task: Task,
     if rc != 0:
         return "fail", f"Verify command exit code is non-zero (={rc}): {task.verify}"
 
+    # A session handed the bounded shared-path review clause must have run the
+    # controlled operation; a source snapshot that is still UNKNOWN or STALE is
+    # refused with a precise retry reason rather than closed out.
+    contract = _shared_paths_contract(cfg)
+    refusal = shared_paths.closeout_refusal(contract) if contract else ""
+    if refusal:
+        return "fail", refusal[:1].upper() + refusal[1:]
+
     return "done", None
 
 
@@ -1192,6 +1241,9 @@ def _verify_focused_locked(cfg: Config) -> int:
             f"folder {folder} has no DONE task with an eligible focused verify "
             "command")
 
+    # --focus provisions the persistent source worktree like every other verify
+    # entry point, and writes no receipt of any kind.
+    shared_paths.prepare_sources(main, [(folder, source.worktree)])
     print(f"verify {folder} --focus: source worktree {source.worktree}")
     print("verify --focus: focused task verification cannot authorize `accept`; "
           "complete integration verification has not run")

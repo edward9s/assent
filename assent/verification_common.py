@@ -387,6 +387,27 @@ def ignored_input_diagnosis(output: str,
         "later session.")
 
 
+def diagnosed_ignored_directories(failure_summary: str) -> tuple[str, ...]:
+    """The directories a stored ``Ignored input diagnosis:`` names, if any.
+
+    This reads back exactly what ``ignored_input_diagnosis`` wrote, so a full
+    verifier's own output-backed evidence can invalidate a reviewed shared-path
+    profile that does not declare a directory the run proved necessary.  It
+    parses one recorded line and never touches the filesystem.
+    """
+    for line in failure_summary.splitlines():
+        if not line.startswith(IGNORED_INPUT_PREFIX):
+            continue
+        listed = line[len(IGNORED_INPUT_PREFIX):]
+        for tail in (" is an ordinary", " are ordinary"):
+            head, separator, _rest = listed.partition(tail)
+            if separator:
+                return tuple(
+                    entry.strip().rstrip("/") for entry in head.split(",")
+                    if entry.strip().rstrip("/"))
+    return ()
+
+
 def print_ignored_input_diagnosis(label: str, failure_summary: str) -> None:
     """Surface a stored ignored-input diagnosis on a truncated failure line.
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from assent import AssentError, gitops
+from assent import AssentError, gitops, shared_paths
 from assent.config import Config, validate_tasks_name
 from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
                                         SUMMARY_LIMIT, VERIFY_COMMAND,
@@ -30,11 +30,14 @@ from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
                                         toml_string, verifier_digest)
 
 BATCH_RECEIPT_NAME = "_batch_verification.toml"
-BATCH_RECEIPT_VERSION = 1
+# 2 adds shared_inputs_sha256.  The bump is fail-closed on purpose: a version-1
+# receipt recorded no shared-input evidence at all, so it is stale and unusable
+# rather than silently upgraded with an assumed-empty digest.
+BATCH_RECEIPT_VERSION = 2
 _BATCH_RECEIPT_KEYS = {
     "version", "status", "target_tip", "sources", "final_tree",
-    "verify_script_sha256", "verify_command", "exit_code", "completed_at",
-    "failure_summary",
+    "verify_script_sha256", "shared_inputs_sha256", "verify_command",
+    "exit_code", "completed_at", "failure_summary",
 }
 _BATCH_SOURCE_KEYS = {"folder", "source_tip", "step_tree"}
 
@@ -63,6 +66,9 @@ class BatchVerificationReceipt:
     sources: tuple[BatchSource, ...]
     final_tree: str
     verify_script_sha256: str
+    #: Digest of every reviewed shared input this batch verification depended
+    #: on -- the selected profiles and the exact content of their targets.
+    shared_inputs_sha256: str
     verify_command: str
     exit_code: int
     completed_at: str
@@ -113,6 +119,7 @@ def _batch_receipt_text(receipt: BatchVerificationReceipt) -> str:
         f"target_tip = {toml_string(receipt.target_tip)}\n"
         f"final_tree = {toml_string(receipt.final_tree)}\n"
         f"verify_script_sha256 = {toml_string(receipt.verify_script_sha256)}\n"
+        f"shared_inputs_sha256 = {toml_string(receipt.shared_inputs_sha256)}\n"
         f"verify_command = {toml_string(receipt.verify_command)}\n"
         f"exit_code = {receipt.exit_code}\n"
         f"completed_at = {toml_string(receipt.completed_at)}\n"
@@ -169,6 +176,11 @@ def _validate_batch_receipt(receipt: BatchVerificationReceipt,
             receipt.verify_script_sha256):
         raise AssentError(
             "Batch verification receipt verify_script_sha256 must be a "
+            "64-character lowercase hexadecimal digest")
+    if not isinstance(receipt.shared_inputs_sha256, str) or not DIGEST_RE.fullmatch(
+            receipt.shared_inputs_sha256):
+        raise AssentError(
+            "Batch verification receipt shared_inputs_sha256 must be a "
             "64-character lowercase hexadecimal digest")
     if receipt.verify_command != VERIFY_COMMAND:
         raise AssentError(
@@ -274,6 +286,30 @@ def read_batch_receipt(path: Path,
     return receipt
 
 
+def current_batch_shared_inputs(main: Path,
+                                receipt: BatchVerificationReceipt) -> str:
+    """Recompute the batch's shared-input digest without repairing anything.
+
+    Freshness is a question, not a repair: a profile that changed identity, a
+    declared target that moved, or target content that differs recomputes to
+    another digest, and a source that can no longer be classified has no digest
+    at all.  Both outcomes leave the receipt stale, which is what acceptance
+    needs -- it may never provision a link as a side effect of publishing.
+    """
+    manifest = shared_paths.read_manifest(main)
+    contracts: list[tuple[str, shared_paths.Contract]] = []
+    for source in receipt.sources:
+        worktree = gitops.folder_worktree(main, source.folder)
+        contract = shared_paths.classify(main, worktree or main, manifest)
+        if not contract.settled:
+            raise AssentError(
+                f"the shared-path contract for {source.folder} is "
+                f"{contract.state}; the batch receipt's shared-input evidence "
+                "can no longer be reproduced")
+        contracts.append((source.folder, contract))
+    return shared_paths.shared_inputs_digest(main, contracts)
+
+
 def batch_receipt_staleness(cfg: Config,
                             receipt: BatchVerificationReceipt) -> tuple[str, ...]:
     """Return every reason the whole batch has expired; empty means still current.
@@ -315,6 +351,16 @@ def batch_receipt_staleness(cfg: Config,
                 "on its own")
     if reasons:
         return tuple(reasons)
+
+    # Only once every recorded source identity is still current does asking
+    # about the shared inputs mean anything: a vanished source is already
+    # reported above and would otherwise be reported twice.
+    try:
+        if current_batch_shared_inputs(
+                main, receipt) != receipt.shared_inputs_sha256:
+            return ("the reviewed shared inputs changed since verification",)
+    except AssentError as e:
+        return (f"the reviewed shared inputs cannot be reproduced: {e}",)
 
     candidate = build_batch_candidate(
         main, target_tip,

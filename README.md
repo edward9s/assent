@@ -837,6 +837,37 @@ the verifier output names is reported, and single-folder, selected, dynamic
 batch, and localization runs all record it in the receipt that stores their
 failure summary.
 
+**Reviewed shared ignored directories**: linking one by hand is the fallback.
+Which ignored directories a project genuinely shares is a decision Assent
+reviews once and then caches in the primary worktree's untracked, never
+committed `.assent/manifest.toml`. Under `[shared_paths]` it stores whole
+profiles — the declared directories, the exact tracked dependency or build files
+that `watch` them, and a fingerprint of those files plus the repository's tracked
+Git-ignore rules — keyed by fingerprint, so two branches with different
+dependency structure each keep their own answer instead of overwriting one
+another. A source snapshot is then `UNKNOWN` (nothing answers it yet),
+`REVIEWED-NONE` (a matching `paths = []` profile: a real answer that starts later
+sessions with no links and no AI clause), `REVIEWED-PATHS` (Assent provisions
+every declared directory as a junction or directory symlink to the primary
+worktree's same relative path before your task runs), or `STALE` — a watched file
+moved, a declared target vanished, changed type, or stopped being ignored, or an
+`Ignored input diagnosis:` named a directory the profile does not declare.
+Conflicting matching profiles fail closed.
+
+`assent shared-paths review --path DIR --watch FILE` (or `--none --watch FILE`)
+is the only writer. It validates every value first, takes one project-local
+lock, and replaces the file atomically, so a concurrent attempt is refused and
+an interruption leaves either the previous complete manifest or the complete
+replacement. `UNKNOWN` and `STALE` add one bounded review clause to the next
+scheduled session and block its closeout until it is settled; an unchanged
+fingerprint costs nothing at all. Every verify entry point — single folder,
+selected and dynamic batch, localization prefix, `run --verify`, and `--focus` —
+classifies its sources and reconciles their links before any verifier starts,
+and `assent reconcile` does the same before it creates a managed worktree.
+Folder and batch receipts record a `shared_inputs_sha256` over the selected
+profiles and a bounded snapshot of each declared target, taken before and after
+the verifier, and acceptance rechecks it immediately before publishing a ref.
+
 **Parallel test execution**: choosing `unittest` during `assent init` activates
 the packaged helper `run_unittest_parallel()`, which runs each
 `tests/test_*.py` module in its own subprocess concurrently instead of one

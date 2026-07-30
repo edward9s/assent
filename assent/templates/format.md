@@ -978,6 +978,65 @@ traversed to produce it. The note is appended by single-folder, exact selected,
 dynamic batch, and localization-prefix verification alike, and is stored in
 whichever receipt records that failure summary.
 
+Provisioning that link by hand is the fallback, not the normal path. Which
+ignored directories a project genuinely shares is a reviewed decision, cached in
+the untracked, Assent-owned `.assent/manifest.toml` of the primary worktree. It
+is local execution memory: it is never committed, never copied into a worktree,
+and never a source contract. Under `[shared_paths]` it keeps whole reviewed
+*profiles*, each holding the normalized project-relative directories, the exact
+tracked dependency or build files that `watch` the decision, and a fingerprint
+of those files plus the repository's tracked Git-ignore rules. Profiles are
+retained by fingerprint rather than overwritten, so two branches with different
+dependency structure each keep their own answer instead of making the cache
+oscillate.
+
+A source snapshot therefore starts under one of three states. `UNKNOWN` means no
+stored profile answers it and something is there to decide. `REVIEWED-NONE` is a
+matching profile with `paths = []` — a real answer that starts later sessions
+with no links and no AI discovery clause, and it must never trigger another
+review merely for being empty. `REVIEWED-PATHS` is a matching non-empty profile,
+whose declared directories Assent provisions itself before task work as a
+Windows junction or a POSIX directory symlink pointing at the primary worktree's
+same relative path. `STALE` is a previously reviewed answer that concrete
+evidence has invalidated: a watched file changed, appeared, or disappeared; a
+declared target disappeared, changed type, collided with ordinary content, or
+stopped being ignored; or a complete verifier's own `Ignored input diagnosis:`
+named a required directory the active profile does not declare. Two matching
+profiles that disagree have no correct answer and fail closed.
+
+The only sanctioned writer is `assent shared-paths review`, which takes either
+repeated `--path DIR` values or an explicit `--none`, plus the exact `--watch
+FILE` values that justify reconsidering the decision. It validates every value
+before mutating anything, holds one project-local lock, and replaces the
+manifest atomically, so a concurrent attempt is refused rather than interleaved
+and an interruption leaves the previous complete file. There is no arbitrary
+target, copy fallback, glob, all-ignored mode, force flag, or Git staging.
+`UNKNOWN` or `STALE` adds one bounded review clause to the next already-scheduled
+session — the prior paths and only the changed evidence — and closeout is refused
+while the contract is still unsettled. Nothing here can be inferred from
+`.gitignore` alone: no filesystem rule proves that an ignored directory is
+semantically required.
+
+Every verification entry point is a consumer of that cache. Single-folder
+`assent verify`, exact and dynamic batch verification, localization-prefix
+verification, `assent run ... --verify`, and `assent verify --focus` each
+classify every contributing live source and reconcile its Assent-owned links
+before any candidate or verifier command exists; `--focus` provisions the
+persistent source worktree and writes no receipt. `assent reconcile` classifies
+the finished source before `git worktree add` or the merge begins, provisions the
+managed reconciliation worktree's declared links, and revalidates rather than
+repairs them on `--continue`; continue, abort, and automatic no-conflict cleanup
+detach only Assent-recorded links. A folder or batch receipt binds one
+deterministic `shared_inputs_sha256` over the ordered contributing profiles,
+their declared paths, the exact resolved targets, and a bounded content snapshot
+of those targets, taken immediately before and after the full verifier — a target
+that changes during the run cannot produce a `PASSED` receipt. `REVIEWED-NONE`
+contributes an explicit empty-profile identity, distinct from `UNKNOWN`, which
+has no digest at all. Both receipt schemas were bumped fail-closed: an older
+receipt without the field is stale, never silently upgraded. Acceptance rechecks
+that digest immediately before publishing a ref and never creates or repairs a
+link as a side effect.
+
 Who starts that second stage is a project policy, `receipt_refresh` in
 `assent.toml`'s `[verification]` section. Under the default `"manual"`, run
 closeout does not verify at all; it prints the deferral and the receipt comes

@@ -60,6 +60,20 @@ files (logs; read only when debugging or explicitly referenced), and the
   candidate verification is a separate receipt-refresh stage governed by
   configuration: `"auto"` runs it at folder closeout, while `"manual"` defers it
   until a human explicitly invokes `assent verify`.
+- Shared ignored directories (task session): which ignored directories this
+  project really shares is a reviewed decision Assent caches in the primary
+  worktree's untracked `.assent/manifest.toml`. When a matching profile exists,
+  Assent has already provisioned every declared directory as a link before your
+  session started and you do nothing. When your prompt says the contract is
+  `UNKNOWN` or `STALE`, you must settle it before closeout by running, in this
+  worktree, `assent shared-paths review --path DIR --watch FILE` (repeat both as
+  needed) or `assent shared-paths review --none --watch FILE` when no shared
+  directory is required. `--watch` names the exact tracked dependency or build
+  files whose change would make the decision worth reconsidering. Decide from the
+  Git-ignore rules, the dependency/build declarations, and this task's verifier
+  evidence alone — do not audit the whole repository. That command is the only
+  way you may write the manifest; the scheduler refuses the task's completion
+  while the contract is still unreviewed.
 - Ignored inputs a check needs (task session): the isolated worktree is built
   from tracked content, so a directory Git ignores — a private package tree, a
   large asset directory — is missing there even though the main worktree has

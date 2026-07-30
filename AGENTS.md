@@ -171,6 +171,28 @@ while operating an assent-managed session live in
   exact selected, dynamic batch, and localization-prefix verification alike,
   normalizes separators, and reports only a directory the verifier output
   itself names; it never enumerates or traverses an ignored tree.
+- Which ignored directories a project shares is a reviewed decision cached in
+  the primary worktree's untracked, never-committed `.assent/manifest.toml`;
+  it is Assent-owned local execution memory, not project source, and its only
+  writer is the validated `assent shared-paths review` operation. Under
+  `[shared_paths]` it retains whole profiles by fingerprint -- normalized
+  project-relative `paths`, exact tracked `watch` files, and a digest of those
+  files plus the tracked Git-ignore rules -- so parallel branches never make the
+  cache oscillate. A source snapshot is UNKNOWN, REVIEWED-NONE (a matching
+  `paths = []` profile is an answer and must never trigger another review),
+  REVIEWED-PATHS (Assent provisions the exact Windows junction or POSIX
+  directory symlink to the primary worktree's same relative path itself), or
+  STALE; conflicting matching profiles fail closed. UNKNOWN and STALE add one
+  bounded review clause to the next already-scheduled session and refuse its
+  closeout until settled; an unchanged fingerprint consumes no review tokens.
+  Every verification entry point and `assent reconcile` classify and reconcile
+  before any candidate, verifier, or managed worktree exists, and folder and
+  batch receipts bind one `shared_inputs_sha256` -- snapshotted immediately
+  before and after the full verifier -- that acceptance rechecks before
+  publishing a ref without ever repairing a link or invoking AI. Do not add a
+  copy fallback, glob, all-ignored mode, force flag, Git staging of the
+  manifest, or any claim that semantic necessity can be inferred from
+  `.gitignore` alone.
 - Cross-folder speculative execution stacks only on an explicitly declared
   `base`, so at most one not-yet-accepted upstream tip is ever in a stack. A
   folder that declares no `base` is cut from the integration target; the

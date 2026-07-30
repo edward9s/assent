@@ -137,6 +137,54 @@ class TestContractContent(unittest.TestCase):
                 self.assertIn("`Ignoredinputdiagnosis:`", compact)
                 self.assertIn("junction", compact)
 
+    def test_shared_path_states_are_documented_in_english_and_chinese(self):
+        """The three-state contract and its staleness rules reach every reader."""
+        install_global_contracts(self)
+        english = {
+            "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
+                encoding="utf-8"),
+            "format.md": contracts.installed_contract_text("format.md"),
+            "instructions.md": contracts.installed_contract_text(
+                "instructions.md"),
+            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+                encoding="utf-8"),
+            "docs/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        session = english.pop("instructions.md")
+        for name, text in english.items():
+            compact = " ".join(text.split())
+            for phrase in ("REVIEWED-NONE", "REVIEWED-PATHS", "STALE",
+                           "`.assent/manifest.toml`",
+                           "assent shared-paths review"):
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+        # The scheduled session reads only instructions.md, so the remedy -- not
+        # the state vocabulary a scheduler owns -- is what has to be there.
+        compact = " ".join(session.split())
+        for phrase in ("`.assent/manifest.toml`", "`UNKNOWN` or `STALE`",
+                       "assent shared-paths review --path DIR --watch FILE",
+                       "assent shared-paths review --none --watch FILE"):
+            with self.subTest(document="instructions.md", phrase=phrase):
+                self.assertIn(phrase, compact)
+
+        chinese = {
+            "README.zh-TW.md": (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+                encoding="utf-8"),
+            "docs/zh-TW/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        for name, text in chinese.items():
+            compact = "".join(text.split())
+            for phrase in ("REVIEWED-NONE", "REVIEWED-PATHS", "STALE",
+                           "`.assent/manifest.toml`",
+                           "assentshared-pathsreview",
+                           "`shared_inputs_sha256`"):
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+
     def test_link_cleanup_contract_is_present_in_all_reader_documents(self):
         documents = {
             "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(

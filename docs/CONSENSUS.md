@@ -180,6 +180,27 @@ remedy. It reports only directories the verifier output itself names, after
 separator normalization, and enumerates no ignored tree. No copy fallback,
 `local_inputs` setting, or force flag is added.
 
+Which ignored directories are shared is a reviewed decision, not an inference.
+No filesystem rule proves that an ignored directory is semantically required, so
+the answer is reviewed once and cached in the primary worktree's untracked
+`.assent/manifest.toml` — local execution memory, never project source, never
+committed, never copied into a worktree. `[shared_paths]` retains whole profiles
+by fingerprint (declared paths, exact tracked `watch` files, and a digest of
+those files plus the tracked Git-ignore rules), so parallel branches do not make
+the cache oscillate. A source snapshot is `UNKNOWN`, `REVIEWED-NONE` (a matching
+`paths = []` profile is an answer and never triggers another review),
+`REVIEWED-PATHS` (Assent provisions the exact junctions or directory symlinks
+itself), or `STALE`; conflicting matching profiles fail closed.
+`assent shared-paths review` is the only writer, validating before mutating,
+holding one project-local lock, and replacing the file atomically. `UNKNOWN` and
+`STALE` add one bounded review clause to the next already-scheduled session and
+refuse its closeout until settled. Every verification entry point and
+`assent reconcile` classify and reconcile before any candidate, verifier, or
+managed worktree exists, and folder and batch receipts bind one
+`shared_inputs_sha256` — snapshotted before and after the verifier — that
+acceptance rechecks immediately before publishing a ref, never repairing a link
+to make it pass.
+
 Receipts are disposable derived artifacts and never outrank Git. A target tip
 change is acceptable when the rebuilt integration tree is identical; a content
 change makes the receipt stale. Direct and selected acceptance refuse missing,
