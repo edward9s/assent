@@ -1067,6 +1067,79 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         self.assertEqual(receipt.status, "PASSED")
         self.assertEqual(receipt.folders, ("aa", "bb"))
 
+    def copy_ignored_package(self, folder: str) -> Path:
+        """Give one source worktree a physical ignored pkg/fl_chart copy."""
+        package = gitops.worktree_path(self.root, folder) / "pkg" / "fl_chart"
+        package.mkdir(parents=True)
+        (package / "pubspec.yaml").write_text("name: fl_chart\n",
+                                              encoding="utf-8")
+        return package
+
+    def write_missing_package_verify(self) -> None:
+        """Fail the way a dependency resolver does when pkg/fl_chart is gone."""
+        self.write_verify(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "assert not Path('pkg').exists(), 'ignored tree leaked'\n"
+            "print('Could not find a file named pubspec.yaml in "
+            "pkg/fl_chart.', file=sys.stderr)\n"
+            "sys.exit(1)\n")
+
+    def test_a_selected_batch_diagnoses_a_copied_ignored_package(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        self.copy_ignored_package("aa")
+        unrelated = gitops.worktree_path(self.root, "bb") / "ignored"
+        unrelated.mkdir()
+        self.write_missing_package_verify()
+
+        code, output = self.run_selected("aa", "bb", bisect=False)
+
+        self.assertEqual(code, 1, output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertIn("Could not find a file named pubspec.yaml",
+                      receipt.failure_summary)
+        self.assertIn("Ignored input diagnosis: pkg/", receipt.failure_summary)
+        self.assertNotIn("ignored/", receipt.failure_summary)
+        self.assertIn("verify selected: Ignored input diagnosis: pkg/", output)
+
+    def test_a_dynamic_batch_diagnoses_a_copied_ignored_package(self) -> None:
+        self.make_source("aa")
+        self.copy_ignored_package("aa")
+        self.write_missing_package_verify()
+
+        code, output = self.run_batch(bisect=False)
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("Ignored input diagnosis: pkg/",
+                      self.read_batch_receipt().failure_summary)
+        self.assertIn("verify --batch: Ignored input diagnosis: pkg/", output)
+
+    def test_localizing_a_batch_keeps_the_ignored_input_diagnosis(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        self.copy_ignored_package("bb")
+        # Only bb copied the ignored tree, so the prefix that first includes it
+        # is where the diagnosis has to appear.
+        self.write_verify(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "if Path('bb.txt').exists():\n"
+            "    print('Could not find a file named pubspec.yaml in "
+            "pkg/fl_chart.', file=sys.stderr)\n"
+            "    sys.exit(1)\n"
+            "sys.exit(0)\n")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("localized the failure to bb", output)
+        self.assertIn("Ignored input diagnosis: pkg/", output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertEqual(receipt.folders, ("aa",))
+
     def test_conflicting_link_targets_refuse_the_whole_batch(self) -> None:
         self.make_source("aa")
         self.make_source("bb")

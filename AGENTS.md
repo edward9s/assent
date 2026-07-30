@@ -160,6 +160,17 @@ while operating an assent-managed session live in
   links, files, and targets survive success, failure, and interruption alike.
   Do not add `--force`, a project `local_inputs` setting, a blanket `.gitignore`
   overlay, or copies of ignored directory contents into Git.
+- The ignored-input handoff is documented where each reader actually looks: the
+  packaged scheduled-task instructions tell an executing session to provision a
+  required ignored directory as a junction or directory symlink at the same
+  relative path and never to copy the tree, and a full verifier that fails on a
+  path inside a physically ignored source directory gets one appended
+  `Ignored input diagnosis:` note naming that directory and the directory-link
+  remedy. The note preserves the verifier output and exit code, is stored in
+  whichever receipt records the failure summary, applies to single-folder,
+  exact selected, dynamic batch, and localization-prefix verification alike,
+  normalizes separators, and reports only a directory the verifier output
+  itself names; it never enumerates or traverses an ignored tree.
 - Cross-folder speculative execution stacks only on an explicitly declared
   `base`, so at most one not-yet-accepted upstream tip is ever in a stack. A
   folder that declares no `base` is cut from the integration target; the

@@ -166,6 +166,20 @@ on this path. A malformed batch receipt refuses rather than falling back. The
 first real verification or acceptance failure stops the sequential chain while
 earlier publications remain.
 
+Ignored inputs are a handoff, not a hole. A candidate is built from tracked
+content plus exactly two mirrored artifact kinds — provisioned ignored
+directory links and ordinary ignored leaf files — so the rule that a required
+ignored directory must be provisioned as a junction or directory symlink, never
+copied, is stated in the packaged scheduled-task instructions an executing
+session actually reads, not only in the format contract. When a full verifier
+nevertheless fails on a path inside a physically ignored directory a
+contributing source worktree holds, the evidence keeps the verifier output and
+exit code and appends one `Ignored input diagnosis:` note that names the
+directory, says it is intentionally omitted, and gives the directory-link
+remedy. It reports only directories the verifier output itself names, after
+separator normalization, and enumerates no ignored tree. No copy fallback,
+`local_inputs` setting, or force flag is added.
+
 Receipts are disposable derived artifacts and never outrank Git. A target tip
 change is acceptable when the rebuilt integration tree is identical; a content
 change makes the receipt stale. Direct and selected acceptance refuse missing,

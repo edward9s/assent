@@ -131,6 +131,16 @@ accept。已整合資料夾是 ancestry no-op;已完成且 source branch 與 wor
 不會 fallback。逐資料夾路徑第一次真正的驗證或接受失敗就停止,但先前已發佈的成果
 保留不撤回。
 
+被忽略的輸入是交接問題,不是破口。候選由被追蹤內容加上剛好兩種鏡射產物——已佈建
+的被忽略目錄連結,以及一般被忽略葉節點檔案——組成,因此「必要的被忽略目錄必須以
+junction 或目錄符號連結佈建、絕不複製」這條規則,也寫在執行 session 真正會讀的
+打包排程任務指示中,而不只寫在 format 契約裡。若完整 verifier 仍然失敗在某個
+contributing source worktree 實體持有的被忽略目錄底下的路徑,證據會保留 verifier
+輸出與 exit code,並附上一則 `Ignored input diagnosis:` 註記,指名該目錄、說明它是
+刻意不放進候選的,並給出目錄連結的修法。它只回報 verifier 輸出自己指名的目錄,
+分隔符號先正規化,且不列舉任何被忽略的樹。不新增複製 fallback、`local_inputs`
+設定或 force 旗標。
+
 receipt 是 derived artifact,不凌駕 Git。target tip 改變但重建後 integration tree
 完全相同仍可接受;內容改變就 stale。直接與 selected acceptance 遇到 missing、
 malformed、stale 或 mismatch evidence 時會拒絕,不自行啟動驗證。passive merge

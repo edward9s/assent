@@ -25,8 +25,10 @@ from assent.folderdeps import (infer_folder_completion, live_upstreams,
                                parse_folder_dependency_graph)
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.verification_common import (VERIFY_COMMAND, candidate_tree,
-                                        BatchCandidate, invalidate_receipt,
-                                        merge_chain,
+                                        BatchCandidate,
+                                        ignored_input_diagnosis,
+                                        invalidate_receipt, merge_chain,
+                                        print_ignored_input_diagnosis,
                                         provisioned_candidate_links,
                                         run_full_verifier, sha256_file,
                                         source_snapshot, summary,
@@ -269,6 +271,24 @@ def _prefix_links(worktrees: Mapping[str, Path],
         [worktrees.get(folder) for folder, _tip in sources])
 
 
+def _failure_summary(result: subprocess.CompletedProcess[str],
+                     worktrees: Mapping[str, Path],
+                     sources: Sequence[tuple[str, str]]) -> str:
+    """Summarize one failed batch run, with the ignored-input hint appended.
+
+    Every batch entry point -- exact selection, dynamic discovery, and each
+    localization prefix -- builds its failure evidence here, so the actionable
+    fact is stored the same way whichever of them ran the verifier.
+    """
+    return summary(
+        result.stdout, result.stderr,
+        f"Verification command failed: {VERIFY_COMMAND} "
+        f"(exit code {result.returncode})",
+        ignored_input_diagnosis(
+            f"{result.stdout}\n{result.stderr}",
+            [worktrees.get(folder) for folder, _tip in sources]))
+
+
 def _verify_prefix(main: Path, target_tip: str,
                    sources: Sequence[tuple[str, str]], script: Path,
                    worktrees: Mapping[str, Path]) -> _PrefixRun:
@@ -299,11 +319,8 @@ def _verify_prefix(main: Path, target_tip: str,
                                   f"Unable to start verification: {e}")
     if result.returncode == 0:
         return _PrefixRun(True, chain.step_trees, 0, "")
-    return _PrefixRun(
-        False, chain.step_trees, result.returncode,
-        summary(result.stdout, result.stderr,
-                f"Verification command failed: {VERIFY_COMMAND} "
-                f"(exit code {result.returncode})"))
+    return _PrefixRun(False, chain.step_trees, result.returncode,
+                      _failure_summary(result, worktrees, sources))
 
 
 def bisect_batch_failure(main: Path, target_tip: str,
@@ -756,10 +773,8 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
             assert result is not None
             status = "PASSED" if result.returncode == 0 else "FAILED"
             exit_code = result.returncode
-            failure_summary = "" if result.returncode == 0 else summary(
-                result.stdout, result.stderr,
-                f"Verification command failed: {VERIFY_COMMAND} "
-                f"(exit code {result.returncode})")
+            failure_summary = "" if result.returncode == 0 else _failure_summary(
+                result, source_worktrees, batch_sources)
             if status == "FAILED" and bisect:
                 bisected = bisect_batch_failure(
                     main, target_tip, batch_sources, script, failure_summary,
@@ -811,6 +826,9 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
               "`assent accept --all` publishes exactly those")
         return 1
     print(f"{label}: failed ({receipt.failure_summary.splitlines()[0]})")
+    # Only the first stored line is echoed above, so an ignored-input hint is
+    # printed explicitly rather than left for a human to find in the receipt.
+    print_ignored_input_diagnosis(label, receipt.failure_summary)
     return 1
 
 
@@ -836,10 +854,10 @@ def verify_batch(config_path: str, assent_dir: str | Path, bisect: bool = True,
             return _verify_batch_locked(
                 config_path, assent_dir, bisect, confirm)
     except LockBusy as e:
-        print(f"verify selected: refused ({e})")
+        print(f"verify --batch: refused ({e})")
         return 1
     except AssentError as e:
-        print(f"verify selected: failed ({e})")
+        print(f"verify --batch: failed ({e})")
         return 1
 
 
@@ -858,10 +876,10 @@ def verify_selected_batch(config_path: str, assent_dir: str | Path,
             return _verify_batch_locked(
                 config_path, assent_dir, bisect, confirm_on_terminal, folders)
     except LockBusy as e:
-        print(f"verify --batch: refused ({e})")
+        print(f"verify selected: refused ({e})")
         return 1
     except AssentError as e:
-        print(f"verify --batch: failed ({e})")
+        print(f"verify selected: failed ({e})")
         return 1
 
 

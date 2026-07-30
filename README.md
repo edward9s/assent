@@ -824,6 +824,19 @@ source worktree's links, generated files, and external targets survive a pass,
 a failure, and a Ctrl-C alike. There is no force flag and no project setting
 that widens this.
 
+The same rule is in the scheduled-task instructions `assent init` installs, so
+an unattended session that needs an ignored input is told to link it at the
+same relative path instead of copying the tree — a copy passes the focused
+check and is then pruned from the candidate. If a full verification does fail
+on a path inside an ordinary ignored directory one of the source worktrees
+holds physically, such as `pkg/fl_chart`, the failure keeps its output and exit
+code and gains one `Ignored input diagnosis:` note: `pkg/` is intentionally
+omitted from the candidate, and the fix is a directory junction or symlink in
+the source worktree, not a copy. Separators are normalized, only a directory
+the verifier output names is reported, and single-folder, selected, dynamic
+batch, and localization runs all record it in the receipt that stores their
+failure summary.
+
 **Parallel test execution**: choosing `unittest` during `assent init` activates
 the packaged helper `run_unittest_parallel()`, which runs each
 `tests/test_*.py` module in its own subprocess concurrently instead of one

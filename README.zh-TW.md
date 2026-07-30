@@ -657,6 +657,15 @@ ownership、盤點目錄連結與其他目錄 reparse point,並先解除每個�
 source worktree 連結、生成檔與外部目標,在通過、失敗與 Ctrl-C 之下都同樣存活。
 沒有任何 force 旗標或專案設定可以放寬這一點。
 
+同一條規則也寫在 `assent init` 安裝的排程任務指示裡,因此需要被忽略輸入的無人
+值守 session 會被告知在相同相對路徑佈建連結,而不是複製整棵樹——複製只能通過
+focused 檢查,之後就會在候選中被剪除。若完整驗證真的失敗在某個 source worktree
+實體持有的一般被忽略目錄底下的路徑,例如 `pkg/fl_chart`,該次失敗會保留原本的
+輸出與 exit code,並附上一則 `Ignored input diagnosis:` 註記:`pkg/` 是刻意不放進
+候選的,修法是在 source worktree 佈建目錄 junction 或符號連結,而不是複製。分隔
+符號會先正規化,只回報 verifier 輸出自己指名的目錄,而單一資料夾、selected、
+動態 batch 與定位執行都會把它記進各自存放 failure summary 的 receipt。
+
 **平行執行測試**:在 `assent init` 選 `unittest` 會啟用打包的
 `run_unittest_parallel()`,把 `tests/test_*.py` 底下每個模組各自丟進獨立
 subprocess 平行執行,而非單一行程依序跑完整套件。打包 template 會把這個以及

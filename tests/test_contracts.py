@@ -89,6 +89,54 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
 
+    def test_the_task_session_is_told_to_link_a_required_ignored_directory(self):
+        """A zero-memory session reads instructions.md, never format.md."""
+        install_global_contracts(self)
+        text = " ".join(
+            contracts.installed_contract_text("instructions.md").split())
+        for phrase in (
+                "directory junction (Windows, `mklink /J`) or a directory "
+                "symlink (POSIX, `ln -s`) at that relative path inside your "
+                "worktree",
+                "Never copy the ignored directory tree in",
+                "never modify anything inside the linked target"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+        # The scheduled reading scope must stay as it is: the session is not
+        # sent to the format contract to learn this.
+        scope = text.split("An **assent-scheduled task session** reads only:")[1]
+        self.assertNotIn("format.md", scope.split("## Working rules")[0])
+
+    def test_the_ignored_input_diagnosis_is_documented_in_english_and_chinese(self):
+        install_global_contracts(self)
+        english = {
+            "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
+                encoding="utf-8"),
+            "format.md": contracts.installed_contract_text("format.md"),
+            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+                encoding="utf-8"),
+            "docs/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        for name, text in english.items():
+            compact = " ".join(text.split())
+            with self.subTest(document=name):
+                self.assertIn("`Ignored input diagnosis:`", compact)
+                self.assertIn("junction", compact)
+        chinese = {
+            "README.zh-TW.md": (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+                encoding="utf-8"),
+            "docs/zh-TW/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        for name, text in chinese.items():
+            compact = "".join(text.split())
+            with self.subTest(document=name):
+                self.assertIn("`Ignoredinputdiagnosis:`", compact)
+                self.assertIn("junction", compact)
+
     def test_link_cleanup_contract_is_present_in_all_reader_documents(self):
         documents = {
             "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(

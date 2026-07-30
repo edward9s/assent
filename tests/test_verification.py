@@ -671,6 +671,63 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         branches, paths = self._temporary_resources()
         self.assertEqual((branches, paths), ([], []))
 
+    def test_a_failure_below_a_copied_ignored_directory_is_diagnosed(self):
+        # The Flutter-shaped reproduction: the source worktree holds a physical
+        # copy of the ignored pkg/ tree, so the candidate simply has no
+        # pkg/fl_chart and the verifier fails on a path nobody provisioned.
+        package = self.source_worktree / "pkg" / "fl_chart"
+        package.mkdir(parents=True)
+        (package / "pubspec.yaml").write_text("name: fl_chart\n",
+                                              encoding="utf-8")
+        unrelated = self.source_worktree / "ignored"
+        unrelated.mkdir()
+        (unrelated / "editor.state").write_text("local\n", encoding="utf-8")
+        self._commit_target_verifier(
+            exit_code=1, absent=("pkg",),
+            stderr="Could not find a file named pubspec.yaml in pkg/fl_chart.")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = verify_folder(self.cfg)
+        text = output.getvalue()
+
+        self.assertEqual(code, 1, text)
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertEqual(receipt.exit_code, 1)
+        # The verifier's own words survive next to the actionable diagnosis.
+        self.assertIn("Could not find a file named pubspec.yaml",
+                      receipt.failure_summary)
+        for phrase in ("Ignored input diagnosis: pkg/",
+                       "intentionally omitted from the integration candidate",
+                       "directory junction (Windows) or directory symlink"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, receipt.failure_summary)
+        self.assertIn("Ignored input diagnosis: pkg/", text)
+        # An ignored directory the failure never names stays unmentioned, and
+        # neither ignored tree was mirrored or disturbed.
+        self.assertNotIn("ignored/", receipt.failure_summary)
+        self.assertTrue((unrelated / "editor.state").is_file())
+        self.assertTrue((package / "pubspec.yaml").is_file())
+
+    def test_a_provisioned_link_named_in_a_failure_is_not_diagnosed(self):
+        # pkg/ is a real junction here, so it does reach the candidate; the
+        # failure is about the change, not about a missing input.
+        pkg = self._provision_link(self.source_worktree, "pkg")
+        self._commit_target_verifier(
+            exit_code=3, probe=("pkg",),
+            stderr="dependency resolution failed for pkg/fl_chart")
+
+        self.assertEqual(verify_folder(self.cfg), 1)
+
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertIn("dependency resolution failed", receipt.failure_summary)
+        self.assertNotIn("Ignored input diagnosis", receipt.failure_summary)
+        # The failed candidate cleanup left the link and its target intact.
+        self.assertTrue((pkg / "marker.txt").is_file())
+        self.assertTrue((self.source_worktree / "pkg" / "marker.txt").is_file())
+
     def test_a_dangling_link_refuses_without_writing_evidence(self):
         target = self._provision_link(self.source_worktree, "pkg")
         shutil.rmtree(target)
@@ -759,6 +816,23 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
             exit_code=0, read=("lib/models/task.g.dart",),
             absent=("lib/.cache",))
         self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertTrue((cache / "build.g.dart").is_file())
+
+    def test_a_windows_separator_path_in_a_nested_ignored_tree_is_diagnosed(self):
+        # A nested ignored directory, named by a failure using backslashes, is
+        # the same handoff problem one level down.
+        cache = self.source_worktree / "lib/.cache"
+        cache.mkdir()
+        (cache / "build.g.dart").write_text("cached\n", encoding="utf-8")
+        self._commit_target_verifier(
+            exit_code=2,
+            stderr=r"FileNotFoundError: lib\.cache\build.g.dart is missing")
+
+        self.assertEqual(verify_folder(self.cfg), 1)
+
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertIn("Ignored input diagnosis: lib/.cache/",
+                      receipt.failure_summary)
         self.assertTrue((cache / "build.g.dart").is_file())
 
     def test_cleanup_removes_only_the_parents_assent_created(self):

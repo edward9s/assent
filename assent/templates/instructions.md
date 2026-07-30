@@ -60,6 +60,21 @@ files (logs; read only when debugging or explicitly referenced), and the
   candidate verification is a separate receipt-refresh stage governed by
   configuration: `"auto"` runs it at folder closeout, while `"manual"` defers it
   until a human explicitly invokes `assent verify`.
+- Ignored inputs a check needs (task session): the isolated worktree is built
+  from tracked content, so a directory Git ignores — a private package tree, a
+  large asset directory — is missing there even though the main worktree has
+  it. When your assigned task or its focused verify command demonstrably needs
+  one, provision it as a link: confirm the exact target path in the main
+  worktree, confirm Git ignores that same relative path, then create a
+  directory junction (Windows, `mklink /J`) or a directory symlink (POSIX,
+  `ln -s`) at that relative path inside your worktree, pointing at that target.
+  Never copy the ignored directory tree in: a copy passes the focused check and
+  then disappears, because the integration candidate mirrors provisioned
+  directory links and ignored leaf files and never a physical ignored tree.
+  Provision nothing else — not caches, credentials, editor state, build output,
+  or ignored directories the task does not require — and never modify anything
+  inside the linked target. An ordinary ignored file generated beside its
+  tracked source, such as a `*.g.dart`, needs no action.
 - During interactive work, run the smallest relevant checks. Do not launch the
   full project suite merely because files changed. Launch it only when the human
   explicitly asks, when a scheduler-provided focused verify command itself

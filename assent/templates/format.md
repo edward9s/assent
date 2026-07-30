@@ -962,6 +962,22 @@ directory link yourself, next to the source worktree, when a private package
 directory or a large asset tree must stay out of Git; there is no project
 setting and no force flag that widens any of this.
 
+That provisioning rule is also stated in the packaged scheduled-task
+instructions, which are what an executing session actually reads, so a
+zero-memory task session that needs an ignored input is told to link it rather
+than copy it. A copy would satisfy the focused check and then be pruned from
+the candidate, which is why the handoff belongs in both contracts. When a full
+verifier does fail on a path inside an ordinary ignored directory that a
+contributing source worktree holds physically, the failure evidence keeps the
+verifier output and exit code unchanged and appends one `Ignored input
+diagnosis:` note naming that directory, stating that it is intentionally
+omitted from the candidate, and giving the directory-link remedy. Windows and
+POSIX separators are normalized before the match, only a directory the verifier
+output itself names is reported, and no ignored tree is enumerated or
+traversed to produce it. The note is appended by single-folder, exact selected,
+dynamic batch, and localization-prefix verification alike, and is stored in
+whichever receipt records that failure summary.
+
 Who starts that second stage is a project policy, `receipt_refresh` in
 `assent.toml`'s `[verification]` section. Under the default `"manual"`, run
 closeout does not verify at all; it prints the deferral and the receipt comes

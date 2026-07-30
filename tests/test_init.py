@@ -37,6 +37,19 @@ class TestInitContractRefresh(unittest.TestCase):
         self.assertFalse((self.root / ".assent/format.md").exists())
         self.assertIn("Updated:", output.getvalue())
 
+    def test_init_installs_the_ignored_input_provisioning_instruction(self):
+        """What a scheduled session reads must forbid copying an ignored tree."""
+        (self.user_home / "instructions.md").write_text(
+            "an older working instruction\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root, test="unittest"), 0)
+
+        text = " ".join((self.user_home / "instructions.md").read_text(
+            encoding="utf-8").split())
+        self.assertIn("Never copy the ignored directory tree in", text)
+        self.assertIn("directory junction (Windows, `mklink /J`)", text)
+        self.assertFalse((self.root / ".assent/instructions.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

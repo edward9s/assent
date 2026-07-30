@@ -27,6 +27,7 @@ from assent.plan import Plan
 from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
                                         SUMMARY_LIMIT, VERIFY_COMMAND,
                                         atomic_write_text, candidate_tree,
+                                        ignored_input_diagnosis,
                                         invalidate_receipt,
                                         provisioned_candidate_links,
                                         require_oid, run_full_verifier,
@@ -266,8 +267,9 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
     upstream_sources = _stack_sources(cfg, target_tip, source_tip)
     # Resolved with the other preflight facts, so a conflicting or unresolvable
     # provisioned link refuses while the previous receipt is still on disk.
-    links = union_worktree_links(
-        [source_worktree, *(source.worktree for source in upstream_sources)])
+    worktrees = [source_worktree,
+                 *(source.worktree for source in upstream_sources)]
+    links = union_worktree_links(worktrees)
     invalidate_receipt(path)
 
     integration_tree = gitops.tree_of(main, target_tip)
@@ -314,7 +316,11 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
                         failure_summary=("" if result.returncode == 0 else summary(
                             result.stdout, result.stderr,
                             f"Verification command failed: {VERIFY_COMMAND} "
-                            f"(exit code {result.returncode})")),
+                            f"(exit code {result.returncode})",
+                            # Appended last so it survives a truncated capture.
+                            ignored_input_diagnosis(
+                                f"{result.stdout}\n{result.stderr}",
+                                worktrees))),
                     )
 
     # External Git writes are unsupported, but detecting them keeps the receipt
