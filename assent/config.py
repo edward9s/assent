@@ -24,6 +24,7 @@ from pathlib import Path
 
 from assent import AssentError
 from assent.lockfile import LOCK_NAME
+from assent.shared_paths import MANIFEST_LOCK_NAME, MANIFEST_NAME
 from assent.user_home import user_config_path
 
 _TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt", "verification"}
@@ -310,6 +311,15 @@ class Config:
     @property
     def verification_receipt_rel(self) -> str:
         return self.git_rel(self.tasks_dir / "_verification.toml")
+
+    @property
+    def shared_paths_manifest_rel(self) -> str:
+        """The local reviewed-shared-path cache; local memory, never project source."""
+        return self.git_rel(self.assent_dir / MANIFEST_NAME)
+
+    @property
+    def shared_paths_lock_rel(self) -> str:
+        return self.git_rel(self.assent_dir / MANIFEST_LOCK_NAME)
 
     @property
     def git_excludes(self) -> tuple[str, ...]:

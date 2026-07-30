@@ -379,7 +379,12 @@ def ignored_input_diagnosis(output: str,
         "Provision a required input in the source worktree as a directory "
         "junction (Windows) or directory symlink (POSIX) pointing at its real "
         "location, then verify again; copying an ignored directory into the "
-        "source worktree cannot reach the candidate.")
+        "source worktree cannot reach the candidate.\n"
+        "If the directory is a required shared input the reviewed shared-path "
+        "profile does not declare, record it with `assent shared-paths review` "
+        "-- naming the dependency or build file that made it necessary as a "
+        "`--watch` value -- and assent provisions the link itself for every "
+        "later session.")
 
 
 def print_ignored_input_diagnosis(label: str, failure_summary: str) -> None:
@@ -443,20 +448,6 @@ def union_worktree_links(
     ordered = tuple(merged[path] for path in sorted(merged))
     _require_no_overlap(ordered)
     return ordered
-
-
-def _create_directory_link(destination: Path, target: Path) -> None:
-    """Create one directory link, preferring a junction on Windows.
-
-    A Windows directory symlink needs a privilege an unattended run cannot
-    assume, while a junction needs none, so Windows always gets a junction
-    regardless of which kind the source worktree used.
-    """
-    if os.name == "nt":
-        import _winapi
-        _winapi.CreateJunction(str(target), str(destination))
-    else:
-        os.symlink(target, destination, target_is_directory=True)
 
 
 def _create_file_link(destination: Path, target: Path) -> None:
@@ -551,7 +542,7 @@ def provisioned_candidate_links(
             parents.extend(_create_parents(candidate, link.path))
             try:
                 if link.is_directory:
-                    _create_directory_link(destination, link.target)
+                    pathops.create_directory_link(destination, link.target)
                 else:
                     _create_file_link(destination, link.target)
             except OSError as e:
