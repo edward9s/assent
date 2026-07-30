@@ -142,8 +142,10 @@ def _build_parser() -> argparse.ArgumentParser:
              "that matches the selection: one folder as a folder receipt, an "
              "exact multi-folder selection as that selected batch, and --all or "
              "a bare `...` as the whole-project batch. A failing run is "
-             "returned as-is and verifies nothing; cannot be used with --once "
-             "or --task")
+             "returned as-is and verifies nothing. With --once or --task it "
+             "verifies only when that limited run left the single selected "
+             "folder complete, and an incomplete folder fails the request "
+             "without writing a receipt")
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
@@ -507,6 +509,11 @@ def _close_run(result: int, *, verify: bool, config_path: str,
     ``selection`` is the exact folder set the run covered, and ``None`` is a
     whole-project request (``--all`` or a bare ``...``), which keeps the dynamic
     batch's own discovery rather than freezing a set the scheduler may extend.
+
+    A limited ``--once`` / ``--task`` run arrives here as its one selected
+    folder like any other single-folder selection: ``verify_folder`` re-reads the
+    plan and its own pre-candidate gate refuses an incomplete folder, so the CLI
+    keeps no second completion predicate.
     """
     if result != 0 or not verify:
         return result
@@ -548,11 +555,9 @@ def _dispatch(argv: list[str]) -> int:
             parser.error("run's --once and --task each require at most one FOLDER")
         if not args.all_folders and args.jobs is not None:
             parser.error("run's --jobs can only be used with --all")
-        # --once and --task stop before folder closeout on purpose, so pairing
-        # them with --verify would offer complete acceptance evidence for a plan
-        # that is knowingly incomplete.
-        if args.verify and (args.once or args.task is not None):
-            parser.error("run's --verify cannot be used with --once or --task")
+        # --once and --task stay legal with --verify: they select exactly one
+        # folder, so the receipt scope is unambiguous, and verify_folder's own
+        # pre-candidate gate refuses a folder the limited run left incomplete.
 
     if args.command == "accept":
         if remainder and args.all_folders:

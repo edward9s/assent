@@ -412,14 +412,22 @@ there is no finished plan to certify. The verification matches the selection:
 | `assent run A ... --verify` | the exact expanded selection as one batch |
 | `assent run --all --verify` | the whole-project dynamic batch |
 | `assent run ... --verify` | the whole-project dynamic batch |
+| `assent run A --once --verify`<br>`assent run A --task t003 --verify` | A's folder receipt, but only if the limited run left A complete |
 
 A bare `...` is a whole-project request and therefore happens to land on the
 same dynamic batch `--all` uses, rather than freezing a set the scheduler may
 still extend; an explicit prefix plus `...` stays an exact expanded selection
 and is verified as exactly the folders it ran. The verification's exit code
-becomes the command's exit code. `--verify` is refused with `--once` and
-`--task`, which stop before folder closeout on purpose, and it is an
-invocation-level request that runs regardless of the configured
+becomes the command's exit code.
+
+`--once` and `--task` may be combined with `--verify`. They select exactly one
+folder, so the receipt scope is unambiguous, but they stop after a single task:
+the request therefore verifies only when that limited run left the single
+selected folder complete — every task `DONE` or `SKIP`. An incomplete folder
+fails the request without writing a receipt; the refusal names the incomplete
+task ids and statuses and happens before any integration candidate is created
+or any full verifier starts, so it is a failure rather than a silent skip.
+`--verify` is an invocation-level request that runs regardless of the configured
 `receipt_refresh` policy.
 
 #### Multi-folder `clean` and `archive`
@@ -919,7 +927,7 @@ derived from task-file facts, and Git is always enabled.
 |---|---|---|
 | `assent run [FOLDER]`<br>`assent run parallel01` | Runs a work folder until every task is DONE/BLOCKED/SKIP. Omitting `FOLDER` derives the single runnable folder; `--once` stops after the next task; `--task ID` runs a single task while still checking its upstreams, e.g. `assent run --task t003 parallel01`. | Only spent while an AI session runs; `--once` or `--task` run at most one task |
 | `assent run A B`<br>`assent run A B --all`<br>`assent run A B ...` | Runs exactly A then B in the stated order and stops on the first failure. With `--all`, it then runs every remaining incomplete folder in dependency order; the literal `...` instead appends every remaining folder as one selection snapshotted before the run starts. `...` and `--all` cannot be combined, and neither form verifies or accepts implicitly. | Only spent while an AI session runs |
-| `assent run --all --verify`<br>`assent run A B --verify` | Runs, then — only if the run exited zero — runs the complete verification that matches the selection: one folder as a folder receipt, an exact multi-folder selection as that selected batch, `--all` or a bare `...` as the whole-project batch. The verification's exit code becomes the command's; incompatible with `--once` and `--task`. | Only spent while an AI session runs; the verification itself is **zero** |
+| `assent run --all --verify`<br>`assent run A B --verify` | Runs, then — only if the run exited zero — runs the complete verification that matches the selection: one folder as a folder receipt, an exact multi-folder selection as that selected batch, `--all` or a bare `...` as the whole-project batch. The verification's exit code becomes the command's. With `--once` or `--task` it verifies only when that limited run left the single selected folder complete; an incomplete folder fails the request without writing a receipt. | Only spent while an AI session runs; the verification itself is **zero** |
 | `assent run --all`<br>`assent run --all --jobs 2` | Runs every incomplete folder in `_folder.toml` dependency order; `--jobs N` caps how many folders run at once (default 1), with the parent terminal live-tagging each subprocess's output as `[folder] message`. | Only spent while an AI session runs |
 | `assent status [FOLDER]`<br>`assent status parallel01` | Shows progress statistics, the next task, the branch, and the last checkpoint. Accepts `--config PATH`. | **Zero** |
 | `assent check [FOLDER]`<br>`assent check --config .assent/assent.toml parallel01` | Validates task-file format, dependency-cycle freedom, config, and environment; this is the planning meeting's adjournment condition. Accepts `--config PATH`. | **Zero** |

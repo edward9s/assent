@@ -90,8 +90,11 @@ selected acceptance 仍要求恰好涵蓋展開後集合的證據,且不驗證�
 `assent run --verify` 只在 run 成功時接上完整驗證。失敗的 run 原樣回傳、不背書
 任何東西;成功時驗證範圍與選擇一致 —— 一個資料夾寫 folder receipt,明示的多
 資料夾選擇寫該 selected batch,`--all` 或單獨的 `...` 則是全專案的動態 batch ——
-其 exit code 就是這道命令的 exit code。它不能與刻意在資料夾收尾前停止的
-`--once`、`--task` 併用;作為呼叫層級的請求,它不理會設定中的 receipt 刷新政策。
+其 exit code 就是這道命令的 exit code。`--once`、`--task` 同樣可以併用:它們恰好
+只選出一個資料夾,因此只有在該次受限執行讓所選資料夾變成完成時才驗證,而資料夾
+未完成則此請求失敗且不寫下 receipt。這道拒絕來自 `verify_folder` 自己在建立
+candidate 之前的關卡,會指出未完成的任務 id 與狀態,並且發生在任何整合 candidate
+或完整驗證器之前。作為呼叫層級的請求,`--verify` 不理會設定中的 receipt 刷新政策。
 
 多資料夾的 `clean A B` 在一趟 upstream-first 流程裡清理,每個資料夾的證據規則
 不變。多資料夾的 `archive A B` 遵守的是單一資料夾 `archive` 的契約而非 `--all`

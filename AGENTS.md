@@ -92,10 +92,13 @@ while operating an assent-managed session live in
   nonzero run is returned as-is and verifies nothing, and the exit code of the
   verification becomes the command's exit code. It matches the selection --
   one folder as a folder receipt, an exact multi-folder selection as that
-  selected batch, `--all` or a bare `...` as the whole-project batch -- and is
-  refused with `--once` or `--task`, which stop before folder closeout on
-  purpose. It is an invocation-level request and does not consult the
-  configured receipt-refresh policy.
+  selected batch, `--all` or a bare `...` as the whole-project batch. With
+  `--once` or `--task` it verifies only when that limited run left the single
+  selected folder complete, and an incomplete folder fails the request without
+  writing a receipt: the CLI reuses `verify_folder`'s own pre-candidate gate,
+  which names the incomplete task ids and statuses and refuses before any
+  integration candidate or full verifier exists. It is an invocation-level
+  request and does not consult the configured receipt-refresh policy.
 - A multi-folder `archive A B` keeps `archive FOLDER`'s contract, not `--all`'s:
   the human named those folders, so an ineligible one is a refusal that exits
   nonzero after every named folder has been attempted, while `--all` skips an

@@ -131,7 +131,9 @@ a `...`-expanded selection is an ordinary exact selection, so
 `assent accept A ...` still requires evidence for exactly the expanded set and
 still starts no verification. `assent run --verify` chains complete
 verification onto a run that exited zero, matching that same selection; a
-failing run verifies nothing, and `--once` or `--task` refuse the flag.
+failing run verifies nothing. With `--once` or `--task` it verifies only when
+that limited run left the single selected folder complete, and an incomplete
+folder fails the request without writing a receipt.
 
 The worktree is a change-isolation, conflict-management, audit, and recovery
 boundary, not a security sandbox. With `danger-full-access` or

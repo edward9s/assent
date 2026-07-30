@@ -24,6 +24,7 @@ from assent.__main__ import _start_stdin_stop_watcher, main
 from assent.adapters.process import clear_stop_wake
 from assent.config import load_config
 from assent.init import init as run_init
+from assent.plan import Plan
 from tests.test_contracts import install_global_contracts
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -711,7 +712,11 @@ class TestRunVerifyChaining(MainTestCase):
     def test_a_failing_run_is_preserved_and_verifies_nothing(self):
         self.write_task("alpha")
         cases = (["run", "alpha", "--verify"], ["run", "alpha", "beta", "--verify"],
-                 ["run", "...", "--verify"], ["run", "--verify"])
+                 ["run", "...", "--verify"], ["run", "--verify"],
+                 ["run", "alpha", "--once", "--verify"],
+                 ["run", "alpha", "--task", "t001", "--verify"],
+                 ["run", "--once", "--verify"],
+                 ["run", "--task", "t001", "--verify"])
         for argv in cases:
             with self.subTest(argv=argv):
                 with patch("assent.__main__.engine.run", return_value=3), \
@@ -747,19 +752,110 @@ class TestRunVerifyChaining(MainTestCase):
                 ["run", "alpha", "--config", str(self.config)])
         self.assertEqual(code, 0)
 
-    def test_verify_is_rejected_with_once_and_task(self):
-        for argv in (["run", "--verify", "--once"],
-                     ["run", "alpha", "--verify", "--once"],
-                     ["run", "--verify", "--task", "t001"],
-                     ["run", "alpha", "--verify", "--task", "t001"]):
+    def write_second_task(self, folder: str, status: str) -> Path:
+        """Add a t002 beside write_task's t001, so a folder can be part-done."""
+        path = self.root / ".assent" / folder / "t002_task.e.toml"
+        path.write_text(
+            'title = "Second task"\n'
+            'deps = []\n'
+            'model = "lite"\n'
+            f'status = "{status}"\n'
+            'scope = ["assent/"]\n'
+            'verify = "python -m unittest"\n'
+            'goal = "finish the folder"\n'
+            'acceptance = "verified"\n',
+            encoding="utf-8")
+        return path
+
+    def test_once_and_task_verify_the_single_selected_folder(self):
+        """A limited run selects one folder, so it earns a folder receipt."""
+        self.write_task("active", "TODO")
+        cases = ((["run", "alpha", "--once", "--verify"], "alpha"),
+                 (["run", "alpha", "--task", "t001", "--verify"], "alpha"),
+                 (["run", "--once", "--verify"], "active"),
+                 (["run", "--task", "t001", "--verify"], "active"))
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                with patch("assent.__main__.engine.run", return_value=0), \
+                        self.only("verify_folder") as folder:
+                    code, _ = self.run_main(
+                        [*argv, "--config", str(self.config)])
+                self.assertEqual(code, 0)
+                self.assertEqual(folder.call_args.args[0].tasks_name, expected)
+
+    def test_a_last_task_completion_verifies_the_finished_plan(self):
+        """The verification reads the plan the limited run just completed."""
+        self.write_task("alpha", "DONE")
+        self.write_second_task("alpha", "TODO")
+        task = self.root / ".assent" / "alpha" / "t002_task.e.toml"
+
+        def finish_the_folder(cfg, **kwargs):
+            task.write_text(
+                task.read_text(encoding="utf-8").replace(
+                    'status = "TODO"', 'status = "DONE"'),
+                encoding="utf-8")
+            return 0
+
+        observed = []
+        with patch("assent.__main__.engine.run", side_effect=finish_the_folder), \
+                self.only("verify_folder") as folder:
+            folder.side_effect = lambda cfg: observed.append(
+                [task.status for task in Plan.parse(cfg.tasks_dir).tasks]) or 0
+            code, _ = self.run_main(
+                ["run", "alpha", "--task", "t002", "--verify",
+                 "--config", str(self.config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(observed, [["DONE", "DONE"]])
+
+    def test_an_incomplete_folder_refuses_before_candidate_or_receipt(self):
+        """The real folder-verification gate refuses; the CLI adds no predicate."""
+        subprocess.run(["git", "init"], cwd=self.root, check=True,
+                       capture_output=True)
+        self.write_task("alpha", "DONE")
+        self.write_second_task("alpha", "WIP")
+        for argv in (["run", "alpha", "--once", "--verify"],
+                     ["run", "alpha", "--task", "t002", "--verify"],
+                     ["run", "--once", "--verify"]):
+            with self.subTest(argv=argv):
+                with patch("assent.__main__.engine.run", return_value=0), \
+                        patch("assent.folder_verification.gitops."
+                              "temporary_integration_worktree",
+                              side_effect=AssertionError("created a candidate")), \
+                        patch("assent.folder_verification.run_full_verifier",
+                              side_effect=AssertionError("ran the verifier")):
+                    code, out = self.run_main(
+                        [*argv, "--config", str(self.config)])
+                self.assertEqual(code, 1)
+                self.assertIn("folder is not complete", out)
+                self.assertIn("t002=WIP", out)
+                self.assertFalse(
+                    (self.assent_dir / "alpha" / "_verification.toml").exists())
+
+    def test_verification_failure_of_a_limited_run_becomes_the_exit_code(self):
+        for argv in (["run", "alpha", "--once", "--verify"],
+                     ["run", "alpha", "--task", "t001", "--verify"]):
+            with self.subTest(argv=argv):
+                with patch("assent.__main__.engine.run", return_value=0), \
+                        self.only("verify_folder", result=1):
+                    code, _ = self.run_main(
+                        [*argv, "--config", str(self.config)])
+                self.assertEqual(code, 1)
+
+    def test_once_and_task_stay_incompatible_with_wider_selections(self):
+        """Only the --verify prohibition was lifted, not the selector rules."""
+        for argv in (["run", "--all", "--once", "--verify"],
+                     ["run", "--all", "--task", "t001", "--verify"],
+                     ["run", "alpha", "...", "--once", "--verify"],
+                     ["run", "alpha", "beta", "--once", "--verify"],
+                     ["run", "alpha", "beta", "--task", "t001", "--verify"]):
             with self.subTest(argv=argv):
                 errors = io.StringIO()
                 with self.assertRaises(SystemExit) as ctx, \
-                        contextlib.redirect_stderr(errors):
+                        contextlib.redirect_stderr(errors), \
+                        contextlib.redirect_stdout(io.StringIO()):
                     main(argv)
                 self.assertEqual(ctx.exception.code, 2)
-                self.assertIn("--verify cannot be used with --once or --task",
-                              " ".join(errors.getvalue().split()))
+                self.assertIn("--once", " ".join(errors.getvalue().split()))
 
 
 class TestHelpPalette(MainTestCase):
@@ -808,7 +904,11 @@ class TestHelpPalette(MainTestCase):
                       "remaining discovered work folder", run_help)
         self.assertIn("After the whole run exits zero, run the complete "
                       "verification that matches the selection", run_help)
-        self.assertIn("cannot be used with --once or --task", run_help)
+        self.assertIn("With --once or --task it verifies only when that limited "
+                      "run left the single selected folder complete, and an "
+                      "incomplete folder fails the request without writing a "
+                      "receipt", run_help)
+        self.assertNotIn("cannot be used with --once or --task", run_help)
 
         accept_help = " ".join(self.help_output(["accept"], {}).split())
         self.assertIn("a fresh PASSED batch receipt is replayed and released "

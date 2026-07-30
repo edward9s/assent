@@ -114,10 +114,14 @@ verifying anything.
 A nonzero run is returned as-is and certifies nothing; otherwise the
 verification matches the selection — one folder as a folder receipt, an exact
 multi-folder selection as that selected batch, and `--all` or a bare `...` as
-the whole-project dynamic batch — and its exit code becomes the command's. It
-is refused with `--once` and `--task`, which deliberately stop before folder
-closeout, and being an invocation-level request it runs regardless of the
-configured receipt-refresh policy.
+the whole-project dynamic batch — and its exit code becomes the command's.
+`--once` and `--task` are allowed too: they select exactly one folder, so the
+request verifies only when that limited run left the single selected folder
+complete, and an incomplete folder fails the request without writing a receipt. The refusal comes
+from `verify_folder`'s own pre-candidate gate, names the incomplete task ids and
+statuses, and precedes any integration candidate or full verifier run. Being an
+invocation-level request, `--verify` runs regardless of the configured
+receipt-refresh policy.
 
 Multi-folder `clean A B` cleans in one upstream-first pass with every evidence
 rule unchanged. Multi-folder `archive A B` keeps single-folder `archive`'s

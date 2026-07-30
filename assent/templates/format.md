@@ -662,9 +662,14 @@ selection, including a `...`-expanded one, as that selected batch, and `--all`
 or a bare `...` as the whole-project dynamic batch, which is why a bare `...`
 happens to verify like `--all` while an explicit prefix plus `...` certifies
 exactly the folders it ran. The verification's exit code becomes the command's
-exit code. `--verify` cannot be combined with `--once` or `--task`, which stop
-before folder closeout on purpose, and as an invocation-level request it
-verifies regardless of the configured `receipt_refresh` policy.
+exit code. `--verify` may also be combined with `--once` or `--task`: those
+selectors stop after a single task, so the request verifies only when that
+limited run left the single selected folder complete, and an incomplete folder
+fails the request without writing a receipt. The refusal names the incomplete
+task ids and statuses and happens before any integration candidate is created
+or any full verifier starts; it is a failure, not a silent skip. As an
+invocation-level request `--verify` verifies regardless of the configured
+`receipt_refresh` policy.
 
 `assent verify FOLDER --focus` is the distinct focused mode and requires one
 folder. It runs each distinct `verify` command belonging to a `DONE` task in
