@@ -218,12 +218,30 @@ def _shared_digest(main: Path, contracts: Mapping[str, shared_paths.Contract],
                for folder, _tip in sources if folder in contracts])
 
 
+def _current_shared_digest(
+        main: Path, sources: Sequence[tuple[str, str]],
+        source_worktrees: Mapping[str, Path]) -> str:
+    """Reclassify one batch source set without repairing any worktree links."""
+    manifest = shared_paths.read_manifest(main)
+    contracts: list[tuple[str, shared_paths.Contract]] = []
+    for folder, _tip in sources:
+        contract = shared_paths.classify(
+            main, source_worktrees.get(folder) or main, manifest=manifest)
+        if not contract.settled:
+            raise AssentError(
+                f"the shared-path contract for {folder} is {contract.state}; "
+                "the batch's shared-input evidence can no longer be reproduced")
+        contracts.append((folder, contract))
+    return shared_paths.shared_inputs_digest(main, contracts)
+
+
 def _batch_drift(configs: dict[str, Config], main: Path, excludes: Sequence[str],
                  target_branch: str, target_tip: str,
                  sources: Sequence[tuple[str, str]], script: Path,
                  digest: str, contracts: Mapping[str, shared_paths.Contract],
                  shared_sources: Sequence[tuple[str, str]],
-                 shared_inputs: str) -> list[str]:
+                 shared_inputs: str,
+                 source_worktrees: Mapping[str, Path]) -> list[str]:
     """Re-observe every identity the batch receipt is about to certify."""
     changed: list[str] = []
     if gitops.current_branch(main) != target_branch:
@@ -246,7 +264,8 @@ def _batch_drift(configs: dict[str, Config], main: Path, excludes: Sequence[str]
     # content moved during the run turns an apparent pass into a failure, so no
     # PASSED batch receipt can describe inputs the verifier never saw.
     try:
-        if _shared_digest(main, contracts, shared_sources) != shared_inputs:
+        if _current_shared_digest(
+                main, shared_sources, source_worktrees) != shared_inputs:
             changed.append(
                 "a declared shared input changed while the full verifier was "
                 "running, so the run certifies nothing")
@@ -832,7 +851,7 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
         changed = _batch_drift(
             configs, main, excludes, target_branch, target_tip,
             batch_sources, script, digest,
-            contracts, selection.sources, shared_before)
+            contracts, selection.sources, shared_before, source_worktrees)
         if changed:
             if localized:
                 print(f"{label}: the repository changed while the batch "

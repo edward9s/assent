@@ -384,8 +384,12 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
     # Snapshotted again after the verifier: a declared target whose content moved
     # during the run turns an apparent pass into a failure, so no PASSED receipt
     # can describe inputs the verifier never actually saw.
+    # Reclassify against the current manifest after the verifier, rather than
+    # hashing the original Contract objects again.  A concurrent review that
+    # replaces a profile with a different identity must invalidate the run even
+    # when its path list and target bytes happen to be unchanged.
     try:
-        if shared_paths.shared_inputs_digest(main, contracts) != shared_inputs:
+        if current_shared_inputs(cfg) != shared_inputs:
             changed.append(_SHARED_INPUT_DRIFT)
     except AssentError as e:
         changed.append(f"shared inputs became unreadable: {e}")

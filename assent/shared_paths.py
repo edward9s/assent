@@ -10,7 +10,8 @@ This module owns that answer and everything around it:
 
 * ``.assent/manifest.toml`` in the primary worktree -- one untracked,
   Assent-owned file of local execution memory.  It is not project source, not
-  receipt evidence and not an acceptance input, and it is never committed.
+  candidate content, and it is never committed; the selected profile and
+  target snapshot are bound separately into verification evidence.
   Named top-level tables keep it extensible; this module owns ``[shared_paths]``
   alone and a top-level ``version`` governs compatible future sections.
 * Reviewed *profiles*, retained by fingerprint rather than overwritten, so two
@@ -36,11 +37,13 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import stat
 import tomllib
 import uuid
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from pathlib import Path
 
 from assent import AssentError, gitops, pathops
@@ -69,6 +72,7 @@ ABSENT = "absent"                       # a watched path that is not there at al
 _EXCLUDED_ROOTS = (".git", ".assent")
 _IGNORE_RULE_PATHSPEC = "*.gitignore"
 REVIEW_COMMAND = "assent shared-paths review"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # --------------------------------------------------------------------------- #
@@ -108,7 +112,7 @@ class Application:
 
 @dataclass
 class Manifest:
-    """The parsed local manifest; unknown top-level tables are preserved."""
+    """The parsed local manifest; unknown top-level tables keep their meaning."""
 
     version: int = SCHEMA_VERSION
     profiles: tuple[Profile, ...] = ()
@@ -258,21 +262,68 @@ def _string_list(value: object, label: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _stored_relative(value: object, label: str, path: Path) -> str:
+    """Validate one canonical path read from Assent-owned evidence."""
+    if not isinstance(value, str):
+        raise AssentError(f"{path}: {label} must contain strings")
+    normalized = require_safe_relative(value, path)
+    if value != normalized:
+        raise AssentError(
+            f"{path}: {label} contains non-normalized path {value!r}; "
+            f"expected {normalized!r}")
+    return normalized
+
+
+def _canonical_list(values: tuple[str, ...], label: str, path: Path
+                   ) -> tuple[str, ...]:
+    if len(set(values)) != len(values):
+        raise AssentError(f"{path}: {label} contains duplicate paths")
+    if values != tuple(sorted(values)):
+        raise AssentError(f"{path}: {label} is not in normalized order")
+    return values
+
+
 def _profile_from(data: object, path: Path) -> Profile:
     if not isinstance(data, dict):
         raise AssentError(f"{path}: each [{SECTION}] profile must be a table")
     fingerprint = data.get("fingerprint")
-    if not isinstance(fingerprint, str) or not fingerprint:
-        raise AssentError(f"{path}: a shared-path profile needs a fingerprint")
-    paths = _string_list(data.get("paths", []), f"{path}: profile paths")
-    watch = _string_list(data.get("watch", []), f"{path}: profile watch")
+    if not isinstance(fingerprint, str) or not _SHA256_RE.fullmatch(fingerprint):
+        raise AssentError(
+            f"{path}: a shared-path profile fingerprint must be a 64-character "
+            "lowercase SHA-256 digest")
+    raw_paths = _string_list(data.get("paths", []), f"{path}: profile paths")
+    raw_watch = _string_list(data.get("watch", []), f"{path}: profile watch")
+    if not raw_watch:
+        raise AssentError(
+            f"{path}: a shared-path profile needs at least one watch file")
+    paths = _canonical_list(tuple(
+        _stored_relative(value, "profile paths", path) for value in raw_paths),
+        "profile paths", path)
+    watch = _canonical_list(tuple(
+        _stored_relative(value, "profile watch", path) for value in raw_watch),
+        "profile watch", path)
     digests = data.get("digests", {})
-    if not isinstance(digests, dict) or any(
-            not isinstance(v, str) for v in digests.values()):
+    if not isinstance(digests, dict):
         raise AssentError(f"{path}: profile digests must be a table of strings")
-    for relative in (*paths, *watch):
-        require_safe_relative(relative, path)
-    return Profile(fingerprint, tuple(paths), tuple(watch), dict(digests))
+    normalized_digests: dict[str, str] = {}
+    for raw_relative, digest in digests.items():
+        relative = _stored_relative(raw_relative, "profile digest keys", path)
+        if not isinstance(digest, str) or (
+                digest != ABSENT and not _SHA256_RE.fullmatch(digest)):
+            raise AssentError(
+                f"{path}: profile digest for {relative} must be a 64-character "
+                f"lowercase SHA-256 digest or {ABSENT!r}")
+        normalized_digests[relative] = digest
+    missing_watch = [relative for relative in watch
+                     if relative not in normalized_digests]
+    if missing_watch:
+        raise AssentError(
+            f"{path}: profile watch file(s) lack recorded digest evidence: "
+            + ", ".join(missing_watch))
+    if fingerprint != fingerprint_of(normalized_digests):
+        raise AssentError(
+            f"{path}: profile fingerprint does not match its digest evidence")
+    return Profile(fingerprint, paths, watch, normalized_digests)
 
 
 def _application_from(data: object, path: Path) -> Application:
@@ -282,12 +333,15 @@ def _application_from(data: object, path: Path) -> Application:
     fingerprint = data.get("fingerprint")
     if not isinstance(worktree, str) or not worktree:
         raise AssentError(f"{path}: an application record needs a worktree")
-    if not isinstance(fingerprint, str) or not fingerprint:
-        raise AssentError(f"{path}: an application record needs a fingerprint")
-    paths = _string_list(data.get("paths", []), f"{path}: application paths")
-    for relative in paths:
-        require_safe_relative(relative, path)
-    return Application(worktree, fingerprint, tuple(paths))
+    if not isinstance(fingerprint, str) or not _SHA256_RE.fullmatch(fingerprint):
+        raise AssentError(
+            f"{path}: an application record needs a 64-character lowercase "
+            "SHA-256 fingerprint")
+    raw_paths = _string_list(data.get("paths", []), f"{path}: application paths")
+    paths = _canonical_list(tuple(
+        _stored_relative(value, "application paths", path) for value in raw_paths),
+        "application paths", path)
+    return Application(worktree, fingerprint, paths)
 
 
 def read_manifest(main: Path) -> Manifest:
@@ -323,10 +377,16 @@ def read_manifest(main: Path) -> Manifest:
     section = data.get(SECTION, {})
     if not isinstance(section, dict):
         raise AssentError(f"{path}: [{SECTION}] must be a table")
-    profiles = tuple(_profile_from(entry, path)
-                     for entry in section.get("profile", []))
+    raw_profiles = section.get("profile", [])
+    raw_applications = section.get("application", [])
+    if not isinstance(raw_profiles, list):
+        raise AssentError(f"{path}: [{SECTION}].profile must be an array of tables")
+    if not isinstance(raw_applications, list):
+        raise AssentError(
+            f"{path}: [{SECTION}].application must be an array of tables")
+    profiles = tuple(_profile_from(entry, path) for entry in raw_profiles)
     applications = tuple(_application_from(entry, path)
-                         for entry in section.get("application", []))
+                         for entry in raw_applications)
     other = {key: value for key, value in data.items()
              if key not in (SECTION, "version")}
     return Manifest(version, profiles, applications, other, present=True)
@@ -339,6 +399,12 @@ def _toml_value(value: object) -> str:
         return repr(value)
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, datetime):
+        return value.isoformat(" ")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat()
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
     raise AssentError(
@@ -368,7 +434,13 @@ def _toml_key(key: str) -> str:
 
 
 def render_manifest(manifest: Manifest) -> str:
-    """Serialize the manifest, keeping unknown top-level tables verbatim."""
+    """Serialize the manifest while preserving supported unknown meaning.
+
+    TOML has no round-trip guarantee for comments, ordering, or whitespace, so
+    unknown tables are reconstructed semantically.  Their standard scalar and
+    nested table values are retained; an unsupported shape raises before the
+    atomic replacement starts.
+    """
     lines = [
         "# assent local shared-path manifest -- Assent-owned execution memory.",
         "# Untracked and never committed: it records reviewed decisions for this",
@@ -403,6 +475,23 @@ def render_manifest(manifest: Manifest) -> str:
 
 def write_manifest(main: Path, manifest: Manifest) -> None:
     """Replace the manifest atomically after proving the result parses."""
+    manifest_file = manifest_path(main)
+    # Programmatic callers are subject to the same evidence checks as TOML
+    # readers.  This keeps a malformed Profile from being written first and
+    # discovered only by the next classification gate.
+    for profile in manifest.profiles:
+        _profile_from({
+            "fingerprint": profile.fingerprint,
+            "paths": list(profile.paths),
+            "watch": list(profile.watch),
+            "digests": dict(profile.digests),
+        }, manifest_file)
+    for application in manifest.applications:
+        _application_from({
+            "worktree": application.worktree,
+            "fingerprint": application.fingerprint,
+            "paths": list(application.paths),
+        }, manifest_file)
     text = render_manifest(manifest)
     try:
         tomllib.loads(text)
@@ -453,17 +542,19 @@ def _digest_of(path: Path) -> str:
 
 def ignore_rule_files(worktree: Path) -> tuple[str, ...]:
     """Every tracked Git-ignore rule file in the source snapshot."""
-    try:
-        tracked = gitops.tracked_paths(Path(worktree), _IGNORE_RULE_PATHSPEC)
-    except AssentError:
-        return ()
+    # A failed query is an actionable classification failure.  Turning it into
+    # an empty set could make an old profile look current and spend verification
+    # or acceptance evidence on a snapshot whose ignore rules were never read.
+    tracked = gitops.tracked_paths(Path(worktree), _IGNORE_RULE_PATHSPEC)
     return tuple(sorted(
         entry for entry in tracked
         if entry.rsplit("/", 1)[-1] == ".gitignore"))
 
 
 def snapshot_digests(worktree: Path,
-                     watch: Sequence[str]) -> dict[str, str]:
+                     watch: Sequence[str], *,
+                     ignore_files: Sequence[str] | None = None
+                     ) -> dict[str, str]:
     """The evidence one profile is fingerprinted from, read from the worktree.
 
     Two kinds of file decide whether a reviewed answer still holds: the exact
@@ -474,7 +565,9 @@ def snapshot_digests(worktree: Path,
     """
     worktree = Path(worktree)
     digests: dict[str, str] = {}
-    for relative in sorted(set(watch) | set(ignore_rule_files(worktree))):
+    if ignore_files is None:
+        ignore_files = ignore_rule_files(worktree)
+    for relative in sorted(set(watch) | set(ignore_files)):
         digests[relative] = _digest_of(worktree / relative)
     return digests
 
@@ -497,9 +590,11 @@ def _matches(profile: Profile, current: dict[str, str]) -> bool:
     The comparison is over the profile's own recorded keys, so two profiles with
     different watch sets are each answered against their own evidence.
     """
-    if not profile.digests:
+    if set(profile.digests) != set(current):
         return False
-    return all(current.get(relative, ABSENT) == recorded
+    if fingerprint_of(current) != profile.fingerprint:
+        return False
+    return all(current[relative] == recorded
                for relative, recorded in profile.digests.items())
 
 
@@ -507,7 +602,8 @@ def changed_watch_evidence(profile: Profile,
                            current: dict[str, str]) -> tuple[str, ...]:
     """Name only the watched files whose state actually differs, and how."""
     changes: list[str] = []
-    for relative, recorded in sorted(profile.digests.items()):
+    for relative in sorted(set(profile.digests) | set(current)):
+        recorded = profile.digests.get(relative, ABSENT)
         now = current.get(relative, ABSENT)
         if now == recorded:
             continue
@@ -533,6 +629,28 @@ def _is_ordinary_directory(path: Path) -> bool:
     return stat.S_ISDIR(info.st_mode)
 
 
+def _parent_problem(root: Path, relative: str) -> str:
+    """Return a reason a relative path has an unsafe existing parent."""
+    current = Path(root)
+    parts = relative.split("/")[:-1]
+    for part in parts:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            # All following parents are necessarily absent too; they can be
+            # created below the real worktree root without traversing anything.
+            break
+        except OSError as e:
+            return f"cannot inspect parent {current}: {e}"
+        if pathops.is_link_stat(info) or pathops.is_reparse_point(info):
+            return (f"parent {current} is a link or reparse point, so the "
+                    "shared path cannot be proven to stay inside the worktree")
+        if not stat.S_ISDIR(info.st_mode):
+            return f"parent {current} is not an ordinary directory"
+    return ""
+
+
 def target_problem(main: Path, relative: str) -> str:
     """Why the primary worktree cannot serve ``relative`` as a shared target.
 
@@ -543,6 +661,9 @@ def target_problem(main: Path, relative: str) -> str:
     """
     main = Path(main)
     path = main / relative
+    parent_problem = _parent_problem(main, relative)
+    if parent_problem:
+        return f"{relative} has an unsafe parent in the primary worktree: {parent_problem}"
     if not os.path.lexists(path):
         return f"{relative} does not exist in the primary worktree {main}"
     if not _is_ordinary_directory(path):
@@ -605,6 +726,10 @@ def snapshot_target(main: Path, relative: str) -> str:
     unreadable link, a device or socket -- refuses rather than being skipped.
     """
     root = Path(main) / relative
+    if not _is_ordinary_directory(root):
+        raise AssentError(
+            f"refusing to snapshot shared target {root}: it is no longer an "
+            "ordinary primary-worktree directory")
     digest = hashlib.sha256()
     digest.update(b"assent-shared-target-v1\n")
     digest.update(relative.encode("utf-8"))
@@ -612,6 +737,16 @@ def snapshot_target(main: Path, relative: str) -> str:
     pending = [("", root)]
     while pending:
         prefix, current = pending.pop()
+        try:
+            info = os.lstat(current)
+        except OSError as e:
+            raise AssentError(
+                f"Unable to inspect the shared target directory {current}: {e}") from e
+        if (pathops.is_link_stat(info) or pathops.is_reparse_point(info)
+                or not stat.S_ISDIR(info.st_mode)):
+            raise AssentError(
+                f"refusing to snapshot the shared target directory {current}: "
+                "it changed to a link, reparse point, or non-directory")
         try:
             with os.scandir(current) as entries:
                 names = sorted(entry.name for entry in entries)
@@ -674,6 +809,11 @@ def shared_inputs_digest(main: Path,
         digest.update(f"{folder}\0{contract.state}\0{fingerprint}\n"
                       .encode("utf-8"))
         for relative in contract.paths:
+            problem = target_problem(main, relative)
+            if problem:
+                raise AssentError(
+                    f"refusing to record shared-input evidence for {folder}: "
+                    f"{problem}")
             if relative not in snapshots:
                 snapshots[relative] = snapshot_target(main, relative)
             digest.update(
@@ -782,8 +922,22 @@ def classify(main: Path, worktree: Path,
 
     watch = sorted({entry for profile in manifest.profiles
                     for entry in profile.watch})
-    digests = snapshot_digests(worktree, watch)
-    matches = manifest.matching(digests)
+    # One tracked-ignore query serves every retained profile.  Each profile is
+    # then compared with its own watch set plus this exact current ignore-rule
+    # set; the union of all profiles' watches must not make otherwise reusable
+    # branch fingerprints stale merely because another branch watches more.
+    ignore_files = ignore_rule_files(worktree)
+    digests = snapshot_digests(worktree, watch, ignore_files=ignore_files)
+    profile_digests = tuple({
+            relative: digests[relative]
+            for relative in set(profile.watch) | set(ignore_files)
+            if relative in digests
+        }
+        for profile in manifest.profiles
+    )
+    matches = tuple(profile for profile, current in
+                    zip(manifest.profiles, profile_digests)
+                    if _matches(profile, current))
 
     if len({profile.paths for profile in matches}) > 1:
         listed = "; ".join(
@@ -797,8 +951,9 @@ def classify(main: Path, worktree: Path,
     if not matches:
         prior = manifest.profiles[-1].paths if manifest.profiles else ()
         evidence = tuple(
-            change for profile in manifest.profiles
-            for change in changed_watch_evidence(profile, digests))
+            change for profile, current in zip(
+                manifest.profiles, profile_digests)
+            for change in changed_watch_evidence(profile, current))
         # Verifier evidence naming a required ignored directory is a real
         # subject on its own: it must never settle as "there is nothing to
         # declare", and a directory the primary worktree cannot serve is
@@ -816,6 +971,8 @@ def classify(main: Path, worktree: Path,
                         needs_review=state in (STALE, UNKNOWN))
 
     profile = matches[0]
+    profile_index = manifest.profiles.index(profile)
+    digests = profile_digests[profile_index]
     problems = tuple(
         problem for problem in
         (target_problem(main, relative) for relative in profile.paths)
@@ -852,16 +1009,25 @@ def _resolves_to(path: Path, target: Path) -> bool:
         return False
 
 
-def _provision_one(main: Path, worktree: Path, relative: str) -> bool:
-    """Ensure one exact link exists; return whether this call created it."""
-    target = _link_target(main, relative)
-    destination = Path(worktree) / relative
-    if os.path.lexists(destination):
-        if _resolves_to(destination, target):
-            return False
+def _validate_destination(main: Path, worktree: Path,
+                          relative: str) -> Path:
+    """Validate one destination without changing either manifest or filesystem."""
+    problem = target_problem(main, relative)
+    if problem:
+        raise AssentError(
+            f"refusing to provision shared paths for {worktree}: {problem}")
+    parent_problem = _parent_problem(worktree, relative)
+    if parent_problem:
         raise AssentError(
             f"refusing to provision the shared path {relative} into {worktree}: "
-            f"{destination} already exists and is not a link to {target}")
+            f"{parent_problem}")
+    destination = Path(worktree) / relative
+    target = _link_target(main, relative)
+    if os.path.lexists(destination):
+        if not _resolves_to(destination, target):
+            raise AssentError(
+                f"refusing to provision the shared path {relative} into {worktree}: "
+                f"{destination} already exists and is not a link to {target}")
     if gitops.tracked_paths(Path(worktree), relative):
         raise AssentError(
             f"refusing to provision the shared path {relative} into {worktree}: "
@@ -871,8 +1037,17 @@ def _provision_one(main: Path, worktree: Path, relative: str) -> bool:
             f"refusing to provision the shared path {relative} into {worktree}: "
             "Git does not ignore it there, so the link would change what the "
             "worktree tracks")
+    return target
+
+
+def _provision_one(main: Path, worktree: Path, relative: str) -> bool:
+    """Ensure one exact link exists; return whether this call created it."""
+    target = _validate_destination(main, worktree, relative)
+    destination = Path(worktree) / relative
+    if os.path.lexists(destination):
+        return False
     parent = destination.parent
-    if not parent.is_dir():
+    if not parent.exists():
         try:
             parent.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -897,6 +1072,26 @@ def _detach_one(main: Path, worktree: Path, relative: str) -> bool:
     the target itself is never walked, modified or removed.
     """
     destination = Path(worktree) / relative
+    if not os.path.lexists(destination):
+        return False
+    parent_problem = _parent_problem(worktree, relative)
+    if parent_problem:
+        raise AssentError(
+            f"Unable to prove ownership of the shared-path link {destination}: "
+            f"{parent_problem}")
+    target_root = Path(main)
+    primary_parent_problem = _parent_problem(target_root, relative)
+    if primary_parent_problem:
+        raise AssentError(
+            f"Unable to prove ownership of the shared-path link {destination}: "
+            f"the primary target has an unsafe parent ({primary_parent_problem})")
+    primary_target = target_root / relative
+    if not os.path.lexists(primary_target) or not _is_ordinary_directory(
+            primary_target):
+        raise AssentError(
+            f"Unable to prove ownership of the shared-path link {destination}: "
+            f"the primary target {primary_target} is no longer an ordinary "
+            "directory")
     if not _resolves_to(destination, _link_target(main, relative)):
         return False
     try:
@@ -943,8 +1138,9 @@ def applied_paths(manifest: Manifest, worktree: Path) -> tuple[str, ...]:
 
 
 def reconcile(main: Path, worktree: Path, contract: Contract, *,
-              manifest: Manifest | None = None) -> tuple[tuple[str, ...],
-                                                         tuple[str, ...]]:
+              manifest: Manifest | None = None,
+              force_write: bool = False) -> tuple[tuple[str, ...],
+                                                   tuple[str, ...]]:
     """Bring one source worktree in line with its reviewed profile.
 
     Returns ``(created, detached)``.  Additions create only genuinely missing
@@ -960,29 +1156,67 @@ def reconcile(main: Path, worktree: Path, contract: Contract, *,
         raise AssentError(
             f"refusing to provision shared paths for {worktree}: the source "
             f"contract is {contract.state}, not a reviewed answer")
+    manifest = read_manifest(main) if manifest is None else manifest
     if _worktree_key(worktree) == _worktree_key(main):
+        if force_write:
+            write_manifest(main, manifest)
         return (), ()
 
-    manifest = read_manifest(main) if manifest is None else manifest
     wanted = contract.paths
     previous = applied_paths(manifest, worktree)
 
+    # Validate every destination before creating any link.  This is the
+    # ownership boundary for review/provision: a later collision must not leave
+    # an earlier new link behind while the old manifest still describes the old
+    # application.
     for relative in wanted:
-        problem = target_problem(main, relative)
-        if problem:
-            raise AssentError(
-                f"refusing to provision shared paths for {worktree}: {problem}")
+        _validate_destination(main, worktree, relative)
 
-    created = tuple(relative for relative in wanted
-                    if _provision_one(main, worktree, relative))
-    detached = tuple(relative for relative in previous
-                     if relative not in wanted
-                     and _detach_one(main, worktree, relative))
-    if _record_application(
+    original_applications = manifest.applications
+    created: list[str] = []
+    detached: list[str] = []
+    try:
+        for relative in wanted:
+            if _provision_one(main, worktree, relative):
+                created.append(relative)
+        for relative in previous:
+            if relative not in wanted and _detach_one(main, worktree, relative):
+                detached.append(relative)
+        changed = _record_application(
             manifest, worktree,
-            contract.profile.fingerprint if contract.profile else "", wanted):
-        write_manifest(main, manifest)
-    return created, detached
+            contract.profile.fingerprint if contract.profile else "", wanted)
+        if changed or force_write:
+            write_manifest(main, manifest)
+    except BaseException as primary_error:
+        # No manifest/application update is considered complete until all link
+        # operations and the atomic manifest replacement have succeeded.  Roll
+        # back only links proven to belong to this invocation; foreign links,
+        # ordinary directories, and uncertain targets are retained and named.
+        rollback_problems: list[str] = []
+        for relative in reversed(created):
+            try:
+                _detach_one(main, worktree, relative)
+            except AssentError as e:
+                rollback_problems.append(str(e))
+        for relative in reversed(detached):
+            destination = Path(worktree) / relative
+            try:
+                if not os.path.lexists(destination):
+                    _provision_one(main, worktree, relative)
+                elif not _resolves_to(destination, _link_target(main, relative)):
+                    rollback_problems.append(
+                        f"unable to restore the prior shared-path link {destination}: "
+                        "the destination changed while rolling back")
+            except (AssentError, OSError) as e:
+                rollback_problems.append(
+                    f"unable to restore the prior shared-path link {destination}: {e}")
+        manifest.applications = original_applications
+        if rollback_problems:
+            primary_error.add_note(
+                "Shared-path rollback was incomplete: "
+                + "; ".join(rollback_problems))
+        raise
+    return tuple(created), tuple(detached)
 
 
 def application_problem(main: Path, worktree: Path, *,
@@ -1085,10 +1319,16 @@ def prepare_worktree(main: Path, worktree: Path, *,
     AI instructions, and UNKNOWN or STALE touches the filesystem not at all and
     leaves the session to run the controlled review.
     """
-    contract = classify(main, worktree, required_evidence=required_evidence)
-    if contract.settled:
-        with hold_manifest_lock(main):
-            reconcile(main, worktree, contract)
+    # Classification and application must observe one manifest generation.  A
+    # review running between these two operations must either serialize before
+    # this section or wait until both facts have been applied; it may not replace
+    # the selected profile after classification and before provisioning.
+    with hold_manifest_lock(main):
+        manifest = read_manifest(main)
+        contract = classify(main, worktree, manifest,
+                            required_evidence=required_evidence)
+        if contract.settled:
+            reconcile(main, worktree, contract, manifest=manifest)
     return contract
 
 
@@ -1174,11 +1414,16 @@ def review(main: Path, worktree: Path, *,
             existing for existing in manifest.profiles
             if existing.fingerprint != profile.fingerprint) + (profile,)
         manifest.version = SCHEMA_VERSION
-        write_manifest(main, manifest)
 
         contract = Contract(REVIEWED_NONE if profile.is_none else REVIEWED_PATHS,
                             profile, digests, profile.paths)
-        reconcile(main, worktree, contract, manifest=manifest)
+        # The prospective profile is held only in memory until every declared
+        # destination has passed preflight and every required link has been
+        # reconciled.  ``force_write`` also covers REVIEWED-NONE and the primary
+        # worktree, where there is no application-record change to trigger a
+        # manifest write.
+        reconcile(main, worktree, contract, manifest=manifest,
+                  force_write=True)
     return contract
 
 

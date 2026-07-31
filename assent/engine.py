@@ -193,18 +193,15 @@ def _diagnosed_shared_inputs(cfg: Config) -> tuple[str, ...]:
     return verification.diagnosed_ignored_directories(receipt.failure_summary)
 
 
-def _shared_paths_contract(cfg: Config) -> "shared_paths.Contract | None":
-    """This source worktree's shared-path contract, or None when it is unreadable.
+def _shared_paths_contract(cfg: Config) -> "shared_paths.Contract":
+    """Return this source worktree's current shared-path contract.
 
     Both the bounded review clause and the closeout gate ask the same question of
-    the same snapshot, so they ask it here.  A manifest that cannot be read at
-    all is reported as unknown to the caller rather than raised: the surrounding
-    session decision has its own refusal path.
+    the same snapshot.  Classification errors intentionally propagate: an
+    unreadable or ambiguous manifest is a closeout refusal, never permission to
+    finish as though no shared input existed.
     """
-    try:
-        return shared_paths.classify(gitops.main_worktree(cfg.root), cfg.root)
-    except AssentError:
-        return None
+    return shared_paths.classify(gitops.main_worktree(cfg.root), cfg.root)
 
 
 def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
@@ -223,7 +220,14 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
             .replace("{requested_model}", session.requested_model)
             .replace("{effort}", session.effort or "")
             .replace("{requested_effort}", session.requested_effort or ""))
-    contract = _shared_paths_contract(cfg)
+    # Startup provisioning already reports a classification failure before an
+    # adapter is normally reached.  Prompt construction remains best-effort so
+    # that a pre-session failure does not acquire a duplicated clause; the
+    # closeout gate below handles the same error fail-closed.
+    try:
+        contract = _shared_paths_contract(cfg)
+    except AssentError:
+        contract = None
     if contract is not None:
         text += shared_paths.review_clause(contract)
     if resumed:
@@ -1174,8 +1178,11 @@ def _evaluate(cfg: Config, task: Task,
     # A session handed the bounded shared-path review clause must have run the
     # controlled operation; a source snapshot that is still UNKNOWN or STALE is
     # refused with a precise retry reason rather than closed out.
-    contract = _shared_paths_contract(cfg)
-    refusal = shared_paths.closeout_refusal(contract) if contract else ""
+    try:
+        contract = _shared_paths_contract(cfg)
+    except AssentError as e:
+        return "fail", f"Shared-path contract could not be classified: {e}"
+    refusal = shared_paths.closeout_refusal(contract)
     if refusal:
         return "fail", refusal[:1].upper() + refusal[1:]
 

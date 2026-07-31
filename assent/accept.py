@@ -274,6 +274,16 @@ def _accept_locked(cfg: Config) -> int:
                             gate_problem = (
                                 "the verification script changed during acceptance")
                         if gate_problem is None:
+                            try:
+                                final_shared = verification.current_shared_inputs(cfg)
+                            except AssentError as e:
+                                gate_problem = str(e)
+                            else:
+                                if final_shared != current_shared:
+                                    gate_problem = (
+                                        "the reviewed shared inputs changed during "
+                                        "acceptance")
+                        if gate_problem is None:
                             gitops.fast_forward(main, integration_commit)
                             published = True
             body_completed = True

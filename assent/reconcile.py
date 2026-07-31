@@ -344,10 +344,6 @@ def _start(cfg: Config) -> int:
         print(f"{label}: refused, {e}")
         return 1
 
-    contract = _shared_contract(managed, worktree, label)
-    if contract is None:
-        return 1
-
     if gitops.is_ancestor(managed.main, source_tip, target_tip):
         print(f"{label}: nothing to reconcile; source {source_branch} "
               f"({source_tip[:12]}) is already contained in {target_branch}.")
@@ -365,15 +361,32 @@ def _start(cfg: Config) -> int:
               f"`assent reconcile --abort {folder}` to discard it.")
         return 1
 
-    gitops.add_worktree_branch(
-        managed.main, managed.branch, managed.path, source_tip)
-    # The declared shared inputs exist before the merge does: a resolution is
-    # edited and later verified in this worktree, so it must look like a real
-    # source worktree.  REVIEWED-NONE creates nothing at all.
+    # Classification and provisioning share the manifest lock.  A concurrent
+    # review can therefore only run before this snapshot or after the managed
+    # worktree has been provisioned; it can never replace the profile between
+    # the refusal gate and link creation.
     try:
         with shared_paths.hold_manifest_lock(managed.main):
+            manifest = shared_paths.read_manifest(managed.main)
+            try:
+                contract = shared_paths.classify(
+                    managed.main, worktree, manifest=manifest)
+            except AssentError as e:
+                print(f"{label}: refused, {e}. Nothing was created.")
+                return 1
+            if not contract.settled:
+                print(f"{label}: refused, "
+                      f"{shared_paths.closeout_refusal(contract)}. "
+                      "Nothing was created.")
+                return 1
+            gitops.add_worktree_branch(
+                managed.main, managed.branch, managed.path, source_tip)
+            # The declared shared inputs exist before the merge does: a
+            # resolution is edited and later verified in this worktree, so it
+            # must look like a real source worktree. REVIEWED-NONE creates
+            # nothing at all.
             created, _detached = shared_paths.reconcile(
-                managed.main, managed.path, contract)
+                managed.main, managed.path, contract, manifest=manifest)
     except AssentError as e:
         raise AssentError(
             f"{e}. The reconciliation worktree {managed.path} was kept; run "

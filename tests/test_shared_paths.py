@@ -219,7 +219,7 @@ class TestThreeStateContract(SharedPathsCase):
         self._review("pkg")
         manifest = shared_paths.read_manifest(self.root)
         clone = shared_paths.Profile(
-            manifest.profiles[0].fingerprint + "x", ("assets",),
+            manifest.profiles[0].fingerprint, ("assets",),
             manifest.profiles[0].watch, dict(manifest.profiles[0].digests))
         manifest.profiles = manifest.profiles + (clone,)
         shared_paths.write_manifest(self.root, manifest)
