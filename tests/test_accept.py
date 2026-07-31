@@ -127,6 +127,10 @@ class AcceptRepositoryCase(unittest.TestCase):
                 gitops.commit_parents(candidate), (target_tip, source_tip))
             reconstructed_tree = gitops.tree_of(candidate, "HEAD")
         digest = verification.verifier_digest(cfg)
+        # The real digest, computed the same way acceptance recomputes it: a
+        # fixture default would make every receipt test pass against weakened
+        # validation instead of the production shared-input check.
+        shared_inputs = verification.current_shared_inputs(cfg)
         receipt = verification.VerificationReceipt(
             version=verification.RECEIPT_VERSION,
             status=status,
@@ -134,6 +138,7 @@ class AcceptRepositoryCase(unittest.TestCase):
             target_tip=target_tip,
             integration_tree=integration_tree or reconstructed_tree,
             verify_script_sha256=digest,
+            shared_inputs_sha256=shared_inputs,
             verify_command=verification.VERIFY_COMMAND,
             exit_code=0 if status == "PASSED" else 7,
             completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -145,6 +150,7 @@ class AcceptRepositoryCase(unittest.TestCase):
             verification.receipt_path(cfg), self.root)
         self.assertEqual(stored.source_tip, source_tip)
         self.assertEqual(stored.verify_script_sha256, digest)
+        self.assertEqual(stored.shared_inputs_sha256, shared_inputs)
         if assert_exact:
             self.assertEqual(stored.integration_tree, reconstructed_tree)
         return stored

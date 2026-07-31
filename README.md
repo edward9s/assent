@@ -854,6 +854,24 @@ moved, a declared target vanished, changed type, or stopped being ignored, or an
 `Ignored input diagnosis:` named a directory the profile does not declare.
 Conflicting matching profiles fail closed.
 
+A repository with nothing to declare spends nothing.
+`NO-IGNORED-DIRECTORY-CANDIDATE` means only that a successful Git ignored-entry
+query of the primary worktree found no existing ordinary ignored directory
+outside `.git/` and `.assent/` — not that the project semantically needs no
+shared input. It settles with no manifest profile, no junction, and no AI
+review, carries its own receipt-digest identity distinct from `REVIEWED-NONE`,
+and is recomputed cheaply at every gate. It fails closed: a Git discovery error
+refuses instead of pretending the candidate set is empty, ignored leaf files
+do not count while any ordinary ignored directory does (even one a review later
+answers with `paths = []`), a directory appearing later makes the next
+classification `UNKNOWN`, and verifier evidence naming a required directory is
+never settled this way — it becomes a review when a valid primary target exists
+and otherwise refuses with the exact missing or not-ignored target. The query
+asks the primary worktree because every allowed link target must be an existing
+ordinary Git-ignored directory at that same primary relative path; a directory
+that exists only on an unaccepted source branch is not yet provisionable and
+produces an actionable refusal rather than a "none needed" claim.
+
 `assent shared-paths review --path DIR --watch FILE` (or `--none --watch FILE`)
 is the only writer. It validates every value first, takes one project-local
 lock, and replaces the file atomically, so a concurrent attempt is refused and

@@ -157,6 +157,20 @@ closeout。每一條驗證入口與 `assent reconcile` 都在候選、verifier �
 快照的 `shared_inputs_sha256`,acceptance 在推進 ref 之前再次核對,且絕不為了讓它
 通過而修復任何連結。
 
+`NO-IGNORED-DIRECTORY-CANDIDATE` 是與這些狀態並列、確定性的零 token 快捷路徑。
+它只主張:一次成功的 Git ignored-entry 查詢在主 worktree 找不到任何位於 `.git/`
+與 `.assent/` 之外、實際存在的一般被忽略目錄,而不是主張這個專案在語意上不需要
+共享輸入。它不需要 profile、junction 或 AI 審閱即告 settled,在 receipt 摘要中帶有
+與 `REVIEWED-NONE` 不同的身分,並在每一道適用的關卡廉價地重新計算。它 fail
+closed:Git 查詢失敗是可行動的拒絕,而不是空的候選集合;被忽略的葉節點檔案不算,
+任何一般被忽略目錄都算,即使之後審閱成 `paths = []`;出現候選時下一次分類為
+`UNKNOWN`,除非已有相符的快取 profile 回答它;完整 verifier 的 `required_evidence`
+指名缺少的目錄時,主 worktree 有合法目標就轉為審閱,否則以精確的「目標缺少或未被
+忽略」問題拒絕。候選列舉之所以問主 worktree,是因為每個被允許的連結目標都必須是
+該主 worktree 同一相對路徑上實際存在、被 Git 忽略的一般目錄,而全新的 source
+checkout 本來就不會有;只存在於尚未接受之 source 分支上的目錄或 ignore 規則尚不可
+佈建,會發出可行動的拒絕,而不是宣稱不需要。
+
 receipt 是 derived artifact,不凌駕 Git。target tip 改變但重建後 integration tree
 完全相同仍可接受;內容改變就 stale。直接與 selected acceptance 遇到 missing、
 malformed、stale 或 mismatch evidence 時會拒絕,不自行啟動驗證。passive merge

@@ -689,6 +689,20 @@ verifier 開始前分類 source 並調和其連結,`assent reconcile` 在建立�
 folder 與 batch receipt 會記錄 `shared_inputs_sha256`,涵蓋選定 profile 與每個宣告
 目標在 verifier 前後的有界快照,acceptance 則在推進 ref 之前再次核對。
 
+沒有東西可宣告的倉庫則完全不花成本。`NO-IGNORED-DIRECTORY-CANDIDATE` 只表示:
+一次成功的 Git ignored-entry 查詢在主 worktree 找不到任何位於 `.git/` 與
+`.assent/` 之外、實際存在的一般被忽略目錄;它不是「這個專案在語意上不需要共享
+輸入」的主張。這個狀態不需要 manifest profile、不建立 junction、也不動用 AI 審閱
+即告 settled,並在 receipt 摘要中帶有一個與 `REVIEWED-NONE` 不同的身分,且在每一
+道適用的關卡都廉價地重新計算。它在各個方向都 fail closed:Git 查詢失敗是可行動的
+拒絕,絕不被轉換成空的候選集合;被忽略的葉節點檔案不算候選,而任何一般被忽略
+目錄都算——即使之後審閱的答案是 `paths = []`;若之後出現候選目錄,下一次分類就是
+`UNKNOWN`;完整 verifier 的 `required_evidence` 指名缺少的目錄時也絕不以此狀態
+結案——主 worktree 有合法目標時它轉為審閱,否則以精確的「目標缺少或未被忽略」
+問題拒絕。這個查詢之所以問主 worktree,是因為每個被允許的連結目標都必須是主
+worktree 同一相對路徑上實際存在、被 Git 忽略的一般目錄;只存在於尚未接受之 source
+分支上的目錄尚不可佈建,必要時會發出可行動的拒絕,而不是宣稱「不需要」。
+
 **平行執行測試**:在 `assent init` 選 `unittest` 會啟用打包的
 `run_unittest_parallel()`,把 `tests/test_*.py` 底下每個模組各自丟進獨立
 subprocess 平行執行,而非單一行程依序跑完整套件。打包 template 會把這個以及

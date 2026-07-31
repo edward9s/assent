@@ -201,6 +201,26 @@ managed worktree exists, and folder and batch receipts bind one
 acceptance rechecks immediately before publishing a ref, never repairing a link
 to make it pass.
 
+`NO-IGNORED-DIRECTORY-CANDIDATE` is the deterministic zero-token fast path
+beside those states. It asserts only that a successful Git ignored-entry query
+of the primary worktree found no existing ordinary ignored directory outside
+`.git/` and `.assent/`, never that the project semantically needs no shared
+input. It settles without a profile, junction, or AI review, contributes a
+receipt-digest identity distinct from `REVIEWED-NONE`, and is recomputed
+cheaply at every applicable gate. It fails closed: a Git discovery error is an
+actionable refusal rather than an empty candidate set; ignored leaf files do
+not count and any ordinary ignored directory does, even one later reviewed to
+`paths = []`; an appearing candidate makes the next classification `UNKNOWN`
+unless a matching cached profile answers it; and complete-verifier
+`required_evidence` naming a missing directory is classified for review when a
+valid primary target exists and otherwise refuses with the exact missing or
+not-ignored target problem. Candidate enumeration asks the primary worktree
+because every allowed link target must be an existing ordinary Git-ignored
+directory at that same primary relative path, and a fresh source checkout is
+expected to hold none; a directory or ignore rule living only on an unaccepted
+source branch is not yet a provisionable target and refuses actionably instead
+of claiming that nothing is needed.
+
 Receipts are disposable derived artifacts and never outrank Git. A target tip
 change is acceptable when the rebuilt integration tree is identical; a content
 change makes the receipt stale. Direct and selected acceptance refuse missing,

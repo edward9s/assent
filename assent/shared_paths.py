@@ -18,7 +18,9 @@ This module owns that answer and everything around it:
   instead of making the cache oscillate.
 * The three-state contract a scheduled session starts under -- UNKNOWN,
   REVIEWED-NONE, REVIEWED-PATHS -- plus STALE, which is a matched answer that
-  concrete evidence has invalidated.
+  concrete evidence has invalidated, and NO-IGNORED-DIRECTORY-CANDIDATE, the
+  deterministic fast path for a primary worktree a successful Git query proves
+  holds no ordinary ignored directory to declare at all.
 * The controlled review operation, the only writer of the manifest, and the
   provisioning that turns a reviewed profile into real directory links using
   ``pathops.create_directory_link`` -- the same primitive candidate mirroring
@@ -52,11 +54,16 @@ UNKNOWN = "UNKNOWN"
 REVIEWED_NONE = "REVIEWED-NONE"
 REVIEWED_PATHS = "REVIEWED-PATHS"
 STALE = "STALE"
-# A repository that ignores no directory at all has nothing anyone could declare
-# as a shared input.  That is not an unanswered question, so it neither charges a
-# session for a review nor refuses a verification; it is still its own identity
-# in the shared-input digest, distinct from a reviewed empty answer.
-NO_SUBJECT = "NO-SHARED-INPUT"
+# A successful Git ignored-entry query of the primary worktree that found no
+# existing ordinary ignored directory outside `.git/` and `.assent/`.  It is a
+# statement about that query alone and never a claim that the project needs no
+# shared input semantically: nothing exists there that anyone could declare, so
+# it neither charges a session for a review nor refuses a verification.  It is
+# still its own identity in the shared-input digest, distinct from the reviewed
+# empty answer REVIEWED-NONE.  A failed query is not this state -- it is a
+# refusal -- and the moment a candidate directory appears, classification
+# becomes UNKNOWN.
+NO_IGNORED_DIRECTORY_CANDIDATE = "NO-IGNORED-DIRECTORY-CANDIDATE"
 
 ABSENT = "absent"                       # a watched path that is not there at all
 _EXCLUDED_ROOTS = (".git", ".assent")
@@ -120,9 +127,9 @@ class Contract:
     """The shared-path state one source worktree starts a task session under.
 
     ``needs_review`` separates "no answer and something to decide" from "no
-    answer and nothing to decide": a repository holding no ordinary ignored
-    directory at all has no shared input to review, so no session is charged for
-    discovering that.
+    answer and nothing to decide": a primary worktree that a successful Git
+    query proves holds no ordinary ignored directory has nothing anyone could
+    declare, so no session is charged for discovering that.
     """
 
     state: str
@@ -139,7 +146,8 @@ class Contract:
     @property
     def settled(self) -> bool:
         """True when nothing is left to decide before real work may start."""
-        return self.state in (REVIEWED_NONE, REVIEWED_PATHS, NO_SUBJECT)
+        return self.state in (REVIEWED_NONE, REVIEWED_PATHS,
+                              NO_IGNORED_DIRECTORY_CANDIDATE)
 
 
 # --------------------------------------------------------------------------- #
@@ -677,28 +685,75 @@ def shared_inputs_digest(main: Path,
 # --------------------------------------------------------------------------- #
 # Classification
 # --------------------------------------------------------------------------- #
-def has_review_subject(worktree: Path) -> bool:
-    """True when the worktree actually holds an ignored directory.
+def has_ignored_directory_candidate(worktree: Path) -> bool:
+    """True when the worktree really holds an ordinary ignored directory.
 
-    A repository that ignores no directory at all has no shared input anyone
-    could declare, so an absent manifest there is not an unanswered question and
-    no session is asked to discover that.  ``.git`` and ``.assent`` never count.
+    This is the whole content of the NO-IGNORED-DIRECTORY-CANDIDATE fast path:
+    nothing exists there that anyone could declare as a shared input, so an
+    absent manifest is not an unanswered question and no session is asked to
+    discover that.  ``.git`` and ``.assent`` never count, an ignored leaf file
+    is not a candidate, and a directory that is not an ordinary directory --
+    a junction, a symlink, a path that has since gone -- is not one either.
+    Any remaining ignored directory does count, even one a review would go on
+    to answer with ``paths = []``.
+
+    Failure is never an answer: an unusable Git query raises rather than
+    reporting False, because being unable to inspect the ignored entries is not
+    evidence that there are none.
+
     The question is always asked of the *primary* worktree: that is where a
-    shared input really lives, and a fresh source checkout legitimately has none
-    of them yet -- which is precisely what a review exists to fix.
+    shared input really lives and where every allowed link target must be, and
+    a fresh source checkout legitimately has none of them yet -- which is
+    precisely what a review exists to fix.
     """
-    try:
-        entries = gitops.ignored_entries(Path(worktree))
-    except AssentError:
-        return False
-    for entry in entries:
+    root = Path(worktree)
+    for entry in gitops.ignored_entries(root):
         if not entry.endswith("/"):
-            continue
+            continue                    # an ignored leaf file is not a candidate
         relative = entry.rstrip("/")
         if relative.split("/")[0] in _EXCLUDED_ROOTS:
             continue
+        # Only the entry itself is examined; a link is never followed and no
+        # ignored tree is ever walked.
+        if not _is_ordinary_directory(root / relative):
+            continue
         return True
     return False
+
+
+def _evidence_note(relative: str) -> str:
+    return (f"{relative} is required by complete-verifier evidence but no "
+            "reviewed profile declares it")
+
+
+def _required_evidence_paths(main: Path,
+                             required_evidence: Iterable[str]) -> tuple[str, ...]:
+    """Normalize verifier-required directories, refusing unusable ones.
+
+    A complete verifier that names a required ignored directory has produced a
+    subject for review -- but only the primary worktree can serve one, so a
+    named directory that is missing there, is not an ordinary directory, or is
+    no longer ignored cannot be reviewed into existence.  That is reported as
+    the exact target problem rather than as a review clause the session could
+    never satisfy, and never as "nothing needs sharing".
+    """
+    normalized: list[str] = []
+    problems: list[str] = []
+    for entry in required_evidence:
+        relative = require_safe_relative(entry)
+        if relative in normalized:
+            continue
+        problem = target_problem(main, relative)
+        if problem:
+            problems.append(problem)
+        normalized.append(relative)
+    if problems:
+        raise AssentError(
+            "complete-verifier evidence requires a shared ignored directory "
+            f"that cannot be provisioned: {'; '.join(problems)}. Create the "
+            f"directory in the primary worktree and keep it Git-ignored, then "
+            f"run `{REVIEW_COMMAND}`")
+    return tuple(sorted(normalized))
 
 
 def classify(main: Path, worktree: Path,
@@ -714,6 +769,12 @@ def classify(main: Path, worktree: Path,
     ``required_evidence`` (a complete verifier naming a required ignored
     directory) contradicts the active profile.  Two matching profiles that
     disagree have no correct answer and fail closed.
+
+    NO-IGNORED-DIRECTORY-CANDIDATE is reached only when nothing was ever
+    reviewed, no verifier evidence demands anything, and a *successful* Git
+    query proves the primary worktree holds no ordinary ignored directory.  A
+    failed query and a required directory that the primary worktree cannot
+    serve are both refusals, never that fast path.
     """
     main = Path(main)
     worktree = Path(worktree)
@@ -738,12 +799,19 @@ def classify(main: Path, worktree: Path,
         evidence = tuple(
             change for profile in manifest.profiles
             for change in changed_watch_evidence(profile, digests))
+        # Verifier evidence naming a required ignored directory is a real
+        # subject on its own: it must never settle as "there is nothing to
+        # declare", and a directory the primary worktree cannot serve is
+        # refused with that exact problem instead of being queued for a review
+        # that could not succeed.
+        required = _required_evidence_paths(main, required_evidence)
         if manifest.profiles:
             state = STALE
-        elif has_review_subject(main):
+        elif required or has_ignored_directory_candidate(main):
             state = UNKNOWN
         else:
-            state = NO_SUBJECT
+            state = NO_IGNORED_DIRECTORY_CANDIDATE
+        evidence += tuple(_evidence_note(relative) for relative in required)
         return Contract(state, None, digests, prior, tuple(dict.fromkeys(evidence)),
                         needs_review=state in (STALE, UNKNOWN))
 
@@ -752,12 +820,11 @@ def classify(main: Path, worktree: Path,
         problem for problem in
         (target_problem(main, relative) for relative in profile.paths)
         if problem)
-    required = {require_safe_relative(entry) for entry in required_evidence}
+    required = set(_required_evidence_paths(main, required_evidence))
     missing = tuple(sorted(required - set(profile.paths)))
     if problems or missing:
-        evidence = problems + tuple(
-            f"{relative} is required by complete-verifier evidence but the "
-            "active profile does not declare it" for relative in missing)
+        evidence = problems + tuple(_evidence_note(relative)
+                                    for relative in missing)
         return Contract(STALE, profile, digests, profile.paths, evidence,
                         needs_review=True)
     return Contract(REVIEWED_NONE if profile.is_none else REVIEWED_PATHS,
@@ -1163,6 +1230,7 @@ def describe(contract: Contract) -> str:
         return f"Shared paths: REVIEWED-PATHS ({', '.join(contract.paths)})"
     if contract.state == REVIEWED_NONE:
         return "Shared paths: REVIEWED-NONE (no shared directory is required)"
-    if not contract.needs_review:
-        return "Shared paths: none to review (this repository ignores no directory)"
+    if contract.state == NO_IGNORED_DIRECTORY_CANDIDATE:
+        return (f"Shared paths: {NO_IGNORED_DIRECTORY_CANDIDATE} (the primary "
+                "worktree holds no ignored directory anyone could declare)")
     return f"Shared paths: {contract.state}; one bounded review is required"

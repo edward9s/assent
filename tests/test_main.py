@@ -116,6 +116,31 @@ class TestDispatch(MainTestCase):
                 self.assertEqual(result.returncode, 0)
                 self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
+    def test_shared_paths_review_is_reachable_through_the_real_cli(self):
+        """The only manifest writer must be a real subcommand, not a helper.
+
+        It also has to reach dispatch without a project `.assent`: it acts on
+        the Git worktree it is run in, and a source worktree carries none.
+        """
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(_PROJECT_ROOT)
+        result = subprocess.run(
+            [sys.executable, "-m", "assent", "shared-paths", "review", "--help"],
+            cwd=self.root, capture_output=True, text=True,
+            encoding="utf-8", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--watch", result.stdout)
+        self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
+
+        with patch("assent.__main__.shared_paths_review",
+                   return_value=0) as review:
+            code, _out = self.run_main(
+                ["shared-paths", "review", "--path", "pkg",
+                 "--watch", "pubspec.yaml"])
+        self.assertEqual(code, 0)
+        review.assert_called_once_with(["pkg"], ["pubspec.yaml"], False)
+        self.assertFalse((self.root / ".assent").exists())
+
     def test_missing_config_reports_error(self):
         code, out = self.run_main(["status"])
         self.assertEqual(code, 1)

@@ -112,6 +112,18 @@ class SharedPathsCase(unittest.TestCase):
         return shared_paths.classify(
             self.root, self.worktree if worktree is None else worktree, **kwargs)
 
+    def _plain_repository(self, name: str = "plain") -> Path:
+        """A committed repository that ignores no directory at all."""
+        bare = self.parent / name
+        bare.mkdir()
+        _git(bare, "init")
+        _git(bare, "config", "user.name", "Assent Test")
+        _git(bare, "config", "user.email", "assent@example.invalid")
+        (bare / "README.md").write_text("plain\n", encoding="utf-8")
+        _git(bare, "add", "-A")
+        _git(bare, "-c", "commit.gpgsign=false", "commit", "-m", "initial")
+        return bare
+
 
 class TestThreeStateContract(SharedPathsCase):
     def test_unknown_becomes_reviewed_paths_and_is_cached_atomically(self):
@@ -147,19 +159,17 @@ class TestThreeStateContract(SharedPathsCase):
         self.assertEqual((created, detached), ((), ()))
 
     def test_a_repository_with_no_ignored_directory_has_nothing_to_review(self):
-        bare = self.parent / "plain"
-        bare.mkdir()
-        _git(bare, "init")
-        _git(bare, "config", "user.name", "Assent Test")
-        _git(bare, "config", "user.email", "assent@example.invalid")
-        (bare / "README.md").write_text("plain\n", encoding="utf-8")
-        _git(bare, "add", "-A")
-        _git(bare, "-c", "commit.gpgsign=false", "commit", "-m", "initial")
+        bare = self._plain_repository()
         contract = shared_paths.classify(bare, bare)
-        self.assertEqual(contract.state, shared_paths.NO_SUBJECT)
+        self.assertEqual(contract.state,
+                         shared_paths.NO_IGNORED_DIRECTORY_CANDIDATE)
         self.assertFalse(contract.needs_review)
         self.assertTrue(contract.settled)
         self.assertEqual(shared_paths.review_clause(contract), "")
+        self.assertIn("NO-IGNORED-DIRECTORY-CANDIDATE",
+                      shared_paths.describe(contract))
+        # A settled fast path costs no manifest at all.
+        self.assertFalse(shared_paths.manifest_path(bare).exists())
 
     def test_a_changed_watch_file_goes_stale_with_only_the_changed_evidence(self):
         self._review("pkg")
@@ -215,6 +225,138 @@ class TestThreeStateContract(SharedPathsCase):
         shared_paths.write_manifest(self.root, manifest)
         with self.assertRaisesRegex(AssentError, "conflicting matching profiles"):
             self._classify()
+
+
+class TestNoIgnoredDirectoryCandidate(SharedPathsCase):
+    """The deterministic zero-token fast path, and every way it must not apply.
+
+    The state says exactly one thing: a *successful* Git ignored-entry query of
+    the primary worktree found no existing ordinary ignored directory outside
+    `.git/` and `.assent/`.  It is never a claim that the project semantically
+    needs no shared input, so each case below pins one boundary of that claim.
+    """
+
+    def test_only_a_successful_empty_discovery_settles_the_fast_path(self):
+        bare = self._plain_repository()
+        self.assertFalse(shared_paths.has_ignored_directory_candidate(bare))
+        # `.git` is ignored-by-definition and `.assent` is assent's own; neither
+        # is a candidate anyone could declare.
+        (bare / ".gitignore").write_text(".assent/\n", encoding="utf-8")
+        (bare / ".assent" / "plan01").mkdir(parents=True)
+        (bare / ".assent" / "plan01" / "t001.e.toml").write_text(
+            "x = 1\n", encoding="utf-8")
+        _git(bare, "add", "-A")
+        _git(bare, "-c", "commit.gpgsign=false", "commit", "-m", "assent dir")
+        self.assertFalse(shared_paths.has_ignored_directory_candidate(bare))
+        self.assertEqual(shared_paths.classify(bare, bare).state,
+                         shared_paths.NO_IGNORED_DIRECTORY_CANDIDATE)
+
+    def test_an_ignored_leaf_file_is_not_a_candidate(self):
+        bare = self._plain_repository()
+        (bare / ".gitignore").write_text("*.g.dart\n", encoding="utf-8")
+        (bare / "model.g.dart").write_text("generated\n", encoding="utf-8")
+        _git(bare, "add", "-A")
+        _git(bare, "-c", "commit.gpgsign=false", "commit", "-m", "generated leaf")
+        self.assertFalse(shared_paths.has_ignored_directory_candidate(bare))
+        self.assertEqual(shared_paths.classify(bare, bare).state,
+                         shared_paths.NO_IGNORED_DIRECTORY_CANDIDATE)
+
+    def test_an_appearing_ignored_directory_turns_the_next_answer_unknown(self):
+        bare = self._plain_repository()
+        (bare / ".gitignore").write_text("cache/\n", encoding="utf-8")
+        _git(bare, "add", "-A")
+        _git(bare, "-c", "commit.gpgsign=false", "commit", "-m", "ignore rule")
+        # A rule alone declares nothing: the directory has to be there.
+        self.assertEqual(shared_paths.classify(bare, bare).state,
+                         shared_paths.NO_IGNORED_DIRECTORY_CANDIDATE)
+
+        (bare / "cache").mkdir()
+        (bare / "cache" / "entry.bin").write_text("cached\n", encoding="utf-8")
+        contract = shared_paths.classify(bare, bare)
+        self.assertEqual(contract.state, shared_paths.UNKNOWN)
+        self.assertTrue(contract.needs_review)
+        self.assertFalse(contract.settled)
+
+    def test_an_existing_candidate_still_counts_when_it_reviews_to_none(self):
+        """`paths = []` is a reviewed answer, not evidence of no candidate."""
+        self.assertTrue(shared_paths.has_ignored_directory_candidate(self.root))
+        self._review(none=True)
+        contract = self._classify()
+        self.assertEqual(contract.state, shared_paths.REVIEWED_NONE)
+        # And the matching profile, not the fast path, is what answers it.
+        self.assertIsNotNone(contract.profile)
+
+    def test_a_failed_ignored_entry_query_refuses_instead_of_answering_none(self):
+        """Being unable to look is not evidence that there is nothing to see."""
+        broken = self.parent / "not a repository"
+        broken.mkdir()
+        with self.assertRaises(AssentError):
+            shared_paths.has_ignored_directory_candidate(broken)
+        with self.assertRaises(AssentError):
+            shared_paths.classify(broken, broken)
+
+    def test_verifier_required_evidence_is_never_settled_as_no_candidate(self):
+        """A verifier that proved a directory is needed created a subject."""
+        bare = self._plain_repository()
+        (bare / ".gitignore").write_text("pkg/\n", encoding="utf-8")
+        _git(bare, "add", "-A")
+        _git(bare, "-c", "commit.gpgsign=false", "commit", "-m", "ignore pkg")
+        (bare / "pkg").mkdir()
+        (bare / "pkg" / "vendored.txt").write_text("v\n", encoding="utf-8")
+        # A directory the primary worktree can genuinely serve becomes a review
+        # naming it, never a settled "nothing to declare".
+        contract = shared_paths.classify(bare, bare, required_evidence=("pkg",))
+        self.assertEqual(contract.state, shared_paths.UNKNOWN)
+        self.assertIn("pkg is required by complete-verifier evidence",
+                      " ".join(contract.evidence))
+        self.assertIn("pkg", shared_paths.review_clause(contract))
+
+    def test_required_evidence_without_a_primary_target_refuses_precisely(self):
+        bare = self._plain_repository()
+        with self.assertRaises(AssentError) as missing:
+            shared_paths.classify(bare, bare, required_evidence=("pkg",))
+        self.assertIn("does not exist in the primary worktree",
+                      str(missing.exception))
+        self.assertIn("shared-paths review", str(missing.exception))
+
+        # Present but not ignored is the other half: a link there would change
+        # what the worktree tracks, so it is refused with that exact problem.
+        (bare / "pkg").mkdir()
+        (bare / "pkg" / "kept.txt").write_text("tracked\n", encoding="utf-8")
+        _git(bare, "add", "-A")
+        _git(bare, "-c", "commit.gpgsign=false", "commit", "-m", "tracked pkg")
+        with self.assertRaises(AssentError) as tracked:
+            shared_paths.classify(bare, bare, required_evidence=("pkg",))
+        self.assertIn("no longer Git-ignored", str(tracked.exception))
+
+    def test_a_source_only_directory_is_not_a_provisionable_primary_target(self):
+        """Enumeration asks the primary worktree, by design and not by accident."""
+        # The source worktree holds an ignored directory the primary one does
+        # not; it is not a target anyone may link to, so requiring it refuses
+        # with the primary-target prerequisite rather than claiming "none".
+        source_only = self.worktree / "build"
+        source_only.mkdir()
+        (source_only / "out.bin").write_text("built\n", encoding="utf-8")
+        self.assertTrue(
+            shared_paths.has_ignored_directory_candidate(self.worktree))
+        with self.assertRaises(AssentError) as ctx:
+            self._classify(required_evidence=("build",))
+        self.assertIn("build does not exist in the primary worktree",
+                      str(ctx.exception))
+
+    def test_the_fast_path_settles_every_gate_without_a_manifest(self):
+        bare = self._plain_repository()
+        contract = shared_paths.prepare_worktree(bare, bare)
+        self.assertEqual(contract.state,
+                         shared_paths.NO_IGNORED_DIRECTORY_CANDIDATE)
+        self.assertEqual(shared_paths.closeout_refusal(contract), "")
+        prepared = shared_paths.prepare_sources(bare, [("plan01", bare)])
+        self.assertEqual(prepared[0][1].state,
+                         shared_paths.NO_IGNORED_DIRECTORY_CANDIDATE)
+        # A digest is available (verification may proceed) and no profile was
+        # ever cached to produce it.
+        self.assertTrue(shared_paths.shared_inputs_digest(bare, prepared))
+        self.assertEqual(shared_paths.read_manifest(bare).profiles, ())
 
 
 class TestReviewOperation(SharedPathsCase):
@@ -426,10 +568,14 @@ class TestSharedInputEvidence(SharedPathsCase):
             self.root, [("plan測試", none_contract)])
         nothing = shared_paths.shared_inputs_digest(self.root, [])
         self.assertNotEqual(empty, nothing)
-        no_subject = shared_paths.Contract(shared_paths.NO_SUBJECT)
+        # "Reviewed to need nothing" and "there was nothing to review" are
+        # different evidence and must not share a digest identity.
+        no_candidate = shared_paths.Contract(
+            shared_paths.NO_IGNORED_DIRECTORY_CANDIDATE)
         self.assertNotEqual(
             empty,
-            shared_paths.shared_inputs_digest(self.root, [("plan測試", no_subject)]))
+            shared_paths.shared_inputs_digest(
+                self.root, [("plan測試", no_candidate)]))
         with self.assertRaisesRegex(AssentError, "not a reviewed answer"):
             shared_paths.shared_inputs_digest(
                 self.root,

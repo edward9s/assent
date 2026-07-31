@@ -1004,6 +1004,32 @@ stopped being ignored; or a complete verifier's own `Ignored input diagnosis:`
 named a required directory the active profile does not declare. Two matching
 profiles that disagree have no correct answer and fail closed.
 
+One further state costs nothing at all.
+`NO-IGNORED-DIRECTORY-CANDIDATE` means only that a successful Git
+ignored-entry query of the primary worktree found no existing ordinary ignored
+directory outside `.git/` and `.assent/`. It is not a claim that the project
+semantically needs no shared input; it is the observation that nothing is
+there for anyone to declare. It settles without a manifest profile, a
+junction, or an AI review, contributes its own receipt-digest identity
+distinct from `REVIEWED-NONE`, and is recomputed cheaply at every applicable
+gate. It fails closed in every direction: an error from Git ignored-entry
+discovery is an actionable refusal and is never converted into an empty
+candidate set; an ignored leaf file is not a candidate while any existing
+ordinary ignored directory is one, even if a review later answers `paths =
+[]`; a candidate that appears later makes the next classification `UNKNOWN`,
+unless a matching cached profile already answers it; and a complete verifier's
+`required_evidence` naming a missing directory is never settled this way — it
+is classified for review when a valid primary target exists and otherwise
+refuses with the exact missing or not-ignored target problem.
+
+That question is asked of the *primary* worktree by design, not by inference.
+Every allowed junction target must be an existing ordinary, Git-ignored
+directory at that same primary relative path, and a fresh source checkout is
+expected not to contain ignored inputs at all. So a directory or ignore rule
+that exists only on an unaccepted source branch is not yet a provisionable
+primary target: when it is required, it produces an actionable refusal naming
+that prerequisite, never a semantic "none needed" claim.
+
 The only sanctioned writer is `assent shared-paths review`, which takes either
 repeated `--path DIR` values or an explicit `--none`, plus the exact `--watch
 FILE` values that justify reconsidering the decision. It validates every value

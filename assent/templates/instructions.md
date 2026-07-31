@@ -73,7 +73,13 @@ files (logs; read only when debugging or explicitly referenced), and the
   Git-ignore rules, the dependency/build declarations, and this task's verifier
   evidence alone — do not audit the whole repository. That command is the only
   way you may write the manifest; the scheduler refuses the task's completion
-  while the contract is still unreviewed.
+  while the contract is still unreviewed. When your prompt instead says
+  `NO-IGNORED-DIRECTORY-CANDIDATE`, a successful Git query found no ordinary
+  ignored directory in the primary worktree to declare at all: there is
+  nothing to review and you must not run the command "just in case". It is not
+  a claim that this project needs no shared input — if such a directory later
+  appears, or a verifier proves one is required, the contract becomes
+  `UNKNOWN` and you will be asked then.
 - Ignored inputs a check needs (task session): the isolated worktree is built
   from tracked content, so a directory Git ignores — a private package tree, a
   large asset directory — is missing there even though the main worktree has
