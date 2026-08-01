@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import AssentError
-from assent.adapters import TaskResult, get_adapter
+from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult, get_adapter
 from assent.adapters import process as process_runner
 from assent.adapters.claude import (
     ClaudeAdapter, build_command, format_stream_event, parse_output_for_billing,
@@ -127,6 +127,32 @@ class TestParseQuota(unittest.TestCase):
             "\n\nnot json at all\n{broken json\n")
         self.assertFalse(exhausted)
         self.assertIsNone(reset_at)
+
+
+class TestCheckpointResume(unittest.TestCase):
+    def test_exact_final_record_is_recognized_and_not_rendered(self):
+        from assent.adapters import parse_checkpoint_resume_output
+
+        output = "partial output\n" + CHECKPOINT_RESUME_RECORD + "\n"
+        self.assertTrue(parse_checkpoint_resume_output(output, 1, False))
+        self.assertIsNone(format_stream_event(CHECKPOINT_RESUME_RECORD + "\n"))
+
+    def test_zero_exit_stall_and_nonfinal_or_lookalike_records_are_rejected(self):
+        from assent.adapters import parse_checkpoint_resume_output
+
+        cases = (
+            (0, CHECKPOINT_RESUME_RECORD + "\n", False),
+            (1, CHECKPOINT_RESUME_RECORD + "\n", True),
+            (1, "prefix " + CHECKPOINT_RESUME_RECORD + "\n", False),
+            (1, CHECKPOINT_RESUME_RECORD[:-1] + "\n", False),
+            (1, CHECKPOINT_RESUME_RECORD + "\ntrailing\n", False),
+            (1, CHECKPOINT_RESUME_RECORD + " \n", False),
+            (1, '{"type": "assent.checkpoint_resume"}\n', False),
+        )
+        for exit_code, output, stalled in cases:
+            with self.subTest(exit_code=exit_code, output=output, stalled=stalled):
+                self.assertFalse(
+                    parse_checkpoint_resume_output(output, exit_code, stalled))
 
 
 class TestParseBilling(unittest.TestCase):
@@ -399,6 +425,26 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(result.stalled)
         self.assertIsNone(result.reset_at)
         self.assertNotEqual(result.exit_code, 0)
+
+    def test_checkpoint_resume_record_sets_distinct_result_and_keeps_raw_output(self):
+        output = "partial\n" + CHECKPOINT_RESUME_RECORD + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = ClaudeAdapter(make_cfg()).run_task(
+            "p", "fable", "medium", Path("."))
+        self.assertTrue(result.checkpoint_resume)
+        self.assertFalse(result.quota_exhausted)
+        self.assertEqual(result.output, output)
+        self.assertIsNone(result.failure_kind)
+
+    def test_quota_and_control_record_use_the_quota_path(self):
+        quota = json.dumps({"type": "rate_limit_event",
+                            "rate_limit_info": {"status": "rejected"}})
+        output = quota + "\n" + CHECKPOINT_RESUME_RECORD + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = ClaudeAdapter(make_cfg()).run_task(
+            "p", "fable", "medium", Path("."))
+        self.assertTrue(result.quota_exhausted)
+        self.assertFalse(result.checkpoint_resume)
 
 
 class TestGetAdapter(unittest.TestCase):

@@ -7,8 +7,8 @@ imports back, so the query commands stay loadable without the scheduler.
 
 Iron rules inherited from field experience on the workflow project: **never discard
 output the execution AI has already burned tokens to produce.**
-- Quota interrupted -> keep progress in a wip checkpoint, then after reset resume with a
-  "continue" prompt instead of scrapping and rerunning.
+- Quota or checkpoint-resume interrupted -> keep progress in a wip checkpoint, then resume with
+  a "continue" prompt instead of scrapping and rerunning.
 - Acceptance failed -> do not restore the working tree; a retry fixes the existing work
   (cheap) rather than redoing it from scratch (expensive).
 - Retries exhausted -> commit the not-yet-passing work into a BLOCKED checkpoint and hand
@@ -81,7 +81,8 @@ _DEFAULT_PROMPT_TEMPLATE = (
 _RETRY_SUFFIX = ("\nThe previous attempt failed acceptance. Reason: {failure_reason}. "
                  "The previous attempt's work is still in the working tree; review and fix "
                  "it on top of what is there, do not redo it.")
-_RESUME_SUFFIX = ("\nThe previous run of this task was interrupted (quota exhausted or user "
+_RESUME_SUFFIX = ("\nThe previous adapter session was interrupted (quota exhausted, "
+                  "checkpoint-resume control, or user "
                   "interrupt); the partial work already done is kept in the working tree "
                   "(possibly including a wip checkpoint). Review the current state first, "
                   "resume and finish the remaining part, and do not redo what is already done.")
@@ -935,6 +936,30 @@ def _mark_billing_task(task: Task, session: SessionIdentity, detail: str,
         print(f"Writing the billing journal failed: {e} (working tree left as is, nothing discarded)")
 
 
+def _preserve_interrupted_progress(cfg: Config, task: Task,
+                                   session: SessionIdentity, *, event: str,
+                                   summary: str, detail: str,
+                                   checkpoint_reason: str,
+                                   now: Callable[[], datetime]) -> None:
+    """Record a resumable adapter interruption, checkpoint its dirty progress, and refresh.
+
+    Quota exhaustion and the provider-neutral checkpoint-resume control have different
+    continuation decisions, but both must preserve the same token-burned work before that
+    decision.  The caller owns the subsequent wait/rotation choice and sets the resume prompt.
+    """
+    append_entry(task.journal_path, by="scheduler", event=event,
+                 summary=summary, detail=detail,
+                 agent=session.agent,
+                 requested_model=session.requested_model,
+                 requested_effort=session.requested_effort,
+                 time_str=now().isoformat(timespec="seconds"))
+    if gitops.commit_if_dirty(
+            cfg.root, _checkpoint_subject(cfg, "wip", task, checkpoint_reason),
+            cfg.git_excludes):
+        print("  wip checkpoint created.")
+    try_write_report(cfg)
+
+
 def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
                              now: Callable[[], datetime]) -> str | None:
     """Detect and, where possible, port back paths a just-finished session wrote into the main
@@ -992,8 +1017,8 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   sleep: Callable[[float], None],
                   now: Callable[[], datetime], session_state: _SessionState,
                   resumed: bool = False) -> None:
-    """Run a single task's full lifecycle; internally handles quota waiting and retries, and by
-    the end the task is DONE/BLOCKED.
+    """Run a single task's full lifecycle; internally handles quota/control resumption and
+    retries, and by the end the task is DONE/BLOCKED.
 
     `task` is the trusted version parsed at task-selection time (= the previous checkpoint):
     scope/verify and all fields are taken from it, and the only legal change the execution AI
@@ -1029,6 +1054,21 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         if escape_reason is not None:
             print(f"  {escape_reason}")
             outcome, reason = "fail", escape_reason
+        elif (result.checkpoint_resume and not result.quota_exhausted
+              and not result.stalled and result.exit_code != 0):
+            print("  Checkpoint-resume control received -> keep progress (wip checkpoint).")
+            _preserve_interrupted_progress(
+                cfg, task, session, event="checkpoint_resume",
+                summary=("Checkpoint-resume requested; progress kept, immediately "
+                         "resuming the same adapter command"),
+                detail=("The adapter emitted the exact final control record "
+                        '{"type":"assent.checkpoint_resume"}; no quota wait, '
+                        "adapter rotation, or retry was used."),
+                checkpoint_reason="checkpoint-resume control, progress kept", now=now)
+            print("  Resuming the same adapter command immediately without waiting, "
+                  "rotating, or consuming a retry.")
+            resumed = True
+            continue
         elif result.quota_exhausted:  # quota exhaustion does not count as a failure
             print("  Quota exhausted -> keep progress (wip checkpoint).")
             wait_kind: str | None = None
@@ -1058,18 +1098,10 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                         f"  Switching adapter {adapter_name} -> {rotation.name} "
                         "immediately; resuming the same task without "
                         "consuming a retry.")
-            append_entry(task.journal_path, by="scheduler", event="quota",
-                         summary=quota_summary,
-                         agent=session.agent,
-                         requested_model=session.requested_model,
-                         requested_effort=session.requested_effort,
-                         time_str=now().isoformat(timespec="seconds"))
-            if gitops.commit_if_dirty(
-                    cfg.root, _checkpoint_subject(
-                        cfg, "wip", task, "quota interrupt, progress kept"),
-                    cfg.git_excludes):
-                print("  wip checkpoint created.")
-            try_write_report(cfg)
+            _preserve_interrupted_progress(
+                cfg, task, session, event="quota", summary=quota_summary,
+                detail="Quota evidence preserved the current task progress for resumption.",
+                checkpoint_reason="quota interrupt, progress kept", now=now)
             print(quota_action)
             if wait_kind == "quota":
                 _wait_for_quota(cfg, result.reset_at, sleep, now)

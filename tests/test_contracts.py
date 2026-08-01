@@ -93,6 +93,23 @@ class TestContractContent(unittest.TestCase):
         self.assertIn("立即切換 adapter", chinese)
         self.assertIn("整輪耗盡才等輪詢", chinese)
 
+    def test_checkpoint_resume_control_is_documented_consistently(self):
+        install_global_contracts(self)
+        record = '{"type":"assent.checkpoint_resume"}'
+        format_text = contracts.installed_contract_text("format.md")
+        english = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        chinese = (_PROJECT_ROOT / "README.zh-TW.md").read_text(encoding="utf-8")
+        for name, text in (("format.md", format_text),
+                           ("README.md", english),
+                           ("README.zh-TW.md", chinese)):
+            with self.subTest(document=name):
+                self.assertIn(record, text)
+                self.assertIn("checkpoint_resume", text)
+        self.assertIn("A wrapper may replace a provider quota result", format_text)
+        self.assertIn("A wrapper may replace a provider quota result",
+                      " ".join(english.split()))
+        self.assertIn("provider quota", chinese)
+
     def test_folder_verification_report_refresh_is_documented(self):
         install_global_contracts(self)
         english = {

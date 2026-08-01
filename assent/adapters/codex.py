@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from assent.adapters import Adapter, TaskResult
+from assent.adapters import (Adapter, TaskResult, is_checkpoint_resume_line,
+                             parse_checkpoint_resume_output)
 from assent.adapters.process import run_subprocess
 
 if TYPE_CHECKING:
@@ -82,6 +83,8 @@ def _item_brief(item: dict) -> str | None:
 
 def format_stream_event(raw_line: str) -> str | None:
     """Translate one Codex JSONL event into concise live terminal text."""
+    if is_checkpoint_resume_line(raw_line):
+        return None
     line = raw_line.strip()
     if not line:
         return None
@@ -199,15 +202,18 @@ class CodexAdapter(Adapter):
         returncode, output, stalled = run_subprocess(
             command, cwd, stall_seconds, echo=self._echo_line)
         exhausted = False if stalled else parse_output_for_quota(output)
+        billing = (not stalled and not exhausted and returncode != 0
+                   and parse_output_for_billing(output))
+        checkpoint_resume = (
+            parse_checkpoint_resume_output(output, returncode, stalled)
+            and not exhausted and not billing)
         # Billing is a failure classification, so it is only meaningful for a failed session
         # that is neither a stall nor quota exhaustion.
-        failure_kind = ("billing"
-                        if not stalled and not exhausted and returncode != 0
-                        and parse_output_for_billing(output)
-                        else None)
+        failure_kind = "billing" if billing else None
         return TaskResult(exit_code=returncode, output=output,
                           quota_exhausted=exhausted, reset_at=None,
-                          stalled=stalled, failure_kind=failure_kind)
+                          stalled=stalled, checkpoint_resume=checkpoint_resume,
+                          failure_kind=failure_kind)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

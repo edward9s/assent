@@ -11,9 +11,10 @@ it unattended.
   `assent check` passes.
 - **Execution**: `assent run` finishes every task unattended — picking a
   task, opening a headless AI session, running its focused verification,
-  committing a git checkpoint, waiting out quota exhaustion and resuming. Once
-  a folder is complete, the scheduler runs the full candidate verification
-  outside the AI session; the scheduler loop itself burns zero tokens.
+  committing a git checkpoint, waiting out quota exhaustion or honoring an
+  adapter checkpoint-resume control, and resuming. Once a folder is complete,
+  the scheduler runs the full candidate verification outside the AI session;
+  the scheduler loop itself burns zero tokens.
 - **Review**: a human reads the program-generated `.assent/<work
   folder>/_report.md` (zero tokens), and opens a session only for the tasks
   that need a decision.
@@ -31,7 +32,8 @@ it unattended.
    Humans never hand-edit files; when a review fails, they issue instructions
    for an AI to make the change.
 4. **Token-burned output from the executing AI is never discarded.**
-   A quota interruption is collected into a `wip` checkpoint and resumed;
+   A quota interruption or adapter checkpoint-resume control is collected into a
+   `wip` checkpoint and resumed;
    a failed review is not reverted, and retried on top of the existing
    results; once retries are exhausted, the results are committed into a
    `BLOCKED` checkpoint for human adjudication.
@@ -58,6 +60,8 @@ it unattended.
               │      switch adapter immediately, or wait for  │
               │      the rotation poll when all are exhausted │
               │      → resume with a "continue" prompt       │
+              │  4d. Checkpoint-resume control → wip checkpoint│
+              │      → immediately rerun the same adapter     │
               └────────────────────────────────────────────┘
 ```
 
@@ -1360,6 +1364,27 @@ list, quota exhaustion switches immediately to the named next adapter. The
 scheduler waits for the configured rotation poll only after every adapter in
 the rotation is exhausted, then continues with the named next adapter.
 
+**Adapter checkpoint-resume control**
+
+An adapter command may ask Assent to preserve the current task and immediately
+reopen the same command by ending a finished, non-stalled, nonzero session with
+this exact final non-empty output line:
+
+```text
+{"type":"assent.checkpoint_resume"}
+```
+
+Assent keeps the raw adapter output for diagnostics, hides this terminal control
+line from live human-facing output, gathers the work into a `WIP` checkpoint,
+refreshes the report, and reruns the same adapter with the existing continue
+prompt. It does not sleep, rotate adapters, or consume a task retry. The record
+is not a configuration key and needs no capability probe. A wrapper may replace
+a provider quota result with this record only after it has already arranged an
+immediate continuation. If it forwards the provider quota result instead,
+Assent performs its normal single-adapter wait or configured adapter rotation.
+If quota evidence and the control record are both present, the ordinary quota
+path wins.
+
 **Fixing configuration after a preflight error**
 
 Do not modify the task file's abstract tier or effort. Instead, update only the
@@ -1453,9 +1478,10 @@ then translates the abstract effort into `requested_effort` per the config
 file, and calls the existing `run_task(prompt, requested_model,
 requested_effort, cwd) -> TaskResult`. An adapter does not define a separate
 effort-translation method — it only uses the actual CLI value it is handed.
-`TaskResult` carries `exit_code`, `output`, `quota_exhausted`, and
-`reset_at`; quota detection is encapsulated inside the adapter, and the main
-loop is unaware of vendor differences.
+`TaskResult` carries `exit_code`, `output`, `quota_exhausted`, `reset_at`, and
+the distinct `checkpoint_resume` outcome; quota and control-record detection
+are encapsulated inside the adapter, and the main loop is unaware of vendor
+differences.
 
 ## Project status
 

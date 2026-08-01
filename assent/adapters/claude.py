@@ -34,7 +34,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from assent.adapters import Adapter, TaskResult
+from assent.adapters import (Adapter, TaskResult, is_checkpoint_resume_line,
+                             parse_checkpoint_resume_output)
 # The subprocess runner is shared adapter infrastructure, not claude knowledge; it is
 # re-exported here because callers patch this module's name to fake a session.
 from assent.adapters.process import run_subprocess
@@ -102,6 +103,8 @@ def format_stream_event(raw_line: str) -> str | None:
     session ends. Display only — it doesn't affect parse_output_for_quota's after-the-fact
     verdict.
     """
+    if is_checkpoint_resume_line(raw_line):
+        return None
     s = raw_line.strip()
     if not s:
         return None
@@ -271,15 +274,18 @@ class ClaudeAdapter(Adapter):
                               quota_exhausted=False, reset_at=None,
                               stalled=True)
         exhausted, reset_at = parse_output_for_quota(output)
+        billing = (returncode != 0 and parse_output_for_billing(output)
+                   if not exhausted else False)
+        checkpoint_resume = (
+            parse_checkpoint_resume_output(output, returncode, stalled)
+            and not exhausted and not billing)
         # Billing is a failure classification, so it is only meaningful for a failed session;
         # a successful run whose prose merely mentions "credit balance" must never be flagged.
-        failure_kind = ("billing"
-                        if not exhausted and returncode != 0
-                        and parse_output_for_billing(output)
-                        else None)
+        failure_kind = "billing" if billing else None
         return TaskResult(exit_code=returncode, output=output,
                           quota_exhausted=exhausted, reset_at=reset_at,
-                          stalled=False, failure_kind=failure_kind)
+                          stalled=False, checkpoint_resume=checkpoint_resume,
+                          failure_kind=failure_kind)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

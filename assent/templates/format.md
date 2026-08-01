@@ -570,7 +570,7 @@ time = "2026-07-17T02:03:04+00:00"
 by = "claude"                    # executor: claude | codex | antigravity
 requested_model = "fable"       # the --model value passed to the AI CLI this run
 requested_effort = "high"       # the actual effort value sent to the CLI this run
-event = "done"                   # suggested values: done | blocked | quota | interrupt | note
+event = "done"                   # suggested values: done | blocked | quota | checkpoint_resume | interrupt | note
 summary = "skeleton done, 37 tests all green"
 detail = '''
 Longer process notes, blockers, a summary of verification output.
@@ -594,8 +594,9 @@ Longer process notes, blockers, a summary of verification output.
 - The scheduler's machine events use `by = "scheduler"`, additionally writing
   `agent = "claude"`, `agent = "codex"`, or `agent = "antigravity"` and the
   same run's `requested_model`. Existing events include a quota interruption
-  `quota`, a user or infrastructure interruption `interrupt`, and a `blocked`
-  mark; no separate session-start event is written.
+  `quota`, an adapter checkpoint-resume request `checkpoint_resume`, a user or
+  infrastructure interruption `interrupt`, and a `blocked` mark; no separate
+  session-start event is written.
 - Old logs' `by = "ai"` and entries missing the new fields stay readable, not
   migrated and not overwritten.
 
@@ -610,6 +611,20 @@ requested_model = "fable"
 requested_effort = "high"
 event = "quota"
 summary = "quota exhausted; progress kept, switching to codex immediately"
+```
+
+Checkpoint-resume adapter event example:
+
+```toml
+[[entry]]
+time = "2026-08-01T08:30:00+00:00"
+by = "scheduler"
+agent = "codex"
+requested_model = "gpt-5.6-terra"
+requested_effort = "high"
+event = "checkpoint_resume"
+summary = "checkpoint-resume requested; progress kept, immediately resuming the same adapter command"
+detail = '''The exact final control record was received; no quota wait, adapter rotation, or retry was used.'''
 ```
 
 Antigravity adapter example:
@@ -1261,6 +1276,18 @@ human.
   immediately to the next adapter in order; the scheduler waits for the
   configured rotation poll only after every adapter in the rotation is
   exhausted, then continues with the next adapter.
+- Adapter checkpoint-resume control -> not counted as a failure: a finished,
+  non-stalled, nonzero adapter process whose complete final non-empty output
+  line is exactly `{"type":"assent.checkpoint_resume"}` records
+  `checkpoint_resume`, gathers progress into the same WIP checkpoint, refreshes
+  the report, and immediately reopens the same adapter command with the resume
+  prompt. It does not sleep, rotate adapters, or consume a retry. The terminal
+  control line is suppressed from live rendering while the raw adapter output
+  remains available as result evidence. The record adds no configuration key or
+  capability probe. A wrapper may replace a provider quota result with it only
+  after arranging an immediate continuation; if it forwards provider quota,
+  Assent performs the normal wait or rotation. When quota evidence and this
+  record are both present, the ordinary quota path wins.
 - Unclean exit (power loss, a forced kill) never reaches the Ctrl+C/quota
   interrupt handlers, so a dirty worktree can survive to the next `run`
   startup. The startup gate checks whether every uncommitted change is

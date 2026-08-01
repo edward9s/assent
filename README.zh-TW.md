@@ -10,8 +10,9 @@
 - **規劃**:人與 AI 開會議 session,共識即時固化為 `.assent/` 裡的任務檔,
   散會條件 = `assent check` 通過。
 - **執行**:`assent run` 無人值守跑完全部任務——選任務、開 headless AI session、
-  執行任務 focused verify、建立 git 檢查點、額度等待與續作。資料夾完成後,
-  調度器在 AI session 外執行一次完整 candidate verify;調度本身零 token。
+  執行任務 focused verify、建立 git 檢查點、等待額度或處理 adapter 的
+  checkpoint-resume 控制並續作。資料夾完成後,調度器在 AI session 外執行一次完整
+  candidate verify;調度本身零 token。
 - **驗收**:人先讀程式生成的 `.assent/<工作資料夾>/_report.md`(零 token),只對要裁決的任務開 session。
 
 ## 設計原則
@@ -24,7 +25,8 @@
 3. **AI 能處理的全部自動處理,人類只做審查與裁決。**
    人不手改檔案;驗收不過就下指令叫 AI 改。
 4. **執行 AI 燒過 tokens 的產出絕不丟棄。**
-   額度中斷收 wip 檢查點續作;驗收失敗不還原、在現有成果上重試;
+   額度中斷或 adapter checkpoint-resume 控制收 wip 檢查點續作;
+   驗收失敗不還原、在現有成果上重試;
    重試用盡連同成果 commit 進 BLOCKED 檢查點交人類裁決。
 
 ## 運作原理
@@ -44,6 +46,8 @@
               │      標 BLOCKED 連成果一起 commit → 回到 1    │
               │  4c. 額度耗盡 → wip 檢查點 → 立即切換 adapter │
               │      或整輪耗盡才等輪詢 → 帶「接續」提示續作 │
+              │  4d. checkpoint-resume 控制 → wip 檢查點     │
+              │      → 立即重開同一個 adapter                │
               └────────────────────────────────────────────┘
 ```
 
@@ -1105,6 +1109,23 @@ assent run <FOLDER>  # 自動從 WIP 恢復
 只有整輪 adapter 都耗盡時,調度器才等待設定的輪詢間隔,之後再繼續指定的
 下一個 adapter。
 
+**Adapter checkpoint-resume 控制**
+
+Adapter 命令可以在一次已結束、沒有 watchdog stall 且 exit code 非零的 session
+最後一個非空輸出行,寫出以下完全相同的控制記錄,要求 Assent 保留目前任務並立即
+重開同一個命令:
+
+```text
+{"type":"assent.checkpoint_resume"}
+```
+
+Assent 會保留 adapter 原始輸出供診斷,但不把這個終端控制行顯示給人;它會把成果
+收進 `WIP` 檢查點、更新報告,再帶既有的接續提示重跑同一個 adapter。不會睡眠、
+切換 adapter 或消耗任務重試。這不是組態 key,也不需要 capability probe。Wrapper
+只有在自己已經安排好立即續作時,才可以用這筆記錄取代 provider quota 結果;如果
+直接轉送 provider quota,Assent 就照正常的單一 adapter 等待或設定的 adapter 輪替
+處理。如果同時出現 quota 證據與控制記錄,一律走正常 quota 路徑。
+
 **組態 preflight 錯誤後修正**
 
 別改任務檔的抽象檔位或 effort。只改 adapter 組態。例如 prime/normal 對應
@@ -1183,8 +1204,8 @@ adapter,或推測某個模型能讀哪種媒體。
 engine 依設定檔把抽象 effort 翻成 `requested_effort`,再呼叫既有的
 `run_task(prompt, requested_model, requested_effort, cwd) -> TaskResult`。Adapter
 不另設 effort 翻譯方法,只使用收到的 CLI 實際值執行。`TaskResult` 包含
-`exit_code`、`output`、`quota_exhausted`、
-`reset_at`;額度偵測封裝在 adapter 內,主迴圈不感知廠牌差異。
+`exit_code`、`output`、`quota_exhausted`、`reset_at` 與獨立的
+`checkpoint_resume` 結果;額度與控制記錄偵測封裝在 adapter 內,主迴圈不感知廠牌差異。
 
 ## 專案狀態
 

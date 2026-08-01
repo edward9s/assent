@@ -1,7 +1,8 @@
 """Adapter interface and shared data types.
 
 Quota message detection and parsing are encapsulated inside each adapter; the main loop
-stays unaware of vendor differences.
+stays unaware of vendor differences.  The one provider-neutral terminal control record is
+recognized here so every adapter applies the same exact-match rule.
 """
 from __future__ import annotations
 
@@ -17,6 +18,27 @@ if TYPE_CHECKING:
     from assent.config import AdapterSettings, Config
 
 
+CHECKPOINT_RESUME_RECORD = '{"type":"assent.checkpoint_resume"}'
+
+
+def is_checkpoint_resume_line(raw_line: str) -> bool:
+    """Return whether one streamed line is exactly the checkpoint-resume record."""
+    return raw_line.rstrip("\r\n") == CHECKPOINT_RESUME_RECORD
+
+
+def parse_checkpoint_resume_output(output: str, exit_code: int,
+                                   stalled: bool) -> bool:
+    """Recognize the control record only as a finished nonzero final non-empty line.
+
+    Empty lines after the record are harmless transport formatting; any later non-empty
+    line, extra character, zero exit, or watchdog stall makes the result ineligible.
+    """
+    if exit_code == 0 or stalled:
+        return False
+    nonempty = [line for line in output.splitlines() if line.strip()]
+    return bool(nonempty and is_checkpoint_resume_line(nonempty[-1]))
+
+
 @dataclass
 class TaskResult:
     exit_code: int
@@ -29,6 +51,7 @@ class TaskResult:
     # journal and retry prompt only: the adapter never writes task status or checkpoints,
     # and a classification never turns a non-zero exit into a success.
     failure_kind: str | None = None
+    checkpoint_resume: bool = False  # True = exact terminal control record requested continuation
 
 
 @dataclass(frozen=True)

@@ -44,7 +44,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
 from assent import AssentError
-from assent.adapters import Adapter, InvocationRequest, TaskResult
+from assent.adapters import (Adapter, InvocationRequest, TaskResult,
+                             is_checkpoint_resume_line,
+                             parse_checkpoint_resume_output)
 from assent.adapters.process import run_subprocess
 
 if TYPE_CHECKING:
@@ -280,6 +282,8 @@ def format_output_line(raw_line: str) -> str | None:
     arrived.  No JSON event, token count, tool call or server-selected model is inferred:
     a line that merely looks like JSON is still just a line of output.
     """
+    if is_checkpoint_resume_line(raw_line):
+        return None
     text = raw_line.rstrip("\r\n")
     if not text.strip():
         return None
@@ -413,10 +417,15 @@ class AntigravityAdapter(Adapter):
             except OSError:
                 pass
         kind = classify_output(returncode, stalled, output)
+        checkpoint_resume = (
+            parse_checkpoint_resume_output(output, returncode, stalled)
+            and kind == "nonzero")
         return TaskResult(exit_code=returncode, output=output,
                           quota_exhausted=kind == "quota",
                           reset_at=None,        # print mode states no reset time; none is invented
-                          stalled=stalled, failure_kind=kind)
+                          stalled=stalled,
+                          checkpoint_resume=checkpoint_resume,
+                          failure_kind=None if checkpoint_resume else kind)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

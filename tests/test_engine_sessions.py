@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import AssentError, engine, gitops
-from assent.adapters import TaskResult
+from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      wake_stop_waiters)
 from assent.config import load_config
@@ -435,6 +435,57 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
             quota["summary"],
             "Quota exhausted; progress kept, waiting for quota reset before resuming")
         self.assertNotIn("session", [e["event"] for e in entries])
+
+    def test_checkpoint_resume_keeps_same_adapter_without_wait_rotation_or_retry(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0)
+        cfg.adapter_names = ("claude", "codex")
+        self.commit_all()
+        control = TaskResult(
+            exit_code=1, output=CHECKPOINT_RESUME_RECORD + "\n",
+            quota_exhausted=False, reset_at=None, checkpoint_resume=True)
+
+        def checkpoint_step(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text("kept", encoding="utf-8")
+            return control
+
+        claude = ScriptedAdapter(
+            [checkpoint_step, self.ai_done(path)], resolved_model="claude-lite")
+        codex = ScriptedAdapter([], resolved_model="codex-lite")
+        sleeps: list[float] = []
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            with mock.patch("assent.engine.get_adapter", return_value=codex):
+                result = engine.run(
+                    cfg, once=True, adapter=claude, sleep=sleeps.append)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(claude.calls), 2)
+        self.assertEqual(codex.calls, [])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(claude.calls[0][1:], claude.calls[1][1:])
+        self.assertIn("resume", claude.calls[1][0].lower())
+
+        terminal = out.getvalue()
+        self.assertIn("Checkpoint-resume control received", terminal)
+        self.assertIn("same adapter command", terminal)
+        self.assertNotIn("Waiting for quota reset", terminal)
+        self.assertNotIn("Switching adapter", terminal)
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        checkpoint = next(entry for entry in entries
+                          if entry["event"] == "checkpoint_resume")
+        self.assertEqual(checkpoint["agent"], "claude")
+        self.assertEqual(checkpoint["requested_model"], "claude-lite")
+        self.assertEqual(checkpoint["requested_effort"], "medium")
+        self.assertIn(CHECKPOINT_RESUME_RECORD, checkpoint["detail"])
+        self.assertNotIn("quota", [entry["event"] for entry in entries])
+        self.assertTrue(any(subject.startswith("wip(plan01/t001): ")
+                            for subject in self.subjects()))
 
     def test_quota_rotates_to_next_adapter_and_records_each_identity(self):
         path = self.write_task(1)
