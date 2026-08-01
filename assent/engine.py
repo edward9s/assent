@@ -28,6 +28,7 @@ Acceptance defences added by assent (the format contract's "defence rules"):
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
@@ -38,8 +39,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, TextIO
 
-from assent import (AssentError, contracts, gitops, lockfile, shared_paths,
-                    verification)
+from assent import (AssentError, auto_fix, contracts, gitops, lockfile,
+                    shared_paths, verification)
 from assent.adapters import Adapter, get_adapter
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      stop_wake_requested)
@@ -49,9 +50,9 @@ from assent.inspection import try_write_report
 from assent.plan import (Plan, Task, append_entry, parse_task_file,
                          read_entries, same_except_status, set_status)
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
-                              StackState, capability_errors, has_git_marker,
-                              resolve_session, resolve_stack_state,
-                              worktree_configuration_errors)
+                              StackState, auto_fix_review_capability_errors,
+                              capability_errors, has_git_marker, resolve_session,
+                              resolve_stack_state, worktree_configuration_errors)
 
 # Default prompt template (overridable via [prompt] template; variables are substituted
 # literally, tolerating other braces inside the template).
@@ -104,6 +105,37 @@ _CLOSEOUT_RETRY_SUFFIX = (
     "This session must only close out the task: change the status line in the task "
     "file to DONE, and append one [[entry]] journal record to the journal file. "
     "Do not modify any code or tests.")
+
+_AUTO_FIX_REVIEW_PROMPT = """You are the read-only Assent folder reviewer.
+
+Inspect the complete cumulative implementation for folder {folder}. This is a
+blocking review gate, not an implementation session: do not edit, create,
+delete, rename, format, or otherwise write any project or management-plane
+file. This cooperative write check does not make the worktree a security
+sandbox and cannot intercept effects outside the project.
+
+Review all of the following before deciding:
+- the cumulative checkpoint diff: `git diff --find-renames {base_ref}..HEAD --`
+- every task contract and relevant journal reproduced below
+- the implementation and tests named by those contracts and changed by the diff
+- the final focused evidence, whose distinct commands all exited zero
+
+Report only blocking correctness, safety, unmet-requirement, or missing-test
+findings. Do not report style, preference, optional cleanup, or speculative
+enhancement comments. Finish with exactly one provider-neutral JSON object on
+the last non-empty output line and no later text:
+PASS: {{"type":"assent.auto_fix_review","verdict":"PASS","findings":[]}}
+FAIL: {{"type":"assent.auto_fix_review","verdict":"FAIL","findings":[{{"task_id":"tNNN or null","path":"project/relative/path","summary":"concise blocker","evidence":"specific evidence"}}]}}
+
+Source tree: {source_tree}
+Base commit: {base_ref}
+
+Final focused evidence:
+{focused_evidence}
+
+Task contracts and journals:
+{management_evidence}
+"""
 
 _QUOTA_BUFFER = timedelta(minutes=2)  # reset time + buffer, to avoid being blocked again right at the edge
 _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
@@ -512,6 +544,7 @@ def _prepare_worktree(cfg: Config) -> Config:
 # --------------------------------------------------------------------------- #
 def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         adapter: Adapter | None = None,
+        auto_fix_adapter: Adapter | None = None,
         sleep: Callable[[float], None] | None = None,
         now: Callable[[], datetime] | None = None,
         run_level_verify: bool = False) -> int:
@@ -559,7 +592,8 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     result: int
     try:
         with lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name):
-            result = _run_locked(cfg, once, task_id, adapter, sleep, now)
+            result = _run_locked(
+                cfg, once, task_id, adapter, auto_fix_adapter, sleep, now)
     except lockfile.LockBusy as e:
         print(str(e))
         return 1
@@ -597,6 +631,7 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
 
 def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 adapter: Adapter | None,
+                auto_fix_adapter: Adapter | None,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
     """The actual run body, after the task folder lock is held."""
@@ -689,6 +724,13 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
 
             if once or task_id is not None:
                 break
+
+        if cfg.auto_fix_review is not None:
+            review_result = _run_auto_fix_review_gate(
+                cfg, once=once, task_id=task_id,
+                injected_adapter=auto_fix_adapter, sleep=sleep, now=now)
+            if review_result != 0:
+                return review_result
     except KeyboardInterrupt:
         # Ctrl+C on the Windows console reaches the child process (the AI session) too, so
         # the session is terminated by the OS signal; here the engine gathers the produced
@@ -772,6 +814,239 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     _print_summary(Plan.parse(cfg.tasks_dir))
     try_write_report(cfg)
     return 0
+
+
+def _auto_fix_management_evidence(plan: Plan) -> str:
+    """Reproduce the reviewed contracts and journals in deterministic order."""
+    sections: list[str] = []
+    for task in plan.tasks:
+        for label, path in (("task contract", task.path),
+                            ("journal", task.journal_path)):
+            if label == "journal" and not path.is_file():
+                text = "(journal does not exist)"
+            else:
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError as e:
+                    raise AssentError(
+                        f"Unable to read auto-fix review {label} {path}: {e}") from e
+            sections.append(f"--- {task.id} {label}: {path} ---\n{text.rstrip()}")
+    return "\n\n".join(sections)
+
+
+def _auto_fix_review_identity(cfg: Config, plan: Plan,
+                              commands: list[str]) -> tuple[str, str, str, str]:
+    """Return source tree, task-plan digest, prompt text, and prompt digest."""
+    source_tree = gitops.tree_of(cfg.root, "HEAD")
+    resolved_base = resolve_stack_state(cfg).base.resolved_base
+    base_ref = gitops.merge_base(cfg.root, resolved_base, "HEAD")
+    focused = "\n".join(f"- PASS: {command}" for command in commands)
+    prompt = _AUTO_FIX_REVIEW_PROMPT.format(
+        folder=cfg.tasks_name,
+        base_ref=base_ref,
+        source_tree=source_tree,
+        focused_evidence=focused,
+        management_evidence=_auto_fix_management_evidence(plan),
+    )
+    plan_digest = auto_fix.sha256_files(task.path for task in plan.tasks)
+    prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    return source_tree, plan_digest, prompt, prompt_digest
+
+
+def _auto_fix_existing_state(cfg: Config) -> auto_fix.AutoFixState | None:
+    path = auto_fix.auto_fix_state_path(cfg)
+    if not path.exists():
+        return None
+    return auto_fix.read_auto_fix_state(path)
+
+
+def _auto_fix_surface_change(
+        before: auto_fix.ProjectSurfaceSnapshot,
+        cfg: Config, before_head: str,
+        before_status: gitops.WorkingTreeStatus,
+        before_primary_head: str | None,
+        before_primary_status: gitops.WorkingTreeStatus | None) -> tuple[str, ...]:
+    after = auto_fix.snapshot_project_surface(
+        cfg.root, cfg.assent_dir, cfg.source_root)
+    changed = list(before.changed_paths(after))
+    if gitops.commit_of(cfg.root, "HEAD") != before_head:
+        changed.append("source:.git/HEAD")
+    if gitops.working_tree_status(cfg.root, cfg.git_excludes) != before_status:
+        changed.append("source:.git/index-or-status")
+    if cfg.source_root is not None:
+        if gitops.commit_of(cfg.source_root, "HEAD") != before_primary_head:
+            changed.append("primary:.git/HEAD")
+        if (gitops.working_tree_status(cfg.source_root, cfg.git_excludes)
+                != before_primary_status):
+            changed.append("primary:.git/index-or-status")
+    return tuple(sorted(set(changed)))
+
+
+def _run_auto_fix_review_gate(
+        cfg: Config, *, once: bool, task_id: str | None,
+        injected_adapter: Adapter | None,
+        sleep: Callable[[float], None],
+        now: Callable[[], datetime]) -> int:
+    """Run the optional read-only folder review while the folder lock is held."""
+    review = cfg.auto_fix_review
+    if review is None:
+        return 0
+
+    plan = Plan.parse(cfg.tasks_dir)
+    incomplete = [task for task in plan.tasks
+                  if task.status not in ("DONE", "SKIP")]
+    if incomplete:
+        limited = " after the limited run" if once or task_id is not None else ""
+        shown = ", ".join(f"{task.id}={task.status}" for task in incomplete)
+        print(f"Auto-fix folder review deferred{limited}; folder is incomplete ({shown}).")
+        return 0
+
+    done = [task for task in plan.tasks if task.status == "DONE"]
+    if not done:
+        print("Auto-fix folder review: all tasks are SKIP; no implementation review session needed.")
+        return 0
+
+    commands: list[str] = []
+    seen: set[str] = set()
+    print("Auto-fix folder review: running final distinct focused checks.")
+    for task in done:
+        if task.verify in seen:
+            continue
+        seen.add(task.verify)
+        commands.append(task.verify)
+        if _run_verify(cfg, task.verify) != 0:
+            print("Auto-fix folder review: focused verification failed; reviewer was not started.")
+            return 1
+    if not gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
+        print("Auto-fix folder review: focused verification changed the source worktree; "
+              "reviewer was not started and the exact changes are preserved.")
+        return 1
+
+    source_tree, plan_digest, prompt, prompt_digest = _auto_fix_review_identity(
+        cfg, plan, commands)
+    existing = _auto_fix_existing_state(cfg)
+    freshness = dict(
+        source_tree=source_tree,
+        task_plan_sha256=plan_digest,
+        review_prompt_sha256=prompt_digest,
+        reviewer_adapter=review.adapter,
+        reviewer_model=review.requested_model,
+        reviewer_effort=review.requested_effort,
+    )
+    if existing is not None and auto_fix.auto_fix_state_is_fresh(
+            existing, **freshness):
+        print("Auto-fix folder review: reusing exact fresh PASS; no reviewer session started.")
+        return 0
+
+    try:
+        reviewer = injected_adapter or get_adapter(review.adapter, cfg)
+    except AssentError as e:
+        print(f"Auto-fix reviewer resolution failed: {e}")
+        return 1
+    session, errors = auto_fix_review_capability_errors(cfg, reviewer)
+    if errors:
+        print(f"{review.adapter} auto-fix review capability preflight: FAIL "
+              "(refusing before the review session)")
+        for message in errors:
+            print(f"  - {message}")
+        return 1
+    assert session is not None
+
+    baseline = auto_fix.snapshot_project_surface(
+        cfg.root, cfg.assent_dir, cfg.source_root)
+    baseline_head = gitops.commit_of(cfg.root, "HEAD")
+    baseline_status = gitops.working_tree_status(cfg.root, cfg.git_excludes)
+    baseline_primary_head = (gitops.commit_of(cfg.source_root, "HEAD")
+                             if cfg.source_root is not None else None)
+    baseline_primary_status = (
+        gitops.working_tree_status(cfg.source_root, cfg.git_excludes)
+        if cfg.source_root is not None else None)
+    invalid_attempts = 0
+    while True:
+        print(f"Auto-fix review session: {session.agent} | "
+              f"{review.model}->{session.requested_model} | "
+              f"{review.effort}->{session.requested_effort}")
+        try:
+            result = reviewer.run_task(
+                prompt, session.requested_model, session.requested_effort, cfg.root)
+        except KeyboardInterrupt:
+            changed = _auto_fix_surface_change(
+                baseline, cfg, baseline_head, baseline_status,
+                baseline_primary_head, baseline_primary_status)
+            if changed:
+                print("Auto-fix reviewer interruption left project writes; exact edits are preserved: "
+                      + ", ".join(changed[:8]))
+            else:
+                print("Auto-fix reviewer interrupted; no verdict was recorded.")
+            return 130
+        except OSError as e:
+            changed = _auto_fix_surface_change(
+                baseline, cfg, baseline_head, baseline_status,
+                baseline_primary_head, baseline_primary_status)
+            suffix = (f"; project writes preserved: {', '.join(changed[:8])}"
+                      if changed else "")
+            print(f"Auto-fix reviewer infrastructure failure: {e}{suffix}")
+            return 1
+
+        changed = _auto_fix_surface_change(
+            baseline, cfg, baseline_head, baseline_status,
+            baseline_primary_head, baseline_primary_status)
+        if changed:
+            shown = ", ".join(changed[:8]) + (" ..." if len(changed) > 8 else "")
+            print("Auto-fix reviewer violated the read-only gate; PASS/FAIL was ignored and "
+                  f"the exact edits are preserved ({shown}).")
+            return 1
+
+        if (result.checkpoint_resume and not result.quota_exhausted
+                and not result.stalled and result.exit_code != 0):
+            print("Auto-fix reviewer requested immediate checkpoint-resume continuation.")
+            continue
+        if result.quota_exhausted:
+            print("Auto-fix reviewer quota exhausted; waiting before resuming the same review.")
+            _wait_for_quota(cfg, result.reset_at, sleep, now)
+            continue
+        if result.failure_kind == "billing":
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output, result.failure_kind)
+            print(f"Auto-fix reviewer billing/balance failure: {reason}")
+            return 1
+        if result.exit_code != 0 or result.stalled:
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output, result.failure_kind)
+            print(f"Auto-fix reviewer adapter failure: {reason}")
+            if result.exit_code == 130 or result.failure_kind == "interrupt":
+                return 130
+            return 1
+
+        try:
+            record = auto_fix.parse_review_output(result.output)
+            known_ids = {task.id for task in plan.tasks}
+            unknown = sorted({finding.task_id for finding in record.findings
+                              if finding.task_id is not None
+                              and finding.task_id not in known_ids})
+            if unknown:
+                raise AssentError(
+                    "Auto-fix review findings name unknown task ids: "
+                    + ", ".join(unknown))
+        except AssentError as e:
+            if invalid_attempts < cfg.retry_per_task:
+                invalid_attempts += 1
+                print(f"Auto-fix reviewer returned invalid output ({e}); retrying "
+                      f"({invalid_attempts}/{cfg.retry_per_task}).")
+                continue
+            print(f"Auto-fix reviewer returned invalid output after configured retries: {e}")
+            return 1
+
+        state = auto_fix.state_for_review(record, previous=existing, **freshness)
+        auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
+        if record.verdict == "PASS":
+            print("Auto-fix folder review: PASS.")
+            return 0
+        print("Auto-fix folder review: FAIL; blocking findings were preserved for repair.")
+        for finding in record.findings:
+            owner = f"{finding.task_id}: " if finding.task_id else ""
+            print(f"  - {owner}{finding.path}: {finding.summary}")
+        return 1
 
 
 def _recover_or_ensure_clean(cfg: Config, now: Callable[[], datetime]) -> None:

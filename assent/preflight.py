@@ -130,6 +130,40 @@ def capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
     return adapter.preflight(requests)
 
 
+def resolve_auto_fix_review_session(cfg: Config,
+                                    adapter: Adapter) -> SessionIdentity:
+    """Resolve the configured folder reviewer through normal adapter mappings."""
+    review = cfg.auto_fix_review
+    if review is None:
+        raise AssentError("Auto-fix folder review is not configured")
+    return SessionIdentity(
+        agent=review.adapter,
+        requested_model=review.requested_model,
+        effort=review.effort,
+        requested_effort=review.requested_effort,
+    )
+
+
+def auto_fix_review_capability_errors(
+        cfg: Config, adapter: Adapter) -> tuple[SessionIdentity | None, list[str]]:
+    """Resolve and preflight the one optional read-only folder-review invocation."""
+    review = cfg.auto_fix_review
+    if review is None:
+        return None, []
+    try:
+        session = resolve_auto_fix_review_session(cfg, adapter)
+        request = InvocationRequest(
+            task_id=f"{cfg.tasks_name}/folder-review",
+            model=review.model,
+            effort=review.effort,
+            requested_model=session.requested_model,
+            requested_effort=session.requested_effort,
+        )
+    except AssentError as e:
+        return None, [str(e)]
+    return session, adapter.preflight([request])
+
+
 # --------------------------------------------------------------------------- #
 # assignment rendering
 # --------------------------------------------------------------------------- #

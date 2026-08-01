@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Iterable
 
 from assent import AssentError
 from assent.config import Config
@@ -144,6 +147,121 @@ class AutoFixState:
     @property
     def review_effort(self) -> str:
         return self.reviewer_effort
+
+
+@dataclass(frozen=True)
+class ProjectSurfaceSnapshot:
+    """Content identities for the source tree and Assent management plane.
+
+    Directory links and Windows reparse points are recorded as leaf objects and
+    never traversed.  This is a write detector around a cooperative read-only
+    reviewer, not a process sandbox.
+    """
+
+    entries: tuple[tuple[str, str], ...]
+
+    def changed_paths(self, other: "ProjectSurfaceSnapshot") -> tuple[str, ...]:
+        before = dict(self.entries)
+        after = dict(other.entries)
+        return tuple(sorted(
+            path for path in set(before) | set(after)
+            if before.get(path) != after.get(path)))
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _surface_entries(root: Path, prefix: str,
+                     excluded_roots: Iterable[str] = ()) -> list[tuple[str, str]]:
+    """Inventory one directory without following a directory link/reparse point."""
+    excluded = set(excluded_roots)
+    entries: list[tuple[str, str]] = []
+
+    def walk(directory: Path, relative: PurePosixPath) -> None:
+        try:
+            with os.scandir(directory) as iterator:
+                children = sorted(iterator, key=lambda item: item.name)
+        except OSError as e:
+            raise AssentError(f"Unable to snapshot review surface {directory}: {e}") from e
+        for child in children:
+            child_rel = relative / child.name
+            rel_text = child_rel.as_posix()
+            if not relative.parts and child.name in excluded:
+                continue
+            key = f"{prefix}:{rel_text}"
+            try:
+                info = child.stat(follow_symlinks=False)
+                attributes = getattr(info, "st_file_attributes", 0)
+                reparse = bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+                if child.is_symlink() or reparse:
+                    try:
+                        target = os.readlink(child.path)
+                    except OSError:
+                        target = ""
+                    identity = hashlib.sha256(
+                        (f"link\0{info.st_mode}\0{attributes}\0{target}").encode(
+                            "utf-8", errors="surrogatepass")).hexdigest()
+                    entries.append((key, f"link:{identity}"))
+                elif child.is_dir(follow_symlinks=False):
+                    entries.append((key, "directory"))
+                    walk(Path(child.path), child_rel)
+                elif child.is_file(follow_symlinks=False):
+                    entries.append((key, f"file:{info.st_size}:{_file_sha256(Path(child.path))}"))
+                else:
+                    entries.append((key, f"other:{info.st_mode}"))
+            except OSError as e:
+                raise AssentError(
+                    f"Unable to snapshot review surface entry {child.path}: {e}") from e
+
+    walk(root, PurePosixPath())
+    return entries
+
+
+def snapshot_project_surface(source_root: Path,
+                             assent_dir: Path,
+                             primary_root: Path | None = None
+                             ) -> ProjectSurfaceSnapshot:
+    """Snapshot the reviewer-visible source and project management files."""
+    source_root = Path(source_root)
+    assent_dir = Path(assent_dir)
+    if not source_root.is_dir():
+        raise AssentError(f"Auto-fix review source is not a directory: {source_root}")
+    if not assent_dir.is_dir():
+        raise AssentError(
+            f"Auto-fix review management plane is not a directory: {assent_dir}")
+    entries = _surface_entries(source_root, "source", {".git", ".assent"})
+    if primary_root is not None:
+        primary_root = Path(primary_root)
+        if not primary_root.is_dir():
+            raise AssentError(
+                f"Auto-fix review primary tree is not a directory: {primary_root}")
+        if primary_root.resolve() != source_root.resolve():
+            entries.extend(_surface_entries(
+                primary_root, "primary", {".git", ".assent"}))
+    entries.extend(_surface_entries(assent_dir, "management"))
+    return ProjectSurfaceSnapshot(tuple(sorted(entries)))
+
+
+def sha256_files(paths: Iterable[Path]) -> str:
+    """Hash an ordered set of named files, including names and exact bytes."""
+    digest = hashlib.sha256()
+    for path in sorted((Path(path) for path in paths), key=lambda item: item.name):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            data = path.read_bytes()
+        except OSError as e:
+            raise AssentError(f"Unable to hash auto-fix input {path}: {e}") from e
+        digest.update(str(len(data)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(data)
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _require_exact_keys(data: dict, expected: set[str], label: str) -> None:
@@ -457,6 +575,12 @@ def _state_text(state: AutoFixState) -> str:
         "current_finding_fingerprints = "
         f"{_toml_array(state.current_finding_fingerprints)}\n"
     )
+    if not state.findings:
+        text += "findings = []\n"
+    if not state.observed_states:
+        text += "observed_states = []\n"
+    if not state.consumed_fixer_profiles:
+        text += "consumed_fixer_profiles = []\n"
     for finding in state.findings:
         text += (
             "\n[[findings]]\n"
@@ -577,6 +701,45 @@ def auto_fix_state_is_fresh(
         and state.reviewer_model == reviewer_model
         and state.reviewer_effort == reviewer_effort
     )
+
+
+def state_for_review(
+        record: ReviewRecord, *, source_tree: str, task_plan_sha256: str,
+        review_prompt_sha256: str, reviewer_adapter: str,
+        reviewer_model: str, reviewer_effort: str,
+        previous: AutoFixState | None = None) -> AutoFixState:
+    """Build the next durable state while retaining prior finding evidence."""
+    record = _validate_review_record(record)
+    prior_findings = previous.findings if previous is not None else ()
+    prior_observed = previous.observed_states if previous is not None else ()
+    prior_profiles = previous.consumed_fixer_profiles if previous is not None else ()
+
+    ledger = {finding.fingerprint: finding for finding in prior_findings}
+    current: list[str] = []
+    for finding in record.findings:
+        persisted = persisted_finding(finding)
+        ledger.setdefault(persisted.fingerprint, persisted)
+        current.append(persisted.fingerprint)
+    current_tuple = tuple(current)
+    observed = ObservedState(source_tree, current_tuple)
+    observations = prior_observed
+    if observed not in observations:
+        observations += (observed,)
+    state = AutoFixState(
+        version=AUTO_FIX_STATE_VERSION,
+        source_tree=source_tree,
+        task_plan_sha256=task_plan_sha256,
+        review_prompt_sha256=review_prompt_sha256,
+        reviewer_adapter=reviewer_adapter,
+        reviewer_model=reviewer_model,
+        reviewer_effort=reviewer_effort,
+        verdict=record.verdict,
+        current_finding_fingerprints=current_tuple,
+        findings=tuple(ledger.values()),
+        observed_states=observations,
+        consumed_fixer_profiles=prior_profiles,
+    )
+    return _validate_state(state)
 
 
 read_state = read_auto_fix_state

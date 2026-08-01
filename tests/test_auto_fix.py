@@ -11,7 +11,8 @@ from assent.auto_fix import (
     ReviewFinding, ReviewRecord, auto_fix_state_is_fresh,
     auto_fix_state_path, finding_fingerprint, normalize_finding_path,
     parse_review_output, persisted_finding, read_auto_fix_state,
-    review_record_json, write_auto_fix_state,
+    review_record_json, snapshot_project_surface, state_for_review,
+    write_auto_fix_state,
 )
 
 
@@ -176,6 +177,29 @@ class TestAutoFixState(unittest.TestCase):
     def test_state_path_is_folder_local(self):
         self.assertEqual(auto_fix_state_path(self.root / ".assent" / "plan01"),
                          self.path)
+
+    def test_new_pass_with_empty_ledger_round_trips(self):
+        state = state_for_review(
+            ReviewRecord("PASS", ()), source_tree=self.tree,
+            task_plan_sha256=self.plan_digest,
+            review_prompt_sha256=self.prompt_digest,
+            reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+            reviewer_effort="high")
+        write_auto_fix_state(self.path, state)
+        self.assertEqual(read_auto_fix_state(self.path), state)
+
+    def test_surface_snapshot_reports_exact_changed_paths(self):
+        source = self.root / "source"
+        management = self.root / ".assent"
+        source.mkdir()
+        management.mkdir(exist_ok=True)
+        (source / "code.py").write_text("before\n", encoding="utf-8")
+        before = snapshot_project_surface(source, management)
+        (source / "code.py").write_text("after\n", encoding="utf-8")
+        (management / "new.toml").write_text("value = 1\n", encoding="utf-8")
+        after = snapshot_project_surface(source, management)
+        self.assertEqual(before.changed_paths(after), (
+            "management:new.toml", "source:code.py"))
 
 
 if __name__ == "__main__":

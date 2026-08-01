@@ -16,7 +16,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from assent import engine, gitops, inspection
+from assent import auto_fix, engine, gitops, inspection
 from assent.adapters import TaskResult
 from assent.config import load_config
 from assent.lockfile import hold_lock
@@ -941,6 +941,150 @@ class TestReworkPromptSuffix(GlobalContractsMixin, EngineTestCase):
         prompt = adapter.calls[0][0]
         self.assertNotIn("rejected by a human reviewer", prompt)
 
+
+class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
+    def build_review(self, retry=1):
+        return self.build(
+            retry=retry,
+            extra_config=(
+                '[auto_fix.review]\n'
+                'adapter = "codex"\n'
+                'model = "core"\n'
+                'effort = "heavy"\n'))
+
+    def test_complete_folder_sweeps_distinct_checks_then_reuses_exact_pass(self):
+        command = _OK
+        self.write_task(1, status="DONE", verify=command)
+        self.write_task(2, status="DONE", verify=command)
+        cfg = self.build_review()
+        self.commit_all()
+
+        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+
+        def review(prompt):
+            self.assertIn("cumulative checkpoint diff", prompt)
+            self.assertIn("t001 task contract", prompt)
+            self.assertIn(f"PASS: {command}", prompt)
+            return TaskResult(0, terminal, False, None)
+
+        reviewer = ScriptedAdapter([review])
+        reviewer.preflight = mock.Mock(return_value=[])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter([]),
+                auto_fix_adapter=reviewer), 0)
+        self.assertEqual(len(reviewer.calls), 1)
+        reviewer.preflight.assert_called_once()
+        self.assertEqual(out.getvalue().count(f"  verify: {command}"), 1)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
+
+        cached = ScriptedAdapter([])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter([]),
+                auto_fix_adapter=cached), 0)
+        self.assertEqual(cached.calls, [])
+        self.assertIn("reusing exact fresh PASS", out.getvalue())
+
+    def test_focused_failure_starts_no_reviewer(self):
+        self.write_task(1, status="DONE", verify=_FAILV)
+        cfg = self.build_review()
+        self.commit_all()
+        reviewer = ScriptedAdapter([])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([]),
+            auto_fix_adapter=reviewer), 1)
+        self.assertEqual(reviewer.calls, [])
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
+
+    def test_detectable_reviewer_write_is_preserved_and_cannot_pass(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build_review()
+        self.commit_all()
+        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+
+        def mutating_review(_prompt):
+            (self.execution_root() / "reviewer-write.txt").write_text(
+                "evidence\n", encoding="utf-8")
+            return TaskResult(0, terminal, False, None)
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([]),
+            auto_fix_adapter=ScriptedAdapter([mutating_review])), 1)
+        self.assertEqual(
+            (self.execution_root() / "reviewer-write.txt").read_text(encoding="utf-8"),
+            "evidence\n")
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
+
+    def test_invalid_response_retries_then_persists_valid_fail(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build_review(retry=1)
+        self.commit_all()
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/missing.py", "Required test is missing",
+            "The acceptance case has no regression test.")
+        failed = auto_fix.review_record_json(
+            auto_fix.ReviewRecord("FAIL", (finding,)))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, "not a review record", False, None),
+            TaskResult(0, failed, False, None),
+        ])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([]),
+            auto_fix_adapter=reviewer), 1)
+        self.assertEqual(len(reviewer.calls), 2)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "FAIL")
+        self.assertEqual(state.findings[0].evidence, finding.evidence)
+
+    def test_checkpoint_resume_and_quota_continue_without_consuming_invalid_retry(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build_review(retry=0)
+        self.commit_all()
+        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        reviewer = ScriptedAdapter([
+            TaskResult(1, '{"type":"assent.checkpoint_resume"}', False,
+                       None, checkpoint_resume=True),
+            TaskResult(1, "quota", True, None),
+            TaskResult(0, terminal, False, None),
+        ])
+        sleeps = []
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
+            sleep=sleeps.append), 0)
+        self.assertEqual(len(reviewer.calls), 3)
+        self.assertEqual(sum(sleeps), cfg.quota_poll_minutes * 60)
+        self.assertLessEqual(max(sleeps), 60)
+
+    def test_incomplete_limited_and_all_skip_folders_spend_no_review_tokens(self):
+        first = self.write_task(1)
+        second = self.write_task(2, deps=("t001",))
+        cfg = self.build_review()
+        self.commit_all()
+        reviewer = ScriptedAdapter([])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, once=True, adapter=ScriptedAdapter([self.ai_done(first)]),
+                auto_fix_adapter=reviewer), 0)
+        self.assertEqual(reviewer.calls, [])
+        self.assertIn("review deferred after the limited run", out.getvalue())
+
+        set_status(first, "SKIP")
+        set_status(second, "SKIP")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter([]),
+                auto_fix_adapter=reviewer), 0)
+        self.assertEqual(reviewer.calls, [])
+        self.assertIn("all tasks are SKIP", out.getvalue())
+
+
+class TestReworkPromptFallbacks(GlobalContractsMixin, EngineTestCase):
     def test_missing_journal_adds_no_suffix_and_does_not_raise(self):
         path = self.write_task(1)
         cfg = self.build()
