@@ -459,6 +459,50 @@ class ContinueTest(ReconcileRepositoryCase):
         self.assertEqual(
             (external / "sentinel.txt").read_text(encoding="utf-8"), "keep\n")
 
+    def test_continue_refuses_when_same_fingerprint_changes_reviewed_paths(self) -> None:
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\nassets/\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "add shared reconciliation targets")
+        for directory in ("pkg", "assets"):
+            (self.root / directory).mkdir()
+            (self.root / directory / "sentinel.txt").write_text(
+                f"{directory} sentinel\n", encoding="utf-8")
+        self._conflicting_repository()
+        shared_paths.review(self.root, self.source_worktree,
+                            paths=("pkg",), watch=(".gitignore",))
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        self._resolve("keep this human resolution\n")
+        managed = self._managed_path()
+        source_tip = self.source_tip
+        target_tip = self.target_tip
+
+        # The watch and ignore rules are unchanged, so this review deliberately
+        # reuses the same fingerprint while replacing the reviewed answer.
+        shared_paths.review(self.root, self.source_worktree,
+                            paths=("assets",), watch=(".gitignore",))
+
+        code, output = self._run(reconcile_continue)
+
+        self.assertEqual(code, 1)
+        self.assertIn("recorded paths", output)
+        self.assertIn("pkg", output)
+        self.assertIn("assets", output)
+        self.assertTrue(managed.exists())
+        self.assertEqual(
+            (managed / "shared.txt").read_text(encoding="utf-8"),
+            "keep this human resolution\n")
+        self.assertTrue(pathops.is_link(managed / "pkg"))
+        self.assertEqual(gitops.merge_head(managed), target_tip)
+        self.assertEqual(gitops.branch_tip(self.root, self.source_branch),
+                         source_tip)
+        self.assertEqual(
+            (self.root / "pkg" / "sentinel.txt").read_text(encoding="utf-8"),
+            "pkg sentinel\n")
+        self.assertEqual(
+            (self.root / "assets" / "sentinel.txt").read_text(encoding="utf-8"),
+            "assets sentinel\n")
+
     def test_continue_detaches_main_tree_links_before_managed_cleanup(self) -> None:
         before = self._provision_linked_targets()
         self._conflicting_repository()

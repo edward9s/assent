@@ -209,6 +209,27 @@ class TestThreeStateContract(SharedPathsCase):
         self.assertIn("pubspec.yaml (changed)", clause)
         self.assertNotIn("assets", clause)
 
+    def test_a_watch_left_untracked_goes_stale_even_when_ignored_bytes_remain(self):
+        (self.root / ".gitignore").write_text(
+            "pkg/\nassets/\nlib/l10n/arb/\nbuild/\npubspec.yaml\n",
+            encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "ignore the tracked watch")
+        before = (self.root / "pubspec.yaml").read_bytes()
+        shared_paths.review(
+            self.root, self.root, paths=("pkg",), watch=("pubspec.yaml",))
+
+        _git(self.root, "rm", "--cached", "pubspec.yaml")
+        _git(self.root, "commit", "-m", "remove the watched file from Git")
+
+        contract = shared_paths.classify(self.root, self.root)
+
+        self.assertEqual(contract.state, shared_paths.STALE)
+        self.assertIn("pubspec.yaml", " ".join(contract.evidence))
+        self.assertIn("no longer Git-tracked", " ".join(contract.evidence))
+        self.assertIn("assent shared-paths review", shared_paths.review_clause(contract))
+        self.assertEqual((self.root / "pubspec.yaml").read_bytes(), before)
+
     def test_two_branch_fingerprints_reuse_their_own_profiles_without_oscillation(
             self):
         self._review("pkg")

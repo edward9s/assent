@@ -69,6 +69,7 @@ STALE = "STALE"
 NO_IGNORED_DIRECTORY_CANDIDATE = "NO-IGNORED-DIRECTORY-CANDIDATE"
 
 ABSENT = "absent"                       # a watched path that is not there at all
+_UNTRACKED = "untracked"                # internal snapshot-only watch state
 _EXCLUDED_ROOTS = (".git", ".assent")
 _IGNORE_RULE_PATHSPEC = "*.gitignore"
 REVIEW_COMMAND = "assent shared-paths review"
@@ -606,7 +607,19 @@ def _profile_snapshots(manifest: Manifest, worktree: Path
     watch = sorted({entry for profile in manifest.profiles
                     for entry in profile.watch})
     ignore_files = ignore_rule_files(worktree)
-    digests = snapshot_digests(worktree, watch, ignore_files=ignore_files)
+    tracked_watch = {
+        relative: relative in gitops.tracked_paths(Path(worktree), relative)
+        for relative in watch
+    }
+    # Do not read an untracked local leftover merely because it has the same
+    # bytes as a formerly tracked watch.  Tracking provenance is part of the
+    # evidence, while the internal marker below never enters the manifest.
+    digests: dict[str, str] = {}
+    for relative in sorted(set(watch) | set(ignore_files)):
+        if relative in tracked_watch and not tracked_watch[relative]:
+            digests[relative] = _UNTRACKED
+        else:
+            digests[relative] = _digest_of(Path(worktree) / relative)
     snapshots = tuple({
             relative: digests[relative]
             for relative in set(profile.watch) | set(ignore_files)
@@ -625,7 +638,11 @@ def changed_watch_evidence(profile: Profile,
         now = current.get(relative, ABSENT)
         if now == recorded:
             continue
-        if recorded == ABSENT:
+        if now == _UNTRACKED:
+            changes.append(
+                f"{relative} (no longer Git-tracked; choose a currently "
+                f"tracked file with `{REVIEW_COMMAND}`)")
+        elif recorded == ABSENT:
             changes.append(f"{relative} (appeared)")
         elif now == ABSENT:
             changes.append(f"{relative} (disappeared)")
@@ -1315,10 +1332,18 @@ def application_problem(main: Path, worktree: Path, *,
                    if application.worktree == key), None)
     if record is None:
         return ""
-    if not any(profile.fingerprint == record.fingerprint
-               for profile in manifest.profiles):
+    same_fingerprint = tuple(
+        profile for profile in manifest.profiles
+        if profile.fingerprint == record.fingerprint)
+    if not same_fingerprint:
         return (f"the shared-path profile {record.fingerprint[:12]} recorded for "
                 f"{worktree} is no longer in {manifest_path(main)}")
+    if not any(profile.paths == record.paths for profile in same_fingerprint):
+        current = "; ".join(
+            f"{list(profile.paths)}" for profile in same_fingerprint)
+        return (f"the shared-path application for {worktree} recorded paths "
+                f"{list(record.paths)} under profile {record.fingerprint[:12]}, "
+                f"but the current profile declares {current}")
     for relative in record.paths:
         target = _link_target(main, relative)
         if not _resolves_to(Path(worktree) / relative, target):
