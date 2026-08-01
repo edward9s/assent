@@ -241,6 +241,12 @@ while operating an assent-managed session live in
   name as a CLI value. Vendor-specific effort values belong to configuration
   mappings (peers of the models table) and must not be hardcoded in adapter
   code.
+- An adapter command may request an immediate continuation only with the exact,
+  provider-neutral `{"type":"assent.checkpoint_resume"}` terminal control
+  record. Assent owns the WIP checkpoint and resume lifecycle; the record carries
+  no account, pool, quota-capacity, or reset semantics, requires no configuration
+  or capability probe, and ordinary vendor quota output keeps the existing
+  wait/adapter-rotation behavior.
 - Effort selection is deterministic: task explicit value, then the configured
   per-tier `default_effort` override, then the built-in per-tier default. A
   stated `default_effort` table overrides per tier rather than replacing the
