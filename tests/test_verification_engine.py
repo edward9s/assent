@@ -23,8 +23,9 @@ from unittest import mock
 
 from assent import engine
 from assent.config import load_config
-from assent.folder_verification import (VerificationReceipt, _verify_locked,
-                                        verify_folder, verify_folder_if_needed)
+from assent.folder_verification import VerificationReceipt, _verify_locked
+from assent.folder_verification_closeout import (verify_folder,
+                                                 verify_folder_if_needed)
 from assent.verification_common import run_full_verifier
 from tests.test_contracts import GlobalContractsMixin
 

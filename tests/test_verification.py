@@ -19,8 +19,8 @@ from assent.folder_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         VerificationReceipt, read_receipt,
                                         receipt_matches_current_candidate,
                                         receipt_path, receipt_report_lines,
-                                        verify_folder,
                                         write_receipt)
+from assent.verification import verify_folder
 from assent.gitops import (branch_tip, commit_of, folder_branches, tree_of,
                            working_tree_status)
 from assent.verification_common import (ProvisionedLink, _require_no_overlap,

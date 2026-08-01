@@ -6,18 +6,14 @@ folder-verification outcome the same best-effort report handoff.
 """
 from __future__ import annotations
 
-from importlib import import_module
-
 from assent.folder_verification import (verify_folder_receipt,
                                         verify_folder_receipt_if_needed)
+from assent.inspection import try_write_report as _try_write_report
 
 
 def try_write_report(cfg) -> None:
-    """Call the existing report writer without importing inspection at load time."""
-    # ``inspection`` imports the verification facade to render receipt lines.
-    # Importing it lazily keeps this orchestration layer acyclic too.
-    inspection = import_module("assent.inspection")
-    inspection.try_write_report(cfg)
+    """Call the inspection layer's best-effort report writer."""
+    _try_write_report(cfg)
 
 
 def refresh_report(cfg) -> None:

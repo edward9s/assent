@@ -428,14 +428,6 @@ def verify_folder_receipt(cfg: Config) -> int:
     return 1
 
 
-def verify_folder(cfg: Config) -> int:
-    """Run folder verification through the shared report closeout boundary."""
-    from importlib import import_module
-
-    return import_module(
-        "assent.folder_verification_closeout").verify_folder(cfg)
-
-
 def _receipt_matches_current_candidate_locked(cfg: Config) -> bool:
     """Compare a PASSED receipt while the integration and folder locks are held."""
     main = gitops.main_worktree(cfg.root)
@@ -561,14 +553,6 @@ def verify_folder_receipt_if_needed(cfg: Config) -> int:
         return 0
     print(f"verify {folder}: failed ({receipt.failure_summary})")
     return 1
-
-
-def verify_folder_if_needed(cfg: Config) -> int:
-    """Run conditional folder verification through the shared report closeout."""
-    from importlib import import_module
-
-    return import_module(
-        "assent.folder_verification_closeout").verify_folder_if_needed(cfg)
 
 
 def receipt_report_lines(cfg: Config) -> list[str]:

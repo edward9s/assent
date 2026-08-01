@@ -25,10 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from assent import AssentError, contracts, gitops, verification
+from assent import AssentError, contracts, gitops
 from assent.adapters import Adapter, get_adapter
 from assent.config import PROJECT_LAYER, Config
 from assent.folderdeps import parse_folder_dependencies
+from assent.folder_verification import receipt_report_lines
 from assent.plan import Plan, Task, read_entries
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               capability_errors, has_git_marker,
@@ -132,7 +133,7 @@ def render_report(cfg: Config, plan: Plan,
     if blocked:
         lines += ["", "To decide: compare each BLOCKED task's r file and checkpoint commit, "
                       "edit the task file and set status back to TODO to continue, or mark SKIP to abandon."]
-    lines += ["", *verification.receipt_report_lines(cfg)]
+    lines += ["", *receipt_report_lines(cfg)]
     return "\n".join(lines) + "\n"
 
 
