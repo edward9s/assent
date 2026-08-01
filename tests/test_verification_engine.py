@@ -466,6 +466,38 @@ class TestFullVerifierProcess(unittest.TestCase):
         self.assertIn("Full verification started", output.getvalue())
         self.assertIn("elapsed 301.2s, exit code 7", output.getvalue())
 
+    def test_invalid_utf8_output_is_escaped_and_nonzero_is_preserved(self):
+        completed = subprocess.CompletedProcess(
+            ["verifier"], 7, "valid output 診斷".encode("utf-8") + b"\x80",
+            b"native stderr\xff")
+        with mock.patch("assent.verification_common.subprocess.run",
+                        return_value=completed), \
+                mock.patch("assent.verification_common.time.monotonic",
+                           side_effect=[10.0, 11.0]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            actual = run_full_verifier(Path("verify.py"), Path("candidate"))
+
+        self.assertEqual(actual.returncode, 7)
+        self.assertIn("valid output 診斷", actual.stdout)
+        self.assertIn(r"\x80", actual.stdout)
+        self.assertIn(r"\xff", actual.stderr)
+        self.assertIn("not valid UTF-8", actual.stderr)
+        self.assertNotIn("\ufffd", actual.stdout + actual.stderr)
+
+    def test_zero_exit_with_invalid_utf8_output_becomes_failure(self):
+        completed = subprocess.CompletedProcess(["verifier"], 0, b"\x80", b"")
+        with mock.patch("assent.verification_common.subprocess.run",
+                        return_value=completed), \
+                mock.patch("assent.verification_common.time.monotonic",
+                           side_effect=[10.0, 11.0]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            actual = run_full_verifier(Path("verify.py"), Path("candidate"))
+
+        self.assertEqual(actual.returncode, 1)
+        self.assertIn(r"\x80", actual.stdout)
+        self.assertIn("not valid UTF-8", actual.stderr)
+        self.assertNotIn("\ufffd", actual.stdout + actual.stderr)
+
     def test_interrupt_is_reported_and_propagated_for_candidate_cleanup(self):
         output = io.StringIO()
         with mock.patch("assent.verification_common.subprocess.run",

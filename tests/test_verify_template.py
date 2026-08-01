@@ -36,6 +36,16 @@ _UNICODE_FAIL_MODULE = (
     "        self.fail('繁體中文失敗診斷')\n"
 )
 
+_INVALID_BYTES_MODULE = (
+    "import os\n"
+    "os.write(1, b'native unittest stdout ' + bytes([0x80]) + b'\\n')\n"
+    "os.write(2, b'native unittest stderr ' + bytes([0xff]) + b'\\n')\n"
+    "import unittest\n\n"
+    "class T(unittest.TestCase):\n"
+    "    def test_ok(self):\n"
+    "        pass\n"
+)
+
 
 class VerifyTemplateFixture(unittest.TestCase):
     """Builds a throwaway git repo running the packaged template as run_verify.py."""
@@ -154,6 +164,22 @@ class RunUnittestParallelCase(VerifyTemplateFixture):
                 self.assertIn(marker, combined)
         self.assertNotIn("\ufffd", combined)
 
+    def test_invalid_native_bytes_fail_closed_at_unittest_boundary(self) -> None:
+        self._write_module("test_invalid_bytes", _INVALID_BYTES_MODULE)
+        self._commit("invalid verifier bytes fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        combined = result.stdout + result.stderr
+        self.assertIn("not valid UTF-8", combined)
+        self.assertIn(r"\x80", combined)
+        self.assertIn(r"\xff", combined)
+        self.assertNotIn("\ufffd", combined)
+        self.assertNotIn("UnicodeDecodeError", combined)
+        self.assertNotIn("Traceback", combined)
+        self.assertNotIn("verify: OK", result.stdout)
+
     def test_assent_verify_jobs_one_is_honored(self) -> None:
         self._write_module("test_a", _PASS_MODULE)
         self._write_module("test_b", _PASS_MODULE)
@@ -217,6 +243,29 @@ class ResolvedCommandCase(VerifyTemplateFixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("fixture bat ran alpha", result.stdout)
         self.assertIn("verify: OK", result.stdout)
+
+    def test_invalid_native_bytes_fail_closed_at_run_boundary(self) -> None:
+        self._write_bytes(
+            "native_bytes.py",
+            b"import os\n"
+            b"os.write(1, b'native stdout ' + bytes([0x80]) + b'\\n')\n"
+            b"os.write(2, b'native stderr ' + bytes([0xff]) + b'\\n')\n",
+        )
+        self._write_script_with_command(
+            'run(sys.executable, "native_bytes.py")')
+        self._commit("invalid native command fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        combined = result.stdout + result.stderr
+        self.assertIn("not valid UTF-8", combined)
+        self.assertIn(r"\x80", combined)
+        self.assertIn(r"\xff", combined)
+        self.assertNotIn("\ufffd", combined)
+        self.assertNotIn("UnicodeDecodeError", combined)
+        self.assertNotIn("Traceback", combined)
+        self.assertNotIn("verify: OK", result.stdout)
 
 
 class DiffIntegrityCase(VerifyTemplateFixture):

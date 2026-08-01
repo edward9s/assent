@@ -284,6 +284,27 @@ class TestBatchCandidateAndReceipt(BatchVerifyRepositoryCase):
                 self.assertIn(marker, receipt.failure_summary)
         self.assertNotIn("\ufffd", receipt.failure_summary)
 
+    def test_invalid_verifier_output_survives_batch_receipt(self) -> None:
+        self.make_source("aa")
+        self.write_verify(
+            "import os\n"
+            "os.write(1, b'raw batch stdout ' + bytes([0x80]) + b'\\n')\n"
+            "os.write(2, b'raw batch stderr ' + bytes([0xff]) + b'\\n')\n"
+            "raise SystemExit(3)\n")
+
+        code, output = self.run_batch(bisect=False)
+
+        self.assertEqual(code, 1, output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertEqual(receipt.exit_code, 3)
+        self.assertIn("not valid UTF-8", receipt.failure_summary)
+        self.assertIn(r"\x80", receipt.failure_summary)
+        self.assertIn(r"\xff", receipt.failure_summary)
+        self.assertNotIn("\ufffd", receipt.failure_summary)
+        self.assertNotIn("UnicodeDecodeError", receipt.failure_summary)
+        self.assertNotIn("Traceback", receipt.failure_summary)
+
     def test_conflicting_folder_is_named_and_no_receipt_is_written(self) -> None:
         self.make_source("aa", filename="shared.txt", content="from aa\n")
         self.make_source("bb", filename="shared.txt", content="from bb\n")

@@ -22,6 +22,31 @@ def _utf8_environment() -> dict[str, str]:
     return environment
 
 
+def _decode_output(output: bytes, stream: str) -> tuple[str, bool]:
+    try:
+        return output.decode("utf-8"), False
+    except UnicodeDecodeError:
+        return output.decode("utf-8", errors="backslashreplace"), True
+
+
+def _encoding_diagnostics(streams: list[str]) -> str:
+    return "\n".join(
+        f"Verifier output on {stream} was not valid UTF-8; "
+        "undecodable bytes are escaped as \\xNN."
+        for stream in streams
+    )
+
+
+def _append_encoding_diagnostics(stderr: str,
+                                 streams: list[str]) -> str:
+    diagnostics = _encoding_diagnostics(streams)
+    if not diagnostics:
+        return stderr
+    if stderr and not stderr.endswith(("\n", "\r")):
+        stderr += "\n"
+    return f"{stderr}{diagnostics}\n"
+
+
 def _configure_utf8_stdio() -> None:
     """Keep this verifier and every Python child on the same text encoding."""
     os.environ["PYTHONIOENCODING"] = "utf-8"
@@ -57,7 +82,22 @@ def run(*cmd: str) -> None:
     if program is None:
         fail(f"command not found on PATH: {cmd[0]}")
     result = subprocess.run((program,) + cmd[1:], cwd=ROOT,
-                            env=_utf8_environment())
+                            capture_output=True, env=_utf8_environment())
+    stdout, bad_stdout = _decode_output(result.stdout, "stdout")
+    stderr, bad_stderr = _decode_output(result.stderr, "stderr")
+    bad_streams = [
+        stream for stream, bad in (("stdout", bad_stdout), ("stderr", bad_stderr))
+        if bad
+    ]
+    stderr = _append_encoding_diagnostics(stderr, bad_streams)
+    if stdout:
+        sys.stdout.write(stdout)
+        sys.stdout.flush()
+    if stderr:
+        sys.stderr.write(stderr)
+        sys.stderr.flush()
+    if bad_streams:
+        fail(f"command output was not valid UTF-8: {' '.join(cmd)}")
     if result.returncode != 0:
         fail(f"command failed (exit code {result.returncode}): {' '.join(cmd)}")
 
@@ -117,11 +157,20 @@ def run_unittest_parallel(start_dir: str = "tests", jobs: int | None = None) -> 
         started = time.monotonic()
         proc = subprocess.run(
             [sys.executable, "-m", "unittest", f"{start_dir}.{name}"],
-            cwd=ROOT, capture_output=True, encoding="utf-8", errors="strict",
-            env=_utf8_environment(),
+            cwd=ROOT, capture_output=True, env=_utf8_environment(),
         )
         elapsed = time.monotonic() - started
-        return proc.returncode, elapsed, proc.stdout, proc.stderr
+        stdout, bad_stdout = _decode_output(proc.stdout, "stdout")
+        stderr, bad_stderr = _decode_output(proc.stderr, "stderr")
+        bad_streams = [
+            stream for stream, bad in (("stdout", bad_stdout), ("stderr", bad_stderr))
+            if bad
+        ]
+        stderr = _append_encoding_diagnostics(stderr, bad_streams)
+        returncode = proc.returncode
+        if bad_streams and returncode == 0:
+            returncode = 1
+        return returncode, elapsed, stdout, stderr
 
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:

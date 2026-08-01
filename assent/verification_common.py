@@ -47,6 +47,58 @@ def _utf8_environment() -> dict[str, str]:
     return environment
 
 
+def _decode_verifier_output(output: bytes | str | None,
+                            stream: str) -> tuple[str, bool]:
+    """Decode one verifier pipe while preserving evidence of bad bytes."""
+    if output is None:
+        return "", False
+    if isinstance(output, str):
+        return output, False
+    try:
+        return output.decode("utf-8"), False
+    except UnicodeDecodeError:
+        return output.decode("utf-8", errors="backslashreplace"), True
+
+
+def _encoding_diagnostics(streams: Iterable[str]) -> str:
+    return "\n".join(
+        f"Verifier output on {stream} was not valid UTF-8; "
+        "undecodable bytes are escaped as \\xNN."
+        for stream in streams
+    )
+
+
+def _append_encoding_diagnostics(stderr: str,
+                                 streams: Iterable[str]) -> str:
+    diagnostics = _encoding_diagnostics(streams)
+    if not diagnostics:
+        return stderr
+    if stderr and not stderr.endswith(("\n", "\r")):
+        stderr += "\n"
+    return f"{stderr}{diagnostics}\n"
+
+
+def _decoded_completed_process(
+        result: subprocess.CompletedProcess[bytes | str]
+        ) -> subprocess.CompletedProcess[str]:
+    """Return text output without letting a bad verifier pipe escape."""
+    stdout, bad_stdout = _decode_verifier_output(result.stdout, "stdout")
+    stderr, bad_stderr = _decode_verifier_output(result.stderr, "stderr")
+    bad_streams = tuple(
+        stream for stream, bad in (("stdout", bad_stdout), ("stderr", bad_stderr))
+        if bad
+    )
+    stderr = _append_encoding_diagnostics(stderr, bad_streams)
+    returncode = result.returncode
+    if bad_streams and returncode == 0:
+        returncode = 1
+    if (not bad_streams and isinstance(result.stdout, str)
+            and isinstance(result.stderr, str)):
+        return result
+    return subprocess.CompletedProcess(
+        result.args, returncode, stdout, stderr)
+
+
 def invalidate_receipt(path: Path) -> None:
     """Remove stale derived evidence before starting a replacement run."""
     try:
@@ -177,8 +229,7 @@ def run_full_verifier(script: Path,
     try:
         result = subprocess.run(
             [sys.executable, str(script)], cwd=str(candidate),
-            capture_output=True, encoding="utf-8", errors="strict",
-            env=_utf8_environment())
+            capture_output=True, env=_utf8_environment())
     except KeyboardInterrupt:
         elapsed = time.monotonic() - started
         print("Full verification interrupted: "
@@ -189,6 +240,7 @@ def run_full_verifier(script: Path,
         print("Full verification finished: "
               f"elapsed {elapsed:.1f}s, exit code 1", flush=True)
         raise
+    result = _decoded_completed_process(result)
     elapsed = time.monotonic() - started
     print("Full verification finished: "
           f"elapsed {elapsed:.1f}s, exit code {result.returncode}",
