@@ -34,6 +34,9 @@ class TestInitContractRefresh(unittest.TestCase):
 
         expected = (_PROJECT_ROOT / "assent/templates/format.md").read_bytes()
         self.assertEqual((self.user_home / "format.md").read_bytes(), expected)
+        self.assertIn(
+            "refreshes `_report.md` after",
+            expected.decode("utf-8"))
         self.assertFalse((self.root / ".assent/format.md").exists())
         self.assertIn("Updated:", output.getvalue())
 

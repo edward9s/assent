@@ -511,6 +511,19 @@ def _dispatch_run_folders(
     return 0
 
 
+def _verify_folder_and_refresh_report(cfg) -> int:
+    """Run folder verification and refresh its report after the call settles.
+
+    The report helper is deliberately in ``finally`` so PASSED, FAILED, refusal,
+    and interrupt outcomes all leave the report observing the latest receipt
+    state.  ``inspection.try_write_report`` keeps the write best-effort.
+    """
+    try:
+        return verify_folder(cfg)
+    finally:
+        inspection.try_write_report(cfg)
+
+
 def _close_run(result: int, *, verify: bool, config_path: str,
                assent_dir: Path, selection: list[str] | None) -> int:
     """Chain `run --verify`'s complete verification onto a successful run.
@@ -540,7 +553,7 @@ def _close_run(result: int, *, verify: bool, config_path: str,
     except AssentError as e:
         print(f"Config error: {e}")
         return 1
-    return verify_folder(cfg)
+    return _verify_folder_and_refresh_report(cfg)
 
 
 def _dispatch(argv: list[str]) -> int:
@@ -772,7 +785,7 @@ def _dispatch(argv: list[str]) -> int:
             if args.focus:
                 return engine.verify_focused(cfg)
             if len(selected) == 1:
-                return verify_folder(cfg)
+                return _verify_folder_and_refresh_report(cfg)
             return verify_selected_batch(
                 args.config, assent_dir, selected, args.bisect)
         except KeyboardInterrupt:

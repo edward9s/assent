@@ -77,6 +77,25 @@ class TestContractPaths(unittest.TestCase):
 class TestContractContent(unittest.TestCase):
     """Durable rules a reader must be able to find in the shipped contract."""
 
+    def test_folder_verification_report_refresh_is_documented(self):
+        install_global_contracts(self)
+        english = {
+            "format.md": contracts.installed_contract_text("format.md"),
+            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+                encoding="utf-8"),
+        }
+        for name, text in english.items():
+            compact = " ".join(text.split())
+            with self.subTest(document=name):
+                self.assertIn("refreshes `_report.md` after", compact)
+                self.assertIn("best-effort", compact)
+
+        chinese = (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+            encoding="utf-8")
+        compact = "".join(chinese.split())
+        self.assertIn("refresh`_report.md`", compact)
+        self.assertIn("best-effort", compact)
+
     def test_format_states_the_provisioned_candidate_link_rule(self):
         install_global_contracts(self)
         text = contracts.installed_contract_text("format.md")

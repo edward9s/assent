@@ -438,6 +438,13 @@ also says the run-level verification follows in the same invocation, so it does
 not tell the user to start the verification command again; the exact selected
 or dynamic path in the table is the handoff that follows.
 
+For the one-folder paths in the table, the chained folder verification refreshes
+`_report.md` after it updates, invalidates, or leaves the folder receipt absent,
+so the report observes that invocation's latest receipt outcome. This report
+write is best-effort and never changes the verification exit code or interrupt
+handling. Selected or dynamic batch verification and `--focus` keep their
+existing contracts and do not refresh a folder report merely for symmetry.
+
 `--once` and `--task` may be combined with `--verify`. They select exactly one
 folder, so the receipt scope is unambiguous, but they stop after a single task:
 the request therefore verifies only when that limited run left the single
@@ -732,10 +739,14 @@ or dynamic run-level verification as the immediate handoff, while `"auto"`
 runs the folder refresh at closeout as soon as every task in the folder is done.
 
 `assent verify <FOLDER>` refreshes that complete verification receipt with zero
-tokens and no AI session; `assent verify --batch` does the same for every
-finished, not-yet-integrated folder as one candidate. Either command's
-`PASSED`/`FAILED` and `fresh`/`stale` state is shown in the report, so a stale
-receipt can be refreshed unattended. Direct `assent accept <FOLDER>` and
+tokens and no AI session, then refreshes `_report.md` after the receipt update;
+the report and receipt therefore describe the same latest folder-verification
+outcome. The report write is best-effort and never changes the verification
+result. `assent verify --batch` does the same for every finished,
+not-yet-integrated folder as one candidate, but does not refresh a folder report
+as a side effect. Either command's `PASSED`/`FAILED` and `fresh`/`stale` state is
+shown in the report, so a stale receipt can be refreshed unattended. Direct
+`assent accept <FOLDER>` and
 selected `assent accept A B` refuse without their matching fresh `PASSED`
 receipt and never start the verifier; `assent accept --all` instead uses its
 fresh-batch release mode or, when batch evidence is absent/expired, its
