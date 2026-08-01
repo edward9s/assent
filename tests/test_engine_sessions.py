@@ -703,6 +703,39 @@ class TestInterruptedTaskResume(GlobalContractsMixin, EngineTestCase):
         self.assertIn("resume", adapter.calls[0][0])
         self.assertEqual(parse_task_file(path).status, "DONE")
 
+    def test_interrupt_during_post_auto_report_keeps_done_without_duplicate_auto(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        refreshes = 0
+
+        def interrupt_first_report(cfg):
+            nonlocal refreshes
+            refreshes += 1
+            if refreshes == 1:
+                raise KeyboardInterrupt
+
+        with mock.patch.object(engine, "try_write_report",
+                               side_effect=interrupt_first_report):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True,
+                adapter=ScriptedAdapter([
+                    self.ai_done(path, {"src/done.py": "done"})])), 130)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        autos = [s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]
+        self.assertEqual(len(autos), 1)
+        self.assertNotIn("wip(plan01/t001): user interrupt", self.subjects())
+
+        # A later run sees the terminal task as already closed and cannot synthesize another
+        # auto marker from the report-refresh interruption.
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([])), 0)
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+
     def test_assent_error_marks_current_task_wip_and_keeps_exit_code(self):
         path = self.write_task(1)
         cfg = self.build()

@@ -127,9 +127,10 @@ _REWORK_REASON_RE = re.compile(
 
 @dataclass
 class _SessionState:
-    """Lets the outer interrupt handler read the resolved identity of the current session."""
+    """Lets the outer interrupt handler read the current session's closeout state."""
 
     identity: SessionIdentity | None = None
+    terminal_checkpoint: bool = False
 
 
 @dataclass
@@ -692,22 +693,33 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         # the session is terminated by the OS signal; here the engine gathers the produced
         # progress into a wip checkpoint (never discard it) and exits with 130.
         print("\nInterrupt received (Ctrl+C): session terminated, keeping current progress...")
+        terminal_checkpoint = bool(
+            current_session is not None and current_session.terminal_checkpoint)
         if (current_task is not None and current_session is not None
-                and current_session.identity is not None):
+                and current_session.identity is not None and not terminal_checkpoint):
             _mark_interrupted_task(
                 current_task, current_session.identity,
                 "User interrupt; progress kept for next resume", now,
                 detail="run received Ctrl+C")
+        if terminal_checkpoint:
+            print("Terminal auto checkpoint already exists; task remains DONE.")
+        else:
+            try:
+                subject = (_checkpoint_subject(
+                    cfg, "wip", current_task, "user interrupt, progress kept")
+                    if current_task is not None
+                    else f"wip({cfg.tasks_name}): user interrupt, progress kept")
+                if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
+                    print("Progress gathered into a wip checkpoint (git revert it yourself if unsatisfied).")
+            except AssentError as e:
+                print(f"wip checkpoint failed: {e} (working tree left as is, nothing discarded)")
         try:
-            subject = (_checkpoint_subject(
-                cfg, "wip", current_task, "user interrupt, progress kept")
-                if current_task is not None
-                else f"wip({cfg.tasks_name}): user interrupt, progress kept")
-            if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
-                print("Progress gathered into a wip checkpoint (git revert it yourself if unsatisfied).")
-        except AssentError as e:
-            print(f"wip checkpoint failed: {e} (working tree left as is, nothing discarded)")
-        try_write_report(cfg)
+            try_write_report(cfg)
+        except KeyboardInterrupt:
+            # A second stop can arrive while the interrupt handler makes its best-effort
+            # report refresh.  The terminal checkpoint, when present, remains authoritative.
+            if not terminal_checkpoint:
+                raise
         print("Interrupted.")
         return 130
     except _BillingAbort as e:
@@ -1167,6 +1179,10 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         if outcome == "done":
             print("  Acceptance passed -> creating checkpoint")
             committed = _commit_terminal_checkpoint(cfg, task, resumed=resumed)
+            # Report refresh is deliberately after the Git evidence.  Keep this marker before
+            # entering it so Ctrl+C there cannot downgrade a task whose terminal ownership is
+            # already recorded or create a second WIP checkpoint.
+            session_state.terminal_checkpoint = committed
             if not committed:
                 print("  (no new changes in the working tree; progress is already in a prior wip checkpoint)")
             elif resumed:
