@@ -273,6 +273,17 @@ class LanguagePolicyTests(unittest.TestCase):
         ]
         self.assertEqual(stale, [])
 
+    def test_antigravity_surfaces_do_not_prescribe_removed_auth_subcommand(self):
+        """AGY sign-in documentation must start the interactive CLI."""
+        surfaces = (
+            Path("README.md"),
+            Path("README.zh-TW.md"),
+            Path("assent/templates/assent.toml"),
+        )
+        for path in surfaces:
+            with self.subTest(path=path):
+                self.assertNotIn("agy auth login", _read(path))
+
     def test_fresh_init_creates_no_project_copy_of_the_shared_files(self):
         """The three shared files belong to the user home, in fact and in the docs."""
         # As above, ASSENT_HOME is redirected so the operator's own home is untouched.

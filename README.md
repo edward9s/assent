@@ -1184,14 +1184,24 @@ Notes:
 
 **First-time setup**
 
-1. Install `agy` (Antigravity CLI) on your machine if not already present.
-2. Run `agy auth login` to interactively sign in once per machine.
-3. Verify your installation with `agy --version` (must be 1.1.5 or later) and
+1. Install `agy` (Antigravity CLI) on your machine if not already present; see
+   [Google's official Antigravity CLI installation and authentication docs](https://antigravity.google/docs/cli/install).
+2. Start the interactive CLI:
+
+   ```bash
+   agy
+   ```
+
+   Complete the Google sign-in in the browser. If `agy` prints an authorization
+   URL instead, open that URL in a browser and finish the prompted sign-in flow.
+3. Finish the interactive sign-in before starting an unattended `assent run`.
+   Verify your installation with `agy --version` (must be 1.1.5 or later) and
    `agy models` (shows available models).
 
-Assent will **not** modify your `~/.gemini/antigravity-cli/settings.json`, run
-the login browser, or interact with credentials. Your login credentials and
-workspace trust remain under your control.
+Assent uses only credentials already held by AGY. It will **not** open the login
+browser, read or modify credentials, switch Google accounts, or alter workspace
+trust. To sign out, start interactive `agy` and enter `/logout` at its prompt;
+`/logout` is not a shell subcommand.
 
 **Example task file using Antigravity**
 
@@ -1311,21 +1321,24 @@ Common causes:
 
 **Problem: `authentication required` or `permission denied`**
 
-You must have logged in once on this machine:
+Complete AGY's interactive Google sign-in before this machine can run an
+unattended task:
 
 ```bash
-agy auth login          # Opens a browser for Google sign-in
+agy
 ```
 
-If you are running `assent run` unattended (e.g., at night), your login must
-complete before the run starts. Assent cannot open a browser, log you in, or
-detect when you are away; it only uses your existing login credentials.
+Follow the browser sign-in, or open the authorization URL that `agy` prints and
+finish that flow. If you are running `assent run` unattended (e.g., at night),
+the sign-in must complete before the run starts. Assent cannot open a browser,
+log you in, read or modify credentials, switch Google accounts, or alter
+workspace trust; it only uses credentials already held by AGY.
 
 **Problem: `command not found: agy`**
 
-Antigravity CLI is not installed or not on your PATH. Visit the [Antigravity
-CLI installation docs](https://google-antigravity.github.io/install) and verify
-with `agy --version`.
+Antigravity CLI is not installed or not on your PATH. Visit [Google's official
+Antigravity CLI installation and authentication docs](https://antigravity.google/docs/cli/install)
+and verify with `agy --version`.
 
 **Problem: Quota exhausted mid-task**
 

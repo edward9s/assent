@@ -952,12 +952,22 @@ heavy = "medium"
 
 **首次設定**
 
-1. 在你的機器上安裝 `agy`(Antigravity CLI)(如無則裝)。
-2. 執行 `agy auth login` 在本機進行一次互動登入。
-3. 用 `agy --version` 驗證版本(必須 1.1.5 或更新)與 `agy models`(顯可用模型)。
+1. 在你的機器上安裝 `agy`(Antigravity CLI)(如無則裝);請參考 [Google 官方
+   Antigravity CLI 安裝與認證文件](https://antigravity.google/docs/cli/install)。
+2. 啟動互動式 CLI:
 
-Assent **不會**修改 `~/.gemini/antigravity-cli/settings.json`、執行登入瀏覽器、
-或和認證互動。你的登入認證與 workspace 信任完全由你管。
+   ```bash
+   agy
+   ```
+
+   在瀏覽器完成 Google 登入。如果 `agy` 改為印出授權 URL,請在瀏覽器開啟
+   該 URL,完成提示的登入流程。
+3. 在啟動無人值守的 `assent run` 前完成這次互動登入。用 `agy --version`
+   驗證版本(必須 1.1.5 或更新)與 `agy models`(顯示可用模型)。
+
+Assent 只使用 AGY 已持有的認證。它**不會**開啟登入瀏覽器、讀取或修改認證、
+切換 Google 帳戶,或改變 workspace trust。若要登出,啟動互動式 `agy` 並在
+CLI 提示中輸入 `/logout`;`/logout` 不是 shell 子命令。
 
 **使用 Antigravity 的任務檔範例**
 
@@ -1063,19 +1073,21 @@ agy --print --model <MODEL> ...    # 試試你的 model/effort 選擇
 
 **問題: `authentication required` 或 `permission denied`**
 
-得在本機登入過一次:
+必須先完成 AGY 的互動式 Google 登入,才能執行無人值守的任務:
 
 ```bash
-agy auth login          # 開瀏覽器 Google 登入
+agy
 ```
 
+請完成瀏覽器登入;如果 `agy` 印出授權 URL,請開啟該 URL 並完成登入流程。
 如果你無人值班執行 `assent run`(例如晚上),登入必須在執行前完成。Assent
-無法開瀏覽器、幫你登入或察覺你是否離開;它只用你既有登入認證。
+無法開啟瀏覽器、幫你登入、讀取或修改認證、切換 Google 帳戶,或改變 workspace
+trust;它只使用 AGY 已持有的認證。
 
 **問題: `command not found: agy`**
 
-Antigravity CLI 未裝或不在 PATH。見 [Antigravity CLI 安裝文件]
-(https://google-antigravity.github.io/install) 並用 `agy --version` 確認。
+Antigravity CLI 未裝或不在 PATH。見 [Google 官方 Antigravity CLI 安裝與認證文件]
+(https://antigravity.google/docs/cli/install) 並用 `agy --version` 確認。
 
 **問題: session 中途額度耗盡**
 

@@ -86,10 +86,15 @@ lite  = "slight"
 
 [adapter.antigravity]
 command = "agy"
-# Antigravity is a locally-installed CLI that requires `agy auth login` once per machine.
-# Headless execution cannot answer permission prompts, so unattended runs use
-# --dangerously-skip-permissions. Assent will not modify your ~/.gemini/ settings,
-# install Antigravity, open a login browser, or change your workspace trust.
+# Antigravity requires an interactive Google sign-in before unattended use. Start
+# `agy` and complete the browser or printed-URL sign-in before `assent run`.
+# See Google's official Antigravity CLI installation and authentication docs:
+# https://antigravity.google/docs/cli/install
+# Sign out with `/logout` only at the interactive AGY prompt; it is not a shell
+# subcommand. Assent uses credentials already held by AGY and does not open the
+# login browser, read or modify credentials, switch Google accounts, or alter
+# workspace trust. Headless execution cannot answer permission prompts, so
+# unattended runs use --dangerously-skip-permissions.
 extra_args = ["--dangerously-skip-permissions"]
 # Print mode timeout: how long AGY will wait for a single --print invocation.
 # Do not set lower than your longest expected task time. The watchdog timeout
