@@ -1148,10 +1148,18 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             print("  Quota exhausted -> keep progress (wip checkpoint).")
             wait_kind: str | None = None
             if len(rotation.names) == 1:
-                quota_summary = (
-                    "Quota exhausted; progress kept, waiting for quota reset "
-                    "before resuming")
-                quota_action = "  Waiting for quota reset before resuming..."
+                if result.reset_at is None:
+                    quota_summary = (
+                        "Quota exhausted; progress kept, waiting for quota poll "
+                        f"(every {cfg.quota_poll_minutes} minutes) before resuming")
+                    quota_action = (
+                        "  Waiting for quota poll "
+                        f"(every {cfg.quota_poll_minutes} minutes) before resuming...")
+                else:
+                    quota_summary = (
+                        "Quota exhausted; progress kept, waiting for quota reset "
+                        "before resuming")
+                    quota_action = "  Waiting for quota reset before resuming..."
                 wait_kind = "quota"
             else:
                 cycle_exhausted = rotation.advance_after_quota()

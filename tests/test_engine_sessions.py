@@ -445,6 +445,53 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
             "Quota exhausted; progress kept, waiting for quota reset before resuming")
         self.assertNotIn("session", [e["event"] for e in entries])
 
+    def test_unknown_quota_wait_names_poll_and_preserves_resume_progress(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        cfg.quota_poll_minutes = 7
+        self.commit_all()
+
+        def quota_step(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text("kept", encoding="utf-8")
+            set_status(path, "DONE")
+            return TaskResult(exit_code=1, output="", quota_exhausted=True,
+                              reset_at=None)
+
+        def resumed(prompt):
+            self.assertEqual(parse_task_file(path).status, "WIP")
+            self.assertIn("resume", prompt.lower())
+            return self.ai_done(path)(prompt)
+
+        adapter = ScriptedAdapter([quota_step, resumed])
+        sleeps: list[float] = []
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = engine.run(cfg, once=True, adapter=adapter,
+                            sleep=sleeps.append)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(sleeps), 7 * 60)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        terminal = out.getvalue()
+        self.assertIn(
+            "Waiting for quota poll (every 7 minutes) before resuming", terminal)
+        self.assertIn("Quota poll (every 7 minutes)", terminal)
+        self.assertNotIn("reset", terminal.lower())
+        self.assertIn("src/partial.py", self._git_execution("ls-files"))
+        self.assertTrue(any(s.startswith("wip(plan01/t001): ")
+                            for s in self.subjects()))
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        quota = next(e for e in entries if e["event"] == "quota")
+        self.assertEqual(
+            quota["summary"],
+            "Quota exhausted; progress kept, waiting for quota poll "
+            "(every 7 minutes) before resuming")
+        self.assertNotIn("reset", quota["summary"].lower())
+
     def test_checkpoint_resume_keeps_same_adapter_without_wait_rotation_or_retry(self):
         path = self.write_task(1)
         cfg = self.build(retry=0)
