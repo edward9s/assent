@@ -27,7 +27,9 @@ from assent.lockfile import LOCK_NAME
 from assent.shared_paths import MANIFEST_LOCK_NAME, MANIFEST_NAME
 from assent.user_home import user_config_path
 
-_TOP_LEVEL_KEYS = {"watchdog", "run", "adapter", "prompt", "verification"}
+_TOP_LEVEL_KEYS = {
+    "watchdog", "run", "adapter", "prompt", "verification", "auto_fix",
+}
 
 # The ordered settings layers, lowest priority first.  The built-in layer contributes no
 # document of its own: several tables (models, efforts) are replaced whole rather than merged
@@ -155,6 +157,24 @@ class AdapterSettings:
 
 
 @dataclass(frozen=True)
+class AutoFixReviewSettings:
+    """Resolved identity for the optional folder-level AI review."""
+
+    adapter: str
+    model: str
+    effort: str
+    command: str
+    extra_args: tuple[str, ...]
+    requested_model: str
+    requested_effort: str
+
+    @property
+    def adapter_name(self) -> str:
+        """Compatibility with call sites that name adapter selections explicitly."""
+        return self.adapter
+
+
+@dataclass(frozen=True)
 class ConfigSource:
     """One layer that contributed to the effective settings."""
 
@@ -208,6 +228,7 @@ class Config:
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
     prompt_template: str | None = None
     receipt_refresh: str = "manual"  # "manual" = explicit verify only, "auto" = also at run closeout
+    auto_fix_review: AutoFixReviewSettings | None = None
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
     # Where the effective settings came from: the layers that were present, lowest priority
     # first, and each stated leaf setting's dotted key mapped to the layer that stated it.
@@ -313,6 +334,11 @@ class Config:
         return self.git_rel(self.tasks_dir / "_verification.toml")
 
     @property
+    def auto_fix_state_rel(self) -> str:
+        """The folder-local, derived auto-fix review state."""
+        return self.git_rel(self.tasks_dir / "_auto_fix.toml")
+
+    @property
     def shared_paths_manifest_rel(self) -> str:
         """The local reviewed-shared-path cache; local memory, never project source."""
         return self.git_rel(self.assent_dir / MANIFEST_NAME)
@@ -325,7 +351,7 @@ class Config:
     def git_excludes(self) -> tuple[str, ...]:
         """Runtime artifacts: excluded from the clean check, scope check, and checkpoint commit."""
         return (self.runtime_log_rel, self.report_rel, self.lockfile_rel,
-                self.verification_receipt_rel,
+                self.verification_receipt_rel, self.auto_fix_state_rel,
                 self.shared_paths_manifest_rel, self.shared_paths_lock_rel)
 
 
@@ -343,6 +369,15 @@ def _typed(section: dict, owner: str, key: str, typ: type, default):
     if not isinstance(val, typ) or (typ is not bool and isinstance(val, bool)):
         raise AssentError(f"Config {owner}.{key} has the wrong type: expected {typ.__name__}")
     return val
+
+
+def _known_keys(section: dict, owner: str, allowed: set[str]) -> None:
+    """Refuse schema drift in a table whose complete key set is owned here."""
+    unknown = sorted(set(section) - allowed)
+    if unknown:
+        raise AssentError(
+            f"Config [{owner}] has unknown keys: {', '.join(unknown)}"
+            f" (valid keys: {', '.join(sorted(allowed))})")
 
 
 def _str_list(section: dict, owner: str, key: str, default: list[str]) -> list[str]:
@@ -702,8 +737,23 @@ def load_config(path: str | Path, folder: str) -> Config:
                    if "antigravity" in adapter else {})
     prompt = _section(data, "prompt")
     verification_section = _section(data, "verification")
+    auto_fix = _section(data, "auto_fix")
+    _known_keys(auto_fix, "auto_fix", {"review"})
+    review_enabled = "review" in auto_fix
+    review = _section(auto_fix, "review") if review_enabled else {}
+    _known_keys(review, "auto_fix.review", {"adapter", "model", "effort"})
     guard = _BlankGuard(provenance, sources)
     adapter_names = _parse_adapter_names(adapter, guard)
+    review_adapter = guard.text(
+        _typed(review, "[auto_fix.review]", "adapter", str,
+               adapter_names[0]),
+        "auto_fix.review.adapter")
+    review_model = guard.text(
+        _typed(review, "[auto_fix.review]", "model", str, "prime"),
+        "auto_fix.review.model")
+    review_effort = guard.text(
+        _typed(review, "[auto_fix.review]", "effort", str, "heavy"),
+        "auto_fix.review.effort")
     claude_efforts, claude_tier_efforts = _effort_maps(
         claude, "adapter.claude", guard)
     codex_efforts, codex_tier_efforts = _effort_maps(
@@ -787,4 +837,33 @@ def load_config(path: str | Path, folder: str) -> Config:
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
+    if review_enabled:
+        if review_adapter not in _ADAPTER_NAMES:
+            raise AssentError(
+                f"[auto_fix.review] adapter = {review_adapter!r} is not a registered"
+                f" adapter ({'/'.join(sorted(_ADAPTER_NAMES))})")
+        if review_model not in _MODEL_TIERS:
+            raise AssentError(
+                f"[auto_fix.review] model = {review_model!r} is not a valid model"
+                f" tier ({'/'.join(sorted(_MODEL_TIERS))})")
+        if review_effort not in _EFFORT_LEVELS:
+            raise AssentError(
+                f"[auto_fix.review] effort = {review_effort!r} is not a valid"
+                f" effort ({'/'.join(sorted(_EFFORT_LEVELS))})")
+        adapter_settings = cfg.adapter_settings(review_adapter)
+        requested_model = adapter_settings.resolve_model(review_model)
+        requested_effort = adapter_settings.resolve_requested_effort(
+            review_model, review_effort)
+        if requested_effort is None:
+            raise AssentError(
+                "[auto_fix.review] effort did not resolve to a requested value")
+        cfg.auto_fix_review = AutoFixReviewSettings(
+            adapter=review_adapter,
+            model=review_model,
+            effort=review_effort,
+            command=adapter_settings.command,
+            extra_args=adapter_settings.extra_args,
+            requested_model=requested_model,
+            requested_effort=requested_effort,
+        )
     return cfg
