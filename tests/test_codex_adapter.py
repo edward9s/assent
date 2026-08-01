@@ -28,7 +28,8 @@ class TestBuildCommand(unittest.TestCase):
         self.assertEqual(cmd[:3], ["codex", "exec", "--json"])
         self.assertEqual(cmd[cmd.index("--model") + 1], "gpt-5.6-sol")
         self.assertIn('model_reasoning_effort="max"', cmd)
-        self.assertEqual(cmd[-3:], ["--sandbox", "workspace-write", "the prompt"])
+        self.assertEqual(
+            cmd[-3:], ["--sandbox", "danger-full-access", "the prompt"])
 
     def test_effort_can_be_omitted_and_extra_args_are_verbatim(self):
         cfg = make_cfg(codex_command="codex.cmd",

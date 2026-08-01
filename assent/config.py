@@ -77,7 +77,7 @@ _DEFAULT_EXTRA_ARGS = ["--permission-mode", "acceptEdits"]
 _DEFAULT_MODELS = {"prime": "fable", "core": "opus", "lite": "sonnet"}
 _DEFAULT_EFFORT = {"prime": "heavy", "core": "heavy", "lite": "normal"}
 
-_DEFAULT_CODEX_EXTRA_ARGS = ["--sandbox", "workspace-write"]
+_DEFAULT_CODEX_EXTRA_ARGS = ["--sandbox", "danger-full-access"]
 _DEFAULT_CODEX_MODELS = {
     "prime": "gpt-5.6-sol", "core": "gpt-5.6-terra", "lite": "gpt-5.6-luna",
 }

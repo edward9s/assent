@@ -2,6 +2,7 @@
 import os
 import shutil
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -647,11 +648,22 @@ class TestAdapterSettings(ConfigTestCase):
         codex = cfg.adapter_settings("codex")
         self.assertEqual(codex.name, "codex")
         self.assertEqual(codex.command, "codex.cmd")
-        self.assertEqual(codex.extra_args, ("--sandbox", "workspace-write"))
+        self.assertEqual(codex.extra_args, ("--sandbox", "danger-full-access"))
         self.assertEqual(codex.resolve_model("prime"), "gpt-5.6-sol")
         with self.assertRaisesRegex(AssentError,
                                     r"\[adapter\.codex\.models\]"):
             codex.resolve_model("nonexistent")
+
+    def test_codex_builtin_extra_args_match_the_packaged_default(self):
+        cfg = load_config(self.write(_MINIMAL), "plan01")
+        template_path = (Path(__file__).resolve().parents[1]
+                         / "assent" / "templates" / "assent.toml")
+        packaged = tomllib.loads(template_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            cfg.adapter_settings("codex").extra_args,
+            tuple(packaged["adapter"]["codex"]["extra_args"]),
+        )
 
     def test_resolve_effort_precedence_task_then_stated_default_then_builtin(self):
         cfg = load_config(self.write(
