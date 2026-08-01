@@ -118,12 +118,18 @@ Review all of the following before deciding:
 - the cumulative checkpoint diff: `git diff --find-renames {base_ref}..HEAD --`
 - every task contract and relevant journal reproduced below
 - the implementation and tests named by those contracts and changed by the diff
+- directly interacting code encountered while tracing those changes
 - the final focused evidence, whose distinct commands all exited zero
 
 Report only blocking correctness, safety, unmet-requirement, or missing-test
-findings. Do not report style, preference, optional cleanup, or speculative
-enhancement comments. Finish with exactly one provider-neutral JSON object on
-the last non-empty output line and no later text:
+findings. Also report concrete technical debt encountered during this bounded
+review, even when it is pre-existing, when its repair is local to an existing
+task's declared scope and can be reliably verified by relevant focused tests;
+such eligible debt is a blocking finding for this gate. Do not conduct a
+repository-wide debt search or report style, preference, optional cleanup,
+speculative refactoring, or work requiring unrelated scope expansion. Finish
+with exactly one provider-neutral JSON object on the last non-empty output line
+and no later text:
 PASS: {{"type":"assent.auto_fix_review","verdict":"PASS","findings":[]}}
 FAIL: {{"type":"assent.auto_fix_review","verdict":"FAIL","findings":[{{"task_id":"tNNN or null","path":"project/relative/path","summary":"concise blocker","evidence":"specific evidence"}}]}}
 
@@ -860,14 +866,30 @@ def _auto_fix_existing_state(cfg: Config) -> auto_fix.AutoFixState | None:
     return auto_fix.read_auto_fix_state(path)
 
 
+def _auto_fix_surface_snapshot(cfg: Config) -> auto_fix.ProjectSurfaceSnapshot:
+    """Capture only this review's protected project-management surfaces."""
+    stable = [cfg.assent_dir / "verify.py"]
+    management_root = cfg.assent_dir.absolute()
+    for source in cfg.sources:
+        if source.path is None:
+            continue
+        try:
+            source.path.absolute().relative_to(management_root)
+        except ValueError:
+            continue
+        stable.append(source.path)
+    return auto_fix.snapshot_project_surface(
+        cfg.root, cfg.assent_dir, cfg.source_root,
+        tasks_dir=cfg.tasks_dir, stable_management_files=stable)
+
+
 def _auto_fix_surface_change(
         before: auto_fix.ProjectSurfaceSnapshot,
         cfg: Config, before_head: str,
         before_status: gitops.WorkingTreeStatus,
         before_primary_head: str | None,
         before_primary_status: gitops.WorkingTreeStatus | None) -> tuple[str, ...]:
-    after = auto_fix.snapshot_project_surface(
-        cfg.root, cfg.assent_dir, cfg.source_root)
+    after = _auto_fix_surface_snapshot(cfg)
     changed = list(before.changed_paths(after))
     if gitops.commit_of(cfg.root, "HEAD") != before_head:
         changed.append("source:.git/HEAD")
@@ -952,8 +974,7 @@ def _run_auto_fix_review_gate(
         return 1
     assert session is not None
 
-    baseline = auto_fix.snapshot_project_surface(
-        cfg.root, cfg.assent_dir, cfg.source_root)
+    baseline = _auto_fix_surface_snapshot(cfg)
     baseline_head = gitops.commit_of(cfg.root, "HEAD")
     baseline_status = gitops.working_tree_status(cfg.root, cfg.git_excludes)
     baseline_primary_head = (gitops.commit_of(cfg.source_root, "HEAD")
@@ -974,7 +995,8 @@ def _run_auto_fix_review_gate(
                 baseline, cfg, baseline_head, baseline_status,
                 baseline_primary_head, baseline_primary_status)
             if changed:
-                print("Auto-fix reviewer interruption left project writes; exact edits are preserved: "
+                print("Auto-fix reviewer interruption interval contains project writes; "
+                      "exact edits are preserved: "
                       + ", ".join(changed[:8]))
             else:
                 print("Auto-fix reviewer interrupted; no verdict was recorded.")
@@ -993,8 +1015,9 @@ def _run_auto_fix_review_gate(
             baseline_primary_head, baseline_primary_status)
         if changed:
             shown = ", ".join(changed[:8]) + (" ..." if len(changed) > 8 else "")
-            print("Auto-fix reviewer violated the read-only gate; PASS/FAIL was ignored and "
-                  f"the exact edits are preserved ({shown}).")
+            print("Protected project writes were detected during the reviewer interval; "
+                  "PASS/FAIL was ignored and the exact edits are preserved "
+                  f"({shown}).")
             return 1
 
         if (result.checkpoint_resume and not result.quota_exhausted

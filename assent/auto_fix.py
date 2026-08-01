@@ -224,9 +224,19 @@ def _surface_entries(root: Path, prefix: str,
 
 def snapshot_project_surface(source_root: Path,
                              assent_dir: Path,
-                             primary_root: Path | None = None
+                             primary_root: Path | None = None,
+                             *,
+                             tasks_dir: Path | None = None,
+                             stable_management_files: Iterable[Path] = (),
                              ) -> ProjectSurfaceSnapshot:
-    """Snapshot the reviewer-visible source and project management files."""
+    """Snapshot source plus the management surfaces protected during review.
+
+    A production caller supplies ``tasks_dir`` and the stable root management
+    inputs it consumed.  That deliberately excludes the active terminal log and
+    every unrelated work folder, whose scheduler-owned files may advance while
+    another folder is being reviewed.  Omitting ``tasks_dir`` retains the
+    general whole-directory form used by lower-level callers.
+    """
     source_root = Path(source_root)
     assent_dir = Path(assent_dir)
     if not source_root.is_dir():
@@ -243,7 +253,63 @@ def snapshot_project_surface(source_root: Path,
         if primary_root.resolve() != source_root.resolve():
             entries.extend(_surface_entries(
                 primary_root, "primary", {".git", ".assent"}))
-    entries.extend(_surface_entries(assent_dir, "management"))
+    if tasks_dir is None:
+        entries.extend(_surface_entries(assent_dir, "management"))
+    else:
+        tasks_dir = Path(tasks_dir)
+        try:
+            tasks_rel = tasks_dir.absolute().relative_to(
+                assent_dir.absolute()).as_posix()
+        except ValueError as e:
+            raise AssentError(
+                f"Auto-fix review task folder is outside the management plane: "
+                f"{tasks_dir}") from e
+        if not tasks_dir.is_dir():
+            raise AssentError(
+                f"Auto-fix review task folder is not a directory: {tasks_dir}")
+        entries.extend(_surface_entries(
+            tasks_dir, f"management:{tasks_rel}", {"_assent.log"}))
+
+        seen: set[Path] = set()
+        for path in stable_management_files:
+            path = Path(path)
+            try:
+                relative = path.absolute().relative_to(assent_dir.absolute())
+            except ValueError as e:
+                raise AssentError(
+                    f"Auto-fix review management input is outside {assent_dir}: "
+                    f"{path}") from e
+            if path in seen:
+                continue
+            seen.add(path)
+            key = f"management:{relative.as_posix()}"
+            try:
+                info = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                entries.append((key, "missing"))
+                continue
+            except OSError as e:
+                raise AssentError(
+                    f"Unable to snapshot auto-fix management input {path}: {e}") from e
+            attributes = getattr(info, "st_file_attributes", 0)
+            reparse = bool(
+                attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+            if path.is_symlink() or reparse:
+                try:
+                    target = os.readlink(path)
+                except OSError:
+                    target = ""
+                identity = hashlib.sha256(
+                    (f"link\0{info.st_mode}\0{attributes}\0{target}").encode(
+                        "utf-8", errors="surrogatepass")).hexdigest()
+                entries.append((key, f"link:{identity}"))
+            elif stat.S_ISREG(info.st_mode):
+                entries.append((key, f"file:{info.st_size}:{_file_sha256(path)}"))
+            elif stat.S_ISDIR(info.st_mode):
+                entries.append((key, "directory"))
+                entries.extend(_surface_entries(path, key))
+            else:
+                entries.append((key, f"other:{info.st_mode}"))
     return ProjectSurfaceSnapshot(tuple(sorted(entries)))
 
 

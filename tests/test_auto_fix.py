@@ -201,6 +201,38 @@ class TestAutoFixState(unittest.TestCase):
         self.assertEqual(before.changed_paths(after), (
             "management:new.toml", "source:code.py"))
 
+    def test_review_surface_excludes_log_and_unrelated_folder(self):
+        source = self.root / "source"
+        management = self.root / ".assent"
+        folder = management / "plan01"
+        unrelated = management / "plan02"
+        source.mkdir()
+        folder.mkdir(parents=True)
+        unrelated.mkdir()
+        task = folder / "t001_task.e.toml"
+        verifier = management / "verify.py"
+        task.write_text('status = "DONE"\n', encoding="utf-8")
+        verifier.write_text("before\n", encoding="utf-8")
+        before = snapshot_project_surface(
+            source, management, tasks_dir=folder,
+            stable_management_files=(verifier,))
+
+        (folder / "_assent.log").write_text("runtime output\n", encoding="utf-8")
+        (unrelated / "t001_task.r.toml").write_text(
+            "parallel progress\n", encoding="utf-8")
+        unchanged = snapshot_project_surface(
+            source, management, tasks_dir=folder,
+            stable_management_files=(verifier,))
+        self.assertEqual(before.changed_paths(unchanged), ())
+
+        task.write_text('status = "BLOCKED"\n', encoding="utf-8")
+        verifier.write_text("after\n", encoding="utf-8")
+        changed = snapshot_project_surface(
+            source, management, tasks_dir=folder,
+            stable_management_files=(verifier,))
+        self.assertEqual(before.changed_paths(changed), (
+            "management:plan01:t001_task.e.toml", "management:verify.py"))
+
 
 if __name__ == "__main__":
     unittest.main()
