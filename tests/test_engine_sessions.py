@@ -412,11 +412,14 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
                               reset_at=reset)
 
         adapter = ScriptedAdapter([quota_step, self.ai_done(path)])
-        rc = self.run_quiet(cfg, once=True, adapter=adapter,
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = engine.run(cfg, once=True, adapter=adapter,
                             sleep=sleeps.append, now=lambda: t0)
         self.assertEqual(rc, 0)
         self.assertAlmostEqual(sum(sleeps), (5 + 2) * 60, delta=1)  # +2 minute buffer
         self.assertIn("resume", adapter.calls[1][0])
+        self.assertIn("Waiting for quota reset before resuming", out.getvalue())
         # one zero-token capability preflight before the run, then one per attempt
         self.assertEqual(adapter.resolve_calls, ["lite", "lite", "lite"])
         subjects = self.subjects()
@@ -428,6 +431,9 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(quota["agent"], "claude")
         self.assertEqual(quota["requested_model"], "lite")
         self.assertEqual(quota["requested_effort"], "medium")
+        self.assertEqual(
+            quota["summary"],
+            "Quota exhausted; progress kept, waiting for quota reset before resuming")
         self.assertNotIn("session", [e["event"] for e in entries])
 
     def test_quota_rotates_to_next_adapter_and_records_each_identity(self):
@@ -448,13 +454,19 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
                 path, by="codex", requested_model="codex-lite")],
             resolved_model="codex-lite")
         sleeps: list[float] = []
+        out = io.StringIO()
 
-        with mock.patch("assent.engine.get_adapter", return_value=codex):
-            self.assertEqual(self.run_quiet(
-                cfg, once=True, adapter=claude, sleep=sleeps.append), 0)
+        with contextlib.redirect_stdout(out):
+            with mock.patch("assent.engine.get_adapter", return_value=codex):
+                self.assertEqual(engine.run(
+                    cfg, once=True, adapter=claude, sleep=sleeps.append), 0)
 
         self.assertEqual(sleeps, [])
         self.assertIn("resume", codex.calls[0][0])
+        terminal = out.getvalue()
+        self.assertIn("Switching adapter claude -> codex immediately", terminal)
+        self.assertNotIn("waiting for reset", terminal.lower())
+        self.assertNotIn("rotation poll", terminal.lower())
         self.assertTrue(any(
             subject.startswith("wip(plan01/t001): ")
             for subject in self.subjects()))
@@ -463,6 +475,10 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         quota = next(entry for entry in entries if entry["event"] == "quota")
         self.assertEqual(quota["agent"], "claude")
         self.assertEqual(quota["requested_model"], "claude-lite")
+        self.assertEqual(
+            quota["summary"],
+            "Quota exhausted; progress kept, switching immediately to adapter codex")
+        self.assertNotIn("wait", quota["summary"].lower())
         done = next(entry for entry in entries if entry["by"] == "codex")
         self.assertEqual(done["requested_model"], "codex-lite")
 
@@ -521,6 +537,24 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         self.assertIn("Every adapter in the rotation is quota-exhausted",
                       out.getvalue())
         self.assertIn("continuing with claude", out.getvalue())
+        self.assertEqual(out.getvalue().count(
+            "Every adapter in the rotation is quota-exhausted"), 1)
+
+        from assent.plan import read_entries
+        quotas = [entry for entry in read_entries(journal_path_for(path))
+                  if entry["event"] == "quota"]
+        self.assertEqual(len(quotas), 2)
+        self.assertEqual(
+            [(entry["agent"], entry["requested_model"])
+             for entry in quotas],
+            [("claude", "claude-lite"), ("codex", "codex-lite")])
+        self.assertEqual(
+            quotas[0]["summary"],
+            "Quota exhausted; progress kept, switching immediately to adapter codex")
+        self.assertEqual(
+            quotas[1]["summary"],
+            "Quota exhausted; progress kept, every adapter in the rotation is "
+            "quota-exhausted; waiting for rotation poll before continuing with claude")
 
     def test_all_rotation_adapters_are_preflighted_before_worktree_creation(self):
         self.write_task(1)

@@ -55,8 +55,9 @@ it unattended.
               │      → still failing → mark BLOCKED, commit   │
               │      results together → back to 1             │
               │  4c. Quota exhausted → wip checkpoint →       │
-              │      countdown until reset → resume with a    │
-              │      "continue" prompt                        │
+              │      switch adapter immediately, or wait for  │
+              │      the rotation poll when all are exhausted │
+              │      → resume with a "continue" prompt       │
               └────────────────────────────────────────────┘
 ```
 
@@ -1350,13 +1351,14 @@ or hourly depending on your plan), you can resume the same task:
 assent run <FOLDER>  # Resumes from WIP automatically
 ```
 
-The task journal records the exact quota-reset time (if available) and the
-scheduler will poll until then before retrying. If you need to run a different
-folder in the meantime, you can run it in a second terminal as long as it does
-not depend on the quota-limited folder.
-When `[adapter].name` is a list, quota exhaustion rotates to the next adapter
-in order; the scheduler waits for the rotation poll only after every adapter
-in the rotation is exhausted.
+With one configured adapter, the task journal records the exact quota-reset
+time (if available), and the scheduler waits until then before retrying; when
+no reset is known, it waits for the configured quota poll. If you need to run a
+different folder in the meantime, you can run it in a second terminal as long
+as it does not depend on the quota-limited folder. When `[adapter].name` is a
+list, quota exhaustion switches immediately to the named next adapter. The
+scheduler waits for the configured rotation poll only after every adapter in
+the rotation is exhausted, then continues with the named next adapter.
 
 **Fixing configuration after a preflight error**
 

@@ -609,7 +609,7 @@ agent = "claude"
 requested_model = "fable"
 requested_effort = "high"
 event = "quota"
-summary = "quota exhausted; progress kept, waiting for reset to continue"
+summary = "quota exhausted; progress kept, switching to codex immediately"
 ```
 
 Antigravity adapter example:
@@ -1254,11 +1254,13 @@ human.
   file + commits along with the results that did not pass. **Token-burned output
   is never discarded.**
 - Quota exhausted -> not counted as a failure: the r file records `quota`,
-  progress is gathered into a `wip(<work folder>/tNNN)` checkpoint, a countdown
-  waits for the reset, and the same task reruns carrying a "resume" prompt.
-  When `[adapter].name` is a list, quota exhaustion rotates to the next adapter
-  in order; the scheduler waits for the rotation poll only after every adapter
-  in the rotation is exhausted.
+  progress is gathered into a `wip(<work folder>/tNNN)` checkpoint, and the
+  same task reruns carrying a "resume" prompt. With one configured adapter, a
+  countdown waits for the known reset (or the configured quota poll when no
+  reset is known). When `[adapter].name` is a list, quota exhaustion switches
+  immediately to the next adapter in order; the scheduler waits for the
+  configured rotation poll only after every adapter in the rotation is
+  exhausted, then continues with the next adapter.
 - Unclean exit (power loss, a forced kill) never reaches the Ctrl+C/quota
   interrupt handlers, so a dirty worktree can survive to the next `run`
   startup. The startup gate checks whether every uncommitted change is

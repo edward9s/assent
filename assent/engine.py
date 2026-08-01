@@ -1030,9 +1030,36 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             print(f"  {escape_reason}")
             outcome, reason = "fail", escape_reason
         elif result.quota_exhausted:  # quota exhaustion does not count as a failure
-            print("  Quota exhausted -> keep progress (wip checkpoint) and wait for reset before resuming...")
+            print("  Quota exhausted -> keep progress (wip checkpoint).")
+            wait_kind: str | None = None
+            if len(rotation.names) == 1:
+                quota_summary = (
+                    "Quota exhausted; progress kept, waiting for quota reset "
+                    "before resuming")
+                quota_action = "  Waiting for quota reset before resuming..."
+                wait_kind = "quota"
+            else:
+                cycle_exhausted = rotation.advance_after_quota()
+                if cycle_exhausted:
+                    quota_summary = (
+                        "Quota exhausted; progress kept, every adapter in the "
+                        "rotation is quota-exhausted; waiting for rotation poll "
+                        f"before continuing with {rotation.name}")
+                    quota_action = (
+                        "  Every adapter in the rotation is quota-exhausted; "
+                        f"waiting {cfg.rotation_poll_minutes} minute(s) before "
+                        f"continuing with {rotation.name}.")
+                    wait_kind = "rotation"
+                else:
+                    quota_summary = (
+                        "Quota exhausted; progress kept, switching immediately "
+                        f"to adapter {rotation.name}")
+                    quota_action = (
+                        f"  Switching adapter {adapter_name} -> {rotation.name} "
+                        "immediately; resuming the same task without "
+                        "consuming a retry.")
             append_entry(task.journal_path, by="scheduler", event="quota",
-                         summary="Quota exhausted; progress kept, waiting for reset before resuming",
+                         summary=quota_summary,
                          agent=session.agent,
                          requested_model=session.requested_model,
                          requested_effort=session.requested_effort,
@@ -1043,17 +1070,11 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                     cfg.git_excludes):
                 print("  wip checkpoint created.")
             try_write_report(cfg)
-            if len(rotation.names) == 1:
+            print(quota_action)
+            if wait_kind == "quota":
                 _wait_for_quota(cfg, result.reset_at, sleep, now)
-            else:
-                cycle_exhausted = rotation.advance_after_quota()
-                print(f"  Switching adapter {adapter_name} -> {rotation.name}; "
-                      "resuming the same task without consuming a retry.")
-                if cycle_exhausted:
-                    print("  Every adapter in the rotation is quota-exhausted; "
-                          f"waiting {cfg.rotation_poll_minutes} minute(s) before "
-                          f"continuing with {rotation.name}.")
-                    _wait_for_rotation(cfg, sleep)
+            elif wait_kind == "rotation":
+                _wait_for_rotation(cfg, sleep)
             resumed = True
             continue  # resume the same task, without counting a retry
         elif result.failure_kind == "billing":

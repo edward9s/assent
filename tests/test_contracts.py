@@ -77,6 +77,22 @@ class TestContractPaths(unittest.TestCase):
 class TestContractContent(unittest.TestCase):
     """Durable rules a reader must be able to find in the shipped contract."""
 
+    def test_quota_examples_describe_rotation_action(self):
+        install_global_contracts(self)
+        format_text = contracts.installed_contract_text("format.md")
+        self.assertIn(
+            'summary = "quota exhausted; progress kept, switching to codex '
+            'immediately"', format_text)
+        self.assertNotIn("waiting for reset to continue", format_text)
+
+        english = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("switch adapter immediately", english)
+        self.assertIn("rotation poll when all are exhausted", english)
+        chinese = (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+            encoding="utf-8")
+        self.assertIn("立即切換 adapter", chinese)
+        self.assertIn("整輪耗盡才等輪詢", chinese)
+
     def test_folder_verification_report_refresh_is_documented(self):
         install_global_contracts(self)
         english = {
