@@ -280,6 +280,9 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
         self.assertFalse(path.with_name("r001_task.toml").exists())
         subject = next(s for s in self.subjects()
                        if s.startswith("auto(plan01/t001): "))
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
         self.assertNotIn("Co-Authored-By", subject)
         self.assertNotIn("Generated with", subject)
         # working tree clean apart from _report.md and assent.lock (runtime artifacts)

@@ -44,7 +44,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
 from assent import AssentError
-from assent.adapters import Adapter, InvocationRequest, TaskResult
+from assent.adapters import (Adapter, InvocationRequest, TaskResult,
+                             is_checkpoint_resume_line,
+                             parse_checkpoint_resume_output)
 from assent.adapters.process import run_subprocess
 
 if TYPE_CHECKING:
@@ -280,6 +282,8 @@ def format_output_line(raw_line: str) -> str | None:
     arrived.  No JSON event, token count, tool call or server-selected model is inferred:
     a line that merely looks like JSON is still just a line of output.
     """
+    if is_checkpoint_resume_line(raw_line):
+        return None
     text = raw_line.rstrip("\r\n")
     if not text.strip():
         return None
@@ -309,6 +313,17 @@ def classify_output(exit_code: int, stalled: bool, output: str) -> str | None:
     if _TIMEOUT_TEXT_RE.search(output):
         return "timeout"
     return "nonzero"
+
+
+def _has_quota_evidence(exit_code: int, stalled: bool, output: str) -> bool:
+    """Return whether a failed, non-stalled transcript contains quota evidence.
+
+    Quota is kept as an independent fact because another diagnostic classifier may also match
+    the same prose.  The scheduler needs the quota path to win over those diagnostics when the
+    exact checkpoint-resume control record is present.
+    """
+    return (exit_code != 0 and not stalled
+            and _QUOTA_TEXT_RE.search(output) is not None)
 
 
 # --------------------------------------------------------------------------- #
@@ -412,11 +427,19 @@ class AntigravityAdapter(Adapter):
                 log_path.unlink()
             except OSError:
                 pass
-        kind = classify_output(returncode, stalled, output)
+        quota_evidence = _has_quota_evidence(returncode, stalled, output)
+        kind = "quota" if quota_evidence else classify_output(
+            returncode, stalled, output)
+        terminal_record = parse_checkpoint_resume_output(output, returncode, stalled)
+        # The exact final control record is authoritative over every non-quota prose
+        # classifier.  Independently detected quota evidence remains the stronger outcome.
+        checkpoint_resume = terminal_record and not quota_evidence
         return TaskResult(exit_code=returncode, output=output,
-                          quota_exhausted=kind == "quota",
+                          quota_exhausted=quota_evidence,
                           reset_at=None,        # print mode states no reset time; none is invented
-                          stalled=stalled, failure_kind=kind)
+                          stalled=stalled,
+                          checkpoint_resume=checkpoint_resume,
+                          failure_kind=None if checkpoint_resume else kind)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

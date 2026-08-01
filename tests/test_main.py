@@ -409,11 +409,9 @@ class TestDispatch(MainTestCase):
         self.assertEqual(codes, [0, 1])
         self.assertEqual(mocked.call_count, 2)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
-        self.assertEqual(
-            [call.args[0].tasks_name for call in report.call_args_list],
-            ["reviewed", "reviewed"])
+        report.assert_not_called()
 
-    def test_single_folder_verify_refreshes_stale_report_after_pass_or_failure(self):
+    def test_single_folder_verify_does_not_add_a_cli_report_refresh(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
         report_path = self.root / ".assent" / "reviewed" / "_report.md"
@@ -439,18 +437,16 @@ class TestDispatch(MainTestCase):
                 with patch("assent.__main__.verify_folder",
                            side_effect=verify), \
                         patch("assent.__main__.inspection.try_write_report",
-                              side_effect=refresh):
+                              side_effect=refresh) as report:
                     code, _ = self.run_main(
                         ["verify", "reviewed", "--config", str(config)])
 
                 self.assertEqual(code, result)
-                self.assertEqual(events, [
-                    ("verify", "stale report\n"),
-                    ("report", f"receipt result {result}\n"),
-                ])
+                self.assertEqual(events, [("verify", "stale report\n")])
+                report.assert_not_called()
                 self.assertEqual(
                     report_path.read_text(encoding="utf-8"),
-                    f"report result {result}\n")
+                    f"receipt result {result}\n")
 
     def test_verify_dispatches_exact_selected_batch_and_focus(self):
         config = self.write_config()
@@ -504,7 +500,7 @@ class TestDispatch(MainTestCase):
                 ["verify", "reviewed", "--config", str(config)])
         self.assertEqual(code, 130)
         self.assertIn("temporary resources were cleaned up", out)
-        report.assert_called_once()
+        report.assert_not_called()
 
     def test_no_push_subcommand_exists(self):
         with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
@@ -902,7 +898,7 @@ class TestRunVerifyChaining(MainTestCase):
                 ["run", "alpha", "--verify", "--config", str(self.config)])
         self.assertEqual(code, 1)
 
-    def test_single_folder_run_verify_refreshes_stale_report_after_pass_or_failure(self):
+    def test_single_folder_run_verify_does_not_add_a_cli_report_refresh(self):
         self.write_task("alpha", "DONE")
         report_path = self.root / ".assent" / "alpha" / "_report.md"
 
@@ -928,19 +924,17 @@ class TestRunVerifyChaining(MainTestCase):
                         patch("assent.__main__.verify_folder",
                               side_effect=verify), \
                         patch("assent.__main__.inspection.try_write_report",
-                              side_effect=refresh):
+                              side_effect=refresh) as report:
                     code, _ = self.run_main(
                         ["run", "alpha", "--verify",
                          "--config", str(self.config)])
 
                 self.assertEqual(code, result)
-                self.assertEqual(events, [
-                    ("verify", "stale report\n"),
-                    ("report", f"receipt result {result}\n"),
-                ])
+                self.assertEqual(events, [("verify", "stale report\n")])
+                report.assert_not_called()
                 self.assertEqual(
                     report_path.read_text(encoding="utf-8"),
-                    f"report result {result}\n")
+                    f"receipt result {result}\n")
 
     def test_a_run_without_verify_never_verifies(self):
         self.write_task("alpha")

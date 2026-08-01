@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from assent import AssentError
-from assent.adapters import TaskResult, get_adapter
+from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult, get_adapter
 from assent.adapters.codex import (
     CodexAdapter, build_command, format_stream_event, parse_output_for_billing,
     parse_output_for_quota,
@@ -74,6 +74,9 @@ class TestFormatStreamEvent(unittest.TestCase):
         self.assertIn("warning", format_stream_event("warning"))
         self.assertIsNone(format_stream_event("  \n"))
 
+    def test_checkpoint_resume_record_is_hidden_from_live_output(self):
+        self.assertIsNone(format_stream_event(CHECKPOINT_RESUME_RECORD + "\n"))
+
 
 class TestQuota(unittest.TestCase):
     def test_error_and_agent_limit_messages_are_detected(self):
@@ -92,6 +95,31 @@ class TestQuota(unittest.TestCase):
         normal = {"type": "turn.completed", "usage": {"output_tokens": 1}}
         output = json.dumps(command) + "\n" + json.dumps(normal)
         self.assertFalse(parse_output_for_quota(output))
+
+
+class TestCheckpointResume(unittest.TestCase):
+    def test_exact_final_record_is_recognized(self):
+        from assent.adapters import parse_checkpoint_resume_output
+
+        output = "partial\n" + CHECKPOINT_RESUME_RECORD + "\n\n"
+        self.assertTrue(parse_checkpoint_resume_output(output, 1, False))
+
+    def test_zero_exit_stall_and_nonfinal_or_lookalike_records_are_rejected(self):
+        from assent.adapters import parse_checkpoint_resume_output
+
+        cases = (
+            (0, CHECKPOINT_RESUME_RECORD + "\n", False),
+            (1, CHECKPOINT_RESUME_RECORD + "\n", True),
+            (1, "prefix" + CHECKPOINT_RESUME_RECORD + "\n", False),
+            (1, CHECKPOINT_RESUME_RECORD[:-1] + "\n", False),
+            (1, CHECKPOINT_RESUME_RECORD + "\ntrailing\n", False),
+            (1, CHECKPOINT_RESUME_RECORD + " \n", False),
+            (1, '{"type": "assent.checkpoint_resume"}\n', False),
+        )
+        for exit_code, output, stalled in cases:
+            with self.subTest(exit_code=exit_code, output=output, stalled=stalled):
+                self.assertFalse(
+                    parse_checkpoint_resume_output(output, exit_code, stalled))
 
 
 class TestBilling(unittest.TestCase):
@@ -153,6 +181,18 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(stalled.stalled)
         self.assertFalse(stalled.quota_exhausted)
 
+    def test_quota_like_assistant_prose_on_success_is_not_quota(self):
+        for phrase in ("quota exceeded", "rate limit", "session limit"):
+            with self.subTest(phrase=phrase):
+                line = json.dumps({"type": "item.completed", "item": {
+                    "type": "agent_message",
+                    "text": f"The answer discusses {phrase}."}})
+                self.patch_run(lambda *args, **kwargs: (0, line + "\n", False))
+                result = CodexAdapter(make_cfg()).run_task(
+                    "p", "gpt-5.6-sol", None, Path("."))
+                self.assertEqual(result.exit_code, 0)
+                self.assertFalse(result.quota_exhausted)
+
     def test_billing_output_sets_failure_kind_not_quota(self):
         billing = json.dumps({"type": "turn.failed",
                               "error": {"message": "Credit balance is too low"}})
@@ -169,6 +209,36 @@ class TestRunTask(unittest.TestCase):
             "p", adapter.resolve_model("lite"), None, Path("."))
         self.assertTrue(stalled.stalled)
         self.assertIsNone(stalled.failure_kind)
+
+    def test_checkpoint_resume_record_sets_distinct_result_and_keeps_raw_output(self):
+        output = "partial\n" + CHECKPOINT_RESUME_RECORD + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = CodexAdapter(make_cfg()).run_task(
+            "p", "gpt-5.6-sol", "medium", Path("."))
+        self.assertTrue(result.checkpoint_resume)
+        self.assertFalse(result.quota_exhausted)
+        self.assertEqual(result.output, output)
+        self.assertIsNone(result.failure_kind)
+
+    def test_quota_and_control_record_use_the_quota_path(self):
+        quota = json.dumps({"type": "error", "message": "usage limit reached"})
+        output = quota + "\n" + CHECKPOINT_RESUME_RECORD + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = CodexAdapter(make_cfg()).run_task(
+            "p", "gpt-5.6-sol", "medium", Path("."))
+        self.assertTrue(result.quota_exhausted)
+        self.assertFalse(result.checkpoint_resume)
+
+    def test_terminal_record_overrides_preceding_billing_prose(self):
+        prose = json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": "I checked the credit balance report."}})
+        output = prose + "\n" + CHECKPOINT_RESUME_RECORD + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = CodexAdapter(make_cfg()).run_task(
+            "p", "gpt-5.6-sol", "medium", Path("."))
+        self.assertTrue(result.checkpoint_resume)
+        self.assertFalse(result.quota_exhausted)
+        self.assertIsNone(result.failure_kind)
 
     def test_unknown_tier_raises(self):
         with self.assertRaises(AssentError):

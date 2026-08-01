@@ -7,8 +7,8 @@ imports back, so the query commands stay loadable without the scheduler.
 
 Iron rules inherited from field experience on the workflow project: **never discard
 output the execution AI has already burned tokens to produce.**
-- Quota interrupted -> keep progress in a wip checkpoint, then after reset resume with a
-  "continue" prompt instead of scrapping and rerunning.
+- Quota or checkpoint-resume interrupted -> keep progress in a wip checkpoint, then resume with
+  a "continue" prompt instead of scrapping and rerunning.
 - Acceptance failed -> do not restore the working tree; a retry fixes the existing work
   (cheap) rather than redoing it from scratch (expensive).
 - Retries exhausted -> commit the not-yet-passing work into a BLOCKED checkpoint and hand
@@ -81,7 +81,8 @@ _DEFAULT_PROMPT_TEMPLATE = (
 _RETRY_SUFFIX = ("\nThe previous attempt failed acceptance. Reason: {failure_reason}. "
                  "The previous attempt's work is still in the working tree; review and fix "
                  "it on top of what is there, do not redo it.")
-_RESUME_SUFFIX = ("\nThe previous run of this task was interrupted (quota exhausted or user "
+_RESUME_SUFFIX = ("\nThe previous adapter session was interrupted (quota exhausted, "
+                  "checkpoint-resume control, or user "
                   "interrupt); the partial work already done is kept in the working tree "
                   "(possibly including a wip checkpoint). Review the current state first, "
                   "resume and finish the remaining part, and do not redo what is already done.")
@@ -126,9 +127,11 @@ _REWORK_REASON_RE = re.compile(
 
 @dataclass
 class _SessionState:
-    """Lets the outer interrupt handler read the resolved identity of the current session."""
+    """Lets the outer interrupt handler read the current session's closeout state."""
 
     identity: SessionIdentity | None = None
+    terminal_checkpoint: bool = False
+    terminal_checkpoint_attempt: tuple[str, str] | None = None
 
 
 @dataclass
@@ -588,7 +591,7 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
                       "(default) for the per-folder receipt under manual "
                       "policy; run "
                       "`assent verify [--batch]` before accepting")
-        try_write_report(cfg)
+            try_write_report(cfg)
     return result
 
 
@@ -691,22 +694,38 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         # the session is terminated by the OS signal; here the engine gathers the produced
         # progress into a wip checkpoint (never discard it) and exits with 130.
         print("\nInterrupt received (Ctrl+C): session terminated, keeping current progress...")
+        terminal_checkpoint = bool(
+            current_session is not None and current_session.terminal_checkpoint)
+        if (not terminal_checkpoint and current_session is not None):
+            terminal_checkpoint = _terminal_checkpoint_matches_attempt(
+                cfg, current_session.terminal_checkpoint_attempt)
+            if terminal_checkpoint:
+                current_session.terminal_checkpoint = True
         if (current_task is not None and current_session is not None
-                and current_session.identity is not None):
+                and current_session.identity is not None and not terminal_checkpoint):
             _mark_interrupted_task(
                 current_task, current_session.identity,
                 "User interrupt; progress kept for next resume", now,
                 detail="run received Ctrl+C")
+        if terminal_checkpoint:
+            print("Terminal auto checkpoint already exists; task remains DONE.")
+        else:
+            try:
+                subject = (_checkpoint_subject(
+                    cfg, "wip", current_task, "user interrupt, progress kept")
+                    if current_task is not None
+                    else f"wip({cfg.tasks_name}): user interrupt, progress kept")
+                if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
+                    print("Progress gathered into a wip checkpoint (git revert it yourself if unsatisfied).")
+            except AssentError as e:
+                print(f"wip checkpoint failed: {e} (working tree left as is, nothing discarded)")
         try:
-            subject = (_checkpoint_subject(
-                cfg, "wip", current_task, "user interrupt, progress kept")
-                if current_task is not None
-                else f"wip({cfg.tasks_name}): user interrupt, progress kept")
-            if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
-                print("Progress gathered into a wip checkpoint (git revert it yourself if unsatisfied).")
-        except AssentError as e:
-            print(f"wip checkpoint failed: {e} (working tree left as is, nothing discarded)")
-        try_write_report(cfg)
+            try_write_report(cfg)
+        except KeyboardInterrupt:
+            # A second stop can arrive while the interrupt handler makes its best-effort
+            # report refresh.  The terminal checkpoint, when present, remains authoritative.
+            if not terminal_checkpoint:
+                raise
         print("Interrupted.")
         return 130
     except _BillingAbort as e:
@@ -935,6 +954,87 @@ def _mark_billing_task(task: Task, session: SessionIdentity, detail: str,
         print(f"Writing the billing journal failed: {e} (working tree left as is, nothing discarded)")
 
 
+def _preserve_interrupted_progress(cfg: Config, task: Task,
+                                   session: SessionIdentity, *, event: str,
+                                   summary: str, detail: str,
+                                   checkpoint_reason: str,
+                                   now: Callable[[], datetime]) -> None:
+    """Record a resumable adapter interruption, checkpoint its dirty progress, and refresh.
+
+    Quota exhaustion and the provider-neutral checkpoint-resume control have different
+    continuation decisions, but both must preserve the same token-burned work before that
+    decision.  The task is persisted as WIP first so a result that arrived after the execution
+    AI wrote DONE cannot skip the next run's resume path; an explicit BLOCKED result remains
+    untouched.  The caller owns the subsequent wait/rotation choice and sets the resume prompt.
+    """
+    try:
+        fresh = parse_task_file(task.path)
+        if fresh.status != "BLOCKED":
+            set_status(task.path, "WIP")
+    except Exception as e:  # status persistence must not discard progress or hide the interruption
+        print(f"Writing back the resumable task status failed: {e} (working tree left as is, nothing discarded)")
+
+    append_entry(task.journal_path, by="scheduler", event=event,
+                 summary=summary, detail=detail,
+                 agent=session.agent,
+                 requested_model=session.requested_model,
+                 requested_effort=session.requested_effort,
+                 time_str=now().isoformat(timespec="seconds"))
+    if gitops.commit_if_dirty(
+            cfg.root, _checkpoint_subject(cfg, "wip", task, checkpoint_reason),
+            cfg.git_excludes):
+        print("  wip checkpoint created.")
+    try_write_report(cfg)
+
+
+def _commit_terminal_checkpoint(cfg: Config, task: Task, *, resumed: bool,
+                                session_state: _SessionState) -> bool:
+    """Create the one terminal auto checkpoint after a task passes every acceptance gate.
+
+    Ordinary success keeps its existing dirty-tree behavior.  A task that resumed from WIP is
+    different: its content may already be present in the preceding WIP commit, so a clean tree
+    still needs one empty, namespaced auto marker proving terminal ownership.  The caller invokes
+    this once, only after ``_evaluate`` returns ``done``.
+    """
+    subject = _checkpoint_subject(cfg, "auto", task, _short(task.title) or "done")
+    pre_attempt_head = gitops.head_ref(cfg.root)
+    if pre_attempt_head is not None:
+        # This in-memory witness is intentionally armed at the closeout boundary, not at task
+        # start.  It lets Ctrl+C recover a commit that succeeded just before the return path.
+        session_state.terminal_checkpoint_attempt = (pre_attempt_head, subject)
+    else:
+        session_state.terminal_checkpoint_attempt = None
+    if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
+        return True
+    if resumed:
+        gitops.commit_empty(cfg.root, subject)
+        return True
+    # No terminal operation was needed for a non-resumed clean task.  Do not leave a witness
+    # armed while the post-closeout report is being refreshed.
+    session_state.terminal_checkpoint_attempt = None
+    return False
+
+
+def _terminal_checkpoint_matches_attempt(
+        cfg: Config, attempt: tuple[str, str] | None) -> bool:
+    """Prove that an interrupted closeout created its exact auto commit.
+
+    The attempt is armed only immediately before the scheduler's terminal commit, after
+    ``_evaluate`` has passed.  Requiring first-parent history to contain the recorded subject
+    with the recorded pre-attempt HEAD as its only parent rejects matching commits made by the
+    execution AI, a retry, or any earlier phase of the task.
+    """
+    if attempt is None:
+        return False
+    base_ref, expected = attempt
+    try:
+        history = gitops.commit_history(cfg.root)
+    except AssentError:
+        return False
+    return any(subject == expected and parents == (base_ref,)
+               for _commit, parents, subject in history)
+
+
 def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
                              now: Callable[[], datetime]) -> str | None:
     """Detect and, where possible, port back paths a just-finished session wrote into the main
@@ -992,8 +1092,8 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   sleep: Callable[[float], None],
                   now: Callable[[], datetime], session_state: _SessionState,
                   resumed: bool = False) -> None:
-    """Run a single task's full lifecycle; internally handles quota waiting and retries, and by
-    the end the task is DONE/BLOCKED.
+    """Run a single task's full lifecycle; internally handles quota/control resumption and
+    retries, and by the end the task is DONE/BLOCKED.
 
     `task` is the trusted version parsed at task-selection time (= the previous checkpoint):
     scope/verify and all fields are taken from it, and the only legal change the execution AI
@@ -1029,31 +1129,67 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         if escape_reason is not None:
             print(f"  {escape_reason}")
             outcome, reason = "fail", escape_reason
+        elif (result.checkpoint_resume and not result.quota_exhausted
+              and not result.stalled and result.exit_code != 0):
+            print("  Checkpoint-resume control received -> keep progress (wip checkpoint).")
+            _preserve_interrupted_progress(
+                cfg, task, session, event="checkpoint_resume",
+                summary=("Checkpoint-resume requested; progress kept, immediately "
+                         "resuming the same adapter command"),
+                detail=("The adapter emitted the exact final control record "
+                        '{"type":"assent.checkpoint_resume"}; no quota wait, '
+                        "adapter rotation, or retry was used."),
+                checkpoint_reason="checkpoint-resume control, progress kept", now=now)
+            print("  Resuming the same adapter command immediately without waiting, "
+                  "rotating, or consuming a retry.")
+            resumed = True
+            continue
         elif result.quota_exhausted:  # quota exhaustion does not count as a failure
-            print("  Quota exhausted -> keep progress (wip checkpoint) and wait for reset before resuming...")
-            append_entry(task.journal_path, by="scheduler", event="quota",
-                         summary="Quota exhausted; progress kept, waiting for reset before resuming",
-                         agent=session.agent,
-                         requested_model=session.requested_model,
-                         requested_effort=session.requested_effort,
-                         time_str=now().isoformat(timespec="seconds"))
-            if gitops.commit_if_dirty(
-                    cfg.root, _checkpoint_subject(
-                        cfg, "wip", task, "quota interrupt, progress kept"),
-                    cfg.git_excludes):
-                print("  wip checkpoint created.")
-            try_write_report(cfg)
+            print("  Quota exhausted -> keep progress (wip checkpoint).")
+            wait_kind: str | None = None
             if len(rotation.names) == 1:
-                _wait_for_quota(cfg, result.reset_at, sleep, now)
+                if result.reset_at is None:
+                    quota_summary = (
+                        "Quota exhausted; progress kept, waiting for quota poll "
+                        f"(every {cfg.quota_poll_minutes} minutes) before resuming")
+                    quota_action = (
+                        "  Waiting for quota poll "
+                        f"(every {cfg.quota_poll_minutes} minutes) before resuming...")
+                else:
+                    quota_summary = (
+                        "Quota exhausted; progress kept, waiting for quota reset "
+                        "before resuming")
+                    quota_action = "  Waiting for quota reset before resuming..."
+                wait_kind = "quota"
             else:
                 cycle_exhausted = rotation.advance_after_quota()
-                print(f"  Switching adapter {adapter_name} -> {rotation.name}; "
-                      "resuming the same task without consuming a retry.")
                 if cycle_exhausted:
-                    print("  Every adapter in the rotation is quota-exhausted; "
-                          f"waiting {cfg.rotation_poll_minutes} minute(s) before "
-                          f"continuing with {rotation.name}.")
-                    _wait_for_rotation(cfg, sleep)
+                    quota_summary = (
+                        "Quota exhausted; progress kept, every adapter in the "
+                        "rotation is quota-exhausted; waiting for rotation poll "
+                        f"before continuing with {rotation.name}")
+                    quota_action = (
+                        "  Every adapter in the rotation is quota-exhausted; "
+                        f"waiting {cfg.rotation_poll_minutes} minute(s) before "
+                        f"continuing with {rotation.name}.")
+                    wait_kind = "rotation"
+                else:
+                    quota_summary = (
+                        "Quota exhausted; progress kept, switching immediately "
+                        f"to adapter {rotation.name}")
+                    quota_action = (
+                        f"  Switching adapter {adapter_name} -> {rotation.name} "
+                        "immediately; resuming the same task without "
+                        "consuming a retry.")
+            _preserve_interrupted_progress(
+                cfg, task, session, event="quota", summary=quota_summary,
+                detail="Quota evidence preserved the current task progress for resumption.",
+                checkpoint_reason="quota interrupt, progress kept", now=now)
+            print(quota_action)
+            if wait_kind == "quota":
+                _wait_for_quota(cfg, result.reset_at, sleep, now)
+            elif wait_kind == "rotation":
+                _wait_for_rotation(cfg, sleep)
             resumed = True
             continue  # resume the same task, without counting a retry
         elif result.failure_kind == "billing":
@@ -1087,11 +1223,16 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             outcome, reason = _evaluate(cfg, task, start_ref)
         if outcome == "done":
             print("  Acceptance passed -> creating checkpoint")
-            if not gitops.commit_if_dirty(
-                    cfg.root, _checkpoint_subject(
-                        cfg, "auto", task, _short(task.title) or "done"),
-                    cfg.git_excludes):
+            committed = _commit_terminal_checkpoint(
+                cfg, task, resumed=resumed, session_state=session_state)
+            # Report refresh is deliberately after the Git evidence.  Keep this marker before
+            # entering it so Ctrl+C there cannot downgrade a task whose terminal ownership is
+            # already recorded or create a second WIP checkpoint.
+            session_state.terminal_checkpoint = committed
+            if not committed:
                 print("  (no new changes in the working tree; progress is already in a prior wip checkpoint)")
+            elif resumed:
+                print("  terminal auto checkpoint created; resumed progress was preserved")
             try_write_report(cfg)
             return
         if outcome == "self_blocked":

@@ -628,7 +628,9 @@ def accept_all(config_path: str, assent_dir: Path) -> int:
     Selection and ordering reuse ``folderdeps`` exactly as ``run --all``
     does. Each folder refreshes its verification receipt only when stale
     (``verify_folder_if_needed``, the same unattended full verification as
-    ``assent verify FOLDER``), then reuses ``accept_folder`` unchanged. A
+    ``assent verify FOLDER``); that shared folder-verification entry point also
+    performs the one post-verification best-effort report refresh. The chain
+    then reuses ``accept_folder`` unchanged. A
     folder already published by a prior run skips straight to
     ``accept_folder``'s own idempotent path (see ``_already_integrated``).
     A finished folder whose source branch and worktree have both already

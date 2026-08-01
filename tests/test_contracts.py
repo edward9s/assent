@@ -77,24 +77,187 @@ class TestContractPaths(unittest.TestCase):
 class TestContractContent(unittest.TestCase):
     """Durable rules a reader must be able to find in the shipped contract."""
 
+    def test_quota_examples_describe_rotation_action(self):
+        install_global_contracts(self)
+        format_text = contracts.installed_contract_text("format.md")
+        self.assertIn(
+            'summary = "quota exhausted; progress kept, switching to codex '
+            'immediately"', format_text)
+        self.assertNotIn("waiting for reset to continue", format_text)
+
+        english = (_PROJECT_ROOT / "docs/CONFIGURATION.md").read_text(
+            encoding="utf-8")
+        for phrase in (
+                "Quota exhaustion records a WIP checkpoint",
+                "rotates immediately to the next configured adapter",
+                "waits only after all are exhausted"):
+            with self.subTest(document="docs/CONFIGURATION.md", phrase=phrase):
+                self.assertIn(phrase, english)
+        chinese = (_PROJECT_ROOT / "docs/zh-TW/CONFIGURATION.md").read_text(
+            encoding="utf-8")
+        for phrase in ("quota 中斷會記錄 WIP", "adapter list 會立即切到下一個",
+                       "全部用盡才等待"):
+            with self.subTest(document="docs/zh-TW/CONFIGURATION.md",
+                              phrase=phrase):
+                self.assertIn(phrase, chinese)
+
+    def test_checkpoint_resume_control_is_documented_consistently(self):
+        install_global_contracts(self)
+        record = '{"type":"assent.checkpoint_resume"}'
+        format_text = contracts.installed_contract_text("format.md")
+        english = (_PROJECT_ROOT / "docs/CONFIGURATION.md").read_text(
+            encoding="utf-8")
+        for name, text in (("format.md", format_text),
+                           ("docs/CONFIGURATION.md", english)):
+            with self.subTest(document=name):
+                self.assertIn(record, text)
+                self.assertIn("checkpoint_resume", text)
+                compact = " ".join(text.split())
+                self.assertIn(
+                    "A wrapper may replace a provider quota result with it only "
+                    "after arranging an immediate continuation; if it forwards "
+                    "provider quota, Assent performs the normal wait or rotation. "
+                    "When quota evidence and this record are both present, the "
+                    "ordinary quota path wins.",
+                    compact)
+
+        chinese = (_PROJECT_ROOT / "docs/zh-TW/CONFIGURATION.md").read_text(
+            encoding="utf-8")
+        compact = "".join(chinese.split())
+        self.assertIn(record, chinese)
+        self.assertIn("checkpoint_resume", chinese)
+        for phrase in (
+                "先安排立即續跑，才可把providerquotaresult換成這個record",
+                "若轉送providerquota，Assent仍負責普通wait或rotation",
+                "若quotaevidence與這個record同時存在，普通quotapath優先"):
+            with self.subTest(document="docs/zh-TW/CONFIGURATION.md",
+                              phrase=phrase):
+                self.assertIn(phrase, compact)
+
+    def test_wip_progress_and_terminal_auto_boundary_are_documented(self):
+        install_global_contracts(self)
+        format_text = contracts.installed_contract_text("format.md")
+        english = (_PROJECT_ROOT / "docs/WORKFLOW.md").read_text(
+            encoding="utf-8")
+        for name, text in (("format.md", format_text),
+                           ("docs/WORKFLOW.md", english)):
+            compact = " ".join(text.split())
+            for phrase in (
+                    "progress-bearing WIP checkpoint",
+                    "terminal auto",
+                    "clean legacy `DONE` task",
+                    "does not retroactively synthesize"):
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+
+        chinese = (_PROJECT_ROOT / "docs/zh-TW/WORKFLOW.md").read_text(
+            encoding="utf-8")
+        for phrase in ("具備進度的 `WIP`", "終端 auto checkpoint",
+                       "乾淨 legacy `DONE` task", "不會改寫或捏造歷史證據"):
+            with self.subTest(document="docs/zh-TW/WORKFLOW.md", phrase=phrase):
+                self.assertIn(phrase, chinese)
+
+    def test_command_guides_state_the_per_subcommand_config_contract(self):
+        commands = (
+            "run", "status", "check", "report", "verify", "clean", "archive",
+            "accept", "reconcile", "reject", "rework",
+        )
+        english = (_PROJECT_ROOT / "docs/COMMANDS.md").read_text(
+            encoding="utf-8")
+        chinese = (_PROJECT_ROOT / "docs/zh-TW/COMMANDS.md").read_text(
+            encoding="utf-8")
+        for name, text in (("docs/COMMANDS.md", english),
+                           ("docs/zh-TW/COMMANDS.md", chinese)):
+            compact = " ".join(text.split())
+            with self.subTest(document=name):
+                clause = (
+                    "`run`, `status`, `check`, `report`, `verify`, `clean`, "
+                    "`archive`, `accept`, `reconcile`, `reject`, and `rework` "
+                    "accept `--config PATH`"
+                    if name == "docs/COMMANDS.md" else
+                    "`run`、`status`、`check`、`report`、`verify`、`clean`、"
+                    "`archive`、`accept`、`reconcile`、`reject`、`rework` "
+                    "支援 `--config PATH`")
+                self.assertIn(
+                    clause if name == "docs/COMMANDS.md"
+                    else "".join(clause.split()),
+                    compact if name == "docs/COMMANDS.md"
+                    else "".join(compact.split()))
+                for command in commands:
+                    self.assertIn(f"`{command}`", compact)
+                self.assertIn(
+                    "per-subcommand" if name == "docs/COMMANDS.md"
+                    else "每個 subcommand 自己的 option", compact)
+                self.assertIn("top-level global option", compact)
+                self.assertIn(
+                    "have their own project-location contracts"
+                    if name == "docs/COMMANDS.md"
+                    else "各有自己的 project-location contract", compact)
+
+    def test_operations_guides_separate_recovery_and_persistent_evidence(self):
+        english = (_PROJECT_ROOT / "docs/OPERATIONS.md").read_text(
+            encoding="utf-8")
+        chinese = (_PROJECT_ROOT / "docs/zh-TW/OPERATIONS.md").read_text(
+            encoding="utf-8")
+        english_compact = " ".join(english.split())
+        for phrase in (
+                "every uncommitted change is provably attributable",
+                "marks that task `WIP`",
+                "gathers the edits into a `WIP` checkpoint",
+                "without opening an AI session",
+                "keeps the dirty worktree for human inspection",
+                "journal carries structured events plus bounded summaries and adapter classifications",
+                "not the full raw adapter stream",
+                "rendered terminal session output",
+                "without a parent scheduler prefix"):
+            with self.subTest(document="docs/OPERATIONS.md", phrase=phrase):
+                self.assertIn(phrase, english_compact)
+        chinese_compact = " ".join(chinese.split())
+        for phrase in (
+                "每個未提交變更都能證明屬於要恢復的 task",
+                "將 task 標成 `WIP`",
+                "收進 `WIP` checkpoint",
+                "不開 AI session",
+                "保留 dirty worktree 供人類檢查",
+                "journal 保存 structured events",
+                "不保存完整 raw adapter stream",
+                "rendered terminal session output",
+                "沒有 parent scheduler prefix"):
+            with self.subTest(document="docs/zh-TW/OPERATIONS.md", phrase=phrase):
+                self.assertIn(phrase, chinese_compact)
+        self.assertNotIn("journal preserves the adapter result, raw output",
+                         english_compact)
+        self.assertNotIn("journal 會保留 adapter result、raw output",
+                         chinese_compact)
+
     def test_folder_verification_report_refresh_is_documented(self):
         install_global_contracts(self)
         english = {
             "format.md": contracts.installed_contract_text("format.md"),
-            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+            "docs/VERIFICATION.md": (_PROJECT_ROOT / "docs/VERIFICATION.md").read_text(
                 encoding="utf-8"),
         }
         for name, text in english.items():
             compact = " ".join(text.split())
-            with self.subTest(document=name):
-                self.assertIn("refreshes `_report.md` after", compact)
-                self.assertIn("best-effort", compact)
+            phrases = (
+                ("refreshes `_report.md` after", "best-effort")
+                if name == "format.md" else
+                ("refreshes that folder's `_report.md` exactly once",
+                 "all verification locks are released",
+                 "best-effort report refresh"))
+            for phrase in phrases:
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
 
-        chinese = (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+        chinese = (_PROJECT_ROOT / "docs/zh-TW/VERIFICATION.md").read_text(
             encoding="utf-8")
         compact = "".join(chinese.split())
-        self.assertIn("refresh`_report.md`", compact)
-        self.assertIn("best-effort", compact)
+        for phrase in ("恰好刷新一次該folder的`_report.md`",
+                       "receiptoperationsettle且所有verificationlock釋放後",
+                       "best-effortreportrefresh"):
+            with self.subTest(document="docs/zh-TW/VERIFICATION.md",
+                              phrase=phrase):
+                self.assertIn(phrase, compact)
 
     def test_format_states_the_provisioned_candidate_link_rule(self):
         install_global_contracts(self)
@@ -154,29 +317,41 @@ class TestContractContent(unittest.TestCase):
             "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
                 encoding="utf-8"),
             "format.md": contracts.installed_contract_text("format.md"),
-            "README.md": (_PROJECT_ROOT / "README.md").read_text(
-                encoding="utf-8"),
             "docs/CONSENSUS.md": (
                 _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+            "docs/VERIFICATION.md": (
+                _PROJECT_ROOT / "docs/VERIFICATION.md").read_text(
                     encoding="utf-8"),
         }
         for name, text in english.items():
             compact = " ".join(text.split())
+            phrases = (("`Ignored input diagnosis:`", "junction")
+                       if name != "docs/VERIFICATION.md" else
+                       ("Ignored input diagnosis:", "junction",
+                        "shared-paths review"))
             with self.subTest(document=name):
-                self.assertIn("`Ignored input diagnosis:`", compact)
-                self.assertIn("junction", compact)
+                for phrase in phrases:
+                    with self.subTest(phrase=phrase):
+                        self.assertIn(phrase, compact)
         chinese = {
-            "README.zh-TW.md": (_PROJECT_ROOT / "README.zh-TW.md").read_text(
-                encoding="utf-8"),
             "docs/zh-TW/CONSENSUS.md": (
                 _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+            "docs/zh-TW/VERIFICATION.md": (
+                _PROJECT_ROOT / "docs/zh-TW/VERIFICATION.md").read_text(
                     encoding="utf-8"),
         }
         for name, text in chinese.items():
             compact = "".join(text.split())
+            phrases = (("`Ignoredinputdiagnosis:`", "junction")
+                       if name != "docs/zh-TW/VERIFICATION.md" else
+                       ("Ignoredinputdiagnosis:", "junction",
+                        "assentshared-pathsreview"))
             with self.subTest(document=name):
-                self.assertIn("`Ignoredinputdiagnosis:`", compact)
-                self.assertIn("junction", compact)
+                for phrase in phrases:
+                    with self.subTest(phrase=phrase):
+                        self.assertIn(phrase, compact)
 
     def test_shared_path_states_are_documented_in_english_and_chinese(self):
         """The three-state contract and its staleness rules reach every reader."""
@@ -187,10 +362,11 @@ class TestContractContent(unittest.TestCase):
             "format.md": contracts.installed_contract_text("format.md"),
             "instructions.md": contracts.installed_contract_text(
                 "instructions.md"),
-            "README.md": (_PROJECT_ROOT / "README.md").read_text(
-                encoding="utf-8"),
             "docs/CONSENSUS.md": (
                 _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+            "docs/VERIFICATION.md": (
+                _PROJECT_ROOT / "docs/VERIFICATION.md").read_text(
                     encoding="utf-8"),
         }
         session = english.pop("instructions.md")
@@ -211,10 +387,11 @@ class TestContractContent(unittest.TestCase):
                 self.assertIn(phrase, compact)
 
         chinese = {
-            "README.zh-TW.md": (_PROJECT_ROOT / "README.zh-TW.md").read_text(
-                encoding="utf-8"),
             "docs/zh-TW/CONSENSUS.md": (
                 _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+            "docs/zh-TW/VERIFICATION.md": (
+                _PROJECT_ROOT / "docs/zh-TW/VERIFICATION.md").read_text(
                     encoding="utf-8"),
         }
         for name, text in chinese.items():
@@ -240,18 +417,25 @@ class TestContractContent(unittest.TestCase):
             "format.md": contracts.installed_contract_text("format.md"),
             "instructions.md": contracts.installed_contract_text(
                 "instructions.md"),
-            "README.md": (_PROJECT_ROOT / "README.md").read_text(
-                encoding="utf-8"),
             "docs/CONSENSUS.md": (
                 _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+            "docs/VERIFICATION.md": (
+                _PROJECT_ROOT / "docs/VERIFICATION.md").read_text(
                     encoding="utf-8"),
         }
         session = english.pop("instructions.md")
         for name, text in english.items():
             compact = " ".join(text.split())
-            for phrase in ("NO-IGNORED-DIRECTORY-CANDIDATE",
-                           "ignored-entry query",
-                           "semantically needs no shared input"):
+            phrases = (("NO-IGNORED-DIRECTORY-CANDIDATE",
+                        "ignored-entry query",
+                        "semantically needs no shared input")
+                       if name != "docs/VERIFICATION.md" else
+                       ("NO-IGNORED-DIRECTORY-CANDIDATE",
+                        "ignored-entry query",
+                        "not a semantic claim that the project never needs "
+                        "shared input"))
+            for phrase in phrases:
                 with self.subTest(document=name, phrase=phrase):
                     self.assertIn(phrase, compact)
         compact = " ".join(session.split())
@@ -261,10 +445,11 @@ class TestContractContent(unittest.TestCase):
                 self.assertIn(phrase, compact)
 
         chinese = {
-            "README.zh-TW.md": (_PROJECT_ROOT / "README.zh-TW.md").read_text(
-                encoding="utf-8"),
             "docs/zh-TW/CONSENSUS.md": (
                 _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+            "docs/zh-TW/VERIFICATION.md": (
+                _PROJECT_ROOT / "docs/zh-TW/VERIFICATION.md").read_text(
                     encoding="utf-8"),
         }
         for name, text in chinese.items():
@@ -279,7 +464,7 @@ class TestContractContent(unittest.TestCase):
             "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
                 encoding="utf-8"),
             "format.md": contracts.installed_contract_text("format.md"),
-            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+            "docs/OPERATIONS.md": (_PROJECT_ROOT / "docs/OPERATIONS.md").read_text(
                 encoding="utf-8"),
         }
         required = (
@@ -290,19 +475,27 @@ class TestContractContent(unittest.TestCase):
         )
         for name, text in documents.items():
             compact = " ".join(text.split())
-            for phrase in required:
+            phrases = (required if name != "docs/OPERATIONS.md" else (
+                "A directory junction, directory symlink, or other directory "
+                "reparse point is detached as a link object before any recursive "
+                "Git or filesystem removal.",
+                "The remover never traverses the link's resolved target.",
+                "External targets survive success, refusal, failure, "
+                "interruption, and retry."))
+            for phrase in phrases:
                 with self.subTest(document=name, phrase=phrase):
                     self.assertIn(phrase, compact)
 
-        chinese = (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+        chinese = (_PROJECT_ROOT / "docs/zh-TW/OPERATIONS.md").read_text(
             encoding="utf-8")
         compact = "".join(chinese.split())
         for phrase in (
-                "連結目標清理警告",
-                "Assent在任何遞迴Git或檔案系統移除前,都會先解除每個目錄連結物件,"
-                "絕不沿解析後的目標路徑走訪。",
-                "外部連結目標在成功、拒絕、失敗、中斷與重試後都存活。"):
-            with self.subTest(document="README.zh-TW.md", phrase=phrase):
+                "directoryjunction、directorysymlink或其他directoryreparsepoint會先以"
+                "linkobject脫離",
+                "絕不穿越resolvedtarget",
+                "外部target在成功、拒絕、失敗、中斷與重試後都保留"):
+            with self.subTest(document="docs/zh-TW/OPERATIONS.md",
+                              phrase=phrase):
                 self.assertIn(phrase, compact)
 
     def test_limited_run_verification_is_conditional_in_every_document(self):
@@ -314,10 +507,11 @@ class TestContractContent(unittest.TestCase):
             "format.md": contracts.installed_contract_text("format.md"),
             "instructions.md": contracts.installed_contract_text(
                 "instructions.md"),
-            "README.md": (_PROJECT_ROOT / "README.md").read_text(
-                encoding="utf-8"),
             "docs/CONSENSUS.md": (
                 _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+            "docs/COMMANDS.md": (
+                _PROJECT_ROOT / "docs/COMMANDS.md").read_text(
                     encoding="utf-8"),
         }
         required = (
@@ -335,7 +529,12 @@ class TestContractContent(unittest.TestCase):
         )
         for name, text in english.items():
             compact = " ".join(text.split())
-            for phrase in required:
+            phrases = (required if name != "docs/COMMANDS.md" else (
+                "only if the limited run left every task complete",
+                "an incomplete folder fails the request",
+                "before any candidate or full verifier exists and writes no "
+                "receipt"))
+            for phrase in phrases:
                 with self.subTest(document=name, phrase=phrase):
                     self.assertIn(phrase, compact)
             for phrase in forbidden:
@@ -343,16 +542,21 @@ class TestContractContent(unittest.TestCase):
                     self.assertNotIn(phrase, compact)
 
         chinese = {
-            "README.zh-TW.md": (_PROJECT_ROOT / "README.zh-TW.md").read_text(
-                encoding="utf-8"),
             "docs/zh-TW/CONSENSUS.md": (
                 _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+            "docs/zh-TW/COMMANDS.md": (
+                _PROJECT_ROOT / "docs/zh-TW/COMMANDS.md").read_text(
                     encoding="utf-8"),
         }
         for name, text in chinese.items():
             compact = "".join(text.split())
-            for phrase in ("只有在該次受限執行讓所選資料夾變成完成時才驗證",
-                           "資料夾未完成則此請求失敗且不寫下receipt"):
+            phrases = (("只有在該次受限執行讓所選資料夾變成完成時才驗證",
+                        "資料夾未完成則此請求失敗且不寫下receipt")
+                       if name != "docs/zh-TW/COMMANDS.md" else
+                       ("只有A的所有task完成時才驗證",
+                        "未完成folder時，會在candidate/verifier建立前拒絕且不寫receipt"))
+            for phrase in phrases:
                 with self.subTest(document=name, phrase=phrase):
                     self.assertIn(phrase, compact)
             with self.subTest(document=name, forbidden="blanket refusal"):

@@ -19,8 +19,8 @@ from assent.folder_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         VerificationReceipt, read_receipt,
                                         receipt_matches_current_candidate,
                                         receipt_path, receipt_report_lines,
-                                        verify_folder,
                                         write_receipt)
+from assent.verification import verify_folder
 from assent.gitops import (branch_tip, commit_of, folder_branches, tree_of,
                            working_tree_status)
 from assent.verification_common import (ProvisionedLink, _require_no_overlap,
@@ -201,6 +201,17 @@ class VerificationRepositoryCase(unittest.TestCase):
         _git(self.root, "add", ".assent/verify.py")
         _git(self.root, "commit", "-m", "change full verifier")
 
+    def _commit_raw_verifier(self, exit_code: int) -> None:
+        script = (
+            "import os\n"
+            "os.write(1, b'raw verifier stdout ' + bytes([0x80]) + b'\\n')\n"
+            "os.write(2, b'raw verifier stderr ' + bytes([0xff]) + b'\\n')\n"
+            f"raise SystemExit({exit_code})\n"
+        )
+        (self.assent_dir / "verify.py").write_text(script, encoding="utf-8")
+        _git(self.root, "add", ".assent/verify.py")
+        _git(self.root, "commit", "-m", "invalid verifier output")
+
     def _temporary_resources(self) -> tuple[list[str], list[Path]]:
         branches = folder_branches(self.root, "assent-integration")
         container = self.parent / f"{self.root.name}.integration"
@@ -302,6 +313,41 @@ class TestVerificationRun(VerificationRepositoryCase):
         self.assertNotIn("\r", receipt.failure_summary)
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
         self.assertEqual(self._temporary_resources(), ([], []))
+
+    def test_non_ascii_verifier_output_survives_folder_failure_summary(self):
+        self._commit_target_verifier(
+            exit_code=7, stderr="繁體中文資料錯誤")
+
+        self.assertEqual(verify_folder(self.cfg), 1)
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertIn("繁體中文資料錯誤", receipt.failure_summary)
+        self.assertNotIn("\ufffd", receipt.failure_summary)
+
+    def test_invalid_verifier_output_writes_bounded_failure_evidence(self):
+        self._commit_raw_verifier(exit_code=7)
+
+        self.assertEqual(verify_folder(self.cfg), 1)
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertEqual(receipt.exit_code, 7)
+        self.assertIn("not valid UTF-8", receipt.failure_summary)
+        self.assertIn(r"\x80", receipt.failure_summary)
+        self.assertIn(r"\xff", receipt.failure_summary)
+        self.assertNotIn("\ufffd", receipt.failure_summary)
+        self.assertNotIn("UnicodeDecodeError", receipt.failure_summary)
+        self.assertNotIn("Traceback", receipt.failure_summary)
+        self.assertLessEqual(len(receipt.failure_summary), 4000)
+        self.assertEqual(self._temporary_resources(), ([], []))
+
+    def test_zero_exit_with_invalid_verifier_output_cannot_pass(self):
+        self._commit_raw_verifier(exit_code=0)
+
+        self.assertEqual(verify_folder(self.cfg), 1)
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertEqual(receipt.exit_code, 1)
+        self.assertIn("not valid UTF-8", receipt.failure_summary)
+        self.assertNotIn("\ufffd", receipt.failure_summary)
 
     def test_short_summary_is_unchanged_except_normalization(self):
         normalized = summary("short\r\noutput 診斷", "stderr\x00tail")

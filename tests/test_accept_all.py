@@ -22,6 +22,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from assent import gitops, verification
 from assent.accept import accept_folder
@@ -206,6 +207,21 @@ class TestOrderingAndPublication(AcceptAllRepositoryCase):
             "accept(beta): integrate into trunk",
         ])
         self.assertIn("accepted:  aaa, alpha, beta", output)
+
+    def test_sequential_fallback_refreshes_each_folder_report_once(self) -> None:
+        for folder in ("alpha", "beta"):
+            self._write_task(folder)
+            self._make_source(folder)
+        refreshed: list[str] = []
+
+        with mock.patch(
+                "assent.folder_verification_closeout.try_write_report",
+                side_effect=lambda cfg: refreshed.append(cfg.tasks_name)) as report:
+            code, output = self._accept_all()
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(refreshed, ["alpha", "beta"])
+        self.assertEqual(report.call_count, 2)
 
     def test_fresh_receipt_skips_full_verify_but_stale_receipt_refreshes(self) -> None:
         counter = self.parent / "verify_runs.log"

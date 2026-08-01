@@ -20,9 +20,10 @@ from assent.batch_receipt import (BATCH_RECEIPT_NAME, BATCH_RECEIPT_VERSION,
                                   batch_receipt_staleness,
                                   current_batch_shared_inputs,
                                   read_batch_receipt, write_batch_receipt)
-from assent.folder_verification import RECEIPT_NAME, read_receipt, verify_folder
+from assent.folder_verification import RECEIPT_NAME, read_receipt
 from assent.gitops import commit_of, tree_of
 from assent.verification_common import build_batch_candidate, verifier_digest
+from assent.verification import verify_folder
 from tests.link_support import make_directory_link
 # The batch receipt describes the same repository the per-folder receipt tests
 # already build, so the fixture is shared rather than copied.

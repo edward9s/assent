@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import AssentError, engine, gitops
-from assent.adapters import TaskResult
+from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      wake_stop_waiters)
 from assent.config import load_config
@@ -408,27 +408,169 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
             root = self.execution_root()
             (root / "src").mkdir(exist_ok=True)
             (root / "src" / "partial.py").write_text("p", encoding="utf-8")
+            # The adapter can write DONE before the process result is classified as quota;
+            # the scheduler must put the task back into the resumable state first.
+            set_status(path, "DONE")
             return TaskResult(exit_code=1, output="", quota_exhausted=True,
                               reset_at=reset)
 
-        adapter = ScriptedAdapter([quota_step, self.ai_done(path)])
-        rc = self.run_quiet(cfg, once=True, adapter=adapter,
+        def resumed(prompt):
+            self.assertEqual(parse_task_file(path).status, "WIP")
+            return self.ai_done(path)(prompt)
+
+        adapter = ScriptedAdapter([quota_step, resumed])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = engine.run(cfg, once=True, adapter=adapter,
                             sleep=sleeps.append, now=lambda: t0)
         self.assertEqual(rc, 0)
         self.assertAlmostEqual(sum(sleeps), (5 + 2) * 60, delta=1)  # +2 minute buffer
         self.assertIn("resume", adapter.calls[1][0])
+        self.assertIn("Waiting for quota reset before resuming", out.getvalue())
         # one zero-token capability preflight before the run, then one per attempt
         self.assertEqual(adapter.resolve_calls, ["lite", "lite", "lite"])
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(plan01/t001): ")
                             for s in subjects))
+        self.assertEqual(
+            len([s for s in subjects if s.startswith("auto(plan01/t001): ")]), 1)
         from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         quota = next(e for e in entries if e["event"] == "quota")
         self.assertEqual(quota["agent"], "claude")
         self.assertEqual(quota["requested_model"], "lite")
         self.assertEqual(quota["requested_effort"], "medium")
+        self.assertEqual(
+            quota["summary"],
+            "Quota exhausted; progress kept, waiting for quota reset before resuming")
         self.assertNotIn("session", [e["event"] for e in entries])
+
+    def test_unknown_quota_wait_names_poll_and_preserves_resume_progress(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        cfg.quota_poll_minutes = 7
+        self.commit_all()
+
+        def quota_step(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text("kept", encoding="utf-8")
+            set_status(path, "DONE")
+            return TaskResult(exit_code=1, output="", quota_exhausted=True,
+                              reset_at=None)
+
+        def resumed(prompt):
+            self.assertEqual(parse_task_file(path).status, "WIP")
+            self.assertIn("resume", prompt.lower())
+            return self.ai_done(path)(prompt)
+
+        adapter = ScriptedAdapter([quota_step, resumed])
+        sleeps: list[float] = []
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = engine.run(cfg, once=True, adapter=adapter,
+                            sleep=sleeps.append)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(sum(sleeps), 7 * 60)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        terminal = out.getvalue()
+        self.assertIn(
+            "Waiting for quota poll (every 7 minutes) before resuming", terminal)
+        self.assertIn("Quota poll (every 7 minutes)", terminal)
+        self.assertNotIn("reset", terminal.lower())
+        self.assertIn("src/partial.py", self._git_execution("ls-files"))
+        self.assertTrue(any(s.startswith("wip(plan01/t001): ")
+                            for s in self.subjects()))
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        quota = next(e for e in entries if e["event"] == "quota")
+        self.assertEqual(
+            quota["summary"],
+            "Quota exhausted; progress kept, waiting for quota poll "
+            "(every 7 minutes) before resuming")
+        self.assertNotIn("reset", quota["summary"].lower())
+
+    def test_checkpoint_resume_keeps_same_adapter_without_wait_rotation_or_retry(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0)
+        cfg.adapter_names = ("claude", "codex")
+        self.commit_all()
+        control = TaskResult(
+            exit_code=1, output=CHECKPOINT_RESUME_RECORD + "\n",
+            quota_exhausted=False, reset_at=None, checkpoint_resume=True)
+
+        def checkpoint_step(prompt):
+            root = self.execution_root()
+            (root / "src").mkdir(exist_ok=True)
+            (root / "src" / "partial.py").write_text("kept", encoding="utf-8")
+            set_status(path, "DONE")
+            return control
+
+        def resumed(prompt):
+            self.assertEqual(parse_task_file(path).status, "WIP")
+            return self.ai_done(path)(prompt)
+
+        claude = ScriptedAdapter(
+            [checkpoint_step, resumed], resolved_model="claude-lite")
+        codex = ScriptedAdapter([], resolved_model="codex-lite")
+        sleeps: list[float] = []
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            with mock.patch("assent.engine.get_adapter", return_value=codex):
+                result = engine.run(
+                    cfg, once=True, adapter=claude, sleep=sleeps.append)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(claude.calls), 2)
+        self.assertEqual(codex.calls, [])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(claude.calls[0][1:], claude.calls[1][1:])
+        self.assertIn("resume", claude.calls[1][0].lower())
+
+        terminal = out.getvalue()
+        self.assertIn("Checkpoint-resume control received", terminal)
+        self.assertIn("same adapter command", terminal)
+        self.assertNotIn("Waiting for quota reset", terminal)
+        self.assertNotIn("Switching adapter", terminal)
+
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        checkpoint = next(entry for entry in entries
+                          if entry["event"] == "checkpoint_resume")
+        self.assertEqual(checkpoint["agent"], "claude")
+        self.assertEqual(checkpoint["requested_model"], "claude-lite")
+        self.assertEqual(checkpoint["requested_effort"], "medium")
+        self.assertIn(CHECKPOINT_RESUME_RECORD, checkpoint["detail"])
+        self.assertNotIn("quota", [entry["event"] for entry in entries])
+        self.assertTrue(any(subject.startswith("wip(plan01/t001): ")
+                            for subject in self.subjects()))
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+
+    def test_quota_preserves_an_explicit_blocked_result(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0)
+        self.commit_all()
+
+        def blocked_quota(prompt):
+            set_status(path, "BLOCKED")
+            return TaskResult(exit_code=1, output="", quota_exhausted=True,
+                              reset_at=None)
+
+        def resumed(prompt):
+            self.assertEqual(parse_task_file(path).status, "BLOCKED")
+            return ok_result()
+
+        self.assertEqual(
+            engine.run(cfg, once=True, sleep=lambda _: None,
+                       adapter=ScriptedAdapter([blocked_quota, resumed])), 0)
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        self.assertFalse(any(s.startswith("auto(plan01/t001): ")
+                             for s in self.subjects()))
 
     def test_quota_rotates_to_next_adapter_and_records_each_identity(self):
         path = self.write_task(1)
@@ -448,13 +590,19 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
                 path, by="codex", requested_model="codex-lite")],
             resolved_model="codex-lite")
         sleeps: list[float] = []
+        out = io.StringIO()
 
-        with mock.patch("assent.engine.get_adapter", return_value=codex):
-            self.assertEqual(self.run_quiet(
-                cfg, once=True, adapter=claude, sleep=sleeps.append), 0)
+        with contextlib.redirect_stdout(out):
+            with mock.patch("assent.engine.get_adapter", return_value=codex):
+                self.assertEqual(engine.run(
+                    cfg, once=True, adapter=claude, sleep=sleeps.append), 0)
 
         self.assertEqual(sleeps, [])
         self.assertIn("resume", codex.calls[0][0])
+        terminal = out.getvalue()
+        self.assertIn("Switching adapter claude -> codex immediately", terminal)
+        self.assertNotIn("waiting for reset", terminal.lower())
+        self.assertNotIn("rotation poll", terminal.lower())
         self.assertTrue(any(
             subject.startswith("wip(plan01/t001): ")
             for subject in self.subjects()))
@@ -463,6 +611,10 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         quota = next(entry for entry in entries if entry["event"] == "quota")
         self.assertEqual(quota["agent"], "claude")
         self.assertEqual(quota["requested_model"], "claude-lite")
+        self.assertEqual(
+            quota["summary"],
+            "Quota exhausted; progress kept, switching immediately to adapter codex")
+        self.assertNotIn("wait", quota["summary"].lower())
         done = next(entry for entry in entries if entry["by"] == "codex")
         self.assertEqual(done["requested_model"], "codex-lite")
 
@@ -521,6 +673,24 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         self.assertIn("Every adapter in the rotation is quota-exhausted",
                       out.getvalue())
         self.assertIn("continuing with claude", out.getvalue())
+        self.assertEqual(out.getvalue().count(
+            "Every adapter in the rotation is quota-exhausted"), 1)
+
+        from assent.plan import read_entries
+        quotas = [entry for entry in read_entries(journal_path_for(path))
+                  if entry["event"] == "quota"]
+        self.assertEqual(len(quotas), 2)
+        self.assertEqual(
+            [(entry["agent"], entry["requested_model"])
+             for entry in quotas],
+            [("claude", "claude-lite"), ("codex", "codex-lite")])
+        self.assertEqual(
+            quotas[0]["summary"],
+            "Quota exhausted; progress kept, switching immediately to adapter codex")
+        self.assertEqual(
+            quotas[1]["summary"],
+            "Quota exhausted; progress kept, every adapter in the rotation is "
+            "quota-exhausted; waiting for rotation poll before continuing with claude")
 
     def test_all_rotation_adapters_are_preflighted_before_worktree_creation(self):
         self.write_task(1)
@@ -579,6 +749,134 @@ class TestInterruptedTaskResume(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
         self.assertIn("resume", adapter.calls[0][0])
         self.assertEqual(parse_task_file(path).status, "DONE")
+
+    def test_interrupt_during_post_auto_report_keeps_done_without_duplicate_auto(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        refreshes = 0
+
+        def interrupt_first_report(cfg):
+            nonlocal refreshes
+            refreshes += 1
+            if refreshes == 1:
+                raise KeyboardInterrupt
+
+        with mock.patch.object(engine, "try_write_report",
+                               side_effect=interrupt_first_report):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True,
+                adapter=ScriptedAdapter([
+                    self.ai_done(path, {"src/done.py": "done"})])), 130)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        autos = [s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]
+        self.assertEqual(len(autos), 1)
+        self.assertNotIn("wip(plan01/t001): user interrupt", self.subjects())
+
+        # A later run sees the terminal task as already closed and cannot synthesize another
+        # auto marker from the report-refresh interruption.
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([])), 0)
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+
+    def test_interrupt_after_dirty_terminal_auto_commit_keeps_done(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        real_commit_if_dirty = engine.gitops.commit_if_dirty
+
+        def commit_then_interrupt(root, message, excludes=()):
+            committed = real_commit_if_dirty(root, message, excludes)
+            if message.startswith("auto(plan01/t001): "):
+                raise KeyboardInterrupt
+            return committed
+
+        with mock.patch.object(engine.gitops, "commit_if_dirty",
+                               side_effect=commit_then_interrupt):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True,
+                adapter=ScriptedAdapter([
+                    self.ai_done(path, {"src/done.py": "done"})])), 130)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertFalse(any(entry["event"] == "interrupt" for entry in entries))
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+        self.assertNotIn("wip(plan01/t001): user interrupt", self.subjects())
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([])), 0)
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+
+    def test_interrupt_after_resumed_empty_terminal_auto_commit_keeps_done(self):
+        path = self.write_task(1, status="WIP")
+        cfg = self.build()
+        self.commit_all()
+        real_commit_empty = engine.gitops.commit_empty
+
+        def empty_commit_then_interrupt(root, message):
+            real_commit_empty(root, message)
+            if message.startswith("auto(plan01/t001): "):
+                raise KeyboardInterrupt
+
+        with mock.patch.object(engine.gitops, "commit_empty",
+                               side_effect=empty_commit_then_interrupt):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([
+                    self.ai_done(path)])), 130)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertFalse(any(entry["event"] == "interrupt" for entry in entries))
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+        self.assertNotIn("wip(plan01/t001): user interrupt", self.subjects())
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([])), 0)
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+
+    def test_matching_auto_commit_before_terminal_closeout_cannot_recover_done(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        expected = "auto(plan01/t001): task"
+
+        def interrupted(prompt):
+            root = self.execution_root()
+            (root / "src" / "before_closeout.py").parent.mkdir(exist_ok=True)
+            (root / "src" / "before_closeout.py").write_text(
+                "work", encoding="utf-8")
+            # This terminal-looking commit belongs to the adapter phase, before the scheduler
+            # has passed _evaluate and armed its closeout witness.
+            gitops.commit_empty(root, expected)
+            set_status(path, "DONE")
+            raise KeyboardInterrupt
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([interrupted])), 130)
+
+        self.assertEqual(parse_task_file(path).status, "WIP")
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertTrue(any(entry["event"] == "interrupt" for entry in entries))
+        self.assertIn(expected, self.subjects())
+        self.assertTrue(any(
+            subject.startswith("wip(plan01/t001): ")
+            for subject in self.subjects()))
 
     def test_assent_error_marks_current_task_wip_and_keeps_exit_code(self):
         path = self.write_task(1)

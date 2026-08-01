@@ -18,7 +18,8 @@ from pathlib import Path
 from unittest import mock
 
 from assent import AssentError
-from assent.adapters import InvocationRequest, TaskResult, get_adapter
+from assent.adapters import (CHECKPOINT_RESUME_RECORD, InvocationRequest,
+                             TaskResult, get_adapter)
 from assent.adapters.antigravity import (
     AntigravityAdapter, NAME, build_command, classify_output,
     format_output_line, load_catalog, log_file, parse_models_catalog,
@@ -394,6 +395,34 @@ class TestOutputContract(unittest.TestCase):
         self.assertTrue(rendered.startswith("  AI| "))
         self.assertIn('{"type": "result"', rendered)
 
+    def test_checkpoint_resume_record_is_hidden_from_live_output(self):
+        self.assertIsNone(format_output_line(CHECKPOINT_RESUME_RECORD + "\n"))
+
+
+class TestCheckpointResume(unittest.TestCase):
+    def test_exact_final_record_is_recognized(self):
+        from assent.adapters import parse_checkpoint_resume_output
+
+        output = "partial\n" + CHECKPOINT_RESUME_RECORD + "\n\n"
+        self.assertTrue(parse_checkpoint_resume_output(output, 1, False))
+
+    def test_zero_exit_stall_and_nonfinal_or_lookalike_records_are_rejected(self):
+        from assent.adapters import parse_checkpoint_resume_output
+
+        cases = (
+            (0, CHECKPOINT_RESUME_RECORD + "\n", False),
+            (1, CHECKPOINT_RESUME_RECORD + "\n", True),
+            (1, "prefix" + CHECKPOINT_RESUME_RECORD + "\n", False),
+            (1, CHECKPOINT_RESUME_RECORD[:-1] + "\n", False),
+            (1, CHECKPOINT_RESUME_RECORD + "\ntrailing\n", False),
+            (1, CHECKPOINT_RESUME_RECORD + " \n", False),
+            (1, '{"type": "assent.checkpoint_resume"}\n', False),
+        )
+        for exit_code, output, stalled in cases:
+            with self.subTest(exit_code=exit_code, output=output, stalled=stalled):
+                self.assertFalse(
+                    parse_checkpoint_resume_output(output, exit_code, stalled))
+
     def test_failure_classification(self):
         cases = {
             "Error: invalid model selection (--model \"x\")": "unsupported_model",
@@ -504,6 +533,57 @@ class TestRunTask(unittest.TestCase):
         self.assertEqual(result.failure_kind, "billing")
         self.assertFalse(result.quota_exhausted)
         self.assertIsNone(result.reset_at)
+
+    def test_checkpoint_resume_record_sets_distinct_result_and_keeps_raw_output(self):
+        output = "partial\n" + CHECKPOINT_RESUME_RECORD + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = make_adapter().run_task(
+            "p", "gemini-3.1-pro", "high", Path("."))
+        self.assertTrue(result.checkpoint_resume)
+        self.assertFalse(result.quota_exhausted)
+        self.assertEqual(result.output, output)
+        self.assertIsNone(result.failure_kind)
+
+    def test_quota_and_control_record_use_the_quota_path(self):
+        output = "Error: Resource has been exhausted\n" + CHECKPOINT_RESUME_RECORD + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = make_adapter().run_task(
+            "p", "gemini-3.1-pro", "high", Path("."))
+        self.assertTrue(result.quota_exhausted)
+        self.assertFalse(result.checkpoint_resume)
+
+    def test_quota_evidence_wins_over_other_classifier_and_control_record(self):
+        for prose in (
+                "Error: invalid model selection",
+                "Error: your credit balance is too low",
+                "Error: permission denied for tool write_to_file",
+                "Error: timed out waiting for the response"):
+            with self.subTest(prose=prose):
+                output = (prose + "\nError: Resource has been exhausted\n"
+                          + CHECKPOINT_RESUME_RECORD + "\n")
+                self.patch_run(lambda *args, output=output, **kwargs:
+                               (1, output, False))
+                result = make_adapter().run_task(
+                    "p", "gemini-3.1-pro", "high", Path("."))
+                self.assertTrue(result.quota_exhausted)
+                self.assertFalse(result.checkpoint_resume)
+                self.assertEqual(result.failure_kind, "quota")
+
+    def test_terminal_record_overrides_preceding_non_quota_classifiers(self):
+        for prose in (
+                "Error: invalid model selection",
+                "Error: your credit balance is too low",
+                "Error: permission denied for tool write_to_file",
+                "Error: timed out waiting for the response"):
+            with self.subTest(prose=prose):
+                output = prose + "\n" + CHECKPOINT_RESUME_RECORD + "\n"
+                self.patch_run(lambda *args, output=output, **kwargs:
+                               (1, output, False))
+                result = make_adapter().run_task(
+                    "p", "gemini-3.1-pro", "high", Path("."))
+                self.assertTrue(result.checkpoint_resume)
+                self.assertFalse(result.quota_exhausted)
+                self.assertIsNone(result.failure_kind)
 
     def test_unsupported_model_outcome_is_classified_for_the_scheduler(self):
         self.patch_run(lambda *a, **k: (

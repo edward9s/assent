@@ -544,7 +544,7 @@ acceptance = """
 | Status | Meaning |
 |---|---|
 | `TODO` | not started (a new task; or reverted here when human review fails and orders a redo) |
-| `WIP` | a session touched it but did not finish = **a signal to resume after interruption**: `run` prefers to resume WIP tasks at startup |
+| `WIP` | a session touched it but did not finish = **a progress-bearing WIP checkpoint and signal to resume after interruption**: `run` prefers to resume WIP tasks at startup; WIP is not terminal success evidence |
 | `DONE` | the executing AI believes it is finished, pending the scheduler's objective review |
 | `BLOCKED` | stuck, handed to human adjudication (self-marked by the executing AI, or marked by the scheduler when retries are exhausted) |
 | `SKIP` | not doing it this round |
@@ -570,7 +570,7 @@ time = "2026-07-17T02:03:04+00:00"
 by = "claude"                    # executor: claude | codex | antigravity
 requested_model = "fable"       # the --model value passed to the AI CLI this run
 requested_effort = "high"       # the actual effort value sent to the CLI this run
-event = "done"                   # suggested values: done | blocked | quota | interrupt | note
+event = "done"                   # suggested values: done | blocked | quota | checkpoint_resume | interrupt | note
 summary = "skeleton done, 37 tests all green"
 detail = '''
 Longer process notes, blockers, a summary of verification output.
@@ -594,8 +594,9 @@ Longer process notes, blockers, a summary of verification output.
 - The scheduler's machine events use `by = "scheduler"`, additionally writing
   `agent = "claude"`, `agent = "codex"`, or `agent = "antigravity"` and the
   same run's `requested_model`. Existing events include a quota interruption
-  `quota`, a user or infrastructure interruption `interrupt`, and a `blocked`
-  mark; no separate session-start event is written.
+  `quota`, an adapter checkpoint-resume request `checkpoint_resume`, a user or
+  infrastructure interruption `interrupt`, and a `blocked` mark; no separate
+  session-start event is written.
 - Old logs' `by = "ai"` and entries missing the new fields stay readable, not
   migrated and not overwritten.
 
@@ -609,7 +610,21 @@ agent = "claude"
 requested_model = "fable"
 requested_effort = "high"
 event = "quota"
-summary = "quota exhausted; progress kept, waiting for reset to continue"
+summary = "quota exhausted; progress kept, switching to codex immediately"
+```
+
+Checkpoint-resume adapter event example:
+
+```toml
+[[entry]]
+time = "2026-08-01T08:30:00+00:00"
+by = "scheduler"
+agent = "codex"
+requested_model = "gpt-5.6-terra"
+requested_effort = "high"
+event = "checkpoint_resume"
+summary = "checkpoint-resume requested; progress kept, immediately resuming the same adapter command"
+detail = '''The exact final control record was received; no quota wait, adapter rotation, or retry was used.'''
 ```
 
 Antigravity adapter example:
@@ -699,12 +714,19 @@ the per-folder receipt. If `--verify` was requested, that closeout identifies
 the run-level verification that follows in the same invocation instead of
 telling the user to start that verification command again.
 
-For a one-folder run-level verification, the chained folder verification
-refreshes `_report.md` after it updates, invalidates, or leaves the folder
-receipt absent, so the report observes the latest receipt outcome. This
-best-effort write never changes the verification exit code or interrupt
-handling. Selected or dynamic batch verification and `--focus` do not refresh a
-folder report merely for symmetry.
+Every production folder-level complete verification operation uses the same
+closeout boundary: after `verify_folder(cfg)` or
+`verify_folder_if_needed(cfg)` settles and releases its verification locks, it
+refreshes `_report.md` after the receipt operation and lock release exactly once
+on a best-effort basis. This includes PASSED and
+FAILED results, stale-receipt replacement, fresh-receipt reuse,
+malformed-receipt refusal, incomplete-folder no-op, and interrupt outcomes; the
+refresh observes the resulting receipt state and never changes or masks the
+verification result or interrupt. This invariant covers direct folder verify,
+single-folder `run --verify`, automatic run closeout, and the sequential
+per-folder fallback of `accept --all`. Selected or dynamic batch verification
+and `--focus` write no folder receipt and therefore do not refresh a folder
+report merely for symmetry.
 
 `assent verify FOLDER --focus` is the distinct focused mode and requires one
 folder. It runs each distinct `verify` command belonging to a `DONE` task in
@@ -1095,20 +1117,21 @@ fallback may run `verify_folder_if_needed` when batch evidence is absent or
 expired. The report still shows a missing receipt as `NOT RUN`.
 
 `assent verify <FOLDER>` is a zero-token, unattended full receipt refresh. It
-does not change the target or open an AI session. The single-folder path also
-refreshes `_report.md` after the receipt update, so the report and receipt
-describe the same latest folder-verification outcome; this write is
-best-effort and never changes the verification result. It may be run again
-whenever the receipt is stale or missing. `assent verify A B` is the selected
-equivalent: it normalizes exactly the named set to dependency order, builds one
-integration candidate, runs the full verifier once, and writes one batch receipt
-for that exact set. A selected conflict refuses instead of being skipped. Batch
-and focused verification do not refresh a folder report as a side effect. Both
-commands produce derived, disposable evidence: it never outranks Git and can
-be deleted and rebuilt. A changed target commit does not by itself make
-acceptance impossible when the rebuilt candidate tree is identical; a changed
-candidate tree makes the receipt stale. Neither command changes a Git ref or
-accepts a folder.
+does not change the target or open an AI session. Its folder-verification
+boundary refreshes `_report.md` exactly once after the receipt operation and
+lock release, including when the receipt is reused, refused, replaced, or the
+folder is incomplete; the write is best-effort and never changes the
+verification result or interrupt. It may be run again whenever the receipt is
+stale or missing. `assent verify A B` is the selected equivalent: it normalizes
+exactly the named set to dependency order, builds one integration candidate,
+runs the full verifier once, and writes one batch receipt for that exact set. A
+selected conflict refuses instead of being skipped. Batch and focused
+verification do not refresh a folder report as a side effect. Both commands
+produce derived, disposable evidence: it never outranks Git and can be deleted
+and rebuilt. A changed target commit does not by itself make acceptance
+impossible when the rebuilt candidate tree is identical; a changed candidate
+tree makes the receipt stale. Neither command changes a Git ref or accepts a
+folder.
 
 `assent verify --batch` is the same unattended, zero-token refresh, but for
 the dynamic set of every finished, not-yet-integrated folder. It uses the same
@@ -1244,7 +1267,11 @@ human.
    is recorded before retrying. Full candidate verification belongs to the
    post-folder scheduler stage, not to the AI tool.
 
-- Pass -> an `auto(<work folder>/tNNN): <title>` checkpoint commit. A
+- Pass -> one terminal `auto(<work folder>/tNNN): <title>` checkpoint commit. A
+  resumed task gets this terminal marker even when its tree is clean because an earlier WIP
+  checkpoint already contains all file changes: Assent creates an intentional empty commit
+  carrying only the namespaced ownership evidence. Ordinary dirty success commits its changes
+  once. No empty WIP checkpoint, duplicate terminal auto, or gate-failed task gets this marker. A
   self-marked BLOCKED -> after the structural tamper and fail-closed scope
   checks, committed directly in the same namespace without focused
   verification (BLOCKED is also a legitimate result, handed to human
@@ -1254,17 +1281,38 @@ human.
   file + commits along with the results that did not pass. **Token-burned output
   is never discarded.**
 - Quota exhausted -> not counted as a failure: the r file records `quota`,
-  progress is gathered into a `wip(<work folder>/tNNN)` checkpoint, a countdown
-  waits for the reset, and the same task reruns carrying a "resume" prompt.
-  When `[adapter].name` is a list, quota exhaustion rotates to the next adapter
-  in order; the scheduler waits for the rotation poll only after every adapter
-  in the rotation is exhausted.
+  the task status is written back to `WIP` unless the task explicitly wrote `BLOCKED`,
+  progress is gathered into a progress-bearing `wip(<work folder>/tNNN)` checkpoint, and the
+  same task reruns carrying a "resume" prompt. The status write happens before the wait or
+  adapter rotation, so a result that arrived after the AI wrote `DONE` cannot skip closeout.
+  With one configured adapter, a
+  countdown waits for the known reset (or the configured quota poll when no
+  reset is known). When `[adapter].name` is a list, quota exhaustion switches
+  immediately to the next adapter in order; the scheduler waits for the
+  configured rotation poll only after every adapter in the rotation is
+  exhausted, then continues with the next adapter.
+- Adapter checkpoint-resume control -> not counted as a failure: a finished,
+  non-stalled, nonzero adapter process whose complete final non-empty output
+  line is exactly `{"type":"assent.checkpoint_resume"}` records
+  `checkpoint_resume`, writes the task back to `WIP` unless it explicitly wrote `BLOCKED`,
+  gathers progress into the same WIP checkpoint, refreshes the report, and immediately reopens
+  the same adapter command with the resume prompt. It does not sleep, rotate adapters, or consume
+  a retry. The terminal
+  control line is suppressed from live rendering while the raw adapter output
+  remains available as result evidence. The record adds no configuration key or
+  capability probe. A wrapper may replace a provider quota result with it only
+  after arranging an immediate continuation; if it forwards provider quota,
+  Assent performs the normal wait or rotation. When quota evidence and this
+  record are both present, the ordinary quota path wins.
 - Unclean exit (power loss, a forced kill) never reaches the Ctrl+C/quota
   interrupt handlers, so a dirty worktree can survive to the next `run`
   startup. The startup gate checks whether every uncommitted change is
   provably inside the scope of the resumable candidate task: provable ->
   gathered into a `wip` checkpoint and the run continues, no AI session;
   otherwise -> fail-closed, `run` refuses and hands the state to a human.
+  A clean legacy `DONE` task backed only by an older WIP checkpoint is not treated as dirty and
+  does not receive a retroactive auto marker; existing history remains reviewable without being
+  synthesized, amended, rebased, or renumbered.
 - If setup fails after Assent creates a new worktree, only that exact,
   still-owned path and branch are cleanup candidates. Assent re-proves the
   clean checkout, expected `HEAD`, and branch ownership, detaches every
@@ -1307,6 +1355,11 @@ touching Git in general.
    moment history is rewritten, in every case. That is an expected cost:
    rebuild it through the standard `verify` flow. A receipt is a disposable
    cache, never a long-term source of truth.
+
+Legacy checkpoint boundary: a historical branch may contain a progress-bearing WIP checkpoint
+without its later terminal auto marker. Assent does not retroactively synthesize that marker or
+rewrite, amend, rebase, or renumber the branch; the empty terminal auto rule applies to a new
+resumed run that passes its gates.
 
 ## _report.md (the review meeting's agenda)
 

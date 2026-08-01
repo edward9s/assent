@@ -404,7 +404,7 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
     return receipt
 
 
-def verify_folder(cfg: Config) -> int:
+def verify_folder_receipt(cfg: Config) -> int:
     """Verify exactly ``cfg.tasks_name`` and return zero only for PASSED."""
     folder = cfg.tasks_name
     try:
@@ -513,7 +513,7 @@ def receipt_matches_current_candidate(cfg: Config) -> bool:
             return _receipt_matches_current_candidate_locked(cfg)
 
 
-def verify_folder_if_needed(cfg: Config) -> int:
+def verify_folder_receipt_if_needed(cfg: Config) -> int:
     """Run unattended verification unless an exact current PASSED receipt exists.
 
     This is the post-task scheduler entry point.  It deliberately acquires the

@@ -162,15 +162,18 @@ class NeutralFolderServices(unittest.TestCase):
 
 
 class VerificationModuleBoundaries(unittest.TestCase):
-    """Verification is a facade over two receipt leaves and one common base.
+    """Verification is a facade over receipt leaves and one closeout boundary.
 
     ``assent.verification`` re-exports; ``folder_verification`` and
     ``batch_receipt`` own one receipt model each; ``batch_verification`` runs the
     batch and writes the evidence ``batch_receipt`` defines; and
-    ``verification_common`` sits under all three without knowing any of them.
+    ``folder_verification_closeout`` owns the shared per-folder report handoff.
+    ``verification_common`` sits below all receipt implementations without
+    knowing any of them.
     """
 
-    LEAVES = ("folder_verification", "batch_receipt", "batch_verification")
+    LEAVES = ("folder_verification", "batch_receipt", "batch_verification",
+              "folder_verification_closeout")
 
     def test_the_facade_defines_no_implementation_of_its_own(self) -> None:
         tree = ast.parse((PACKAGE / "verification.py").read_text(
@@ -185,18 +188,37 @@ class VerificationModuleBoundaries(unittest.TestCase):
         self.assertEqual(imported & {*self.LEAVES, "verification"}, set())
 
     def test_the_leaves_form_no_import_cycle(self) -> None:
-        # Batch execution may use the batch receipt it writes; no other edge
-        # between the four is allowed, and none of them imports the facade.
+        # Batch execution may use the batch receipt it writes, and closeout may
+        # use the folder receipt it wraps; no other edge between these modules
+        # is allowed, and none of them imports the facade.
         allowed = {
             "folder_verification": set(),
             "batch_receipt": set(),
             "batch_verification": {"batch_receipt"},
+            "folder_verification_closeout": {"folder_verification"},
         }
         for leaf in self.LEAVES:
             with self.subTest(module=leaf):
                 imported = _imported_assent_modules(leaf)
                 self.assertNotIn("verification", imported)
                 self.assertEqual(imported & set(self.LEAVES), allowed[leaf])
+
+    def test_closeout_uses_static_receipt_and_report_edges(self) -> None:
+        imported = _imported_assent_modules("folder_verification_closeout")
+        self.assertEqual(imported & {"folder_verification", "inspection"},
+                         {"folder_verification", "inspection"})
+
+    def test_inspection_reads_folder_receipt_lines_from_their_owner(self) -> None:
+        imported = _imported_assent_modules("inspection")
+        self.assertIn("folder_verification", imported)
+        self.assertNotIn("verification", imported)
+
+    def test_folder_closeout_edge_is_not_hidden_by_runtime_lookup(self) -> None:
+        for module in ("folder_verification", "folder_verification_closeout"):
+            with self.subTest(module=module):
+                source = (PACKAGE / f"{module}.py").read_text(encoding="utf-8")
+                self.assertNotIn("import_module", source)
+                self.assertNotIn("__getattr__", source)
 
     def test_every_verification_entry_point_stays_importable(self) -> None:
         from assent import verification

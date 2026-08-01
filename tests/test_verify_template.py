@@ -26,6 +26,26 @@ _FAIL_MODULE = (
     "        self.fail('deliberate fixture failure marker')\n"
 )
 
+_UNICODE_FAIL_MODULE = (
+    "import sys\n"
+    "import unittest\n\n"
+    "class T(unittest.TestCase):\n"
+    "    def test_fail(self):\n"
+    "        print('繁體中文標準輸出')\n"
+    "        print('繁體中文錯誤輸出', file=sys.stderr)\n"
+    "        self.fail('繁體中文失敗診斷')\n"
+)
+
+_INVALID_BYTES_MODULE = (
+    "import os\n"
+    "os.write(1, b'native unittest stdout ' + bytes([0x80]) + b'\\n')\n"
+    "os.write(2, b'native unittest stderr ' + bytes([0xff]) + b'\\n')\n"
+    "import unittest\n\n"
+    "class T(unittest.TestCase):\n"
+    "    def test_ok(self):\n"
+    "        pass\n"
+)
+
 
 class VerifyTemplateFixture(unittest.TestCase):
     """Builds a throwaway git repo running the packaged template as run_verify.py."""
@@ -75,7 +95,7 @@ class VerifyTemplateFixture(unittest.TestCase):
             env.update(env_overrides)
         return subprocess.run(
             [sys.executable, str(self.script)], cwd=self.root,
-            capture_output=True, encoding="utf-8", errors="replace", env=env)
+            capture_output=True, encoding="utf-8", errors="strict", env=env)
 
 
 class RunUnittestParallelCase(VerifyTemplateFixture):
@@ -129,6 +149,35 @@ class RunUnittestParallelCase(VerifyTemplateFixture):
         self.assertIn("test_b: fail (", result.stdout)
         self.assertIn("deliberate fixture failure marker", combined)
         self.assertIn("verify: FAIL", result.stdout)
+        self.assertNotIn("verify: OK", result.stdout)
+
+    def test_non_ascii_failure_survives_unittest_process_boundary(self) -> None:
+        self._write_module("test_unicode", _UNICODE_FAIL_MODULE)
+        self._commit("unicode failure fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        combined = result.stdout + result.stderr
+        for marker in ("繁體中文標準輸出", "繁體中文錯誤輸出", "繁體中文失敗診斷"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, combined)
+        self.assertNotIn("\ufffd", combined)
+
+    def test_invalid_native_bytes_fail_closed_at_unittest_boundary(self) -> None:
+        self._write_module("test_invalid_bytes", _INVALID_BYTES_MODULE)
+        self._commit("invalid verifier bytes fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        combined = result.stdout + result.stderr
+        self.assertIn("not valid UTF-8", combined)
+        self.assertIn(r"\x80", combined)
+        self.assertIn(r"\xff", combined)
+        self.assertNotIn("\ufffd", combined)
+        self.assertNotIn("UnicodeDecodeError", combined)
+        self.assertNotIn("Traceback", combined)
         self.assertNotIn("verify: OK", result.stdout)
 
     def test_assent_verify_jobs_one_is_honored(self) -> None:
@@ -194,6 +243,29 @@ class ResolvedCommandCase(VerifyTemplateFixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("fixture bat ran alpha", result.stdout)
         self.assertIn("verify: OK", result.stdout)
+
+    def test_invalid_native_bytes_fail_closed_at_run_boundary(self) -> None:
+        self._write_bytes(
+            "native_bytes.py",
+            b"import os\n"
+            b"os.write(1, b'native stdout ' + bytes([0x80]) + b'\\n')\n"
+            b"os.write(2, b'native stderr ' + bytes([0xff]) + b'\\n')\n",
+        )
+        self._write_script_with_command(
+            'run(sys.executable, "native_bytes.py")')
+        self._commit("invalid native command fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        combined = result.stdout + result.stderr
+        self.assertIn("not valid UTF-8", combined)
+        self.assertIn(r"\x80", combined)
+        self.assertIn(r"\xff", combined)
+        self.assertNotIn("\ufffd", combined)
+        self.assertNotIn("UnicodeDecodeError", combined)
+        self.assertNotIn("Traceback", combined)
+        self.assertNotIn("verify: OK", result.stdout)
 
 
 class DiffIntegrityCase(VerifyTemplateFixture):

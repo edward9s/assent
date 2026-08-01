@@ -29,6 +29,11 @@ TRANSLATION_MARKERS = (
 TRANSLATION_PAIRS = (
     (Path("README.md"), Path("README.zh-TW.md")),
     (Path("docs/CONSENSUS.md"), Path("docs/zh-TW/CONSENSUS.md")),
+    (Path("docs/WORKFLOW.md"), Path("docs/zh-TW/WORKFLOW.md")),
+    (Path("docs/COMMANDS.md"), Path("docs/zh-TW/COMMANDS.md")),
+    (Path("docs/CONFIGURATION.md"), Path("docs/zh-TW/CONFIGURATION.md")),
+    (Path("docs/VERIFICATION.md"), Path("docs/zh-TW/VERIFICATION.md")),
+    (Path("docs/OPERATIONS.md"), Path("docs/zh-TW/OPERATIONS.md")),
 )
 # The two contracts live in the user home, so a project-relative spelling of either
 # one is a stale claim in any language.  "~/.assent/format.md" ends in the same
@@ -272,6 +277,19 @@ class LanguagePolicyTests(unittest.TestCase):
             for claim in _project_local_contract_claims(_read(path))
         ]
         self.assertEqual(stale, [])
+
+    def test_antigravity_surfaces_do_not_prescribe_removed_auth_subcommand(self):
+        """AGY sign-in documentation must start the interactive CLI."""
+        surfaces = (
+            Path("README.md"),
+            Path("README.zh-TW.md"),
+            Path("docs/CONFIGURATION.md"),
+            Path("docs/zh-TW/CONFIGURATION.md"),
+            Path("assent/templates/assent.toml"),
+        )
+        for path in surfaces:
+            with self.subTest(path=path):
+                self.assertNotIn("agy auth login", _read(path))
 
     def test_fresh_init_creates_no_project_copy_of_the_shared_files(self):
         """The three shared files belong to the user home, in fact and in the docs."""

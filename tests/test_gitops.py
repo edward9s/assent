@@ -11,7 +11,8 @@ from unittest import mock
 
 from assent import AssentError, pathops
 from assent.gitops import (
-    branches_with_prefix, changes_outside_scope, commit_all, commit_if_dirty,
+    branches_with_prefix, changes_outside_scope, commit_all, commit_empty,
+    commit_if_dirty,
     cleanup_unstarted_worktree, ensure_branch,
     ensure_clean, ensure_worktree, head_ref, resolve_folder_source, restore, tracked_paths,
     worktree_path)
@@ -548,6 +549,23 @@ class TestCommitIfDirty(GitTestCase):
         self.assertFalse(commit_if_dirty(self.root, "should not exist",
                                          excludes=("assent.log",)))
         self.assertEqual(head_ref(self.root), before)
+
+
+class TestCommitEmpty(GitTestCase):
+    def test_empty_commit_records_terminal_evidence_without_staging_content(self):
+        before = head_ref(self.root)
+        commit_empty(self.root, "auto(plan01/t001): resumed task")
+        after = head_ref(self.root)
+
+        self.assertNotEqual(after, before)
+        self.assertEqual(
+            subprocess.run(["git", "diff-tree", "--no-commit-id", "--name-only",
+                            "-r", after], cwd=self.root, capture_output=True,
+                           encoding="utf-8", check=True).stdout.strip(), "")
+        self.assertEqual(
+            subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=self.root,
+                           capture_output=True, encoding="utf-8", check=True).stdout.strip(),
+            "auto(plan01/t001): resumed task")
 
 
 class TestHeadRef(GitTestCase):
