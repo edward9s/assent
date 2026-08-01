@@ -164,6 +164,38 @@ def auto_fix_review_capability_errors(
     return session, adapter.preflight([request])
 
 
+def resolve_auto_fix_fixer_session(
+        cfg: Config, adapter: Adapter, adapter_name: str,
+        model: str, effort: str) -> SessionIdentity:
+    """Resolve one bounded fixer profile through the normal settings tables."""
+    settings = cfg.adapter_settings(adapter_name)
+    return SessionIdentity(
+        agent=adapter_name,
+        requested_model=adapter.resolve_model(model),
+        effort=effort,
+        requested_effort=settings.resolve_requested_effort(model, effort),
+    )
+
+
+def auto_fix_fixer_capability_errors(
+        cfg: Config, adapter: Adapter, adapter_name: str,
+        model: str, effort: str) -> tuple[SessionIdentity | None, list[str]]:
+    """Resolve and preflight one write-capable bounded repair invocation."""
+    try:
+        session = resolve_auto_fix_fixer_session(
+            cfg, adapter, adapter_name, model, effort)
+        request = InvocationRequest(
+            task_id=f"{cfg.tasks_name}/auto-fix",
+            model=model,
+            effort=effort,
+            requested_model=session.requested_model,
+            requested_effort=session.requested_effort,
+        )
+    except AssentError as e:
+        return None, [str(e)]
+    return session, adapter.preflight([request])
+
+
 # --------------------------------------------------------------------------- #
 # assignment rendering
 # --------------------------------------------------------------------------- #

@@ -14,12 +14,15 @@ import stat
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 from assent import AssentError
 from assent.config import Config
 from assent.verification_common import (DIGEST_RE, OID_RE, atomic_write_text,
                                         toml_string)
+
+if TYPE_CHECKING:
+    from assent.plan import Plan
 
 AUTO_FIX_STATE_NAME = "_auto_fix.toml"
 AUTO_FIX_STATE_VERSION = 1
@@ -508,6 +511,113 @@ def persisted_finding(finding: ReviewFinding) -> PersistedFinding:
         fingerprint=finding_fingerprint(finding), task_id=finding.task_id,
         path=finding.path, summary=finding.summary, evidence=finding.evidence,
     )
+
+
+def _path_is_in_scope(path: str, scope: Iterable[str]) -> bool:
+    """Apply the execution engine's literal project-relative prefix rule."""
+    normalized = path.replace("\\", "/")
+    for item in scope:
+        prefix = item.replace("\\", "/").rstrip("/")
+        if prefix and (normalized == prefix
+                       or normalized.startswith(prefix + "/")):
+            return True
+    return False
+
+
+def validate_review_findings(record: ReviewRecord, plan: "Plan") -> ReviewRecord:
+    """Resolve every finding to exactly one existing task and its declared scope.
+
+    A reviewer may omit ``task_id`` only when the path itself has one unambiguous
+    owner.  This is the authorization boundary between read-only review output
+    and a write-capable repair session: an unknown task, out-of-scope path, or
+    overlapping unowned path needs a human decision instead of widening scope.
+    """
+    record = _validate_review_record(record)
+    tasks = {task.id: task for task in plan.tasks}
+    resolved: list[ReviewFinding] = []
+    for finding in record.findings:
+        if finding.task_id is not None:
+            task = tasks.get(finding.task_id)
+            if task is None:
+                raise AssentError(
+                    f"Auto-fix review finding names unknown task id: {finding.task_id}")
+            if not _path_is_in_scope(finding.path, task.scope):
+                raise AssentError(
+                    f"Auto-fix review finding path {finding.path!r} is outside "
+                    f"{finding.task_id}'s declared scope")
+            resolved.append(finding)
+            continue
+
+        owners = [task for task in plan.tasks
+                  if _path_is_in_scope(finding.path, task.scope)]
+        if not owners:
+            raise AssentError(
+                f"Auto-fix review finding path {finding.path!r} is outside every "
+                "existing task's declared scope")
+        if len(owners) != 1:
+            names = ", ".join(task.id for task in owners)
+            raise AssentError(
+                f"Auto-fix review finding path {finding.path!r} has ambiguous task "
+                f"ownership: {names}")
+        resolved.append(ReviewFinding(
+            owners[0].id, finding.path, finding.summary, finding.evidence))
+    return ReviewRecord(record.verdict, tuple(resolved))
+
+
+def current_review_record(state: AutoFixState) -> ReviewRecord:
+    """Reconstruct the current validated verdict from durable ledger entries."""
+    state = _validate_state(state)
+    by_fingerprint = {item.fingerprint: item for item in state.findings}
+    findings = tuple(
+        by_fingerprint[fingerprint].finding
+        for fingerprint in state.current_finding_fingerprints)
+    return _validate_review_record(ReviewRecord(state.verdict, findings))
+
+
+def consume_fixer_profile(state: AutoFixState,
+                          profile: FixerProfile) -> AutoFixState:
+    """Persistently consume one unique repair profile before its session starts."""
+    state = _validate_state(state)
+    candidate = replace_fixer_profiles(
+        state, state.consumed_fixer_profiles + (profile,))
+    return _validate_state(candidate)
+
+
+def replace_fixer_profiles(
+        state: AutoFixState,
+        profiles: tuple[FixerProfile, ...]) -> AutoFixState:
+    """Return a state copy with a caller-supplied ordered profile history."""
+    return AutoFixState(
+        version=state.version,
+        source_tree=state.source_tree,
+        task_plan_sha256=state.task_plan_sha256,
+        review_prompt_sha256=state.review_prompt_sha256,
+        reviewer_adapter=state.reviewer_adapter,
+        reviewer_model=state.reviewer_model,
+        reviewer_effort=state.reviewer_effort,
+        verdict=state.verdict,
+        current_finding_fingerprints=state.current_finding_fingerprints,
+        findings=state.findings,
+        observed_states=state.observed_states,
+        consumed_fixer_profiles=profiles,
+    )
+
+
+def next_unused_fixer_profile(
+        state: AutoFixState,
+        profiles: Iterable[FixerProfile]) -> FixerProfile | None:
+    """Return the first unique profile not already consumed by this folder."""
+    state = _validate_state(state)
+    used = {(item.adapter, item.model, item.effort)
+            for item in state.consumed_fixer_profiles}
+    seen = set(used)
+    for profile in profiles:
+        identity = (profile.adapter, profile.model, profile.effort)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        return profile
+    return None
 
 
 def auto_fix_state_path(config_or_folder: Config | str | Path) -> Path:

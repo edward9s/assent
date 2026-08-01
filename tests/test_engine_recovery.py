@@ -12,10 +12,56 @@ import io
 import subprocess
 import unittest
 
-from assent import engine, gitops
+from assent import auto_fix, engine, gitops
+from assent.adapters import TaskResult
 from assent.plan import journal_path_for, parse_task_file
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
 from tests.test_contracts import GlobalContractsMixin
+
+
+class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
+    def test_interrupt_preserves_edits_and_restart_uses_next_profile(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "stale value", "review evidence")
+        failed = auto_fix.review_record_json(
+            auto_fix.ReviewRecord("FAIL", (finding,)))
+        passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, failed, False, None),
+            TaskResult(0, passed, False, None),
+        ])
+
+        def interrupt_after_edit(_prompt):
+            target = self.execution_root() / "src" / "value.txt"
+            target.write_text("partial\n", encoding="utf-8")
+            raise KeyboardInterrupt
+
+        first_worker = ScriptedAdapter([interrupt_after_edit])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=first_worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 130)
+        self.assertEqual(parse_task_file(task_path).status, "WIP")
+
+        second_worker = ScriptedAdapter([
+            self.ai_done(task_path, {"src/value.txt": "fixed\n"},
+                         requested_model="prime")])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=second_worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.consumed_fixer_profiles, (
+            auto_fix.FixerProfile("claude", "lite", "normal"),
+            auto_fix.FixerProfile("claude", "prime", "heavy"),
+        ))
+        self.assertEqual((self.execution_root() / "src" / "value.txt").read_text(
+            encoding="utf-8"), "fixed\n")
 
 
 class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):

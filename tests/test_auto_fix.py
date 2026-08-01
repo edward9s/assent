@@ -4,15 +4,17 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from assent import AssentError
 from assent.auto_fix import (
     AUTO_FIX_STATE_VERSION, AutoFixState, FixerProfile, ObservedState,
     ReviewFinding, ReviewRecord, auto_fix_state_is_fresh,
-    auto_fix_state_path, finding_fingerprint, normalize_finding_path,
+    auto_fix_state_path, consume_fixer_profile, current_review_record,
+    finding_fingerprint, next_unused_fixer_profile, normalize_finding_path,
     parse_review_output, persisted_finding, read_auto_fix_state,
     review_record_json, snapshot_project_surface, state_for_review,
-    write_auto_fix_state,
+    validate_review_findings, write_auto_fix_state,
 )
 
 
@@ -35,6 +37,20 @@ class TestReviewRecord(unittest.TestCase):
                 parsed = parse_review_output("adapter preamble\n" + text + "\n")
                 self.assertEqual(review_record_json(parsed), text)
         self.assertEqual(parsed.findings[0].path, "assent/config.py")
+
+    def test_findings_require_one_existing_scope_owner(self):
+        plan = SimpleNamespace(tasks=(
+            SimpleNamespace(id="t001", scope=["assent/"]),
+            SimpleNamespace(id="t002", scope=["tests/"]),
+        ))
+        record = validate_review_findings(
+            ReviewRecord("FAIL", (replace(
+                self.finding, task_id=None, path="assent/config.py"),)), plan)
+        self.assertEqual(record.findings[0].task_id, "t001")
+        with self.assertRaisesRegex(AssentError, "outside.*declared scope"):
+            validate_review_findings(
+                ReviewRecord("FAIL", (replace(
+                    self.finding, path="tests/test_config.py"),)), plan)
 
     def test_fingerprints_are_scheduler_computed_and_stable(self):
         normalized = ReviewFinding(
@@ -122,6 +138,21 @@ class TestAutoFixState(unittest.TestCase):
         self.assertFalse(any(
             child.name.endswith(".tmp")
             for child in self.path.parent.iterdir()))
+
+    def test_profile_cursor_is_deduplicated_and_current_record_is_recoverable(self):
+        candidates = (
+            self.state.consumed_fixer_profiles[0],
+            FixerProfile("claude", "prime", "heavy"),
+            FixerProfile("claude", "prime", "heavy"),
+        )
+        selected = next_unused_fixer_profile(self.state, candidates)
+        self.assertEqual(selected, FixerProfile("claude", "prime", "heavy"))
+        consumed = consume_fixer_profile(self.state, selected)
+        self.assertIsNone(next_unused_fixer_profile(consumed, candidates))
+        self.assertEqual(current_review_record(consumed).findings[0],
+                         self.state.findings[0].finding)
+        with self.assertRaisesRegex(AssentError, "duplicate consumed"):
+            consume_fixer_profile(consumed, selected)
 
     def test_atomic_replacement_writes_one_complete_new_state(self):
         write_auto_fix_state(self.path, self.state)

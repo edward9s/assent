@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, TextIO
 
-from assent import (AssentError, auto_fix, contracts, gitops, lockfile,
+from assent import (AssentError, auto_fix, contracts, gitops, lockfile, rework,
                     shared_paths, verification)
 from assent.adapters import Adapter, get_adapter
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
@@ -50,9 +50,10 @@ from assent.inspection import try_write_report
 from assent.plan import (Plan, Task, append_entry, parse_task_file,
                          read_entries, same_except_status, set_status)
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
-                              StackState, auto_fix_review_capability_errors,
-                              capability_errors, has_git_marker, resolve_session,
-                              resolve_stack_state, worktree_configuration_errors)
+                              StackState, auto_fix_fixer_capability_errors,
+                              auto_fix_review_capability_errors, capability_errors,
+                              has_git_marker, resolve_session, resolve_stack_state,
+                              worktree_configuration_errors)
 
 # Default prompt template (overridable via [prompt] template; variables are substituted
 # literally, tolerating other braces inside the template).
@@ -143,6 +144,28 @@ Task contracts and journals:
 {management_evidence}
 """
 
+_AUTO_FIX_REPAIR_SUFFIX = """
+
+This is an Assent-authorized bounded auto-fix attempt. Preserve the current
+implementation and repair the findings owned by this task; do not create tasks,
+change task requirements or scope, revert code, accept work, or delete sources.
+The complete durable folder finding ledger and all prior capability attempts
+are reproduced below. Re-evaluate current code rather than assuming an older
+finding is still present, and run this task's ordinary focused gate before
+closeout.
+
+Current cumulative diff relevant to this task:
+{diff_evidence}
+
+Durable finding ledger (current blockers are marked CURRENT):
+{finding_ledger}
+
+Previously consumed fixer profiles:
+{prior_attempts}
+"""
+
+_AUTO_FIX_EVIDENCE_LIMIT = 64_000
+
 _QUOTA_BUFFER = timedelta(minutes=2)  # reset time + buffer, to avoid being blocked again right at the edge
 _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
 # Longest single sleep the non-tty countdown may take. A quota wait is often
@@ -170,6 +193,23 @@ class _SessionState:
     identity: SessionIdentity | None = None
     terminal_checkpoint: bool = False
     terminal_checkpoint_attempt: tuple[str, str] | None = None
+
+
+@dataclass
+class _ActiveTask:
+    """Mutable interrupt witness shared by normal and auto-fix task loops."""
+
+    task: Task | None = None
+    session: _SessionState | None = None
+
+
+@dataclass(frozen=True)
+class _AutoFixReviewOutcome:
+    """One final-focused/reviewer cycle and its durable repair evidence."""
+
+    code: int
+    state: auto_fix.AutoFixState | None = None
+    human_reason: str | None = None
 
 
 @dataclass
@@ -313,14 +353,15 @@ def _rework_prompt_suffix(task: Task) -> str:
 
 
 def _session_line(adapter_name: str, task: Task,
-                  session: SessionIdentity) -> str:
+                  session: SessionIdentity,
+                  model: str | None = None) -> str:
     """The one opening line that states the whole resolved session identity.
 
     Four facts, in the order they are decided: which adapter runs, and each abstract choice
     beside the concrete value actually sent to that adapter's CLI, e.g.
     ``Session: codex | core->gpt-5.6-luna | heavy->max``.
     """
-    return (f"  Session: {adapter_name} | {task.model}->{session.requested_model}"
+    return (f"  Session: {adapter_name} | {model or task.model}->{session.requested_model}"
             f" | {session.effort}->{session.requested_effort}")
 
 
@@ -551,6 +592,7 @@ def _prepare_worktree(cfg: Config) -> Config:
 def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         adapter: Adapter | None = None,
         auto_fix_adapter: Adapter | None = None,
+        auto_fix: bool = False,
         sleep: Callable[[float], None] | None = None,
         now: Callable[[], datetime] | None = None,
         run_level_verify: bool = False) -> int:
@@ -599,7 +641,8 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     try:
         with lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name):
             result = _run_locked(
-                cfg, once, task_id, adapter, auto_fix_adapter, sleep, now)
+                cfg, once, task_id, adapter, auto_fix_adapter, auto_fix,
+                sleep, now)
     except lockfile.LockBusy as e:
         print(str(e))
         return 1
@@ -638,6 +681,7 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
 def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 adapter: Adapter | None,
                 auto_fix_adapter: Adapter | None,
+                auto_fix_enabled: bool,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
     """The actual run body, after the task folder lock is held."""
@@ -694,10 +738,14 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         print(f"git setup failed: {e}")
         return 1
 
-    current_task: Task | None = None
-    current_session: _SessionState | None = None
+    active = _ActiveTask()
     try:
-        while True:
+        existing_auto_fix = (_auto_fix_existing_state(cfg)
+                             if auto_fix_enabled else None)
+        resuming_auto_fix = bool(
+            existing_auto_fix is not None
+            and existing_auto_fix.verdict == "FAIL")
+        while not resuming_auto_fix:
             plan = Plan.parse(cfg.tasks_dir)
             if task_id is not None:
                 task = plan.get(task_id)
@@ -722,37 +770,49 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 task, resumed = selected
 
             session = _SessionState()
-            current_task = task
-            current_session = session
+            active.task = task
+            active.session = session
             _process_task(cfg, task, rotation, sleep, now, session, resumed)
-            current_task = None
-            current_session = None
+            active.task = None
+            active.session = None
 
             if once or task_id is not None:
                 break
 
+        if resuming_auto_fix:
+            assert existing_auto_fix is not None
+            return _run_auto_fix_repairs(
+                cfg, existing_auto_fix, rotation, active,
+                injected_reviewer=auto_fix_adapter, sleep=sleep, now=now)
+
         if cfg.auto_fix_review is not None:
-            review_result = _run_auto_fix_review_gate(
+            review_outcome = _run_auto_fix_review_once(
                 cfg, once=once, task_id=task_id,
                 injected_adapter=auto_fix_adapter, sleep=sleep, now=now)
-            if review_result != 0:
-                return review_result
+            if review_outcome.code != 0:
+                if (auto_fix_enabled and review_outcome.state is not None
+                        and review_outcome.human_reason is None):
+                    return _run_auto_fix_repairs(
+                        cfg, review_outcome.state, rotation, active,
+                        injected_reviewer=auto_fix_adapter,
+                        sleep=sleep, now=now)
+                return review_outcome.code
     except KeyboardInterrupt:
         # Ctrl+C on the Windows console reaches the child process (the AI session) too, so
         # the session is terminated by the OS signal; here the engine gathers the produced
         # progress into a wip checkpoint (never discard it) and exits with 130.
         print("\nInterrupt received (Ctrl+C): session terminated, keeping current progress...")
         terminal_checkpoint = bool(
-            current_session is not None and current_session.terminal_checkpoint)
-        if (not terminal_checkpoint and current_session is not None):
+            active.session is not None and active.session.terminal_checkpoint)
+        if (not terminal_checkpoint and active.session is not None):
             terminal_checkpoint = _terminal_checkpoint_matches_attempt(
-                cfg, current_session.terminal_checkpoint_attempt)
+                cfg, active.session.terminal_checkpoint_attempt)
             if terminal_checkpoint:
-                current_session.terminal_checkpoint = True
-        if (current_task is not None and current_session is not None
-                and current_session.identity is not None and not terminal_checkpoint):
+                active.session.terminal_checkpoint = True
+        if (active.task is not None and active.session is not None
+                and active.session.identity is not None and not terminal_checkpoint):
             _mark_interrupted_task(
-                current_task, current_session.identity,
+                active.task, active.session.identity,
                 "User interrupt; progress kept for next resume", now,
                 detail="run received Ctrl+C")
         if terminal_checkpoint:
@@ -760,8 +820,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         else:
             try:
                 subject = (_checkpoint_subject(
-                    cfg, "wip", current_task, "user interrupt, progress kept")
-                    if current_task is not None
+                    cfg, "wip", active.task, "user interrupt, progress kept")
+                    if active.task is not None
                     else f"wip({cfg.tasks_name}): user interrupt, progress kept")
                 if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
                     print("Progress gathered into a wip checkpoint (git revert it yourself if unsatisfied).")
@@ -783,13 +843,13 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         print(f"Run aborted (billing/balance): {e}")
         print("The account's prepaid balance is exhausted; retrying cannot fix this. "
               "Top up the account, then rerun to resume from the kept progress.")
-        if (current_task is not None and current_session is not None
-                and current_session.identity is not None):
-            _mark_billing_task(current_task, current_session.identity, str(e), now)
+        if (active.task is not None and active.session is not None
+                and active.session.identity is not None):
+            _mark_billing_task(active.task, active.session.identity, str(e), now)
         try:
             subject = (_checkpoint_subject(
-                cfg, "wip", current_task, "billing abort, progress kept")
-                if current_task is not None
+                cfg, "wip", active.task, "billing abort, progress kept")
+                if active.task is not None
                 else f"wip({cfg.tasks_name}): billing abort, progress kept")
             if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
                 print("Progress gathered into a wip checkpoint.")
@@ -799,16 +859,16 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         return 1
     except (AssentError, OSError) as e:
         print(f"Run aborted (infrastructure error): {e}")
-        if (current_task is not None and current_session is not None
-                and current_session.identity is not None):
+        if (active.task is not None and active.session is not None
+                and active.session.identity is not None):
             _mark_interrupted_task(
-                current_task, current_session.identity,
+                active.task, active.session.identity,
                 "Aborted on infrastructure error; progress kept for next resume", now,
                 detail=str(e))
         try:
             subject = (_checkpoint_subject(
-                cfg, "wip", current_task, "infrastructure error abort, progress kept")
-                if current_task is not None
+                cfg, "wip", active.task, "infrastructure error abort, progress kept")
+                if active.task is not None
                 else f"wip({cfg.tasks_name}): infrastructure error abort, progress kept")
             if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
                 print("Progress gathered into a wip checkpoint.")
@@ -841,17 +901,16 @@ def _auto_fix_management_evidence(plan: Plan) -> str:
 
 
 def _auto_fix_review_identity(cfg: Config, plan: Plan,
-                              commands: list[str]) -> tuple[str, str, str, str]:
+                              focused_evidence: str) -> tuple[str, str, str, str]:
     """Return source tree, task-plan digest, prompt text, and prompt digest."""
     source_tree = gitops.tree_of(cfg.root, "HEAD")
     resolved_base = resolve_stack_state(cfg).base.resolved_base
     base_ref = gitops.merge_base(cfg.root, resolved_base, "HEAD")
-    focused = "\n".join(f"- PASS: {command}" for command in commands)
     prompt = _AUTO_FIX_REVIEW_PROMPT.format(
         folder=cfg.tasks_name,
         base_ref=base_ref,
         source_tree=source_tree,
-        focused_evidence=focused,
+        focused_evidence=focused_evidence,
         management_evidence=_auto_fix_management_evidence(plan),
     )
     plan_digest = auto_fix.sha256_files(task.path for task in plan.tasks)
@@ -904,15 +963,15 @@ def _auto_fix_surface_change(
     return tuple(sorted(set(changed)))
 
 
-def _run_auto_fix_review_gate(
+def _run_auto_fix_review_once(
         cfg: Config, *, once: bool, task_id: str | None,
         injected_adapter: Adapter | None,
         sleep: Callable[[float], None],
-        now: Callable[[], datetime]) -> int:
-    """Run the optional read-only folder review while the folder lock is held."""
+        now: Callable[[], datetime]) -> _AutoFixReviewOutcome:
+    """Run one final-focused and read-only review cycle under the folder lock."""
     review = cfg.auto_fix_review
     if review is None:
-        return 0
+        return _AutoFixReviewOutcome(0)
 
     plan = Plan.parse(cfg.tasks_dir)
     incomplete = [task for task in plan.tasks
@@ -921,31 +980,64 @@ def _run_auto_fix_review_gate(
         limited = " after the limited run" if once or task_id is not None else ""
         shown = ", ".join(f"{task.id}={task.status}" for task in incomplete)
         print(f"Auto-fix folder review deferred{limited}; folder is incomplete ({shown}).")
-        return 0
+        return _AutoFixReviewOutcome(0)
 
     done = [task for task in plan.tasks if task.status == "DONE"]
     if not done:
         print("Auto-fix folder review: all tasks are SKIP; no implementation review session needed.")
-        return 0
+        return _AutoFixReviewOutcome(0)
 
-    commands: list[str] = []
+    focused_lines: list[str] = []
     seen: set[str] = set()
     print("Auto-fix folder review: running final distinct focused checks.")
     for task in done:
         if task.verify in seen:
             continue
         seen.add(task.verify)
-        commands.append(task.verify)
-        if _run_verify(cfg, task.verify) != 0:
-            print("Auto-fix folder review: focused verification failed; reviewer was not started.")
-            return 1
+        verify_result = _verify_subprocess(cfg, task.verify)
+        _show_verify_result(task.verify, verify_result)
+        if verify_result.returncode != 0:
+            diagnostic = _bounded_adapter_diagnostic(
+                verify_result.stderr or verify_result.stdout or "")
+            focused_lines.append(
+                f"- FAIL ({verify_result.returncode}): {task.verify}; {diagnostic}")
+            owners = [item for item in done if item.verify == task.verify]
+            record = auto_fix.ReviewRecord("FAIL", tuple(
+                auto_fix.ReviewFinding(
+                    item.id, item.scope[0],
+                    "Final focused verification failed",
+                    f"exit {verify_result.returncode}: {task.verify}; {diagnostic}")
+                for item in owners))
+            record = auto_fix.validate_review_findings(record, plan)
+            source_tree, plan_digest, _prompt, prompt_digest = (
+                _auto_fix_review_identity(
+                    cfg, plan, "\n".join(focused_lines)))
+            previous = _auto_fix_existing_state(cfg)
+            state = auto_fix.state_for_review(
+                record, previous=previous,
+                source_tree=source_tree,
+                task_plan_sha256=plan_digest,
+                review_prompt_sha256=prompt_digest,
+                reviewer_adapter=review.adapter,
+                reviewer_model=review.requested_model,
+                reviewer_effort=review.requested_effort)
+            auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
+            print("Auto-fix folder review: focused verification failed; "
+                  "scheduler findings were preserved and the reviewer was not started.")
+            dirty = not gitops.working_tree_status(
+                cfg.root, cfg.git_excludes).is_clean
+            reason = ("focused verification changed the source worktree"
+                      if dirty else None)
+            return _AutoFixReviewOutcome(1, state, reason)
+        focused_lines.append(f"- PASS: {task.verify}")
     if not gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
         print("Auto-fix folder review: focused verification changed the source worktree; "
               "reviewer was not started and the exact changes are preserved.")
-        return 1
+        return _AutoFixReviewOutcome(
+            1, human_reason="focused verification changed the source worktree")
 
     source_tree, plan_digest, prompt, prompt_digest = _auto_fix_review_identity(
-        cfg, plan, commands)
+        cfg, plan, "\n".join(focused_lines))
     existing = _auto_fix_existing_state(cfg)
     freshness = dict(
         source_tree=source_tree,
@@ -958,20 +1050,20 @@ def _run_auto_fix_review_gate(
     if existing is not None and auto_fix.auto_fix_state_is_fresh(
             existing, **freshness):
         print("Auto-fix folder review: reusing exact fresh PASS; no reviewer session started.")
-        return 0
+        return _AutoFixReviewOutcome(0, existing)
 
     try:
         reviewer = injected_adapter or get_adapter(review.adapter, cfg)
     except AssentError as e:
         print(f"Auto-fix reviewer resolution failed: {e}")
-        return 1
+        return _AutoFixReviewOutcome(1, human_reason=str(e))
     session, errors = auto_fix_review_capability_errors(cfg, reviewer)
     if errors:
         print(f"{review.adapter} auto-fix review capability preflight: FAIL "
               "(refusing before the review session)")
         for message in errors:
             print(f"  - {message}")
-        return 1
+        return _AutoFixReviewOutcome(1, human_reason="; ".join(errors))
     assert session is not None
 
     baseline = _auto_fix_surface_snapshot(cfg)
@@ -1000,7 +1092,8 @@ def _run_auto_fix_review_gate(
                       + ", ".join(changed[:8]))
             else:
                 print("Auto-fix reviewer interrupted; no verdict was recorded.")
-            return 130
+            return _AutoFixReviewOutcome(
+                130, human_reason="reviewer interrupted")
         except OSError as e:
             changed = _auto_fix_surface_change(
                 baseline, cfg, baseline_head, baseline_status,
@@ -1008,7 +1101,7 @@ def _run_auto_fix_review_gate(
             suffix = (f"; project writes preserved: {', '.join(changed[:8])}"
                       if changed else "")
             print(f"Auto-fix reviewer infrastructure failure: {e}{suffix}")
-            return 1
+            return _AutoFixReviewOutcome(1, human_reason=str(e))
 
         changed = _auto_fix_surface_change(
             baseline, cfg, baseline_head, baseline_status,
@@ -1018,7 +1111,8 @@ def _run_auto_fix_review_gate(
             print("Protected project writes were detected during the reviewer interval; "
                   "PASS/FAIL was ignored and the exact edits are preserved "
                   f"({shown}).")
-            return 1
+            return _AutoFixReviewOutcome(
+                1, human_reason="reviewer project writes detected")
 
         if (result.checkpoint_resume and not result.quota_exhausted
                 and not result.stalled and result.exit_code != 0):
@@ -1032,25 +1126,17 @@ def _run_auto_fix_review_gate(
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output, result.failure_kind)
             print(f"Auto-fix reviewer billing/balance failure: {reason}")
-            return 1
+            return _AutoFixReviewOutcome(1, human_reason=reason)
         if result.exit_code != 0 or result.stalled:
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output, result.failure_kind)
             print(f"Auto-fix reviewer adapter failure: {reason}")
             if result.exit_code == 130 or result.failure_kind == "interrupt":
-                return 130
-            return 1
+                return _AutoFixReviewOutcome(130, human_reason=reason)
+            return _AutoFixReviewOutcome(1, human_reason=reason)
 
         try:
             record = auto_fix.parse_review_output(result.output)
-            known_ids = {task.id for task in plan.tasks}
-            unknown = sorted({finding.task_id for finding in record.findings
-                              if finding.task_id is not None
-                              and finding.task_id not in known_ids})
-            if unknown:
-                raise AssentError(
-                    "Auto-fix review findings name unknown task ids: "
-                    + ", ".join(unknown))
         except AssentError as e:
             if invalid_attempts < cfg.retry_per_task:
                 invalid_attempts += 1
@@ -1058,18 +1144,241 @@ def _run_auto_fix_review_gate(
                       f"({invalid_attempts}/{cfg.retry_per_task}).")
                 continue
             print(f"Auto-fix reviewer returned invalid output after configured retries: {e}")
-            return 1
+            return _AutoFixReviewOutcome(1, human_reason=str(e))
 
-        state = auto_fix.state_for_review(record, previous=existing, **freshness)
+        try:
+            resolved_record = auto_fix.validate_review_findings(record, plan)
+        except AssentError as e:
+            # Preserve the reviewer's concrete output even though it cannot
+            # authorize a write-capable task session.
+            state = auto_fix.state_for_review(
+                record, previous=existing, **freshness)
+            auto_fix.write_auto_fix_state(
+                auto_fix.auto_fix_state_path(cfg), state)
+            print(f"Auto-fix findings require a human scope/plan decision: {e}")
+            return _AutoFixReviewOutcome(1, state, str(e))
+
+        state = auto_fix.state_for_review(
+            resolved_record, previous=existing, **freshness)
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
-        if record.verdict == "PASS":
+        if resolved_record.verdict == "PASS":
             print("Auto-fix folder review: PASS.")
-            return 0
+            return _AutoFixReviewOutcome(0, state)
         print("Auto-fix folder review: FAIL; blocking findings were preserved for repair.")
-        for finding in record.findings:
+        for finding in resolved_record.findings:
             owner = f"{finding.task_id}: " if finding.task_id else ""
             print(f"  - {owner}{finding.path}: {finding.summary}")
-        return 1
+        return _AutoFixReviewOutcome(1, state)
+
+
+def _auto_fix_profile_for_task(cfg: Config, task: Task) -> auto_fix.FixerProfile:
+    """The primary worker's ordinary identity for one reopened task."""
+    settings = cfg.adapter_settings(cfg.adapter_names[0])
+    effort = settings.resolve_effort(task.effort, task.model)
+    if effort is None:
+        raise AssentError(
+            f"Auto-fix task profile has no concrete effort: {task.id}")
+    return auto_fix.FixerProfile(cfg.adapter_names[0], task.model, effort)
+
+
+def _auto_fix_escalation_profiles(cfg: Config) -> tuple[auto_fix.FixerProfile, ...]:
+    """Primary worker first, then each other worker adapter, all at prime/heavy."""
+    return tuple(auto_fix.FixerProfile(name, "prime", "heavy")
+                 for name in cfg.adapter_names)
+
+
+def _auto_fix_adapter(
+        rotation: _AdapterRotation,
+        adapter_name: str) -> Adapter:
+    try:
+        return rotation.adapters[rotation.names.index(adapter_name)]
+    except ValueError as e:
+        raise AssentError(
+            f"Auto-fix profile names an adapter outside the worker rotation: "
+            f"{adapter_name}") from e
+
+
+def _auto_fix_repair_context(
+        cfg: Config, task: Task, state: auto_fix.AutoFixState) -> str:
+    """Render the complete durable ledger, attempts, and task-relevant diff."""
+    current = set(state.current_finding_fingerprints)
+    ledger_lines = []
+    for finding in state.findings:
+        marker = "CURRENT" if finding.fingerprint in current else "HISTORY"
+        owner = finding.task_id or "unassigned"
+        ledger_lines.append(
+            f"- [{marker}] {finding.fingerprint} {owner} {finding.path}: "
+            f"{finding.summary}\n  evidence: {finding.evidence}")
+    ledger = "\n".join(ledger_lines) or "- none"
+    attempts = "\n".join(
+        f"- {item.adapter}/{item.model}/{item.effort}"
+        for item in state.consumed_fixer_profiles) or "- none"
+
+    base = resolve_stack_state(cfg).base.resolved_base
+    merge_base = gitops.merge_base(cfg.root, base, "HEAD")
+    result = subprocess.run(
+        ["git", "diff", "--find-renames", f"{merge_base}..HEAD", "--",
+         *task.scope], cwd=str(cfg.root), capture_output=True,
+        encoding="utf-8", errors="replace")
+    if result.returncode == 0:
+        diff = result.stdout or "(no committed diff in this task's scope)"
+    else:
+        diff = ("(unable to render diff: "
+                f"{_bounded_adapter_diagnostic(result.stderr or result.stdout)})")
+    if len(diff) > _AUTO_FIX_EVIDENCE_LIMIT:
+        diff = diff[:_AUTO_FIX_EVIDENCE_LIMIT] + "\n... [diff truncated]"
+    return _AUTO_FIX_REPAIR_SUFFIX.format(
+        diff_evidence=diff.rstrip(), finding_ledger=ledger,
+        prior_attempts=attempts)
+
+
+def _auto_fix_failure_state(
+        cfg: Config, state: auto_fix.AutoFixState,
+        failures: list[tuple[Task, str]]) -> auto_fix.AutoFixState:
+    """Join concrete ordinary-gate failures to the same durable ledger."""
+    record = auto_fix.ReviewRecord("FAIL", tuple(
+        auto_fix.ReviewFinding(
+            task.id, task.scope[0], "Automatic repair task gate failed", reason)
+        for task, reason in failures))
+    plan = Plan.parse(cfg.tasks_dir)
+    record = auto_fix.validate_review_findings(record, plan)
+    next_state = auto_fix.state_for_review(
+        record, previous=state,
+        source_tree=gitops.tree_of(cfg.root, "HEAD"),
+        task_plan_sha256=auto_fix.sha256_files(
+            task.path for task in plan.tasks),
+        review_prompt_sha256=state.review_prompt_sha256,
+        reviewer_adapter=state.reviewer_adapter,
+        reviewer_model=state.reviewer_model,
+        reviewer_effort=state.reviewer_effort)
+    auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), next_state)
+    return next_state
+
+
+def _run_auto_fix_repairs(
+        cfg: Config, state: auto_fix.AutoFixState,
+        rotation: _AdapterRotation, active: _ActiveTask, *,
+        injected_reviewer: Adapter | None,
+        sleep: Callable[[float], None],
+        now: Callable[[], datetime]) -> int:
+    """Consume the finite worker capability sequence until review passes or hands off."""
+    state_path = auto_fix.auto_fix_state_path(cfg)
+    while True:
+        plan = Plan.parse(cfg.tasks_dir)
+        try:
+            record = auto_fix.validate_review_findings(
+                auto_fix.current_review_record(state), plan)
+        except AssentError as e:
+            print(f"Auto-fix stopped for a human scope/plan decision: {e}")
+            return 1
+        implicated = list(dict.fromkeys(
+            finding.task_id for finding in record.findings
+            if finding.task_id is not None))
+        if not implicated:
+            print("Auto-fix stopped: no existing task owns the current findings.")
+            return 1
+
+        ordinary = [_auto_fix_profile_for_task(cfg, plan.get(task_id))
+                    for task_id in implicated if plan.get(task_id) is not None]
+        candidates = tuple(ordinary) + _auto_fix_escalation_profiles(cfg)
+        available = auto_fix.next_unused_fixer_profile(state, candidates)
+        if available is None:
+            # A reviewer failure arrived after clean task closeout: make the
+            # unresolved implementation visible.  A legitimate worker BLOCKED
+            # status is already visible and must not be disguised as TODO/DONE.
+            implicated_tasks = [plan.get(task_id) for task_id in implicated]
+            if all(task is not None and task.status in ("DONE", "SKIP")
+                   for task in implicated_tasks):
+                reason = "Auto-fix profiles exhausted with unresolved findings"
+                if rework.rework_tasks_locked(cfg, implicated, reason) != 0:
+                    return 1
+            print("Auto-fix profiles exhausted; unresolved state and evidence "
+                  "were preserved for human adjudication.")
+            return 1
+
+        reason = "Automatic repair of durable folder-review findings"
+        if rework.rework_tasks_locked(cfg, implicated, reason) != 0:
+            return 1
+        plan = Plan.parse(cfg.tasks_dir)
+        repair_tasks = [task for task in plan.tasks
+                        if task.status in ("TODO", "WIP")]
+        failures: list[tuple[Task, str]] = []
+        for task in repair_tasks:
+            normal_profile = _auto_fix_profile_for_task(cfg, task)
+            profile = auto_fix.next_unused_fixer_profile(
+                state, (normal_profile,))
+            if profile is None:
+                profile = auto_fix.next_unused_fixer_profile(
+                    state, _auto_fix_escalation_profiles(cfg))
+            if profile is None:
+                failures.append((task, "No unused fixer profile remains"))
+                continue
+
+            identity = (profile.adapter, profile.model, profile.effort)
+            consumed = {(item.adapter, item.model, item.effort)
+                        for item in state.consumed_fixer_profiles}
+            if identity not in consumed:
+                state = auto_fix.consume_fixer_profile(state, profile)
+                auto_fix.write_auto_fix_state(state_path, state)
+
+            try:
+                fixer = _auto_fix_adapter(rotation, profile.adapter)
+                session, errors = auto_fix_fixer_capability_errors(
+                    cfg, fixer, profile.adapter, profile.model, profile.effort)
+                if errors:
+                    failures.append((task, "Fixer capability unavailable: "
+                                     + "; ".join(errors)))
+                    continue
+                assert session is not None
+                append_entry(
+                    task.journal_path, by="scheduler", event="auto_fix_attempt",
+                    summary=("Bounded automatic repair profile consumed: "
+                             f"{profile.adapter}/{profile.model}/{profile.effort}"),
+                    detail=("The profile was durably consumed before this "
+                            "write-capable fixer session; all edits and later "
+                            "gate evidence are preserved."),
+                    agent=session.agent,
+                    requested_model=session.requested_model,
+                    requested_effort=session.requested_effort,
+                    time_str=now().isoformat(timespec="seconds"))
+                task_rotation = _AdapterRotation(
+                    (profile.adapter,), (fixer,))
+                session_state = _SessionState()
+                active.task = task
+                active.session = session_state
+                failure = _process_task(
+                    cfg, task, task_rotation, sleep, now, session_state,
+                    resumed=task.status == "WIP",
+                    session_override=session,
+                    profile_model=profile.model,
+                    auto_fix_context=_auto_fix_repair_context(cfg, task, state),
+                    retry_limit=0, billing_is_failure=True)
+                active.task = None
+                active.session = None
+                if failure is not None:
+                    failures.append((task, failure))
+            except OSError as e:
+                if active.session is not None and active.session.identity is not None:
+                    _mark_interrupted_task(
+                        task, active.session.identity,
+                        "Auto-fix adapter infrastructure failure; progress kept",
+                        now, detail=str(e))
+                failures.append((task, f"Fixer infrastructure failure: {e}"))
+                active.task = None
+                active.session = None
+
+        if failures:
+            state = _auto_fix_failure_state(cfg, state, failures)
+            continue
+
+        outcome = _run_auto_fix_review_once(
+            cfg, once=False, task_id=None,
+            injected_adapter=injected_reviewer, sleep=sleep, now=now)
+        if outcome.code == 0:
+            return 0
+        if outcome.state is None or outcome.human_reason is not None:
+            return outcome.code
+        state = outcome.state
 
 
 def _recover_or_ensure_clean(cfg: Config, now: Callable[[], datetime]) -> None:
@@ -1389,7 +1698,12 @@ def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
 def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   sleep: Callable[[float], None],
                   now: Callable[[], datetime], session_state: _SessionState,
-                  resumed: bool = False) -> None:
+                  resumed: bool = False, *,
+                  session_override: SessionIdentity | None = None,
+                  profile_model: str | None = None,
+                  auto_fix_context: str = "",
+                  retry_limit: int | None = None,
+                  billing_is_failure: bool = False) -> str | None:
     """Run a single task's full lifecycle; internally handles quota/control resumption and
     retries, and by the end the task is DONE/BLOCKED.
 
@@ -1410,10 +1724,14 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     while True:
         adapter = rotation.adapter
         adapter_name = rotation.name
-        session = resolve_session(cfg, adapter, task, adapter_name)
+        session = (session_override or
+                   resolve_session(cfg, adapter, task, adapter_name))
         session_state.identity = session
         prompt = _build_prompt(cfg, task, failure_reason, session, resumed)
-        print(_session_line(adapter_name, task, session))
+        if auto_fix_context:
+            prompt += auto_fix_context
+        print(_session_line(
+            adapter_name, task, session, model=profile_model))
         main_tree_baseline = (gitops.dirty_paths(cfg.source_root, _task_excludes(cfg, task))
                               if cfg.source_root is not None else None)
         result = adapter.run_task(
@@ -1499,7 +1817,12 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 result.exit_code, result.stalled, result.output,
                 result.failure_kind)
             print(f"  Adapter failure: {reason}")
-            raise _BillingAbort(reason)
+            if not billing_is_failure:
+                raise _BillingAbort(reason)
+            _append_adapter_failure_entry(
+                task, session, result.exit_code, result.stalled, reason, now,
+                failure_kind=result.failure_kind)
+            outcome = "fail"
         elif result.exit_code != 0 or result.stalled:
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output,
@@ -1532,7 +1855,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             elif resumed:
                 print("  terminal auto checkpoint created; resumed progress was preserved")
             try_write_report(cfg)
-            return
+            return None
         if outcome == "self_blocked":
             print("  Execution AI self-marked BLOCKED (legal output, handed to a human) -> creating checkpoint")
             gitops.commit_if_dirty(
@@ -1540,13 +1863,15 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                     cfg, "auto", task, "BLOCKED (execution AI self-marked)"),
                 cfg.git_excludes)
             try_write_report(cfg)
-            return
+            return "Execution AI self-marked BLOCKED"
 
         # outcome == "fail": no restore (output kept), retry with the reason; once retries are
         # exhausted the scheduler marks BLOCKED, and the not-yet-passing work is committed
         # together with the BLOCKED mark for a human to make the final call.
         print(f"  Acceptance failed: {reason}")
-        if attempts_used < cfg.retry_per_task:
+        allowed_retries = (cfg.retry_per_task
+                           if retry_limit is None else retry_limit)
+        if attempts_used < allowed_retries:
             attempts_used += 1
             failure_reason = reason
             print(f"  Keeping existing work, retrying with the failure reason (attempt {attempts_used})...")
@@ -1555,7 +1880,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         _mark_blocked(cfg, task, session, reason or "acceptance failed", now,
                       attempts=attempts_used)
         try_write_report(cfg)
-        return
+        return reason or "acceptance failed"
 
 
 def _inspect_task_safety(cfg: Config, task: Task,
@@ -1653,8 +1978,15 @@ def _verify_subprocess(cfg: Config, command: str) -> subprocess.CompletedProcess
 def _run_verify(cfg: Config, command: str) -> int:
     """Run verify in the target working tree; exit code 0 = pass. Echoes the command and
     result (with a failure tail) to stdout."""
-    print(f"  verify: {command}")
     result = _verify_subprocess(cfg, command)
+    _show_verify_result(command, result)
+    return result.returncode
+
+
+def _show_verify_result(
+        command: str, result: subprocess.CompletedProcess) -> None:
+    """Render one already-completed focused command without rerunning it."""
+    print(f"  verify: {command}")
     if result.returncode != 0:
         print(f"  verify failed (exit {result.returncode})")
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-8:]
@@ -1664,7 +1996,6 @@ def _run_verify(cfg: Config, command: str) -> int:
                 print(f"  | {line}")
     else:
         print("  verify passed (exit 0)")
-    return result.returncode
 
 
 def _verify_focused_locked(cfg: Config) -> int:
