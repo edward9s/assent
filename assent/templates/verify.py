@@ -15,9 +15,23 @@ import sys
 import time
 from pathlib import Path
 
-# On Windows, stdout redirected to a pipe/file defaults to the system code page, which garbles non-ASCII text
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
+
+def _utf8_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
+
+
+def _configure_utf8_stdio() -> None:
+    """Keep this verifier and every Python child on the same text encoding."""
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="strict")
+
+
+# On Windows, redirected stdio otherwise defaults to the system code page.
+_configure_utf8_stdio()
 
 # The verification target is always the cwd the scheduler sets; under isolated execution the script body still lives in the main tree.
 ROOT = Path.cwd().resolve()
@@ -42,7 +56,8 @@ def run(*cmd: str) -> None:
     program = shutil.which(cmd[0])
     if program is None:
         fail(f"command not found on PATH: {cmd[0]}")
-    result = subprocess.run((program,) + cmd[1:], cwd=ROOT)
+    result = subprocess.run((program,) + cmd[1:], cwd=ROOT,
+                            env=_utf8_environment())
     if result.returncode != 0:
         fail(f"command failed (exit code {result.returncode}): {' '.join(cmd)}")
 
@@ -54,7 +69,8 @@ def check_committed_delta() -> None:
         cwd=ROOT,
         capture_output=True,
         encoding="utf-8",
-        errors="replace",
+        errors="strict",
+        env=_utf8_environment(),
     )
     if parent.returncode == 0:
         first_parent = parent.stdout.strip()
@@ -101,7 +117,8 @@ def run_unittest_parallel(start_dir: str = "tests", jobs: int | None = None) -> 
         started = time.monotonic()
         proc = subprocess.run(
             [sys.executable, "-m", "unittest", f"{start_dir}.{name}"],
-            cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace",
+            cwd=ROOT, capture_output=True, encoding="utf-8", errors="strict",
+            env=_utf8_environment(),
         )
         elapsed = time.monotonic() - started
         return proc.returncode, elapsed, proc.stdout, proc.stderr

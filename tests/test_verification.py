@@ -303,6 +303,15 @@ class TestVerificationRun(VerificationRepositoryCase):
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
         self.assertEqual(self._temporary_resources(), ([], []))
 
+    def test_non_ascii_verifier_output_survives_folder_failure_summary(self):
+        self._commit_target_verifier(
+            exit_code=7, stderr="繁體中文資料錯誤")
+
+        self.assertEqual(verify_folder(self.cfg), 1)
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertIn("繁體中文資料錯誤", receipt.failure_summary)
+        self.assertNotIn("\ufffd", receipt.failure_summary)
+
     def test_short_summary_is_unchanged_except_normalization(self):
         normalized = summary("short\r\noutput 診斷", "stderr\x00tail")
         self.assertEqual(

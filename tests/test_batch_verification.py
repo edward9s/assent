@@ -267,6 +267,23 @@ class TestBatchCandidateAndReceipt(BatchVerifyRepositoryCase):
         self.assertIn("exit code 3", receipt.failure_summary)
         self.assertIn("verify --batch: failed", output)
 
+    def test_non_ascii_failure_survives_batch_receipt(self) -> None:
+        self.make_source("aa")
+        self.write_verify(
+            "import sys\n"
+            "print('繁體中文批次標準輸出')\n"
+            "print('繁體中文批次錯誤輸出', file=sys.stderr)\n"
+            "raise SystemExit(3)\n")
+
+        code, output = self.run_batch(bisect=False)
+
+        self.assertEqual(code, 1, output)
+        receipt = self.read_batch_receipt()
+        for marker in ("繁體中文批次標準輸出", "繁體中文批次錯誤輸出"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, receipt.failure_summary)
+        self.assertNotIn("\ufffd", receipt.failure_summary)
+
     def test_conflicting_folder_is_named_and_no_receipt_is_written(self) -> None:
         self.make_source("aa", filename="shared.txt", content="from aa\n")
         self.make_source("bb", filename="shared.txt", content="from bb\n")
@@ -898,7 +915,8 @@ class TestBatchFailureLocalization(BatchVerifyRepositoryCase):
 
         self.assertEqual(code, 1)
         self.assertIn("bb and its downstream (cc) are out of this batch", output)
-        self.assertIn("assent rework bb", output)
+        self.assertIn("assent rework bb <TASK>", output)
+        self.assertNotIn("`assent rework bb`", output)
         self.assertEqual(self.read_batch_receipt().folders, ("aa",))
 
     def test_no_bisect_records_the_failure_without_localizing(self) -> None:

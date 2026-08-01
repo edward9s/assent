@@ -609,8 +609,9 @@ def _report_localization(assent_dir: Path, folders: Sequence[str],
         ejected = (f"{result.guilty} and its downstream ("
                    + ", ".join(downstream) + ") are out of this batch")
     print(f"{label}: {ejected}. Its status and task files were not "
-          f"touched; decide with `assent rework {result.guilty}` or "
-          f"`assent reject {result.guilty}`")
+          f"touched; a human must select the guilty task before running "
+          f"`assent rework {result.guilty} <TASK>`, or can run "
+          f"`assent reject {result.guilty}` for the whole-folder alternative")
     note = (f"Batch localization: {result.guilty} is the first folder whose "
             f"merge fails the full verification; {ejected}.")
     if result.kept:

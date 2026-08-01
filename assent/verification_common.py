@@ -40,6 +40,13 @@ DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 SUMMARY_LIMIT = 4000
 
 
+def _utf8_environment() -> dict[str, str]:
+    """Give Python verifier processes a stable UTF-8 stdio contract."""
+    environment = os.environ.copy()
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
+
+
 def invalidate_receipt(path: Path) -> None:
     """Remove stale derived evidence before starting a replacement run."""
     try:
@@ -170,7 +177,8 @@ def run_full_verifier(script: Path,
     try:
         result = subprocess.run(
             [sys.executable, str(script)], cwd=str(candidate),
-            capture_output=True, encoding="utf-8", errors="replace")
+            capture_output=True, encoding="utf-8", errors="strict",
+            env=_utf8_environment())
     except KeyboardInterrupt:
         elapsed = time.monotonic() - started
         print("Full verification interrupted: "

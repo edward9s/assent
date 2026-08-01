@@ -26,6 +26,16 @@ _FAIL_MODULE = (
     "        self.fail('deliberate fixture failure marker')\n"
 )
 
+_UNICODE_FAIL_MODULE = (
+    "import sys\n"
+    "import unittest\n\n"
+    "class T(unittest.TestCase):\n"
+    "    def test_fail(self):\n"
+    "        print('繁體中文標準輸出')\n"
+    "        print('繁體中文錯誤輸出', file=sys.stderr)\n"
+    "        self.fail('繁體中文失敗診斷')\n"
+)
+
 
 class VerifyTemplateFixture(unittest.TestCase):
     """Builds a throwaway git repo running the packaged template as run_verify.py."""
@@ -75,7 +85,7 @@ class VerifyTemplateFixture(unittest.TestCase):
             env.update(env_overrides)
         return subprocess.run(
             [sys.executable, str(self.script)], cwd=self.root,
-            capture_output=True, encoding="utf-8", errors="replace", env=env)
+            capture_output=True, encoding="utf-8", errors="strict", env=env)
 
 
 class RunUnittestParallelCase(VerifyTemplateFixture):
@@ -130,6 +140,19 @@ class RunUnittestParallelCase(VerifyTemplateFixture):
         self.assertIn("deliberate fixture failure marker", combined)
         self.assertIn("verify: FAIL", result.stdout)
         self.assertNotIn("verify: OK", result.stdout)
+
+    def test_non_ascii_failure_survives_unittest_process_boundary(self) -> None:
+        self._write_module("test_unicode", _UNICODE_FAIL_MODULE)
+        self._commit("unicode failure fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        combined = result.stdout + result.stderr
+        for marker in ("繁體中文標準輸出", "繁體中文錯誤輸出", "繁體中文失敗診斷"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, combined)
+        self.assertNotIn("\ufffd", combined)
 
     def test_assent_verify_jobs_one_is_honored(self) -> None:
         self._write_module("test_a", _PASS_MODULE)
