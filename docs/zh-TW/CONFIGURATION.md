@@ -234,8 +234,10 @@ Adapter 若要立即續跑，只能用這個 exact final non-empty line：
 ```
 
 Assent 隱藏 live output 的控制列、保留 raw diagnostics、建立 WIP，再用 continue
-prompt 重開同一 adapter。它沒有 account/quota/reset/capability-probe 語意；若同時有
-quota evidence，普通 quota path 優先。
+prompt 重開同一 adapter。它沒有 account/quota/reset/capability-probe 語意。
+Wrapper 只有先安排立即續跑，才可把 provider quota result 換成這個 record；若轉送
+provider quota，Assent 仍負責普通 wait 或 rotation。若 quota evidence 與這個 record
+同時存在，普通 quota path 優先。
 
 ## Media 與 custom adapter
 

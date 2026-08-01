@@ -272,8 +272,11 @@ non-stalled, nonzero session with the exact non-empty line:
 
 Assent hides that terminal control line from live human output, preserves raw
 diagnostics, creates WIP, and reruns the same adapter with a continue prompt.
-The record has no account, quota, reset, or capability-probe meaning. If quota
-evidence is also present, ordinary quota handling wins.
+The record has no account, quota, reset, or capability-probe meaning.
+A wrapper may replace a provider quota result with it only after arranging an
+immediate continuation; if it forwards provider quota, Assent performs the
+normal wait or rotation. When quota evidence and this record are both present,
+the ordinary quota path wins.
 
 ## Media and custom adapters
 
