@@ -37,8 +37,8 @@ assent run parallel02
 
 也可用 `assent run --all --jobs N` 讓 scheduler 安排。parent process 保持 foreground，
 即時 child output 以 `[work-folder] message` 加前綴。root `.assent/_assent.log` 只留
-startup 與 per-folder scheduling summary；各 folder 的 `_assent.log` 保存一次自己的 raw
-session output，不含 parent prefix。
+startup 與 per-folder scheduling summary；各 folder 的 `_assent.log` 會附加自己的
+rendered terminal session output，不含 parent scheduler 的 `[work-folder]` prefix。
 
 並行會共享 adapter quota，branch 整合回 main line 是人類責任。speculative content
 由明示 `base` 決定，不由 `after` 推導；詳見[工作流程](WORKFLOW.md)。
@@ -60,13 +60,18 @@ session output，不含 parent prefix。
 
 ## 中斷與復原
 
-Assent 有處理的中斷會寫 `WIP` checkpoint，`assent run` 以 continue prompt 恢復。若
-process 或 host 突然失敗，source worktree 可能有未提交編輯；Assent 不猜，會拒絕 dirty
-worktree，請先檢查並建立 checkpoint。`assent.lock` 不是復原狀態，不要處理它。
+Assent 有處理的中斷會寫 `WIP` checkpoint，`assent run` 以 continue prompt 恢復。在
+run startup，如果每個未提交變更都能證明屬於要恢復的 task（或一個尚未被 checkpoint
+的 `DONE` task），Assent 會將 task 標成 `WIP`、記錄 scope-verified recovery、把編輯
+收進 `WIP` checkpoint，並在不開 AI session 的情況下繼續 recovery path。若 ownership
+有 ambiguity，或任何 dirt 超出 task scope，Assent 會保留 dirty worktree 供人類檢查，
+fail closed 而不猜；重新執行前請先檢查並建立 checkpoint。`assent.lock` 不是復原狀態，
+不要處理它。
 
 Scheduler 不會在失敗時 revert workspace。失敗 review 的程式碼保留並在其上重試；重試
-用盡後成果進入 `BLOCKED` checkpoint 供人類裁決。journal 會保留 adapter result、raw
-output、quota/reset 與 checkpoint-resume outcome。
+用盡後成果進入 `BLOCKED` checkpoint 供人類裁決。journal 保存 structured events、
+有界的 summary 與 adapter classification，不保存完整 raw adapter stream；各 folder 的
+`_assent.log` 保存 rendered terminal session output，且沒有 parent scheduler prefix。
 
 ### 臨時 integration candidate
 

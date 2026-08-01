@@ -11,10 +11,12 @@
 assent <command> [options] [FOLDER ...]
 ```
 
-`run`、`status`、`check`、`report` 支援 `--config PATH`。它指定 optional
-project-level config（預設 `.assent/assent.toml`），也從 `.assent` parent 找到
-project；它不是 current-folder pointer。`--config` 與 folder argument 正交，沒有
-套用所有 subcommand 的 top-level global option。
+`run`、`status`、`check`、`report`、`verify`、`clean`、`archive`、`accept`、
+`reconcile`、`reject`、`rework` 支援 `--config PATH`。它指定 optional project-level
+config（預設 `.assent/assent.toml`），也從該 path 找到 project；這是每個
+subcommand 自己的 option，不是 top-level global option。`--config` 與 folder
+argument 正交。`init`、`doctor`、`shared-paths` 各有自己的 project-location
+contract。
 
 不寫 folder 時，`run` 從 task state 與 `_folder.toml` 的 `after` prerequisite
 推導唯一可執行資料夾；有 ambiguity 就拒絕。`status`、`check`、`report` 不寫 folder

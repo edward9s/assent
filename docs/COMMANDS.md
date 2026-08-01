@@ -16,11 +16,12 @@ The common form is:
 assent <command> [options] [FOLDER ...]
 ```
 
-`run`, `status`, `check`, and `report` accept `--config PATH`; it selects the
+`run`, `status`, `check`, `report`, `verify`, `clean`, `archive`, `accept`,
+`reconcile`, `reject`, and `rework` accept `--config PATH`; it selects the
 optional project-level config file (default `.assent/assent.toml`) and also
-locates the project from that path. It does not maintain a current-folder
-pointer. `--config` and a folder argument are orthogonal. There is no top-level
-global option that applies to every subcommand.
+locates the project from that path. It is a per-subcommand option, not a
+top-level global option. `--config` and a folder argument are orthogonal.
+`init`, `doctor`, and `shared-paths` have their own project-location contracts.
 
 When no folder is named, `run` derives one unambiguous runnable folder from
 task state and `_folder.toml`'s `after` prerequisites; ambiguity is refused.

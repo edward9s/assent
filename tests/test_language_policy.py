@@ -283,6 +283,8 @@ class LanguagePolicyTests(unittest.TestCase):
         surfaces = (
             Path("README.md"),
             Path("README.zh-TW.md"),
+            Path("docs/CONFIGURATION.md"),
+            Path("docs/zh-TW/CONFIGURATION.md"),
             Path("assent/templates/assent.toml"),
         )
         for path in surfaces:

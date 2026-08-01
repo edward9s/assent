@@ -47,8 +47,8 @@ assent run parallel02
 Or let `assent run --all --jobs N` schedule independent folders. The parent
 process stays in the foreground and prefixes live child output as
 `[work-folder] message`. The root `.assent/_assent.log` keeps only startup and
-per-folder scheduling summaries; each folder's `_assent.log` keeps its own raw
-session output once, without the parent prefix.
+per-folder scheduling summaries; each folder's `_assent.log` appends the rendered
+terminal session output without the parent scheduler's `[work-folder]` prefix.
 
 Parallelism shares adapter quota, and integrating branches back to the main
 line remains a human decision. A declared `base`, not `after`, determines
@@ -77,15 +77,22 @@ some network filesystems.
 ## Interrupted execution and recovery
 
 If the scheduler handled an interruption, it records a `WIP` checkpoint and
-`assent run` resumes the task with a continue prompt. If a process or host
-failed abruptly, the source worktree can contain uncommitted edits. Assent
-refuses to guess in a dirty worktree; inspect and checkpoint the edits before
-rerunning. The lock file is not part of this recovery and should be left alone.
+`assent run` resumes the task with a continue prompt. At run startup, if every
+uncommitted change is provably attributable to the task that will resume (or to
+one uncheckpointed `DONE` task), Assent marks that task `WIP`, records the
+scope-verified recovery, gathers the edits into a `WIP` checkpoint, and
+continues the recovery path without opening an AI session. If ownership is
+ambiguous or any dirt is outside the task's scope, Assent keeps the dirty
+worktree for human inspection and refuses to guess; inspect and checkpoint the
+edits before rerunning. The lock file is not part of this recovery and should
+be left alone.
 
 The scheduler never reverts the workspace on failure. A failed review keeps
 the code and retries on top of it; exhausted results are committed into a
-`BLOCKED` checkpoint for human adjudication. A task's journal preserves the
-adapter result, raw output, quota/reset facts, and checkpoint-resume outcome.
+`BLOCKED` checkpoint for human adjudication. A task's journal carries structured
+events plus bounded summaries and adapter classifications, not the full raw
+adapter stream. The per-folder `_assent.log` carries the rendered terminal
+session output, without a parent scheduler prefix.
 
 ### Temporary integration candidates
 

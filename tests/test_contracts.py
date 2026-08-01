@@ -157,6 +157,79 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(document="docs/zh-TW/WORKFLOW.md", phrase=phrase):
                 self.assertIn(phrase, chinese)
 
+    def test_command_guides_state_the_per_subcommand_config_contract(self):
+        commands = (
+            "run", "status", "check", "report", "verify", "clean", "archive",
+            "accept", "reconcile", "reject", "rework",
+        )
+        english = (_PROJECT_ROOT / "docs/COMMANDS.md").read_text(
+            encoding="utf-8")
+        chinese = (_PROJECT_ROOT / "docs/zh-TW/COMMANDS.md").read_text(
+            encoding="utf-8")
+        for name, text in (("docs/COMMANDS.md", english),
+                           ("docs/zh-TW/COMMANDS.md", chinese)):
+            compact = " ".join(text.split())
+            with self.subTest(document=name):
+                clause = (
+                    "`run`, `status`, `check`, `report`, `verify`, `clean`, "
+                    "`archive`, `accept`, `reconcile`, `reject`, and `rework` "
+                    "accept `--config PATH`"
+                    if name == "docs/COMMANDS.md" else
+                    "`run`、`status`、`check`、`report`、`verify`、`clean`、"
+                    "`archive`、`accept`、`reconcile`、`reject`、`rework` "
+                    "支援 `--config PATH`")
+                self.assertIn(
+                    clause if name == "docs/COMMANDS.md"
+                    else "".join(clause.split()),
+                    compact if name == "docs/COMMANDS.md"
+                    else "".join(compact.split()))
+                for command in commands:
+                    self.assertIn(f"`{command}`", compact)
+                self.assertIn(
+                    "per-subcommand" if name == "docs/COMMANDS.md"
+                    else "每個 subcommand 自己的 option", compact)
+                self.assertIn("top-level global option", compact)
+                self.assertIn(
+                    "have their own project-location contracts"
+                    if name == "docs/COMMANDS.md"
+                    else "各有自己的 project-location contract", compact)
+
+    def test_operations_guides_separate_recovery_and_persistent_evidence(self):
+        english = (_PROJECT_ROOT / "docs/OPERATIONS.md").read_text(
+            encoding="utf-8")
+        chinese = (_PROJECT_ROOT / "docs/zh-TW/OPERATIONS.md").read_text(
+            encoding="utf-8")
+        english_compact = " ".join(english.split())
+        for phrase in (
+                "every uncommitted change is provably attributable",
+                "marks that task `WIP`",
+                "gathers the edits into a `WIP` checkpoint",
+                "without opening an AI session",
+                "keeps the dirty worktree for human inspection",
+                "journal carries structured events plus bounded summaries and adapter classifications",
+                "not the full raw adapter stream",
+                "rendered terminal session output",
+                "without a parent scheduler prefix"):
+            with self.subTest(document="docs/OPERATIONS.md", phrase=phrase):
+                self.assertIn(phrase, english_compact)
+        chinese_compact = " ".join(chinese.split())
+        for phrase in (
+                "每個未提交變更都能證明屬於要恢復的 task",
+                "將 task 標成 `WIP`",
+                "收進 `WIP` checkpoint",
+                "不開 AI session",
+                "保留 dirty worktree 供人類檢查",
+                "journal 保存 structured events",
+                "不保存完整 raw adapter stream",
+                "rendered terminal session output",
+                "沒有 parent scheduler prefix"):
+            with self.subTest(document="docs/zh-TW/OPERATIONS.md", phrase=phrase):
+                self.assertIn(phrase, chinese_compact)
+        self.assertNotIn("journal preserves the adapter result, raw output",
+                         english_compact)
+        self.assertNotIn("journal 會保留 adapter result、raw output",
+                         chinese_compact)
+
     def test_folder_verification_report_refresh_is_documented(self):
         install_global_contracts(self)
         english = {

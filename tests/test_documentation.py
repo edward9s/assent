@@ -85,6 +85,19 @@ class DocumentationTests(unittest.TestCase):
                 self.assertIn("../../README.zh-TW.md", _read(translated))
                 self.assertIn("../" + f"{topic}.md", _read(translated))
 
+    def test_chinese_readme_topic_columns_point_to_the_named_languages(self):
+        text = _read(Path("README.zh-TW.md"))
+        for topic in TOPICS:
+            with self.subTest(topic=topic):
+                row = next(
+                    line for line in text.splitlines()
+                    if line.startswith("|") and f"[{topic}]" in line
+                )
+                cells = [cell.strip() for cell in row.strip("|").split("|")]
+                self.assertEqual(len(cells), 3)
+                self.assertIn(f"(docs/{topic}.md)", cells[1])
+                self.assertIn(f"(docs/zh-TW/{topic}.md)", cells[2])
+
     def test_maintained_markdown_file_links_resolve_case_sensitively(self):
         for relative in _maintained_surfaces():
             source = ROOT / relative

@@ -114,11 +114,11 @@ README 是入口；詳細內容放在五組英中配對指南：
 
 | 主題 | English canonical | 正體中文 reader guide |
 | --- | --- | --- |
-| 規劃、執行、審查、prompt、重做 | [WORKFLOW](docs/zh-TW/WORKFLOW.md) | [English version](docs/WORKFLOW.md) |
-| 選取與 CLI 參考 | [COMMANDS](docs/zh-TW/COMMANDS.md) | [English version](docs/COMMANDS.md) |
-| init、設定、adapter、模型、effort | [CONFIGURATION](docs/zh-TW/CONFIGURATION.md) | [English version](docs/CONFIGURATION.md) |
-| focused/full verification、receipt、reconcile、accept 證據 | [VERIFICATION](docs/zh-TW/VERIFICATION.md) | [English version](docs/VERIFICATION.md) |
-| worktree、鎖、並行、復原、清理、封存 | [OPERATIONS](docs/zh-TW/OPERATIONS.md) | [English version](docs/OPERATIONS.md) |
+| 規劃、執行、審查、prompt、重做 | [WORKFLOW](docs/WORKFLOW.md) | [WORKFLOW 正體中文](docs/zh-TW/WORKFLOW.md) |
+| 選取與 CLI 參考 | [COMMANDS](docs/COMMANDS.md) | [COMMANDS 正體中文](docs/zh-TW/COMMANDS.md) |
+| init、設定、adapter、模型、effort | [CONFIGURATION](docs/CONFIGURATION.md) | [CONFIGURATION 正體中文](docs/zh-TW/CONFIGURATION.md) |
+| focused/full verification、receipt、reconcile、accept 證據 | [VERIFICATION](docs/VERIFICATION.md) | [VERIFICATION 正體中文](docs/zh-TW/VERIFICATION.md) |
+| worktree、鎖、並行、復原、清理、封存 | [OPERATIONS](docs/OPERATIONS.md) | [OPERATIONS 正體中文](docs/zh-TW/OPERATIONS.md) |
 
 英文檔是 canonical，正體中文檔是讀者翻譯；內容不一致時以英文版為準。
 [設計共識](docs/zh-TW/CONSENSUS.md)與[翻譯流程](docs/TRANSLATING.md)維持原有
