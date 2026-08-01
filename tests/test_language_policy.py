@@ -29,6 +29,11 @@ TRANSLATION_MARKERS = (
 TRANSLATION_PAIRS = (
     (Path("README.md"), Path("README.zh-TW.md")),
     (Path("docs/CONSENSUS.md"), Path("docs/zh-TW/CONSENSUS.md")),
+    (Path("docs/WORKFLOW.md"), Path("docs/zh-TW/WORKFLOW.md")),
+    (Path("docs/COMMANDS.md"), Path("docs/zh-TW/COMMANDS.md")),
+    (Path("docs/CONFIGURATION.md"), Path("docs/zh-TW/CONFIGURATION.md")),
+    (Path("docs/VERIFICATION.md"), Path("docs/zh-TW/VERIFICATION.md")),
+    (Path("docs/OPERATIONS.md"), Path("docs/zh-TW/OPERATIONS.md")),
 )
 # The two contracts live in the user home, so a project-relative spelling of either
 # one is a stale claim in any language.  "~/.assent/format.md" ends in the same
