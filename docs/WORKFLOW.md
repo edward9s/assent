@@ -68,12 +68,47 @@ closeout. `assent run --verify` is an invocation-level request and chains the
 matching complete verification only after a successful run. The candidate,
 receipt, and report rules are in [Verification](VERIFICATION.md).
 
+#### Optional bounded auto-fix
+
+If `[auto_fix.review]` is configured, a completed folder run performs a
+folder-level read-only review. The final gate order is ordinary task-focused
+verification, one final run of each distinct `DONE`-task `verify` command,
+then the reviewer; an incomplete `--once`/`--task` run defers the review and
+spends no review token. A focused failure prevents the reviewer from starting.
+
+`assent run --auto-fix` is an invocation-level authorization for the repair
+half of that loop. It is orthogonal to selection and works with the implicit
+folder, explicit folders, `...`, `--all`, `--once`, `--task`, and `--verify`
+forms. With `--all`, every launched folder receives the same policy. With
+`--verify`, complete verification still happens only after the run and bounded
+loop succeed; auto-fix itself never verifies a full candidate or accepts.
+
+A failed review is written to the folder's derived `_auto_fix.toml` state and
+report. With `--auto-fix`, only findings resolved to existing tasks and their
+declared scopes may trigger automatic, code-preserving rework. The scheduler
+records the reason `Automatic repair of durable folder-review findings` and
+`authorization: run --auto-fix`, then consumes a finite fixer-profile sequence
+before each write-capable session. A pre-existing technical-debt finding is
+eligible when it is encountered in changed or directly interacting code, local
+to an existing task scope, and reliably testable; the review is not a
+repository-wide debt audit. Unknown, ambiguous, or out-of-scope findings stop
+for a human. No automatic task creation, source reversion, source deletion, or
+acceptance occurs. Exhaustion, interruption, quota, and failed repair gates
+preserve state and edits for a later `run --auto-fix` recovery or human
+adjudication.
+
 ### Act 3: human review and decision
 
 Start with the generated `.assent/<work folder>/_report.md`; it is the zero-token
 agenda containing progress, blockers, checkpoint hashes, and verification
 status. Then inspect the relevant task and journal files, the checkpoint commit
 and diff, the implementation, and focused/full verification evidence.
+
+The report's `Folder auto-fix` line is zero-token derived evidence: `NOT RUN`
+means no state file, `PASSED (fresh)` and `FAILED (fresh)` show the current
+review verdict, and `STALE` means malformed state or a changed source/task
+binding. A `FAIL` report lists current findings, but neither that state nor a
+review `PASS` is acceptance evidence.
 
 `DONE` means that the executing AI claims the task is complete. It is not a
 second review state and it is not human approval. Human approval is the
@@ -128,9 +163,11 @@ evidence-based findings first: bugs, structural problems, overengineering,
 missing tests, and documentation/runtime drift. Recommend a high-capability
 model from a different vendor than the implementer for an independent
 cross-review, but do not require or encode a second model or automatic gate.
-Never accept or rework automatically. Wait for the human decision; only after
-the human agrees should you write any Assent-format rework tasks or explain
-the acceptance action.
+This ordinary acceptance review remains human-driven: do not accept or rework
+as part of the review. Wait for the human decision; only after the human agrees
+should you write any Assent-format rework tasks or explain the acceptance
+action. An explicit `run --auto-fix` is a separate bounded repair authorization
+and still never accepts a folder.
 ```
 
 The recommendation is workflow guidance only. It does not add a model field,

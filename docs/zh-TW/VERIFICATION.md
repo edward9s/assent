@@ -18,6 +18,26 @@
 不建立 integration candidate 或 receipt，通過也不能授權 accept。focused verification
 仍會在 check 開始前分類 shared ignored input 並同步 reviewed link。
 
+### Folder auto-fix review gate
+
+若設定 `[auto_fix.review]`，completed folder run 會在最後 focused gate 後做 folder-level
+唯讀 review。Scheduler 先再跑每個 distinct `DONE` task 的 `verify` 一次；任何 failure
+都只寫 focused finding evidence，不啟動 reviewer。`--once` 或 `--task` 若留下 incomplete
+folder，會延後 review 且不消耗 token；只有 `SKIP` 的 folder 不需要 implementation review。
+
+`run --auto-fix` 是該次 invocation 修正 FAIL review 的授權，與 run selection 正交，可和
+明示 folder、`...`、`--all`、`--once`、`--task`、`--verify` 合用。它不跑 full candidate、
+不 publish ref。沒有 flag 時 FAIL 是人類裁決 evidence；有 flag 時每個 finding 都必須對應
+一個既有 task 與 declared scope，才會記錄 code-preserving reason-bearing rework，並在
+每個 repair session 前消耗有限 fixer profile。
+
+Review 依循 changed 與 directly interacting code；既有 technical debt 只有在修正局部於
+既有 scope 且 focused gate 能可靠測試時才合格，不做全 repository audit。未知、含糊或越界
+finding 交人類。不會自動建立 task、改 task requirement/scope、還原 source、刪 source、
+accept，也不把 `_auto_fix.toml` 當 task status。Reviewer 不得寫 project 或 management file；
+Assent 以 before/after surface snapshot 偵測並拒絕寫入、保留原編輯。這是在
+`danger-full-access` 預設下的 cooperative rule，不是 security sandbox。
+
 ### 完整 candidate verification
 
 `assent verify <FOLDER>` 建立臨時 integration candidate，把 source 結果放入其中，
@@ -47,6 +67,13 @@ identity、重建的 integration tree、verifier-script digest 與 shared-input 
 的 `_report.md`。best-effort report refresh 會觀察 `PASSED`、`FAILED`、stale replacement、
 fresh reuse、malformed refusal、incomplete no-op 與 interrupt，但不改變或遮蔽 verification
 結果。
+
+Folder report 也會以零 token 顯示 derived `_auto_fix.toml`：沒有檔案是
+`Folder auto-fix: NOT RUN (no review state)`；malformed 或 source/task binding 改變是
+`STALE`；新鮮 review PASS 是 `PASSED (fresh)`；新鮮 FAIL 是 `FAILED (fresh)` 並列出
+current blocking findings。State 綁定 source tree、task-plan digest、review-prompt digest、
+resolved reviewer adapter/model/effort，保留 finding ledger、observed states 與 consumed
+fixer profiles。它可刪除重建，不是 receipt、task status 或 acceptance gate。
 
 `[verification] receipt_refresh = "manual"`（預設）讓普通 run closeout 延後 folder
 receipt；`"auto"` 在 folder 所有 task 完成時刷新。`assent run --verify` 不受這個設定

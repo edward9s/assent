@@ -12,7 +12,7 @@ The management plane is `.assent/`; the source project remains ordinary Git.
 | Stage | What happens | Main commands |
 | --- | --- | --- |
 | Plan | Discuss the goal, write Assent-format task files, and validate the plan. | `assent check` |
-| Execute | Run focused task checks, keep WIP/checkpoint evidence, and let the scheduler continue unattended. | `assent run` |
+| Execute | Run focused task checks, keep WIP/checkpoint evidence, and optionally authorize a bounded folder review-and-repair loop. | `assent run`, `assent run --auto-fix` |
 | Review | Read `_report.md`, inspect the diff and verification evidence, then decide whether to accept, rework, or reject. | `assent report`, `assent verify`, `assent accept` |
 
 `DONE` is an executing AI's completion claim, not human approval. A complete
@@ -86,6 +86,27 @@ readiness; only an explicit `base` makes a downstream worktree start from an
 upstream commit. See [Workflow](docs/WORKFLOW.md) and
 [Operations](docs/OPERATIONS.md).
 
+## Optional bounded auto-fix
+
+Configure `[auto_fix.review]` when a project wants a final, folder-level AI
+review. The reviewer runs read-only after all task-focused checks and the final
+distinct focused sweep pass. An explicit `assent run --auto-fix` authorizes the
+bounded repair loop for that invocation; it is compatible with the normal run
+selectors, including explicit folders, `...`, `--all`, `--once`, `--task`, and
+`--verify`. A limited run that leaves work incomplete defers the review.
+
+The reviewer may identify a regression, an unmet requirement, or eligible
+pre-existing technical debt encountered in the changed and directly
+interacting code. Debt is eligible only when repair stays inside an existing
+task's scope and its focused tests can verify the result; this is not an
+unbounded repository-wide debt audit. A failed review automatically reopens
+only implicated existing tasks, records a reason-bearing rework, and tries a
+finite sequence of fixer profiles. It keeps code by default and never creates
+tasks, reverts source, deletes source, or accepts a folder. Profile exhaustion
+preserves the findings and edits for human adjudication. `_auto_fix.toml` is
+derived runtime memory, not a task status or acceptance evidence; see the
+[Workflow](docs/WORKFLOW.md) and [Verification](docs/VERIFICATION.md) guides.
+
 ## Planning-meeting prompt
 
 Use this prompt as a starting point. It keeps the discussion human-led and
@@ -122,14 +143,18 @@ evidence-based findings first: bugs, structural problems, overengineering,
 missing tests, and documentation/runtime drift. Recommend a high-capability
 model from a different vendor than the implementer for an independent
 cross-review, but do not require or encode a second model or automatic gate.
-Never accept or rework automatically. Wait for the human decision; only after
-the human agrees should you write any Assent-format rework tasks or explain
-the acceptance action.
+This ordinary acceptance review remains human-driven: do not accept or rework
+as part of the review. Wait for the human decision; only after the human agrees
+should you write any Assent-format rework tasks or explain the acceptance
+action. An explicit `run --auto-fix` is the separate, bounded review-and-repair
+authorization; it still never accepts a folder.
 ```
 
-The reviewer does not mutate the worktree while forming findings. Human
-acceptance remains `assent accept <FOLDER>` (or an explicitly selected batch),
-and human rework remains `assent rework <FOLDER> <TASK>`.
+The ordinary reviewer does not mutate the worktree while forming findings. The
+configured auto-fix reviewer is also read-only and uses prompt-plus-detection
+write refusal before any repair session. Human acceptance remains
+`assent accept <FOLDER>` (or an explicitly selected batch), and human rework
+remains `assent rework <FOLDER> <TASK>`.
 
 ## Topic map
 
@@ -165,6 +190,10 @@ translations and identify English as the source of truth. The specialized
 - A worktree is an isolation and audit boundary, not a security sandbox:
   unattended AI still has the OS identity's access to credentials, network,
   external Git writers, and files outside the worktree.
+- `[auto_fix.review]` is a configured read-only folder review; only an explicit
+  `run --auto-fix` authorizes its finite, code-preserving repair loop. Its
+  derived `_auto_fix.toml` state is never acceptance, and `accept` remains a
+  human action.
 
 For exact selection rules, receipt freshness, shared ignored-input review,
 adapter mappings, recovery, and all command options, use the topic guides above.

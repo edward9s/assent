@@ -240,6 +240,46 @@ Session: codex | core->gpt-5.6-terra | heavy->high
 The left side is the task's portable value and the right side is the actual
 CLI argument.
 
+## Optional folder review and auto-fix
+
+The optional `[auto_fix.review]` table configures the folder-level reviewer.
+Its `adapter` must be a registered adapter name; `model` and `effort` remain
+the abstract `prime`/`core`/`lite` and `heavy`/`normal`/`slight` values. The
+reviewer reuses that adapter's normal model and effort mappings, so an
+explicit reviewer adapter may select a different vendor from the worker
+rotation in `[adapter].name`:
+
+```toml
+[adapter]
+name = ["claude", "codex"]
+
+[auto_fix.review]
+adapter = "antigravity"       # registered reviewer; outside the worker rotation
+model = "prime"               # abstract tier
+effort = "heavy"              # abstract effort
+```
+
+The table enables a read-only review after a complete folder run. The
+invocation-level `assent run --auto-fix` flag authorizes the bounded repair
+half; without the flag, a failed review is preserved for human adjudication.
+The flag is independent of folder selection and can accompany explicit,
+remainder, `--all`, `--once`, `--task`, and `--verify` run forms. The reviewer
+identity stored in `_auto_fix.toml` is the resolved adapter plus actual CLI
+model and effort, not an unverified reviewer-supplied identity. A configured
+reviewer remains read-only, and prompt-plus-detection write refusal is not a
+security sandbox.
+
+Automatic repair uses the worker rotation's finite abstract profiles, records
+each profile before its write-capable session, and reopens only existing
+in-scope tasks with the reason `Automatic repair of durable folder-review
+findings`. It preserves code by default and never creates tasks, reverts
+source, deletes source, or accepts work. Existing technical debt is eligible
+only when encountered in changed or directly interacting code, local to an
+existing task scope, and reliably covered by focused tests; this is not a
+repository-wide debt audit. Profile exhaustion, interruption, or a failed
+repair gate preserves the edits and state for recovery. See [Workflow](WORKFLOW.md)
+and [Verification](VERIFICATION.md) for the state and report contract.
+
 ## Antigravity timeout and troubleshooting
 
 `print_timeout_minutes` limits one AGY print invocation; the Assent watchdog

@@ -50,11 +50,37 @@ receipt_refresh` 預設為 `"manual"`，需要之後顯式 `assent verify`；設
 明確要求，只在 run 成功後接續相符的完整驗證。候選樹、receipt 與報告規則見
 [驗證指南](VERIFICATION.md)。
 
+#### 可選的有界 auto-fix
+
+若設定 `[auto_fix.review]`，folder 完成後會做 folder-level 唯讀 review。順序固定為：
+普通 task-focused verification、每個 distinct `DONE` task 的最後一次 focused sweep，
+然後才啟動 reviewer；`--once`/`--task` 若留下 incomplete folder，就延後 review 且不
+消耗 review token。focused failure 不會啟動 reviewer。
+
+`assent run --auto-fix` 是該次 invocation 進入 repair 的授權，與選取正交，可和自動
+選取、明示 folder、`...`、`--all`、`--once`、`--task`、`--verify` 合用。`--all` 會把
+同一 policy 傳給每個 child folder；`--verify` 仍只在 run 與 auto-fix loop 成功後做
+完整 verification。auto-fix 自己不建立 full candidate，也不 publish 或 accept。
+
+失敗 review 會寫入 folder 的 derived `_auto_fix.toml` 與 report。只有能對應到一個既有
+task 且位於其 declared scope 的 finding，才可自動 code-preserving rework；scheduler
+記錄理由 `Automatic repair of durable folder-review findings` 與
+`authorization: run --auto-fix`，再在 write-capable session 前消耗有限 fixer profile。
+變更或直接互動程式碼中遇到的既有 technical debt，若修正局部且 focused test 可可靠驗證，
+也可合格；review 不做全 repository debt audit。未知、含糊或越界 finding 交人類處理。
+不會自動建立 task、還原 source、刪 source，絕不自動接受 folder。用盡、quota、中斷或 gate 失敗都
+保留 state 與編輯，之後可用 `run --auto-fix` recovery 或交人類裁決。
+
 ### 第三幕：人類審查與裁決
 
 先讀產生的 `.assent/<work folder>/_report.md`；它是零 token 的議程，包含進度、
 阻塞、checkpoint hash 與驗證狀態。再檢查相關任務與 journal、checkpoint commit
 與 diff、實作，以及 focused/full verification 證據。
+
+Report 的 `Folder auto-fix` 是零 token 的 derived evidence：沒有 state file 是
+`NOT RUN`，新鮮的 review pass/fail 分別是 `PASSED (fresh)` 與 `FAILED (fresh)`，
+malformed state 或 source/task binding 改變則是 `STALE`。`FAIL` 的 current findings
+會列出，但 state 或 review `PASS` 都不是 acceptance evidence。
 
 `DONE` 代表執行 AI 主張任務完成，不是第二個 review state，也不是人類批准。
 人類批准是明示的 `assent accept` 加上受保護的 Git integration。直接與 selected
@@ -86,11 +112,12 @@ accept 會重播新鮮且相符的 receipt，不會自行啟動完整 verifier�
 ## 獨立驗收審查 prompt
 
 ```text
-請擔任獨立的驗收審查者。請簡潔回答，不要用子代理。任何變更前，先檢查工作資料夾的 _report.md、相關任務與 journal 檔、checkpoint commit/diff、實作，以及 focused/full verification 證據。先回報有證據支持的發現：bug、結構問題、過度設計、缺少測試，以及說明文件與程式行為漂移。建議使用與實作者不同 vendor 的高能力模型做獨立 cross-review，但不要要求或編碼第二模型或自動 gate。絕不要自動 accept 或 rework。等待人類決定；只有人類同意後，才寫 Assent 格式的 rework 任務或說明 acceptance 動作。
+請擔任獨立的驗收審查者。請簡潔回答，不要用子代理。任何變更前，先檢查工作資料夾的 _report.md、相關任務與 journal 檔、checkpoint commit/diff、實作，以及 focused/full verification 證據。先回報有證據支持的發現：bug、結構問題、過度設計、缺少測試，以及說明文件與程式行為漂移。建議使用與實作者不同 vendor 的高能力模型做獨立 cross-review，但不要要求或編碼第二模型或自動 gate。這個一般驗收審查由人類主導，不在審查中自動 accept 或 rework；等待人類決定，只有人類同意後，才寫 Assent 格式的 rework 任務或說明 acceptance 動作。明示的 `run --auto-fix` 是另一個有界修正授權，但仍絕不自動接受 folder。
 ```
 
 這個建議只是人類 workflow 指引，不會新增 model 欄位、adapter capability、
-scheduler state，也不會強制使用多模型。
+scheduler state，也不會強制使用多模型。auto-fix reviewer 仍受唯讀與寫入偵測規則
+限制，`danger-full-access` 是執行權限預設，不是 security sandbox。
 
 ## 資料夾依賴與堆疊
 

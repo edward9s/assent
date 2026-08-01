@@ -486,6 +486,36 @@ This holds until a concrete adapter attachment requirement proves a schema
 change is necessary; the textual contract is the cheaper answer while it
 suffices.
 
+## Opt-in folder review and bounded repair consensus
+
+The ordinary review path remains human-driven. `[auto_fix.review]` may configure
+one folder-level reviewer, but the reviewer is read-only and runs only after a
+completed folder's final distinct focused checks pass. `run --auto-fix` is the
+invocation-level, selection-orthogonal authorization for the repair half; it
+works with the normal run selectors, including explicit folders, `...`,
+`--all`, `--once`, `--task`, and `--verify`. It never turns review into
+acceptance or a full candidate verification.
+
+The reviewer follows the cumulative diff and directly interacting code. It may
+report eligible pre-existing technical debt when a local repair fits an
+existing task's declared scope and focused tests can reliably verify it, but it
+does not perform an unbounded repository-wide debt audit. A failed review can
+automatically reopen only existing tasks whose scopes own the findings. The
+rework is code-preserving, reason-bearing, and authorized by `run --auto-fix`;
+it never creates tasks, changes requirements or scope, reverts source, deletes
+source, or accepts a folder. A finding without one unambiguous existing task
+owner remains a human decision.
+
+`_auto_fix.toml` is deletable derived folder memory, not a task status or
+acceptance evidence. It binds source and task-plan identity, the review prompt,
+the resolved reviewer identity, the current `PASS`/`FAIL` findings, observed
+states, and consumed fixer profiles. Profiles are consumed before a
+write-capable repair session and form a finite escalation budget. Interruption,
+quota, failed gates, and exhaustion preserve all edits and evidence; recovery
+with `run --auto-fix` resumes WIP work and unused profiles. The reviewer
+write-detection snapshot is a cooperative rule under `danger-full-access`, not
+a security sandbox. Human `accept` remains the only publication decision.
+
 ## Quality standard (replacing token-count KPIs)
 
 **Cold-start test**: given only AGENTS.md + instructions.md + any one `TODO`

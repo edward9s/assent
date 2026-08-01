@@ -25,6 +25,18 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 # whether the integration candidate is green.
 # receipt_refresh = "manual"
 
+# Optional folder-level AI review. The table's presence enables the configured
+# read-only review after a folder's completed task run; `run --auto-fix` is the
+# invocation-level authorization to repair a failed review. It never accepts.
+# [auto_fix.review]
+# adapter = "antigravity"        # any registered adapter; may differ from the worker rotation
+# model = "prime"                # abstract tier only: prime | core | lite
+# effort = "heavy"               # abstract value only: heavy | normal | slight
+# An explicit adapter reuses its own [adapter.<name>] model/effort mappings,
+# so it can select a different vendor from the worker rotation without changing
+# the worker rotation used by ordinary task sessions. The bounded reviewer remains
+# read-only; automatic repair is still limited to existing in-scope tasks.
+
 [adapter]
 # One adapter name or a non-empty list of names. A list rotates in order and
 # wraps around; a single string has the same behavior as a one-item list.

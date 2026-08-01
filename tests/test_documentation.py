@@ -151,7 +151,9 @@ class DocumentationTests(unittest.TestCase):
             "checkpoint commit and diff",
             "focused and full verification evidence",
             "evidence-based findings first",
-            "Never accept or rework automatically",
+            "This ordinary acceptance review remains human-driven",
+            "explicit `run --auto-fix`",
+            "still never accepts a folder",
             "Wait for the human decision",
             "different vendor",
         ):
@@ -161,9 +163,53 @@ class DocumentationTests(unittest.TestCase):
         chinese_review = _read(Path("README.zh-TW.md")) + _read(
             Path("docs/zh-TW/WORKFLOW.md")
         )
-        for phrase in ("不要用子代理", "絕不要自動 accept 或 rework", "等待人類決定"):
+        for phrase in (
+                "不要用子代理",
+                "這個一般驗收審查由人類主導",
+                "`run --auto-fix`",
+                "絕不自動接受 folder",
+                "等待人類決定"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, chinese_review)
+
+    def test_auto_fix_is_explicit_bounded_and_never_acceptance(self):
+        english = "\n".join(
+            _read(path) for path in (Path("README.md"), Path("docs/WORKFLOW.md"),
+                                     Path("docs/COMMANDS.md"),
+                                     Path("docs/VERIFICATION.md")))
+        for phrase in (
+                "`run --auto-fix`",
+                "selection-orthogonal",
+            "finite fixer-profile",
+            "never creates tasks",
+            "never accepts",
+            "pre-existing technical debt",
+            "directly interacting code",
+            "repository-wide debt audit",
+                "_auto_fix.toml",
+                "read-only"):
+            with self.subTest(language="English", phrase=phrase):
+                self.assertIn(phrase, english)
+        self.assertNotIn("Never accept or rework automatically", english)
+
+        chinese = "\n".join(
+            _read(path) for path in (Path("README.zh-TW.md"),
+                                     Path("docs/zh-TW/WORKFLOW.md"),
+                                     Path("docs/zh-TW/COMMANDS.md"),
+                                     Path("docs/zh-TW/VERIFICATION.md")))
+        for phrase in (
+                "`run --auto-fix`",
+                "與選取正交",
+                "有限 fixer profile",
+            "不會自動建立 task",
+            "絕不自動接受 folder",
+                "既有 technical debt",
+                "直接互動程式碼",
+                "全 repository debt audit",
+                "`_auto_fix.toml`",
+                "唯讀"):
+            with self.subTest(language="Traditional Chinese", phrase=phrase):
+                self.assertIn(phrase, chinese)
 
 
 if __name__ == "__main__":

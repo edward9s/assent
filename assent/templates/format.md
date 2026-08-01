@@ -714,6 +714,15 @@ the per-folder receipt. If `--verify` was requested, that closeout identifies
 the run-level verification that follows in the same invocation instead of
 telling the user to start that verification command again.
 
+`run --auto-fix` does not select folders, reorder them, widen scope, or change
+the meaning of `--once`, `--task`, `--all`, `...`, or `--verify`. It is passed to
+every explicitly selected folder and every folder launched by `--all`; with
+`--once` or `--task` the review/repair gate runs only if that limited invocation
+leaves the folder complete. A successful bounded loop then lets `--verify`
+continue to its separately requested complete verification. A nonzero run or
+auto-fix loop does not start that full verification, and no form of auto-fix
+publishes a Git ref.
+
 Every production folder-level complete verification operation uses the same
 closeout boundary: after `verify_folder(cfg)` or
 `verify_folder_if_needed(cfg)` settles and releases its verification locks, it
@@ -929,6 +938,161 @@ that write the same main worktree during acceptance. After acceptance and any
 separately chosen synchronization, `assent clean <FOLDER>` may remove the
 source only when its independent merged-and-clean proof succeeds; cleanup
 never deletes source before that proof.
+
+### Opt-in folder review and bounded repair
+
+The optional `[auto_fix.review]` table configures one folder-level reviewer.
+Its presence enables a read-only review after a completed `run`; the command
+flag is the separate invocation-level authorization for repair:
+
+```text
+assent run FOLDER --auto-fix
+```
+
+`--auto-fix` is selection-orthogonal. It is forwarded unchanged for an
+automatically selected folder, an explicit one-folder or multi-folder
+selection, a prefix plus `...`, and `--all`; it is also compatible with
+`--once`, `--task`, and `--verify`. Those selectors retain their own ordering,
+limited-run, and complete-verification contracts. A limited run that leaves
+the folder incomplete defers the folder review and spends no reviewer token.
+With `--verify`, the optional complete verification remains after a successful
+run and successful auto-fix loop; auto-fix itself is not full verification and
+never accepts. Without `[auto_fix.review]`, `--auto-fix` has no configured
+reviewer or repair policy to run.
+
+The lifecycle is deliberately folder-level and ordered:
+
+1. Run each selected task session and its ordinary focused gate.
+2. Once every task is `DONE` or `SKIP`, run each distinct `DONE`-task `verify`
+   command once as a final focused sweep. A folder with only `SKIP` tasks has
+   no implementation review to run.
+3. If every final focused command passes and the source remains clean, start
+   the configured reviewer with the cumulative checkpoint diff, all task
+   contracts and journals, directly interacting code, and the focused evidence.
+4. The reviewer returns exactly one provider-neutral `PASS` or `FAIL` record.
+   A `PASS` ends the auto-fix loop. A `FAIL` is preserved as derived state and
+   ends the run unless this invocation included `--auto-fix`.
+5. With `--auto-fix`, validate each finding against one existing task and its
+   declared scope, reopen only those implicated tasks, and run a bounded repair
+   session. Re-run the ordinary focused gate and the final distinct focused
+   sweep before reviewing the changed folder again.
+6. Stop with `PASS`, an adapter/infrastructure failure, an unresolved
+   human-scope decision, or finite fixer-profile exhaustion. Every stop keeps
+   its edits and evidence for inspection or recovery.
+
+The reviewer is read-only by contract: it must not edit, create, delete,
+rename, format, or otherwise write project or management-plane files. Assent
+captures protected source and management surfaces before and after the
+reviewer interval. Any detected write makes its `PASS`/`FAIL` unusable,
+preserves the exact edits, and refuses the review. The configured
+`danger-full-access` or `bypassPermissions` execution default remains in
+force; this prompt-plus-detection rule is cooperative write detection, not a
+security sandbox or a preventive permission boundary.
+
+#### `_auto_fix.toml` derived-state contract
+
+`<FOLDER>/_auto_fix.toml` is a folder-local, untracked, deletable runtime
+artifact. It is included in the runtime exclusions with `_assent.log`,
+`_report.md`, locks, and verification receipts; it is not a task file, a new
+task status, acceptance evidence, or a source-of-truth database. It may be
+rebuilt from the current folder run and must never be staged or committed.
+Version 1 has exactly these scalar fields and ordered table collections:
+
+```toml
+version = 1
+source_tree = "<40-or-64 lowercase hexadecimal tree id>"
+task_plan_sha256 = "<64 lowercase hexadecimal digest>"
+review_prompt_sha256 = "<64 lowercase hexadecimal digest>"
+reviewer_adapter = "<registered adapter>"
+reviewer_model = "<resolved requested model>"
+reviewer_effort = "<resolved requested effort>"
+verdict = "PASS"                 # PASS or FAIL
+current_finding_fingerprints = []
+findings = []
+observed_states = []
+consumed_fixer_profiles = []
+
+[[findings]]
+fingerprint = "<64 lowercase hexadecimal digest>"
+task_id = "t001"                 # empty string represents a null reviewer id
+path = "project/relative/path"
+summary = "concise blocker"
+evidence = "specific evidence"
+
+[[observed_states]]
+source_tree = "<40-or-64 lowercase hexadecimal tree id>"
+finding_fingerprints = []
+
+[[consumed_fixer_profiles]]
+adapter = "codex"
+model = "prime"                  # abstract tier
+effort = "heavy"                 # abstract effort
+```
+
+The actual file may use empty arrays instead of the example tables. The
+serializer writes a null `task_id` as `""`; readers restore it to null. The
+reviewer never supplies a fingerprint: Assent normalizes each finding and
+computes its identity from `task_id`, path, summary, and evidence. A `PASS`
+has no current findings; a `FAIL` has at least one. The findings ledger and
+`observed_states` retain prior evidence, while `consumed_fixer_profiles` is an
+ordered set and cannot contain duplicates.
+
+An exact fresh `PASS` requires all of `source_tree`, `task_plan_sha256`,
+`review_prompt_sha256`, `reviewer_adapter`, `reviewer_model`, and
+`reviewer_effort` to match the current invocation. A source or task-contract
+change, or any change to the prompt inputs or resolved reviewer identity,
+therefore makes old review evidence unusable. A malformed state refuses closed
+rather than being ignored. Reports use the derived state as zero-token
+evidence only:
+
+- no file: `Folder auto-fix: NOT RUN (no review state)`;
+- malformed file: `STALE (malformed review state: ...)`;
+- source tree or task-contract drift: `STALE` with the changed binding;
+- fresh `PASS`: `PASSED (fresh)`;
+- fresh `FAIL`: `FAILED (fresh)` plus the current blocking findings.
+
+The report is informational and never authorizes acceptance.
+
+#### Review findings, repair, escalation, and recovery
+
+The reviewer may report correctness, safety, unmet-requirement, missing-test,
+or eligible technical-debt blockers. The review follows the cumulative diff
+and directly interacting code; it does not perform a repository-wide debt
+search. A pre-existing issue is eligible only when its repair is local to an
+existing task's declared scope and relevant focused tests can reliably verify
+it. An unknown task, ambiguous ownership, out-of-scope path, or finding that
+would widen the plan is a human decision, not an automatic repair candidate.
+
+Automatic repair calls the ordinary code-preserving rework operation with the
+reason `Automatic repair of durable folder-review findings` and records
+`authorization: run --auto-fix` in the task journal. It may reopen only the
+implicated existing tasks; it never creates a task, edits task requirements or
+scope, performs a repository-wide debt sweep, reverts source, accepts work,
+deletes source, or treats a review result as a second task status. Code remains
+in place unless a human later chooses explicit `rework --revert-code`.
+
+Each repair profile is persisted before its write-capable session starts. The
+implicated task's ordinary adapter/model/effort profile is considered first;
+then the configured worker rotation supplies unique `prime`/`heavy` profiles.
+The sequence is finite and profile exhaustion is a modification bound, not an
+invitation to keep retrying. An exhausted loop preserves the current finding
+ledger, all consumed profiles, task journals, WIP/checkpoint edits, and
+unresolved task state for human adjudication. It does not revert the code or
+invent another task.
+
+An interruption, quota wait, adapter failure, or failed focused repair keeps
+the edits and runtime state. A later `run --auto-fix` resumes an existing
+`FAIL` state, carries its durable ledger into the next repair prompt, resumes
+WIP work, and skips profiles already consumed. Running without the flag can
+continue ordinary task execution and read-only review, but never authorizes a
+repair. The full lifecycle remains:
+
+```text
+run -> focused task gates -> final focused sweep -> read-only folder review
+     -> (optional --auto-fix: reason-bearing rework -> repair -> focused sweep
+         -> review, within finite profiles)
+     -> optional complete verify -> human review -> accept -> clean
+```
 
 ## Lifecycle and review (the objective gate)
 
@@ -1228,11 +1392,17 @@ receipt, since reopening the work it certified makes it stale evidence; the
 next `assent verify --batch` simply rebuilds it.
 
 There is no `review` task-file field. `DONE` is the executing AI's completion
-claim, the receipt is the scheduler's complete-verification evidence, and
-calling `accept` is the human approval. The lifecycle is:
+claim, `_auto_fix.toml` is deletable folder-review memory, a verification
+receipt is the scheduler's complete-verification evidence, and calling
+`accept` is the human approval. The ordinary lifecycle is:
 
 `run` -> explicit `verify [--batch]` -> human review -> `accept` ->
 ordinary Git synchronization, if desired -> `clean`.
+
+When configured and explicitly authorized, the bounded folder loop is inserted
+after `run` and before optional complete verification; it never changes the
+human-only `accept` step. Automatic review/repair is not a second task status,
+not implicit acceptance, and not a substitute for complete verification.
 
 For each task: open a headless session -> after the session ends the scheduler
 checks in order, and commits only when all pass:

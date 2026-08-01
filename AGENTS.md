@@ -75,6 +75,21 @@ while operating an assent-managed session live in
 - Human approval is the explicit `assent accept FOLDER` action plus the resulting
   Git integration; do not add a second per-task `review` state alongside task
   execution status.
+- `run --auto-fix` is an invocation-level, selection-orthogonal opt-in. A
+  configured folder review is folder-level and read-only; it runs only after
+  the completed folder's distinct focused checks pass. Repair may automatically
+  reopen only existing tasks implicated by a finding, and may include
+  pre-existing technical debt encountered in the changed and directly
+  interacting code when the repair is local to that task's scope and reliably
+  testable. Each automatic rework carries its reason, consumes a finite fixer
+  profile before the write-capable session starts, and preserves code by
+  default; profile exhaustion hands the findings to a human. Auto-fix never
+  creates tasks, reverts source, accepts a folder, deletes source, or changes
+  the explicit human `accept` boundary.
+- The default adapter permissions remain `danger-full-access` where configured:
+  the read-only reviewer's prompt plus before/after write detection is a
+  cooperative rule, not a security sandbox and not a preventive permission
+  boundary.
 - The literal ASCII token `...` is remainder syntax shared by every
   folder-taking command (`run`, `verify`, `accept`, `clean`, `archive`): given
   once, as the last positional argument, it means "and every remaining folder

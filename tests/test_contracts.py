@@ -563,6 +563,97 @@ class TestContractContent(unittest.TestCase):
                 self.assertNotIn("不可與`--once`、`--task`併用", compact)
                 self.assertNotIn("不能與刻意在資料夾收尾前停止的", compact)
 
+    def test_auto_fix_lifecycle_and_derived_state_are_documented(self):
+        """The auto-fix contract must remain discoverable in every owning surface."""
+        install_global_contracts(self)
+        root = _PROJECT_ROOT
+        english = {
+            "AGENTS.md": (root / "AGENTS.md").read_text(encoding="utf-8"),
+            "format.md": contracts.installed_contract_text("format.md"),
+            "instructions.md": contracts.installed_contract_text("instructions.md"),
+            "README.md": (root / "README.md").read_text(encoding="utf-8"),
+            "WORKFLOW.md": (root / "docs/WORKFLOW.md").read_text(encoding="utf-8"),
+            "COMMANDS.md": (root / "docs/COMMANDS.md").read_text(encoding="utf-8"),
+            "CONFIGURATION.md": (root / "docs/CONFIGURATION.md").read_text(
+                encoding="utf-8"),
+            "VERIFICATION.md": (root / "docs/VERIFICATION.md").read_text(
+                encoding="utf-8"),
+            "OPERATIONS.md": (root / "docs/OPERATIONS.md").read_text(
+                encoding="utf-8"),
+            "CONSENSUS.md": (root / "docs/CONSENSUS.md").read_text(
+                encoding="utf-8"),
+        }
+        required = (
+            "run --auto-fix",
+            "read-only",
+            "pre-existing technical debt",
+            "directly interacting code",
+            "finite",
+            "never creates tasks",
+            "never accepts",
+            "_auto_fix.toml",
+        )
+        for name, text in english.items():
+            compact = " ".join(text.split())
+            with self.subTest(document=name):
+                self.assertIn("run --auto-fix", compact)
+                self.assertIn("read-only", compact)
+        english_contract = " ".join(" ".join(text.split())
+                                    for text in english.values())
+        for phrase in required:
+            with self.subTest(english_contract=phrase):
+                self.assertIn(phrase, english_contract)
+
+        format_text = english["format.md"]
+        for field in (
+                "source_tree", "task_plan_sha256", "review_prompt_sha256",
+                "reviewer_adapter", "reviewer_model", "reviewer_effort",
+                "current_finding_fingerprints", "observed_states",
+                "consumed_fixer_profiles"):
+            with self.subTest(state_field=field):
+                self.assertIn(field, format_text)
+        for phrase in (
+                "malformed state refuses closed",
+                "PASSED (fresh)", "FAILED (fresh)",
+                "Automatic repair of durable folder-review findings",
+                "authorization: run --auto-fix",
+                "prompt-plus-detection",
+                "source deletion",
+                "focused sweep"):
+            with self.subTest(format_phrase=phrase):
+                self.assertIn(phrase, format_text)
+
+        configuration = (root / "assent/templates/assent.toml").read_text(
+            encoding="utf-8")
+        self.assertIn("# [auto_fix.review]", configuration)
+        self.assertIn('# model = "prime"', configuration)
+        self.assertIn('# effort = "heavy"', configuration)
+        self.assertIn("different vendor from the worker rotation", configuration)
+
+        chinese = {
+            "WORKFLOW.zh-TW.md": (root / "docs/zh-TW/WORKFLOW.md").read_text(
+                encoding="utf-8"),
+            "COMMANDS.zh-TW.md": (root / "docs/zh-TW/COMMANDS.md").read_text(
+                encoding="utf-8"),
+            "CONFIGURATION.zh-TW.md": (
+                root / "docs/zh-TW/CONFIGURATION.md").read_text(encoding="utf-8"),
+            "VERIFICATION.zh-TW.md": (
+                root / "docs/zh-TW/VERIFICATION.md").read_text(encoding="utf-8"),
+            "OPERATIONS.zh-TW.md": (
+                root / "docs/zh-TW/OPERATIONS.md").read_text(encoding="utf-8"),
+            "CONSENSUS.zh-TW.md": (
+                root / "docs/zh-TW/CONSENSUS.md").read_text(encoding="utf-8"),
+        }
+        translated_required = (
+            "`run --auto-fix`", "唯讀", "既有 technical debt", "直接互動程式碼",
+            "不會自動建立 task", "絕不自動接受 folder", "`_auto_fix.toml`",
+        )
+        chinese_contract = "".join("".join(text.split())
+                                   for text in chinese.values())
+        for phrase in translated_required:
+            with self.subTest(chinese_contract=phrase):
+                self.assertIn("".join(phrase.split()), chinese_contract)
+
     def test_reader_recovery_never_recommends_raw_recursive_worktree_removal(self):
         paths = (
             _PROJECT_ROOT / "AGENTS.md",

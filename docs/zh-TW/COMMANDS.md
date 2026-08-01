@@ -82,6 +82,24 @@ snapshot，不是 `--all` 的別名。和 `--all` 合用、重複、或不在最
 寫 receipt；錯誤會列出 incomplete task ID 與 status。這是 invocation-level request，
 不受 `receipt_refresh` 設定影響。
 
+## `run --auto-fix`
+
+`--auto-fix` 是 invocation-level、與選取正交的 repair 授權。它可和所有 `run` 選取
+形式合用：自動選取、明示一個或多個 folder、prefix 加 `...`、`--all`、`--once`、
+`--task` 與 `--verify`。它不代表 `--all`、不改變 cardinality 或 remainder 規則，會
+依 command 原本順序傳給每個選取 folder；`--all` 的每個 child folder 都收到同一 policy。
+
+專案必須設定 `[auto_fix.review]` 才有 reviewer。所有 task-focused gate 與最後 distinct
+focused sweep 通過後才做 folder-level 唯讀 review；受限執行不完整會延後，focused
+failure 不會開 reviewer。沒有明示 `--auto-fix` 時，FAIL 只保留給人類裁決。
+
+自動修正只重開 finding 所有權明確且位於 declared scope 的既有 task，記錄帶理由且
+保留程式碼的 rework，並在每個 write-capable session 前消耗有限 fixer profile。變更或
+直接互動程式碼中的既有 technical debt，只在局部且 focused test 可可靠驗證時才合格；
+review 不做全 repository debt audit。不會自動建立 task、還原 source、刪 source、做
+完整 candidate acceptance 或 publish Git。`_auto_fix.toml` 與 report 都是 derived evidence；
+`accept` 仍是人類明示動作。
+
 ## 指令速查
 
 | 指令 | 效果與邊界 | token cost |
@@ -90,6 +108,7 @@ snapshot，不是 `--all` 的別名。和 `--all` 合用、重複、或不在最
 | `assent run A B` | 依寫出順序跑 A、B，第一個失敗即停止；不暗中驗證或接受。 | 只有 AI session |
 | `assent run A B --all` | 先跑明示前綴，再依 dependency order 跑剩餘 incomplete folder。 | 只有 AI session |
 | `assent run --all [--jobs N]` | 用 dependency scheduler 跑所有 incomplete folder，`--jobs` 限制並行數。 | 只有 AI session |
+| `assent run [selection] --auto-fix` | 在 completed folder 的最後 focused sweep 後，授權設定好的有界 review-and-repair loop；與 run selectors 相容，絕不 accept。 | AI session 加設定好的 review/repair |
 | `assent status [FOLDER]` | 顯示進度、下一個 task、branch 與最後 checkpoint。 | 零 |
 | `assent check [FOLDER]` | 檢查 task format、dependency cycle、設定與環境；是規劃散會 gate。 | 零 |
 | `assent report [FOLDER]` | 產生並顯示 `_report.md`。 | 零 |
