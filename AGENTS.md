@@ -134,7 +134,7 @@ while operating an assent-managed session live in
   verification-script digest must reproduce it before it can authorize accept.
 - Complete verification mirrors exactly two kinds of artifact from the source
   worktrees that enter the candidate, never arbitrary ignored content:
-  explicitly provisioned ignored directory links -- Windows junctions and
+  reviewed-profile ignored directory links provisioned by Assent -- Windows junctions and
   directory symlinks, POSIX directory symlinks -- and ordinary ignored leaf
   files that sit inside an otherwise tracked directory, such as a generated
   `*.g.dart` beside its tracked source. Both may be at the root or nested below
@@ -161,9 +161,10 @@ while operating an assent-managed session live in
   Do not add `--force`, a project `local_inputs` setting, a blanket `.gitignore`
   overlay, or copies of ignored directory contents into Git.
 - The ignored-input handoff is documented where each reader actually looks: the
-  packaged scheduled-task instructions tell an executing session to provision a
-  required ignored directory as a junction or directory symlink at the same
-  relative path and never to copy the tree, and a full verifier that fails on a
+  packaged scheduled-task instructions tell an executing session to record a
+  required ignored directory through `assent shared-paths review`, which
+  provisions the same-relative junction or directory symlink, and never to copy
+  the tree or hand-create a source link; a full verifier that fails on a
   path inside a physically ignored source directory gets one appended
   `Ignored input diagnosis:` note naming that directory and the directory-link
   remedy. The note preserves the verifier output and exit code, is stored in
@@ -215,6 +216,11 @@ while operating an assent-managed session live in
   copy fallback, glob, all-ignored mode, force flag, Git staging of the
   manifest, or any claim that semantic necessity can be inferred from
   `.gitignore` alone.
+  Every contributing source's ignored directory links must equal its active
+  profile and resolve to those exact primary targets. An undeclared manual link
+  is unreviewed evidence under every state and refuses verification,
+  reconciliation, receipt freshness, reporting, and acceptance; ordinary
+  ignored leaf files keep their separate automatic candidate-link behavior.
 - Cross-folder speculative execution stacks only on an explicitly declared
   `base`, so at most one not-yet-accepted upstream tip is ever in a stack. A
   folder that declares no `base` is cut from the integration target; the

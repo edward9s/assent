@@ -11,11 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import AssentError, gitops, verification
+from assent import AssentError, gitops, shared_paths, verification
 from assent import accept as accept_mod
 from assent.accept import accept_folder
 from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
+from tests.link_support import make_directory_link
 
 _DEFAULT_VERIFY = "python .assent/verify.py"
 
@@ -448,6 +449,30 @@ class TestReceiptRefusals(AcceptRepositoryCase):
         self._write_receipt(status="FAILED")
         output = self._assert_refused_unchanged(before, self._accept())
         self.assertIn("status is FAILED", output)
+
+    def test_undeclared_directory_link_expires_a_preexisting_receipt(self) -> None:
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "ignore shared package")
+        _git(self.worktree, "merge", "--no-edit", "trunk")
+        pkg = self.root / "pkg"
+        pkg.mkdir()
+        (pkg / "primary.txt").write_text("primary\n", encoding="utf-8")
+        shared_paths.review(
+            self.root, self.worktree, none=True, watch=("README.md",))
+        self._write_receipt()
+        external = self.parent / "external pkg"
+        external.mkdir()
+        marker = external / "marker.txt"
+        marker.write_text("external\n", encoding="utf-8")
+        make_directory_link(self.worktree / "pkg", external)
+        before = self._head()
+
+        output = self._assert_refused_unchanged(before, self._accept())
+
+        self.assertIn("outside its active REVIEWED-NONE profile", output)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "external\n")
 
     def test_source_tip_and_verifier_digest_staleness_fail_closed(self) -> None:
         self._write_receipt()

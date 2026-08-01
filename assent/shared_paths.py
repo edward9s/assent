@@ -142,6 +142,9 @@ class Contract:
     prior_paths: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()
     needs_review: bool = False
+    _main: Path | None = field(default=None, repr=False, compare=False)
+    _worktree: Path | None = field(default=None, repr=False, compare=False)
+    _allow_missing_links: bool = field(default=False, repr=False, compare=False)
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -150,8 +153,13 @@ class Contract:
     @property
     def settled(self) -> bool:
         """True when nothing is left to decide before real work may start."""
-        return self.state in (REVIEWED_NONE, REVIEWED_PATHS,
-                              NO_IGNORED_DIRECTORY_CANDIDATE)
+        settled = self.state in (REVIEWED_NONE, REVIEWED_PATHS,
+                                 NO_IGNORED_DIRECTORY_CANDIDATE)
+        if settled and self._main is not None and self._worktree is not None:
+            require_directory_link_agreement(
+                self._main, self._worktree, self,
+                allow_missing=self._allow_missing_links)
+        return settled
 
 
 # --------------------------------------------------------------------------- #
@@ -411,25 +419,26 @@ def _toml_value(value: object) -> str:
         f"the shared-path manifest cannot represent {type(value).__name__} values")
 
 
-def _render_table(name: str, table: dict, array: bool = False) -> list[str]:
+def _render_table(path: tuple[str, ...], table: dict,
+                  array: bool = False) -> list[str]:
+    name = ".".join(_toml_key(segment) for segment in path)
     header = f"[[{name}]]" if array else f"[{name}]"
     lines = [header]
     nested: list[str] = []
     for key, value in table.items():
         if isinstance(value, dict):
-            nested.extend(_render_table(f"{name}.{key}", value))
+            nested.extend(_render_table(path + (key,), value))
         elif isinstance(value, list) and value and all(
                 isinstance(item, dict) for item in value):
             for item in value:
-                nested.extend(_render_table(f"{name}.{key}", item, array=True))
+                nested.extend(_render_table(path + (key,), item, array=True))
         else:
             lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
     return lines + ([""] + nested if nested else [])
 
 
 def _toml_key(key: str) -> str:
-    plain = key and all(
-        character.isalnum() or character in "-_" for character in key)
+    plain = bool(re.fullmatch(r"[A-Za-z0-9_-]+", key))
     return key if plain else json.dumps(key, ensure_ascii=False)
 
 
@@ -450,12 +459,12 @@ def render_manifest(manifest: Manifest) -> str:
     ]
     for name, value in manifest.other.items():
         if isinstance(value, dict):
-            lines.extend(_render_table(name, value))
+            lines.extend(_render_table((name,), value))
             lines.append("")
         else:
             lines.insert(4, f"{_toml_key(name)} = {_toml_value(value)}")
     for profile in manifest.profiles:
-        lines.extend(_render_table(f"{SECTION}.profile", {
+        lines.extend(_render_table((SECTION, "profile"), {
             "fingerprint": profile.fingerprint,
             "paths": list(profile.paths),
             "watch": list(profile.watch),
@@ -463,7 +472,7 @@ def render_manifest(manifest: Manifest) -> str:
         }, array=True))
         lines.append("")
     for application in manifest.applications:
-        lines.extend(_render_table(f"{SECTION}.application", {
+        lines.extend(_render_table((SECTION, "application"), {
             "worktree": application.worktree,
             "fingerprint": application.fingerprint,
             "paths": list(application.paths),
@@ -596,6 +605,23 @@ def _matches(profile: Profile, current: dict[str, str]) -> bool:
         return False
     return all(current[relative] == recorded
                for relative, recorded in profile.digests.items())
+
+
+def _profile_snapshots(manifest: Manifest, worktree: Path
+                       ) -> tuple[dict[str, str],
+                                  tuple[dict[str, str], ...]]:
+    """Rebuild each retained profile's own evidence for one source snapshot."""
+    watch = sorted({entry for profile in manifest.profiles
+                    for entry in profile.watch})
+    ignore_files = ignore_rule_files(worktree)
+    digests = snapshot_digests(worktree, watch, ignore_files=ignore_files)
+    snapshots = tuple({
+            relative: digests[relative]
+            for relative in set(profile.watch) | set(ignore_files)
+            if relative in digests
+        }
+        for profile in manifest.profiles)
+    return digests, snapshots
 
 
 def changed_watch_evidence(profile: Profile,
@@ -898,7 +924,8 @@ def _required_evidence_paths(main: Path,
 
 def classify(main: Path, worktree: Path,
              manifest: Manifest | None = None,
-             required_evidence: Iterable[str] = ()) -> Contract:
+             required_evidence: Iterable[str] = (), *,
+             allow_missing_links: bool = False) -> Contract:
     """Decide the shared-path state one source worktree starts under.
 
     UNKNOWN means no stored profile answers this snapshot at all; REVIEWED-NONE
@@ -915,26 +942,21 @@ def classify(main: Path, worktree: Path,
     query proves the primary worktree holds no ordinary ignored directory.  A
     failed query and a required directory that the primary worktree cannot
     serve are both refusals, never that fast path.
+
+    A settled answer is usable only when the source's directory links agree
+    with it. Provisioning callers may allow missing declared links for the
+    duration of their locked reconcile step; foreign, undeclared, or
+    misdirected links still refuse before anything relies on the source.
     """
     main = Path(main)
     worktree = Path(worktree)
     manifest = read_manifest(main) if manifest is None else manifest
 
-    watch = sorted({entry for profile in manifest.profiles
-                    for entry in profile.watch})
     # One tracked-ignore query serves every retained profile.  Each profile is
     # then compared with its own watch set plus this exact current ignore-rule
     # set; the union of all profiles' watches must not make otherwise reusable
     # branch fingerprints stale merely because another branch watches more.
-    ignore_files = ignore_rule_files(worktree)
-    digests = snapshot_digests(worktree, watch, ignore_files=ignore_files)
-    profile_digests = tuple({
-            relative: digests[relative]
-            for relative in set(profile.watch) | set(ignore_files)
-            if relative in digests
-        }
-        for profile in manifest.profiles
-    )
+    digests, profile_digests = _profile_snapshots(manifest, worktree)
     matches = tuple(profile for profile, current in
                     zip(manifest.profiles, profile_digests)
                     if _matches(profile, current))
@@ -967,8 +989,10 @@ def classify(main: Path, worktree: Path,
         else:
             state = NO_IGNORED_DIRECTORY_CANDIDATE
         evidence += tuple(_evidence_note(relative) for relative in required)
-        return Contract(state, None, digests, prior, tuple(dict.fromkeys(evidence)),
-                        needs_review=state in (STALE, UNKNOWN))
+        return Contract(
+            state, None, digests, prior, tuple(dict.fromkeys(evidence)),
+            needs_review=state in (STALE, UNKNOWN), _main=main,
+            _worktree=worktree, _allow_missing_links=allow_missing_links)
 
     profile = matches[0]
     profile_index = manifest.profiles.index(profile)
@@ -984,8 +1008,10 @@ def classify(main: Path, worktree: Path,
                                     for relative in missing)
         return Contract(STALE, profile, digests, profile.paths, evidence,
                         needs_review=True)
-    return Contract(REVIEWED_NONE if profile.is_none else REVIEWED_PATHS,
-                    profile, digests, profile.paths)
+    return Contract(
+        REVIEWED_NONE if profile.is_none else REVIEWED_PATHS,
+        profile, digests, profile.paths, _main=main, _worktree=worktree,
+        _allow_missing_links=allow_missing_links)
 
 
 # --------------------------------------------------------------------------- #
@@ -1007,6 +1033,71 @@ def _resolves_to(path: Path, target: Path) -> bool:
         return Path(os.path.realpath(path, strict=True)) == target
     except OSError:
         return False
+
+
+def ignored_directory_links(worktree: Path) -> tuple[str, ...]:
+    """List ignored directory-link objects without entering their targets."""
+    root = Path(worktree)
+    found: list[str] = []
+    for entry in gitops.ignored_entries(root):
+        if not entry.endswith("/"):
+            continue
+        relative = entry.rstrip("/")
+        if relative.split("/")[0] in _EXCLUDED_ROOTS:
+            continue
+        require_safe_relative(relative, root)
+        if pathops.is_link(root / relative):
+            found.append(relative)
+    return tuple(sorted(found))
+
+
+def require_directory_link_agreement(
+        main: Path, worktree: Path, contract: Contract, *,
+        folder: str | None = None, allow_missing: bool = False) -> None:
+    """Require source directory links to reproduce exactly one reviewed answer.
+
+    Git supplies a collapsed ignored-entry inventory and each link object is
+    inspected only at its own path. Unexpected links are never resolved: an
+    unreviewed external target is neither enumerated nor hashed for diagnosis.
+    """
+    root = Path(worktree)
+    folder = folder or root.name
+    declared = set(contract.paths)
+    actual = set(ignored_directory_links(root))
+    unexpected = sorted(actual - declared)
+    if unexpected:
+        relative = unexpected[0]
+        raise AssentError(
+            f"refusing to rely on shared inputs for {folder}: source worktree "
+            f"{root} contains the ignored directory link {relative}, which is "
+            f"outside its active {contract.state} profile. Remove the link if "
+            "it is irrelevant. If it is required, place its ordinary "
+            f"Git-ignored target at {Path(main) / relative} and record "
+            f"{relative} with `{REVIEW_COMMAND}`; an external hand-provisioned "
+            "link is not reviewed evidence")
+    if Path(main).resolve() == root.resolve():
+        # A vanished source falls back to the primary snapshot. Its declared
+        # targets are the ordinary directories themselves, never links to self.
+        return
+    for relative in contract.paths:
+        destination = root / relative
+        if not os.path.lexists(destination):
+            if allow_missing:
+                continue
+            raise AssentError(
+                f"refusing to rely on shared inputs for {folder}: the active "
+                f"profile declares {relative}, but {destination} is missing. "
+                "Reconcile the source so Assent can provision the exact "
+                "same-relative primary-worktree link")
+        target = _link_target(main, relative)
+        if relative not in actual or not _resolves_to(destination, target):
+            raise AssentError(
+                f"refusing to rely on shared inputs for {folder}: the active "
+                f"profile declares {relative}, but {destination} is not a "
+                f"directory link to the reviewed primary target {target}. "
+                "Remove an irrelevant link; otherwise place the required "
+                "ordinary Git-ignored target at that primary path and record "
+                f"it with `{REVIEW_COMMAND}`")
 
 
 def _validate_destination(main: Path, worktree: Path,
@@ -1299,13 +1390,19 @@ def prepare_sources(main: Path,
             # so it is classified against the primary worktree -- the same
             # receipt-backed fallback acceptance already uses.  Doing it here
             # rather than skipping keeps a later freshness check comparable.
-            contract = classify(main, worktree or main, manifest)
+            contract = classify(
+                main, worktree or main, manifest, allow_missing_links=True)
             if not contract.settled:
                 raise AssentError(
                     f"refusing to verify: the shared-path contract for "
                     f"{folder} ({worktree}) is {contract.state}. "
                     f"{closeout_refusal(contract) or 'Run `' + REVIEW_COMMAND + '`'}")
+            require_directory_link_agreement(
+                main, worktree or main, contract, folder=folder,
+                allow_missing=True)
             reconcile(main, worktree or main, contract, manifest=manifest)
+            require_directory_link_agreement(
+                main, worktree or main, contract, folder=folder)
             prepared.append((folder, contract))
     return tuple(prepared)
 
@@ -1325,10 +1422,14 @@ def prepare_worktree(main: Path, worktree: Path, *,
     # the selected profile after classification and before provisioning.
     with hold_manifest_lock(main):
         manifest = read_manifest(main)
-        contract = classify(main, worktree, manifest,
-                            required_evidence=required_evidence)
+        contract = classify(
+            main, worktree, manifest, required_evidence=required_evidence,
+            allow_missing_links=True)
         if contract.settled:
+            require_directory_link_agreement(
+                main, worktree, contract, allow_missing=True)
             reconcile(main, worktree, contract, manifest=manifest)
+            require_directory_link_agreement(main, worktree, contract)
     return contract
 
 
@@ -1390,8 +1491,9 @@ def review(main: Path, worktree: Path, *,
     through one atomic replacement, so a concurrent attempt is refused rather
     than interleaved and an interruption leaves the previous complete file.
 
-    Recording a profile never destroys another branch's profile: an existing
-    entry with the same fingerprint is replaced, everything else is retained.
+    Recording a profile replaces every retained answer that matches this exact
+    source snapshot, even when those answers watched different files. Profiles
+    for genuinely different snapshots remain cached for later branch switches.
     """
     main = Path(main)
     worktree = Path(worktree)
@@ -1408,11 +1510,13 @@ def review(main: Path, worktree: Path, *,
 
     with hold_manifest_lock(main):
         manifest = read_manifest(main)
+        _all_digests, current = _profile_snapshots(manifest, worktree)
         digests = snapshot_digests(worktree, watched)
         profile = Profile(fingerprint_of(digests), declared, watched, digests)
         manifest.profiles = tuple(
-            existing for existing in manifest.profiles
-            if existing.fingerprint != profile.fingerprint) + (profile,)
+            existing for existing, snapshot in zip(manifest.profiles, current)
+            if not _matches(existing, snapshot)
+            and existing.fingerprint != profile.fingerprint) + (profile,)
         manifest.version = SCHEMA_VERSION
 
         contract = Contract(REVIEWED_NONE if profile.is_none else REVIEWED_PATHS,

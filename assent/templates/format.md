@@ -928,8 +928,8 @@ cannot be completed, the path, branch, and external target remain in place.
 That candidate is built by `git worktree add`, so untracked and ignored paths
 are absent from it. Complete verification therefore mirrors, and mirrors only,
 two kinds of artifact from the source worktrees that enter the candidate, at
-the root or nested below tracked parents: the explicitly provisioned ignored
-directory links — Windows junctions and directory symlinks, POSIX directory
+the root or nested below tracked parents: the reviewed-profile ignored
+directory links Assent provisioned — Windows junctions and directory symlinks, POSIX directory
 symlinks — and ordinary ignored leaf files that sit inside an otherwise tracked
 directory, such as a generated `lib/models/task.g.dart` beside its tracked
 source. A directory is mirrored as a link to the same resolved target, a file
@@ -957,15 +957,16 @@ traverses, modifies, or deletes a linked target, and the source worktree's own
 links and files survive success, failure, and interruption. Assent detaches each
 directory-link object before any recursive Git or filesystem removal and never
 traverses its resolved target. External link targets survive success, refusal,
-failure, interruption, and retry. Provision a
-directory link yourself, next to the source worktree, when a private package
-directory or a large asset tree must stay out of Git; there is no project
-setting and no force flag that widens any of this.
+failure, interruption, and retry. Record a required private package or large
+asset directory through the shared-path review so Assent provisions its
+reviewed-profile link; there is no project setting, hand-created-link fallback,
+or force flag that widens any of this.
 
 That provisioning rule is also stated in the packaged scheduled-task
 instructions, which are what an executing session actually reads, so a
-zero-memory task session that needs an ignored input is told to link it rather
-than copy it. A copy would satisfy the focused check and then be pruned from
+zero-memory task session that needs an ignored input is told to record the
+valid primary target through the review command rather than copy it or create a
+source link by hand. A copy would satisfy the focused check and then be pruned from
 the candidate, which is why the handoff belongs in both contracts. When a full
 verifier does fail on a path inside an ordinary ignored directory that a
 contributing source worktree holds physically, the failure evidence keeps the
@@ -978,7 +979,7 @@ traversed to produce it. The note is appended by single-folder, exact selected,
 dynamic batch, and localization-prefix verification alike, and is stored in
 whichever receipt records that failure summary.
 
-Provisioning that link by hand is the fallback, not the normal path. Which
+Provisioning a source link by hand is not a fallback. Which
 ignored directories a project genuinely shares is a reviewed decision, cached in
 the untracked, Assent-owned `.assent/manifest.toml` of the primary worktree. It
 is local execution memory: it is never committed, never copied into a worktree,
@@ -1002,7 +1003,9 @@ evidence has invalidated: a watched file changed, appeared, or disappeared; a
 declared target disappeared, changed type, collided with ordinary content, or
 stopped being ignored; or a complete verifier's own `Ignored input diagnosis:`
 named a required directory the active profile does not declare. Two matching
-profiles that disagree have no correct answer and fail closed.
+profiles that disagree have no correct answer and fail closed. One controlled
+review replaces every profile matching that source snapshot, including matches
+with different watch sets, while retaining nonmatching branch profiles.
 
 One further state costs nothing at all.
 `NO-IGNORED-DIRECTORY-CANDIDATE` means only that a successful Git
@@ -1061,7 +1064,11 @@ contributes an explicit empty-profile identity, distinct from `UNKNOWN`, which
 has no digest at all. Both receipt schemas were bumped fail-closed: an older
 receipt without the field is stale, never silently upgraded. Acceptance rechecks
 that digest immediately before publishing a ref and never creates or repairs a
-link as a side effect.
+link as a side effect. Every contributing source's ignored directory links must
+equal its active profile and point to the exact primary targets; an undeclared
+manual link refuses before a verifier and makes folder and batch receipts, plus
+folder report freshness, non-fresh or invalid. Ordinary ignored leaf files keep
+their independent automatic mirroring and never become manifest paths.
 
 Who starts that second stage is a project policy, `receipt_refresh` in
 `assent.toml`'s `[verification]` section. Under the default `"manual"`, run

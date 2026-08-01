@@ -231,6 +231,9 @@ def _current_shared_digest(
             raise AssentError(
                 f"the shared-path contract for {folder} is {contract.state}; "
                 "the batch's shared-input evidence can no longer be reproduced")
+        shared_paths.require_directory_link_agreement(
+            main, source_worktrees.get(folder) or main, contract,
+            folder=folder)
         contracts.append((folder, contract))
     return shared_paths.shared_inputs_digest(main, contracts)
 

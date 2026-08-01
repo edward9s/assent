@@ -131,9 +131,9 @@ accept。已整合資料夾是 ancestry no-op;已完成且 source branch 與 wor
 不會 fallback。逐資料夾路徑第一次真正的驗證或接受失敗就停止,但先前已發佈的成果
 保留不撤回。
 
-被忽略的輸入是交接問題,不是破口。候選由被追蹤內容加上剛好兩種鏡射產物——已佈建
-的被忽略目錄連結,以及一般被忽略葉節點檔案——組成,因此「必要的被忽略目錄必須以
-junction 或目錄符號連結佈建、絕不複製」這條規則,也寫在執行 session 真正會讀的
+被忽略的輸入是交接問題,不是破口。候選由被追蹤內容加上剛好兩種鏡射產物——已審閱且由 Assent 佈建
+的被忽略目錄連結,以及一般被忽略葉節點檔案——組成,因此「必要的被忽略目錄必須透過
+shared-path review 記錄,再以 junction 或目錄符號連結佈建、絕不複製或手動建 link」這條規則,也寫在執行 session 真正會讀的
 打包排程任務指示中,而不只寫在 format 契約裡。若完整 verifier 仍然失敗在某個
 contributing source worktree 實體持有的被忽略目錄底下的路徑,證據會保留 verifier
 輸出與 exit code,並附上一則 `Ignored input diagnosis:` 註記,指名該目錄、說明它是
@@ -149,13 +149,16 @@ contributing source worktree 實體持有的被忽略目錄底下的路徑,證�
 分支不會讓快取來回擺盪。source 快照為 `UNKNOWN`、`REVIEWED-NONE`(相符且
 `paths = []` 的 profile 就是答案,絕不因為它是空的而再次觸發審閱)、
 `REVIEWED-PATHS`(Assent 自行佈建精確的 junction 或目錄符號連結)或 `STALE`;
-相符但互相矛盾的 profile 一律 fail closed。`assent shared-paths review` 是唯一的
+相符但互相矛盾的 profile 一律 fail closed;一次新 review 會取代所有與目前快照相符
+的 profile,即使 watch 集合不同,並保留不相符的分支 profile。`assent shared-paths review` 是唯一的
 寫入者,先驗證再變更,持有一個專案本地鎖,並以原子方式取代檔案。`UNKNOWN` 與
 `STALE` 會為下一個已排程 session 附加一則有界的審閱指示,在 settled 之前拒絕其
 closeout。每一條驗證入口與 `assent reconcile` 都在候選、verifier 或受管 worktree
 出現之前先分類並調和,folder 與 batch receipt 綁定一個在 verifier 前後各取一次
-快照的 `shared_inputs_sha256`,acceptance 在推進 ref 之前再次核對,且絕不為了讓它
-通過而修復任何連結。
+快照的 `shared_inputs_sha256`,也綁定每個 source 與 active profile 的精確連結一致性。
+未宣告的手動目錄連結會拒絕驗證與 reconcile,使 folder/batch receipt 重播以及 folder
+report freshness 過期或無效。acceptance 在推進 ref 之前再次核對,且絕不為了讓它
+通過而修復任何連結;一般被忽略葉節點檔案仍自動處理,不需審閱。
 
 `NO-IGNORED-DIRECTORY-CANDIDATE` 是與這些狀態並列、確定性的零 token 快捷路徑。
 它只主張:一次成功的 Git ignored-entry 查詢在主 worktree 找不到任何位於 `.git/`

@@ -799,7 +799,7 @@ object is not deleting anything through its resolved path.
 candidate from tracked content, so ignored paths are absent from it. Complete
 verification therefore mirrors exactly two kinds of artifact from each source
 worktree that enters the candidate, at the root or nested below tracked
-parents: ignored directory links you provisioned yourself (Windows junctions
+parents: reviewed directory links Assent provisioned (Windows junctions
 and directory symlinks, POSIX directory symlinks), such as a nested
 `lib/l10n/arb`, and ordinary ignored leaf files sitting inside an otherwise
 tracked directory, such as a generated `lib/models/task.g.dart` beside its
@@ -825,19 +825,21 @@ a failure, and a Ctrl-C alike. There is no force flag and no project setting
 that widens this.
 
 The same rule is in the scheduled-task instructions `assent init` installs, so
-an unattended session that needs an ignored input is told to link it at the
-same relative path instead of copying the tree — a copy passes the focused
+an unattended session that needs an ignored input is told to record it with
+`assent shared-paths review` so Assent links the primary worktree's exact
+same-relative target instead of copying the tree — a copy passes the focused
 check and is then pruned from the candidate. If a full verification does fail
 on a path inside an ordinary ignored directory one of the source worktrees
 holds physically, such as `pkg/fl_chart`, the failure keeps its output and exit
 code and gains one `Ignored input diagnosis:` note: `pkg/` is intentionally
-omitted from the candidate, and the fix is a directory junction or symlink in
-the source worktree, not a copy. Separators are normalized, only a directory
+omitted from the candidate, and the fix is to place the required ordinary,
+Git-ignored target at the primary path and record it through the review command,
+not to copy it or hand-create a source link. Separators are normalized, only a directory
 the verifier output names is reported, and single-folder, selected, dynamic
 batch, and localization runs all record it in the receipt that stores their
 failure summary.
 
-**Reviewed shared ignored directories**: linking one by hand is the fallback.
+**Reviewed shared ignored directories**: a hand-created source link is not a fallback.
 Which ignored directories a project genuinely shares is a decision Assent
 reviews once and then caches in the primary worktree's untracked, never
 committed `.assent/manifest.toml`. Under `[shared_paths]` it stores whole
@@ -852,7 +854,9 @@ every declared directory as a junction or directory symlink to the primary
 worktree's same relative path before your task runs), or `STALE` — a watched file
 moved, a declared target vanished, changed type, or stopped being ignored, or an
 `Ignored input diagnosis:` named a directory the profile does not declare.
-Conflicting matching profiles fail closed.
+Conflicting matching profiles fail closed; one controlled review replaces all
+profiles matching that source snapshot, even when their watch sets differ,
+while retaining genuinely nonmatching branch profiles.
 
 A repository with nothing to declare spends nothing.
 `NO-IGNORED-DIRECTORY-CANDIDATE` means only that a successful Git ignored-entry
@@ -884,7 +888,12 @@ classifies its sources and reconciles their links before any verifier starts,
 and `assent reconcile` does the same before it creates a managed worktree.
 Folder and batch receipts record a `shared_inputs_sha256` over the selected
 profiles and a bounded snapshot of each declared target, taken before and after
-the verifier, and acceptance rechecks it immediately before publishing a ref.
+the verifier. Each source's ignored directory links must equal its active
+profile and point to those exact primary targets; an undeclared manual link
+refuses before verification and expires existing folder or batch evidence.
+`assent report` includes this digest and agreement in folder freshness, and
+acceptance rechecks it immediately before publishing a ref. Ordinary ignored
+leaf files remain automatic and are not manifest paths.
 
 **Parallel test execution**: choosing `unittest` during `assent init` activates
 the packaged helper `run_unittest_parallel()`, which runs each

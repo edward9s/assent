@@ -445,8 +445,12 @@ def _receipt_matches_current_candidate_locked(cfg: Config) -> bool:
     if source_tip != receipt.source_tip:
         return False
     upstream_sources = _stack_sources(cfg, target_tip, source_tip)
-    if _current_shared_inputs(cfg, main, worktree,
-                              upstream_sources) != receipt.shared_inputs_sha256:
+    try:
+        current_shared = _current_shared_inputs(
+            cfg, main, worktree, upstream_sources)
+    except AssentError:
+        return False
+    if current_shared != receipt.shared_inputs_sha256:
         return False
     tree, outcome = candidate_tree(
         main, cfg.tasks_name, target_tip, source_tip)
@@ -476,6 +480,8 @@ def _current_shared_inputs(
             raise AssentError(
                 f"the shared-path contract for {folder} is {contract.state}; "
                 "the receipt's shared-input evidence can no longer be reproduced")
+        shared_paths.require_directory_link_agreement(
+            main, tree or main, contract, folder=folder)
         contracts.append((folder, contract))
     return shared_paths.shared_inputs_digest(main, contracts)
 
@@ -553,8 +559,8 @@ def receipt_report_lines(cfg: Config) -> list[str]:
     """Return read-only folder-verification facts for the human report.
 
     Freshness here is intentionally conservative and side-effect free: exact
-    source, target, and verifier identities are fresh.  Acceptance remains
-    responsible for rebuilding and comparing the candidate tree.
+    source, target, verifier, and shared-input identities are fresh. Acceptance
+    remains responsible for rebuilding and comparing the candidate tree.
     """
     path = receipt_path(cfg)
     if not path.exists():
@@ -569,9 +575,15 @@ def receipt_report_lines(cfg: Config) -> list[str]:
         target_branch = gitops.require_current_branch(main)
         if gitops.commit_of(main, target_branch) != receipt.target_tip:
             reasons.append("target tip changed")
-        _branch, source_tip, _worktree = source_snapshot(cfg, main)
+        _branch, source_tip, worktree = source_snapshot(cfg, main)
         if source_tip != receipt.source_tip:
             reasons.append("source tip changed")
+        upstream_sources = _stack_sources(
+            cfg, gitops.commit_of(main, target_branch), source_tip)
+        if _current_shared_inputs(
+                cfg, main, worktree,
+                upstream_sources) != receipt.shared_inputs_sha256:
+            reasons.append("shared inputs changed")
         if receipt.status != "PASSED":
             reasons.append(f"exit code {receipt.exit_code}")
     except AssentError as e:

@@ -84,10 +84,11 @@ files (logs; read only when debugging or explicitly referenced), and the
   from tracked content, so a directory Git ignores — a private package tree, a
   large asset directory — is missing there even though the main worktree has
   it. When your assigned task or its focused verify command demonstrably needs
-  one, provision it as a link: confirm the exact target path in the main
-  worktree, confirm Git ignores that same relative path, then create a
-  directory junction (Windows, `mklink /J`) or a directory symlink (POSIX,
-  `ln -s`) at that relative path inside your worktree, pointing at that target.
+  one, confirm an ordinary target exists at the same relative path in the main
+  worktree and Git ignores it, then record that path with
+  `assent shared-paths review --path DIR --watch FILE`; Assent provisions the
+  exact junction or directory symlink. Never hand-create a source-worktree link:
+  a link outside the active profile is unreviewed evidence and closeout refuses.
   Never copy the ignored directory tree in: a copy passes the focused check and
   then disappears, because the integration candidate mirrors provisioned
   directory links and ignored leaf files and never a physical ignored tree.

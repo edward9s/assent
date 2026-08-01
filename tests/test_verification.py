@@ -18,7 +18,8 @@ from assent.config import load_config
 from assent.folder_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         VerificationReceipt, read_receipt,
                                         receipt_matches_current_candidate,
-                                        receipt_path, verify_folder,
+                                        receipt_path, receipt_report_lines,
+                                        verify_folder,
                                         write_receipt)
 from assent.gitops import (branch_tip, commit_of, folder_branches, tree_of,
                            working_tree_status)
@@ -128,9 +129,16 @@ class VerificationRepositoryCase(unittest.TestCase):
         return peer
 
     def _provision_link(self, worktree: Path, name: str) -> Path:
-        """Link ``worktree/name`` at a fresh external target and return it."""
-        target = self._link_target(name)
-        make_directory_link(worktree / name, target)
+        """Review one same-relative primary target and return it."""
+        target = self.root / name
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "marker.txt").write_text(
+            f"{name} marker\n", encoding="utf-8")
+        declared = set(getattr(self, "declared", ()))
+        declared.add(name)
+        self.declared = tuple(sorted(declared))
+        shared_paths.review(
+            self.root, worktree, paths=self.declared, watch=("README.md",))
         return target
 
     def _write_verifier(self, exit_code: int, output_size: int = 0,
@@ -653,14 +661,11 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         (tracked / "keep.txt").write_text("tracked\n", encoding="utf-8")
         _git(self.root, "add", "-f", "pkg/keep.txt")
         _git(self.root, "commit", "-m", "track a real pkg directory")
-        self._provision_link(self.source_worktree, "pkg")
-
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code = verify_folder(self.cfg)
-
-        self.assertEqual(code, 1, output.getvalue())
-        self.assertIn("already contains pkg", output.getvalue())
+        target = self._link_target("occupied pkg")
+        with self.assertRaisesRegex(AssentError, "already contains pkg"):
+            with provisioned_candidate_links(
+                    self.root, (ProvisionedLink("pkg", target),)):
+                self.fail("an occupied candidate path was replaced")
         self.assertFalse(receipt_path(self.cfg).exists())
         self.assertEqual(self.counter.exists(), False)
 
@@ -706,7 +711,8 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
                       receipt.failure_summary)
         for phrase in ("Ignored input diagnosis: pkg/",
                        "intentionally omitted from the integration candidate",
-                       "directory junction (Windows) or directory symlink"):
+                       "record it with `assent shared-paths review`",
+                       "Do not copy the tree or hand-create"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, receipt.failure_summary)
         self.assertIn("Ignored input diagnosis: pkg/", text)
@@ -745,7 +751,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         # The human provisioned pkg deliberately, so a target that has gone
         # missing is a refusal rather than a candidate quietly missing it.
         self.assertEqual(code, 1, output.getvalue())
-        self.assertIn("cannot be resolved", output.getvalue())
+        self.assertIn("pkg does not exist", output.getvalue())
         self.assertFalse(receipt_path(self.cfg).exists())
         self.assertFalse(self.counter.exists())
         self.assertFalse((self.source_worktree / "pkg").is_dir())
@@ -761,12 +767,14 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
     """
 
     def _provision_nested(self) -> Path:
-        """Link the ignored lib/l10n/arb below tracked parents in the source."""
-        target = self.parent / "external arb"
-        target.mkdir()
+        """Review the ignored lib/l10n/arb below tracked parents."""
+        target = self.root / "lib/l10n/arb"
+        target.mkdir(parents=True)
         (target / "app_localizations.dart").write_text(
             "// generated localizations\n", encoding="utf-8")
-        make_directory_link(self.source_worktree / "lib/l10n/arb", target)
+        shared_paths.review(
+            self.root, self.source_worktree, paths=("lib/l10n/arb",),
+            watch=("README.md",))
         return target
 
     def _provision_generated_part(self) -> Path:
@@ -935,6 +943,31 @@ class TestSharedPathGate(VerificationRepositoryCase):
         (self.root / "pkg" / "marker.txt").write_text(
             "changed marker\n", encoding="utf-8")
         self.assertFalse(receipt_matches_current_candidate(self.cfg))
+        self.assertIn(
+            "stale: shared inputs changed",
+            receipt_report_lines(self.cfg)[0])
+
+    def test_reviewed_none_refuses_an_external_ignored_directory_link(self):
+        shared_paths.review(self.root, self.source_worktree,
+                            none=True, watch=("README.md",))
+        external = self.parent / "external pkg"
+        external.mkdir()
+        marker = external / "marker.txt"
+        marker.write_text("external\n", encoding="utf-8")
+        make_directory_link(self.source_worktree / "pkg", external)
+        self._commit_target_verifier(exit_code=0, stderr="must not run")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(verify_folder(self.cfg), 1)
+
+        diagnostic = output.getvalue()
+        self.assertIn("outside its active REVIEWED-NONE profile", diagnostic)
+        self.assertIn("Remove the link if it is irrelevant", diagnostic)
+        self.assertIn("assent shared-paths review", diagnostic)
+        self.assertFalse(self.counter.exists())
+        self.assertFalse(receipt_path(self.cfg).exists())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "external\n")
 
     def test_a_missing_link_is_recreated_rather_than_depended_on(self):
         shared_paths.review(self.root, self.source_worktree,

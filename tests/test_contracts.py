@@ -81,7 +81,7 @@ class TestContractContent(unittest.TestCase):
         install_global_contracts(self)
         text = contracts.installed_contract_text("format.md")
         for phrase in (
-                "explicitly provisioned ignored\ndirectory links",
+                "reviewed-profile ignored\ndirectory links Assent provisioned",
                 "ordinary ignored leaf files that sit inside an otherwise "
                 "tracked\ndirectory",
                 "Arbitrary ignored content is never exposed",
@@ -89,15 +89,14 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
 
-    def test_the_task_session_is_told_to_link_a_required_ignored_directory(self):
+    def test_the_task_session_is_told_to_review_a_required_ignored_directory(self):
         """A zero-memory session reads instructions.md, never format.md."""
         install_global_contracts(self)
         text = " ".join(
             contracts.installed_contract_text("instructions.md").split())
         for phrase in (
-                "directory junction (Windows, `mklink /J`) or a directory "
-                "symlink (POSIX, `ln -s`) at that relative path inside your "
-                "worktree",
+                "assent shared-paths review --path DIR --watch FILE",
+                "Never hand-create a source-worktree link",
                 "Never copy the ignored directory tree in",
                 "never modify anything inside the linked target"):
             with self.subTest(phrase=phrase):

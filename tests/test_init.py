@@ -47,7 +47,9 @@ class TestInitContractRefresh(unittest.TestCase):
         text = " ".join((self.user_home / "instructions.md").read_text(
             encoding="utf-8").split())
         self.assertIn("Never copy the ignored directory tree in", text)
-        self.assertIn("directory junction (Windows, `mklink /J`)", text)
+        self.assertIn(
+            "assent shared-paths review --path DIR --watch FILE", text)
+        self.assertIn("Never hand-create a source-worktree link", text)
         self.assertFalse((self.root / ".assent/instructions.md").exists())
 
 

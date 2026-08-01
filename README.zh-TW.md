@@ -638,8 +638,8 @@ ownership、盤點目錄連結與其他目錄 reparse point,並先解除每個�
 
 **候選仍需要的被忽略輸入**:`git worktree add` 只用被追蹤的內容建出候選,
 被忽略的路徑因此不在其中。完整驗證只會從每個進入候選的 source worktree
-鏡射兩種產物,位置可以在根層,也可以巢狀在被追蹤的上層目錄底下:一是你自己
-佈建的被忽略目錄連結(Windows junction 與目錄符號連結、POSIX 目錄符號連結),
+鏡射兩種產物,位置可以在根層,也可以巢狀在被追蹤的上層目錄底下:一是 Assent
+依已審閱 profile 佈建的被忽略目錄連結(Windows junction 與目錄符號連結、POSIX 目錄符號連結),
 例如巢狀的 `lib/l10n/arb`;二是夾在被追蹤目錄之中的一般被忽略葉節點檔案,
 例如生成在被追蹤原始碼旁邊的 `lib/models/task.g.dart`。目錄會鏡射成指向同一個
 已解析目標的連結,檔案則鏡射成候選端指向 source 檔案的連結(Windows 用同磁碟區
@@ -658,15 +658,17 @@ source worktree 連結、生成檔與外部目標,在通過、失敗與 Ctrl-C �
 沒有任何 force 旗標或專案設定可以放寬這一點。
 
 同一條規則也寫在 `assent init` 安裝的排程任務指示裡,因此需要被忽略輸入的無人
-值守 session 會被告知在相同相對路徑佈建連結,而不是複製整棵樹——複製只能通過
+值守 session 會被告知用 `assent shared-paths review` 記錄需求,由 Assent 連到主
+worktree 的精確相同相對路徑目標,而不是複製整棵樹——複製只能通過
 focused 檢查,之後就會在候選中被剪除。若完整驗證真的失敗在某個 source worktree
 實體持有的一般被忽略目錄底下的路徑,例如 `pkg/fl_chart`,該次失敗會保留原本的
 輸出與 exit code,並附上一則 `Ignored input diagnosis:` 註記:`pkg/` 是刻意不放進
-候選的,修法是在 source worktree 佈建目錄 junction 或符號連結,而不是複製。分隔
+候選的,修法是在主路徑放置一般且被 Git 忽略的必要目標,再用 review 命令記錄;
+不是複製內容,也不是手動建立 source 連結。分隔
 符號會先正規化,只回報 verifier 輸出自己指名的目錄,而單一資料夾、selected、
 動態 batch 與定位執行都會把它記進各自存放 failure summary 的 receipt。
 
-**已審閱的共享被忽略目錄**:手動佈建連結只是備援。一個專案真正共享哪些被忽略
+**已審閱的共享被忽略目錄**:手動建立 source 連結不是備援。一個專案真正共享哪些被忽略
 目錄,是 Assent 只審閱一次、之後就快取在主 worktree 那份未被追蹤、永不提交的
 `.assent/manifest.toml` 裡的決定。`[shared_paths]` 以整份 profile 保存——宣告的
 目錄、判定何時該重新考慮的精確被追蹤相依/建置檔 `watch`,以及那些檔案加上倉庫
@@ -677,7 +679,8 @@ focused 檢查,之後就會在候選中被剪除。若完整驗證真的失敗�
 自行把每個宣告目錄佈建為指向主 worktree 相同相對路徑的 junction 或目錄符號連結),
 或 `STALE`——被 watch 的檔案變動、宣告目標消失、型別改變或不再被忽略,或某則
 `Ignored input diagnosis:` 指名了 profile 未宣告的目錄。相符但互相矛盾的 profile
-一律 fail closed。
+一律 fail closed;一次受控 review 會取代所有與目前 source 快照相符的 profile,
+即使 watch 集合不同,並保留真正不相符的分支 profile。
 
 `assent shared-paths review --path DIR --watch FILE`(或 `--none --watch FILE`)
 是唯一的寫入者。它先驗證每個值,取得一個專案本地鎖,再以原子方式取代整個檔案,
@@ -687,7 +690,10 @@ settled 之前擋住該任務 closeout;指紋沒變則完全不花成本。每�
 資料夾、selected 與動態 batch、定位前綴、`run --verify` 與 `--focus`——都會在任何
 verifier 開始前分類 source 並調和其連結,`assent reconcile` 在建立受管資源前也一樣。
 folder 與 batch receipt 會記錄 `shared_inputs_sha256`,涵蓋選定 profile 與每個宣告
-目標在 verifier 前後的有界快照,acceptance 則在推進 ref 之前再次核對。
+目標在 verifier 前後的有界快照。每個 source 的被忽略目錄連結必須精確等於 active
+profile 並指向那些主目標;未宣告的手動連結會在驗證前拒絕,並使既有 folder/batch
+證據及 folder report freshness 過期或無效。acceptance 在推進 ref 之前再次核對;
+一般被忽略葉節點檔案仍自動處理,不成為 manifest path。
 
 沒有東西可宣告的倉庫則完全不花成本。`NO-IGNORED-DIRECTORY-CANDIDATE` 只表示:
 一次成功的 Git ignored-entry 查詢在主 worktree 找不到任何位於 `.git/` 與

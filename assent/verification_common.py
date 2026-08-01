@@ -376,15 +376,13 @@ def ignored_input_diagnosis(output: str,
         "worktree, so it is intentionally omitted from the integration "
         "candidate; complete verification mirrors only provisioned directory "
         "links and ignored leaf files, never a physical ignored tree.\n"
-        "Provision a required input in the source worktree as a directory "
-        "junction (Windows) or directory symlink (POSIX) pointing at its real "
-        "location, then verify again; copying an ignored directory into the "
-        "source worktree cannot reach the candidate.\n"
-        "If the directory is a required shared input the reviewed shared-path "
-        "profile does not declare, record it with `assent shared-paths review` "
-        "-- naming the dependency or build file that made it necessary as a "
-        "`--watch` value -- and assent provisions the link itself for every "
-        "later session.")
+        "For a required input, place its ordinary Git-ignored target at the "
+        "same relative path in the primary worktree, then record it with "
+        "`assent shared-paths review` -- naming the dependency or build file "
+        "that made it necessary as a `--watch` value. Assent provisions the "
+        "exact junction or directory symlink for later sessions. Do not copy "
+        "the tree or hand-create a source-worktree link; neither is reviewed "
+        "candidate evidence.")
 
 
 def diagnosed_ignored_directories(failure_summary: str) -> tuple[str, ...]:

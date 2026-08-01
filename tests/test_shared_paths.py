@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tomllib
 import unittest
+from datetime import date, datetime, time
 from pathlib import Path
 
 from assent import AssentError, gitops, shared_paths
@@ -34,12 +36,12 @@ def settle_shared_paths(main: Path, worktree: Path, *paths: str) -> None:
     """Record one reviewed shared-path profile so verification may start.
 
     Most fixtures elsewhere are not about the reviewed cache at all: they
-    hand-provision the links they need and only have to get past the shared-path
-    gate.  With no ``--path`` this records the reviewed empty answer, which is
-    what those repositories honestly are -- nothing is declared shared, and any
-    junction such a test made by hand still reaches the candidate through the
-    ordinary ignored-input mirroring.  It lives here, beside the cache it
-    exercises, so the other suites import one helper instead of restating it.
+    exercise low-level mirroring separately and only have to get past the
+    shared-path gate. With no ``--path`` this records the reviewed empty answer,
+    which is what those repositories honestly are. A complete verification
+    consumer still refuses any directory link those low-level cases create by
+    hand, because REVIEWED-NONE declares none. It lives here, beside the cache
+    it exercises, so the other suites import one helper instead of restating it.
     """
     main = Path(main)
     tracked = [entry for entry in gitops.tracked_paths(Path(worktree), ".")
@@ -225,6 +227,32 @@ class TestThreeStateContract(SharedPathsCase):
         shared_paths.write_manifest(self.root, manifest)
         with self.assertRaisesRegex(AssentError, "conflicting matching profiles"):
             self._classify()
+
+    def test_one_review_replaces_all_matching_answers_only(self):
+        self._review("pkg", watch=("pubspec.yaml",))
+        manifest = shared_paths.read_manifest(self.root)
+        readme_digests = shared_paths.snapshot_digests(
+            self.worktree, ("README.md",))
+        conflicting = shared_paths.Profile(
+            shared_paths.fingerprint_of(readme_digests), ("assets",),
+            ("README.md",), readme_digests)
+        stale_digests = dict(readme_digests)
+        stale_digests["README.md"] = "0" * 64
+        retained = shared_paths.Profile(
+            shared_paths.fingerprint_of(stale_digests), ("lib/l10n/arb",),
+            ("README.md",), stale_digests)
+        manifest.profiles += (conflicting, retained)
+        shared_paths.write_manifest(self.root, manifest)
+        with self.assertRaisesRegex(AssentError, "conflicting matching profiles"):
+            self._classify()
+
+        resolved = self._review("pkg", watch=("pubspec.yaml",))
+
+        self.assertEqual(resolved.paths, ("pkg",))
+        profiles = shared_paths.read_manifest(self.root).profiles
+        self.assertEqual(len(profiles), 2)
+        self.assertIn(retained, profiles)
+        self.assertEqual(sum(profile.paths == ("pkg",) for profile in profiles), 1)
 
 
 class TestNoIgnoredDirectoryCandidate(SharedPathsCase):
@@ -429,6 +457,26 @@ class TestReviewOperation(SharedPathsCase):
         text = shared_paths.manifest_path(self.root).read_text(encoding="utf-8")
         self.assertIn("[future]", text)
         self.assertIn('kept = "yes"', text)
+
+    def test_quoted_unknown_table_paths_and_dates_keep_parsed_meaning(self):
+        path = shared_paths.manifest_path(self.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            'version = 1\n\n["a.b"]\n'
+            'day = 2026-08-01\nclock = 12:34:56\n'
+            'stamp = 2026-08-01T12:34:56+08:00\n'
+            '["a.b"."nested space"]\n"key.with.dot" = "kept"\n'
+            '[["a.b"."array.key"]]\n"space key" = 1\n',
+            encoding="utf-8")
+        before = shared_paths.read_manifest(self.root).other
+        self.assertIsInstance(before["a.b"]["day"], date)
+        self.assertIsInstance(before["a.b"]["clock"], time)
+        self.assertIsInstance(before["a.b"]["stamp"], datetime)
+
+        self._review("pkg")
+
+        after = tomllib.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(after["a.b"], before["a.b"])
 
 
 class TestProvisioning(SharedPathsCase):

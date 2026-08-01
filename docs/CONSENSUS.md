@@ -167,10 +167,11 @@ first real verification or acceptance failure stops the sequential chain while
 earlier publications remain.
 
 Ignored inputs are a handoff, not a hole. A candidate is built from tracked
-content plus exactly two mirrored artifact kinds — provisioned ignored
+content plus exactly two mirrored artifact kinds — reviewed, Assent-provisioned ignored
 directory links and ordinary ignored leaf files — so the rule that a required
-ignored directory must be provisioned as a junction or directory symlink, never
-copied, is stated in the packaged scheduled-task instructions an executing
+ignored directory must be recorded through the shared-path review and
+provisioned as a junction or directory symlink, never copied or linked by hand,
+is stated in the packaged scheduled-task instructions an executing
 session actually reads, not only in the format contract. When a full verifier
 nevertheless fails on a path inside a physically ignored directory a
 contributing source worktree holds, the evidence keeps the verifier output and
@@ -190,16 +191,21 @@ those files plus the tracked Git-ignore rules), so parallel branches do not make
 the cache oscillate. A source snapshot is `UNKNOWN`, `REVIEWED-NONE` (a matching
 `paths = []` profile is an answer and never triggers another review),
 `REVIEWED-PATHS` (Assent provisions the exact junctions or directory symlinks
-itself), or `STALE`; conflicting matching profiles fail closed.
+itself), or `STALE`; conflicting matching profiles fail closed, while one new
+review replaces all profiles matching the current snapshot and retains
+nonmatching branch profiles.
 `assent shared-paths review` is the only writer, validating before mutating,
 holding one project-local lock, and replacing the file atomically. `UNKNOWN` and
 `STALE` add one bounded review clause to the next already-scheduled session and
 refuse its closeout until settled. Every verification entry point and
 `assent reconcile` classify and reconcile before any candidate, verifier, or
 managed worktree exists, and folder and batch receipts bind one
-`shared_inputs_sha256` — snapshotted before and after the verifier — that
-acceptance rechecks immediately before publishing a ref, never repairing a link
-to make it pass.
+`shared_inputs_sha256` — snapshotted before and after the verifier — that also
+binds each source's exact agreement with its active profile. An undeclared
+manual directory link refuses verification and reconciliation and expires
+folder or batch receipt reuse; folder report freshness shows the same drift.
+Acceptance rechecks immediately before publishing a ref, never repairing a link
+to make it pass. Ordinary ignored leaf files remain automatic and unreviewed.
 
 `NO-IGNORED-DIRECTORY-CANDIDATE` is the deterministic zero-token fast path
 beside those states. It asserts only that a successful Git ignored-entry query
