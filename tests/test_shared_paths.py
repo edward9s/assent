@@ -160,6 +160,24 @@ class TestThreeStateContract(SharedPathsCase):
             self.root, self.worktree, contract)
         self.assertEqual((created, detached), ((), ()))
 
+    def test_settled_is_pure_when_an_undeclared_link_appears(self):
+        self._review(none=True)
+        contract = self._classify()
+        external = self.parent / "external build"
+        external.mkdir()
+        (external / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+        make_directory_link(self.worktree / "build", external)
+
+        # State inspection neither inventories links nor turns an agreement
+        # failure into an exception. The relying operation owns that gate.
+        self.assertTrue(contract.settled)
+        self.assertEqual(shared_paths.closeout_refusal(contract), "")
+        with self.assertRaisesRegex(AssentError, "outside its active REVIEWED-NONE"):
+            shared_paths.require_directory_link_agreement(
+                self.root, self.worktree, contract)
+        self.assertEqual(
+            (external / "sentinel.txt").read_text(encoding="utf-8"), "keep\n")
+
     def test_a_repository_with_no_ignored_directory_has_nothing_to_review(self):
         bare = self._plain_repository()
         contract = shared_paths.classify(bare, bare)

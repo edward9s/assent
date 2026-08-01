@@ -142,9 +142,6 @@ class Contract:
     prior_paths: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()
     needs_review: bool = False
-    _main: Path | None = field(default=None, repr=False, compare=False)
-    _worktree: Path | None = field(default=None, repr=False, compare=False)
-    _allow_missing_links: bool = field(default=False, repr=False, compare=False)
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -153,13 +150,8 @@ class Contract:
     @property
     def settled(self) -> bool:
         """True when nothing is left to decide before real work may start."""
-        settled = self.state in (REVIEWED_NONE, REVIEWED_PATHS,
-                                 NO_IGNORED_DIRECTORY_CANDIDATE)
-        if settled and self._main is not None and self._worktree is not None:
-            require_directory_link_agreement(
-                self._main, self._worktree, self,
-                allow_missing=self._allow_missing_links)
-        return settled
+        return self.state in (REVIEWED_NONE, REVIEWED_PATHS,
+                              NO_IGNORED_DIRECTORY_CANDIDATE)
 
 
 # --------------------------------------------------------------------------- #
@@ -924,8 +916,7 @@ def _required_evidence_paths(main: Path,
 
 def classify(main: Path, worktree: Path,
              manifest: Manifest | None = None,
-             required_evidence: Iterable[str] = (), *,
-             allow_missing_links: bool = False) -> Contract:
+             required_evidence: Iterable[str] = ()) -> Contract:
     """Decide the shared-path state one source worktree starts under.
 
     UNKNOWN means no stored profile answers this snapshot at all; REVIEWED-NONE
@@ -943,10 +934,10 @@ def classify(main: Path, worktree: Path,
     failed query and a required directory that the primary worktree cannot
     serve are both refusals, never that fast path.
 
-    A settled answer is usable only when the source's directory links agree
-    with it. Provisioning callers may allow missing declared links for the
-    duration of their locked reconcile step; foreign, undeclared, or
-    misdirected links still refuse before anything relies on the source.
+    Classification is state-only. Every consumer must separately require that
+    the source's directory links agree with a settled answer; provisioning
+    callers may allow missing declared links only for the duration of their
+    locked reconcile step.
     """
     main = Path(main)
     worktree = Path(worktree)
@@ -991,8 +982,7 @@ def classify(main: Path, worktree: Path,
         evidence += tuple(_evidence_note(relative) for relative in required)
         return Contract(
             state, None, digests, prior, tuple(dict.fromkeys(evidence)),
-            needs_review=state in (STALE, UNKNOWN), _main=main,
-            _worktree=worktree, _allow_missing_links=allow_missing_links)
+            needs_review=state in (STALE, UNKNOWN))
 
     profile = matches[0]
     profile_index = manifest.profiles.index(profile)
@@ -1010,8 +1000,7 @@ def classify(main: Path, worktree: Path,
                         needs_review=True)
     return Contract(
         REVIEWED_NONE if profile.is_none else REVIEWED_PATHS,
-        profile, digests, profile.paths, _main=main, _worktree=worktree,
-        _allow_missing_links=allow_missing_links)
+        profile, digests, profile.paths)
 
 
 # --------------------------------------------------------------------------- #
@@ -1390,8 +1379,7 @@ def prepare_sources(main: Path,
             # so it is classified against the primary worktree -- the same
             # receipt-backed fallback acceptance already uses.  Doing it here
             # rather than skipping keeps a later freshness check comparable.
-            contract = classify(
-                main, worktree or main, manifest, allow_missing_links=True)
+            contract = classify(main, worktree or main, manifest)
             if not contract.settled:
                 raise AssentError(
                     f"refusing to verify: the shared-path contract for "
@@ -1423,8 +1411,7 @@ def prepare_worktree(main: Path, worktree: Path, *,
     with hold_manifest_lock(main):
         manifest = read_manifest(main)
         contract = classify(
-            main, worktree, manifest, required_evidence=required_evidence,
-            allow_missing_links=True)
+            main, worktree, manifest, required_evidence=required_evidence)
         if contract.settled:
             require_directory_link_agreement(
                 main, worktree, contract, allow_missing=True)

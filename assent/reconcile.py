@@ -99,17 +99,24 @@ def _require_source(cfg: Config, main: Path) -> tuple[str, str, Path]:
 
 
 def _shared_contract(managed: _Managed, worktree: Path,
-                     label: str) -> shared_paths.Contract | None:
+                     label: str, *,
+                     manifest: shared_paths.Manifest | None = None
+                     ) -> shared_paths.Contract | None:
     """Classify the finished source snapshot, or refuse before any managed resource.
 
     The reconciliation worktree is another consumer of the reviewed manifest, so
     the answer has to exist before ``git worktree add`` or the merge starts:
-    UNKNOWN, STALE, a malformed or ambiguous manifest and an invalid profile all
-    stop here, with the zero-AI review as the remedy.  Reconciliation never
-    invokes AI and never guesses a profile of its own.
+    UNKNOWN, STALE, a malformed or ambiguous manifest, an invalid profile, and
+    source-link disagreement all stop here, with the actionable review or link
+    remedy. Reconciliation never invokes AI and never guesses a profile of its
+    own.
     """
     try:
-        contract = shared_paths.classify(managed.main, worktree)
+        contract = shared_paths.classify(
+            managed.main, worktree, manifest=manifest)
+        if contract.settled:
+            shared_paths.require_directory_link_agreement(
+                managed.main, worktree, contract, folder=managed.folder)
     except AssentError as e:
         print(f"{label}: refused, {e}. Nothing was created.")
         return None
@@ -368,16 +375,9 @@ def _start(cfg: Config) -> int:
     try:
         with shared_paths.hold_manifest_lock(managed.main):
             manifest = shared_paths.read_manifest(managed.main)
-            try:
-                contract = shared_paths.classify(
-                    managed.main, worktree, manifest=manifest)
-            except AssentError as e:
-                print(f"{label}: refused, {e}. Nothing was created.")
-                return 1
-            if not contract.settled:
-                print(f"{label}: refused, "
-                      f"{shared_paths.closeout_refusal(contract)}. "
-                      "Nothing was created.")
+            contract = _shared_contract(
+                managed, worktree, label, manifest=manifest)
+            if contract is None:
                 return 1
             gitops.add_worktree_branch(
                 managed.main, managed.branch, managed.path, source_tip)
@@ -481,6 +481,21 @@ def _continue(cfg: Config) -> int:
     except AssentError as e:
         print(f"{label}: refused, {e}. Nothing was deleted; every edit in "
               f"{managed.path} was preserved.")
+        return 1
+
+    try:
+        contract = shared_paths.classify(managed.main, source_worktree)
+        if contract.settled:
+            shared_paths.require_directory_link_agreement(
+                managed.main, source_worktree, contract, folder=folder)
+    except AssentError as e:
+        print(f"{label}: refused, {e}. The reconciliation worktree "
+              f"{managed.path} and every edit were preserved.")
+        return 1
+    if not contract.settled:
+        print(f"{label}: refused, {shared_paths.closeout_refusal(contract)}. "
+              f"The reconciliation worktree {managed.path} and every edit "
+              "were preserved.")
         return 1
 
     if not managed.path.exists():

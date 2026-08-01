@@ -306,6 +306,8 @@ def current_batch_shared_inputs(main: Path,
                 f"the shared-path contract for {source.folder} is "
                 f"{contract.state}; the batch receipt's shared-input evidence "
                 "can no longer be reproduced")
+        shared_paths.require_directory_link_agreement(
+            main, worktree or main, contract, folder=source.folder)
         contracts.append((source.folder, contract))
     return shared_paths.shared_inputs_digest(main, contracts)
 

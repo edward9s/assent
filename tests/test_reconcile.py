@@ -288,6 +288,33 @@ class SharedPathContractTest(ReconcileRepositoryCase):
 
 
 class StartTest(ReconcileRepositoryCase):
+    def test_undeclared_source_link_refuses_before_managed_resources(self) -> None:
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "ignore shared package")
+        self._conflicting_repository()
+        (self.root / "pkg").mkdir()
+        (self.root / "pkg" / "primary.txt").write_text(
+            "primary\n", encoding="utf-8")
+        settle_shared_paths(self.root, self.source_worktree)
+        external = self.parent / "external source package"
+        external.mkdir()
+        (external / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+        make_directory_link(self.source_worktree / "pkg", external)
+
+        code, output = self._run(reconcile_start)
+
+        self.assertEqual(code, 1)
+        self.assertIn("outside its active REVIEWED-NONE", output)
+        self.assertIn("Nothing was created", output)
+        self._assert_managed_gone()
+        self.assertEqual(
+            (external / "sentinel.txt").read_text(encoding="utf-8"), "keep\n")
+        self.assertEqual(
+            (self.root / "pkg" / "primary.txt").read_text(encoding="utf-8"),
+            "primary\n")
+
     def test_start_prepares_only_the_reconciliation_worktree(self) -> None:
         self._conflicting_repository()
         code, output = self._run(reconcile_start)
@@ -408,6 +435,30 @@ class StartTest(ReconcileRepositoryCase):
 
 
 class ContinueTest(ReconcileRepositoryCase):
+    def test_undeclared_source_link_refuses_before_resuming_managed_worktree(
+            self) -> None:
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "ignore shared package")
+        self._conflicting_repository()
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        external = self.parent / "late external source package"
+        external.mkdir()
+        (external / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+        make_directory_link(self.source_worktree / "pkg", external)
+
+        code, output = self._run(reconcile_continue)
+
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "outside its active NO-IGNORED-DIRECTORY-CANDIDATE", output)
+        self.assertIn("every edit were preserved", output)
+        self.assertTrue(self._managed_path().exists())
+        self.assertTrue(gitops.branch_exists(self.root, self._managed_branch()))
+        self.assertEqual(
+            (external / "sentinel.txt").read_text(encoding="utf-8"), "keep\n")
+
     def test_continue_detaches_main_tree_links_before_managed_cleanup(self) -> None:
         before = self._provision_linked_targets()
         self._conflicting_repository()

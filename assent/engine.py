@@ -194,14 +194,19 @@ def _diagnosed_shared_inputs(cfg: Config) -> tuple[str, ...]:
 
 
 def _shared_paths_contract(cfg: Config) -> "shared_paths.Contract":
-    """Return this source worktree's current shared-path contract.
+    """Return this source worktree's current usable shared-path contract.
 
     Both the bounded review clause and the closeout gate ask the same question of
-    the same snapshot.  Classification errors intentionally propagate: an
-    unreadable or ambiguous manifest is a closeout refusal, never permission to
-    finish as though no shared input existed.
+    the same snapshot. Classification and agreement errors intentionally
+    propagate: an unreadable or ambiguous manifest or an undeclared source link
+    is a closeout refusal, never permission to finish as though no shared input
+    existed.
     """
-    return shared_paths.classify(gitops.main_worktree(cfg.root), cfg.root)
+    main = gitops.main_worktree(cfg.root)
+    contract = shared_paths.classify(main, cfg.root)
+    if contract.settled:
+        shared_paths.require_directory_link_agreement(main, cfg.root, contract)
+    return contract
 
 
 def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
