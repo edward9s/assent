@@ -367,11 +367,15 @@ receipt 延後。若這次呼叫有 `--verify`,收尾訊息會說明同一次呼
 run-level verification,不會再叫使用者重新啟動已經正在進行的驗證命令;表格中的
 exact selected 或動態路徑就是這個交接。
 
-表格中的單一資料夾路徑會在 folder verification 更新、使 receipt 失效或留下
-沒有 receipt 之後 refresh `_report.md`,因此報告會反映這次呼叫最新的 receipt
-結果。這個 best-effort 寫入不會改變 verification 的 exit code 或中斷處理;
-selected 或動態 batch 驗證以及 `--focus` 保留原有契約,不會只為了對稱而刷新
-folder report。
+所有 production 的 folder-level complete verification 都使用同一個 closeout
+boundary: `verify_folder` 或 `verify_folder_if_needed` 結束並釋放 verification
+locks 後,恰好嘗試一次 best-effort `_report.md` refresh。這涵蓋 PASSED、FAILED、
+stale-receipt replacement、fresh-receipt reuse、malformed-receipt refusal、
+incomplete-folder no-op 與 interrupt 結果;報告會看到最後的 receipt 狀態,但
+不會改變或遮蔽 verification 結果。它適用於 direct folder verify、單資料夾
+`run --verify`、automatic run closeout 以及 `accept --all` 的逐資料夾 fallback。
+selected 或動態 batch 驗證與 `--focus` 不寫 folder receipt,因此不會只為了對稱
+刷新 folder report。
 
 `--once`、`--task` 可以與 `--verify` 併用。它們恰好只選出一個資料夾,receipt 的
 範圍因此毫無歧義,但它們在單一任務後就停止:所以只有在該次受限執行讓所選資料夾
@@ -600,9 +604,10 @@ focused verify;資料夾完成後是否還在 AI session 外建立臨時 integra
 當成同一次呼叫的立即交接;`"auto"` 則在資料夾全部任務完成時的 run 收尾就執行。
 
 `assent verify <FOLDER>` 是零 token、可離席執行的完整驗證 receipt refresh,不改
-target、不開 AI session;單一資料夾路徑會在 receipt 更新後 refresh `_report.md`,
-所以報告與 receipt 描述同一個最新的資料夾驗證結果,而且這個 best-effort 寫入
-不會改變 verification 結果。`assent verify --batch` 則對每個已完成、尚未整合的
+target、不開 AI session。它的 folder-verification boundary 會在 receipt 操作與
+lock 釋放後恰好 refresh `_report.md` 一次,所以報告與 receipt 描述同一個最新的
+資料夾驗證結果;這個 best-effort 寫入不會改變 verification 結果或 interrupt。
+`assent verify --batch` 則對每個已完成、尚未整合的
 資料夾一次做同樣的事,但不會順便刷新 folder report。兩者的報告都會顯示
 `PASSED`/`FAILED` 與 `fresh`/`stale`,stale 時可在無人值守階段重新 refresh。直接
 `assent accept <FOLDER>` 與 selected

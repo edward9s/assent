@@ -589,7 +589,7 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
                       "(default) for the per-folder receipt under manual "
                       "policy; run "
                       "`assent verify [--batch]` before accepting")
-        try_write_report(cfg)
+            try_write_report(cfg)
     return result
 
 

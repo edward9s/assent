@@ -443,12 +443,17 @@ also says the run-level verification follows in the same invocation, so it does
 not tell the user to start the verification command again; the exact selected
 or dynamic path in the table is the handoff that follows.
 
-For the one-folder paths in the table, the chained folder verification refreshes
-`_report.md` after it updates, invalidates, or leaves the folder receipt absent,
-so the report observes that invocation's latest receipt outcome. This report
-write is best-effort and never changes the verification exit code or interrupt
-handling. Selected or dynamic batch verification and `--focus` keep their
-existing contracts and do not refresh a folder report merely for symmetry.
+Every production folder-level complete verification path uses one closeout
+boundary: after `verify_folder` or `verify_folder_if_needed` settles and releases
+its locks, it refreshes `_report.md` after the receipt operation and lock release
+exactly once on a best-effort basis. The report
+therefore observes PASSED, FAILED, stale-receipt replacement, fresh-receipt
+reuse, malformed-receipt refusal, incomplete-folder no-op, and interrupt
+outcomes without changing or masking the verification result. This covers
+direct folder verify, single-folder `run --verify`, automatic run closeout, and
+the sequential per-folder fallback of `accept --all`. Selected or dynamic
+batch verification and `--focus` write no folder receipt, so they do not refresh
+a folder report merely for symmetry.
 
 `--once` and `--task` may be combined with `--verify`. They select exactly one
 folder, so the receipt scope is unambiguous, but they stop after a single task:
@@ -744,10 +749,11 @@ or dynamic run-level verification as the immediate handoff, while `"auto"`
 runs the folder refresh at closeout as soon as every task in the folder is done.
 
 `assent verify <FOLDER>` refreshes that complete verification receipt with zero
-tokens and no AI session, then refreshes `_report.md` after the receipt update;
-the report and receipt therefore describe the same latest folder-verification
-outcome. The report write is best-effort and never changes the verification
-result. `assent verify --batch` does the same for every finished,
+tokens and no AI session. Its folder-verification boundary refreshes
+`_report.md` exactly once after the receipt operation and lock release, so the
+report and receipt describe the same latest folder-verification outcome; the
+write is best-effort and never changes the verification result or interrupt.
+`assent verify --batch` does the same for every finished,
 not-yet-integrated folder as one candidate, but does not refresh a folder report
 as a side effect. Either command's `PASSED`/`FAILED` and `fresh`/`stale` state is
 shown in the report, so a stale receipt can be refreshed unattended. Direct

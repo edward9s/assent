@@ -19,7 +19,10 @@ files:
 ``assent.verification_common`` holds what more than one of them needs.  This
 module adds no behavior of its own: it exists so that ``accept``, ``engine``,
 ``reconcile``, ``reject``, ``rework``, and the CLI keep one import name for the
-whole verification surface.
+whole verification surface.  The per-folder entry points own their shared
+closeout handoff through ``assent.folder_verification_closeout``; batch and
+focused verification remain receipt paths of their own and do not refresh a
+folder report.
 """
 from __future__ import annotations
 
@@ -37,6 +40,8 @@ from assent.batch_verification import (BatchBisectResult, BatchConflict,
                                        select_explicit_batch_folders,
                                        verify_batch, verify_batch_selected,
                                        verify_selected_batch)
+from assent.folder_verification_closeout import (verify_folder,
+                                                 verify_folder_if_needed)
 from assent.folder_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         VerificationReceipt,
                                         current_shared_inputs,
@@ -44,7 +49,6 @@ from assent.folder_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         read_verification_receipt,
                                         receipt_matches_current_candidate,
                                         receipt_path, receipt_report_lines,
-                                        verify_folder, verify_folder_if_needed,
                                         write_receipt,
                                         write_verification_receipt)
 from assent.verification_common import (

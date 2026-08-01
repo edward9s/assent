@@ -404,7 +404,7 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
     return receipt
 
 
-def verify_folder(cfg: Config) -> int:
+def verify_folder_receipt(cfg: Config) -> int:
     """Verify exactly ``cfg.tasks_name`` and return zero only for PASSED."""
     folder = cfg.tasks_name
     try:
@@ -426,6 +426,14 @@ def verify_folder(cfg: Config) -> int:
         print(f"Run `assent reconcile {folder}` to resolve the source-versus-"
               "target conflict in an isolated worktree, then verify again.")
     return 1
+
+
+def verify_folder(cfg: Config) -> int:
+    """Run folder verification through the shared report closeout boundary."""
+    from importlib import import_module
+
+    return import_module(
+        "assent.folder_verification_closeout").verify_folder(cfg)
 
 
 def _receipt_matches_current_candidate_locked(cfg: Config) -> bool:
@@ -513,7 +521,7 @@ def receipt_matches_current_candidate(cfg: Config) -> bool:
             return _receipt_matches_current_candidate_locked(cfg)
 
 
-def verify_folder_if_needed(cfg: Config) -> int:
+def verify_folder_receipt_if_needed(cfg: Config) -> int:
     """Run unattended verification unless an exact current PASSED receipt exists.
 
     This is the post-task scheduler entry point.  It deliberately acquires the
@@ -553,6 +561,14 @@ def verify_folder_if_needed(cfg: Config) -> int:
         return 0
     print(f"verify {folder}: failed ({receipt.failure_summary})")
     return 1
+
+
+def verify_folder_if_needed(cfg: Config) -> int:
+    """Run conditional folder verification through the shared report closeout."""
+    from importlib import import_module
+
+    return import_module(
+        "assent.folder_verification_closeout").verify_folder_if_needed(cfg)
 
 
 def receipt_report_lines(cfg: Config) -> list[str]:

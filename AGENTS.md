@@ -129,6 +129,15 @@ while operating an assent-managed session live in
   not-already-integrated accept, stops on the first failure, and preserves
   earlier publications. A malformed batch receipt refuses rather than falling
   back. Exact receipt replay and the human approval boundary remain mandatory.
+- Every production folder-level complete verification operation, whether
+  `verify_folder` or `verify_folder_if_needed`, refreshes that folder's
+  `_report.md` exactly once after the receipt operation settles and all
+  verification locks are released. The best-effort refresh observes PASSED,
+  FAILED, stale-receipt replacement, fresh-receipt reuse, malformed-receipt
+  refusal, incomplete-folder no-op, and interrupt outcomes without changing or
+  masking the verification result. Focused verification and selected or
+  dynamic batch verification write no folder receipt and therefore do not
+  refresh a folder report.
 - A verification receipt is a deletable derived artifact, never an independent
   source of truth: source commits, the reconstructed integration tree, and the
   verification-script digest must reproduce it before it can authorize accept.

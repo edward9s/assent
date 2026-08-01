@@ -714,12 +714,19 @@ the per-folder receipt. If `--verify` was requested, that closeout identifies
 the run-level verification that follows in the same invocation instead of
 telling the user to start that verification command again.
 
-For a one-folder run-level verification, the chained folder verification
-refreshes `_report.md` after it updates, invalidates, or leaves the folder
-receipt absent, so the report observes the latest receipt outcome. This
-best-effort write never changes the verification exit code or interrupt
-handling. Selected or dynamic batch verification and `--focus` do not refresh a
-folder report merely for symmetry.
+Every production folder-level complete verification operation uses the same
+closeout boundary: after `verify_folder(cfg)` or
+`verify_folder_if_needed(cfg)` settles and releases its verification locks, it
+refreshes `_report.md` after the receipt operation and lock release exactly once
+on a best-effort basis. This includes PASSED and
+FAILED results, stale-receipt replacement, fresh-receipt reuse,
+malformed-receipt refusal, incomplete-folder no-op, and interrupt outcomes; the
+refresh observes the resulting receipt state and never changes or masks the
+verification result or interrupt. This invariant covers direct folder verify,
+single-folder `run --verify`, automatic run closeout, and the sequential
+per-folder fallback of `accept --all`. Selected or dynamic batch verification
+and `--focus` write no folder receipt and therefore do not refresh a folder
+report merely for symmetry.
 
 `assent verify FOLDER --focus` is the distinct focused mode and requires one
 folder. It runs each distinct `verify` command belonging to a `DONE` task in
@@ -1110,20 +1117,21 @@ fallback may run `verify_folder_if_needed` when batch evidence is absent or
 expired. The report still shows a missing receipt as `NOT RUN`.
 
 `assent verify <FOLDER>` is a zero-token, unattended full receipt refresh. It
-does not change the target or open an AI session. The single-folder path also
-refreshes `_report.md` after the receipt update, so the report and receipt
-describe the same latest folder-verification outcome; this write is
-best-effort and never changes the verification result. It may be run again
-whenever the receipt is stale or missing. `assent verify A B` is the selected
-equivalent: it normalizes exactly the named set to dependency order, builds one
-integration candidate, runs the full verifier once, and writes one batch receipt
-for that exact set. A selected conflict refuses instead of being skipped. Batch
-and focused verification do not refresh a folder report as a side effect. Both
-commands produce derived, disposable evidence: it never outranks Git and can
-be deleted and rebuilt. A changed target commit does not by itself make
-acceptance impossible when the rebuilt candidate tree is identical; a changed
-candidate tree makes the receipt stale. Neither command changes a Git ref or
-accepts a folder.
+does not change the target or open an AI session. Its folder-verification
+boundary refreshes `_report.md` exactly once after the receipt operation and
+lock release, including when the receipt is reused, refused, replaced, or the
+folder is incomplete; the write is best-effort and never changes the
+verification result or interrupt. It may be run again whenever the receipt is
+stale or missing. `assent verify A B` is the selected equivalent: it normalizes
+exactly the named set to dependency order, builds one integration candidate,
+runs the full verifier once, and writes one batch receipt for that exact set. A
+selected conflict refuses instead of being skipped. Batch and focused
+verification do not refresh a folder report as a side effect. Both commands
+produce derived, disposable evidence: it never outranks Git and can be deleted
+and rebuilt. A changed target commit does not by itself make acceptance
+impossible when the rebuilt candidate tree is identical; a changed candidate
+tree makes the receipt stale. Neither command changes a Git ref or accepts a
+folder.
 
 `assent verify --batch` is the same unattended, zero-token refresh, but for
 the dynamic set of every finished, not-yet-integrated folder. It uses the same

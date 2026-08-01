@@ -18,12 +18,13 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from assent import engine
 from assent.config import load_config
 from assent.folder_verification import (VerificationReceipt, _verify_locked,
-                                        verify_folder_if_needed)
+                                        verify_folder, verify_folder_if_needed)
 from assent.verification_common import run_full_verifier
 from tests.test_contracts import GlobalContractsMixin
 
@@ -174,13 +175,14 @@ class TestRunCloseoutReceiptPolicy(VerificationEngineCase):
                 mock.patch("assent.engine.try_write_report") as report:
             with contextlib.redirect_stdout(out):
                 result = engine.run(self.cfg, once=True, **options)
-        self.assertTrue(report.called)
+        self.engine_report_called = report.called
         return result, calls, out.getvalue()
 
     def test_default_manual_runs_no_full_verification_and_states_the_next_step(self):
         result, calls, output = self._run_closeout()
         self.assertEqual(result, 0)
         self.assertEqual(calls, [])
+        self.assertTrue(self.engine_report_called)
         self.assertIn("receipt refresh deferred (default)", output)
         self.assertIn("assent verify [--batch]", output)
         self.assertFalse((self.tasks_dir / "_verification.toml").exists())
@@ -190,12 +192,14 @@ class TestRunCloseoutReceiptPolicy(VerificationEngineCase):
         result, calls, output = self._run_closeout()
         self.assertEqual(result, 0)
         self.assertEqual(calls, [])
+        self.assertTrue(self.engine_report_called)
         self.assertIn("receipt refresh deferred (default)", output)
 
     def test_run_level_verification_handoff_does_not_repeat_the_next_command(self):
         result, calls, output = self._run_closeout(run_level_verify=True)
         self.assertEqual(result, 0)
         self.assertEqual(calls, [])
+        self.assertTrue(self.engine_report_called)
         self.assertIn("per-folder receipt", output)
         self.assertIn("run-level verification follows this invocation", output)
         self.assertNotIn("assent verify [--batch]", output)
@@ -205,8 +209,156 @@ class TestRunCloseoutReceiptPolicy(VerificationEngineCase):
         result, calls, output = self._run_closeout()
         self.assertEqual(result, 0)
         self.assertEqual(calls, ["verify"])
+        self.assertFalse(self.engine_report_called)
         # Nothing is added around the verification layer's own line under "auto".
         self.assertEqual(output, "verify work: passed (deadbeef)\n")
+
+
+class TestFolderVerificationReportCloseout(VerificationEngineCase):
+    """Every per-folder verification result refreshes its report once, outside locks."""
+
+    def _locks(self, events: list[str]):
+        @contextmanager
+        def integration_lock(_path):
+            events.append("integration-enter")
+            try:
+                yield
+            finally:
+                events.append("integration-exit")
+
+        @contextmanager
+        def folder_lock(*_args):
+            events.append("folder-enter")
+            try:
+                yield
+            finally:
+                events.append("folder-exit")
+
+        return integration_lock, folder_lock
+
+    def test_success_and_failure_refresh_after_receipt_operation_and_locks(self):
+        for status, expected_result in (("PASSED", 0), ("FAILED", 1)):
+            with self.subTest(status=status):
+                self.write_status("DONE")
+                events: list[str] = []
+                integration_lock, folder_lock = self._locks(events)
+                receipt = SimpleNamespace(
+                    status=status, integration_tree="tree", failure_summary="")
+
+                def verify(_cfg):
+                    events.append("receipt")
+                    return receipt
+
+                with mock.patch("assent.folder_verification.hold_integration_lock",
+                                integration_lock), \
+                        mock.patch("assent.folder_verification.hold_lock",
+                                   folder_lock), \
+                        mock.patch("assent.folder_verification._verify_locked",
+                                   side_effect=verify), \
+                        mock.patch(
+                            "assent.folder_verification_closeout.try_write_report",
+                            side_effect=lambda _cfg: events.append("report")) as report:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        result = verify_folder(self.cfg)
+
+                self.assertEqual(result, expected_result)
+                self.assertEqual(events, [
+                    "integration-enter", "folder-enter", "receipt",
+                    "folder-exit", "integration-exit", "report",
+                ])
+                report.assert_called_once_with(self.cfg)
+
+    def test_refusal_and_interrupt_still_refresh_once_after_locks(self):
+        for outcome in (engine.AssentError("refused"), KeyboardInterrupt()):
+            with self.subTest(outcome=type(outcome).__name__):
+                self.write_status("DONE")
+                events: list[str] = []
+                integration_lock, folder_lock = self._locks(events)
+
+                def verify(_cfg):
+                    events.append("receipt")
+                    raise outcome
+
+                with mock.patch("assent.folder_verification.hold_integration_lock",
+                                integration_lock), \
+                        mock.patch("assent.folder_verification.hold_lock",
+                                   folder_lock), \
+                        mock.patch("assent.folder_verification._verify_locked",
+                                   side_effect=verify), \
+                        mock.patch(
+                            "assent.folder_verification_closeout.try_write_report",
+                            side_effect=lambda _cfg: events.append("report")) as report:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        if isinstance(outcome, KeyboardInterrupt):
+                            with self.assertRaises(KeyboardInterrupt):
+                                verify_folder(self.cfg)
+                        else:
+                            self.assertEqual(verify_folder(self.cfg), 1)
+
+                self.assertEqual(events, [
+                    "integration-enter", "folder-enter", "receipt",
+                    "folder-exit", "integration-exit", "report",
+                ])
+                report.assert_called_once_with(self.cfg)
+
+    def test_report_failure_cannot_change_result_or_mask_interrupt(self):
+        self.write_status("DONE")
+        receipt = SimpleNamespace(
+            status="PASSED", integration_tree="tree", failure_summary="")
+        with mock.patch("assent.folder_verification._verify_locked",
+                        return_value=receipt), \
+                mock.patch(
+                    "assent.folder_verification_closeout.try_write_report",
+                    side_effect=OSError("report unavailable")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(verify_folder(self.cfg), 0)
+
+        with mock.patch("assent.folder_verification._verify_locked",
+                        side_effect=KeyboardInterrupt), \
+                mock.patch(
+                    "assent.folder_verification_closeout.try_write_report",
+                    side_effect=OSError("report unavailable")):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    self.assertRaises(KeyboardInterrupt):
+                verify_folder(self.cfg)
+
+    def test_incomplete_folder_and_fresh_reuse_refresh_once(self):
+        events: list[str] = []
+        integration_lock, folder_lock = self._locks(events)
+        with mock.patch("assent.folder_verification.hold_integration_lock",
+                        integration_lock), \
+                mock.patch("assent.folder_verification.hold_lock", folder_lock), \
+                mock.patch(
+                    "assent.folder_verification_closeout.try_write_report",
+                    side_effect=lambda _cfg: events.append("report")) as report:
+            self.write_status("TODO")
+            self.assertEqual(verify_folder_if_needed(self.cfg), 0)
+            self.write_status("DONE")
+            (self.tasks_dir / "_verification.toml").write_text(
+                "receipt\n", encoding="utf-8")
+            with mock.patch(
+                    "assent.folder_verification._receipt_matches_current_candidate_locked",
+                    return_value=True), \
+                    mock.patch("assent.folder_verification.read_receipt",
+                               return_value=SimpleNamespace(
+                                   status="PASSED", integration_tree="tree")), \
+                    mock.patch("assent.folder_verification.gitops.main_worktree",
+                               return_value=self.root):
+                self.assertEqual(verify_folder_if_needed(self.cfg), 0)
+            with mock.patch(
+                    "assent.folder_verification._receipt_matches_current_candidate_locked",
+                    side_effect=engine.AssentError("malformed receipt")):
+                self.assertEqual(verify_folder_if_needed(self.cfg), 1)
+
+        self.assertEqual(events, [
+            "integration-enter", "folder-enter", "folder-exit",
+            "integration-exit", "report",
+            "integration-enter", "folder-enter", "folder-exit",
+            "integration-exit", "report",
+            "integration-enter", "folder-enter", "folder-exit",
+            "integration-exit", "report",
+        ])
+        self.assertEqual(report.call_count, 3)
 
 
 class TestAutomaticReceiptPolicy(VerificationEngineCase):
