@@ -543,6 +543,16 @@ def commit_if_dirty(root: Path, message: str, excludes: Sequence[str] = ()) -> b
     return True
 
 
+def commit_empty(root: Path, message: str) -> None:
+    """Create an intentionally empty commit for terminal ownership evidence.
+
+    The caller has already proved that no meaningful working-tree changes remain.  Keeping
+    this separate from :func:`commit_all` means an empty terminal marker never stages or
+    traverses project content, including embedded repositories or runtime artifacts.
+    """
+    _git(root, "commit", "--allow-empty", "-m", message)
+
+
 def head_ref(root: Path) -> str | None:
     """The current HEAD commit hash; returns None if unavailable (e.g. an empty repo)."""
     result = _run_git(root, "rev-parse", "HEAD")

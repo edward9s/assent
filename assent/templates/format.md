@@ -544,7 +544,7 @@ acceptance = """
 | Status | Meaning |
 |---|---|
 | `TODO` | not started (a new task; or reverted here when human review fails and orders a redo) |
-| `WIP` | a session touched it but did not finish = **a signal to resume after interruption**: `run` prefers to resume WIP tasks at startup |
+| `WIP` | a session touched it but did not finish = **a progress-bearing WIP checkpoint and signal to resume after interruption**: `run` prefers to resume WIP tasks at startup; WIP is not terminal success evidence |
 | `DONE` | the executing AI believes it is finished, pending the scheduler's objective review |
 | `BLOCKED` | stuck, handed to human adjudication (self-marked by the executing AI, or marked by the scheduler when retries are exhausted) |
 | `SKIP` | not doing it this round |
@@ -1267,7 +1267,11 @@ human.
    is recorded before retrying. Full candidate verification belongs to the
    post-folder scheduler stage, not to the AI tool.
 
-- Pass -> an `auto(<work folder>/tNNN): <title>` checkpoint commit. A
+- Pass -> one terminal `auto(<work folder>/tNNN): <title>` checkpoint commit. A
+  resumed task gets this terminal marker even when its tree is clean because an earlier WIP
+  checkpoint already contains all file changes: Assent creates an intentional empty commit
+  carrying only the namespaced ownership evidence. Ordinary dirty success commits its changes
+  once. No empty WIP checkpoint, duplicate terminal auto, or gate-failed task gets this marker. A
   self-marked BLOCKED -> after the structural tamper and fail-closed scope
   checks, committed directly in the same namespace without focused
   verification (BLOCKED is also a legitimate result, handed to human
@@ -1277,8 +1281,11 @@ human.
   file + commits along with the results that did not pass. **Token-burned output
   is never discarded.**
 - Quota exhausted -> not counted as a failure: the r file records `quota`,
-  progress is gathered into a `wip(<work folder>/tNNN)` checkpoint, and the
-  same task reruns carrying a "resume" prompt. With one configured adapter, a
+  the task status is written back to `WIP` unless the task explicitly wrote `BLOCKED`,
+  progress is gathered into a progress-bearing `wip(<work folder>/tNNN)` checkpoint, and the
+  same task reruns carrying a "resume" prompt. The status write happens before the wait or
+  adapter rotation, so a result that arrived after the AI wrote `DONE` cannot skip closeout.
+  With one configured adapter, a
   countdown waits for the known reset (or the configured quota poll when no
   reset is known). When `[adapter].name` is a list, quota exhaustion switches
   immediately to the next adapter in order; the scheduler waits for the
@@ -1287,9 +1294,10 @@ human.
 - Adapter checkpoint-resume control -> not counted as a failure: a finished,
   non-stalled, nonzero adapter process whose complete final non-empty output
   line is exactly `{"type":"assent.checkpoint_resume"}` records
-  `checkpoint_resume`, gathers progress into the same WIP checkpoint, refreshes
-  the report, and immediately reopens the same adapter command with the resume
-  prompt. It does not sleep, rotate adapters, or consume a retry. The terminal
+  `checkpoint_resume`, writes the task back to `WIP` unless it explicitly wrote `BLOCKED`,
+  gathers progress into the same WIP checkpoint, refreshes the report, and immediately reopens
+  the same adapter command with the resume prompt. It does not sleep, rotate adapters, or consume
+  a retry. The terminal
   control line is suppressed from live rendering while the raw adapter output
   remains available as result evidence. The record adds no configuration key or
   capability probe. A wrapper may replace a provider quota result with it only
@@ -1302,6 +1310,9 @@ human.
   provably inside the scope of the resumable candidate task: provable ->
   gathered into a `wip` checkpoint and the run continues, no AI session;
   otherwise -> fail-closed, `run` refuses and hands the state to a human.
+  A clean legacy `DONE` task backed only by an older WIP checkpoint is not treated as dirty and
+  does not receive a retroactive auto marker; existing history remains reviewable without being
+  synthesized, amended, rebased, or renumbered.
 - If setup fails after Assent creates a new worktree, only that exact,
   still-owned path and branch are cleanup candidates. Assent re-proves the
   clean checkout, expected `HEAD`, and branch ownership, detaches every
@@ -1344,6 +1355,11 @@ touching Git in general.
    moment history is rewritten, in every case. That is an expected cost:
    rebuild it through the standard `verify` flow. A receipt is a disposable
    cache, never a long-term source of truth.
+
+Legacy checkpoint boundary: a historical branch may contain a progress-bearing WIP checkpoint
+without its later terminal auto marker. Assent does not retroactively synthesize that marker or
+rewrite, amend, rebase, or renumber the branch; the empty terminal auto rule applies to a new
+resumed run that passes its gates.
 
 ## _report.md (the review meeting's agenda)
 

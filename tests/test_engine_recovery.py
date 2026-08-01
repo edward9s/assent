@@ -104,6 +104,11 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(len(adapter.calls), 1)
         self.assertIn("resume", adapter.calls[0][0])
         self.assertEqual(parse_task_file(first).status, "DONE")
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+        report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        self.assertRegex(report, r"t001  DONE\s+.*\[[0-9a-f]+\]")
         self.assertEqual(parse_task_file(second).status, "TODO")
         self.assertFalse(any(s.startswith("wip(plan01/t002)") for s in self.subjects()))
         self.assertEqual(
@@ -168,8 +173,7 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
         self.assertFalse(any(s.startswith("wip(plan01/") for s in self.subjects()))
 
     def test_wip_backed_done_task_without_auto_commit_is_not_reopened(self):
-        """A DONE task can legitimately have no auto() commit when all of its changes were
-        already stored in an earlier wip checkpoint; that clean state stays untouched."""
+        """A clean legacy DONE task backed only by WIP remains reviewable without history rewrite."""
         first = self.write_task(1, status="DONE", scope=("src/",))
         second = self.write_task(2, slug="next", scope=("other/",))
         cfg = self.build()
@@ -187,6 +191,51 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(len(adapter.calls), 1)
         self.assertNotIn("resume", adapter.calls[0][0])
         self.assertFalse(any(s.startswith("wip(plan01/t001): recovered")
+                             for s in self.subjects()))
+        self.assertFalse(any(s.startswith("auto(plan01/t001): ")
+                             for s in self.subjects()))
+
+    def test_wip_resume_creates_empty_terminal_auto_and_report_attribution(self):
+        path = self.write_task(1, status="WIP", title="Resume stored work",
+                               scope=("src/",))
+        cfg = self.build()
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "stored.py").write_text("stored", encoding="utf-8")
+        self._commit_in_worktree(worktree, "wip(plan01/t001): progress kept")
+
+        self.assertEqual(
+            self.run_quiet(cfg, once=True,
+                           adapter=ScriptedAdapter([self.ai_done(path)])), 0)
+
+        subjects = self.subjects()
+        autos = [s for s in subjects if s.startswith("auto(plan01/t001): ")]
+        self.assertEqual(autos, ["auto(plan01/t001): Resume stored work"])
+        auto_hash = self._git_execution("rev-parse", "HEAD").strip()
+        self.assertEqual(
+            self._git_execution("diff-tree", "--no-commit-id", "--name-only",
+                                "-r", "HEAD").strip(), "")
+        report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        self.assertIn(f"t001  DONE     Resume stored work  [{auto_hash[:7]}]", report)
+
+    def test_resumed_task_that_fails_a_gate_gets_no_empty_terminal_auto(self):
+        path = self.write_task(
+            1, status="WIP", scope=("src/",),
+            verify='python -c "raise SystemExit(3)"')
+        cfg = self.build(retry=0)
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "stored.py").write_text("stored", encoding="utf-8")
+        self._commit_in_worktree(worktree, "wip(plan01/t001): progress kept")
+
+        self.assertEqual(
+            self.run_quiet(cfg, once=True,
+                           adapter=ScriptedAdapter([self.ai_done(path)])), 0)
+
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        self.assertFalse(any(s.startswith("auto(plan01/t001): ")
                              for s in self.subjects()))
 
 

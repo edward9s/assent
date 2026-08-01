@@ -945,8 +945,17 @@ def _preserve_interrupted_progress(cfg: Config, task: Task,
 
     Quota exhaustion and the provider-neutral checkpoint-resume control have different
     continuation decisions, but both must preserve the same token-burned work before that
-    decision.  The caller owns the subsequent wait/rotation choice and sets the resume prompt.
+    decision.  The task is persisted as WIP first so a result that arrived after the execution
+    AI wrote DONE cannot skip the next run's resume path; an explicit BLOCKED result remains
+    untouched.  The caller owns the subsequent wait/rotation choice and sets the resume prompt.
     """
+    try:
+        fresh = parse_task_file(task.path)
+        if fresh.status != "BLOCKED":
+            set_status(task.path, "WIP")
+    except Exception as e:  # status persistence must not discard progress or hide the interruption
+        print(f"Writing back the resumable task status failed: {e} (working tree left as is, nothing discarded)")
+
     append_entry(task.journal_path, by="scheduler", event=event,
                  summary=summary, detail=detail,
                  agent=session.agent,
@@ -958,6 +967,23 @@ def _preserve_interrupted_progress(cfg: Config, task: Task,
             cfg.git_excludes):
         print("  wip checkpoint created.")
     try_write_report(cfg)
+
+
+def _commit_terminal_checkpoint(cfg: Config, task: Task, *, resumed: bool) -> bool:
+    """Create the one terminal auto checkpoint after a task passes every acceptance gate.
+
+    Ordinary success keeps its existing dirty-tree behavior.  A task that resumed from WIP is
+    different: its content may already be present in the preceding WIP commit, so a clean tree
+    still needs one empty, namespaced auto marker proving terminal ownership.  The caller invokes
+    this once, only after ``_evaluate`` returns ``done``.
+    """
+    subject = _checkpoint_subject(cfg, "auto", task, _short(task.title) or "done")
+    if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
+        return True
+    if resumed:
+        gitops.commit_empty(cfg.root, subject)
+        return True
+    return False
 
 
 def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
@@ -1140,11 +1166,11 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             outcome, reason = _evaluate(cfg, task, start_ref)
         if outcome == "done":
             print("  Acceptance passed -> creating checkpoint")
-            if not gitops.commit_if_dirty(
-                    cfg.root, _checkpoint_subject(
-                        cfg, "auto", task, _short(task.title) or "done"),
-                    cfg.git_excludes):
+            committed = _commit_terminal_checkpoint(cfg, task, resumed=resumed)
+            if not committed:
                 print("  (no new changes in the working tree; progress is already in a prior wip checkpoint)")
+            elif resumed:
+                print("  terminal auto checkpoint created; resumed progress was preserved")
             try_write_report(cfg)
             return
         if outcome == "self_blocked":

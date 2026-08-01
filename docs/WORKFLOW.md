@@ -42,14 +42,23 @@ The session runs the task's focused `verify` command. After it exits, Assent
 checks the task-file structural diff, scope, and focused result before changing
 status and recording the matching journal entry.
 
-Successful work receives an `auto(work-folder/task)` checkpoint. A failed
-attempt keeps its edits and retries with the reason; exhausted retries become a
-`BLOCKED` checkpoint with the work preserved. A handled quota interruption
-becomes a `WIP` checkpoint and resumes with a continue prompt after waiting or
-adapter rotation. The exact provider-neutral checkpoint-resume control record
-is `{"type":"assent.checkpoint_resume"}`; it requests immediate continuation
-without quota or account semantics. See [Configuration](CONFIGURATION.md) for
-adapter behavior.
+Successful work receives one terminal `auto(work-folder/task)` checkpoint. A
+failed attempt keeps its edits and retries with the reason; exhausted retries
+become a `BLOCKED` checkpoint with the work preserved. A handled quota
+interruption becomes a progress-bearing WIP checkpoint and resumes with a
+continue prompt after waiting or adapter rotation; the task status is set to
+`WIP` before that wait unless the session explicitly wrote `BLOCKED`. The exact
+provider-neutral checkpoint-resume control record is
+`{"type":"assent.checkpoint_resume"}`; it requests immediate continuation
+without quota or account semantics and follows the same WIP rule. When a
+resumed task later passes every gate, Assent writes exactly one terminal auto
+checkpoint even if the tree is clean because the WIP checkpoint already holds
+the changes: that marker is an intentional empty ownership-only commit. A
+normal dirty success still gets one content-bearing auto checkpoint. A clean
+legacy `DONE` task backed only by an older WIP checkpoint is left untouched; the
+new rule does not retroactively synthesize historical evidence and never
+rewrites it. See
+[Configuration](CONFIGURATION.md) for adapter behavior.
 
 The session's focused verification is not the scheduler's full candidate
 verification. Folder receipts are controlled by `[verification]

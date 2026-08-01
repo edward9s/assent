@@ -408,10 +408,17 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
             root = self.execution_root()
             (root / "src").mkdir(exist_ok=True)
             (root / "src" / "partial.py").write_text("p", encoding="utf-8")
+            # The adapter can write DONE before the process result is classified as quota;
+            # the scheduler must put the task back into the resumable state first.
+            set_status(path, "DONE")
             return TaskResult(exit_code=1, output="", quota_exhausted=True,
                               reset_at=reset)
 
-        adapter = ScriptedAdapter([quota_step, self.ai_done(path)])
+        def resumed(prompt):
+            self.assertEqual(parse_task_file(path).status, "WIP")
+            return self.ai_done(path)(prompt)
+
+        adapter = ScriptedAdapter([quota_step, resumed])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = engine.run(cfg, once=True, adapter=adapter,
@@ -425,6 +432,8 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(plan01/t001): ")
                             for s in subjects))
+        self.assertEqual(
+            len([s for s in subjects if s.startswith("auto(plan01/t001): ")]), 1)
         from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         quota = next(e for e in entries if e["event"] == "quota")
@@ -449,10 +458,15 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
             root = self.execution_root()
             (root / "src").mkdir(exist_ok=True)
             (root / "src" / "partial.py").write_text("kept", encoding="utf-8")
+            set_status(path, "DONE")
             return control
 
+        def resumed(prompt):
+            self.assertEqual(parse_task_file(path).status, "WIP")
+            return self.ai_done(path)(prompt)
+
         claude = ScriptedAdapter(
-            [checkpoint_step, self.ai_done(path)], resolved_model="claude-lite")
+            [checkpoint_step, resumed], resolved_model="claude-lite")
         codex = ScriptedAdapter([], resolved_model="codex-lite")
         sleeps: list[float] = []
         out = io.StringIO()
@@ -486,6 +500,30 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         self.assertNotIn("quota", [entry["event"] for entry in entries])
         self.assertTrue(any(subject.startswith("wip(plan01/t001): ")
                             for subject in self.subjects()))
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+
+    def test_quota_preserves_an_explicit_blocked_result(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0)
+        self.commit_all()
+
+        def blocked_quota(prompt):
+            set_status(path, "BLOCKED")
+            return TaskResult(exit_code=1, output="", quota_exhausted=True,
+                              reset_at=None)
+
+        def resumed(prompt):
+            self.assertEqual(parse_task_file(path).status, "BLOCKED")
+            return ok_result()
+
+        self.assertEqual(
+            engine.run(cfg, once=True, sleep=lambda _: None,
+                       adapter=ScriptedAdapter([blocked_quota, resumed])), 0)
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        self.assertFalse(any(s.startswith("auto(plan01/t001): ")
+                             for s in self.subjects()))
 
     def test_quota_rotates_to_next_adapter_and_records_each_identity(self):
         path = self.write_task(1)

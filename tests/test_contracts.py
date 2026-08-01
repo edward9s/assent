@@ -134,6 +134,29 @@ class TestContractContent(unittest.TestCase):
                               phrase=phrase):
                 self.assertIn(phrase, compact)
 
+    def test_wip_progress_and_terminal_auto_boundary_are_documented(self):
+        install_global_contracts(self)
+        format_text = contracts.installed_contract_text("format.md")
+        english = (_PROJECT_ROOT / "docs/WORKFLOW.md").read_text(
+            encoding="utf-8")
+        for name, text in (("format.md", format_text),
+                           ("docs/WORKFLOW.md", english)):
+            compact = " ".join(text.split())
+            for phrase in (
+                    "progress-bearing WIP checkpoint",
+                    "terminal auto",
+                    "clean legacy `DONE` task",
+                    "does not retroactively synthesize"):
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+
+        chinese = (_PROJECT_ROOT / "docs/zh-TW/WORKFLOW.md").read_text(
+            encoding="utf-8")
+        for phrase in ("具備進度的 `WIP`", "終端 auto checkpoint",
+                       "乾淨 legacy `DONE` task", "不會改寫或捏造歷史證據"):
+            with self.subTest(document="docs/zh-TW/WORKFLOW.md", phrase=phrase):
+                self.assertIn(phrase, chinese)
+
     def test_folder_verification_report_refresh_is_documented(self):
         install_global_contracts(self)
         english = {

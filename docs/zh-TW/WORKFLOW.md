@@ -34,11 +34,15 @@ assent check
 結束後，Assent 檢查 task-file structural diff、scope 與 focused 結果，才更新
 status 並寫入對應 journal。
 
-成功工作會有 `auto(work-folder/task)` checkpoint。失敗會保留編輯並附理由重試；
-重試用盡後成為保留成果的 `BLOCKED` checkpoint。quota 中斷會成為 `WIP`，等待或
-輪換 adapter 後以 continue prompt 恢復。唯一的 provider-neutral 立即續跑控制
-記錄是 `{"type":"assent.checkpoint_resume"}`；它不攜帶帳號、quota 或 reset
-語意。
+成功工作會有一個終端 `auto(work-folder/task)` checkpoint。失敗會保留編輯並附理由重試；
+重試用盡後成為保留成果的 `BLOCKED` checkpoint。quota 中斷會成為具備進度的 `WIP`
+checkpoint，並在等待或輪換 adapter 後以 continue prompt 恢復；除非 session 明確寫入
+`BLOCKED`，否則會先把 task status 寫回 `WIP`。唯一的 provider-neutral 立即續跑控制
+記錄是 `{"type":"assent.checkpoint_resume"}`，也遵循相同的 WIP 規則，不攜帶帳號、quota
+或 reset 語意。恢復的 task 後來通過所有 gate 時，即使 WIP checkpoint 已保存全部檔案變更、
+目前 tree 因而乾淨，Assent 仍只建立一個終端 auto checkpoint；這是只攜帶 ownership evidence
+的刻意空 commit。一般有變更的成功仍只有一個包含內容的 auto checkpoint。只由舊 WIP
+checkpoint 支撐的乾淨 legacy `DONE` task 會原樣保留；新規則不會改寫或捏造歷史證據。
 
 focused verify 不等於完整 candidate verification。`[verification]
 receipt_refresh` 預設為 `"manual"`，需要之後顯式 `assent verify`；設為
