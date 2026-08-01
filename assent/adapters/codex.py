@@ -201,7 +201,8 @@ class CodexAdapter(Adapter):
         stall_seconds = self.cfg.stall_minutes * 60 if self.cfg.stall_minutes else 0
         returncode, output, stalled = run_subprocess(
             command, cwd, stall_seconds, echo=self._echo_line)
-        exhausted = False if stalled else parse_output_for_quota(output)
+        exhausted = (
+            not stalled and returncode != 0 and parse_output_for_quota(output))
         billing = (not stalled and not exhausted and returncode != 0
                    and parse_output_for_billing(output))
         checkpoint_resume = (

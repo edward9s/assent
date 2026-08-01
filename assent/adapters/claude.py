@@ -273,7 +273,8 @@ class ClaudeAdapter(Adapter):
             return TaskResult(exit_code=returncode, output=output,
                               quota_exhausted=False, reset_at=None,
                               stalled=True)
-        exhausted, reset_at = parse_output_for_quota(output)
+        exhausted, reset_at = (
+            parse_output_for_quota(output) if returncode != 0 else (False, None))
         billing = (returncode != 0 and parse_output_for_billing(output)
                    if not exhausted else False)
         checkpoint_resume = (

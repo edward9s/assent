@@ -181,6 +181,18 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(stalled.stalled)
         self.assertFalse(stalled.quota_exhausted)
 
+    def test_quota_like_assistant_prose_on_success_is_not_quota(self):
+        for phrase in ("quota exceeded", "rate limit", "session limit"):
+            with self.subTest(phrase=phrase):
+                line = json.dumps({"type": "item.completed", "item": {
+                    "type": "agent_message",
+                    "text": f"The answer discusses {phrase}."}})
+                self.patch_run(lambda *args, **kwargs: (0, line + "\n", False))
+                result = CodexAdapter(make_cfg()).run_task(
+                    "p", "gpt-5.6-sol", None, Path("."))
+                self.assertEqual(result.exit_code, 0)
+                self.assertFalse(result.quota_exhausted)
+
     def test_billing_output_sets_failure_kind_not_quota(self):
         billing = json.dumps({"type": "turn.failed",
                               "error": {"message": "Credit balance is too low"}})

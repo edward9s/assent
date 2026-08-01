@@ -384,12 +384,25 @@ class TestRunTask(unittest.TestCase):
         ts = 1784041800
         quota_line = json.dumps({"type": "rate_limit_event", "rate_limit_info": {
             "status": "rejected", "resetsAt": ts}}) + "\n"
-        self.patch_run(lambda c, w, s, echo=None: (0, quota_line, False))
+        self.patch_run(lambda c, w, s, echo=None: (1, quota_line, False))
         adapter = ClaudeAdapter(make_cfg())
         result = adapter.run_task(
             "p", adapter.resolve_model("lite"), None, Path("."))
         self.assertTrue(result.quota_exhausted)
         self.assertEqual(result.reset_at, datetime.fromtimestamp(ts, tz=timezone.utc))
+
+    def test_quota_like_assistant_prose_on_success_is_not_quota(self):
+        for phrase in ("quota exceeded", "rate limit", "session limit"):
+            with self.subTest(phrase=phrase):
+                line = json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text",
+                                 "text": f"The answer discusses {phrase}."}]}})
+                self.patch_run(lambda c, w, s, echo=None: (0, line + "\n", False))
+                result = ClaudeAdapter(make_cfg()).run_task(
+                    "p", "fable", None, Path("."))
+                self.assertEqual(result.exit_code, 0)
+                self.assertFalse(result.quota_exhausted)
+                self.assertIsNone(result.reset_at)
 
     def test_billing_output_sets_failure_kind_not_quota(self):
         output = (FIXTURES / "stream_json_billing.txt").read_text(encoding="utf-8")
