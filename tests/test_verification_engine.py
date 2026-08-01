@@ -192,6 +192,14 @@ class TestRunCloseoutReceiptPolicy(VerificationEngineCase):
         self.assertEqual(calls, [])
         self.assertIn("receipt refresh deferred (default)", output)
 
+    def test_run_level_verification_handoff_does_not_repeat_the_next_command(self):
+        result, calls, output = self._run_closeout(run_level_verify=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("per-folder receipt", output)
+        self.assertIn("run-level verification follows this invocation", output)
+        self.assertNotIn("assent verify [--batch]", output)
+
     def test_auto_keeps_the_previous_closeout_behavior_and_output(self):
         self.set_receipt_refresh("auto")
         result, calls, output = self._run_closeout()

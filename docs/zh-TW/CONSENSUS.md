@@ -104,6 +104,11 @@ lock、receipt 或 Git 資格;省略資料夾、`--all`、`--batch` 與單獨的
 candidate 之前的關卡,會指出未完成的任務 id 與狀態,並且發生在任何整合 candidate
 或完整驗證器之前。作為呼叫層級的請求,`--verify` 不理會設定中的 receipt 刷新政策。
 
+在預設的 manual receipt-refresh 政策下,run 收尾延後的是 per-folder receipt;若這次
+呼叫要求了 `--verify`,收尾會指出同一次呼叫接下來的 run-level verification,不會
+叫使用者重新啟動那道已經要執行的命令。這樣交接仍然只有一個 invocation 與一個
+選擇集合。
+
 多資料夾的 `clean A B` 在一趟 upstream-first 流程裡清理,每個資料夾的證據規則
 不變。多資料夾的 `archive A B` 遵守的是單一資料夾 `archive` 的契約而非 `--all`
 的:每個被指名的資料夾都會嘗試,只是不合格也算被拒絕、以非零 exit code 結束,
@@ -125,6 +130,49 @@ accept。已整合資料夾是 ancestry no-op;已完成且 source branch 與 wor
 已證明整合後被清除的資料夾,只有這條路徑會跳過。malformed batch receipt 會拒絕,
 不會 fallback。逐資料夾路徑第一次真正的驗證或接受失敗就停止,但先前已發佈的成果
 保留不撤回。
+
+被忽略的輸入是交接問題,不是破口。候選由被追蹤內容加上剛好兩種鏡射產物——已審閱且由 Assent 佈建
+的被忽略目錄連結,以及一般被忽略葉節點檔案——組成,因此「必要的被忽略目錄必須透過
+shared-path review 記錄,再以 junction 或目錄符號連結佈建、絕不複製或手動建 link」這條規則,也寫在執行 session 真正會讀的
+打包排程任務指示中,而不只寫在 format 契約裡。若完整 verifier 仍然失敗在某個
+contributing source worktree 實體持有的被忽略目錄底下的路徑,證據會保留 verifier
+輸出與 exit code,並附上一則 `Ignored input diagnosis:` 註記,指名該目錄、說明它是
+刻意不放進候選的,並給出目錄連結的修法。它只回報 verifier 輸出自己指名的目錄,
+分隔符號先正規化,且不列舉任何被忽略的樹。不新增複製 fallback、`local_inputs`
+設定或 force 旗標。
+
+哪些被忽略目錄是共享的,是審閱出來的決定,不是推論。沒有任何檔案系統規則能證明
+某個被忽略目錄在語意上是必要的,因此這個答案只審閱一次,快取在主 worktree 那份
+未被追蹤的 `.assent/manifest.toml`——它是本機執行記憶,不是專案來源,永不提交,
+也不複製進任何 worktree。`[shared_paths]` 以指紋為鍵保留整份 profile(宣告路徑、
+精確的被追蹤 `watch` 檔,以及那些檔案加上被追蹤 Git-ignore 規則的摘要),使並行
+分支不會讓快取來回擺盪。source 快照為 `UNKNOWN`、`REVIEWED-NONE`(相符且
+`paths = []` 的 profile 就是答案,絕不因為它是空的而再次觸發審閱)、
+`REVIEWED-PATHS`(Assent 自行佈建精確的 junction 或目錄符號連結)或 `STALE`;
+相符但互相矛盾的 profile 一律 fail closed;一次新 review 會取代所有與目前快照相符
+的 profile,即使 watch 集合不同,並保留不相符的分支 profile。`assent shared-paths review` 是唯一的
+寫入者,先驗證再變更,持有一個專案本地鎖,並以原子方式取代檔案。`UNKNOWN` 與
+`STALE` 會為下一個已排程 session 附加一則有界的審閱指示,在 settled 之前拒絕其
+closeout。每一條驗證入口與 `assent reconcile` 都在候選、verifier 或受管 worktree
+出現之前先分類並調和,folder 與 batch receipt 綁定一個在 verifier 前後各取一次
+快照的 `shared_inputs_sha256`,也綁定每個 source 與 active profile 的精確連結一致性。
+未宣告的手動目錄連結會拒絕驗證與 reconcile,使 folder/batch receipt 重播以及 folder
+report freshness 過期或無效。acceptance 在推進 ref 之前再次核對,且絕不為了讓它
+通過而修復任何連結;一般被忽略葉節點檔案仍自動處理,不需審閱。
+
+`NO-IGNORED-DIRECTORY-CANDIDATE` 是與這些狀態並列、確定性的零 token 快捷路徑。
+它只主張:一次成功的 Git ignored-entry 查詢在主 worktree 找不到任何位於 `.git/`
+與 `.assent/` 之外、實際存在的一般被忽略目錄,而不是主張這個專案在語意上不需要
+共享輸入。它不需要 profile、junction 或 AI 審閱即告 settled,在 receipt 摘要中帶有
+與 `REVIEWED-NONE` 不同的身分,並在每一道適用的關卡廉價地重新計算。它 fail
+closed:Git 查詢失敗是可行動的拒絕,而不是空的候選集合;被忽略的葉節點檔案不算,
+任何一般被忽略目錄都算,即使之後審閱成 `paths = []`;出現候選時下一次分類為
+`UNKNOWN`,除非已有相符的快取 profile 回答它;完整 verifier 的 `required_evidence`
+指名缺少的目錄時,主 worktree 有合法目標就轉為審閱,否則以精確的「目標缺少或未被
+忽略」問題拒絕。候選列舉之所以問主 worktree,是因為每個被允許的連結目標都必須是
+該主 worktree 同一相對路徑上實際存在、被 Git 忽略的一般目錄,而全新的 source
+checkout 本來就不會有;只存在於尚未接受之 source 分支上的目錄或 ignore 規則尚不可
+佈建,會發出可行動的拒絕,而不是宣稱不需要。
 
 receipt 是 derived artifact,不凌駕 Git。target tip 改變但重建後 integration tree
 完全相同仍可接受;內容改變就 stale。直接與 selected acceptance 遇到 missing、
@@ -221,6 +269,15 @@ verification 覆蓋,conflict 則 target 不變交由人工作裁決。Assent 不
 
 ## 批次衝突略過共識(2026-07-26)
 
+Exact selected verification 的輸出標籤是 `verify selected`;`verify --batch` 只保留
+給動態發現與互動式衝突略過決策。Exact selected 的 candidate 建置若發生衝突,
+會在任何恢復建議前說明完整 verifier 尚未執行,列出衝突資料夾與路徑,並說明沒有
+寫入 receipt、target 與 selected source ref 都維持不變。若資料夾單獨就與 target
+衝突,直接指向 `assent reconcile <FOLDER>`;若只是 peer-only conflict,會列出衝突
+資料夾前方相容的 selected prefix,建議先驗證並接受該 prefix,等 target 前進後再
+針對衝突資料夾 reconcile。`rework` 與 `reject` 仍是明確替代方案。Exact
+selection 絕不提問略過,也不縮小集合。
+
 `verify --batch` 從不自行解決 source conflict;它只做一次決定:是否改為
 證明一個較小的批次,而非完全不證明。建置批次候選時,無論較早出現的
 conflict 為何,都仍會依序嘗試合併每個排入佇列的資料夾,因此一個資料夾
@@ -232,9 +289,10 @@ conflict 的資料夾與其遞移排在其 `after` 之後的下游一併蒐集�
 「否」、無法辨識的回答、或 EOF 一律 fail-closed,不證明任何東西。若整批
 都沒有獨立可提供的資料夾,批次會直接拒絕,不會提問。
 
-略過刻意不是任何形式的解決:它不改變 target 或任何 source(不論被略過
-或已合併),conflict 資料夾自身的 source 仍須經過明確的人工 `rework` 或
-`reject` 才能重新加入未來的批次。`accept --all` 有兩種不同模式:fresh PASSED
+略過刻意不是任何形式的解決:它不改變 target 或任何 source(不論被略過或已合併)。
+若是 peer-only conflict,可先驗證並接受衝突資料夾前方相容的工作,讓 target 前進
+後再處理該資料夾;`rework` 與 `reject` 仍是重新開啟或捨棄它的明確替代方案。
+`accept --all` 有兩種不同模式:fresh PASSED
 batch receipt 的 release 路徑只在一次原子 ref 更新中發佈 receipt 涵蓋的確切
 資料夾,其餘被排除的已完成資料夾只回報,同一次執行不驗證或接受它們。沒有 receipt,
 或 evidence 已過期/不是 PASSED 時,刻意的逐資料夾路徑會逐一驗證並接受,第一次
@@ -261,8 +319,9 @@ derived artifact,重建的代價只是一次 `assent verify`。`assent verify FO
 仍是由人控制的昂貴步驟,`assent accept FOLDER` 仍是明確批准,並且仍要求一份
 fresh、可重現的 `PASSED` 完整驗證 receipt。Reconcile 不是整合引擎:只處理單一
 資料夾對當前整合 target、不自動解決內容;兩個未被接受 source 之間、只在批次中
-出現的 conflict 仍留給 `verify --batch` 的略過決定,再由 `rework` 或 `reject`
-處理。
+出現的 conflict 仍留給動態 `verify --batch` 的略過決定。若 peer-only conflict
+前方已有相容工作,先驗證並接受該工作,再對 target 前進後的衝突資料夾 reconcile;
+`rework` 或 `reject` 仍是明確替代方案。
 
 ## 模型與推理投入共識
 

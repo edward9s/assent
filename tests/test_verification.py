@@ -13,18 +13,20 @@ from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
-from assent import AssentError
+from assent import AssentError, pathops, shared_paths
 from assent.config import load_config
-from assent.folder_verification import (RECEIPT_NAME, VerificationReceipt,
-                                        read_receipt,
+from assent.folder_verification import (RECEIPT_NAME, RECEIPT_VERSION,
+                                        VerificationReceipt, read_receipt,
                                         receipt_matches_current_candidate,
-                                        receipt_path, verify_folder,
+                                        receipt_path, receipt_report_lines,
+                                        verify_folder,
                                         write_receipt)
 from assent.gitops import (branch_tip, commit_of, folder_branches, tree_of,
                            working_tree_status)
 from assent.verification_common import (ProvisionedLink, _require_no_overlap,
                                         provisioned_candidate_links, summary,
                                         union_worktree_links)
+from tests.test_shared_paths import settle_shared_paths
 
 
 def _git(root: Path, *args: str) -> str:
@@ -106,6 +108,10 @@ class VerificationRepositoryCase(unittest.TestCase):
         _git(self.source_worktree, "commit", "-m", "source result")
         self.source_tip = commit_of(self.root, "plan測試/run")
         self.cfg = load_config(self.assent_dir / "assent.toml", "plan測試")
+        # These fixtures hand-provision whatever links they need, so the honest
+        # reviewed answer here is the empty one; recording it once gets every
+        # case past the shared-path gate without pretending a path is declared.
+        settle_shared_paths(self.root, self.source_worktree)
         self.addCleanup(self._cleanup)
 
     def _link_target(self, name: str) -> Path:
@@ -123,9 +129,16 @@ class VerificationRepositoryCase(unittest.TestCase):
         return peer
 
     def _provision_link(self, worktree: Path, name: str) -> Path:
-        """Link ``worktree/name`` at a fresh external target and return it."""
-        target = self._link_target(name)
-        make_directory_link(worktree / name, target)
+        """Review one same-relative primary target and return it."""
+        target = self.root / name
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "marker.txt").write_text(
+            f"{name} marker\n", encoding="utf-8")
+        declared = set(getattr(self, "declared", ()))
+        declared.add(name)
+        self.declared = tuple(sorted(declared))
+        shared_paths.review(
+            self.root, worktree, paths=self.declared, watch=("README.md",))
         return target
 
     def _write_verifier(self, exit_code: int, output_size: int = 0,
@@ -296,10 +309,10 @@ class TestVerificationRun(VerificationRepositoryCase):
             normalized,
             "short\noutput 診斷\nstderr?tail")
         receipt = VerificationReceipt(
-            version=1, status="FAILED", source_tip=self.source_tip,
+            version=RECEIPT_VERSION, status="FAILED", source_tip=self.source_tip,
             target_tip=self.target_tip,
             integration_tree=tree_of(self.root, self.source_tip),
-            verify_script_sha256="a" * 64,
+            verify_script_sha256="a" * 64, shared_inputs_sha256="b" * 64,
             verify_command="python .assent/verify.py", exit_code=1,
             completed_at="2026-01-01T00:00:00+00:00",
             failure_summary=normalized)
@@ -538,6 +551,7 @@ class TestReceiptParsing(VerificationRepositoryCase):
             version=True, status="PASSED", source_tip=self.source_tip,
             target_tip=self.target_tip, integration_tree=tree_of(
                 self.root, self.source_tip), verify_script_sha256="a" * 64,
+            shared_inputs_sha256="b" * 64,
             verify_command="python .assent/verify.py", exit_code=0,
             completed_at="2026-01-01T00:00:00+00:00", failure_summary="")
         with self.assertRaises(AssentError):
@@ -647,14 +661,11 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         (tracked / "keep.txt").write_text("tracked\n", encoding="utf-8")
         _git(self.root, "add", "-f", "pkg/keep.txt")
         _git(self.root, "commit", "-m", "track a real pkg directory")
-        self._provision_link(self.source_worktree, "pkg")
-
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code = verify_folder(self.cfg)
-
-        self.assertEqual(code, 1, output.getvalue())
-        self.assertIn("already contains pkg", output.getvalue())
+        target = self._link_target("occupied pkg")
+        with self.assertRaisesRegex(AssentError, "already contains pkg"):
+            with provisioned_candidate_links(
+                    self.root, (ProvisionedLink("pkg", target),)):
+                self.fail("an occupied candidate path was replaced")
         self.assertFalse(receipt_path(self.cfg).exists())
         self.assertEqual(self.counter.exists(), False)
 
@@ -671,6 +682,64 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         branches, paths = self._temporary_resources()
         self.assertEqual((branches, paths), ([], []))
 
+    def test_a_failure_below_a_copied_ignored_directory_is_diagnosed(self):
+        # The Flutter-shaped reproduction: the source worktree holds a physical
+        # copy of the ignored pkg/ tree, so the candidate simply has no
+        # pkg/fl_chart and the verifier fails on a path nobody provisioned.
+        package = self.source_worktree / "pkg" / "fl_chart"
+        package.mkdir(parents=True)
+        (package / "pubspec.yaml").write_text("name: fl_chart\n",
+                                              encoding="utf-8")
+        unrelated = self.source_worktree / "ignored"
+        unrelated.mkdir()
+        (unrelated / "editor.state").write_text("local\n", encoding="utf-8")
+        self._commit_target_verifier(
+            exit_code=1, absent=("pkg",),
+            stderr="Could not find a file named pubspec.yaml in pkg/fl_chart.")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = verify_folder(self.cfg)
+        text = output.getvalue()
+
+        self.assertEqual(code, 1, text)
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertEqual(receipt.exit_code, 1)
+        # The verifier's own words survive next to the actionable diagnosis.
+        self.assertIn("Could not find a file named pubspec.yaml",
+                      receipt.failure_summary)
+        for phrase in ("Ignored input diagnosis: pkg/",
+                       "intentionally omitted from the integration candidate",
+                       "record it with `assent shared-paths review`",
+                       "Do not copy the tree or hand-create"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, receipt.failure_summary)
+        self.assertIn("Ignored input diagnosis: pkg/", text)
+        # An ignored directory the failure never names stays unmentioned, and
+        # neither ignored tree was mirrored or disturbed.
+        self.assertNotIn("ignored/", receipt.failure_summary)
+        self.assertTrue((unrelated / "editor.state").is_file())
+        self.assertTrue((package / "pubspec.yaml").is_file())
+
+    def test_a_provisioned_link_named_in_a_failure_is_not_diagnosed(self):
+        # pkg/ is a real junction here, so it does reach the candidate; the
+        # failure is about the change, not about a missing input.
+        pkg = self._provision_link(self.source_worktree, "pkg")
+        self._commit_target_verifier(
+            exit_code=3, probe=("pkg",),
+            stderr="dependency resolution failed for pkg/fl_chart")
+
+        self.assertEqual(verify_folder(self.cfg), 1)
+
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertIn("dependency resolution failed", receipt.failure_summary)
+        self.assertNotIn("Ignored input diagnosis", receipt.failure_summary)
+        # The failed candidate cleanup left the link and its target intact.
+        self.assertTrue((pkg / "marker.txt").is_file())
+        self.assertTrue((self.source_worktree / "pkg" / "marker.txt").is_file())
+
     def test_a_dangling_link_refuses_without_writing_evidence(self):
         target = self._provision_link(self.source_worktree, "pkg")
         shutil.rmtree(target)
@@ -682,7 +751,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         # The human provisioned pkg deliberately, so a target that has gone
         # missing is a refusal rather than a candidate quietly missing it.
         self.assertEqual(code, 1, output.getvalue())
-        self.assertIn("cannot be resolved", output.getvalue())
+        self.assertIn("pkg does not exist", output.getvalue())
         self.assertFalse(receipt_path(self.cfg).exists())
         self.assertFalse(self.counter.exists())
         self.assertFalse((self.source_worktree / "pkg").is_dir())
@@ -698,12 +767,14 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
     """
 
     def _provision_nested(self) -> Path:
-        """Link the ignored lib/l10n/arb below tracked parents in the source."""
-        target = self.parent / "external arb"
-        target.mkdir()
+        """Review the ignored lib/l10n/arb below tracked parents."""
+        target = self.root / "lib/l10n/arb"
+        target.mkdir(parents=True)
         (target / "app_localizations.dart").write_text(
             "// generated localizations\n", encoding="utf-8")
-        make_directory_link(self.source_worktree / "lib/l10n/arb", target)
+        shared_paths.review(
+            self.root, self.source_worktree, paths=("lib/l10n/arb",),
+            watch=("README.md",))
         return target
 
     def _provision_generated_part(self) -> Path:
@@ -761,6 +832,23 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
         self.assertEqual(verify_folder(self.cfg), 0)
         self.assertTrue((cache / "build.g.dart").is_file())
 
+    def test_a_windows_separator_path_in_a_nested_ignored_tree_is_diagnosed(self):
+        # A nested ignored directory, named by a failure using backslashes, is
+        # the same handoff problem one level down.
+        cache = self.source_worktree / "lib/.cache"
+        cache.mkdir()
+        (cache / "build.g.dart").write_text("cached\n", encoding="utf-8")
+        self._commit_target_verifier(
+            exit_code=2,
+            stderr=r"FileNotFoundError: lib\.cache\build.g.dart is missing")
+
+        self.assertEqual(verify_folder(self.cfg), 1)
+
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertIn("Ignored input diagnosis: lib/.cache/",
+                      receipt.failure_summary)
+        self.assertTrue((cache / "build.g.dart").is_file())
+
     def test_cleanup_removes_only_the_parents_assent_created(self):
         # lib/models is part of the candidate's tracked tree, so only a parent
         # chain Assent had to create may be removed again afterwards.
@@ -810,3 +898,103 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSharedPathGate(VerificationRepositoryCase):
+    """Verification is a consumer of the reviewed shared-path cache.
+
+    The fixture's own reviewed empty answer is deliberately discarded here, so
+    each case starts from what a real project looks like the first time: real
+    ignored directories in the primary worktree and no reviewed answer at all.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        shared_paths.manifest_path(self.root).unlink()
+        for relative in ("pkg", "assets"):
+            (self.root / relative).mkdir(parents=True, exist_ok=True)
+            (self.root / relative / "marker.txt").write_text(
+                f"{relative} marker\n", encoding="utf-8")
+
+    def test_an_unreviewed_source_refuses_before_the_verifier_runs(self):
+        self._commit_target_verifier(exit_code=0, stderr="gate")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertIn("UNKNOWN", output.getvalue())
+        self.assertIn("assent shared-paths review", output.getvalue())
+        # No verifier ran and no receipt was written.
+        self.assertFalse(self.counter.exists())
+        self.assertFalse(receipt_path(self.cfg).exists())
+
+    def test_a_reviewed_profile_provisions_the_source_and_binds_the_digest(self):
+        shared_paths.review(self.root, self.source_worktree,
+                            paths=("pkg",), watch=("README.md",))
+        self._commit_target_verifier(exit_code=0, probe=("pkg",))
+
+        self.assertEqual(verify_folder(self.cfg), 0)
+
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertRegex(receipt.shared_inputs_sha256, r"^[0-9a-f]{64}$")
+        self.assertTrue(receipt_matches_current_candidate(self.cfg))
+
+        # Changing the declared target's content makes that receipt stale.
+        (self.root / "pkg" / "marker.txt").write_text(
+            "changed marker\n", encoding="utf-8")
+        self.assertFalse(receipt_matches_current_candidate(self.cfg))
+        self.assertIn(
+            "stale: shared inputs changed",
+            receipt_report_lines(self.cfg)[0])
+
+    def test_reviewed_none_refuses_an_external_ignored_directory_link(self):
+        shared_paths.review(self.root, self.source_worktree,
+                            none=True, watch=("README.md",))
+        external = self.parent / "external pkg"
+        external.mkdir()
+        marker = external / "marker.txt"
+        marker.write_text("external\n", encoding="utf-8")
+        make_directory_link(self.source_worktree / "pkg", external)
+        self._commit_target_verifier(exit_code=0, stderr="must not run")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(verify_folder(self.cfg), 1)
+
+        diagnostic = output.getvalue()
+        self.assertIn("outside its active REVIEWED-NONE profile", diagnostic)
+        self.assertIn("Remove the link if it is irrelevant", diagnostic)
+        self.assertIn("assent shared-paths review", diagnostic)
+        self.assertFalse(self.counter.exists())
+        self.assertFalse(receipt_path(self.cfg).exists())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "external\n")
+
+    def test_a_missing_link_is_recreated_rather_than_depended_on(self):
+        shared_paths.review(self.root, self.source_worktree,
+                            paths=("pkg",), watch=("README.md",))
+        pathops.detach_directory_link(self.source_worktree / "pkg")
+        self._commit_target_verifier(exit_code=0, probe=("pkg",))
+
+        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertTrue(pathops.is_link(self.source_worktree / "pkg"))
+
+    def test_a_target_changing_during_the_verifier_cannot_pass(self):
+        shared_paths.review(self.root, self.source_worktree,
+                            paths=("pkg",), watch=("README.md",))
+        # The stand-in verifier rewrites the declared target's content while it
+        # is running, which is exactly the race the second snapshot exists for.
+        marker = self.root / "pkg" / "marker.txt"
+        script = "\n".join((
+            "from pathlib import Path",
+            f"Path({str(marker)!r}).write_text("
+            "'moved during the run', encoding='utf-8')",
+            "raise SystemExit(0)",
+            ""))
+        (self.assent_dir / "verify.py").write_text(script, encoding="utf-8")
+        _git(self.root, "add", ".assent/verify.py")
+        _git(self.root, "commit", "-m", "verifier that disturbs a shared target")
+
+        self.assertEqual(verify_folder(self.cfg), 1)
+        receipt = read_receipt(receipt_path(self.cfg), self.root)
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertIn("shared input changed", receipt.failure_summary)

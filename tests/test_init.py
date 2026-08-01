@@ -34,8 +34,29 @@ class TestInitContractRefresh(unittest.TestCase):
 
         expected = (_PROJECT_ROOT / "assent/templates/format.md").read_bytes()
         self.assertEqual((self.user_home / "format.md").read_bytes(), expected)
+        self.assertIn(
+            "refreshes `_report.md` after",
+            expected.decode("utf-8"))
+        self.assertIn(
+            "descriptive `name` segment has no canonical-language requirement",
+            " ".join(expected.decode("utf-8").split()))
         self.assertFalse((self.root / ".assent/format.md").exists())
         self.assertIn("Updated:", output.getvalue())
+
+    def test_init_installs_the_ignored_input_provisioning_instruction(self):
+        """What a scheduled session reads must forbid copying an ignored tree."""
+        (self.user_home / "instructions.md").write_text(
+            "an older working instruction\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root, test="unittest"), 0)
+
+        text = " ".join((self.user_home / "instructions.md").read_text(
+            encoding="utf-8").split())
+        self.assertIn("Never copy the ignored directory tree in", text)
+        self.assertIn(
+            "assent shared-paths review --path DIR --watch FILE", text)
+        self.assertIn("Never hand-create a source-worktree link", text)
+        self.assertFalse((self.root / ".assent/instructions.md").exists())
 
 
 if __name__ == "__main__":

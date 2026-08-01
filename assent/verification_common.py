@@ -5,9 +5,11 @@ receipt-field vocabulary both receipt schemas validate against, the atomic
 write and digest helpers both of them use, the source-identity snapshot the
 folder and batch paths both take, the two candidate builders (one folder
 merged into the target, and an ordered chain of folders) that both the batch
-freshness rules and the batch execution path rebuild, and the provisioned
+freshness rules and the batch execution path rebuild, the provisioned
 directory links and ignored leaf files the folder and batch runs both mirror
-into a candidate before starting the full verifier.
+into a candidate before starting the full verifier, and the ignored-input
+diagnosis both of them append when a failing verifier names a path inside an
+ignored source directory that was deliberately not mirrored.
 
 This module deliberately imports none of ``folder_verification``,
 ``batch_receipt``, or ``batch_verification``, so those three stay independent
@@ -302,6 +304,123 @@ def discover_worktree_links(worktree: Path) -> tuple[ProvisionedLink, ...]:
     return tuple(sorted(directories + leaves, key=lambda link: link.path))
 
 
+IGNORED_INPUT_PREFIX = "Ignored input diagnosis: "
+
+
+def ordinary_ignored_directories(worktree: Path) -> tuple[str, ...]:
+    """List the physical ignored directory trees a source worktree holds.
+
+    These are exactly the trees ``discover_worktree_links`` deliberately does
+    not mirror: a real directory Git ignores, not a provisioned link.  Git's own
+    collapsed ignore walk supplies the names, and only the entry itself is
+    stat-ed, so no ignored tree is traversed to answer the question.
+    """
+    worktree = Path(worktree)
+    found: list[str] = []
+    for entry in gitops.ignored_entries(worktree):
+        if not entry.endswith("/"):
+            continue
+        relative = entry.rstrip("/")
+        if _excluded(relative) or pathops.is_link(worktree / relative):
+            continue
+        try:
+            _require_safe_relative(relative)
+        except AssentError:
+            continue
+        found.append(relative)
+    return tuple(sorted(found))
+
+
+def _mentions_path_below(text: str, relative: str) -> bool:
+    """True when ``text`` names something inside the ``relative`` directory.
+
+    The whole directory name must match at a path boundary, so ``mypkg/x`` does
+    not answer for ``pkg``, and a mention of the bare directory with nothing
+    below it is not a failing input either.
+    """
+    pattern = (r"(?:^|[^0-9A-Za-z_.\-])" + re.escape(relative)
+               + r"/[0-9A-Za-z_.\-]")
+    return re.search(pattern, text) is not None
+
+
+def ignored_input_diagnosis(output: str,
+                            worktrees: Iterable[Path | None]) -> str:
+    """Explain a verifier failure that names a physically ignored source path.
+
+    A candidate is built from tracked content plus the two mirrored artifact
+    kinds, so an ordinary ignored directory a source worktree happens to hold --
+    a copied package tree, for instance -- is simply not there.  The verifier
+    then fails on a path nobody provisioned, which reads like a broken change
+    rather than a missing input.
+
+    Only the directories whose own path the captured output actually names are
+    reported, after Windows separators are normalized, so unrelated ignored
+    trees are neither listed nor traversed.  An empty string means the failure
+    says nothing about an ignored input.
+    """
+    text = output.replace("\\", "/")
+    named: set[str] = set()
+    for worktree in worktrees:
+        if worktree is None:
+            continue
+        for relative in ordinary_ignored_directories(worktree):
+            if _mentions_path_below(text, relative):
+                named.add(relative)
+    if not named:
+        return ""
+    listed = ", ".join(f"{relative}/" for relative in sorted(named))
+    subject = ("is an ordinary ignored directory" if len(named) == 1
+               else "are ordinary ignored directories")
+    return (
+        f"{IGNORED_INPUT_PREFIX}{listed} {subject} in a contributing source "
+        "worktree, so it is intentionally omitted from the integration "
+        "candidate; complete verification mirrors only provisioned directory "
+        "links and ignored leaf files, never a physical ignored tree.\n"
+        "For a required input, place its ordinary Git-ignored target at the "
+        "same relative path in the primary worktree, then record it with "
+        "`assent shared-paths review` -- naming the dependency or build file "
+        "that made it necessary as a `--watch` value. Assent provisions the "
+        "exact junction or directory symlink for later sessions. Do not copy "
+        "the tree or hand-create a source-worktree link; neither is reviewed "
+        "candidate evidence.")
+
+
+def diagnosed_ignored_directories(failure_summary: str) -> tuple[str, ...]:
+    """The directories a stored ``Ignored input diagnosis:`` names, if any.
+
+    This reads back exactly what ``ignored_input_diagnosis`` wrote, so a full
+    verifier's own output-backed evidence can invalidate a reviewed shared-path
+    profile that does not declare a directory the run proved necessary.  It
+    parses one recorded line and never touches the filesystem.
+    """
+    for line in failure_summary.splitlines():
+        if not line.startswith(IGNORED_INPUT_PREFIX):
+            continue
+        listed = line[len(IGNORED_INPUT_PREFIX):]
+        for tail in (" is an ordinary", " are ordinary"):
+            head, separator, _rest = listed.partition(tail)
+            if separator:
+                return tuple(
+                    entry.strip().rstrip("/") for entry in head.split(",")
+                    if entry.strip().rstrip("/"))
+    return ()
+
+
+def print_ignored_input_diagnosis(label: str, failure_summary: str) -> None:
+    """Surface a stored ignored-input diagnosis on a truncated failure line.
+
+    ``summary`` keeps the tail of an oversized capture and the diagnosis is
+    appended last, so it is still there to print even when the verifier output
+    ahead of it was truncated.
+    """
+    lines = failure_summary.splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith(IGNORED_INPUT_PREFIX):
+            for rest in lines[index:]:
+                print(f"{label}: {rest}")
+            return
+
+
 def _require_no_overlap(links: Sequence[ProvisionedLink]) -> None:
     """Refuse a set where one provisioned path lives inside another one."""
     for index, link in enumerate(links):
@@ -348,20 +467,6 @@ def union_worktree_links(
     ordered = tuple(merged[path] for path in sorted(merged))
     _require_no_overlap(ordered)
     return ordered
-
-
-def _create_directory_link(destination: Path, target: Path) -> None:
-    """Create one directory link, preferring a junction on Windows.
-
-    A Windows directory symlink needs a privilege an unattended run cannot
-    assume, while a junction needs none, so Windows always gets a junction
-    regardless of which kind the source worktree used.
-    """
-    if os.name == "nt":
-        import _winapi
-        _winapi.CreateJunction(str(target), str(destination))
-    else:
-        os.symlink(target, destination, target_is_directory=True)
 
 
 def _create_file_link(destination: Path, target: Path) -> None:
@@ -456,7 +561,7 @@ def provisioned_candidate_links(
             parents.extend(_create_parents(candidate, link.path))
             try:
                 if link.is_directory:
-                    _create_directory_link(destination, link.target)
+                    pathops.create_directory_link(destination, link.target)
                 else:
                     _create_file_link(destination, link.target)
             except OSError as e:

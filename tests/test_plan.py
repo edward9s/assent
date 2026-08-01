@@ -61,6 +61,13 @@ class TestParseTaskFile(PlanTestCase):
         self.assertEqual(task.path, path.resolve())
         self.assertEqual(task.journal_path.name, "t001_demo.r.toml")
 
+    def test_unicode_name_keeps_english_title_and_pairs_journal_without_translation(self):
+        path = self.write("t001_中文任務.e.toml", task_text(title="English task title"))
+        task = parse_task_file(path)
+        self.assertEqual(task.id, "t001")
+        self.assertEqual(task.title, "English task title")
+        self.assertEqual(task.journal_path.name, "t001_中文任務.r.toml")
+
     def test_valid_task_parsed(self):
         path = self.write("t001_demo.e.toml", task_text(
             title="Scaffold", deps=(), model="prime", effort="heavy",
@@ -167,6 +174,19 @@ class TestPlanParse(PlanTestCase):
         self.write("t001_a.e.toml", task_text())
         plan = Plan.parse(self.dir)
         self.assertEqual([t.id for t in plan.tasks], ["t001", "t002"])
+
+    def test_unicode_name_orders_and_resolves_dependencies_by_tnnn(self):
+        self.write("t002_second.e.toml", task_text(
+            title="Second task", deps=("t001",)))
+        self.write("t001_中文任務.e.toml", task_text(
+            title="English first task", status="DONE"))
+        plan = Plan.parse(self.dir)
+        self.assertEqual([task.path.name for task in plan.tasks],
+                         ["t001_中文任務.e.toml", "t002_second.e.toml"])
+        self.assertEqual(plan.tasks[1].deps, ["t001"])
+        task, resumed = plan.next_task()
+        self.assertEqual(task.id, "t002")
+        self.assertFalse(resumed)
 
     def test_non_task_files_ignored(self):
         self.write("t001_a.e.toml", task_text())

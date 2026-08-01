@@ -23,6 +23,7 @@ from assent.lockfile import hold_lock
 from assent.plan import append_entry, journal_path_for, parse_task_file, set_status
 from tests.engine_support import (_FAILV, _NEEDS_OK_TXT, _OK, EngineTestCase,
                                   ScriptedAdapter, ok_result, task_text)
+from tests.link_support import make_directory_link, safe_rmtree
 from tests.test_contracts import GlobalContractsMixin
 
 
@@ -499,6 +500,46 @@ class TestAcceptanceGates(GlobalContractsMixin, EngineTestCase):
         adapter = ScriptedAdapter([lambda p: ok_result()])
         self.run_quiet(cfg, once=True, adapter=adapter)
         self.assertEqual(parse_task_file(path).status, "BLOCKED")  # marked by scheduler
+
+    def test_undeclared_link_at_closeout_is_a_normal_acceptance_failure(self):
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\n", encoding="utf-8")
+        path = self.write_task(1)
+        cfg = self.build(retry=0)
+        self.commit_all()
+        external = self.root.parent / f"{self.root.name} external pkg"
+        external.mkdir()
+        self.addCleanup(safe_rmtree, external)
+        (external / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+
+        def add_unreviewed_link(prompt):
+            make_directory_link(self.execution_root() / "pkg", external)
+            set_status(path, "DONE")
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="done",
+                         summary="implemented")
+            return ok_result()
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = engine.run(
+                cfg, once=True,
+                adapter=ScriptedAdapter([add_unreviewed_link]))
+
+        self.assertEqual(result, 0, output.getvalue())
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        self.assertIn("Acceptance failed:", output.getvalue())
+        self.assertIn("outside its active NO-IGNORED-DIRECTORY-CANDIDATE",
+                      output.getvalue())
+        self.assertNotIn("infrastructure error", output.getvalue())
+        self.assertEqual(
+            (external / "sentinel.txt").read_text(encoding="utf-8"), "keep\n")
+        from assent.plan import read_entries
+        scheduler_entry = next(
+            entry for entry in read_entries(journal_path_for(path))
+            if entry["by"] == "scheduler" and entry["event"] == "blocked")
+        self.assertIn("outside its active NO-IGNORED-DIRECTORY-CANDIDATE",
+                      scheduler_entry["summary"])
 
     def test_status_not_updated_but_verify_green_gets_closeout_suffix(self):
         path = self.write_task(1, verify=_OK)

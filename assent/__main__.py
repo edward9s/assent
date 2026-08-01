@@ -29,6 +29,7 @@ from assent.folderdeps import (find_unfinished_prerequisites,
                                parse_folder_dependency_graph)
 from assent.folder_scheduler import run_all
 from assent.init import init as run_init
+from assent.main import add_shared_paths_command, shared_paths_review
 from assent.plan import Plan
 from assent.reconcile import (reconcile_abort, reconcile_continue,
                               reconcile_start)
@@ -308,6 +309,10 @@ def _build_parser() -> argparse.ArgumentParser:
               "custom:<command> also accepts one quoted command. Omit it on "
               "fresh init for the numbered menu; repeat init does not prompt"))
 
+    # The only sanctioned writer of the local shared-path manifest.  It needs no
+    # .assent project config: it acts on the Git worktree it is run in.
+    add_shared_paths_command(sub)
+
     sub.add_parser(
         "doctor", help="Diagnose the machine environment (Python, git, "
                        "adapter CLIs, temp directory); needs no existing "
@@ -490,7 +495,7 @@ def _dispatch_check_all(config_path: str, assent_dir, folders: list[str]) -> int
 
 def _dispatch_run_folders(
         config_path: str, folders: list[str], *, once: bool,
-        task_id: str | None) -> int:
+        task_id: str | None, run_level_verify: bool = False) -> int:
     """Run explicitly named folders in order, stopping on the first failure."""
     for folder in folders:
         try:
@@ -498,10 +503,25 @@ def _dispatch_run_folders(
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
-        result = engine.run(cfg, once=once, task_id=task_id)
+        result = engine.run(
+            cfg, once=once, task_id=task_id,
+            run_level_verify=run_level_verify)
         if result != 0:
             return result
     return 0
+
+
+def _verify_folder_and_refresh_report(cfg) -> int:
+    """Run folder verification and refresh its report after the call settles.
+
+    The report helper is deliberately in ``finally`` so PASSED, FAILED, refusal,
+    and interrupt outcomes all leave the report observing the latest receipt
+    state.  ``inspection.try_write_report`` keeps the write best-effort.
+    """
+    try:
+        return verify_folder(cfg)
+    finally:
+        inspection.try_write_report(cfg)
 
 
 def _close_run(result: int, *, verify: bool, config_path: str,
@@ -533,7 +553,7 @@ def _close_run(result: int, *, verify: bool, config_path: str,
     except AssentError as e:
         print(f"Config error: {e}")
         return 1
-    return verify_folder(cfg)
+    return _verify_folder_and_refresh_report(cfg)
 
 
 def _dispatch(argv: list[str]) -> int:
@@ -628,6 +648,16 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "doctor":
         return run_doctor()
 
+    # `shared-paths` acts on the Git worktree it runs in and writes only the
+    # primary worktree's local manifest, so it deliberately skips the .assent
+    # project config gate below: a source worktree carries no .assent at all.
+    if args.command == "shared-paths":
+        try:
+            return shared_paths_review(args.path, args.watch, args.none)
+        except AssentError as e:
+            print(f"shared-paths review: failed ({e})")
+            return 1
+
     try:
         assent_dir = validate_config(args.config)
     except AssentError as e:
@@ -682,7 +712,8 @@ def _dispatch(argv: list[str]) -> int:
             assent_dir=assent_dir, selection=selection)
         if args.folders:
             result = _dispatch_run_folders(
-                args.config, args.folders, once=args.once, task_id=args.task)
+                args.config, args.folders, once=args.once, task_id=args.task,
+                run_level_verify=args.verify)
             if result != 0:
                 return result
         if scheduled is not None:
@@ -693,7 +724,8 @@ def _dispatch(argv: list[str]) -> int:
             # dependency order: `...` selects folders, it does not switch the
             # command over to the whole-project scheduler.
             return closeout(_dispatch_run_folders(
-                args.config, scheduled, once=False, task_id=None))
+                args.config, scheduled, once=False, task_id=None,
+                run_level_verify=args.verify))
         if args.all_folders:
             return closeout(run_all(args.config, assent_dir, args.jobs or 1))
         if args.folders:
@@ -753,7 +785,7 @@ def _dispatch(argv: list[str]) -> int:
             if args.focus:
                 return engine.verify_focused(cfg)
             if len(selected) == 1:
-                return verify_folder(cfg)
+                return _verify_folder_and_refresh_report(cfg)
             return verify_selected_batch(
                 args.config, assent_dir, selected, args.bisect)
         except KeyboardInterrupt:
@@ -828,7 +860,8 @@ def _dispatch(argv: list[str]) -> int:
         # The automatically selected folder is one folder, so `--verify` gives it
         # the same folder receipt an explicitly named one would get.
         return _close_run(
-            engine.run(cfg, once=args.once, task_id=args.task),
+            engine.run(cfg, once=args.once, task_id=args.task,
+                       run_level_verify=args.verify),
             verify=args.verify, config_path=args.config, assent_dir=assent_dir,
             selection=[folder])
     if args.command == "status":

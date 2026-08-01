@@ -116,6 +116,31 @@ class TestDispatch(MainTestCase):
                 self.assertEqual(result.returncode, 0)
                 self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
+    def test_shared_paths_review_is_reachable_through_the_real_cli(self):
+        """The only manifest writer must be a real subcommand, not a helper.
+
+        It also has to reach dispatch without a project `.assent`: it acts on
+        the Git worktree it is run in, and a source worktree carries none.
+        """
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(_PROJECT_ROOT)
+        result = subprocess.run(
+            [sys.executable, "-m", "assent", "shared-paths", "review", "--help"],
+            cwd=self.root, capture_output=True, text=True,
+            encoding="utf-8", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--watch", result.stdout)
+        self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
+
+        with patch("assent.__main__.shared_paths_review",
+                   return_value=0) as review:
+            code, _out = self.run_main(
+                ["shared-paths", "review", "--path", "pkg",
+                 "--watch", "pubspec.yaml"])
+        self.assertEqual(code, 0)
+        review.assert_called_once_with(["pkg"], ["pubspec.yaml"], False)
+        self.assertFalse((self.root / ".assent").exists())
+
     def test_missing_config_reports_error(self):
         code, out = self.run_main(["status"])
         self.assertEqual(code, 1)
@@ -376,13 +401,56 @@ class TestDispatch(MainTestCase):
     def test_verify_dispatches_explicit_folder_and_preserves_exit_code(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
-        with patch("assent.__main__.verify_folder", side_effect=[0, 1]) as mocked:
+        with patch("assent.__main__.verify_folder", side_effect=[0, 1]) as mocked, \
+                patch("assent.__main__.inspection.try_write_report") as report:
             codes = [self.run_main(
                 ["verify", "reviewed", "--config", str(config)])[0]
                      for _ in range(2)]
         self.assertEqual(codes, [0, 1])
         self.assertEqual(mocked.call_count, 2)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
+        self.assertEqual(
+            [call.args[0].tasks_name for call in report.call_args_list],
+            ["reviewed", "reviewed"])
+
+    def test_single_folder_verify_refreshes_stale_report_after_pass_or_failure(self):
+        config = self.write_config()
+        self.write_task("reviewed", "DONE")
+        report_path = self.root / ".assent" / "reviewed" / "_report.md"
+
+        for result in (0, 1):
+            with self.subTest(result=result):
+                report_path.write_text("stale report\n", encoding="utf-8")
+                events = []
+
+                def verify(cfg, result=result):
+                    events.append(("verify", report_path.read_text(
+                        encoding="utf-8")))
+                    report_path.write_text(
+                        f"receipt result {result}\n", encoding="utf-8")
+                    return result
+
+                def refresh(cfg, result=result):
+                    events.append(("report", report_path.read_text(
+                        encoding="utf-8")))
+                    report_path.write_text(
+                        f"report result {result}\n", encoding="utf-8")
+
+                with patch("assent.__main__.verify_folder",
+                           side_effect=verify), \
+                        patch("assent.__main__.inspection.try_write_report",
+                              side_effect=refresh):
+                    code, _ = self.run_main(
+                        ["verify", "reviewed", "--config", str(config)])
+
+                self.assertEqual(code, result)
+                self.assertEqual(events, [
+                    ("verify", "stale report\n"),
+                    ("report", f"receipt result {result}\n"),
+                ])
+                self.assertEqual(
+                    report_path.read_text(encoding="utf-8"),
+                    f"report result {result}\n")
 
     def test_verify_dispatches_exact_selected_batch_and_focus(self):
         config = self.write_config()
@@ -430,11 +498,13 @@ class TestDispatch(MainTestCase):
     def test_verify_interrupt_returns_130(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
-        with patch("assent.__main__.verify_folder", side_effect=KeyboardInterrupt):
+        with patch("assent.__main__.verify_folder", side_effect=KeyboardInterrupt), \
+                patch("assent.__main__.inspection.try_write_report") as report:
             code, out = self.run_main(
                 ["verify", "reviewed", "--config", str(config)])
         self.assertEqual(code, 130)
         self.assertIn("temporary resources were cleaned up", out)
+        report.assert_called_once()
 
     def test_no_push_subcommand_exists(self):
         with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
@@ -730,7 +800,7 @@ class TestRunVerifyChaining(MainTestCase):
     def test_exact_multiple_folders_verify_as_that_selected_batch(self):
         self.write_task("alpha", "DONE")
         self.write_task("beta", "DONE")
-        with patch("assent.__main__.engine.run", return_value=0), \
+        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
                 self.only("verify_selected_batch") as batch:
             code, _ = self.run_main(
                 ["run", "alpha", "beta", "--verify", "--config",
@@ -738,6 +808,26 @@ class TestRunVerifyChaining(MainTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(batch.call_args.args,
                          (str(self.config), self.assent_dir, ["alpha", "beta"]))
+        self.assertEqual(
+            [call.kwargs["run_level_verify"] for call in run_mock.call_args_list],
+            [True, True])
+
+    def test_exact_run_verify_manual_closeout_hands_off_to_selected_verification(self):
+        self.write_task("alpha", "DONE")
+        self.write_task("beta", "DONE")
+        (self.root / ".git").mkdir()
+        with patch("assent.engine._run_locked", return_value=0), \
+                patch("assent.engine.try_write_report"), \
+                patch("assent.__main__.verify_selected_batch", return_value=0) as batch:
+            code, out = self.run_main(
+                ["run", "alpha", "beta", "--verify", "--config",
+                 str(self.config)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("per-folder receipt"), 2)
+        self.assertEqual(out.count("run-level verification follows this invocation"), 2)
+        self.assertNotIn("assent verify [--batch]", out)
+        self.assertEqual(batch.call_args.args[2], ["alpha", "beta"])
 
     def test_remainder_verifies_the_pre_expanded_set_once(self):
         for folder in ("alpha", "beta", "gamma"):
@@ -811,6 +901,46 @@ class TestRunVerifyChaining(MainTestCase):
             code, _ = self.run_main(
                 ["run", "alpha", "--verify", "--config", str(self.config)])
         self.assertEqual(code, 1)
+
+    def test_single_folder_run_verify_refreshes_stale_report_after_pass_or_failure(self):
+        self.write_task("alpha", "DONE")
+        report_path = self.root / ".assent" / "alpha" / "_report.md"
+
+        for result in (0, 1):
+            with self.subTest(result=result):
+                report_path.write_text("stale report\n", encoding="utf-8")
+                events = []
+
+                def verify(cfg, result=result):
+                    events.append(("verify", report_path.read_text(
+                        encoding="utf-8")))
+                    report_path.write_text(
+                        f"receipt result {result}\n", encoding="utf-8")
+                    return result
+
+                def refresh(cfg, result=result):
+                    events.append(("report", report_path.read_text(
+                        encoding="utf-8")))
+                    report_path.write_text(
+                        f"report result {result}\n", encoding="utf-8")
+
+                with patch("assent.__main__.engine.run", return_value=0), \
+                        patch("assent.__main__.verify_folder",
+                              side_effect=verify), \
+                        patch("assent.__main__.inspection.try_write_report",
+                              side_effect=refresh):
+                    code, _ = self.run_main(
+                        ["run", "alpha", "--verify",
+                         "--config", str(self.config)])
+
+                self.assertEqual(code, result)
+                self.assertEqual(events, [
+                    ("verify", "stale report\n"),
+                    ("report", f"receipt result {result}\n"),
+                ])
+                self.assertEqual(
+                    report_path.read_text(encoding="utf-8"),
+                    f"report result {result}\n")
 
     def test_a_run_without_verify_never_verifies(self):
         self.write_task("alpha")

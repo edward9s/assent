@@ -82,6 +82,25 @@ def detach_directory_link(path: Path) -> None:
         os.unlink(path)
 
 
+def create_directory_link(destination: Path, target: Path) -> None:
+    """Create one directory link at ``destination`` pointing at ``target``.
+
+    A Windows directory symlink needs a privilege an unattended run cannot
+    assume, while a junction needs none, so Windows always gets a junction and
+    POSIX a directory symlink.  Both the persistent provisioning a source
+    worktree keeps and the temporary mirroring a verification candidate uses go
+    through this one primitive, so "how assent makes a directory link" has a
+    single definition beside ``detach_directory_link``, which undoes it without
+    traversing the target.  ``OSError`` is left unwrapped so each caller can
+    phrase its own refusal.
+    """
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(destination))
+    else:
+        os.symlink(target, destination, target_is_directory=True)
+
+
 def _require_inside(root: Path, path: Path) -> Path:
     """Refuse a path that is not lexically beneath the exact worktree root."""
     try:

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from assent import AssentError, gitops
+from assent import AssentError, gitops, shared_paths
 from assent.config import Config
 from assent.folderdeps import (infer_folder_completion, live_upstreams,
                                parse_folder_dependencies)
@@ -27,6 +27,7 @@ from assent.plan import Plan
 from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
                                         SUMMARY_LIMIT, VERIFY_COMMAND,
                                         atomic_write_text, candidate_tree,
+                                        ignored_input_diagnosis,
                                         invalidate_receipt,
                                         provisioned_candidate_links,
                                         require_oid, run_full_verifier,
@@ -34,16 +35,24 @@ from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
                                         toml_string, union_worktree_links)
 
 RECEIPT_NAME = "_verification.toml"
-RECEIPT_VERSION = 1
+# 2 adds shared_inputs_sha256.  The bump is fail-closed on purpose: a version-1
+# receipt recorded no shared-input evidence at all, so it is unusable rather
+# than silently upgraded with an assumed-empty digest.
+RECEIPT_VERSION = 2
 _COMPLETE_STATUSES = ("DONE", "SKIP")
 # The receipt records a source/target conflict with this prefix, which is also
 # what tells a failed `verify FOLDER` to point at `assent reconcile`.
 _CONFLICT_SUMMARY_PREFIX = "Integration conflict: "
 _RECEIPT_KEYS = {
     "version", "status", "source_tip", "target_tip", "integration_tree",
-    "verify_script_sha256", "verify_command", "exit_code", "completed_at",
-    "failure_summary",
+    "verify_script_sha256", "shared_inputs_sha256", "verify_command",
+    "exit_code", "completed_at", "failure_summary",
 }
+# The evidence a shared-input digest changing produces, phrased so a human sees
+# the remedy without opening the receipt.
+_SHARED_INPUT_DRIFT = (
+    "a declared shared input changed while the full verifier was running, so "
+    "the run certifies nothing")
 
 
 @dataclass(frozen=True)
@@ -58,6 +67,13 @@ class VerificationReceipt:
     exit_code: int
     completed_at: str
     failure_summary: str
+    #: Digest of every reviewed shared input this verification depended on --
+    #: the selected profiles and the exact content of their declared targets.
+    #: The empty default is what a receipt written before this schema carried,
+    #: and it is never a usable value: validation refuses it on the way in and
+    #: on the way out, so an absent digest is stale evidence, not an assumed
+    #: empty one.
+    shared_inputs_sha256: str = ""
 
 
 def receipt_path(cfg: Config) -> Path:
@@ -86,6 +102,7 @@ def _receipt_text(receipt: VerificationReceipt) -> str:
         f"target_tip = {toml_string(receipt.target_tip)}\n"
         f"integration_tree = {toml_string(receipt.integration_tree)}\n"
         f"verify_script_sha256 = {toml_string(receipt.verify_script_sha256)}\n"
+        f"shared_inputs_sha256 = {toml_string(receipt.shared_inputs_sha256)}\n"
         f"verify_command = {toml_string(receipt.verify_command)}\n"
         f"exit_code = {receipt.exit_code}\n"
         f"completed_at = {toml_string(receipt.completed_at)}\n"
@@ -105,6 +122,11 @@ def _validate_receipt(receipt: VerificationReceipt, repository: Path) -> None:
             receipt.verify_script_sha256):
         raise AssentError(
             "Verification receipt verify_script_sha256 must be a 64-character "
+            "lowercase hexadecimal digest")
+    if not isinstance(receipt.shared_inputs_sha256, str) or not DIGEST_RE.fullmatch(
+            receipt.shared_inputs_sha256):
+        raise AssentError(
+            "Verification receipt shared_inputs_sha256 must be a 64-character "
             "lowercase hexadecimal digest")
     if receipt.verify_command != VERIFY_COMMAND:
         raise AssentError(
@@ -220,7 +242,8 @@ def _stack_sources(cfg: Config, target_tip: str,
 
 
 def _new_receipt(*, status: str, source_tip: str, target_tip: str,
-                 integration_tree: str, digest: str, exit_code: int,
+                 integration_tree: str, digest: str, shared_inputs: str,
+                 exit_code: int,
                  failure_summary: str = "") -> VerificationReceipt:
     return VerificationReceipt(
         version=RECEIPT_VERSION,
@@ -229,6 +252,7 @@ def _new_receipt(*, status: str, source_tip: str, target_tip: str,
         target_tip=target_tip,
         integration_tree=integration_tree,
         verify_script_sha256=digest,
+        shared_inputs_sha256=shared_inputs,
         verify_command=VERIFY_COMMAND,
         exit_code=exit_code,
         completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -266,8 +290,18 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
     upstream_sources = _stack_sources(cfg, target_tip, source_tip)
     # Resolved with the other preflight facts, so a conflicting or unresolvable
     # provisioned link refuses while the previous receipt is still on disk.
-    links = union_worktree_links(
-        [source_worktree, *(source.worktree for source in upstream_sources)])
+    worktrees = [source_worktree,
+                 *(source.worktree for source in upstream_sources)]
+    # Every contributing live source is classified and its Assent-owned links
+    # reconciled before a candidate exists, so this path never depends on an
+    # earlier `run` having left a junction behind, and UNKNOWN or STALE refuses
+    # here with the zero-AI review remedy rather than at the verifier.
+    shared_sources = [(cfg.tasks_name, source_worktree),
+                      *((source.folder, source.worktree)
+                        for source in upstream_sources)]
+    contracts = shared_paths.prepare_sources(main, shared_sources)
+    shared_inputs = shared_paths.shared_inputs_digest(main, contracts)
+    links = union_worktree_links(worktrees)
     invalidate_receipt(path)
 
     integration_tree = gitops.tree_of(main, target_tip)
@@ -281,6 +315,7 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
             receipt = _new_receipt(
                 status="FAILED", source_tip=source_tip, target_tip=target_tip,
                 integration_tree=integration_tree, digest=digest,
+                shared_inputs=shared_inputs,
                 exit_code=outcome.exit_code or 1,
                 failure_summary=f"{_CONFLICT_SUMMARY_PREFIX}{conflicts}")
         else:
@@ -303,18 +338,24 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
                         status="FAILED", source_tip=source_tip,
                         target_tip=target_tip,
                         integration_tree=integration_tree,
-                        digest=digest, exit_code=1,
+                        digest=digest, shared_inputs=shared_inputs,
+                        exit_code=1,
                         failure_summary=f"Unable to start verification: {e}")
                 else:
                     receipt = _new_receipt(
                         status="PASSED" if result.returncode == 0 else "FAILED",
                         source_tip=source_tip, target_tip=target_tip,
                         integration_tree=integration_tree, digest=digest,
+                        shared_inputs=shared_inputs,
                         exit_code=result.returncode,
                         failure_summary=("" if result.returncode == 0 else summary(
                             result.stdout, result.stderr,
                             f"Verification command failed: {VERIFY_COMMAND} "
-                            f"(exit code {result.returncode})")),
+                            f"(exit code {result.returncode})",
+                            # Appended last so it survives a truncated capture.
+                            ignored_input_diagnosis(
+                                f"{result.stdout}\n{result.stderr}",
+                                worktrees))),
                     )
 
     # External Git writes are unsupported, but detecting them keeps the receipt
@@ -340,10 +381,23 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
             changed.append("upstream source identity changed")
     if sha256_file(script) != digest:
         changed.append("verification script changed")
+    # Snapshotted again after the verifier: a declared target whose content moved
+    # during the run turns an apparent pass into a failure, so no PASSED receipt
+    # can describe inputs the verifier never actually saw.
+    # Reclassify against the current manifest after the verifier, rather than
+    # hashing the original Contract objects again.  A concurrent review that
+    # replaces a profile with a different identity must invalidate the run even
+    # when its path list and target bytes happen to be unchanged.
+    try:
+        if current_shared_inputs(cfg) != shared_inputs:
+            changed.append(_SHARED_INPUT_DRIFT)
+    except AssentError as e:
+        changed.append(f"shared inputs became unreadable: {e}")
     if changed:
         receipt = _new_receipt(
             status="FAILED", source_tip=source_tip, target_tip=target_tip,
-            integration_tree=integration_tree, digest=digest, exit_code=1,
+            integration_tree=integration_tree, digest=digest,
+            shared_inputs=shared_inputs, exit_code=1,
             failure_summary="; ".join(changed))
 
     write_receipt(path, receipt, main)
@@ -387,13 +441,64 @@ def _receipt_matches_current_candidate_locked(cfg: Config) -> bool:
     if not gitops.working_tree_status(main, cfg.git_excludes).is_clean:
         return False
     target_tip = gitops.commit_of(main, target_branch)
-    _source_branch, source_tip, _worktree = source_snapshot(cfg, main)
+    _source_branch, source_tip, worktree = source_snapshot(cfg, main)
     if source_tip != receipt.source_tip:
         return False
-    _stack_sources(cfg, target_tip, source_tip)
+    upstream_sources = _stack_sources(cfg, target_tip, source_tip)
+    try:
+        current_shared = _current_shared_inputs(
+            cfg, main, worktree, upstream_sources)
+    except AssentError:
+        return False
+    if current_shared != receipt.shared_inputs_sha256:
+        return False
     tree, outcome = candidate_tree(
         main, cfg.tasks_name, target_tip, source_tip)
     return outcome.ok and tree == receipt.integration_tree
+
+
+def _current_shared_inputs(
+        cfg: Config, main: Path, worktree: Path | None,
+        upstream_sources: tuple[gitops.FolderSourceSnapshot, ...]) -> str:
+    """Recompute this folder's shared-input digest without repairing anything.
+
+    Freshness is a question, not a repair: a profile that changed identity, a
+    declared target that moved, or content that differs recomputes to another
+    digest and makes the receipt stale.  A source that can no longer be
+    classified has no digest at all, which is likewise not the recorded one, so
+    acceptance refuses instead of publishing on unproven evidence.
+    """
+    sources = [(cfg.tasks_name, worktree),
+               *((source.folder, source.worktree) for source in upstream_sources)]
+    contracts: list[tuple[str, shared_paths.Contract]] = []
+    manifest = shared_paths.read_manifest(main)
+    for folder, tree in sources:
+        # A vanished source worktree falls back to the primary worktree, exactly
+        # as ``prepare_sources`` did when the receipt was written.
+        contract = shared_paths.classify(main, tree or main, manifest)
+        if not contract.settled:
+            raise AssentError(
+                f"the shared-path contract for {folder} is {contract.state}; "
+                "the receipt's shared-input evidence can no longer be reproduced")
+        shared_paths.require_directory_link_agreement(
+            main, tree or main, contract, folder=folder)
+        contracts.append((folder, contract))
+    return shared_paths.shared_inputs_digest(main, contracts)
+
+
+def current_shared_inputs(cfg: Config) -> str:
+    """This folder's shared-input digest as it stands right now.
+
+    ``accept`` uses it for the same pre-publication recheck it already performs
+    on the source, target, and verifier: the evidence a receipt was written
+    against must still reproduce at the moment a ref is about to move.  It only
+    reads and classifies -- it never provisions, repairs, or invokes AI.
+    """
+    main = gitops.main_worktree(cfg.root)
+    target_tip = gitops.commit_of(main, gitops.require_current_branch(main))
+    _branch, source_tip, worktree = source_snapshot(cfg, main)
+    return _current_shared_inputs(
+        cfg, main, worktree, _stack_sources(cfg, target_tip, source_tip))
 
 
 def receipt_matches_current_candidate(cfg: Config) -> bool:
@@ -454,8 +559,8 @@ def receipt_report_lines(cfg: Config) -> list[str]:
     """Return read-only folder-verification facts for the human report.
 
     Freshness here is intentionally conservative and side-effect free: exact
-    source, target, and verifier identities are fresh.  Acceptance remains
-    responsible for rebuilding and comparing the candidate tree.
+    source, target, verifier, and shared-input identities are fresh. Acceptance
+    remains responsible for rebuilding and comparing the candidate tree.
     """
     path = receipt_path(cfg)
     if not path.exists():
@@ -470,9 +575,15 @@ def receipt_report_lines(cfg: Config) -> list[str]:
         target_branch = gitops.require_current_branch(main)
         if gitops.commit_of(main, target_branch) != receipt.target_tip:
             reasons.append("target tip changed")
-        _branch, source_tip, _worktree = source_snapshot(cfg, main)
+        _branch, source_tip, worktree = source_snapshot(cfg, main)
         if source_tip != receipt.source_tip:
             reasons.append("source tip changed")
+        upstream_sources = _stack_sources(
+            cfg, gitops.commit_of(main, target_branch), source_tip)
+        if _current_shared_inputs(
+                cfg, main, worktree,
+                upstream_sources) != receipt.shared_inputs_sha256:
+            reasons.append("shared inputs changed")
         if receipt.status != "PASSED":
             reasons.append(f"exit code {receipt.exit_code}")
     except AssentError as e:

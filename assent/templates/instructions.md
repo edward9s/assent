@@ -13,6 +13,18 @@
   (`Co-Authored-By`, `Generated with`, and the like); not a single line of it
   is allowed.
 
+## Contract ownership
+
+Each normative rule has one canonical document owner:
+
+- repository-specific development constraints belong in `AGENTS.md`;
+- scheduled-session procedure belongs in `instructions.md`; and
+- persisted artifact schemas, filename rules, state meanings, and CLI/report/
+  receipt contracts belong in `format.md`.
+
+Other documents may reference an owned rule, but must not duplicate it as a
+competing normative contract.
+
 ## Default reading scope
 
 A **meeting / interactive session** reads only, to get started:
@@ -60,6 +72,42 @@ files (logs; read only when debugging or explicitly referenced), and the
   candidate verification is a separate receipt-refresh stage governed by
   configuration: `"auto"` runs it at folder closeout, while `"manual"` defers it
   until a human explicitly invokes `assent verify`.
+- Shared ignored directories (task session): which ignored directories this
+  project really shares is a reviewed decision Assent caches in the primary
+  worktree's untracked `.assent/manifest.toml`. When a matching profile exists,
+  Assent has already provisioned every declared directory as a link before your
+  session started and you do nothing. When your prompt says the contract is
+  `UNKNOWN` or `STALE`, you must settle it before closeout by running, in this
+  worktree, `assent shared-paths review --path DIR --watch FILE` (repeat both as
+  needed) or `assent shared-paths review --none --watch FILE` when no shared
+  directory is required. `--watch` names the exact tracked dependency or build
+  files whose change would make the decision worth reconsidering. Decide from the
+  Git-ignore rules, the dependency/build declarations, and this task's verifier
+  evidence alone — do not audit the whole repository. That command is the only
+  way you may write the manifest; the scheduler refuses the task's completion
+  while the contract is still unreviewed. When your prompt instead says
+  `NO-IGNORED-DIRECTORY-CANDIDATE`, a successful Git query found no ordinary
+  ignored directory in the primary worktree to declare at all: there is
+  nothing to review and you must not run the command "just in case". It is not
+  a claim that this project needs no shared input — if such a directory later
+  appears, or a verifier proves one is required, the contract becomes
+  `UNKNOWN` and you will be asked then.
+- Ignored inputs a check needs (task session): the isolated worktree is built
+  from tracked content, so a directory Git ignores — a private package tree, a
+  large asset directory — is missing there even though the main worktree has
+  it. When your assigned task or its focused verify command demonstrably needs
+  one, confirm an ordinary target exists at the same relative path in the main
+  worktree and Git ignores it, then record that path with
+  `assent shared-paths review --path DIR --watch FILE`; Assent provisions the
+  exact junction or directory symlink. Never hand-create a source-worktree link:
+  a link outside the active profile is unreviewed evidence and closeout refuses.
+  Never copy the ignored directory tree in: a copy passes the focused check and
+  then disappears, because the integration candidate mirrors provisioned
+  directory links and ignored leaf files and never a physical ignored tree.
+  Provision nothing else — not caches, credentials, editor state, build output,
+  or ignored directories the task does not require — and never modify anything
+  inside the linked target. An ordinary ignored file generated beside its
+  tracked source, such as a `*.g.dart`, needs no action.
 - During interactive work, run the smallest relevant checks. Do not launch the
   full project suite merely because files changed. Launch it only when the human
   explicitly asks, when a scheduler-provided focused verify command itself

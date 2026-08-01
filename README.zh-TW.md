@@ -358,6 +358,17 @@ receipt、direct accept、單一 `archive`),兩個以上走 exact selected batch
 expanded selection,驗證的正是它所執行的那些資料夾。驗證的 exit code 就是這道
 命令的 exit code。
 
+在預設的 manual receipt-refresh 政策下,完成資料夾的 run 收尾會先說明 per-folder
+receipt 延後。若這次呼叫有 `--verify`,收尾訊息會說明同一次呼叫接下來要做的是
+run-level verification,不會再叫使用者重新啟動已經正在進行的驗證命令;表格中的
+exact selected 或動態路徑就是這個交接。
+
+表格中的單一資料夾路徑會在 folder verification 更新、使 receipt 失效或留下
+沒有 receipt 之後 refresh `_report.md`,因此報告會反映這次呼叫最新的 receipt
+結果。這個 best-effort 寫入不會改變 verification 的 exit code 或中斷處理;
+selected 或動態 batch 驗證以及 `--focus` 保留原有契約,不會只為了對稱而刷新
+folder report。
+
 `--once`、`--task` 可以與 `--verify` 併用。它們恰好只選出一個資料夾,receipt 的
 範圍因此毫無歧義,但它們在單一任務後就停止:所以只有在該次受限執行讓所選資料夾
 變成完成(每個任務都是 `DONE` 或 `SKIP`)時才驗證。資料夾未完成則此請求失敗且不
@@ -391,6 +402,16 @@ receipt。selected merge conflict 會拒絕,不跳過也不縮小集合;它不�
 也不接受資料夾。若失敗要求被 bisect 成通過 prefix,命令仍回傳失敗,該 prefix
 不能授權原本的 selected acceptance。
 
+這條 exact selected 路徑的標籤是 `verify selected`,不是 `verify --batch`;
+後者保留給動態發現及其互動式衝突略過政策。若 candidate 建置發生衝突,訊息會
+先說明完整 verifier 尚未執行,列出衝突資料夾與路徑,並說明沒有寫入 receipt、
+target 與 selected source ref 都維持不變。若資料夾單獨對 target 就衝突,直接
+指向 `assent reconcile <FOLDER>`。若只是 peer-only conflict,則列出衝突資料夾
+前方相容的 selected prefix,建議先對該 prefix 執行 `assent verify` 再
+`assent accept`,讓 target 前進後再以 `assent reconcile <FOLDER>` 對進階後的
+target 處理;`assent rework <FOLDER> <TASK>` 與 `assent reject <FOLDER>` 仍是
+明確的替代方案。
+
 `assent verify <FOLDER> --focus` 則不同:它在該資料夾的 source worktree 執行
 distinct DONE-task verification commands,不建立 integration candidate、不寫 receipt,
 即使通過也不能授權接受。成功的 exact selected verification 之後,人類審查可執行
@@ -422,9 +443,9 @@ conflict 資料夾及其衝突路徑,並回報每個排在某個 conflict 資料
   不會提問。
 
 略過不是解決、rebase、接受或刪除任何東西——target 與每個 source
-資料夾,不論被略過或已合併,都維持原樣不變。conflict 資料夾自身的
-source 仍需經過明確的人工 `assent rework` 或 `assent reject`,才能
-重新加入未來的批次。
+資料夾,不論被略過或已合併,都維持原樣不變。若是 peer-only conflict,可先驗證並
+接受衝突資料夾前方相容的工作,讓 target 前進後再處理該資料夾;`assent rework`
+與 `assent reject` 仍是重新開啟或捨棄它的明確替代方案。
 
 `assent accept --all` 有兩種刻意區分的模式。fresh PASSED batch receipt 時,只在
 一次原子 ref 更新中發佈 receipt 涵蓋的確切資料夾,並在同一次執行內回報 receipt
@@ -499,8 +520,9 @@ worktree、分支與每一筆編輯;不提交任何東西,也不刪除任何東�
 Reconcile 刻意不是整合引擎。它只處理單一資料夾對當前整合 target;它從不替
 你解決檔案內容、從不合併投機性的同儕資料夾、從不執行 AI adapter,也從不改
 任務狀態。只在建置批次 candidate 時、於兩個未被接受的 source 之間出現的
-conflict 不屬於本指令——那組仍走 `verify --batch` 的略過決定,再由
-`assent rework` 或 `assent reject` 處理。
+conflict 不屬於本指令——那組仍走 `verify --batch` 的略過決定。若 peer-only
+conflict 前方已有相容工作,先驗證並接受該工作,再對 target 前進後的衝突資料夾
+reconcile;`assent rework` 與 `assent reject` 仍是明確替代方案。
 
 ## 平行執行
 
@@ -569,13 +591,17 @@ AI 會議在主樹進行。從主樹可直接用 `git worktree list`、`git log 
 **第 2 幕:無人值守執行**:`assent run`,去睡覺。每個 task session 只跑該任務的
 focused verify;資料夾完成後是否還在 AI session 外建立臨時 integration candidate
 並執行完整 `.assent/verify.py`,取決於 `assent.toml`「[verification]」的
-`receipt_refresh`:預設 `"manual"` 把這一步留給之後顯式的
-`assent verify [--batch]`;`"auto"` 則在資料夾全部任務完成時的 run 收尾就執行。
+`receipt_refresh`:預設 `"manual"` 把 per-folder receipt 留給之後顯式的
+`assent verify` 路徑;`run --verify` 會把 selected 或動態的 run-level verification
+當成同一次呼叫的立即交接;`"auto"` 則在資料夾全部任務完成時的 run 收尾就執行。
 
 `assent verify <FOLDER>` 是零 token、可離席執行的完整驗證 receipt refresh,不改
-target、不開 AI session;`assent verify --batch` 則對每個已完成、尚未整合的資料夾
-一次做同樣的事。兩者的報告都會顯示 `PASSED`/`FAILED` 與 `fresh`/`stale`,stale
-時可在無人值守階段重新 refresh。直接 `assent accept <FOLDER>` 與 selected
+target、不開 AI session;單一資料夾路徑會在 receipt 更新後 refresh `_report.md`,
+所以報告與 receipt 描述同一個最新的資料夾驗證結果,而且這個 best-effort 寫入
+不會改變 verification 結果。`assent verify --batch` 則對每個已完成、尚未整合的
+資料夾一次做同樣的事,但不會順便刷新 folder report。兩者的報告都會顯示
+`PASSED`/`FAILED` 與 `fresh`/`stale`,stale 時可在無人值守階段重新 refresh。直接
+`assent accept <FOLDER>` 與 selected
 `assent accept A B` 沒有相符的新鮮 `PASSED` receipt 就拒絕,且從不自行啟動
 verifier;`assent accept --all` 則依 fresh batch release,或 batch evidence 缺少/
 過期時的刻意逐資料夾 verify-then-accept 模式執行。
@@ -621,8 +647,8 @@ ownership、盤點目錄連結與其他目錄 reparse point,並先解除每個�
 
 **候選仍需要的被忽略輸入**:`git worktree add` 只用被追蹤的內容建出候選,
 被忽略的路徑因此不在其中。完整驗證只會從每個進入候選的 source worktree
-鏡射兩種產物,位置可以在根層,也可以巢狀在被追蹤的上層目錄底下:一是你自己
-佈建的被忽略目錄連結(Windows junction 與目錄符號連結、POSIX 目錄符號連結),
+鏡射兩種產物,位置可以在根層,也可以巢狀在被追蹤的上層目錄底下:一是 Assent
+依已審閱 profile 佈建的被忽略目錄連結(Windows junction 與目錄符號連結、POSIX 目錄符號連結),
 例如巢狀的 `lib/l10n/arb`;二是夾在被追蹤目錄之中的一般被忽略葉節點檔案,
 例如生成在被追蹤原始碼旁邊的 `lib/models/task.g.dart`。目錄會鏡射成指向同一個
 已解析目標的連結,檔案則鏡射成候選端指向 source 檔案的連結(Windows 用同磁碟區
@@ -639,6 +665,58 @@ ownership、盤點目錄連結與其他目錄 reparse point,並先解除每個�
 只在該次 verifier 執行期間存在,並在臨時 worktree 移除之前先移除,因此你的
 source worktree 連結、生成檔與外部目標,在通過、失敗與 Ctrl-C 之下都同樣存活。
 沒有任何 force 旗標或專案設定可以放寬這一點。
+
+同一條規則也寫在 `assent init` 安裝的排程任務指示裡,因此需要被忽略輸入的無人
+值守 session 會被告知用 `assent shared-paths review` 記錄需求,由 Assent 連到主
+worktree 的精確相同相對路徑目標,而不是複製整棵樹——複製只能通過
+focused 檢查,之後就會在候選中被剪除。若完整驗證真的失敗在某個 source worktree
+實體持有的一般被忽略目錄底下的路徑,例如 `pkg/fl_chart`,該次失敗會保留原本的
+輸出與 exit code,並附上一則 `Ignored input diagnosis:` 註記:`pkg/` 是刻意不放進
+候選的,修法是在主路徑放置一般且被 Git 忽略的必要目標,再用 review 命令記錄;
+不是複製內容,也不是手動建立 source 連結。分隔
+符號會先正規化,只回報 verifier 輸出自己指名的目錄,而單一資料夾、selected、
+動態 batch 與定位執行都會把它記進各自存放 failure summary 的 receipt。
+
+**已審閱的共享被忽略目錄**:手動建立 source 連結不是備援。一個專案真正共享哪些被忽略
+目錄,是 Assent 只審閱一次、之後就快取在主 worktree 那份未被追蹤、永不提交的
+`.assent/manifest.toml` 裡的決定。`[shared_paths]` 以整份 profile 保存——宣告的
+目錄、判定何時該重新考慮的精確被追蹤相依/建置檔 `watch`,以及那些檔案加上倉庫
+被追蹤 Git-ignore 規則的指紋——並以指紋為鍵保留,因此相依結構不同的兩個分支各自
+保有自己的答案,不會互相覆蓋。source 快照因而處於 `UNKNOWN`(尚無答案)、
+`REVIEWED-NONE`(相符且 `paths = []` 的 profile:這是真正的答案,之後的 session
+不建立任何連結,也不附加 AI 探查指示)、`REVIEWED-PATHS`(Assent 在你的任務開始前
+自行把每個宣告目錄佈建為指向主 worktree 相同相對路徑的 junction 或目錄符號連結),
+或 `STALE`——被 watch 的檔案變動、宣告目標消失、型別改變或不再被忽略,或某則
+`Ignored input diagnosis:` 指名了 profile 未宣告的目錄。相符但互相矛盾的 profile
+一律 fail closed;一次受控 review 會取代所有與目前 source 快照相符的 profile,
+即使 watch 集合不同,並保留真正不相符的分支 profile。
+
+`assent shared-paths review --path DIR --watch FILE`(或 `--none --watch FILE`)
+是唯一的寫入者。它先驗證每個值,取得一個專案本地鎖,再以原子方式取代整個檔案,
+因此並行嘗試會被拒絕,中斷後留下的要嘛是先前完整的 manifest,要嘛是完整的新版。
+`UNKNOWN` 與 `STALE` 會在下一個已排程 session 附加一則有界的審閱指示,並在契約
+settled 之前擋住該任務 closeout;指紋沒變則完全不花成本。每一條 verify 入口——單一
+資料夾、selected 與動態 batch、定位前綴、`run --verify` 與 `--focus`——都會在任何
+verifier 開始前分類 source 並調和其連結,`assent reconcile` 在建立受管資源前也一樣。
+folder 與 batch receipt 會記錄 `shared_inputs_sha256`,涵蓋選定 profile 與每個宣告
+目標在 verifier 前後的有界快照。每個 source 的被忽略目錄連結必須精確等於 active
+profile 並指向那些主目標;未宣告的手動連結會在驗證前拒絕,並使既有 folder/batch
+證據及 folder report freshness 過期或無效。acceptance 在推進 ref 之前再次核對;
+一般被忽略葉節點檔案仍自動處理,不成為 manifest path。
+
+沒有東西可宣告的倉庫則完全不花成本。`NO-IGNORED-DIRECTORY-CANDIDATE` 只表示:
+一次成功的 Git ignored-entry 查詢在主 worktree 找不到任何位於 `.git/` 與
+`.assent/` 之外、實際存在的一般被忽略目錄;它不是「這個專案在語意上不需要共享
+輸入」的主張。這個狀態不需要 manifest profile、不建立 junction、也不動用 AI 審閱
+即告 settled,並在 receipt 摘要中帶有一個與 `REVIEWED-NONE` 不同的身分,且在每一
+道適用的關卡都廉價地重新計算。它在各個方向都 fail closed:Git 查詢失敗是可行動的
+拒絕,絕不被轉換成空的候選集合;被忽略的葉節點檔案不算候選,而任何一般被忽略
+目錄都算——即使之後審閱的答案是 `paths = []`;若之後出現候選目錄,下一次分類就是
+`UNKNOWN`;完整 verifier 的 `required_evidence` 指名缺少的目錄時也絕不以此狀態
+結案——主 worktree 有合法目標時它轉為審閱,否則以精確的「目標缺少或未被忽略」
+問題拒絕。這個查詢之所以問主 worktree,是因為每個被允許的連結目標都必須是主
+worktree 同一相對路徑上實際存在、被 Git 忽略的一般目錄;只存在於尚未接受之 source
+分支上的目錄尚不可佈建,必要時會發出可行動的拒絕,而不是宣稱「不需要」。
 
 **平行執行測試**:在 `assent init` 選 `unittest` 會啟用打包的
 `run_unittest_parallel()`,把 `tests/test_*.py` 底下每個模組各自丟進獨立

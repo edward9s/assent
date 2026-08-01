@@ -38,7 +38,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, TextIO
 
-from assent import AssentError, contracts, gitops, lockfile, verification
+from assent import (AssentError, contracts, gitops, lockfile, shared_paths,
+                    verification)
 from assent.adapters import Adapter, get_adapter
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      stop_wake_requested)
@@ -176,6 +177,38 @@ class _BillingAbort(Exception):
 # --------------------------------------------------------------------------- #
 # Prompt / small helpers
 # --------------------------------------------------------------------------- #
+def _diagnosed_shared_inputs(cfg: Config) -> tuple[str, ...]:
+    """Directories a stored full-verifier diagnosis proved this folder needs.
+
+    No generic rule can infer that an ignored directory is semantically
+    required, so a complete verifier that already failed on one is the evidence
+    that invalidates a profile which does not declare it.  A missing or
+    unreadable receipt simply contributes nothing.
+    """
+    try:
+        receipt = verification.read_verification_receipt(
+            verification.receipt_path(cfg), gitops.main_worktree(cfg.root))
+    except AssentError:
+        return ()
+    return verification.diagnosed_ignored_directories(receipt.failure_summary)
+
+
+def _shared_paths_contract(cfg: Config) -> "shared_paths.Contract":
+    """Return this source worktree's current usable shared-path contract.
+
+    Both the bounded review clause and the closeout gate ask the same question of
+    the same snapshot. Classification and agreement errors intentionally
+    propagate: an unreadable or ambiguous manifest or an undeclared source link
+    is a closeout refusal, never permission to finish as though no shared input
+    existed.
+    """
+    main = gitops.main_worktree(cfg.root)
+    contract = shared_paths.classify(main, cfg.root)
+    if contract.settled:
+        shared_paths.require_directory_link_agreement(main, cfg.root, contract)
+    return contract
+
+
 def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
                   session: SessionIdentity, resumed: bool = False) -> str:
     template = cfg.prompt_template or _DEFAULT_PROMPT_TEMPLATE
@@ -192,6 +225,16 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
             .replace("{requested_model}", session.requested_model)
             .replace("{effort}", session.effort or "")
             .replace("{requested_effort}", session.requested_effort or ""))
+    # Startup provisioning already reports a classification failure before an
+    # adapter is normally reached.  Prompt construction remains best-effort so
+    # that a pre-session failure does not acquire a duplicated clause; the
+    # closeout gate below handles the same error fail-closed.
+    try:
+        contract = _shared_paths_contract(cfg)
+    except AssentError:
+        contract = None
+    if contract is not None:
+        text += shared_paths.review_clause(contract)
     if resumed:
         text += _RESUME_SUFFIX
     else:
@@ -429,6 +472,13 @@ def _prepare_worktree(cfg: Config) -> Config:
                 f"validation ({detail})")
         _require_stack_ancestry(cfg, state_after, downstream_tip)
 
+        # REVIEWED-PATHS provisions every declared missing link before any
+        # adapter starts; REVIEWED-NONE starts with no links and no extra AI
+        # instructions, and UNKNOWN or STALE touches the filesystem not at all.
+        contract = shared_paths.prepare_worktree(
+            gitops.main_worktree(cfg.root), worktree_cfg.root,
+            required_evidence=_diagnosed_shared_inputs(cfg))
+        print(shared_paths.describe(contract))
         print(f"Isolated worktree: {root}")
         print(f"Target snapshot: {state_after.base.target_snapshot}")
         stacked = state_before.base.speculative_upstream
@@ -460,7 +510,8 @@ def _prepare_worktree(cfg: Config) -> Config:
 def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         adapter: Adapter | None = None,
         sleep: Callable[[float], None] | None = None,
-        now: Callable[[], datetime] | None = None) -> int:
+        now: Callable[[], datetime] | None = None,
+        run_level_verify: bool = False) -> int:
     """Run tasks until all are DONE/BLOCKED/SKIP (or only one with once/task_id). Returns the
     process exit code.
 
@@ -524,11 +575,19 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         if cfg.receipt_refresh == "auto":
             result = verification.verify_folder_if_needed(cfg)
         else:
-            # Default policy: a batch workflow verifies once with an explicit
-            # `assent verify [--batch]`, so per-folder refreshes here would
-            # mostly expire before acceptance anyway.
-            print(f"verify {cfg.tasks_name}: receipt refresh deferred (default); "
-                  "run `assent verify [--batch]` before accepting")
+            # Manual policy deliberately defers this per-folder receipt.  When
+            # the invoking CLI already requested run-level verification, its
+            # selected or dynamic candidate follows immediately after this
+            # closeout and is the next step the user should see.
+            if run_level_verify:
+                print(f"verify {cfg.tasks_name}: receipt refresh deferred "
+                      "(default) for the per-folder receipt under manual "
+                      "policy; run-level verification follows this invocation")
+            else:
+                print(f"verify {cfg.tasks_name}: receipt refresh deferred "
+                      "(default) for the per-folder receipt under manual "
+                      "policy; run "
+                      "`assent verify [--batch]` before accepting")
         try_write_report(cfg)
     return result
 
@@ -1121,6 +1180,17 @@ def _evaluate(cfg: Config, task: Task,
     if rc != 0:
         return "fail", f"Verify command exit code is non-zero (={rc}): {task.verify}"
 
+    # A session handed the bounded shared-path review clause must have run the
+    # controlled operation; a source snapshot that is still UNKNOWN or STALE is
+    # refused with a precise retry reason rather than closed out.
+    try:
+        contract = _shared_paths_contract(cfg)
+    except AssentError as e:
+        return "fail", f"Shared-path contract could not be classified: {e}"
+    refusal = shared_paths.closeout_refusal(contract)
+    if refusal:
+        return "fail", refusal[:1].upper() + refusal[1:]
+
     return "done", None
 
 
@@ -1183,6 +1253,9 @@ def _verify_focused_locked(cfg: Config) -> int:
             f"folder {folder} has no DONE task with an eligible focused verify "
             "command")
 
+    # --focus provisions the persistent source worktree like every other verify
+    # entry point, and writes no receipt of any kind.
+    shared_paths.prepare_sources(main, [(folder, source.worktree)])
     print(f"verify {folder} --focus: source worktree {source.worktree}")
     print("verify --focus: focused task verification cannot authorize `accept`; "
           "complete integration verification has not run")

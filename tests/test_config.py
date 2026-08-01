@@ -161,10 +161,15 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.lockfile_rel, ".assent/plan01/assent.lock")
         self.assertEqual(cfg.verification_receipt_rel,
                          ".assent/plan01/_verification.toml")
+        # The reviewed-shared-path manifest and its lock are Assent-owned local
+        # execution memory in the project's .assent, so they are runtime
+        # artifacts like the log and the receipt: never staged, never part of a
+        # checkpoint, never a scope violation.
         self.assertEqual(cfg.git_excludes,
                          (".assent/plan01/_assent.log", ".assent/plan01/_report.md",
                          ".assent/plan01/assent.lock",
-                         ".assent/plan01/_verification.toml"))
+                         ".assent/plan01/_verification.toml",
+                         ".assent/manifest.toml", ".assent/manifest.lock"))
 
     def test_provided_folder_updates_all_derived_paths(self):
         cfg = load_config(self.write(_MINIMAL), folder="parallel02")
@@ -180,7 +185,8 @@ class TestLoadConfig(ConfigTestCase):
                          (".assent/parallel02/_assent.log",
                           ".assent/parallel02/_report.md",
                           ".assent/parallel02/assent.lock",
-                          ".assent/parallel02/_verification.toml"))
+                          ".assent/parallel02/_verification.toml",
+                          ".assent/manifest.toml", ".assent/manifest.lock"))
 
     def test_missing_file_raises(self):
         with self.assertRaises(AssentError):
@@ -788,6 +794,15 @@ class TestListTaskFolders(ConfigTestCase):
         (folder / "t001_task.e.toml").write_text("", encoding="utf-8")
         with self.assertRaisesRegex(AssentError, "bad\\.lock.*not a valid task folder name"):
             list_task_folders(self.assent_dir)
+
+    def test_discovers_unicode_task_filename_without_transliteration(self):
+        folder = self.assent_dir / "unicode01"
+        folder.mkdir()
+        (folder / "t001_中文任務.e.toml").write_text(
+            'title = "English task title"\n', encoding="utf-8")
+        (folder / "t001_中文任務.r.toml").write_text(
+            "[[entry]]\n", encoding="utf-8")
+        self.assertEqual(list_task_folders(self.assent_dir), ["unicode01"])
 
     def test_missing_assent_directory_is_empty(self):
         self.assertEqual(list_task_folders(self.root / "missing"), [])

@@ -170,7 +170,9 @@ def _batch_source_identities(
 
 def _batch_gate_problem(main: Path, configs: dict[str, Config],
                         sources: Sequence[_BatchSource], target_branch: str,
-                        target_before: str, digest: str) -> str | None:
+                        target_before: str,
+                        receipt: verification.BatchVerificationReceipt
+                        ) -> str | None:
     """Re-observe every identity a batch release is about to publish over.
 
     This is the single-folder accept gate widened to cover all sources at once:
@@ -211,8 +213,19 @@ def _batch_gate_problem(main: Path, configs: dict[str, Config],
         current = verification.verifier_digest(configs[sources[0].folder])
     except AssentError as e:
         return str(e)
-    if current != digest:
+    if current != receipt.verify_script_sha256:
         return "the verification script changed during the batch release"
+    # The shared inputs are evidence like the source, target, and verifier are,
+    # so they are re-observed at the same two moments.  This only reads and
+    # classifies: acceptance never provisions or repairs a link, and never
+    # invokes AI, to make a stale receipt publishable.
+    try:
+        if verification.current_batch_shared_inputs(
+                main, receipt) != receipt.shared_inputs_sha256:
+            return ("the reviewed shared inputs changed during the batch "
+                    "release")
+    except AssentError as e:
+        return f"the reviewed shared inputs can no longer be proven: {e}"
     return None
 
 
@@ -485,8 +498,7 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
             return 1
 
         problem = _batch_gate_problem(
-            main, configs, sources, target_branch, target_before,
-            receipt.verify_script_sha256)
+            main, configs, sources, target_branch, target_before, receipt)
         if problem is not None:
             print(f"{mode}: refused, {problem}. The target was not "
                   "changed and every source was kept")
@@ -509,7 +521,7 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
                     # could leave half a batch published.
                     replay.problem = _batch_gate_problem(
                         main, configs, sources, target_branch, target_before,
-                        receipt.verify_script_sha256) or ""
+                        receipt) or ""
                     if not replay.problem:
                         gitops.fast_forward(main, replay.chain_head)
                         replay.published = True

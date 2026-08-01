@@ -11,11 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import AssentError, gitops, verification
+from assent import AssentError, gitops, shared_paths, verification
 from assent import accept as accept_mod
 from assent.accept import accept_folder
 from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
+from tests.link_support import make_directory_link
 
 _DEFAULT_VERIFY = "python .assent/verify.py"
 
@@ -127,6 +128,10 @@ class AcceptRepositoryCase(unittest.TestCase):
                 gitops.commit_parents(candidate), (target_tip, source_tip))
             reconstructed_tree = gitops.tree_of(candidate, "HEAD")
         digest = verification.verifier_digest(cfg)
+        # The real digest, computed the same way acceptance recomputes it: a
+        # fixture default would make every receipt test pass against weakened
+        # validation instead of the production shared-input check.
+        shared_inputs = verification.current_shared_inputs(cfg)
         receipt = verification.VerificationReceipt(
             version=verification.RECEIPT_VERSION,
             status=status,
@@ -134,6 +139,7 @@ class AcceptRepositoryCase(unittest.TestCase):
             target_tip=target_tip,
             integration_tree=integration_tree or reconstructed_tree,
             verify_script_sha256=digest,
+            shared_inputs_sha256=shared_inputs,
             verify_command=verification.VERIFY_COMMAND,
             exit_code=0 if status == "PASSED" else 7,
             completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -145,6 +151,7 @@ class AcceptRepositoryCase(unittest.TestCase):
             verification.receipt_path(cfg), self.root)
         self.assertEqual(stored.source_tip, source_tip)
         self.assertEqual(stored.verify_script_sha256, digest)
+        self.assertEqual(stored.shared_inputs_sha256, shared_inputs)
         if assert_exact:
             self.assertEqual(stored.integration_tree, reconstructed_tree)
         return stored
@@ -442,6 +449,30 @@ class TestReceiptRefusals(AcceptRepositoryCase):
         self._write_receipt(status="FAILED")
         output = self._assert_refused_unchanged(before, self._accept())
         self.assertIn("status is FAILED", output)
+
+    def test_undeclared_directory_link_expires_a_preexisting_receipt(self) -> None:
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "ignore shared package")
+        _git(self.worktree, "merge", "--no-edit", "trunk")
+        pkg = self.root / "pkg"
+        pkg.mkdir()
+        (pkg / "primary.txt").write_text("primary\n", encoding="utf-8")
+        shared_paths.review(
+            self.root, self.worktree, none=True, watch=("README.md",))
+        self._write_receipt()
+        external = self.parent / "external pkg"
+        external.mkdir()
+        marker = external / "marker.txt"
+        marker.write_text("external\n", encoding="utf-8")
+        make_directory_link(self.worktree / "pkg", external)
+        before = self._head()
+
+        output = self._assert_refused_unchanged(before, self._accept())
+
+        self.assertIn("outside its active REVIEWED-NONE profile", output)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "external\n")
 
     def test_source_tip_and_verifier_digest_staleness_fail_closed(self) -> None:
         self._write_receipt()

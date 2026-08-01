@@ -126,6 +126,10 @@ A nonzero run is returned as-is and certifies nothing; otherwise the
 verification matches the selection — one folder as a folder receipt, an exact
 multi-folder selection as that selected batch, and `--all` or a bare `...` as
 the whole-project dynamic batch — and its exit code becomes the command's.
+Under the default manual receipt-refresh policy, run closeout defers the
+per-folder receipt; when `--verify` was requested, it identifies the run-level
+verification that follows instead of telling the user to start that command
+again. The handoff therefore remains one invocation with one selection.
 `--once` and `--task` are allowed too: they select exactly one folder, so the
 request verifies only when that limited run left the single selected folder
 complete, and an incomplete folder fails the request without writing a receipt. The refusal comes
@@ -161,6 +165,67 @@ branch and worktree were both cleaned after proven integration is skipped only
 on this path. A malformed batch receipt refuses rather than falling back. The
 first real verification or acceptance failure stops the sequential chain while
 earlier publications remain.
+
+Ignored inputs are a handoff, not a hole. A candidate is built from tracked
+content plus exactly two mirrored artifact kinds — reviewed, Assent-provisioned ignored
+directory links and ordinary ignored leaf files — so the rule that a required
+ignored directory must be recorded through the shared-path review and
+provisioned as a junction or directory symlink, never copied or linked by hand,
+is stated in the packaged scheduled-task instructions an executing
+session actually reads, not only in the format contract. When a full verifier
+nevertheless fails on a path inside a physically ignored directory a
+contributing source worktree holds, the evidence keeps the verifier output and
+exit code and appends one `Ignored input diagnosis:` note that names the
+directory, says it is intentionally omitted, and gives the directory-link
+remedy. It reports only directories the verifier output itself names, after
+separator normalization, and enumerates no ignored tree. No copy fallback,
+`local_inputs` setting, or force flag is added.
+
+Which ignored directories are shared is a reviewed decision, not an inference.
+No filesystem rule proves that an ignored directory is semantically required, so
+the answer is reviewed once and cached in the primary worktree's untracked
+`.assent/manifest.toml` — local execution memory, never project source, never
+committed, never copied into a worktree. `[shared_paths]` retains whole profiles
+by fingerprint (declared paths, exact tracked `watch` files, and a digest of
+those files plus the tracked Git-ignore rules), so parallel branches do not make
+the cache oscillate. A source snapshot is `UNKNOWN`, `REVIEWED-NONE` (a matching
+`paths = []` profile is an answer and never triggers another review),
+`REVIEWED-PATHS` (Assent provisions the exact junctions or directory symlinks
+itself), or `STALE`; conflicting matching profiles fail closed, while one new
+review replaces all profiles matching the current snapshot and retains
+nonmatching branch profiles.
+`assent shared-paths review` is the only writer, validating before mutating,
+holding one project-local lock, and replacing the file atomically. `UNKNOWN` and
+`STALE` add one bounded review clause to the next already-scheduled session and
+refuse its closeout until settled. Every verification entry point and
+`assent reconcile` classify and reconcile before any candidate, verifier, or
+managed worktree exists, and folder and batch receipts bind one
+`shared_inputs_sha256` — snapshotted before and after the verifier — that also
+binds each source's exact agreement with its active profile. An undeclared
+manual directory link refuses verification and reconciliation and expires
+folder or batch receipt reuse; folder report freshness shows the same drift.
+Acceptance rechecks immediately before publishing a ref, never repairing a link
+to make it pass. Ordinary ignored leaf files remain automatic and unreviewed.
+
+`NO-IGNORED-DIRECTORY-CANDIDATE` is the deterministic zero-token fast path
+beside those states. It asserts only that a successful Git ignored-entry query
+of the primary worktree found no existing ordinary ignored directory outside
+`.git/` and `.assent/`, never that the project semantically needs no shared
+input. It settles without a profile, junction, or AI review, contributes a
+receipt-digest identity distinct from `REVIEWED-NONE`, and is recomputed
+cheaply at every applicable gate. It fails closed: a Git discovery error is an
+actionable refusal rather than an empty candidate set; ignored leaf files do
+not count and any ordinary ignored directory does, even one later reviewed to
+`paths = []`; an appearing candidate makes the next classification `UNKNOWN`
+unless a matching cached profile answers it; and complete-verifier
+`required_evidence` naming a missing directory is classified for review when a
+valid primary target exists and otherwise refuses with the exact missing or
+not-ignored target problem. Candidate enumeration asks the primary worktree
+because every allowed link target must be an existing ordinary Git-ignored
+directory at that same primary relative path, and a fresh source checkout is
+expected to hold none; a directory or ignore rule living only on an unaccepted
+source branch is not yet a provisionable target and refuses actionably instead
+of claiming that nothing is needed.
 
 Receipts are disposable derived artifacts and never outrank Git. A target tip
 change is acceptable when the rebuilt integration tree is identical; a content
@@ -292,6 +357,19 @@ a separate state database.
 
 ## Batch conflict-skip consensus (2026-07-26)
 
+Exact selected verification is reported as `verify selected`, while
+`verify --batch` is reserved for dynamic discovery and its one interactive
+conflict-skip decision. An exact selected conflict is fail-closed: candidate
+construction states before any recovery advice that the full verifier did not
+run, names the conflicting folder and paths, and states that no receipt was
+written and the target and selected source refs were unchanged. A conflict with
+the target on its own points to `assent reconcile <FOLDER>`. A peer-only
+conflict names the compatible selected prefix ahead of the conflicting folder
+and recommends verifying and accepting that prefix before reconciling the
+conflicting folder against the advanced target; `rework` and `reject` remain
+explicit alternatives. The exact request never asks to skip or shrinks its
+set.
+
 `verify --batch` never resolves a source conflict itself; it only decides,
 once, whether to certify a smaller batch instead of none. Building the batch
 candidate merges every queued folder in turn regardless of an earlier
@@ -306,9 +384,10 @@ answer, or EOF is fail-closed and certifies nothing. A batch with nothing
 independent left to offer refuses outright without asking.
 
 Skipping is deliberately not a form of resolution: it changes nothing about
-the target or any source, conflicting or merged, and the conflicting
-folder's own source still requires an explicit human `rework` or `reject`
-before it can rejoin a future batch. `accept --all` has two distinct modes:
+the target or any source, conflicting or merged. For a peer-only conflict, the
+compatible work ahead of the conflicting folder may be verified and accepted
+first so the target advances before that folder is reconciled; `rework` and
+`reject` remain explicit alternatives. `accept --all` has two distinct modes:
 with a fresh PASSED batch receipt its release path publishes only the exact
 receipt folders in one atomic ref update and only reports every other finished
 folder left out; it does not verify or accept those leftovers in the same run.
@@ -345,8 +424,10 @@ identity, a derived artifact that costs one `assent verify` to rebuild.
 fresh, reproducible `PASSED` complete-verification receipt. Reconcile is not
 an integration engine: exactly one folder against the current integration
 target, no automatic content resolution, and a batch-only conflict between two
-unaccepted sources stays with `verify --batch`'s skip decision and then
-`rework` or `reject`.
+unaccepted sources stays with the dynamic `verify --batch` skip decision. When
+compatible work is already ahead of a peer-only conflict, verify and accept
+that work first, then reconcile the conflicting folder against the advanced
+target; `rework` or `reject` remain explicit alternatives.
 
 ## Model and reasoning-investment consensus
 

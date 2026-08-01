@@ -134,7 +134,7 @@ while operating an assent-managed session live in
   verification-script digest must reproduce it before it can authorize accept.
 - Complete verification mirrors exactly two kinds of artifact from the source
   worktrees that enter the candidate, never arbitrary ignored content:
-  explicitly provisioned ignored directory links -- Windows junctions and
+  reviewed-profile ignored directory links provisioned by Assent -- Windows junctions and
   directory symlinks, POSIX directory symlinks -- and ordinary ignored leaf
   files that sit inside an otherwise tracked directory, such as a generated
   `*.g.dart` beside its tracked source. Both may be at the root or nested below
@@ -160,6 +160,67 @@ while operating an assent-managed session live in
   links, files, and targets survive success, failure, and interruption alike.
   Do not add `--force`, a project `local_inputs` setting, a blanket `.gitignore`
   overlay, or copies of ignored directory contents into Git.
+- The ignored-input handoff is documented where each reader actually looks: the
+  packaged scheduled-task instructions tell an executing session to record a
+  required ignored directory through `assent shared-paths review`, which
+  provisions the same-relative junction or directory symlink, and never to copy
+  the tree or hand-create a source link; a full verifier that fails on a
+  path inside a physically ignored source directory gets one appended
+  `Ignored input diagnosis:` note naming that directory and the directory-link
+  remedy. The note preserves the verifier output and exit code, is stored in
+  whichever receipt records the failure summary, applies to single-folder,
+  exact selected, dynamic batch, and localization-prefix verification alike,
+  normalizes separators, and reports only a directory the verifier output
+  itself names; it never enumerates or traverses an ignored tree.
+- Which ignored directories a project shares is a reviewed decision cached in
+  the primary worktree's untracked, never-committed `.assent/manifest.toml`;
+  it is Assent-owned local execution memory, not project source, and its only
+  writer is the validated `assent shared-paths review` operation. Under
+  `[shared_paths]` it retains whole profiles by fingerprint -- normalized
+  project-relative `paths`, exact tracked `watch` files, and a digest of those
+  files plus the tracked Git-ignore rules -- so parallel branches never make the
+  cache oscillate. A source snapshot is UNKNOWN, REVIEWED-NONE (a matching
+  `paths = []` profile is an answer and must never trigger another review),
+  REVIEWED-PATHS (Assent provisions the exact Windows junction or POSIX
+  directory symlink to the primary worktree's same relative path itself), or
+  STALE; conflicting matching profiles fail closed. One further state,
+  NO-IGNORED-DIRECTORY-CANDIDATE, is the deterministic zero-token fast path:
+  it means only that a successful Git ignored-entry query of the primary
+  worktree found no existing ordinary ignored directory outside `.git/` and
+  `.assent/`, never that the project semantically needs no shared input. It is
+  settled without a manifest profile, junction, or AI review, contributes a
+  receipt-digest identity distinct from REVIEWED-NONE, and is recomputed
+  cheaply at every applicable gate. It fails closed: a Git ignored-entry
+  discovery error is an actionable refusal and is never turned into an empty
+  candidate set, ignored leaf files do not count, any existing ordinary
+  ignored directory does count even when a review later answers `paths = []`,
+  and a directory appearing later makes the next classification UNKNOWN unless
+  a matching cached profile already answers it. Complete-verifier
+  `required_evidence` naming a missing directory is never settled as
+  NO-IGNORED-DIRECTORY-CANDIDATE: it is classified for review when a valid
+  primary target exists and otherwise refuses with the exact missing or
+  not-ignored target problem. Candidate enumeration deliberately asks the
+  primary worktree, because every allowed link target must be an existing
+  ordinary Git-ignored directory at that same primary relative path and a
+  fresh source checkout is expected to hold no ignored inputs; a directory or
+  ignore rule that exists only on an unaccepted source branch is not yet a
+  provisionable primary target and must produce an actionable refusal rather
+  than a "none needed" claim. UNKNOWN and STALE add one
+  bounded review clause to the next already-scheduled session and refuse its
+  closeout until settled; an unchanged fingerprint consumes no review tokens.
+  Every verification entry point and `assent reconcile` classify and reconcile
+  before any candidate, verifier, or managed worktree exists, and folder and
+  batch receipts bind one `shared_inputs_sha256` -- snapshotted immediately
+  before and after the full verifier -- that acceptance rechecks before
+  publishing a ref without ever repairing a link or invoking AI. Do not add a
+  copy fallback, glob, all-ignored mode, force flag, Git staging of the
+  manifest, or any claim that semantic necessity can be inferred from
+  `.gitignore` alone.
+  Every contributing source's ignored directory links must equal its active
+  profile and resolve to those exact primary targets. An undeclared manual link
+  is unreviewed evidence under every state and refuses verification,
+  reconciliation, receipt freshness, reporting, and acceptance; ordinary
+  ignored leaf files keep their separate automatic candidate-link behavior.
 - Cross-folder speculative execution stacks only on an explicitly declared
   `base`, so at most one not-yet-accepted upstream tip is ever in a stack. A
   folder that declares no `base` is cut from the integration target; the

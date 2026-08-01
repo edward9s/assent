@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
+import os
 import shutil
 import subprocess
 import tempfile
@@ -12,14 +13,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import engine, gitops, pathops, verification
+from assent import engine, gitops, pathops, shared_paths, verification
 from assent import accept as accept_mod
 from assent import batch_accept as batch_accept_mod
 from assent import plan as plan_mod
 from assent.config import load_config
 from assent.reconcile import (reconcile_abort, reconcile_commit_message,
                               reconcile_continue, reconcile_start)
-from tests.link_support import cleanup_worktree, make_directory_link, safe_rmtree
+from tests.link_support import (cleanup_worktree, make_directory_link,
+                                safe_rmtree)
+from tests.test_shared_paths import settle_shared_paths
 
 
 def _git(root: Path, *args: str) -> str:
@@ -126,6 +129,10 @@ class ReconcileRepositoryCase(unittest.TestCase):
                 target = self.root / directory / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
+        # Real ignored directories now exist in the primary worktree, so the
+        # shared-path contract has something to answer.  These cases provision
+        # their links by hand, so the honest reviewed answer is the empty one.
+        settle_shared_paths(self.root, self.root)
         return self._target_inventory(targets)
 
     def _target_inventory(self, targets: dict[str, dict[str, str]]) -> list[tuple[str, str]]:
@@ -190,7 +197,124 @@ class ReconcileRepositoryCase(unittest.TestCase):
             gitops.branch_exists(self.root, self._managed_branch()))
 
 
+class SharedPathContractTest(ReconcileRepositoryCase):
+    """Reconciliation is another consumer of the reviewed shared-path cache."""
+
+    def _ignored_targets(self) -> None:
+        """Real ignored directories in the primary worktree, and no review yet."""
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\nassets/\nlib/l10n/arb/\n", encoding="utf-8")
+        (self.root / "lib" / "l10n").mkdir(parents=True)
+        (self.root / "lib" / "l10n" / "app_en.arb").write_text(
+            "{}\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore", "lib/l10n/app_en.arb")
+        _git(self.root, "commit", "-m", "ignored reconciliation targets")
+        for directory in ("pkg", "assets", "lib/l10n/arb"):
+            (self.root / directory).mkdir(parents=True, exist_ok=True)
+            (self.root / directory / "sentinel.txt").write_text(
+                f"{directory} sentinel\n", encoding="utf-8")
+
+    def test_an_unreviewed_source_refuses_before_any_managed_resource(self) -> None:
+        self._ignored_targets()
+        self._conflicting_repository()
+
+        code, output = self._run(reconcile_start)
+
+        self.assertEqual(code, 1)
+        self.assertIn("UNKNOWN", output)
+        self.assertIn("assent shared-paths review", output)
+        self.assertFalse(self._managed_path().exists())
+        self.assertFalse(
+            gitops.branch_exists(self.root, self._managed_branch()))
+        self._assert_source_untouched()
+        self._assert_target_untouched(self.target_tip)
+
+    def test_a_matching_profile_provisions_the_managed_worktree_before_merge(
+            self) -> None:
+        self._ignored_targets()
+        self._conflicting_repository()
+        shared_paths.review(
+            self.root, self.source_worktree,
+            paths=("pkg", "lib/l10n/arb"), watch=(".gitignore",))
+
+        code, output = self._run(reconcile_start)
+
+        self.assertEqual(code, 0, output)
+        for relative in ("pkg", "lib/l10n/arb"):
+            link = self._managed_path() / relative
+            self.assertTrue(pathops.is_link(link), relative)
+            self.assertEqual(Path(os.path.realpath(link)),
+                             (self.root / relative).resolve())
+        # An undeclared ignored directory is not linked into the merge scene.
+        self.assertFalse((self._managed_path() / "assets").exists())
+
+        self._resolve()
+        self.assertEqual(self._run(reconcile_continue)[0], 0)
+        self._assert_managed_gone()
+        self.assertEqual(
+            (self.root / "pkg" / "sentinel.txt").read_text(encoding="utf-8"),
+            "pkg sentinel\n")
+
+    def test_resume_revalidates_rather_than_repairing_an_altered_link(self) -> None:
+        self._ignored_targets()
+        self._conflicting_repository()
+        shared_paths.review(self.root, self.source_worktree,
+                            paths=("pkg",), watch=(".gitignore",))
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        self._resolve()
+        pathops.detach_directory_link(self._managed_path() / "pkg")
+
+        code, output = self._run(reconcile_continue)
+
+        self.assertEqual(code, 1)
+        self.assertIn("no longer a link to", output)
+        self.assertTrue(self._managed_path().exists())
+        self.assertEqual(
+            (self._managed_path() / "shared.txt").read_text(encoding="utf-8"),
+            "resolved\n")
+        self.assertEqual(
+            (self.root / "pkg" / "sentinel.txt").read_text(encoding="utf-8"),
+            "pkg sentinel\n")
+
+    def test_a_reviewed_empty_answer_creates_no_links_at_all(self) -> None:
+        self._ignored_targets()
+        self._conflicting_repository()
+        shared_paths.review(self.root, self.source_worktree, none=True,
+                            watch=(".gitignore",))
+
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        for relative in ("pkg", "assets", "lib/l10n/arb"):
+            self.assertFalse((self._managed_path() / relative).exists())
+
+
 class StartTest(ReconcileRepositoryCase):
+    def test_undeclared_source_link_refuses_before_managed_resources(self) -> None:
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "ignore shared package")
+        self._conflicting_repository()
+        (self.root / "pkg").mkdir()
+        (self.root / "pkg" / "primary.txt").write_text(
+            "primary\n", encoding="utf-8")
+        settle_shared_paths(self.root, self.source_worktree)
+        external = self.parent / "external source package"
+        external.mkdir()
+        (external / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+        make_directory_link(self.source_worktree / "pkg", external)
+
+        code, output = self._run(reconcile_start)
+
+        self.assertEqual(code, 1)
+        self.assertIn("outside its active REVIEWED-NONE", output)
+        self.assertIn("Nothing was created", output)
+        self._assert_managed_gone()
+        self.assertEqual(
+            (external / "sentinel.txt").read_text(encoding="utf-8"), "keep\n")
+        self.assertEqual(
+            (self.root / "pkg" / "primary.txt").read_text(encoding="utf-8"),
+            "primary\n")
+
     def test_start_prepares_only_the_reconciliation_worktree(self) -> None:
         self._conflicting_repository()
         code, output = self._run(reconcile_start)
@@ -311,6 +435,74 @@ class StartTest(ReconcileRepositoryCase):
 
 
 class ContinueTest(ReconcileRepositoryCase):
+    def test_undeclared_source_link_refuses_before_resuming_managed_worktree(
+            self) -> None:
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "ignore shared package")
+        self._conflicting_repository()
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        external = self.parent / "late external source package"
+        external.mkdir()
+        (external / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+        make_directory_link(self.source_worktree / "pkg", external)
+
+        code, output = self._run(reconcile_continue)
+
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "outside its active NO-IGNORED-DIRECTORY-CANDIDATE", output)
+        self.assertIn("every edit were preserved", output)
+        self.assertTrue(self._managed_path().exists())
+        self.assertTrue(gitops.branch_exists(self.root, self._managed_branch()))
+        self.assertEqual(
+            (external / "sentinel.txt").read_text(encoding="utf-8"), "keep\n")
+
+    def test_continue_refuses_when_same_fingerprint_changes_reviewed_paths(self) -> None:
+        (self.root / ".gitignore").write_text(
+            ".assent/\npkg/\nassets/\n", encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "add shared reconciliation targets")
+        for directory in ("pkg", "assets"):
+            (self.root / directory).mkdir()
+            (self.root / directory / "sentinel.txt").write_text(
+                f"{directory} sentinel\n", encoding="utf-8")
+        self._conflicting_repository()
+        shared_paths.review(self.root, self.source_worktree,
+                            paths=("pkg",), watch=(".gitignore",))
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        self._resolve("keep this human resolution\n")
+        managed = self._managed_path()
+        source_tip = self.source_tip
+        target_tip = self.target_tip
+
+        # The watch and ignore rules are unchanged, so this review deliberately
+        # reuses the same fingerprint while replacing the reviewed answer.
+        shared_paths.review(self.root, self.source_worktree,
+                            paths=("assets",), watch=(".gitignore",))
+
+        code, output = self._run(reconcile_continue)
+
+        self.assertEqual(code, 1)
+        self.assertIn("recorded paths", output)
+        self.assertIn("pkg", output)
+        self.assertIn("assets", output)
+        self.assertTrue(managed.exists())
+        self.assertEqual(
+            (managed / "shared.txt").read_text(encoding="utf-8"),
+            "keep this human resolution\n")
+        self.assertTrue(pathops.is_link(managed / "pkg"))
+        self.assertEqual(gitops.merge_head(managed), target_tip)
+        self.assertEqual(gitops.branch_tip(self.root, self.source_branch),
+                         source_tip)
+        self.assertEqual(
+            (self.root / "pkg" / "sentinel.txt").read_text(encoding="utf-8"),
+            "pkg sentinel\n")
+        self.assertEqual(
+            (self.root / "assets" / "sentinel.txt").read_text(encoding="utf-8"),
+            "assets sentinel\n")
+
     def test_continue_detaches_main_tree_links_before_managed_cleanup(self) -> None:
         before = self._provision_linked_targets()
         self._conflicting_repository()
@@ -645,6 +837,7 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
             source_tip=self.source_tip, target_tip=self.target_tip,
             integration_tree=self._tree(),
             verify_script_sha256=verification.verifier_digest(cfg),
+            shared_inputs_sha256=verification.current_shared_inputs(cfg),
             verify_command=verification.VERIFY_COMMAND, exit_code=0,
             completed_at=self._now(), failure_summary=""), self.root)
         return path
@@ -659,6 +852,7 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
                           for folder, tip in folders),
             final_tree=tree,
             verify_script_sha256=verification.verifier_digest(self._config()),
+            shared_inputs_sha256="0" * 64,
             verify_command=verification.VERIFY_COMMAND, exit_code=0,
             completed_at=self._now(), failure_summary=""), self.root)
         return path

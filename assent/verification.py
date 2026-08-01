@@ -27,6 +27,7 @@ from assent.batch_receipt import (BATCH_RECEIPT_NAME, BATCH_RECEIPT_VERSION,
                                   BatchSource, BatchVerificationReceipt,
                                   batch_receipt_is_current, batch_receipt_path,
                                   batch_receipt_staleness,
+                                  current_batch_shared_inputs,
                                   invalidate_batch_receipt, read_batch_receipt,
                                   write_batch_receipt)
 from assent.batch_verification import (BatchBisectResult, BatchConflict,
@@ -38,6 +39,7 @@ from assent.batch_verification import (BatchBisectResult, BatchConflict,
                                        verify_selected_batch)
 from assent.folder_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         VerificationReceipt,
+                                        current_shared_inputs,
                                         invalidate_folder_receipt, read_receipt,
                                         read_verification_receipt,
                                         receipt_matches_current_candidate,
@@ -45,9 +47,11 @@ from assent.folder_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         verify_folder, verify_folder_if_needed,
                                         write_receipt,
                                         write_verification_receipt)
-from assent.verification_common import (VERIFY_COMMAND, BatchCandidate,
-                                        build_batch_candidate, run_full_verifier,
-                                        verifier_digest)
+from assent.verification_common import (
+                                        VERIFY_COMMAND, BatchCandidate,
+                                        build_batch_candidate,
+                                        diagnosed_ignored_directories,
+                                        run_full_verifier, verifier_digest)
 
 # The full verifier used to be private to this module, and callers outside the
 # verification modules still name it that way when they assert that a command
@@ -72,15 +76,18 @@ __all__ = [
     "batch_receipt_is_current",
     "batch_receipt_path",
     "batch_receipt_staleness",
+    "current_batch_shared_inputs",
     "bisect_batch_failure",
     "build_batch_candidate",
     "confirm_on_terminal",
+    "current_shared_inputs",
     "invalidate_batch_receipt",
     "invalidate_folder_receipt",
     "read_batch_receipt",
     "read_receipt",
     "read_verification_receipt",
     "receipt_matches_current_candidate",
+    "diagnosed_ignored_directories",
     "receipt_path",
     "receipt_report_lines",
     "run_full_verifier",

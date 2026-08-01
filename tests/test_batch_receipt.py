@@ -7,20 +7,23 @@ expires it.
 """
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 import tomllib
 import unittest
 from pathlib import Path
 
 from assent import AssentError
-from assent.batch_receipt import (BATCH_RECEIPT_NAME, BatchSource,
-                                  BatchVerificationReceipt,
+from assent.batch_receipt import (BATCH_RECEIPT_NAME, BATCH_RECEIPT_VERSION,
+                                  BatchSource, BatchVerificationReceipt,
                                   batch_receipt_is_current, batch_receipt_path,
-                                  batch_receipt_staleness, read_batch_receipt,
-                                  write_batch_receipt)
+                                  batch_receipt_staleness,
+                                  current_batch_shared_inputs,
+                                  read_batch_receipt, write_batch_receipt)
 from assent.folder_verification import RECEIPT_NAME, read_receipt, verify_folder
 from assent.gitops import commit_of, tree_of
 from assent.verification_common import build_batch_candidate, verifier_digest
+from tests.link_support import make_directory_link
 # The batch receipt describes the same repository the per-folder receipt tests
 # already build, so the fixture is shared rather than copied.
 from tests.test_verification import VerificationRepositoryCase
@@ -58,13 +61,24 @@ class BatchReceiptCase(VerificationRepositoryCase):
             BatchSource(folder, tip, tree)
             for (folder, tip), tree in zip(self.order, candidate.step_trees))
         fields = dict(
-            version=1, status="PASSED", target_tip=self.target_tip,
+            version=BATCH_RECEIPT_VERSION, status="PASSED",
+            target_tip=self.target_tip,
             sources=sources, final_tree=candidate.step_trees[-1],
             verify_script_sha256=verifier_digest(self.cfg),
+            shared_inputs_sha256="0" * 64,
             verify_command="python .assent/verify.py", exit_code=0,
             completed_at="2026-07-24T00:00:00+00:00", failure_summary="")
         fields.update(overrides)
-        return BatchVerificationReceipt(**fields)
+        receipt = BatchVerificationReceipt(**fields)
+        if "shared_inputs_sha256" not in overrides:
+            # The reviewed shared inputs are part of the evidence now, so the
+            # fixture records what the repository currently is rather than a
+            # placeholder that would read as drift.
+            receipt = dataclasses.replace(
+                receipt,
+                shared_inputs_sha256=current_batch_shared_inputs(
+                    self.root, receipt))
+        return receipt
 
     def _write(self, receipt: BatchVerificationReceipt) -> Path:
         path = batch_receipt_path(self.assent_dir)
@@ -178,6 +192,20 @@ class TestBatchReceiptStaleness(BatchReceiptCase):
         receipt = self._batch_receipt()
         self.assertEqual(batch_receipt_staleness(self.cfg, receipt), ())
         self.assertTrue(batch_receipt_is_current(self.cfg, receipt))
+
+    def test_undeclared_source_link_makes_shared_inputs_non_reproducible(self):
+        receipt = self._batch_receipt()
+        external = self._link_target("late batch input")
+        make_directory_link(self.source_worktree / "pkg", external)
+
+        reasons = batch_receipt_staleness(self.cfg, receipt)
+
+        self.assertEqual(len(reasons), 1, reasons)
+        self.assertIn("reviewed shared inputs cannot be reproduced", reasons[0])
+        self.assertIn("outside its active REVIEWED-NONE", reasons[0])
+        self.assertEqual(
+            (external / "marker.txt").read_text(encoding="utf-8"),
+            "late batch input marker\n")
 
     def test_target_metadata_may_advance_but_content_may_not(self):
         receipt = self._batch_receipt()

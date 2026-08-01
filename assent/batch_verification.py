@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from assent import AssentError, gitops
+from assent import AssentError, gitops, shared_paths
 from assent.batch_receipt import (BATCH_RECEIPT_VERSION, BatchSource,
                                   BatchVerificationReceipt, batch_receipt_path,
                                   read_batch_receipt, write_batch_receipt)
@@ -25,7 +25,10 @@ from assent.folderdeps import (infer_folder_completion, live_upstreams,
                                parse_folder_dependency_graph)
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.verification_common import (VERIFY_COMMAND, candidate_tree,
+                                        BatchCandidate,
+                                        ignored_input_diagnosis,
                                         invalidate_receipt, merge_chain,
+                                        print_ignored_input_diagnosis,
                                         provisioned_candidate_links,
                                         run_full_verifier, sha256_file,
                                         source_snapshot, summary,
@@ -46,7 +49,8 @@ class BatchSelection:
 
 def _new_batch_receipt(*, status: str, target_tip: str,
                        sources: Sequence[tuple[str, str]],
-                       step_trees: Sequence[str], digest: str, exit_code: int,
+                       step_trees: Sequence[str], digest: str,
+                       shared_inputs: str, exit_code: int,
                        failure_summary: str = "") -> BatchVerificationReceipt:
     entries = tuple(
         BatchSource(folder, source_tip, step_tree)
@@ -58,6 +62,7 @@ def _new_batch_receipt(*, status: str, target_tip: str,
         sources=entries,
         final_tree=step_trees[-1],
         verify_script_sha256=digest,
+        shared_inputs_sha256=shared_inputs,
         verify_command=VERIFY_COMMAND,
         exit_code=exit_code,
         completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -200,10 +205,46 @@ def select_explicit_batch_folders(
     return BatchSelection(tuple(sources)), configs
 
 
+def _shared_digest(main: Path, contracts: Mapping[str, shared_paths.Contract],
+                   sources: Sequence[tuple[str, str]]) -> str:
+    """The shared-input digest for exactly the folders a receipt will record.
+
+    A batch may shrink -- a declined conflict, a skip, a bisected prefix -- so
+    the digest is taken over the recorded merge order rather than over whatever
+    was classified at the start; the receipt must describe the set it certifies.
+    """
+    return shared_paths.shared_inputs_digest(
+        main, [(folder, contracts[folder])
+               for folder, _tip in sources if folder in contracts])
+
+
+def _current_shared_digest(
+        main: Path, sources: Sequence[tuple[str, str]],
+        source_worktrees: Mapping[str, Path]) -> str:
+    """Reclassify one batch source set without repairing any worktree links."""
+    manifest = shared_paths.read_manifest(main)
+    contracts: list[tuple[str, shared_paths.Contract]] = []
+    for folder, _tip in sources:
+        contract = shared_paths.classify(
+            main, source_worktrees.get(folder) or main, manifest=manifest)
+        if not contract.settled:
+            raise AssentError(
+                f"the shared-path contract for {folder} is {contract.state}; "
+                "the batch's shared-input evidence can no longer be reproduced")
+        shared_paths.require_directory_link_agreement(
+            main, source_worktrees.get(folder) or main, contract,
+            folder=folder)
+        contracts.append((folder, contract))
+    return shared_paths.shared_inputs_digest(main, contracts)
+
+
 def _batch_drift(configs: dict[str, Config], main: Path, excludes: Sequence[str],
                  target_branch: str, target_tip: str,
                  sources: Sequence[tuple[str, str]], script: Path,
-                 digest: str) -> list[str]:
+                 digest: str, contracts: Mapping[str, shared_paths.Contract],
+                 shared_sources: Sequence[tuple[str, str]],
+                 shared_inputs: str,
+                 source_worktrees: Mapping[str, Path]) -> list[str]:
     """Re-observe every identity the batch receipt is about to certify."""
     changed: list[str] = []
     if gitops.current_branch(main) != target_branch:
@@ -222,6 +263,17 @@ def _batch_drift(configs: dict[str, Config], main: Path, excludes: Sequence[str]
                 changed.append(f"source tip for {folder} changed")
     if sha256_file(script) != digest:
         changed.append("verification script changed")
+    # Snapshotted again after the verifier: a declared shared target whose
+    # content moved during the run turns an apparent pass into a failure, so no
+    # PASSED batch receipt can describe inputs the verifier never saw.
+    try:
+        if _current_shared_digest(
+                main, shared_sources, source_worktrees) != shared_inputs:
+            changed.append(
+                "a declared shared input changed while the full verifier was "
+                "running, so the run certifies nothing")
+    except AssentError as e:
+        changed.append(f"shared inputs became unreadable: {e}")
     return changed
 
 
@@ -268,6 +320,24 @@ def _prefix_links(worktrees: Mapping[str, Path],
         [worktrees.get(folder) for folder, _tip in sources])
 
 
+def _failure_summary(result: subprocess.CompletedProcess[str],
+                     worktrees: Mapping[str, Path],
+                     sources: Sequence[tuple[str, str]]) -> str:
+    """Summarize one failed batch run, with the ignored-input hint appended.
+
+    Every batch entry point -- exact selection, dynamic discovery, and each
+    localization prefix -- builds its failure evidence here, so the actionable
+    fact is stored the same way whichever of them ran the verifier.
+    """
+    return summary(
+        result.stdout, result.stderr,
+        f"Verification command failed: {VERIFY_COMMAND} "
+        f"(exit code {result.returncode})",
+        ignored_input_diagnosis(
+            f"{result.stdout}\n{result.stderr}",
+            [worktrees.get(folder) for folder, _tip in sources]))
+
+
 def _verify_prefix(main: Path, target_tip: str,
                    sources: Sequence[tuple[str, str]], script: Path,
                    worktrees: Mapping[str, Path]) -> _PrefixRun:
@@ -298,17 +368,15 @@ def _verify_prefix(main: Path, target_tip: str,
                                   f"Unable to start verification: {e}")
     if result.returncode == 0:
         return _PrefixRun(True, chain.step_trees, 0, "")
-    return _PrefixRun(
-        False, chain.step_trees, result.returncode,
-        summary(result.stdout, result.stderr,
-                f"Verification command failed: {VERIFY_COMMAND} "
-                f"(exit code {result.returncode})"))
+    return _PrefixRun(False, chain.step_trees, result.returncode,
+                      _failure_summary(result, worktrees, sources))
 
 
 def bisect_batch_failure(main: Path, target_tip: str,
                          sources: Sequence[tuple[str, str]], script: Path,
                          failure_summary: str,
-                         worktrees: Mapping[str, Path] | None = None
+                         worktrees: Mapping[str, Path] | None = None,
+                         label: str = "verify --batch"
                          ) -> BatchBisectResult:
     """Localize a failed batch to the first folder whose merge turns it red.
 
@@ -325,7 +393,7 @@ def bisect_batch_failure(main: Path, target_tip: str,
     total = len(sources)
     steps = _bisect_steps(total)
     if steps:
-        print(f"verify --batch: localizing the failure over {total} folders; "
+        print(f"{label}: localizing the failure over {total} folders; "
               f"at most {steps} more full verification(s)")
     low, high = 1, total
     last_pass: _PrefixRun | None = None
@@ -335,7 +403,7 @@ def bisect_batch_failure(main: Path, target_tip: str,
         middle = (low + high) // 2
         step += 1
         prefix = tuple(sources[:middle])
-        print(f"verify --batch: localizing step {step}/{steps}: verifying "
+        print(f"{label}: localizing step {step}/{steps}: verifying "
               f"{middle} of {total} folders ("
               + ", ".join(folder for folder, _tip in prefix) + ")")
         run = _verify_prefix(main, target_tip, prefix, script, worktrees)
@@ -496,14 +564,17 @@ def _report_batch_conflicts(chain: FilteredBatchChain, main: Path,
                   "with an earlier not-yet-accepted source in this batch. "
                   "`assent reconcile` handles one folder against the target "
                   "and never merges speculative peers, so it cannot resolve "
-                  "this; accept the earlier folder first and verify again, or "
+                  "this; verify and accept compatible work ahead first, then "
+                  "run `assent reconcile <FOLDER>` against the advanced target, "
+                  "or "
                   "reopen the folder with `assent rework <FOLDER> <TASK>` or "
                   f"drop it with `assent reject {conflict.folder}`.")
     for folder, cause in chain.skipped_after:
         print(f"verify --batch: {folder} is queued after {cause}, so it is "
               "skipped with it rather than verified without it")
     print("verify --batch: a source conflict is a human decision; accepting "
-          "the folders ahead of it does not resolve it.")
+          "compatible work ahead advances the target but does not resolve the "
+          "conflicting source.")
 
 
 def _skip_question(chain: FilteredBatchChain) -> str:
@@ -515,7 +586,8 @@ def _skip_question(chain: FilteredBatchChain) -> str:
 
 def _report_localization(assent_dir: Path, folders: Sequence[str],
                          result: BatchBisectResult,
-                         requested_folders: Sequence[str] | None = None) -> str:
+                         requested_folders: Sequence[str] | None = None,
+                         label: str = "verify --batch") -> str:
     """Print the localization verdict and return the note stored in the receipt.
 
     The guilty folder keeps its status and its task files: it is still finished
@@ -529,30 +601,84 @@ def _report_localization(assent_dir: Path, folders: Sequence[str],
         # folder that was just proven guilty.
         graph = {}
     downstream = _dependent_folders(graph, result.guilty, folders)
-    print(f"verify --batch: localized the failure to {result.guilty}")
+    print(f"{label}: localized the failure to {result.guilty}")
     for line in result.guilty_summary.splitlines():
         print(f"  {line}")
     ejected = f"{result.guilty} is out of this batch"
     if downstream:
         ejected = (f"{result.guilty} and its downstream ("
                    + ", ".join(downstream) + ") are out of this batch")
-    print(f"verify --batch: {ejected}. Its status and task files were not "
+    print(f"{label}: {ejected}. Its status and task files were not "
           f"touched; decide with `assent rework {result.guilty}` or "
           f"`assent reject {result.guilty}`")
     note = (f"Batch localization: {result.guilty} is the first folder whose "
             f"merge fails the full verification; {ejected}.")
     if result.kept:
-        print("verify --batch: reissuing a PASSED batch receipt for the "
+        print(f"{label}: reissuing a PASSED batch receipt for the "
               f"{len(result.kept)} folder(s) verified ahead of it: "
               + ", ".join(folder for folder, _tip in result.kept))
         if requested_folders is not None:
-            print("verify --batch: this smaller PASSED prefix receipt does not "
+            print(f"{label}: this smaller PASSED prefix receipt does not "
                   "authorize acceptance of the originally requested full set: "
                   + ", ".join(requested_folders))
     else:
-        print("verify --batch: no folder ahead of it remains, so the batch "
+        print(f"{label}: no folder ahead of it remains, so the batch "
               "keeps a FAILED receipt and publishes nothing")
     return summary(note, result.guilty_summary)
+
+
+def _selected_prefix(sources: Sequence[tuple[str, str]],
+                    conflict_folder: str) -> tuple[str, ...]:
+    """Return the selected folders proven merge-compatible before a conflict."""
+    for index, (folder, _tip) in enumerate(sources):
+        if folder == conflict_folder:
+            return tuple(name for name, _source_tip in sources[:index])
+    return ()
+
+
+def _report_selected_conflict(chain: BatchCandidate, main: Path,
+                              target_tip: str,
+                              sources: Sequence[tuple[str, str]]) -> None:
+    """Report an exact conflict and give recovery that preserves its set."""
+    folder = chain.conflict_folder
+    print("verify selected: candidate construction encountered a merge "
+          "conflict; the full verifier did not run.")
+    print(f"verify selected: the exact selected set conflicts while merging "
+          f"{folder} into the candidate. Conflicting file(s):")
+    for conflict in chain.conflicts:
+        print(f"  - {conflict}")
+    print("verify selected: no receipt was written; all target/source refs "
+          "(the integration target ref and every selected source ref) were left "
+          "unchanged.")
+
+    source_tip = dict(sources)[folder]
+    if _conflicts_with_target_alone(
+            main, BatchConflict(folder, chain.conflicts, source_tip), target_tip):
+        print(f"verify selected: {folder} conflicts with the integration "
+              "target on its own. Run `assent reconcile "
+              f"{folder}` to resolve that source-versus-target conflict.")
+        return
+
+    prefix = _selected_prefix(sources, folder)
+    if prefix:
+        prefix_text = ", ".join(prefix)
+        verify_command = "assent verify " + " ".join(prefix)
+        accept_command = "assent accept " + " ".join(prefix)
+        print(f"verify selected: {folder} merges into the integration target "
+              "cleanly on its own; it conflicts only with the selected "
+              "sources ahead of it.")
+        print(f"verify selected: compatible selected prefix ahead of {folder}: "
+              f"{prefix_text}. First run `{verify_command}`, then "
+              f"`{accept_command}`. After the prefix advances the integration "
+              f"target, run `assent reconcile {folder}` against that advanced "
+              "target.")
+    else:
+        print(f"verify selected: {folder} is not independently conflicting "
+              "with the integration target, but no compatible selected prefix "
+              "was available; choose `assent rework <FOLDER> <TASK>` or "
+              f"`assent reject {folder}`.")
+    print(f"verify selected: `assent rework <FOLDER> <TASK>` and `assent reject "
+          f"{folder}` remain explicit alternatives.")
 
 
 def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
@@ -565,6 +691,7 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
     any merge conflict refuses the whole request without asking to skip it.
     """
     exact = selected_folders is not None
+    label = "verify selected" if exact else "verify --batch"
     root = assent_dir.parent
     main = gitops.main_worktree(root)
     path = batch_receipt_path(assent_dir)
@@ -582,7 +709,7 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
         selection, configs = select_batch_folders(
             config_path, assent_dir, main, target_tip)
     for folder, reason in selection.skipped:
-        print(f"verify --batch: skip {folder} ({reason})")
+        print(f"{label}: skip {folder} ({reason})")
     if not selection.sources:
         if exact:
             raise AssentError(
@@ -618,12 +745,20 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                     "were being acquired")
             if worktree is not None:
                 source_worktrees[folder] = worktree
+        # Every contributing live source is classified and its Assent-owned
+        # links reconciled before a candidate exists, so a batch never depends
+        # on an earlier `run` having left a junction behind and UNKNOWN or STALE
+        # refuses here with the zero-AI review remedy.
+        contracts = dict(shared_paths.prepare_sources(
+            main, [(folder, source_worktrees.get(folder))
+                   for folder in selection.folders]))
+        shared_before = _shared_digest(main, contracts, selection.sources)
         script = (assent_dir / "verify.py").resolve()
         if not script.is_file():
             raise AssentError(f"Verification script not found: {script}")
         digest = sha256_file(script)
 
-        print("verify --batch: merging "
+        print(f"{label}: merging "
               f"{len(selection.sources)} folder(s) in dependency order: "
               + ", ".join(selection.folders))
         invalidate_receipt(path)
@@ -642,15 +777,8 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
             if exact:
                 chain = merge_chain(candidate, selection.sources)
                 if not chain.ok:
-                    print("verify --batch: the exact selected set conflicts "
-                          f"while merging {chain.conflict_folder}. "
-                          "Conflicting file(s):")
-                    for conflict in chain.conflicts:
-                        print(f"  - {conflict}")
-                    print("verify --batch: refused; an explicit selected set "
-                          "cannot be reduced by skipping a conflict. The target "
-                          "and every source were left unchanged and no receipt "
-                          "was written")
+                    _report_selected_conflict(
+                        chain, main, target_tip, selection.sources)
                     return 1
                 batch_sources = tuple(selection.sources)
                 batch_step_trees = chain.step_trees
@@ -702,17 +830,15 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
             assert result is not None
             status = "PASSED" if result.returncode == 0 else "FAILED"
             exit_code = result.returncode
-            failure_summary = "" if result.returncode == 0 else summary(
-                result.stdout, result.stderr,
-                f"Verification command failed: {VERIFY_COMMAND} "
-                f"(exit code {result.returncode})")
+            failure_summary = "" if result.returncode == 0 else _failure_summary(
+                result, source_worktrees, batch_sources)
             if status == "FAILED" and bisect:
                 bisected = bisect_batch_failure(
                     main, target_tip, batch_sources, script, failure_summary,
-                    source_worktrees)
+                    source_worktrees, label)
                 failure_summary = _report_localization(
                     assent_dir, batch_folders, bisected,
-                    batch_folders if exact else None)
+                    batch_folders if exact else None, label)
                 localized = True
                 if bisected.kept:
                     sources = bisected.kept
@@ -721,20 +847,23 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
 
         receipt = _new_batch_receipt(
             status=status, target_tip=target_tip, sources=sources,
-            step_trees=step_trees, digest=digest, exit_code=exit_code,
-            failure_summary=failure_summary)
+            step_trees=step_trees, digest=digest,
+            shared_inputs=_shared_digest(main, contracts, sources),
+            exit_code=exit_code, failure_summary=failure_summary)
 
         changed = _batch_drift(
             configs, main, excludes, target_branch, target_tip,
-            batch_sources, script, digest)
+            batch_sources, script, digest,
+            contracts, selection.sources, shared_before, source_worktrees)
         if changed:
             if localized:
-                print("verify --batch: the repository changed while the batch "
+                print(f"{label}: the repository changed while the batch "
                       "was being verified, so the localization above certifies "
                       "nothing and the receipt records the drift instead")
             receipt = _new_batch_receipt(
                 status="FAILED", target_tip=target_tip, sources=batch_sources,
                 step_trees=batch_step_trees, digest=digest,
+                shared_inputs=shared_before,
                 exit_code=1, failure_summary="; ".join(changed))
 
         write_batch_receipt(path, receipt, main)
@@ -744,19 +873,22 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
               f"-> tree {source.step_tree}")
     if receipt.status == "PASSED":
         if not localized:
-            print(f"verify --batch: passed ({receipt.final_tree})")
+            print(f"{label}: passed ({receipt.final_tree})")
             if batch_skipped:
-                print("verify --batch: verified " + ", ".join(batch_folders)
+                print(f"{label}: verified " + ", ".join(batch_folders)
                       + "; skipped " + ", ".join(batch_skipped))
             return 0
         # The batch as requested did not pass, so the exit code stays nonzero
         # even though a smaller batch is now certified: a caller must not read
         # success for folders that were just proven, or suspected, broken.
-        print(f"verify --batch: failed, but {len(receipt.sources)} folder(s) "
+        print(f"{label}: failed, but {len(receipt.sources)} folder(s) "
               f"kept a PASSED batch receipt ({receipt.final_tree}); "
               "`assent accept --all` publishes exactly those")
         return 1
-    print(f"verify --batch: failed ({receipt.failure_summary.splitlines()[0]})")
+    print(f"{label}: failed ({receipt.failure_summary.splitlines()[0]})")
+    # Only the first stored line is echoed above, so an ignored-input hint is
+    # printed explicitly rather than left for a human to find in the receipt.
+    print_ignored_input_diagnosis(label, receipt.failure_summary)
     return 1
 
 
@@ -804,10 +936,10 @@ def verify_selected_batch(config_path: str, assent_dir: str | Path,
             return _verify_batch_locked(
                 config_path, assent_dir, bisect, confirm_on_terminal, folders)
     except LockBusy as e:
-        print(f"verify --batch: refused ({e})")
+        print(f"verify selected: refused ({e})")
         return 1
     except AssentError as e:
-        print(f"verify --batch: failed ({e})")
+        print(f"verify selected: failed ({e})")
         return 1
 
 

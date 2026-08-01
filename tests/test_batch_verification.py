@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from assent import gitops
+from assent import gitops, shared_paths
 from assent.__main__ import _dispatch
 from assent.batch_accept import accept_all
 from assent.batch_receipt import (BatchVerificationReceipt, batch_receipt_path,
@@ -319,6 +319,8 @@ class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
         code, output = self.run_selected("child", "parent")
 
         self.assertEqual(code, 0, output)
+        self.assertIn("verify selected: merging", output)
+        self.assertNotIn("verify --batch:", output)
         self.assertIn("merging 2 folder(s) in dependency order: parent, child",
                       output)
         receipt = self.read_batch_receipt()
@@ -362,7 +364,19 @@ class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
 
         self.assertEqual(code, 1)
         self.assertIn("exact selected set conflicts", output)
+        self.assertIn("verify selected:", output)
+        self.assertNotIn("verify --batch:", output)
+        self.assertIn("full verifier did not run", output)
         self.assertIn("shared.txt", output)
+        self.assertIn("no receipt was written", output)
+        self.assertIn("target ref", output)
+        self.assertIn("every selected source ref", output)
+        self.assertIn("compatible selected prefix ahead of bb: aa", output)
+        self.assertIn("assent verify aa", output)
+        self.assertIn("assent accept aa", output)
+        self.assertIn("assent reconcile bb", output)
+        self.assertIn("assent rework <FOLDER> <TASK>", output)
+        self.assertIn("assent reject bb", output)
         ask.assert_not_called()
         verifier.assert_not_called()
         self.assertFalse(self.receipt_path().exists())
@@ -371,6 +385,44 @@ class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
         self.assertEqual(branch_tips, {
             branch: _git(self.root, "rev-parse", branch)
             for branch in branch_tips
+        })
+
+    def test_selected_target_conflict_points_to_reconcile_without_verifying(self) -> None:
+        (self.root / "shared.txt").write_text("base\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "shared base")
+        self.make_source("aa")
+        self.make_source("bb", filename="shared.txt", content="from bb\n")
+        (self.root / "shared.txt").write_text("from trunk\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "advance trunk")
+
+        target_tip = self.head()
+        refs_before = {
+            ref: self.head(ref)
+            for ref in _git(self.root, "for-each-ref", "--format=%(refname)",
+                            "refs/heads/").splitlines()
+        }
+        with mock.patch("assent.batch_verification.confirm_on_terminal") as ask, \
+                mock.patch("assent.batch_verification.run_full_verifier") as verifier:
+            code, output = self.run_selected("aa", "bb")
+
+        self.assertEqual(code, 1)
+        self.assertIn("verify selected:", output)
+        self.assertNotIn("verify --batch:", output)
+        self.assertIn("full verifier did not run", output)
+        self.assertIn("bb", output)
+        self.assertIn("shared.txt", output)
+        self.assertIn("bb conflicts with the integration target on its own", output)
+        self.assertIn("assent reconcile bb", output)
+        self.assertNotIn("compatible selected prefix", output)
+        self.assertIn("no receipt was written", output)
+        ask.assert_not_called()
+        verifier.assert_not_called()
+        self.assertFalse(self.receipt_path().exists())
+        self.assertEqual(self.head(), target_tip)
+        self.assertEqual(refs_before, {
+            ref: self.head(ref) for ref in refs_before
         })
 
     def test_selected_no_bisect_records_the_requested_set(self) -> None:
@@ -912,10 +964,20 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
 
     def provision(self, folder: str, name: str,
                   target: Path | None = None) -> Path:
-        """Give ``folder``'s source worktree a real root-level directory link."""
-        target = self.link_target(name) if target is None else target
-        make_directory_link(gitops.worktree_path(self.root, folder) / name,
-                            target)
+        """Review a primary target, or install one deliberate foreign link."""
+        worktree = gitops.worktree_path(self.root, folder)
+        if target is not None:
+            make_directory_link(worktree / name, target)
+            return target
+        target = self.root / name
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "marker.txt").write_text(
+            f"{name} marker\n", encoding="utf-8")
+        declared = set(getattr(self, "declared", ()))
+        declared.add(name)
+        self.declared = tuple(sorted(declared))
+        shared_paths.review(
+            self.root, worktree, paths=self.declared, watch=("README.md",))
         return target
 
     def write_probe_verify(self, *probe: str, absent: tuple[str, ...] = (),
@@ -958,11 +1020,12 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
             self) -> None:
         self.make_source("aa")
         self.make_source("bb")
-        arb = self.parent / "external arb"
-        arb.mkdir()
+        arb = self.root / "lib/l10n/arb"
+        arb.mkdir(parents=True)
         (arb / "app_localizations.dart").write_text("// l10n\n", encoding="utf-8")
-        make_directory_link(
-            gitops.worktree_path(self.root, "aa") / "lib/l10n/arb", arb)
+        shared_paths.review(
+            self.root, gitops.worktree_path(self.root, "aa"),
+            paths=("lib/l10n/arb",), watch=("README.md",))
         part = gitops.worktree_path(self.root, "bb") / "lib/models/task.g.dart"
         part.write_text("// generated part\n", encoding="utf-8")
         cache = gitops.worktree_path(self.root, "bb") / "ignored"
@@ -1015,6 +1078,79 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         self.assertEqual(receipt.status, "PASSED")
         self.assertEqual(receipt.folders, ("aa", "bb"))
 
+    def copy_ignored_package(self, folder: str) -> Path:
+        """Give one source worktree a physical ignored pkg/fl_chart copy."""
+        package = gitops.worktree_path(self.root, folder) / "pkg" / "fl_chart"
+        package.mkdir(parents=True)
+        (package / "pubspec.yaml").write_text("name: fl_chart\n",
+                                              encoding="utf-8")
+        return package
+
+    def write_missing_package_verify(self) -> None:
+        """Fail the way a dependency resolver does when pkg/fl_chart is gone."""
+        self.write_verify(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "assert not Path('pkg').exists(), 'ignored tree leaked'\n"
+            "print('Could not find a file named pubspec.yaml in "
+            "pkg/fl_chart.', file=sys.stderr)\n"
+            "sys.exit(1)\n")
+
+    def test_a_selected_batch_diagnoses_a_copied_ignored_package(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        self.copy_ignored_package("aa")
+        unrelated = gitops.worktree_path(self.root, "bb") / "ignored"
+        unrelated.mkdir()
+        self.write_missing_package_verify()
+
+        code, output = self.run_selected("aa", "bb", bisect=False)
+
+        self.assertEqual(code, 1, output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "FAILED")
+        self.assertIn("Could not find a file named pubspec.yaml",
+                      receipt.failure_summary)
+        self.assertIn("Ignored input diagnosis: pkg/", receipt.failure_summary)
+        self.assertNotIn("ignored/", receipt.failure_summary)
+        self.assertIn("verify selected: Ignored input diagnosis: pkg/", output)
+
+    def test_a_dynamic_batch_diagnoses_a_copied_ignored_package(self) -> None:
+        self.make_source("aa")
+        self.copy_ignored_package("aa")
+        self.write_missing_package_verify()
+
+        code, output = self.run_batch(bisect=False)
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("Ignored input diagnosis: pkg/",
+                      self.read_batch_receipt().failure_summary)
+        self.assertIn("verify --batch: Ignored input diagnosis: pkg/", output)
+
+    def test_localizing_a_batch_keeps_the_ignored_input_diagnosis(self) -> None:
+        self.make_source("aa")
+        self.make_source("bb")
+        self.copy_ignored_package("bb")
+        # Only bb copied the ignored tree, so the prefix that first includes it
+        # is where the diagnosis has to appear.
+        self.write_verify(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "if Path('bb.txt').exists():\n"
+            "    print('Could not find a file named pubspec.yaml in "
+            "pkg/fl_chart.', file=sys.stderr)\n"
+            "    sys.exit(1)\n"
+            "sys.exit(0)\n")
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("localized the failure to bb", output)
+        self.assertIn("Ignored input diagnosis: pkg/", output)
+        receipt = self.read_batch_receipt()
+        self.assertEqual(receipt.status, "PASSED")
+        self.assertEqual(receipt.folders, ("aa",))
+
     def test_conflicting_link_targets_refuse_the_whole_batch(self) -> None:
         self.make_source("aa")
         self.make_source("bb")
@@ -1025,16 +1161,31 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         code, output = self.run_batch()
 
         self.assertEqual(code, 1, output)
-        self.assertIn("conflicting targets", output)
+        self.assertIn("not a directory link to the reviewed primary target", output)
         self.assertIn("pkg", output)
         self.assertFalse(self.receipt_path().exists())
+
+    def test_reviewed_none_refuses_an_external_link_before_batch_verify(self) -> None:
+        self.make_source("aa")
+        worktree = gitops.worktree_path(self.root, "aa")
+        shared_paths.review(
+            self.root, worktree, none=True, watch=("README.md",))
+        target = self.link_target("pkg")
+        make_directory_link(worktree / "pkg", target)
+
+        code, output = self.run_batch()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("outside its active REVIEWED-NONE profile", output)
+        self.assertNotIn("Full verification started", output)
+        self.assertFalse(self.receipt_path().exists())
+        self.assertTrue((target / "marker.txt").is_file())
 
     def test_an_occupied_candidate_destination_refuses_the_batch(self) -> None:
         self.make_source("aa")
         self.provision("aa", "pkg")
         # The target now tracks a real pkg/ directory, so the candidate owns
         # that name and a provisioned link may not take it over.
-        (self.root / "pkg").mkdir()
         (self.root / "pkg" / "keep.txt").write_text("tracked\n", encoding="utf-8")
         _git(self.root, "add", "-f", "pkg/keep.txt")
         _git(self.root, "commit", "-m", "track a real pkg directory")
@@ -1042,7 +1193,7 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         code, output = self.run_batch()
 
         self.assertEqual(code, 1, output)
-        self.assertIn("already contains pkg", output)
+        self.assertIn("no longer Git-ignored", output)
         self.assertFalse(self.receipt_path().exists())
 
 

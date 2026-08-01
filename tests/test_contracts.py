@@ -77,17 +77,202 @@ class TestContractPaths(unittest.TestCase):
 class TestContractContent(unittest.TestCase):
     """Durable rules a reader must be able to find in the shipped contract."""
 
+    def test_folder_verification_report_refresh_is_documented(self):
+        install_global_contracts(self)
+        english = {
+            "format.md": contracts.installed_contract_text("format.md"),
+            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+                encoding="utf-8"),
+        }
+        for name, text in english.items():
+            compact = " ".join(text.split())
+            with self.subTest(document=name):
+                self.assertIn("refreshes `_report.md` after", compact)
+                self.assertIn("best-effort", compact)
+
+        chinese = (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+            encoding="utf-8")
+        compact = "".join(chinese.split())
+        self.assertIn("refresh`_report.md`", compact)
+        self.assertIn("best-effort", compact)
+
     def test_format_states_the_provisioned_candidate_link_rule(self):
         install_global_contracts(self)
         text = contracts.installed_contract_text("format.md")
         for phrase in (
-                "explicitly provisioned ignored\ndirectory links",
+                "reviewed-profile ignored\ndirectory links Assent provisioned",
                 "ordinary ignored leaf files that sit inside an otherwise "
                 "tracked\ndirectory",
                 "Arbitrary ignored content is never exposed",
                 "removed before the temporary worktree"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
+
+    def test_the_task_session_is_told_to_review_a_required_ignored_directory(self):
+        """A zero-memory session reads instructions.md, never format.md."""
+        install_global_contracts(self)
+        text = " ".join(
+            contracts.installed_contract_text("instructions.md").split())
+        for phrase in (
+                "assent shared-paths review --path DIR --watch FILE",
+                "Never hand-create a source-worktree link",
+                "Never copy the ignored directory tree in",
+                "never modify anything inside the linked target"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+        # The scheduled reading scope must stay as it is: the session is not
+        # sent to the format contract to learn this.
+        scope = text.split("An **assent-scheduled task session** reads only:")[1]
+        self.assertNotIn("format.md", scope.split("## Working rules")[0])
+
+    def test_contract_ownership_and_filename_language_have_one_owner(self):
+        install_global_contracts(self)
+        instructions = " ".join(
+            contracts.installed_contract_text("instructions.md").split())
+        format_text = " ".join(
+            contracts.installed_contract_text("format.md").split())
+        for phrase in (
+                "repository-specific development constraints belong in `AGENTS.md`",
+                "scheduled-session procedure belongs in `instructions.md`",
+                "persisted artifact schemas, filename rules, state meanings",
+                "Other documents may reference an owned rule, but must not duplicate it"):
+            with self.subTest(document="instructions.md", phrase=phrase):
+                self.assertIn(phrase, instructions)
+        for phrase in (
+                "descriptive `name` segment has no canonical-language requirement",
+                "preserves the human-requested language, including Unicode",
+                "task identity and dependency references use only the filename prefix `tNNN`",
+                "paired `.r.toml` journal keeps the same descriptive segment"):
+            with self.subTest(document="format.md", phrase=phrase):
+                self.assertIn(phrase, format_text)
+        self.assertNotIn("no canonical-language requirement", instructions)
+        self.assertNotIn("human-requested language", instructions)
+
+    def test_the_ignored_input_diagnosis_is_documented_in_english_and_chinese(self):
+        install_global_contracts(self)
+        english = {
+            "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
+                encoding="utf-8"),
+            "format.md": contracts.installed_contract_text("format.md"),
+            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+                encoding="utf-8"),
+            "docs/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        for name, text in english.items():
+            compact = " ".join(text.split())
+            with self.subTest(document=name):
+                self.assertIn("`Ignored input diagnosis:`", compact)
+                self.assertIn("junction", compact)
+        chinese = {
+            "README.zh-TW.md": (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+                encoding="utf-8"),
+            "docs/zh-TW/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        for name, text in chinese.items():
+            compact = "".join(text.split())
+            with self.subTest(document=name):
+                self.assertIn("`Ignoredinputdiagnosis:`", compact)
+                self.assertIn("junction", compact)
+
+    def test_shared_path_states_are_documented_in_english_and_chinese(self):
+        """The three-state contract and its staleness rules reach every reader."""
+        install_global_contracts(self)
+        english = {
+            "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
+                encoding="utf-8"),
+            "format.md": contracts.installed_contract_text("format.md"),
+            "instructions.md": contracts.installed_contract_text(
+                "instructions.md"),
+            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+                encoding="utf-8"),
+            "docs/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        session = english.pop("instructions.md")
+        for name, text in english.items():
+            compact = " ".join(text.split())
+            for phrase in ("REVIEWED-NONE", "REVIEWED-PATHS", "STALE",
+                           "`.assent/manifest.toml`",
+                           "assent shared-paths review"):
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+        # The scheduled session reads only instructions.md, so the remedy -- not
+        # the state vocabulary a scheduler owns -- is what has to be there.
+        compact = " ".join(session.split())
+        for phrase in ("`.assent/manifest.toml`", "`UNKNOWN` or `STALE`",
+                       "assent shared-paths review --path DIR --watch FILE",
+                       "assent shared-paths review --none --watch FILE"):
+            with self.subTest(document="instructions.md", phrase=phrase):
+                self.assertIn(phrase, compact)
+
+        chinese = {
+            "README.zh-TW.md": (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+                encoding="utf-8"),
+            "docs/zh-TW/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        for name, text in chinese.items():
+            compact = "".join(text.split())
+            for phrase in ("REVIEWED-NONE", "REVIEWED-PATHS", "STALE",
+                           "`.assent/manifest.toml`",
+                           "assentshared-pathsreview",
+                           "`shared_inputs_sha256`"):
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+
+    def test_the_zero_candidate_fast_path_is_documented_everywhere(self):
+        """The state's exact meaning and its limits must reach every reader.
+
+        Naming it is not enough: the documents have to say that it describes a
+        successful ignored-entry query and not a semantic "nothing is needed",
+        which is precisely the claim a reader would otherwise assume.
+        """
+        install_global_contracts(self)
+        english = {
+            "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
+                encoding="utf-8"),
+            "format.md": contracts.installed_contract_text("format.md"),
+            "instructions.md": contracts.installed_contract_text(
+                "instructions.md"),
+            "README.md": (_PROJECT_ROOT / "README.md").read_text(
+                encoding="utf-8"),
+            "docs/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        session = english.pop("instructions.md")
+        for name, text in english.items():
+            compact = " ".join(text.split())
+            for phrase in ("NO-IGNORED-DIRECTORY-CANDIDATE",
+                           "ignored-entry query",
+                           "semantically needs no shared input"):
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+        compact = " ".join(session.split())
+        for phrase in ("NO-IGNORED-DIRECTORY-CANDIDATE",
+                       "nothing to review"):
+            with self.subTest(document="instructions.md", phrase=phrase):
+                self.assertIn(phrase, compact)
+
+        chinese = {
+            "README.zh-TW.md": (_PROJECT_ROOT / "README.zh-TW.md").read_text(
+                encoding="utf-8"),
+            "docs/zh-TW/CONSENSUS.md": (
+                _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
+                    encoding="utf-8"),
+        }
+        for name, text in chinese.items():
+            compact = "".join(text.split())
+            for phrase in ("NO-IGNORED-DIRECTORY-CANDIDATE",
+                           "ignored-entry", "語意上"):
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
 
     def test_link_cleanup_contract_is_present_in_all_reader_documents(self):
         documents = {
