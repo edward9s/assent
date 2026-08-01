@@ -552,6 +552,22 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(result.quota_exhausted)
         self.assertFalse(result.checkpoint_resume)
 
+    def test_terminal_record_overrides_preceding_non_quota_classifiers(self):
+        for prose in (
+                "Error: invalid model selection",
+                "Error: your credit balance is too low",
+                "Error: permission denied for tool write_to_file",
+                "Error: timed out waiting for the response"):
+            with self.subTest(prose=prose):
+                output = prose + "\n" + CHECKPOINT_RESUME_RECORD + "\n"
+                self.patch_run(lambda *args, output=output, **kwargs:
+                               (1, output, False))
+                result = make_adapter().run_task(
+                    "p", "gemini-3.1-pro", "high", Path("."))
+                self.assertTrue(result.checkpoint_resume)
+                self.assertFalse(result.quota_exhausted)
+                self.assertIsNone(result.failure_kind)
+
     def test_unsupported_model_outcome_is_classified_for_the_scheduler(self):
         self.patch_run(lambda *a, **k: (
             1, 'Error: invalid model selection (--model "gemini-3.1-pro" '

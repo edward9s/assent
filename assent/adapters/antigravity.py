@@ -417,9 +417,10 @@ class AntigravityAdapter(Adapter):
             except OSError:
                 pass
         kind = classify_output(returncode, stalled, output)
-        checkpoint_resume = (
-            parse_checkpoint_resume_output(output, returncode, stalled)
-            and kind == "nonzero")
+        terminal_record = parse_checkpoint_resume_output(output, returncode, stalled)
+        # The exact final control record is authoritative over every non-quota prose
+        # classifier.  Independently detected quota evidence remains the stronger outcome.
+        checkpoint_resume = terminal_record and kind != "quota"
         return TaskResult(exit_code=returncode, output=output,
                           quota_exhausted=kind == "quota",
                           reset_at=None,        # print mode states no reset time; none is invented

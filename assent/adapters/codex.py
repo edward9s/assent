@@ -205,9 +205,12 @@ class CodexAdapter(Adapter):
             not stalled and returncode != 0 and parse_output_for_quota(output))
         billing = (not stalled and not exhausted and returncode != 0
                    and parse_output_for_billing(output))
-        checkpoint_resume = (
-            parse_checkpoint_resume_output(output, returncode, stalled)
-            and not exhausted and not billing)
+        terminal_record = parse_checkpoint_resume_output(output, returncode, stalled)
+        # Quota evidence wins; otherwise the exact final control record wins over
+        # unrelated billing-like prose that appeared earlier in the transcript.
+        checkpoint_resume = terminal_record and not exhausted
+        if checkpoint_resume:
+            billing = False
         # Billing is a failure classification, so it is only meaningful for a failed session
         # that is neither a stall nor quota exhaustion.
         failure_kind = "billing" if billing else None

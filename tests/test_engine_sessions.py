@@ -736,6 +736,72 @@ class TestInterruptedTaskResume(GlobalContractsMixin, EngineTestCase):
             len([s for s in self.subjects()
                  if s.startswith("auto(plan01/t001): ")]), 1)
 
+    def test_interrupt_after_dirty_terminal_auto_commit_keeps_done(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        real_commit_if_dirty = engine.gitops.commit_if_dirty
+
+        def commit_then_interrupt(root, message, excludes=()):
+            committed = real_commit_if_dirty(root, message, excludes)
+            if message.startswith("auto(plan01/t001): "):
+                raise KeyboardInterrupt
+            return committed
+
+        with mock.patch.object(engine.gitops, "commit_if_dirty",
+                               side_effect=commit_then_interrupt):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True,
+                adapter=ScriptedAdapter([
+                    self.ai_done(path, {"src/done.py": "done"})])), 130)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertFalse(any(entry["event"] == "interrupt" for entry in entries))
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+        self.assertNotIn("wip(plan01/t001): user interrupt", self.subjects())
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([])), 0)
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+
+    def test_interrupt_after_resumed_empty_terminal_auto_commit_keeps_done(self):
+        path = self.write_task(1, status="WIP")
+        cfg = self.build()
+        self.commit_all()
+        real_commit_empty = engine.gitops.commit_empty
+
+        def empty_commit_then_interrupt(root, message):
+            real_commit_empty(root, message)
+            if message.startswith("auto(plan01/t001): "):
+                raise KeyboardInterrupt
+
+        with mock.patch.object(engine.gitops, "commit_empty",
+                               side_effect=empty_commit_then_interrupt):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([
+                    self.ai_done(path)])), 130)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertFalse(any(entry["event"] == "interrupt" for entry in entries))
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+        self.assertNotIn("wip(plan01/t001): user interrupt", self.subjects())
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([])), 0)
+        self.assertEqual(
+            len([s for s in self.subjects()
+                 if s.startswith("auto(plan01/t001): ")]), 1)
+
     def test_assent_error_marks_current_task_wip_and_keeps_exit_code(self):
         path = self.write_task(1)
         cfg = self.build()

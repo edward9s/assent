@@ -459,6 +459,17 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(result.quota_exhausted)
         self.assertFalse(result.checkpoint_resume)
 
+    def test_terminal_record_overrides_preceding_billing_prose(self):
+        prose = json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "I checked the credit balance report."}]}})
+        output = prose + "\n" + CHECKPOINT_RESUME_RECORD + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = ClaudeAdapter(make_cfg()).run_task(
+            "p", "fable", "medium", Path("."))
+        self.assertTrue(result.checkpoint_resume)
+        self.assertFalse(result.quota_exhausted)
+        self.assertIsNone(result.failure_kind)
+
 
 class TestGetAdapter(unittest.TestCase):
     def test_claude_returns_adapter(self):

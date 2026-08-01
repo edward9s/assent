@@ -131,6 +131,7 @@ class _SessionState:
 
     identity: SessionIdentity | None = None
     terminal_checkpoint: bool = False
+    checkpoint_history_base: str | None = None
 
 
 @dataclass
@@ -695,6 +696,12 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         print("\nInterrupt received (Ctrl+C): session terminated, keeping current progress...")
         terminal_checkpoint = bool(
             current_session is not None and current_session.terminal_checkpoint)
+        if (not terminal_checkpoint and current_task is not None
+                and current_session is not None):
+            terminal_checkpoint = _terminal_checkpoint_exists_since(
+                cfg, current_task, current_session.checkpoint_history_base)
+            if terminal_checkpoint:
+                current_session.terminal_checkpoint = True
         if (current_task is not None and current_session is not None
                 and current_session.identity is not None and not terminal_checkpoint):
             _mark_interrupted_task(
@@ -998,6 +1005,29 @@ def _commit_terminal_checkpoint(cfg: Config, task: Task, *, resumed: bool) -> bo
     return False
 
 
+def _terminal_checkpoint_exists_since(cfg: Config, task: Task,
+                                      base_ref: str | None) -> bool:
+    """Prove that this task's terminal auto checkpoint was created after its run began.
+
+    The Git commit can exist before the in-memory session flag is assigned if Ctrl+C lands at
+    the boundary between those two operations.  First-parent history is the durable evidence;
+    an unreadable history or an auto subject at/before the starting ref fails closed.
+    """
+    expected = _checkpoint_subject(cfg, "auto", task, _short(task.title) or "done")
+    try:
+        history = gitops.commit_history(cfg.root)
+    except AssentError:
+        return False
+
+    found = False
+    for commit, _parents, subject in history:
+        if base_ref is not None and commit == base_ref:
+            return found
+        if subject == expected:
+            found = True
+    return base_ref is None and found
+
+
 def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
                              now: Callable[[], datetime]) -> str | None:
     """Detect and, where possible, port back paths a just-finished session wrote into the main
@@ -1069,6 +1099,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     # The HEAD at this task's start: the scope check must cover all changes since the start
     # (including wip checkpoints).
     start_ref = gitops.head_ref(cfg.root)
+    session_state.checkpoint_history_base = start_ref
 
     attempts_used = 0
     failure_reason: str | None = None
