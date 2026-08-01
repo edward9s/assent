@@ -802,6 +802,35 @@ class TestInterruptedTaskResume(GlobalContractsMixin, EngineTestCase):
             len([s for s in self.subjects()
                  if s.startswith("auto(plan01/t001): ")]), 1)
 
+    def test_matching_auto_commit_before_terminal_closeout_cannot_recover_done(self):
+        path = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        expected = "auto(plan01/t001): task"
+
+        def interrupted(prompt):
+            root = self.execution_root()
+            (root / "src" / "before_closeout.py").parent.mkdir(exist_ok=True)
+            (root / "src" / "before_closeout.py").write_text(
+                "work", encoding="utf-8")
+            # This terminal-looking commit belongs to the adapter phase, before the scheduler
+            # has passed _evaluate and armed its closeout witness.
+            gitops.commit_empty(root, expected)
+            set_status(path, "DONE")
+            raise KeyboardInterrupt
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([interrupted])), 130)
+
+        self.assertEqual(parse_task_file(path).status, "WIP")
+        from assent.plan import read_entries
+        entries = read_entries(journal_path_for(path))
+        self.assertTrue(any(entry["event"] == "interrupt" for entry in entries))
+        self.assertIn(expected, self.subjects())
+        self.assertTrue(any(
+            subject.startswith("wip(plan01/t001): ")
+            for subject in self.subjects()))
+
     def test_assent_error_marks_current_task_wip_and_keeps_exit_code(self):
         path = self.write_task(1)
         cfg = self.build()

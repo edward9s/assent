@@ -552,6 +552,23 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(result.quota_exhausted)
         self.assertFalse(result.checkpoint_resume)
 
+    def test_quota_evidence_wins_over_other_classifier_and_control_record(self):
+        for prose in (
+                "Error: invalid model selection",
+                "Error: your credit balance is too low",
+                "Error: permission denied for tool write_to_file",
+                "Error: timed out waiting for the response"):
+            with self.subTest(prose=prose):
+                output = (prose + "\nError: Resource has been exhausted\n"
+                          + CHECKPOINT_RESUME_RECORD + "\n")
+                self.patch_run(lambda *args, output=output, **kwargs:
+                               (1, output, False))
+                result = make_adapter().run_task(
+                    "p", "gemini-3.1-pro", "high", Path("."))
+                self.assertTrue(result.quota_exhausted)
+                self.assertFalse(result.checkpoint_resume)
+                self.assertEqual(result.failure_kind, "quota")
+
     def test_terminal_record_overrides_preceding_non_quota_classifiers(self):
         for prose in (
                 "Error: invalid model selection",

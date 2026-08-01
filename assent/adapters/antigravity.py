@@ -315,6 +315,17 @@ def classify_output(exit_code: int, stalled: bool, output: str) -> str | None:
     return "nonzero"
 
 
+def _has_quota_evidence(exit_code: int, stalled: bool, output: str) -> bool:
+    """Return whether a failed, non-stalled transcript contains quota evidence.
+
+    Quota is kept as an independent fact because another diagnostic classifier may also match
+    the same prose.  The scheduler needs the quota path to win over those diagnostics when the
+    exact checkpoint-resume control record is present.
+    """
+    return (exit_code != 0 and not stalled
+            and _QUOTA_TEXT_RE.search(output) is not None)
+
+
 # --------------------------------------------------------------------------- #
 # Adapter
 # --------------------------------------------------------------------------- #
@@ -416,13 +427,15 @@ class AntigravityAdapter(Adapter):
                 log_path.unlink()
             except OSError:
                 pass
-        kind = classify_output(returncode, stalled, output)
+        quota_evidence = _has_quota_evidence(returncode, stalled, output)
+        kind = "quota" if quota_evidence else classify_output(
+            returncode, stalled, output)
         terminal_record = parse_checkpoint_resume_output(output, returncode, stalled)
         # The exact final control record is authoritative over every non-quota prose
         # classifier.  Independently detected quota evidence remains the stronger outcome.
-        checkpoint_resume = terminal_record and kind != "quota"
+        checkpoint_resume = terminal_record and not quota_evidence
         return TaskResult(exit_code=returncode, output=output,
-                          quota_exhausted=kind == "quota",
+                          quota_exhausted=quota_evidence,
                           reset_at=None,        # print mode states no reset time; none is invented
                           stalled=stalled,
                           checkpoint_resume=checkpoint_resume,

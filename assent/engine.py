@@ -131,7 +131,7 @@ class _SessionState:
 
     identity: SessionIdentity | None = None
     terminal_checkpoint: bool = False
-    checkpoint_history_base: str | None = None
+    terminal_checkpoint_attempt: tuple[str, str] | None = None
 
 
 @dataclass
@@ -696,10 +696,9 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         print("\nInterrupt received (Ctrl+C): session terminated, keeping current progress...")
         terminal_checkpoint = bool(
             current_session is not None and current_session.terminal_checkpoint)
-        if (not terminal_checkpoint and current_task is not None
-                and current_session is not None):
-            terminal_checkpoint = _terminal_checkpoint_exists_since(
-                cfg, current_task, current_session.checkpoint_history_base)
+        if (not terminal_checkpoint and current_session is not None):
+            terminal_checkpoint = _terminal_checkpoint_matches_attempt(
+                cfg, current_session.terminal_checkpoint_attempt)
             if terminal_checkpoint:
                 current_session.terminal_checkpoint = True
         if (current_task is not None and current_session is not None
@@ -988,7 +987,8 @@ def _preserve_interrupted_progress(cfg: Config, task: Task,
     try_write_report(cfg)
 
 
-def _commit_terminal_checkpoint(cfg: Config, task: Task, *, resumed: bool) -> bool:
+def _commit_terminal_checkpoint(cfg: Config, task: Task, *, resumed: bool,
+                                session_state: _SessionState) -> bool:
     """Create the one terminal auto checkpoint after a task passes every acceptance gate.
 
     Ordinary success keeps its existing dirty-tree behavior.  A task that resumed from WIP is
@@ -997,35 +997,42 @@ def _commit_terminal_checkpoint(cfg: Config, task: Task, *, resumed: bool) -> bo
     this once, only after ``_evaluate`` returns ``done``.
     """
     subject = _checkpoint_subject(cfg, "auto", task, _short(task.title) or "done")
+    pre_attempt_head = gitops.head_ref(cfg.root)
+    if pre_attempt_head is not None:
+        # This in-memory witness is intentionally armed at the closeout boundary, not at task
+        # start.  It lets Ctrl+C recover a commit that succeeded just before the return path.
+        session_state.terminal_checkpoint_attempt = (pre_attempt_head, subject)
+    else:
+        session_state.terminal_checkpoint_attempt = None
     if gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
         return True
     if resumed:
         gitops.commit_empty(cfg.root, subject)
         return True
+    # No terminal operation was needed for a non-resumed clean task.  Do not leave a witness
+    # armed while the post-closeout report is being refreshed.
+    session_state.terminal_checkpoint_attempt = None
     return False
 
 
-def _terminal_checkpoint_exists_since(cfg: Config, task: Task,
-                                      base_ref: str | None) -> bool:
-    """Prove that this task's terminal auto checkpoint was created after its run began.
+def _terminal_checkpoint_matches_attempt(
+        cfg: Config, attempt: tuple[str, str] | None) -> bool:
+    """Prove that an interrupted closeout created its exact auto commit.
 
-    The Git commit can exist before the in-memory session flag is assigned if Ctrl+C lands at
-    the boundary between those two operations.  First-parent history is the durable evidence;
-    an unreadable history or an auto subject at/before the starting ref fails closed.
+    The attempt is armed only immediately before the scheduler's terminal commit, after
+    ``_evaluate`` has passed.  Requiring first-parent history to contain the recorded subject
+    with the recorded pre-attempt HEAD as its only parent rejects matching commits made by the
+    execution AI, a retry, or any earlier phase of the task.
     """
-    expected = _checkpoint_subject(cfg, "auto", task, _short(task.title) or "done")
+    if attempt is None:
+        return False
+    base_ref, expected = attempt
     try:
         history = gitops.commit_history(cfg.root)
     except AssentError:
         return False
-
-    found = False
-    for commit, _parents, subject in history:
-        if base_ref is not None and commit == base_ref:
-            return found
-        if subject == expected:
-            found = True
-    return base_ref is None and found
+    return any(subject == expected and parents == (base_ref,)
+               for _commit, parents, subject in history)
 
 
 def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
@@ -1099,7 +1106,6 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     # The HEAD at this task's start: the scope check must cover all changes since the start
     # (including wip checkpoints).
     start_ref = gitops.head_ref(cfg.root)
-    session_state.checkpoint_history_base = start_ref
 
     attempts_used = 0
     failure_reason: str | None = None
@@ -1209,7 +1215,8 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             outcome, reason = _evaluate(cfg, task, start_ref)
         if outcome == "done":
             print("  Acceptance passed -> creating checkpoint")
-            committed = _commit_terminal_checkpoint(cfg, task, resumed=resumed)
+            committed = _commit_terminal_checkpoint(
+                cfg, task, resumed=resumed, session_state=session_state)
             # Report refresh is deliberately after the Git evidence.  Keep this marker before
             # entering it so Ctrl+C there cannot downgrade a task whose terminal ownership is
             # already recorded or create a second WIP checkpoint.
