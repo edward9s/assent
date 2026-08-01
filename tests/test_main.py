@@ -258,6 +258,44 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[2], 1)
 
+    def test_run_auto_fix_reaches_the_explicit_engine_policy(self):
+        config = self.write_config()
+        self.write_task("work")
+        with patch("assent.__main__.engine.run", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["run", "work", "--auto-fix", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertTrue(mocked.call_args.kwargs["auto_fix"])
+
+    def test_run_auto_fix_reaches_the_automatic_engine_policy(self):
+        config = self.write_config()
+        self.write_task("work")
+        with patch("assent.__main__.engine.run", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["run", "--auto-fix", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertTrue(mocked.call_args.kwargs["auto_fix"])
+
+    def test_run_auto_fix_reaches_remainder_and_all_scheduler_policies(self):
+        config = self.write_config()
+        self.write_task("first")
+        self.write_task("second")
+        with patch("assent.__main__.engine.run", return_value=0) as run_mock:
+            code, _ = self.run_main(
+                ["run", "first", "...", "--auto-fix",
+                 "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [call.kwargs["auto_fix"] for call in run_mock.call_args_list],
+            [True, True])
+
+        with patch("assent.__main__.run_all", return_value=0) as all_mock:
+            code, _ = self.run_main(
+                ["run", "--all", "--jobs", "2", "--auto-fix",
+                 "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertTrue(all_mock.call_args.kwargs["auto_fix"])
+
     def test_run_named_folders_dispatch_in_given_order(self):
         config = self.write_config()
         self.write_task("first")

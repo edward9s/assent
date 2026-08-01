@@ -147,6 +147,10 @@ def _build_parser() -> argparse.ArgumentParser:
              "verifies only when that limited run left the single selected "
              "folder complete, and an incomplete folder fails the request "
              "without writing a receipt")
+    run_p.add_argument(
+        "--auto-fix", action="store_true",
+        help="After task execution, run the configured bounded folder review "
+             "and repair policy")
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
@@ -495,7 +499,8 @@ def _dispatch_check_all(config_path: str, assent_dir, folders: list[str]) -> int
 
 def _dispatch_run_folders(
         config_path: str, folders: list[str], *, once: bool,
-        task_id: str | None, run_level_verify: bool = False) -> int:
+        task_id: str | None, auto_fix: bool = False,
+        run_level_verify: bool = False) -> int:
     """Run explicitly named folders in order, stopping on the first failure."""
     for folder in folders:
         try:
@@ -505,6 +510,7 @@ def _dispatch_run_folders(
             return 1
         result = engine.run(
             cfg, once=once, task_id=task_id,
+            auto_fix=auto_fix,
             run_level_verify=run_level_verify)
         if result != 0:
             return result
@@ -700,6 +706,7 @@ def _dispatch(argv: list[str]) -> int:
         if args.folders:
             result = _dispatch_run_folders(
                 args.config, args.folders, once=args.once, task_id=args.task,
+                auto_fix=args.auto_fix,
                 run_level_verify=args.verify)
             if result != 0:
                 return result
@@ -712,8 +719,12 @@ def _dispatch(argv: list[str]) -> int:
             # command over to the whole-project scheduler.
             return closeout(_dispatch_run_folders(
                 args.config, scheduled, once=False, task_id=None,
+                auto_fix=args.auto_fix,
                 run_level_verify=args.verify))
         if args.all_folders:
+            if args.auto_fix:
+                return closeout(run_all(
+                    args.config, assent_dir, args.jobs or 1, auto_fix=True))
             return closeout(run_all(args.config, assent_dir, args.jobs or 1))
         if args.folders:
             return closeout(0)
@@ -848,6 +859,7 @@ def _dispatch(argv: list[str]) -> int:
         # the same folder receipt an explicitly named one would get.
         return _close_run(
             engine.run(cfg, once=args.once, task_id=args.task,
+                       auto_fix=args.auto_fix,
                        run_level_verify=args.verify),
             verify=args.verify, config_path=args.config, assent_dir=assent_dir,
             selection=[folder])

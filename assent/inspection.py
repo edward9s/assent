@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from assent import AssentError, contracts, gitops
+from assent import AssentError, auto_fix, contracts, gitops
 from assent.adapters import Adapter, get_adapter
 from assent.config import PROJECT_LAYER, Config
 from assent.folderdeps import parse_folder_dependencies
@@ -133,7 +133,8 @@ def render_report(cfg: Config, plan: Plan,
     if blocked:
         lines += ["", "To decide: compare each BLOCKED task's r file and checkpoint commit, "
                       "edit the task file and set status back to TODO to continue, or mark SKIP to abandon."]
-    lines += ["", *receipt_report_lines(cfg)]
+    lines += ["", *auto_fix_report_lines(cfg, plan),
+              "", *receipt_report_lines(cfg)]
     return "\n".join(lines) + "\n"
 
 
@@ -143,6 +144,68 @@ def write_report(cfg: Config, plan: Plan,
     path = cfg.tasks_dir / "_report.md"
     path.write_text(render_report(cfg, plan, now), encoding="utf-8")
     return path
+
+
+def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
+    """Return zero-token folder-level auto-fix evidence for the report.
+
+    The state file is derived memory, not an acceptance gate.  A valid state is
+    fresh only while the source tree and task contracts it names are still the
+    current ones; malformed or no-longer-bound state is shown as stale so a
+    human can see that another review is needed.
+    """
+    path = auto_fix.auto_fix_state_path(cfg)
+    if not path.exists():
+        return ["Folder auto-fix: NOT RUN (no review state)"]
+
+    try:
+        state = auto_fix.read_auto_fix_state(path)
+    except AssentError as e:
+        return [f"Folder auto-fix: STALE (malformed review state: {e})"]
+
+    reasons: list[str] = []
+    current_tree: str | None = None
+    try:
+        current_tree = gitops.tree_of(cfg.root, "HEAD")
+    except AssentError as e:
+        reasons.append(f"current source identity unavailable: {e}")
+    else:
+        if current_tree != state.source_tree:
+            reasons.append("source tree changed")
+
+    try:
+        task_plan_digest = auto_fix.sha256_files(
+            task.path for task in plan.tasks)
+    except AssentError as e:
+        reasons.append(f"task contracts unavailable: {e}")
+    else:
+        if task_plan_digest != state.task_plan_sha256:
+            reasons.append("task contracts changed")
+
+    if reasons:
+        status = "STALE"
+        freshness = "; ".join(reasons)
+    elif state.verdict == "PASS":
+        status = "PASSED"
+        freshness = "fresh"
+    else:
+        status = "FAILED"
+        freshness = "fresh"
+
+    lines = [f"Folder auto-fix: {status} ({freshness})",
+             f"  Source tree: {state.source_tree}"]
+    if current_tree is not None and current_tree != state.source_tree:
+        lines.append(f"  Current source tree: {current_tree}")
+
+    if state.verdict == "FAIL":
+        record = auto_fix.current_review_record(state)
+        if record.findings:
+            lines.append("  Blocking findings:")
+            for finding in record.findings:
+                owner = finding.task_id or "unassigned"
+                lines.append(
+                    f"    - {owner} {finding.path}: {finding.summary}")
+    return lines
 
 
 def try_write_report(cfg: Config) -> None:

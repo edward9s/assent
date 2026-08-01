@@ -146,6 +146,15 @@ class TestRunAll(FolderSchedulerTestCase):
             self.assertIs(options["start_new_session"], True)
             self.assertNotIn("creationflags", options)
 
+    def test_child_argv_includes_auto_fix_when_requested(self):
+        with patch("assent.folder_scheduler.subprocess.Popen",
+                   return_value=object()) as popen:
+            _start_folder(str(self.config), "work", auto_fix=True)
+
+        command = popen.call_args.args[0]
+        self.assertIn("--auto-fix", command)
+        self.assertLess(command.index("--auto-fix"), command.index("--config"))
+
     def test_child_runs_from_package_root_with_absolute_config(self):
         package_root = Path(assent.__file__).resolve().parent.parent
         with patch("assent.folder_scheduler.subprocess.Popen",
@@ -237,6 +246,25 @@ class TestRunAll(FolderSchedulerTestCase):
             forwarded,
             ["[alpha] 甲一", "[alpha] 甲二", "[beta] 乙一", "[beta] 乙二"],
         )
+
+    def test_parallel_children_receive_the_auto_fix_policy(self):
+        tasks = {
+            "alpha": self.make_folder("alpha"),
+            "beta": self.make_folder("beta"),
+        }
+        policies: dict[str, bool] = {}
+
+        def fake_start(_config, folder, *, auto_fix=False):
+            policies[folder] = auto_fix
+            return FinishedProcess(tasks[folder])
+
+        with patch("assent.folder_scheduler._start_folder",
+                   side_effect=fake_start):
+            code = run_all(str(self.config), self.assent_dir,
+                           jobs=2, auto_fix=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(policies, {"alpha": True, "beta": True})
 
     def test_merged_stderr_bad_utf8_and_unterminated_line_are_forwarded(self):
         task = self.make_folder("encoded")
