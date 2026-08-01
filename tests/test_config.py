@@ -795,6 +795,15 @@ class TestListTaskFolders(ConfigTestCase):
         with self.assertRaisesRegex(AssentError, "bad\\.lock.*not a valid task folder name"):
             list_task_folders(self.assent_dir)
 
+    def test_discovers_unicode_task_filename_without_transliteration(self):
+        folder = self.assent_dir / "unicode01"
+        folder.mkdir()
+        (folder / "t001_中文任務.e.toml").write_text(
+            'title = "English task title"\n', encoding="utf-8")
+        (folder / "t001_中文任務.r.toml").write_text(
+            "[[entry]]\n", encoding="utf-8")
+        self.assertEqual(list_task_folders(self.assent_dir), ["unicode01"])
+
     def test_missing_assent_directory_is_empty(self):
         self.assertEqual(list_task_folders(self.root / "missing"), [])
 

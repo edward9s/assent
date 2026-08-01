@@ -364,10 +364,12 @@ shims once used, and above all leave no embedded git repo behind.
 
 ## Task file (tNNN_name.e.toml)
 
-Filename = `t` + a three-digit number + `_` + a short name + `.e.toml`. **The
-task id = the filename prefix tNNN** (the id exists only in the filename and is
-not stored again inside the file). Execution order = lexicographic order of
-filenames.
+Filename = `t` + a three-digit number + `_` + a nonempty descriptive `name`
+segment + `.e.toml`. The descriptive `name` segment has no canonical-language
+requirement and preserves the human-requested language, including Unicode. It
+is not the task identifier: task identity and dependency references use only
+the filename prefix `tNNN`. The paired `.r.toml` journal keeps the same
+descriptive segment. Execution order = lexicographic order of filenames.
 
 `.e.toml` is the only task-file extension. If a work folder still holds a
 deactivated `tNNN_name.toml`, both `check` and `run` fail closed and require it

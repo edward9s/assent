@@ -13,6 +13,18 @@
   (`Co-Authored-By`, `Generated with`, and the like); not a single line of it
   is allowed.
 
+## Contract ownership
+
+Each normative rule has one canonical document owner:
+
+- repository-specific development constraints belong in `AGENTS.md`;
+- scheduled-session procedure belongs in `instructions.md`; and
+- persisted artifact schemas, filename rules, state meanings, and CLI/report/
+  receipt contracts belong in `format.md`.
+
+Other documents may reference an owned rule, but must not duplicate it as a
+competing normative contract.
+
 ## Default reading scope
 
 A **meeting / interactive session** reads only, to get started:

@@ -125,6 +125,29 @@ class TestContractContent(unittest.TestCase):
         scope = text.split("An **assent-scheduled task session** reads only:")[1]
         self.assertNotIn("format.md", scope.split("## Working rules")[0])
 
+    def test_contract_ownership_and_filename_language_have_one_owner(self):
+        install_global_contracts(self)
+        instructions = " ".join(
+            contracts.installed_contract_text("instructions.md").split())
+        format_text = " ".join(
+            contracts.installed_contract_text("format.md").split())
+        for phrase in (
+                "repository-specific development constraints belong in `AGENTS.md`",
+                "scheduled-session procedure belongs in `instructions.md`",
+                "persisted artifact schemas, filename rules, state meanings",
+                "Other documents may reference an owned rule, but must not duplicate it"):
+            with self.subTest(document="instructions.md", phrase=phrase):
+                self.assertIn(phrase, instructions)
+        for phrase in (
+                "descriptive `name` segment has no canonical-language requirement",
+                "preserves the human-requested language, including Unicode",
+                "task identity and dependency references use only the filename prefix `tNNN`",
+                "paired `.r.toml` journal keeps the same descriptive segment"):
+            with self.subTest(document="format.md", phrase=phrase):
+                self.assertIn(phrase, format_text)
+        self.assertNotIn("no canonical-language requirement", instructions)
+        self.assertNotIn("human-requested language", instructions)
+
     def test_the_ignored_input_diagnosis_is_documented_in_english_and_chinese(self):
         install_global_contracts(self)
         english = {

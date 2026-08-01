@@ -37,6 +37,9 @@ class TestInitContractRefresh(unittest.TestCase):
         self.assertIn(
             "refreshes `_report.md` after",
             expected.decode("utf-8"))
+        self.assertIn(
+            "descriptive `name` segment has no canonical-language requirement",
+            " ".join(expected.decode("utf-8").split()))
         self.assertFalse((self.root / ".assent/format.md").exists())
         self.assertIn("Updated:", output.getvalue())
 
