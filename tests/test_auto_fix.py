@@ -13,8 +13,9 @@ from assent.auto_fix import (
     auto_fix_state_path, consume_fixer_profile, current_review_record,
     finding_fingerprint, next_unused_fixer_profile, normalize_finding_path,
     parse_review_output, persisted_finding, read_auto_fix_state,
-    review_record_json, snapshot_project_surface, state_for_review,
-    validate_review_findings, write_auto_fix_state,
+    review_record_json, scheduler_finding_path, snapshot_project_surface,
+    state_for_review, validate_review_findings, with_repair_phase,
+    write_auto_fix_state,
 )
 
 
@@ -97,6 +98,10 @@ class TestReviewRecord(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(AssentError):
                 normalize_finding_path(path)
 
+    def test_scheduler_directory_scope_becomes_a_canonical_finding_path(self):
+        self.assertEqual(scheduler_finding_path("src/"), "src")
+        self.assertEqual(scheduler_finding_path("src\\"), "src")
+
 
 class TestAutoFixState(unittest.TestCase):
     def setUp(self):
@@ -118,6 +123,7 @@ class TestAutoFixState(unittest.TestCase):
             reviewer_adapter="codex",
             reviewer_model="gpt-5.6-sol",
             reviewer_effort="high",
+            phase="NEEDS_REPAIR",
             verdict="FAIL",
             current_finding_fingerprints=(finding.fingerprint,),
             findings=(finding,),
@@ -153,17 +159,22 @@ class TestAutoFixState(unittest.TestCase):
                          self.state.findings[0].finding)
         with self.assertRaisesRegex(AssentError, "duplicate consumed"):
             consume_fixer_profile(consumed, selected)
+        self.assertEqual(
+            with_repair_phase(consumed, "AWAITING_REVIEW").phase,
+            "AWAITING_REVIEW")
 
     def test_atomic_replacement_writes_one_complete_new_state(self):
         write_auto_fix_state(self.path, self.state)
         passed = replace(
-            self.state, verdict="PASS", current_finding_fingerprints=())
+            self.state, phase="COMPLETE", verdict="PASS",
+            current_finding_fingerprints=())
         write_auto_fix_state(self.path, passed)
         self.assertEqual(read_auto_fix_state(self.path), passed)
 
     def test_only_an_exact_pass_is_fresh(self):
         passed = replace(
-            self.state, verdict="PASS", current_finding_fingerprints=())
+            self.state, phase="COMPLETE", verdict="PASS",
+            current_finding_fingerprints=())
         identity = dict(
             source_tree=self.tree,
             task_plan_sha256=self.plan_digest,

@@ -25,9 +25,12 @@ if TYPE_CHECKING:
     from assent.plan import Plan
 
 AUTO_FIX_STATE_NAME = "_auto_fix.toml"
-AUTO_FIX_STATE_VERSION = 1
+AUTO_FIX_STATE_VERSION = 2
 REVIEW_RECORD_TYPE = "assent.auto_fix_review"
 REVIEW_VERDICTS = frozenset({"PASS", "FAIL"})
+AUTO_FIX_PHASES = frozenset({
+    "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
+})
 
 MAX_REVIEW_OUTPUT_BYTES = 1_048_576
 MAX_REVIEW_RECORD_BYTES = 262_144
@@ -41,7 +44,7 @@ _REVIEW_KEYS = {"type", "verdict", "findings"}
 _FINDING_KEYS = {"task_id", "path", "summary", "evidence"}
 _STATE_KEYS = {
     "version", "source_tree", "task_plan_sha256", "review_prompt_sha256",
-    "reviewer_adapter", "reviewer_model", "reviewer_effort", "verdict",
+    "reviewer_adapter", "reviewer_model", "reviewer_effort", "phase", "verdict",
     "current_finding_fingerprints", "findings", "observed_states",
     "consumed_fixer_profiles",
 }
@@ -122,6 +125,7 @@ class AutoFixState:
     reviewer_adapter: str
     reviewer_model: str
     reviewer_effort: str
+    phase: str
     verdict: str
     current_finding_fingerprints: tuple[str, ...]
     findings: tuple[PersistedFinding, ...]
@@ -369,6 +373,18 @@ def normalize_finding_path(value: object) -> str:
     return normalized
 
 
+def scheduler_finding_path(scope_path: object) -> str:
+    """Canonicalize one trusted scope prefix for a scheduler-owned finding.
+
+    Reviewer paths remain strictly normalized.  Scheduler findings sometimes
+    stand for a whole directory scope, whose canonical project-relative entry
+    is the prefix without its declaration-only trailing separator.
+    """
+    path = _require_text(scope_path, "Scheduler finding scope", MAX_PATH_LENGTH)
+    path = path.replace("\\", "/").rstrip("/")
+    return normalize_finding_path(path)
+
+
 def _validate_finding(finding: ReviewFinding, label: str) -> ReviewFinding:
     if not isinstance(finding, ReviewFinding):
         raise AssentError(f"{label} must be a review finding")
@@ -595,12 +611,35 @@ def replace_fixer_profiles(
         reviewer_adapter=state.reviewer_adapter,
         reviewer_model=state.reviewer_model,
         reviewer_effort=state.reviewer_effort,
+        phase=state.phase,
         verdict=state.verdict,
         current_finding_fingerprints=state.current_finding_fingerprints,
         findings=state.findings,
         observed_states=state.observed_states,
         consumed_fixer_profiles=profiles,
     )
+
+
+def with_repair_phase(state: AutoFixState, phase: str) -> AutoFixState:
+    """Durably distinguish an active repair from its pending re-review."""
+    state = _validate_state(state)
+    if phase not in {"REPAIRING", "AWAITING_REVIEW"}:
+        raise AssentError("Auto-fix repair phase must be REPAIRING or AWAITING_REVIEW")
+    return _validate_state(AutoFixState(
+        version=state.version,
+        source_tree=state.source_tree,
+        task_plan_sha256=state.task_plan_sha256,
+        review_prompt_sha256=state.review_prompt_sha256,
+        reviewer_adapter=state.reviewer_adapter,
+        reviewer_model=state.reviewer_model,
+        reviewer_effort=state.reviewer_effort,
+        phase=phase,
+        verdict=state.verdict,
+        current_finding_fingerprints=state.current_finding_fingerprints,
+        findings=state.findings,
+        observed_states=state.observed_states,
+        consumed_fixer_profiles=state.consumed_fixer_profiles,
+    ))
 
 
 def next_unused_fixer_profile(
@@ -656,8 +695,14 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
                     "Auto-fix state review_prompt_sha256")
     for name in ("reviewer_adapter", "reviewer_model", "reviewer_effort"):
         _require_text(getattr(state, name), f"Auto-fix state {name}", 1024)
+    if not isinstance(state.phase, str) or state.phase not in AUTO_FIX_PHASES:
+        raise AssentError("Auto-fix state phase is invalid")
     if not isinstance(state.verdict, str) or state.verdict not in REVIEW_VERDICTS:
         raise AssentError("Auto-fix state verdict must be PASS or FAIL")
+    if state.verdict == "PASS" and state.phase != "COMPLETE":
+        raise AssentError("A PASS auto-fix state must be COMPLETE")
+    if state.verdict == "FAIL" and state.phase == "COMPLETE":
+        raise AssentError("A FAIL auto-fix state must not be COMPLETE")
     for name in ("current_finding_fingerprints", "findings",
                  "observed_states", "consumed_fixer_profiles"):
         if not isinstance(getattr(state, name), tuple):
@@ -747,6 +792,7 @@ def _state_text(state: AutoFixState) -> str:
         f"reviewer_adapter = {toml_string(state.reviewer_adapter)}\n"
         f"reviewer_model = {toml_string(state.reviewer_model)}\n"
         f"reviewer_effort = {toml_string(state.reviewer_effort)}\n"
+        f"phase = {toml_string(state.phase)}\n"
         f"verdict = {toml_string(state.verdict)}\n"
         "current_finding_fingerprints = "
         f"{_toml_array(state.current_finding_fingerprints)}\n"
@@ -909,6 +955,7 @@ def state_for_review(
         reviewer_adapter=reviewer_adapter,
         reviewer_model=reviewer_model,
         reviewer_effort=reviewer_effort,
+        phase="COMPLETE" if record.verdict == "PASS" else "NEEDS_REPAIR",
         verdict=record.verdict,
         current_finding_fingerprints=current_tuple,
         findings=tuple(ledger.values()),

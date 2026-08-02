@@ -1004,7 +1004,7 @@ def _run_auto_fix_review_once(
             owners = [item for item in done if item.verify == task.verify]
             record = auto_fix.ReviewRecord("FAIL", tuple(
                 auto_fix.ReviewFinding(
-                    item.id, item.scope[0],
+                    item.id, auto_fix.scheduler_finding_path(item.scope[0]),
                     "Final focused verification failed",
                     f"exit {verify_result.returncode}: {task.verify}; {diagnostic}")
                 for item in owners))
@@ -1238,7 +1238,8 @@ def _auto_fix_failure_state(
     """Join concrete ordinary-gate failures to the same durable ledger."""
     record = auto_fix.ReviewRecord("FAIL", tuple(
         auto_fix.ReviewFinding(
-            task.id, task.scope[0], "Automatic repair task gate failed", reason)
+            task.id, auto_fix.scheduler_finding_path(task.scope[0]),
+            "Automatic repair task gate failed", reason)
         for task, reason in failures))
     plan = Plan.parse(cfg.tasks_dir)
     record = auto_fix.validate_review_findings(record, plan)
@@ -1278,6 +1279,32 @@ def _run_auto_fix_repairs(
             print("Auto-fix stopped: no existing task owns the current findings.")
             return 1
 
+        incomplete = [task for task in plan.tasks
+                      if task.status not in ("DONE", "SKIP")]
+        if state.phase == "AWAITING_REVIEW":
+            if incomplete:
+                shown = ", ".join(
+                    f"{task.id}={task.status}" for task in incomplete)
+                print("Auto-fix pending-review state is inconsistent with the "
+                      f"task plan ({shown}); preserving it for human adjudication.")
+                return 1
+            outcome = _run_auto_fix_review_once(
+                cfg, once=False, task_id=None,
+                injected_adapter=injected_reviewer, sleep=sleep, now=now)
+            if outcome.code == 0:
+                return 0
+            if outcome.state is None or outcome.human_reason is not None:
+                return outcome.code
+            state = outcome.state
+            continue
+        if state.phase == "REPAIRING" and not incomplete:
+            # A task can reach its terminal checkpoint immediately before the
+            # process dies.  The durable in-repair phase plus the DONE/SKIP
+            # plan mechanically recovers that boundary without another fixer.
+            state = auto_fix.with_repair_phase(state, "AWAITING_REVIEW")
+            auto_fix.write_auto_fix_state(state_path, state)
+            continue
+
         ordinary = [_auto_fix_profile_for_task(cfg, plan.get(task_id))
                     for task_id in implicated if plan.get(task_id) is not None]
         candidates = tuple(ordinary) + _auto_fix_escalation_profiles(cfg)
@@ -1296,12 +1323,22 @@ def _run_auto_fix_repairs(
                   "were preserved for human adjudication.")
             return 1
 
-        reason = "Automatic repair of durable folder-review findings"
-        if rework.rework_tasks_locked(cfg, implicated, reason) != 0:
+        if state.phase == "NEEDS_REPAIR":
+            reason = "Automatic repair of durable folder-review findings"
+            if rework.rework_tasks_locked(cfg, implicated, reason) != 0:
+                return 1
+            state = auto_fix.with_repair_phase(state, "REPAIRING")
+            auto_fix.write_auto_fix_state(state_path, state)
+            plan = Plan.parse(cfg.tasks_dir)
+        elif state.phase != "REPAIRING":
+            print(f"Auto-fix stopped: unsupported repair phase {state.phase!r}.")
             return 1
-        plan = Plan.parse(cfg.tasks_dir)
         repair_tasks = [task for task in plan.tasks
                         if task.status in ("TODO", "WIP")]
+        if not repair_tasks:
+            print("Auto-fix repair has no runnable TODO/WIP task; preserving "
+                  "the current statuses for human adjudication.")
+            return 1
         failures: list[tuple[Task, str]] = []
         for task in repair_tasks:
             normal_profile = _auto_fix_profile_for_task(cfg, task)
@@ -1370,15 +1407,8 @@ def _run_auto_fix_repairs(
         if failures:
             state = _auto_fix_failure_state(cfg, state, failures)
             continue
-
-        outcome = _run_auto_fix_review_once(
-            cfg, once=False, task_id=None,
-            injected_adapter=injected_reviewer, sleep=sleep, now=now)
-        if outcome.code == 0:
-            return 0
-        if outcome.state is None or outcome.human_reason is not None:
-            return outcome.code
-        state = outcome.state
+        state = auto_fix.with_repair_phase(state, "AWAITING_REVIEW")
+        auto_fix.write_auto_fix_state(state_path, state)
 
 
 def _recover_or_ensure_clean(cfg: Config, now: Callable[[], datetime]) -> None:

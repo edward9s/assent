@@ -67,6 +67,36 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                           attempt["requested_effort"]),
                          ("claude", "lite", "medium"))
 
+    def test_directory_scoped_focused_failure_persists_and_starts_fixer(self):
+        verify = ('python -c "import pathlib,sys;sys.exit('
+                  "0 if pathlib.Path('src/ok.txt').exists() else 1)\"")
+        task_path = self.write_task(
+            1, status="DONE", scope=("src/",), verify=verify)
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+        worker = ScriptedAdapter([
+            self.ai_done(task_path, {"src/ok.txt": "ready\n"})])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        focused = next(
+            finding for finding in state.findings
+            if finding.summary == "Final focused verification failed")
+        self.assertEqual(focused.path, "src")
+        self.assertEqual(state.phase, "COMPLETE")
+        self.assertEqual(len(worker.calls), 1)
+        self.assertEqual(len(reviewer.calls), 1)
+
     def test_same_finding_advances_from_normal_identity_to_prime_heavy(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
