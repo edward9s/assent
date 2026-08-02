@@ -785,7 +785,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 cfg, existing_auto_fix, rotation, active,
                 injected_reviewer=auto_fix_adapter, sleep=sleep, now=now)
 
-        if cfg.auto_fix_review is not None:
+        if auto_fix_enabled and cfg.auto_fix_review is not None:
             review_outcome = _run_auto_fix_review_once(
                 cfg, once=once, task_id=task_id,
                 injected_adapter=auto_fix_adapter, sleep=sleep, now=now)

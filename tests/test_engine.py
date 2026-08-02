@@ -977,7 +977,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=reviewer), 0)
+                auto_fix_adapter=reviewer, auto_fix=True), 0)
         self.assertEqual(len(reviewer.calls), 1)
         reviewer.preflight.assert_called_once()
         self.assertEqual(out.getvalue().count(f"  verify: {command}"), 1)
@@ -989,7 +989,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=cached), 0)
+                auto_fix_adapter=cached, auto_fix=True), 0)
         self.assertEqual(cached.calls, [])
         self.assertIn("reusing exact fresh PASS", out.getvalue())
 
@@ -1000,7 +1000,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         reviewer = ScriptedAdapter([])
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([]),
-            auto_fix_adapter=reviewer), 1)
+            auto_fix_adapter=reviewer, auto_fix=True), 1)
         self.assertEqual(reviewer.calls, [])
         self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
 
@@ -1017,7 +1017,8 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([]),
-            auto_fix_adapter=ScriptedAdapter([mutating_review])), 1)
+            auto_fix_adapter=ScriptedAdapter([mutating_review]),
+            auto_fix=True), 1)
         self.assertEqual(
             (self.execution_root() / "reviewer-write.txt").read_text(encoding="utf-8"),
             "evidence\n")
@@ -1040,7 +1041,8 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([]),
-            auto_fix_adapter=ScriptedAdapter([concurrent_runtime_writes])), 0)
+            auto_fix_adapter=ScriptedAdapter([concurrent_runtime_writes]),
+            auto_fix=True), 0)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
 
@@ -1062,7 +1064,8 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=ScriptedAdapter([mutating_management])), 1)
+                auto_fix_adapter=ScriptedAdapter([mutating_management]),
+                auto_fix=True), 1)
         self.assertIn("writes were detected during the reviewer interval", out.getvalue())
         self.assertIn("management:verify.py", out.getvalue())
         self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
@@ -1072,7 +1075,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         cfg = self.build_review(retry=1)
         self.commit_all()
         finding = auto_fix.ReviewFinding(
-            "t001", "src/missing.py", "Required test is missing",
+            "t001", "docs/missing.md", "Required test is missing",
             "The acceptance case has no regression test.")
         failed = auto_fix.review_record_json(
             auto_fix.ReviewRecord("FAIL", (finding,)))
@@ -1082,7 +1085,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         ])
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([]),
-            auto_fix_adapter=reviewer), 1)
+            auto_fix_adapter=reviewer, auto_fix=True), 1)
         self.assertEqual(len(reviewer.calls), 2)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "FAIL")
@@ -1102,7 +1105,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         sleeps = []
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
-            sleep=sleeps.append), 0)
+            auto_fix=True, sleep=sleeps.append), 0)
         self.assertEqual(len(reviewer.calls), 3)
         self.assertEqual(sum(sleeps), cfg.quota_poll_minutes * 60)
         self.assertLessEqual(max(sleeps), 60)
@@ -1117,7 +1120,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, once=True, adapter=ScriptedAdapter([self.ai_done(first)]),
-                auto_fix_adapter=reviewer), 0)
+                auto_fix_adapter=reviewer, auto_fix=True), 0)
         self.assertEqual(reviewer.calls, [])
         self.assertIn("review deferred after the limited run", out.getvalue())
 
@@ -1127,9 +1130,26 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=reviewer), 0)
+                auto_fix_adapter=reviewer, auto_fix=True), 0)
         self.assertEqual(reviewer.calls, [])
         self.assertIn("all tasks are SKIP", out.getvalue())
+
+    def test_configured_review_without_auto_fix_flag_is_inert(self):
+        self.write_task(1, status="DONE", verify=_FAILV)
+        cfg = self.build_review()
+        self.commit_all()
+        reviewer = ScriptedAdapter([])
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter([]),
+                auto_fix_adapter=reviewer), 0)
+
+        self.assertEqual(reviewer.calls, [])
+        self.assertNotIn("Auto-fix folder review", out.getvalue())
+        self.assertNotIn(f"verify: {_FAILV}", out.getvalue())
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
 
 
 class TestReworkPromptFallbacks(GlobalContractsMixin, EngineTestCase):
