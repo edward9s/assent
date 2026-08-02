@@ -22,7 +22,7 @@ from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      wake_stop_waiters)
 from assent.config import load_config
-from assent.plan import (append_entry, journal_path_for, parse_task_file,
+from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
                          read_entries, set_status)
 from tests.engine_support import (EngineTestCase, ScriptedAdapter, ok_result,
                                   task_text)
@@ -93,6 +93,150 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual((attempt["agent"], attempt["requested_model"],
                           attempt["requested_effort"]),
                          ("claude", "lite", "medium"))
+
+    def test_blocked_scope_omission_is_amended_before_fixer_without_handoff(self):
+        task_path = self.write_task(
+            1, scope=("src/base.py",), status="TODO")
+        source = self.root / "src"
+        source.mkdir()
+        (source / "base.py").write_text("base = 1\n", encoding="utf-8")
+        (source / "needed.py").write_text("value = 1\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/needed.py", "Required source file was omitted from scope",
+            "The blocked worker identified src/needed.py as the exact required edit.",
+            kind="scope_amendment",
+            recommendation="Append the exact existing file to t001 scope.",
+            scope_addition=auto_fix.ScopeAddition(
+                "src/needed.py", "existing_file"))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+
+        def blocked(_prompt):
+            set_status(task_path, "BLOCKED")
+            append_entry(
+                journal_path_for(task_path), by="claude",
+                requested_model="lite", requested_effort="medium",
+                event="blocked", summary="Exact source path is outside scope")
+            return ok_result()
+
+        worker = ScriptedAdapter([
+            blocked,
+            self.ai_done(task_path, {"src/needed.py": "value = 2\n"}),
+        ])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+
+        task = parse_task_file(task_path)
+        self.assertEqual(task.status, "DONE")
+        self.assertEqual(task.scope, ["src/base.py", "src/needed.py"])
+        entries = read_entries(journal_path_for(task_path))
+        amendment = next(
+            item for item in entries
+            if item["event"] == "auto_fix_scope_amendment")
+        self.assertIn("task contract before sha256", amendment["detail"])
+        self.assertIn("task plan after sha256", amendment["detail"])
+        self.assertLess(
+            next(index for index, item in enumerate(entries)
+                 if item["event"] == "auto_fix_scope_amendment"),
+            next(index for index, item in enumerate(entries)
+                 if item["event"] == "rework_requested"))
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
+        self.assertTrue(state.plan_digest_transitions)
+        self.assertEqual(len(worker.calls), 2)
+
+    def test_scope_amendment_resumes_after_task_write_before_state_write(self):
+        task_path = self.write_task(
+            1, scope=("src/base.py",), status="BLOCKED")
+        source = self.root / "src"
+        source.mkdir()
+        (source / "base.py").write_text("base = 1\n", encoding="utf-8")
+        (source / "needed.py").write_text("value = 1\n", encoding="utf-8")
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        plan = Plan.parse(cfg.tasks_dir)
+        contracts = engine._task_contract_snapshots(plan)
+        plan_digest = engine._contracts_digest(plan, contracts)
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/needed.py", "Scope omitted an exact source file",
+            "Durable worker evidence names the required source file.",
+            kind="scope_amendment",
+            scope_addition=auto_fix.ScopeAddition(
+                "src/needed.py", "existing_file"))
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (finding,)),
+            source_tree="1" * 40, task_plan_sha256=plan_digest,
+            review_prompt_sha256="2" * 64,
+            reviewer_adapter="claude", reviewer_model="prime",
+            reviewer_effort="heavy", review_context="blocked_adjudication",
+            failure_trigger="worker_blocked")
+        state_path = auto_fix.auto_fix_state_path(cfg)
+        auto_fix.write_auto_fix_state(state_path, state)
+        now = lambda: datetime(2026, 8, 3, tzinfo=timezone.utc)
+
+        task_before = task_path.read_bytes()
+        state_before = state_path.read_bytes()
+        real_access = engine.os.access
+        with mock.patch(
+                "assent.engine.os.access",
+                side_effect=lambda path, mode: (
+                    False if Path(path) == journal_path_for(task_path).parent
+                    else real_access(path, mode))):
+            with self.assertRaisesRegex(AssentError, "not writable"):
+                engine._apply_reviewed_scope_amendments(
+                    cfg, state, plan, contracts, now)
+        self.assertEqual(task_path.read_bytes(), task_before)
+        self.assertEqual(state_path.read_bytes(), state_before)
+
+        with mock.patch(
+                "assent.engine.auto_fix.write_auto_fix_state",
+                side_effect=AssentError("injected state boundary")):
+            with self.assertRaisesRegex(AssentError, "injected state boundary"):
+                engine._apply_reviewed_scope_amendments(
+                    cfg, state, plan, contracts, now)
+        self.assertIn("src/needed.py", parse_task_file(task_path).scope)
+        self.assertFalse(any(
+            item.get("event") == "auto_fix_scope_amendment"
+            for item in read_entries(journal_path_for(task_path))))
+
+        recovered = auto_fix.read_auto_fix_state(state_path)
+        with mock.patch(
+                "assent.engine.append_entry",
+                side_effect=AssentError("injected journal boundary")):
+            with self.assertRaisesRegex(AssentError, "injected journal boundary"):
+                engine._apply_reviewed_scope_amendments(
+                    cfg, recovered, Plan.parse(cfg.tasks_dir),
+                    engine._task_contract_snapshots(
+                        Plan.parse(cfg.tasks_dir)), now)
+        recovered = auto_fix.read_auto_fix_state(state_path)
+        self.assertEqual(recovered.task_plan_sha256,
+                         recovered.plan_digest_transitions[-1].after_sha256)
+        self.assertFalse(any(
+            item.get("event") == "auto_fix_scope_amendment"
+            for item in read_entries(journal_path_for(task_path))))
+
+        recovered, _plan, _contracts = engine._apply_reviewed_scope_amendments(
+            cfg, recovered, Plan.parse(cfg.tasks_dir),
+            engine._task_contract_snapshots(Plan.parse(cfg.tasks_dir)), now)
+        entries = [
+            item for item in read_entries(journal_path_for(task_path))
+            if item.get("event") == "auto_fix_scope_amendment"]
+        self.assertEqual(len(entries), 1)
+
+        engine._apply_reviewed_scope_amendments(
+            cfg, recovered, Plan.parse(cfg.tasks_dir),
+            engine._task_contract_snapshots(Plan.parse(cfg.tasks_dir)), now)
+        entries = [
+            item for item in read_entries(journal_path_for(task_path))
+            if item.get("event") == "auto_fix_scope_amendment"]
+        self.assertEqual(len(entries), 1)
 
     def test_directory_scoped_focused_failure_persists_and_starts_fixer(self):
         verify = ('python -c "import pathlib,sys;sys.exit('

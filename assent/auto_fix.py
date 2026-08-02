@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Iterable
 
-from assent import AssentError
+from assent import AssentError, pathops
 from assent.config import Config
 from assent.verification_common import (DIGEST_RE, OID_RE, atomic_write_text,
                                         toml_string)
@@ -785,6 +785,125 @@ def validate_review_findings(record: ReviewRecord, plan: "Plan") -> ReviewRecord
     return ReviewRecord(record.verdict, tuple(resolved))
 
 
+def validate_scope_additions(
+        root: Path, plan: "Plan",
+        additions: Iterable[ApprovedScopeAddition],
+        ) -> tuple[ApprovedScopeAddition, ...]:
+    """Validate a complete reviewer scope decision without following links.
+
+    The caller must pass the pre-amendment plan. All decisions are checked
+    before this function returns, so its result is safe to hand to the atomic
+    task-contract writer without permitting a partially validated batch.
+    """
+    root = Path(root).absolute()
+    try:
+        root_info = os.lstat(root)
+    except OSError as e:
+        raise AssentError(f"Unable to inspect scope-amendment root {root}: {e}") from e
+    if (pathops.is_link_stat(root_info) or pathops.is_reparse_point(root_info)
+            or not stat.S_ISDIR(root_info.st_mode)):
+        raise AssentError(
+            "Scope-amendment root must be an ordinary repository directory")
+
+    items = tuple(additions)
+    tasks = {task.id: task for task in plan.tasks}
+    seen_paths: set[str] = set()
+    for index, item in enumerate(items):
+        label = f"Approved scope addition[{index}]"
+        if not isinstance(item, ApprovedScopeAddition):
+            raise AssentError(f"{label} is invalid")
+        _require_digest(item.fingerprint, f"{label} fingerprint")
+        task = tasks.get(item.task_id)
+        if task is None:
+            raise AssentError(
+                f"{label} names unknown task id: {item.task_id}")
+        normalized = normalize_finding_path(item.path)
+        if normalized != item.path:
+            raise AssentError(f"{label} path must already be normalized")
+        if item.path_state not in SCOPE_PATH_STATES:
+            raise AssentError(f"{label} path_state is invalid")
+        portable_identity = normalized.casefold()
+        if portable_identity in seen_paths:
+            raise AssentError(
+                "Auto-fix scope decision contains a duplicate or ambiguous path")
+        seen_paths.add(portable_identity)
+
+        parts = PurePosixPath(normalized).parts
+        protected = {".git", ".assent", "_archive"}
+        if any(part.casefold() in protected for part in parts):
+            raise AssentError(
+                f"Auto-fix scope path targets a protected control surface: "
+                f"{normalized}")
+        if len(parts) == 1 and parts[0].casefold() == "agents.md":
+            raise AssentError(
+                f"Auto-fix scope path targets a protected control surface: "
+                f"{normalized}")
+        leaf = parts[-1].casefold()
+        if (re.fullmatch(r"t\d{3}_.+\.(?:e|r)\.toml", leaf)
+                or leaf in {"_auto_fix.toml", "_verification.toml",
+                            "_batch_verification.toml", "_archived.toml",
+                            "_report.md", "assent.lock"}):
+            raise AssentError(
+                f"Auto-fix scope path targets a protected control surface: "
+                f"{normalized}")
+        if any(character in normalized for character in "*?[]{}"):
+            raise AssentError(
+                f"Auto-fix scope path must be exact, not a glob: {normalized}")
+        folded = normalized.casefold()
+        if _path_is_in_scope(normalized, task.scope) or _path_is_in_scope(
+                folded, (item.casefold() for item in task.scope)):
+            raise AssentError(
+                f"Auto-fix scope path is already covered by {task.id}: {normalized}")
+        other_owners = [
+            candidate.id for candidate in plan.tasks
+            if candidate.id != task.id
+            and (_path_is_in_scope(normalized, candidate.scope)
+                 or _path_is_in_scope(
+                     folded, (item.casefold() for item in candidate.scope)))
+        ]
+        if other_owners:
+            raise AssentError(
+                f"Auto-fix scope path has ambiguous ownership with "
+                f"{', '.join(other_owners)}: {normalized}")
+
+        current = root
+        for component_index, component in enumerate(parts):
+            current = current / component
+            final = component_index == len(parts) - 1
+            try:
+                info = os.lstat(current)
+            except FileNotFoundError:
+                if not final:
+                    raise AssentError(
+                        f"Auto-fix scope path has a missing parent: {normalized}")
+                if item.path_state != "new_file":
+                    raise AssentError(
+                        f"Auto-fix scope path_state existing_file does not match "
+                        f"the absent target: {normalized}")
+                break
+            except OSError as e:
+                raise AssentError(
+                    f"Unable to inspect auto-fix scope path {normalized}: {e}") from e
+            if pathops.is_link_stat(info) or pathops.is_reparse_point(info):
+                raise AssentError(
+                    f"Auto-fix scope path traverses a link or reparse point: "
+                    f"{normalized}")
+            if final:
+                if item.path_state == "new_file":
+                    raise AssentError(
+                        f"Auto-fix scope path_state new_file does not match the "
+                        f"existing target: {normalized}")
+                if not stat.S_ISREG(info.st_mode):
+                    raise AssentError(
+                        f"Auto-fix existing_file target is not an ordinary file: "
+                        f"{normalized}")
+            elif not stat.S_ISDIR(info.st_mode):
+                raise AssentError(
+                    f"Auto-fix scope path parent is not an ordinary directory: "
+                    f"{normalized}")
+    return items
+
+
 def validate_review_transitions(
         record: ReviewRecord, *, review_stage: str,
         previous: AutoFixState | None = None) -> ReviewRecord:
@@ -853,6 +972,28 @@ def with_repair_phase(state: AutoFixState, phase: str) -> AutoFixState:
     if phase not in {"REPAIRING", "AWAITING_REVIEW"}:
         raise AssentError("Auto-fix repair phase must be REPAIRING or AWAITING_REVIEW")
     return _validate_state(replace(state, phase=phase))
+
+
+def with_plan_digest_transition(
+        state: AutoFixState, before_sha256: str,
+        after_sha256: str) -> AutoFixState:
+    """Record one scheduler-owned plan amendment exactly once."""
+    state = _validate_state(state)
+    _require_digest(before_sha256, "Plan transition before_sha256")
+    _require_digest(after_sha256, "Plan transition after_sha256")
+    transition = PlanDigestTransition(before_sha256, after_sha256)
+    if (state.task_plan_sha256 == after_sha256
+            and transition in state.plan_digest_transitions):
+        return state
+    if state.task_plan_sha256 != before_sha256:
+        raise AssentError(
+            "Auto-fix state no longer matches the pre-amendment task plan")
+    if transition in state.plan_digest_transitions:
+        raise AssentError(
+            "Auto-fix plan transition is present without its resulting plan digest")
+    return _validate_state(replace(
+        state, task_plan_sha256=after_sha256,
+        plan_digest_transitions=state.plan_digest_transitions + (transition,)))
 
 
 def next_unused_fixer_profile(

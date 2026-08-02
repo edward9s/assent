@@ -1,5 +1,6 @@
 """Tests for provider-neutral auto-fix review records and derived state."""
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -19,6 +20,7 @@ from assent.auto_fix import (
     parse_review_output, persisted_finding, read_auto_fix_state,
     review_record_json, scheduler_finding_path, snapshot_project_surface,
     state_for_review, validate_review_findings, validate_review_transitions,
+    validate_scope_additions,
     with_repair_phase,
     write_auto_fix_state,
 )
@@ -173,6 +175,62 @@ class TestReviewRecord(unittest.TestCase):
     def test_scheduler_directory_scope_becomes_a_canonical_finding_path(self):
         self.assertEqual(scheduler_finding_path("src/"), "src")
         self.assertEqual(scheduler_finding_path("src\\"), "src")
+
+
+class TestScopeAdditionValidation(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        (self.root / "src").mkdir()
+        (self.root / "tests").mkdir()
+        (self.root / "src" / "existing.py").write_text(
+            "value = 1\n", encoding="utf-8")
+        self.plan = SimpleNamespace(tasks=(
+            SimpleNamespace(id="t001", scope=["src/base.py"]),
+            SimpleNamespace(id="t002", scope=["docs/"]),
+        ))
+
+    @staticmethod
+    def addition(path, state="existing_file", task_id="t001"):
+        return ApprovedScopeAddition("a" * 64, task_id, path, state)
+
+    def test_existing_file_and_absent_leaf_are_distinct_valid_actions(self):
+        additions = (
+            self.addition("src/existing.py"),
+            self.addition("tests/new_case.py", "new_file"),
+        )
+        self.assertEqual(
+            validate_scope_additions(self.root, self.plan, additions), additions)
+
+    def test_unsafe_or_mismatched_paths_all_refuse(self):
+        (self.root / "src" / "directory").mkdir()
+        cases = (
+            self.addition("src/missing.py"),
+            self.addition("src/existing.py", "new_file"),
+            self.addition("missing/new.py", "new_file"),
+            self.addition("src/directory"),
+            self.addition(".assent/receipt.toml", "new_file"),
+            self.addition("AGENTS.md", "new_file"),
+            self.addition("src/*.py", "new_file"),
+            self.addition("src/base.py"),
+            self.addition("docs/new.py", "new_file"),
+        )
+        for addition in cases:
+            with self.subTest(path=addition.path), self.assertRaises(AssentError):
+                validate_scope_additions(self.root, self.plan, (addition,))
+
+    def test_link_mediated_parent_refuses_without_traversal(self):
+        target = self.root / "outside"
+        target.mkdir()
+        link = self.root / "linked"
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except OSError as e:
+            self.skipTest(f"directory symlink unavailable: {e}")
+        with self.assertRaisesRegex(AssentError, "link or reparse"):
+            validate_scope_additions(
+                self.root, self.plan,
+                (self.addition("linked/new.py", "new_file"),))
 
 
 class TestAutoFixState(unittest.TestCase):

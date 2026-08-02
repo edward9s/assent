@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -48,7 +49,9 @@ from assent.config import Config
 from assent.folderdeps import find_unfinished_prerequisites
 from assent.inspection import try_write_report
 from assent.plan import (Plan, Task, append_entry, parse_task_file,
-                         read_entries, same_except_status, set_status)
+                         read_entries, same_except_status, set_status,
+                         add_scope_entries, scope_text_without_entries,
+                         task_text_sha256)
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               StackState, auto_fix_fixer_capability_errors,
                               auto_fix_review_capability_errors, capability_errors,
@@ -151,6 +154,15 @@ array. Every FAIL finding must supply all schema fields: kind, task_id, path,
 summary, evidence, recommendation, scope_addition, transition,
 prior_fingerprint, and transition_evidence. Use null where an optional field is
 absent.
+
+When the blocker is exactly an omitted task scope path, use kind
+"scope_amendment", name the existing task_id, and make path and
+scope_addition.path the same normalized exact project-relative file path.
+scope_addition.path_state must be "existing_file" for an existing ordinary
+file or "new_file" for an absent leaf below an existing ordinary directory.
+Never propose a glob, directory, control/management path, removal, verifier
+change, new task, or unrelated scope expansion. The scheduler validates and
+persists an accepted exact addition before any fixer session.
 
 Folder: {folder}
 Source tree: {source_tree}
@@ -1698,6 +1710,196 @@ def _auto_fix_failure_state(
     return next_state
 
 
+_SCOPE_AMENDMENT_EVENT = "auto_fix_scope_amendment"
+_SCOPE_AMENDMENT_SUMMARY = (
+    "Scheduler appended reviewer-approved exact task scope paths")
+
+
+def _scope_amendment_payload(
+        additions: list[auto_fix.ApprovedScopeAddition]) -> tuple[str, str]:
+    fingerprints = json.dumps(
+        [item.fingerprint for item in additions], separators=(",", ":"))
+    delta = json.dumps(
+        [{"path": item.path, "path_state": item.path_state}
+         for item in additions], sort_keys=True, separators=(",", ":"))
+    return fingerprints, delta
+
+
+def _scope_amendment_was_journaled(
+        task: Task, addition: auto_fix.ApprovedScopeAddition) -> bool:
+    """Recognize a scheduler decision already completed in an earlier round."""
+    try:
+        entries = read_entries(task.journal_path)
+    except (AssentError, OSError, ValueError):
+        return False
+    needle = json.dumps(
+        {"path": addition.path, "path_state": addition.path_state},
+        sort_keys=True, separators=(",", ":"))
+    for entry in entries:
+        if (entry.get("by") != "scheduler"
+                or entry.get("event") != _SCOPE_AMENDMENT_EVENT
+                or entry.get("summary") != _SCOPE_AMENDMENT_SUMMARY):
+            continue
+        detail = str(entry.get("detail") or "")
+        if (addition.fingerprint in detail and needle in detail
+                and addition.path in task.scope):
+            return True
+    return False
+
+
+def _scope_amendment_detail(
+        additions: list[auto_fix.ApprovedScopeAddition], *,
+        task_before: str, task_after: str,
+        plan_before: str, plan_after: str) -> str:
+    fingerprints, delta = _scope_amendment_payload(additions)
+    return (
+        f"finding fingerprints: {fingerprints}\n"
+        f"scope delta: {delta}\n"
+        f"task contract before sha256: {task_before}\n"
+        f"task contract after sha256: {task_after}\n"
+        f"task plan before sha256: {plan_before}\n"
+        f"task plan after sha256: {plan_after}\n"
+        "authorization: run --auto-fix reviewer decision"
+    )
+
+
+def _ensure_scope_amendment_writable(
+        state_path, tasks: list[Task]) -> None:
+    """Refuse the whole scope transaction before its first mutation."""
+    targets = [state_path]
+    for task in tasks:
+        targets.extend((task.path, task.journal_path))
+    for target in targets:
+        writable = target if target.exists() else target.parent
+        if not os.access(writable, os.W_OK):
+            raise AssentError(
+                f"Auto-fix scope amendment target is not writable: {target}")
+    for task in tasks:
+        read_entries(task.journal_path)
+
+
+def _apply_reviewed_scope_amendments(
+        cfg: Config, state: auto_fix.AutoFixState,
+        plan: Plan, contracts_by_id: dict[str, str],
+        now: Callable[[], datetime],
+        ) -> tuple[auto_fix.AutoFixState, Plan, dict[str, str]]:
+    """Complete or resume the scheduler-owned amendment before ordinary rework."""
+    if not state.approved_scope_additions:
+        return state, plan, contracts_by_id
+
+    disk_plan = Plan.parse(cfg.tasks_dir)
+    disk_tasks = {task.id: task for task in disk_plan.tasks}
+    pending: list[auto_fix.ApprovedScopeAddition] = []
+    for addition in state.approved_scope_additions:
+        task = disk_tasks.get(addition.task_id)
+        if task is None:
+            raise AssentError(
+                f"Auto-fix scope amendment task disappeared: {addition.task_id}")
+        if not _scope_amendment_was_journaled(task, addition):
+            pending.append(addition)
+    if not pending:
+        current = _task_contract_snapshots(disk_plan)
+        return state, disk_plan, current
+
+    grouped: dict[str, list[auto_fix.ApprovedScopeAddition]] = {}
+    for addition in pending:
+        grouped.setdefault(addition.task_id, []).append(addition)
+
+    current_contracts = _task_contract_snapshots(disk_plan)
+    pre_contracts = dict(current_contracts)
+    applied_in_file: set[str] = set()
+    for task_id, additions in grouped.items():
+        task = disk_tasks[task_id]
+        paths = [item.path for item in additions]
+        present = [path in task.scope for path in paths]
+        if any(present) and not all(present):
+            raise AssentError(
+                f"Auto-fix scope amendment is partially present in {task_id}")
+        if all(present):
+            pre_contracts[task_id] = scope_text_without_entries(
+                current_contracts[task_id], paths)
+            applied_in_file.add(task_id)
+
+    pre_tasks = []
+    for task in disk_plan.tasks:
+        removed = {item.path for item in grouped.get(task.id, ())}
+        pre_tasks.append(replace(
+            task, scope=[path for path in task.scope if path not in removed]))
+    pre_plan = Plan(pre_tasks, disk_plan.dir)
+    auto_fix.validate_scope_additions(cfg.root, pre_plan, pending)
+
+    current_digest = _contracts_digest(disk_plan, current_contracts)
+    before_digest = _contracts_digest(pre_plan, pre_contracts)
+    transition_applied = any(
+        item.before_sha256 == before_digest
+        and item.after_sha256 == current_digest
+        for item in state.plan_digest_transitions)
+    if applied_in_file:
+        if applied_in_file != set(grouped):
+            if before_digest != state.task_plan_sha256:
+                raise AssentError(
+                    "Partially applied scope amendment does not match its durable "
+                    "pre-amendment plan digest")
+        elif not (before_digest == state.task_plan_sha256
+                  or (state.task_plan_sha256 == current_digest
+                      and transition_applied)):
+            raise AssentError(
+                "Applied scope amendment does not match its durable plan transition")
+    elif current_digest != state.task_plan_sha256:
+        raise AssentError(
+            "Task plan drifted before the reviewed scope amendment")
+
+    affected = [disk_tasks[task_id] for task_id in grouped]
+    _ensure_scope_amendment_writable(
+        auto_fix.auto_fix_state_path(cfg), affected)
+
+    task_digests: dict[str, tuple[str, str]] = {}
+    for task_id, additions in grouped.items():
+        paths = [item.path for item in additions]
+        before_text = pre_contracts[task_id]
+        if task_id in applied_in_file:
+            after_text = current_contracts[task_id]
+            task_digests[task_id] = (
+                task_text_sha256(before_text), task_text_sha256(after_text))
+            continue
+        before_sha, after_sha = add_scope_entries(
+            disk_tasks[task_id].path, paths,
+            expected_sha256=task_text_sha256(before_text))
+        task_digests[task_id] = (before_sha, after_sha)
+
+    amended_plan = Plan.parse(cfg.tasks_dir)
+    amended_contracts = _task_contract_snapshots(amended_plan)
+    after_digest = _contracts_digest(amended_plan, amended_contracts)
+    if state.task_plan_sha256 == before_digest:
+        state = auto_fix.with_plan_digest_transition(
+            state, before_digest, after_digest)
+        auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
+    elif state.task_plan_sha256 != after_digest:
+        raise AssentError(
+            "Scope amendment result does not match its durable plan digest")
+
+    for task_id, additions in grouped.items():
+        task = amended_plan.get(task_id)
+        assert task is not None
+        detail = _scope_amendment_detail(
+            additions, task_before=task_digests[task_id][0],
+            task_after=task_digests[task_id][1],
+            plan_before=before_digest, plan_after=after_digest)
+        entries = read_entries(task.journal_path)
+        if any(entry.get("by") == "scheduler"
+               and entry.get("event") == _SCOPE_AMENDMENT_EVENT
+               and entry.get("summary") == _SCOPE_AMENDMENT_SUMMARY
+               and entry.get("detail") == detail for entry in entries):
+            continue
+        append_entry(
+            task.journal_path, by="scheduler",
+            event=_SCOPE_AMENDMENT_EVENT,
+            summary=_SCOPE_AMENDMENT_SUMMARY, detail=detail,
+            time_str=now().isoformat(timespec="seconds"))
+
+    return state, amended_plan, amended_contracts
+
+
 def _run_auto_fix_repairs(
         cfg: Config, state: auto_fix.AutoFixState,
         rotation: _AdapterRotation, active: _ActiveTask, *,
@@ -1712,6 +1914,17 @@ def _run_auto_fix_repairs(
     if recovery_error is not None:
         print(f"Auto-fix recovery refused: {recovery_error}.")
         return 1
+    if state.phase == "NEEDS_REPAIR" and state.approved_scope_additions:
+        authoritative_plan = (
+            _authoritative_status_plan(trusted_plan)
+            if trusted_plan is not None else Plan.parse(cfg.tasks_dir))
+        authoritative_contracts = (
+            _authoritative_contracts(authoritative_plan, trusted_contracts)
+            if trusted_contracts is not None
+            else _task_contract_snapshots(authoritative_plan))
+        state, trusted_plan, trusted_contracts = (
+            _apply_reviewed_scope_amendments(
+                cfg, state, authoritative_plan, authoritative_contracts, now))
     while True:
         plan = Plan.parse(cfg.tasks_dir)
         try:
