@@ -211,6 +211,44 @@ class DocumentationTests(unittest.TestCase):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(phrase, chinese)
 
+    def test_auto_fix_round_budget_and_recovery_identity_stay_in_parity(self):
+        """Reader surfaces must describe round-scoped budgets and fail-closed recovery."""
+        english_paths = [
+            Path("AGENTS.md"), Path("README.md"),
+            Path("assent/templates/assent.toml"),
+            Path("assent/templates/instructions.md"),
+            Path("assent/templates/format.md"),
+            Path("docs/WORKFLOW.md"), Path("docs/COMMANDS.md"),
+            Path("docs/CONFIGURATION.md"), Path("docs/VERIFICATION.md"),
+            Path("docs/OPERATIONS.md"), Path("docs/CONSENSUS.md"),
+        ]
+        english = "\n".join(_read(path) for path in english_paths)
+        for phrase in (
+                "repair round", "multi-task", "dependency cascade",
+                "first write-capable session", "refuses repair and closeout",
+                "resolved reviewer identity", "phase"):
+            with self.subTest(language="English", phrase=phrase):
+                self.assertIn(phrase, english)
+        self.assertNotIn("before each write-capable session", english)
+
+        chinese_paths = [
+            Path("README.zh-TW.md"),
+            Path("docs/zh-TW/WORKFLOW.md"),
+            Path("docs/zh-TW/COMMANDS.md"),
+            Path("docs/zh-TW/CONFIGURATION.md"),
+            Path("docs/zh-TW/VERIFICATION.md"),
+            Path("docs/zh-TW/OPERATIONS.md"),
+            Path("docs/zh-TW/CONSENSUS.md"),
+        ]
+        chinese = "\n".join(_read(path) for path in chinese_paths)
+        for phrase in (
+                "repair round", "多 task", "dependency cascade",
+                "第一個 write-capable session", "拒絕 repair 與 closeout",
+                "resolved reviewer identity", "Version 2"):
+            with self.subTest(language="Traditional Chinese", phrase=phrase):
+                self.assertIn(phrase, chinese)
+        self.assertNotIn("每個 write-capable session 前", chinese)
+
     def test_readme_auto_fix_contracts_stay_in_parity(self):
         """The two onboarding pages must expose the same opt-in boundaries."""
         readmes = {

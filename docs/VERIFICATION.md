@@ -41,7 +41,9 @@ It is orthogonal to run selection and remains compatible with explicit folders,
 candidate verifier or publish a ref. A failed review without the flag is
 human-adjudication evidence; with it, the scheduler validates every finding to
 one existing task and declared scope, records code-preserving reason-bearing
-rework, and consumes a finite fixer-profile sequence before each repair session.
+rework, and selects a finite fixer-profile assignment for each repair round.
+The round's assignments are persisted before its first repair session, so
+multi-task findings and dependency cascades do not escalate one task at a time.
 
 The review follows changed and directly interacting code and may report
 pre-existing technical debt only when repair is local to an existing task's
@@ -96,10 +98,14 @@ The folder report also renders the derived `_auto_fix.toml` memory without
 opening an AI session. No file means `Folder auto-fix: NOT RUN (no review
 state)`; malformed state or a changed source/task binding is `STALE`; a fresh
 review `PASS` is `PASSED (fresh)`; and a fresh `FAIL` is `FAILED (fresh)` with
-its current blocking findings. The state binds the source tree, task-plan
-digest, review-prompt digest, and resolved reviewer adapter/model/effort, and
-retains the finding ledger, observed states, and consumed fixer profiles. It is
-deletable derived evidence, never a receipt, task status, or acceptance gate.
+its current blocking findings. The version-2 state requires `phase` and binds
+the source tree, task-plan digest, review-prompt digest, and resolved reviewer
+adapter/model/effort; it retains the finding ledger, observed states, and
+consumed fixer profiles. Its `NEEDS_REPAIR`, `REPAIRING`, `AWAITING_REVIEW`, and
+`COMPLETE` phases make restart boundaries explicit. It is deletable derived
+evidence, never a receipt, task status, or acceptance gate. Repair and closeout
+refuse when a pending `FAIL` has no current reviewer policy or its resolved
+reviewer identity has drifted.
 
 The configured `[verification] receipt_refresh = "manual"` (the default)
 defers a folder receipt after ordinary `run` closeout. `"auto"` refreshes it

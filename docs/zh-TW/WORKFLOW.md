@@ -67,11 +67,14 @@ review。順序固定為：普通 task-focused verification、每個 distinct `D
 失敗 review 會寫入 folder 的 derived `_auto_fix.toml` 與 report。只有能對應到一個既有
 task 且位於其 declared scope 的 finding，才可自動 code-preserving rework；scheduler
 記錄理由 `Automatic repair of durable folder-review findings` 與
-`authorization: run --auto-fix`，再在 write-capable session 前消耗有限 fixer profile。
-變更或直接互動程式碼中遇到的既有 technical debt，若修正局部且 focused test 可可靠驗證，
-也可合格；review 不做全 repository debt audit。未知、含糊或越界 finding 交人類處理。
-不會自動建立 task、還原 source、刪 source，絕不自動接受 folder。用盡、quota、中斷或 gate 失敗都
-保留 state 與編輯，之後可用 `run --auto-fix` recovery 或交人類裁決。
+`authorization: run --auto-fix`，並在該 repair round 的第一個 write-capable session 前
+持久化整輪的 fixer-profile assignments。多 task finding 與 dependency cascade 不會逐 task
+消耗 normal profile，讓 sibling 提前 escalation。變更或直接互動程式碼中遇到的既有
+technical debt，若修正局部且 focused test 可可靠驗證，也可合格；review 不做全 repository
+debt audit。未知、含糊或越界 finding 交人類處理。不會自動建立 task、還原 source、刪 source，
+絕不自動接受 folder。用盡、quota、中斷或 gate 失敗都保留 state 與編輯，之後可用
+`run --auto-fix` recovery 或交人類裁決；但若目前 `[auto_fix.review]` 被移除或 resolved
+reviewer identity 改變，repair 與 closeout 會 fail closed。
 
 ### 第三幕：人類審查與裁決
 

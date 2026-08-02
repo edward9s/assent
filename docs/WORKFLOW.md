@@ -90,15 +90,18 @@ A failed review is written to the folder's derived `_auto_fix.toml` state and
 report. With `--auto-fix`, only findings resolved to existing tasks and their
 declared scopes may trigger automatic, code-preserving rework. The scheduler
 records the reason `Automatic repair of durable folder-review findings` and
-`authorization: run --auto-fix`, then consumes a finite fixer-profile sequence
-before each write-capable session. A pre-existing technical-debt finding is
-eligible when it is encountered in changed or directly interacting code, local
-to an existing task scope, and reliably testable; the review is not a
-repository-wide debt audit. Unknown, ambiguous, or out-of-scope findings stop
+`authorization: run --auto-fix`, then selects and persists the finite
+fixer-profile assignments for the whole repair round before its first
+write-capable session. Multi-task findings and dependency cascades therefore do
+not consume the normal profile once per task. A pre-existing technical-debt
+finding is eligible when it is encountered in changed or directly interacting
+code, local to an existing task scope, and reliably testable; the review is not
+a repository-wide debt audit. Unknown, ambiguous, or out-of-scope findings stop
 for a human. No automatic task creation, source reversion, source deletion, or
 acceptance occurs. Exhaustion, interruption, quota, and failed repair gates
 preserve state and edits for a later `run --auto-fix` recovery or human
-adjudication.
+adjudication. Recovery refuses repair and closeout if the current
+`[auto_fix.review]` is missing or its resolved reviewer identity drifted.
 
 ### Act 3: human review and decision
 

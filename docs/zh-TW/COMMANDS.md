@@ -96,11 +96,14 @@ FAIL 才能進入 automatic repair。沒有 `--auto-fix` 的普通 run 不會做
 或 repair；受限執行不完整會延後，focused failure 不會開 reviewer。
 
 自動修正只重開 finding 所有權明確且位於 declared scope 的既有 task，記錄帶理由且
-保留程式碼的 rework，並在每個 write-capable session 前消耗有限 fixer profile。變更或
-直接互動程式碼中的既有 technical debt，只在局部且 focused test 可可靠驗證時才合格；
-review 不做全 repository debt audit。不會自動建立 task、還原 source、刪 source、做
-完整 candidate acceptance 或 publish Git。`_auto_fix.toml` 與 report 都是 derived evidence；
-`accept` 仍是人類明示動作。
+保留程式碼的 rework；每個 repair round 依 round 開始前未消耗的有限 fixer profile 選定
+assignments，並在第一個 write-capable session 前持久化。因此多 task finding 與 dependency
+cascade 不會逐 task escalation。變更或直接互動程式碼中的既有 technical debt，只在局部且
+focused test 可可靠驗證時才合格；review 不做全 repository debt audit。不會自動建立 task、
+還原 source、刪 source、做完整 candidate acceptance 或 publish Git。`_auto_fix.toml` 與
+report 都是 derived evidence；`accept` 仍是人類明示動作。Pending `FAIL` 的 opted-in
+recovery 若 `[auto_fix.review]` 被移除或 resolved reviewer identity 漂移，repair 與 closeout
+會拒絕。
 
 ## 指令速查
 

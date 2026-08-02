@@ -508,14 +508,18 @@ source, or accepts a folder. A finding without one unambiguous existing task
 owner remains a human decision.
 
 `_auto_fix.toml` is deletable derived folder memory, not a task status or
-acceptance evidence. It binds source and task-plan identity, the review prompt,
-the resolved reviewer identity, the current `PASS`/`FAIL` findings, observed
-states, and consumed fixer profiles. Profiles are consumed before a
-write-capable repair session and form a finite escalation budget. Interruption,
-quota, failed gates, and exhaustion preserve all edits and evidence; recovery
-with `run --auto-fix` resumes WIP work and unused profiles. The reviewer
-write-detection snapshot is a cooperative rule under `danger-full-access`, not
-a security sandbox. Human `accept` remains the only publication decision.
+acceptance evidence. The version-2 record requires its recovery `phase` and
+binds source and task-plan identity, the review prompt, the resolved reviewer
+identity, the current `PASS`/`FAIL` findings, observed states, and consumed
+fixer profiles. Profile selection is round-scoped: assignments are persisted
+before the first write-capable session in a round, so multi-task findings and
+dependency cascades do not consume the normal profile once per task. The finite
+escalation budget, interruption, quota, and failed gates preserve all edits and
+evidence. Recovery with `run --auto-fix` resumes WIP work and unused profiles
+only while the current reviewer policy and resolved identity still match;
+removal or drift refuses repair and closeout. The reviewer write-detection
+snapshot is a cooperative rule under `danger-full-access`, not a security
+sandbox. Human `accept` remains the only publication decision.
 
 ## Quality standard (replacing token-count KPIs)
 

@@ -975,8 +975,8 @@ deliberately folder-level and ordered:
    the configured reviewer with the cumulative checkpoint diff, all task
    contracts and journals, directly interacting code, and the focused evidence.
 4. The reviewer returns exactly one provider-neutral `PASS` or `FAIL` record.
-   A `PASS` ends the auto-fix loop. A `FAIL` is preserved as derived state and
-   ends the run unless this invocation included `--auto-fix`.
+   A `PASS` ends the auto-fix loop. A `FAIL` is preserved as derived state; only
+   that same invocation's explicit `--auto-fix` authorization may enter repair.
 5. With `--auto-fix`, validate each finding against one existing task and its
    declared scope, reopen only those implicated tasks, and run a bounded repair
    session. Re-run the ordinary focused gate and the final distinct focused
@@ -1088,22 +1088,28 @@ scope, performs a repository-wide debt sweep, reverts source, accepts work,
 deletes source, or treats a review result as a second task status. Code remains
 in place unless a human later chooses explicit `rework --revert-code`.
 
-Each repair profile is persisted before its write-capable session starts. The
-implicated task's ordinary adapter/model/effort profile is considered first;
-then the configured worker rotation supplies unique `prime`/`heavy` profiles.
-The sequence is finite and profile exhaustion is a modification bound, not an
-invitation to keep retrying. An exhausted loop preserves the current finding
-ledger, all consumed profiles, task journals, WIP/checkpoint edits, and
-unresolved task state for human adjudication. It does not revert the code or
-invent another task.
+Repair profile selection is round-scoped. At the start of a repair round, the
+scheduler compares every reopened task's candidate profile against the same
+pre-round consumed-profile history, fixes the round's assignments, and persists
+all newly selected profiles before the round's first write-capable session. Thus
+a multi-task finding or dependency cascade cannot consume the ordinary profile
+once per task and escalate its siblings early. The implicated task's ordinary
+adapter/model/effort profile is considered first; then the configured worker
+rotation supplies unique `prime`/`heavy` profiles. The sequence is finite and
+profile exhaustion is a modification bound, not an invitation to keep retrying.
+An exhausted loop preserves the current finding ledger, all consumed profiles,
+task journals, WIP/checkpoint edits, and unresolved task state for human
+adjudication. It does not revert the code or invent another task.
 
 An interruption, quota wait, adapter failure, or failed focused repair keeps
 the edits and runtime state. A later `run --auto-fix` resumes an existing
 `FAIL` state, carries its durable ledger into the next repair prompt, resumes
-WIP work, and skips profiles already consumed. Running without the flag can
-continue ordinary task execution, but neither starts this review nor
-authorizes repair. The full lifecycle for an explicitly opted-in invocation
-remains:
+WIP work, and skips profiles already consumed only when the current
+`[auto_fix.review]` exists and its resolved reviewer identity matches the
+state. Removing or changing that policy refuses repair and closeout. Running
+without the flag can continue ordinary task execution, but neither starts this
+review nor authorizes repair. The full lifecycle for an explicitly opted-in
+invocation remains:
 
 ```text
 run -> focused task gates

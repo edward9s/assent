@@ -94,10 +94,13 @@ folder，就延後整個 loop。
 Review 只看變更與直接互動的程式碼；既有 technical debt，只有在修正局部於
 既有 task 的 declared scope、且 focused test 能可靠驗證時才合格，不做全 repository
 debt audit。FAIL 只會自動重開 finding 所有權明確的既有 task，記錄帶理由且保留程式碼
-的 rework，並在 write-capable session 前消耗有限 fixer profile。它不會自動建立 task、
-還原 source、刪 source、publish Git 或接受 folder。`_auto_fix.toml` 與 report 是
-derived evidence，不是 task status 或 acceptance evidence；profile 用盡、中斷或 gate
-失敗會保留 state 與編輯，交人類裁決或供下一次明示的 `run --auto-fix` recovery。
+的 rework。每個 repair round 都依該 round 開始前尚未消耗的有限 fixer profile 選定 assignments，
+並在第一個 write-capable session 前持久化；多 task finding 或 dependency cascade 不會
+逐 task 讓 sibling 提前 escalation。它不會自動建立 task、還原 source、刪 source、
+publish Git 或接受 folder。profile 用盡、中斷或 gate 失敗會保留 state 與編輯，交人類裁決。
+之後明示的 `run --auto-fix` recovery 必須仍有相同的目前 reviewer 設定；移除或改變
+`[auto_fix.review]` 會拒絕 repair 與 closeout，直到 policy 恢復。`_auto_fix.toml` 與
+report 是 derived evidence，不是 task status 或 acceptance evidence。
 
 ## 規劃會議 prompt
 

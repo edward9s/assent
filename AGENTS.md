@@ -83,11 +83,13 @@ while operating an assent-managed session live in
   may automatically reopen only existing tasks implicated by a finding, and may
   include pre-existing technical debt encountered in the changed and directly
   interacting code when the repair is local to that task's scope and reliably
-  testable. Each automatic rework carries its reason, consumes a finite fixer
-  profile before the write-capable session starts, and preserves code by
-  default; profile exhaustion hands the findings to a human. Auto-fix never
-  creates tasks, reverts source, accepts a folder, deletes source, or changes
-  the explicit human `accept` boundary.
+  testable. Each repair round carries its reason, selects its finite fixer-profile
+  assignments against the pre-round history, and persists those assignments before
+  the round's first write-capable session; a multi-task finding or dependency
+  cascade therefore cannot consume the normal profile one task at a time. Profile
+  exhaustion hands the findings to a human. Auto-fix never creates tasks, reverts
+  source, accepts a folder, deletes source, or changes the explicit human `accept`
+  boundary.
 - The default adapter permissions remain `danger-full-access` where configured:
   the read-only reviewer's prompt plus before/after write detection is a
   cooperative rule, not a security sandbox and not a preventive permission

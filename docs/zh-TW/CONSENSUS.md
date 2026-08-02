@@ -387,12 +387,14 @@ Reviewer 依循 cumulative diff 與 directly interacting code。若既有 techni
 人類裁決。
 
 `_auto_fix.toml` 是可刪除的 derived folder memory，不是 task status 或 acceptance evidence。
-它綁定 source/task-plan identity、review prompt、resolved reviewer identity、目前
-`PASS`/`FAIL` findings、observed states 與 consumed fixer profiles。Profile 在
-write-capable repair session 前消耗，形成有限 escalation budget。中斷、quota、gate 失敗
-與用盡都保留編輯與 evidence；`run --auto-fix` recovery 會恢復 WIP 並跳過已消耗 profile。
-Reviewer 的 write-detection snapshot 是 `danger-full-access` 下的 cooperative rule，不是
-security sandbox。人類 `accept` 仍是唯一 publication decision。
+Version 2 必須有 recovery `phase`，並綁定 source/task-plan identity、review prompt、resolved
+reviewer identity、目前 `PASS`/`FAIL` findings、observed states 與 consumed fixer profiles。
+Profile selection 是 round-scoped：assignments 在該 round 第一個 write-capable session 前持久化，
+因此多 task finding 與 dependency cascade 不會逐 task 消耗 normal profile。有限 escalation
+budget、中斷、quota、gate 失敗與用盡都保留編輯與 evidence；`run --auto-fix` recovery 只在
+目前 reviewer policy 與 resolved identity 相同時恢復 WIP 並跳過已消耗 profile，移除或 drift 會
+拒絕 repair 與 closeout。Reviewer 的 write-detection snapshot 是 `danger-full-access` 下的
+cooperative rule，不是 security sandbox。人類 `accept` 仍是唯一 publication decision。
 
 ## 品質標準(取代 token 數字 KPI)
 

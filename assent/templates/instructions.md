@@ -249,20 +249,25 @@ audit. A pre-existing technical-debt finding is eligible only when it is in the
 changed or directly interacting code, local to an existing task scope, and
 reliably tested by that task's focused gate.
 
-Each repair profile is consumed durably before its write-capable session. The
-ordinary task profile is tried first, followed by the finite configured worker
-rotation at `prime`/`heavy`; a profile is never silently reused. Repair runs
-the ordinary focused gate before reviewing again. If profiles are exhausted,
-the unresolved finding ledger and all edits remain for human adjudication; no
-automatic code reversion or task creation follows.
+Each repair round selects its profile assignments from the consumed-profile
+history that existed when that round began, then persists every newly selected
+assignment before the round's first write-capable session. The ordinary task
+profile is tried first, followed by the finite configured worker rotation at
+`prime`/`heavy`; one task in a multi-task finding or dependency cascade cannot
+consume a sibling's normal slot and force it to escalate. A profile is never
+silently reused. Repair runs the ordinary focused gate before reviewing again.
+If profiles are exhausted, the unresolved finding ledger and all edits remain
+for human adjudication; no automatic code reversion or task creation follows.
 
 Interruption, quota exhaustion, adapter failure, and a failed repair gate keep
 all edits and state. A later `run --auto-fix` reads the existing `FAIL` state,
-resumes WIP work, and consumes only unused profiles. Running without the flag
-continues ordinary task execution only; it neither starts this review nor
-authorizes repair. A human may inspect the report and use explicit `rework`,
-`reject`, `verify`, or `accept` actions; a review `PASS`, an auto-fix state, or
-a full verification receipt never accepts a folder.
+resumes WIP work, and consumes only unused profiles, but only while the current
+`[auto_fix.review]` exists and its resolved reviewer identity still matches the
+state. Removing or changing that policy refuses repair and closeout. Running
+without the flag continues ordinary task execution only; it neither starts this
+review nor authorizes repair. A human may inspect the report and use explicit
+`rework`, `reject`, `verify`, or `accept` actions; a review `PASS`, an auto-fix
+state, or a full verification receipt never accepts a folder.
 
 ## Task session closeout (when scheduled by assent)
 

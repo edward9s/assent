@@ -269,15 +269,19 @@ plus actual CLI model and effort, not an unverified reviewer-supplied identity.
 A configured reviewer remains read-only, and prompt-plus-detection write
 refusal is not a security sandbox.
 
-Automatic repair uses the worker rotation's finite abstract profiles, records
-each profile before its write-capable session, and reopens only existing
+Automatic repair uses the worker rotation's finite abstract profiles. It selects
+and records the round's profile assignments before the first write-capable
+session in that round, so multi-task findings and dependency cascades do not
+consume the normal profile one task at a time. It reopens only existing
 in-scope tasks with the reason `Automatic repair of durable folder-review
 findings`. It preserves code by default and never creates tasks, reverts
 source, deletes source, or accepts work. Existing technical debt is eligible
 only when encountered in changed or directly interacting code, local to an
 existing task scope, and reliably covered by focused tests; this is not a
 repository-wide debt audit. Profile exhaustion, interruption, or a failed
-repair gate preserves the edits and state for recovery. See [Workflow](WORKFLOW.md)
+repair gate preserves the edits and state for recovery. A pending `FAIL` can
+resume only with the same current `[auto_fix.review]` identity; removing or
+changing that policy refuses repair and closeout. See [Workflow](WORKFLOW.md)
 and [Verification](VERIFICATION.md) for the state and report contract.
 
 ## Antigravity timeout and troubleshooting

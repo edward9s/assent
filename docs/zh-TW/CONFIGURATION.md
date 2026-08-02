@@ -234,11 +234,15 @@ resolved adapter 與實際 CLI model/effort，加上 finding ledger 與 consumed
 接受 reviewer 自己聲稱的 identity。唯讀 review 的 prompt-plus-detection write refusal
 仍不是 security sandbox。
 
-Repair 使用 worker rotation 的有限 abstract profile，每個 write-capable session 前先
-記錄 profile，只會以理由 `Automatic repair of durable folder-review findings` 重開既有
-scope 內的 task。變更或直接互動程式碼遇到的既有 technical debt，若局部且 focused tests
-能可靠驗證，也可修正；不是全 repository debt audit。它不會自動建立 task、還原 source、
-刪 source 或 accept。profile 用盡、中斷或 gate 失敗會保留 state 與編輯供 recovery。
+Repair 使用 worker rotation 的有限 abstract profile；每個 repair round 在第一個
+write-capable session 前先依 round 開始時的 consumed history 記錄整輪 assignments，所以
+多 task finding 或 dependency cascade 不會逐 task 消耗 normal profile。它只會以理由
+`Automatic repair of durable folder-review findings` 重開既有 scope 內的 task。變更或直接
+互動程式碼遇到的既有 technical debt，若局部且 focused tests 能可靠驗證，也可修正；不是
+全 repository debt audit。它不會自動建立 task、還原 source、刪 source 或 accept。profile
+用盡、中斷或 gate 失敗會保留 state 與編輯供 recovery；pending `FAIL` 只有在目前
+`[auto_fix.review]` 存在且 resolved reviewer identity 相同時才能恢復，policy 被移除或改變
+會拒絕 repair 與 closeout。
 
 ## Antigravity timeout 與排錯
 

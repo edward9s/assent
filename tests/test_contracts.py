@@ -659,6 +659,31 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(chinese_contract=phrase):
                 self.assertIn("".join(phrase.split()), chinese_contract)
 
+    def test_auto_fix_state_schema_matches_the_version_two_contract(self):
+        """The executable state shape and packaged contract must advance together."""
+        install_global_contracts(self)
+        from dataclasses import fields
+
+        from assent import auto_fix
+
+        format_text = contracts.installed_contract_text("format.md")
+        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 2)
+        self.assertEqual(
+            {field.name for field in fields(auto_fix.AutoFixState)},
+            auto_fix._STATE_KEYS)
+        for phrase in (
+                "Version 2 has exactly these scalar fields",
+                "version = 2",
+                "phase = \"COMPLETE\"",
+                "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
+                "A restart resumes `REPAIRING` or `AWAITING_REVIEW`",
+                "missing or drifted reviewer configuration",
+                "refuses repair and closeout",
+        ):
+            with self.subTest(format_phrase=phrase):
+                self.assertIn(phrase, format_text)
+        self.assertNotIn("Version 1 has", format_text)
+
     def test_reader_recovery_never_recommends_raw_recursive_worktree_removal(self):
         paths = (
             _PROJECT_ROOT / "AGENTS.md",

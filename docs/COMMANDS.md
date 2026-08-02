@@ -118,13 +118,17 @@ an incomplete limited run defers the loop, and a focused failure starts no
 reviewer.
 
 Automatic repair reopens only existing tasks whose declared scopes own the
-findings, records a reason-bearing code-preserving rework, and consumes a
-finite fixer-profile sequence. Eligible pre-existing technical debt may be
-fixed when it is local to an existing scope and reliably testable in the
-directly interacting code; review does not search the repository for unrelated
-debt. No automatic task creation, source reversion, source deletion, full
-candidate acceptance, or Git publication occurs. `_auto_fix.toml` and the
-report are derived evidence; `accept` remains an explicit human action.
+findings, records a reason-bearing code-preserving rework, and selects a finite
+fixer-profile sequence per repair round. The round's assignments are persisted
+before its first write-capable session, so multi-task findings and dependency
+cascades do not escalate one task at a time. Eligible pre-existing technical
+debt may be fixed when it is local to an existing scope and reliably testable in
+the directly interacting code; review does not search the repository for
+unrelated debt. No automatic task creation, source reversion, source deletion,
+full candidate acceptance, or Git publication occurs. `_auto_fix.toml` and the
+report are derived evidence; `accept` remains an explicit human action. A later
+opted-in recovery refuses repair and closeout if `[auto_fix.review]` was removed
+or its resolved reviewer identity changed.
 
 ## Command reference
 

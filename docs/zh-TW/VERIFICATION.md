@@ -30,8 +30,9 @@ sweep/review，也不會 repair，即使已設定 policy。
 `run --auto-fix` 是該次 invocation 修正 FAIL review 的授權，與 run selection 正交，可和
 明示 folder、`...`、`--all`、`--once`、`--task`、`--verify` 合用。它不跑 full candidate、
 不 publish ref。沒有 flag 時 FAIL 是人類裁決 evidence；有 flag 時每個 finding 都必須對應
-一個既有 task 與 declared scope，才會記錄 code-preserving reason-bearing rework，並在
-每個 repair session 前消耗有限 fixer profile。
+一個既有 task 與 declared scope，才會記錄 code-preserving reason-bearing rework，並為每個
+repair round 選定有限 fixer-profile assignment，在該 round 第一個 write-capable session
+前持久化。多 task finding 與 dependency cascade 不會逐 task 提前 escalation。
 
 Review 依循 changed 與 directly interacting code；既有 technical debt 只有在修正局部於
 既有 scope 且 focused gate 能可靠測試時才合格，不做全 repository audit。未知、含糊或越界
@@ -73,9 +74,11 @@ fresh reuse、malformed refusal、incomplete no-op 與 interrupt，但不改變�
 Folder report 也會以零 token 顯示 derived `_auto_fix.toml`：沒有檔案是
 `Folder auto-fix: NOT RUN (no review state)`；malformed 或 source/task binding 改變是
 `STALE`；新鮮 review PASS 是 `PASSED (fresh)`；新鮮 FAIL 是 `FAILED (fresh)` 並列出
-current blocking findings。State 綁定 source tree、task-plan digest、review-prompt digest、
-resolved reviewer adapter/model/effort，保留 finding ledger、observed states 與 consumed
-fixer profiles。它可刪除重建，不是 receipt、task status 或 acceptance gate。
+current blocking findings。Version 2 的 state 必須有 `phase`，綁定 source tree、task-plan
+digest、review-prompt digest 與 resolved reviewer adapter/model/effort，保留 finding ledger、
+observed states 與 consumed fixer profiles；`NEEDS_REPAIR`、`REPAIRING`、`AWAITING_REVIEW`、
+`COMPLETE` 明確表示 restart boundary。它可刪除重建，不是 receipt、task status 或 acceptance
+gate。Pending FAIL 若沒有目前 reviewer policy 或 identity 漂移，repair 與 closeout 會拒絕。
 
 `[verification] receipt_refresh = "manual"`（預設）讓普通 run closeout 延後 folder
 receipt；`"auto"` 在 folder 所有 task 完成時刷新。`assent run --verify` 不受這個設定

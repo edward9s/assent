@@ -103,11 +103,17 @@ interacting code. Debt is eligible only when repair stays inside an existing
 task's scope and its focused tests can verify the result; this is not an
 unbounded repository-wide debt audit. A failed review automatically reopens
 only implicated existing tasks, records a reason-bearing rework, and tries a
-finite sequence of fixer profiles. It keeps code by default and never creates
-tasks, reverts source, deletes source, or accepts a folder. Profile exhaustion
-preserves the findings and edits for human adjudication. `_auto_fix.toml` is
-derived runtime memory, not a task status or acceptance evidence; see the
-[Workflow](docs/WORKFLOW.md) and [Verification](docs/VERIFICATION.md) guides.
+finite sequence of fixer profiles. Each repair round selects its assignments
+from the profiles unused before that round and persists them before the first
+write-capable session, so a multi-task finding or dependency cascade does not
+escalate sibling tasks one at a time. It keeps code by default and never
+creates tasks, reverts source, deletes source, or accepts a folder. Profile
+exhaustion preserves the findings and edits for human adjudication. A later
+opted-in recovery requires the same current reviewer configuration; removing or
+changing `[auto_fix.review]` refuses repair and closeout until the policy is
+restored. `_auto_fix.toml` is derived runtime memory, not a task status or
+acceptance evidence; see the [Workflow](docs/WORKFLOW.md) and
+[Verification](docs/VERIFICATION.md) guides.
 
 ## Planning-meeting prompt
 

@@ -36,7 +36,9 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 # An explicit adapter reuses its own [adapter.<name>] model/effort mappings,
 # so it can select a different vendor from the worker rotation without changing
 # the worker rotation used by ordinary task sessions. The bounded reviewer remains
-# read-only; automatic repair is still limited to existing in-scope tasks.
+# read-only; automatic repair is still limited to existing in-scope tasks. A later
+# recovery must have this table with the same resolved reviewer identity; removing
+# or changing it refuses repair and closeout for a pending FAIL state.
 
 [adapter]
 # One adapter name or a non-empty list of names. A list rotates in order and
