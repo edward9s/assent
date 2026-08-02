@@ -190,6 +190,85 @@ identity, including external Git writers, network services, credentials, and
 files outside the worktree. Use unattended execution only in trusted projects
 and account environments; Assent does not create a container or VM sandbox.
 
+## Opt-in folder review and bounded repair
+
+When `[auto_fix.review]` is configured, it supplies the policy for the bounded
+folder review-and-repair loop. The entire loop is invocation-level opt-in:
+only `run --auto-fix` starts its folder-level, read-only review after the final
+focused checks and authorizes repair. An ordinary `run` without the flag starts
+neither the review nor repair. The reviewer is configured by a registered
+adapter plus the abstract `prime`/`core`/`lite` model and
+`heavy`/`normal`/`slight` effort values; the adapter mapping resolves the actual
+CLI identity and may name a vendor outside the worker rotation. The flag is
+orthogonal to selection and may accompany an implicit folder, explicit folders,
+`...`, `--all`, `--once`, `--task`, or `--verify`; the ordinary selection and
+verification rules still apply. Without `[auto_fix.review]`, the flag has no
+reviewer or repair policy to authorize.
+
+The order is fixed: task sessions run their ordinary focused gates; when the
+folder is complete, each distinct `DONE`-task `verify` command runs once more;
+only if all of those checks pass and the source remains clean does the reviewer
+start. An incomplete limited run defers the folder review and spends no review
+token. A folder containing only `SKIP` tasks needs no implementation review.
+Focused failure writes the scheduler's finding evidence and starts no reviewer.
+
+The reviewer receives a read-only prompt and must not edit, create, delete,
+rename, or format project or management files. Assent snapshots the protected
+source and management surfaces before and after the reviewer interval; any
+detected write makes the verdict unusable, preserves the exact edits, and
+refuses closeout. This prompt-plus-detection rule is cooperative detection,
+not a security sandbox: the configured `danger-full-access` default remains in
+force and cannot intercept external effects.
+
+`_auto_fix.toml` is derived, deletable folder runtime memory, never a task
+file, status, source-of-truth, or acceptance record. The version-2 record
+contains `source_tree`, `task_plan_sha256`, `review_prompt_sha256`, the
+resolved `reviewer_adapter`, `reviewer_model`, and `reviewer_effort`, the
+required recovery `phase`, a `PASS`/`FAIL` `verdict`,
+`current_finding_fingerprints`, the cumulative `findings` ledger,
+`observed_states`, and `consumed_fixer_profiles`. Its finding fingerprints are
+scheduler identities; its consumed fixer profiles are ordered abstract
+adapter/model/effort triples. The phases are `NEEDS_REPAIR`, `REPAIRING`,
+`AWAITING_REVIEW`, and `COMPLETE`; restart resumes the durable repair or
+review boundary, and a missing or drifted reviewer configuration refuses
+repair and closeout. A malformed record refuses, and a cached `PASS` is
+reusable only when the source tree, task contracts, review prompt, and resolved
+reviewer identity all match exactly. The ledger and consumed profiles survive
+later observations so recovery cannot repeat a profile silently.
+
+A `FAIL` record may be repaired only when `--auto-fix` was stated. Every
+finding must resolve to one existing task and that task's declared scope;
+unknown, ambiguous, or out-of-scope findings stop for a human. Automatic
+repair invokes the normal task session with the durable finding ledger and
+prior profile list, reopens only the implicated existing tasks, and records the
+reason-bearing rework reason `Automatic repair of durable folder-review
+findings` plus `authorization: run --auto-fix`. It keeps code by default and
+never creates a task, changes task requirements or scope, reverts source,
+accepts work, deletes source, or performs an unbounded repository-wide debt
+audit. A pre-existing technical-debt finding is eligible only when it is in the
+changed or directly interacting code, local to an existing task scope, and
+reliably tested by that task's focused gate.
+
+Each repair round selects its profile assignments from the consumed-profile
+history that existed when that round began, then persists every newly selected
+assignment before the round's first write-capable session. The ordinary task
+profile is tried first, followed by the finite configured worker rotation at
+`prime`/`heavy`; one task in a multi-task finding or dependency cascade cannot
+consume a sibling's normal slot and force it to escalate. A profile is never
+silently reused. Repair runs the ordinary focused gate before reviewing again.
+If profiles are exhausted, the unresolved finding ledger and all edits remain
+for human adjudication; no automatic code reversion or task creation follows.
+
+Interruption, quota exhaustion, adapter failure, and a failed repair gate keep
+all edits and state. A later `run --auto-fix` reads the existing `FAIL` state,
+resumes WIP work, and consumes only unused profiles, but only while the current
+`[auto_fix.review]` exists and its resolved reviewer identity still matches the
+state. Removing or changing that policy refuses repair and closeout. Running
+without the flag continues ordinary task execution only; it neither starts this
+review nor authorizes repair. A human may inspect the report and use explicit
+`rework`, `reject`, `verify`, or `accept` actions; a review `PASS`, an auto-fix
+state, or a full verification receipt never accepts a folder.
+
 ## Task session closeout (when scheduled by assent)
 
 1. Closeout must complete synchronously within this same turn: do not defer

@@ -258,6 +258,100 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[2], 1)
 
+    def test_run_auto_fix_reaches_the_explicit_engine_policy(self):
+        config = self.write_config()
+        self.write_task("work")
+        with patch("assent.__main__.engine.run", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["run", "work", "--auto-fix", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertTrue(mocked.call_args.kwargs["auto_fix"])
+
+    def test_run_auto_fix_reaches_the_automatic_engine_policy(self):
+        config = self.write_config()
+        self.write_task("work")
+        with patch("assent.__main__.engine.run", return_value=0) as mocked:
+            code, _ = self.run_main(
+                ["run", "--auto-fix", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertTrue(mocked.call_args.kwargs["auto_fix"])
+
+    def test_run_auto_fix_reaches_remainder_and_all_scheduler_policies(self):
+        config = self.write_config()
+        self.write_task("first")
+        self.write_task("second")
+        with patch("assent.__main__.engine.run", return_value=0) as run_mock:
+            code, _ = self.run_main(
+                ["run", "first", "...", "--auto-fix",
+                 "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [call.kwargs["auto_fix"] for call in run_mock.call_args_list],
+            [True, True])
+
+        with patch("assent.__main__.run_all", return_value=0) as all_mock:
+            code, _ = self.run_main(
+                ["run", "--all", "--jobs", "2", "--auto-fix",
+                 "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertTrue(all_mock.call_args.kwargs["auto_fix"])
+
+    def test_run_auto_fix_reaches_each_legal_limited_selector(self):
+        config = self.write_config()
+        self.write_task("alpha")
+        self.write_task("beta", "DONE")
+        self.write_task("gamma", "DONE")
+
+        cases = (
+            (["run", "alpha", "beta", "--auto-fix"],
+             ["alpha", "beta"], False, None),
+            (["run", "alpha", "...", "--auto-fix"],
+             ["alpha", "beta", "gamma"], False, None),
+            (["run", "...", "--auto-fix"],
+             ["alpha", "beta", "gamma"], False, None),
+            (["run", "--once", "--auto-fix"],
+             ["alpha"], True, None),
+            (["run", "alpha", "--once", "--auto-fix"],
+             ["alpha"], True, None),
+            (["run", "--task", "t001", "--auto-fix"],
+             ["alpha"], False, "t001"),
+            (["run", "alpha", "--task", "t001", "--auto-fix"],
+             ["alpha"], False, "t001"),
+        )
+        for argv, expected_folders, expected_once, expected_task in cases:
+            with self.subTest(argv=argv), patch(
+                    "assent.__main__.engine.run", return_value=0) as run_mock:
+                code, _ = self.run_main(
+                    [*argv, "--config", str(config)])
+
+            self.assertEqual(code, 0, argv)
+            self.assertEqual(
+                [call.args[0].tasks_name for call in run_mock.call_args_list],
+                expected_folders)
+            self.assertTrue(run_mock.call_args_list)
+            for call in run_mock.call_args_list:
+                self.assertTrue(call.kwargs["auto_fix"])
+                self.assertEqual(call.kwargs["once"], expected_once)
+                self.assertEqual(call.kwargs["task_id"], expected_task)
+
+    def test_run_auto_fix_with_all_and_a_prefix_forwards_one_policy(self):
+        config = self.write_config()
+        self.write_task("alpha")
+        self.write_task("beta")
+        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
+                patch("assent.__main__.run_all", return_value=0) as all_mock:
+            code, _ = self.run_main([
+                "run", "alpha", "--all", "--jobs", "2", "--auto-fix",
+                "--config", str(config)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [call.args[0].tasks_name for call in run_mock.call_args_list],
+            ["alpha"])
+        self.assertTrue(run_mock.call_args.kwargs["auto_fix"])
+        all_mock.assert_called_once_with(
+            str(config), config.parent.resolve(), 2, auto_fix=True)
+
     def test_run_named_folders_dispatch_in_given_order(self):
         config = self.write_config()
         self.write_task("first")
@@ -779,19 +873,23 @@ class TestRunVerifyChaining(MainTestCase):
         with patch("assent.__main__.engine.run", return_value=0), \
                 self.only("verify_folder") as folder:
             code, out = self.run_main(
-                ["run", "--verify", "--config", str(self.config)])
+                ["run", "--verify", "--auto-fix", "--config",
+                 str(self.config)])
         self.assertEqual(code, 0)
         self.assertIn("selected automatically", out)
         self.assertEqual(folder.call_args.args[0].tasks_name, "active")
 
     def test_one_explicit_folder_verifies_that_folder(self):
         self.write_task("alpha", "DONE")
-        with patch("assent.__main__.engine.run", return_value=0), \
+        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
                 self.only("verify_folder") as folder:
             code, _ = self.run_main(
-                ["run", "alpha", "--verify", "--config", str(self.config)])
+                ["run", "alpha", "--verify", "--auto-fix", "--config",
+                 str(self.config)])
         self.assertEqual(code, 0)
         self.assertEqual(folder.call_args.args[0].tasks_name, "alpha")
+        self.assertTrue(run_mock.call_args.kwargs["auto_fix"])
+        self.assertTrue(run_mock.call_args.kwargs["run_level_verify"])
 
     def test_exact_multiple_folders_verify_as_that_selected_batch(self):
         self.write_task("alpha", "DONE")
@@ -799,13 +897,16 @@ class TestRunVerifyChaining(MainTestCase):
         with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
                 self.only("verify_selected_batch") as batch:
             code, _ = self.run_main(
-                ["run", "alpha", "beta", "--verify", "--config",
-                 str(self.config)])
+                ["run", "alpha", "beta", "--verify", "--auto-fix",
+                 "--config", str(self.config)])
         self.assertEqual(code, 0)
         self.assertEqual(batch.call_args.args,
                          (str(self.config), self.assent_dir, ["alpha", "beta"]))
         self.assertEqual(
             [call.kwargs["run_level_verify"] for call in run_mock.call_args_list],
+            [True, True])
+        self.assertEqual(
+            [call.kwargs["auto_fix"] for call in run_mock.call_args_list],
             [True, True])
 
     def test_exact_run_verify_manual_closeout_hands_off_to_selected_verification(self):
@@ -828,48 +929,60 @@ class TestRunVerifyChaining(MainTestCase):
     def test_remainder_verifies_the_pre_expanded_set_once(self):
         for folder in ("alpha", "beta", "gamma"):
             self.write_task(folder)
-        with patch("assent.__main__.engine.run", return_value=0), \
+        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
                 self.only("verify_selected_batch") as batch:
             code, _ = self.run_main(
-                ["run", "gamma", "...", "--verify", "--config",
-                 str(self.config)])
+                ["run", "gamma", "...", "--verify", "--auto-fix",
+                 "--config", str(self.config)])
         self.assertEqual(code, 0)
         batch.assert_called_once()
         self.assertEqual(batch.call_args.args[2], ["gamma", "alpha", "beta"])
+        self.assertEqual(
+            [call.args[0].tasks_name for call in run_mock.call_args_list],
+            ["gamma", "alpha", "beta"])
+        self.assertEqual(
+            [call.kwargs["auto_fix"] for call in run_mock.call_args_list],
+            [True, True, True])
 
     def test_bare_remainder_is_a_whole_project_batch(self):
         self.write_task("alpha")
-        with patch("assent.__main__.engine.run", return_value=0), \
+        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
                 self.only("verify_batch") as batch:
             code, _ = self.run_main(
-                ["run", "...", "--verify", "--config", str(self.config)])
+                ["run", "...", "--verify", "--auto-fix", "--config",
+                 str(self.config)])
         self.assertEqual(code, 0)
         self.assertEqual(batch.call_args.args[:2],
                          (str(self.config), self.assent_dir))
+        self.assertEqual(len(run_mock.call_args_list), 1)
+        self.assertTrue(run_mock.call_args.kwargs["auto_fix"])
 
     def test_all_and_an_explicit_prefix_with_all_use_the_whole_project_batch(self):
         self.write_task("alpha", "TODO")
         for argv in (["run", "--all", "--verify"],
                      ["run", "alpha", "--all", "--verify"]):
             with self.subTest(argv=argv):
-                with patch("assent.__main__.run_all", return_value=0), \
+                with patch("assent.__main__.run_all", return_value=0) as all_mock, \
                         patch("assent.__main__.engine.run", return_value=0), \
                         self.only("verify_batch") as batch:
                     code, _ = self.run_main(
-                        [*argv, "--config", str(self.config)])
+                        [*argv, "--auto-fix", "--config", str(self.config)])
                 self.assertEqual(code, 0)
                 self.assertEqual(batch.call_args.args[:2],
                                  (str(self.config), self.assent_dir))
+                self.assertTrue(all_mock.call_args.kwargs["auto_fix"])
 
     def test_a_failing_run_is_preserved_and_verifies_nothing(self):
         self.write_task("alpha")
         self.write_task("beta", "DONE")
-        cases = (["run", "alpha", "--verify"], ["run", "alpha", "beta", "--verify"],
-                 ["run", "...", "--verify"], ["run", "--verify"],
-                 ["run", "alpha", "--once", "--verify"],
-                 ["run", "alpha", "--task", "t001", "--verify"],
-                 ["run", "--once", "--verify"],
-                 ["run", "--task", "t001", "--verify"])
+        cases = (["run", "alpha", "--verify", "--auto-fix"],
+                 ["run", "alpha", "beta", "--verify", "--auto-fix"],
+                 ["run", "...", "--verify", "--auto-fix"],
+                 ["run", "--verify", "--auto-fix"],
+                 ["run", "alpha", "--once", "--verify", "--auto-fix"],
+                 ["run", "alpha", "--task", "t001", "--verify", "--auto-fix"],
+                 ["run", "--once", "--verify", "--auto-fix"],
+                 ["run", "--task", "t001", "--verify", "--auto-fix"])
         for argv in cases:
             with self.subTest(argv=argv):
                 with patch("assent.__main__.engine.run", return_value=3), \
@@ -887,7 +1000,8 @@ class TestRunVerifyChaining(MainTestCase):
                 patch("assent.__main__.verify_batch",
                       side_effect=AssertionError("verified a failed run")):
             code, _ = self.run_main(
-                ["run", "--all", "--verify", "--config", str(self.config)])
+                ["run", "--all", "--verify", "--auto-fix", "--config",
+                 str(self.config)])
         self.assertEqual(code, 1)
 
     def test_verification_failure_becomes_the_exit_code_of_a_successful_run(self):
@@ -895,7 +1009,8 @@ class TestRunVerifyChaining(MainTestCase):
         with patch("assent.__main__.engine.run", return_value=0), \
                 self.only("verify_folder", result=1):
             code, _ = self.run_main(
-                ["run", "alpha", "--verify", "--config", str(self.config)])
+                ["run", "alpha", "--verify", "--auto-fix", "--config",
+                 str(self.config)])
         self.assertEqual(code, 1)
 
     def test_single_folder_run_verify_does_not_add_a_cli_report_refresh(self):
@@ -964,10 +1079,13 @@ class TestRunVerifyChaining(MainTestCase):
         """A limited run selects one folder, so it earns a folder receipt."""
         self.write_task("alpha", "DONE")
         self.write_task("active", "TODO")
-        cases = ((["run", "alpha", "--once", "--verify"], "alpha"),
-                 (["run", "alpha", "--task", "t001", "--verify"], "alpha"),
-                 (["run", "--once", "--verify"], "active"),
-                 (["run", "--task", "t001", "--verify"], "active"))
+        cases = ((["run", "alpha", "--once", "--verify", "--auto-fix"],
+                   "alpha"),
+                 (["run", "alpha", "--task", "t001", "--verify",
+                   "--auto-fix"], "alpha"),
+                 (["run", "--once", "--verify", "--auto-fix"], "active"),
+                 (["run", "--task", "t001", "--verify", "--auto-fix"],
+                  "active"))
         for argv, expected in cases:
             with self.subTest(argv=argv):
                 with patch("assent.__main__.engine.run", return_value=0), \

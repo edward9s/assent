@@ -234,6 +234,38 @@ class LanguagePolicyTests(unittest.TestCase):
                     _case_sensitive_file(translation.parent / translation_target)
                 )
 
+    def test_auto_fix_language_boundary_matches_the_reader_split(self):
+        english_paths = [
+            Path("AGENTS.md"), Path("README.md"),
+            Path("assent/templates/assent.toml"),
+            Path("assent/templates/instructions.md"),
+            Path("assent/templates/format.md"),
+            Path("docs/WORKFLOW.md"), Path("docs/COMMANDS.md"),
+            Path("docs/CONFIGURATION.md"), Path("docs/VERIFICATION.md"),
+            Path("docs/OPERATIONS.md"), Path("docs/CONSENSUS.md"),
+        ]
+        for path in english_paths:
+            with self.subTest(language="English", path=path):
+                text = _read(path)
+                self.assertNotRegex(text, HAN_RE)
+                self.assertIn("run --auto-fix", text)
+
+        chinese_paths = [
+            Path("README.zh-TW.md"),
+            Path("docs/zh-TW/WORKFLOW.md"),
+            Path("docs/zh-TW/COMMANDS.md"),
+            Path("docs/zh-TW/CONFIGURATION.md"),
+            Path("docs/zh-TW/VERIFICATION.md"),
+            Path("docs/zh-TW/OPERATIONS.md"),
+            Path("docs/zh-TW/CONSENSUS.md"),
+        ]
+        for path in chinese_paths:
+            with self.subTest(language="Traditional Chinese", path=path):
+                text = _read(path)
+                self.assertRegex(text, HAN_RE)
+                self.assertIn("run --auto-fix", text)
+                self.assertIn("English", text)
+
     def test_session_rules_have_one_packaged_name_and_fresh_init_path(self):
         self.assertTrue((ROOT / "assent/templates/instructions.md").is_file())
         instruction_templates = [

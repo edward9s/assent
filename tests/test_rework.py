@@ -12,7 +12,7 @@ from assent import AssentError, gitops
 from assent.config import load_config
 from assent.lockfile import hold_lock
 from assent.plan import read_entries, set_status
-from assent.rework import rework_task
+from assent.rework import rework_task, rework_tasks_locked
 
 
 def _git(root: Path, *args: str) -> str:
@@ -112,6 +112,21 @@ class TestRework(unittest.TestCase):
                 self.assertIn(phase, coordinator)
         # The coordinator only sequences the phases; it must not absorb their bodies again.
         self.assertLess(len(coordinator.splitlines()), 40)
+
+    def test_locked_automatic_rework_reuses_cascade_and_records_authorization(self):
+        first = self._write_task(1, "DONE")
+        second = self._write_task(2, "DONE", deps=(1,))
+        worktree, _branch = self._worktree()
+        cfg = self.cfg.for_worktree(worktree)
+        with hold_lock(self.tasks_dir, self.folder):
+            code = rework_tasks_locked(
+                cfg, ["t001"], "review finding needs repair")
+        self.assertEqual(code, 0)
+        self.assertEqual(self._status(first), "TODO")
+        self.assertEqual(self._status(second), "TODO")
+        entry = read_entries(first.with_name("t001_task.r.toml"))[-1]
+        self.assertIn("Automatic repair rework", entry["summary"])
+        self.assertIn("authorization: run --auto-fix", entry["detail"])
 
     def test_all_non_todo_target_statuses_can_reopen(self) -> None:
         task = self._write_task(1, "DONE")

@@ -24,6 +24,38 @@ receipt; a pass cannot authorize acceptance. Focused verification still
 classifies shared ignored inputs and reconciles their reviewed links before any
 check starts.
 
+### Folder auto-fix review gate
+
+When `[auto_fix.review]` is configured and the invocation states
+`run --auto-fix`, the completed folder performs a folder-level read-only review
+after the final focused gate. The scheduler runs each distinct `DONE`-task
+`verify` command once more first; a failure writes the focused finding evidence
+and starts no reviewer. An incomplete `--once` or `--task` run defers the loop
+and spends no review token. A folder containing only `SKIP` tasks needs no
+implementation review. An ordinary `run` without `--auto-fix` starts neither
+this final sweep/review nor repair, even when the policy is configured.
+
+`run --auto-fix` is the per-invocation authorization to repair a failed review.
+It is orthogonal to run selection and remains compatible with explicit folders,
+`...`, `--all`, `--once`, `--task`, and `--verify`. The flag does not run a full
+candidate verifier or publish a ref. A failed review without the flag is
+human-adjudication evidence; with it, the scheduler validates every finding to
+one existing task and declared scope, records code-preserving reason-bearing
+rework, and selects a finite fixer-profile assignment for each repair round.
+The round's assignments are persisted before its first repair session, so
+multi-task findings and dependency cascades do not escalate one task at a time.
+
+The review follows changed and directly interacting code and may report
+pre-existing technical debt only when repair is local to an existing task's
+scope and reliably tested by its focused gate. It is not a repository-wide debt
+audit. Unknown, ambiguous, or out-of-scope findings stop for a human. Automatic
+repair never creates tasks, changes task requirements or scope, reverts source,
+deletes source, accepts work, or treats `_auto_fix.toml` as a task status.
+The reviewer must not write project or management files; Assent's before/after
+surface snapshot refuses any detected write and preserves the exact edits.
+This is cooperative prompt-plus-detection behavior under the documented
+`danger-full-access` default, not a security sandbox.
+
 ### Complete candidate verification
 
 `assent verify <FOLDER>` creates a temporary integration candidate containing
@@ -61,6 +93,19 @@ after the receipt operation settles and all verification locks are released.
 The best-effort report refresh observes `PASSED`, `FAILED`, stale replacement,
 fresh reuse, malformed refusal, incomplete-folder no-op, and interrupt outcomes
 without changing or masking the verification result.
+
+The folder report also renders the derived `_auto_fix.toml` memory without
+opening an AI session. No file means `Folder auto-fix: NOT RUN (no review
+state)`; malformed state or a changed source/task binding is `STALE`; a fresh
+review `PASS` is `PASSED (fresh)`; and a fresh `FAIL` is `FAILED (fresh)` with
+its current blocking findings. The version-2 state requires `phase` and binds
+the source tree, task-plan digest, review-prompt digest, and resolved reviewer
+adapter/model/effort; it retains the finding ledger, observed states, and
+consumed fixer profiles. Its `NEEDS_REPAIR`, `REPAIRING`, `AWAITING_REVIEW`, and
+`COMPLETE` phases make restart boundaries explicit. It is deletable derived
+evidence, never a receipt, task status, or acceptance gate. Repair and closeout
+refuse when a pending `FAIL` has no current reviewer policy or its resolved
+reviewer identity has drifted.
 
 The configured `[verification] receipt_refresh = "manual"` (the default)
 defers a folder receipt after ordinary `run` closeout. `"auto"` refreshes it

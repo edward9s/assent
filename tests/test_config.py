@@ -162,6 +162,8 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.lockfile_rel, ".assent/plan01/assent.lock")
         self.assertEqual(cfg.verification_receipt_rel,
                          ".assent/plan01/_verification.toml")
+        self.assertEqual(cfg.auto_fix_state_rel,
+                         ".assent/plan01/_auto_fix.toml")
         # The reviewed-shared-path manifest and its lock are Assent-owned local
         # execution memory in the project's .assent, so they are runtime
         # artifacts like the log and the receipt: never staged, never part of a
@@ -170,6 +172,7 @@ class TestLoadConfig(ConfigTestCase):
                          (".assent/plan01/_assent.log", ".assent/plan01/_report.md",
                          ".assent/plan01/assent.lock",
                          ".assent/plan01/_verification.toml",
+                         ".assent/plan01/_auto_fix.toml",
                          ".assent/manifest.toml", ".assent/manifest.lock"))
 
     def test_provided_folder_updates_all_derived_paths(self):
@@ -182,12 +185,74 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.lockfile_rel, ".assent/parallel02/assent.lock")
         self.assertEqual(cfg.verification_receipt_rel,
                          ".assent/parallel02/_verification.toml")
+        self.assertEqual(cfg.auto_fix_state_rel,
+                         ".assent/parallel02/_auto_fix.toml")
         self.assertEqual(cfg.git_excludes,
                          (".assent/parallel02/_assent.log",
                           ".assent/parallel02/_report.md",
                           ".assent/parallel02/assent.lock",
                           ".assent/parallel02/_verification.toml",
+                          ".assent/parallel02/_auto_fix.toml",
                           ".assent/manifest.toml", ".assent/manifest.lock"))
+
+    def test_auto_fix_review_is_opt_in_and_resolves_defaults(self):
+        self.assertIsNone(
+            load_config(self.write(_MINIMAL), "plan01").auto_fix_review)
+        cfg = load_config(self.write(
+            '[adapter]\nname = ["codex", "claude"]\n'
+            '[auto_fix.review]\n'), "plan01")
+        review = cfg.auto_fix_review
+        self.assertIsNotNone(review)
+        self.assertEqual(review.adapter, "codex")
+        self.assertEqual(review.model, "prime")
+        self.assertEqual(review.effort, "heavy")
+        self.assertEqual(review.command, "codex")
+        self.assertEqual(review.requested_model, "gpt-5.6-sol")
+        self.assertEqual(review.requested_effort, "high")
+
+    def test_auto_fix_review_explicit_adapter_reuses_its_mappings(self):
+        cfg = load_config(self.write(
+            '[adapter]\nname = "claude"\n'
+            '[adapter.codex]\ncommand = "codex-review.cmd"\n'
+            '[adapter.codex.models]\ncore = "review-model"\n'
+            '[adapter.codex.efforts.core]\nslight = "review-effort"\n'
+            '[auto_fix.review]\nadapter = "codex"\nmodel = "core"\n'
+            'effort = "slight"\n'), "plan01")
+        review = cfg.auto_fix_review
+        self.assertEqual(review.adapter, "codex")
+        self.assertNotIn(review.adapter, cfg.adapter_names)
+        self.assertEqual(review.command, "codex-review.cmd")
+        self.assertEqual(review.requested_model, "review-model")
+        self.assertEqual(review.requested_effort, "review-effort")
+
+    def test_auto_fix_review_rejects_invalid_shapes_and_values(self):
+        cases = (
+            ('auto_fix = true\n', r"\[auto_fix\].*table"),
+            ('[auto_fix]\nreview = true\n', r"\[review\].*table"),
+            ('[auto_fix]\nextra = true\n', "unknown keys"),
+            ('[auto_fix.review]\nextra = true\n', "unknown keys"),
+            ('[auto_fix.review]\nadapter = 1\n', "wrong type"),
+            ('[auto_fix.review]\nadapter = "  "\n', "is blank"),
+            ('[auto_fix.review]\nadapter = "elsewhere"\n', "registered adapter"),
+            ('[auto_fix.review]\nmodel = "max"\n', "valid model tier"),
+            ('[auto_fix.review]\neffort = "medium"\n', "valid effort"),
+        )
+        for text, message in cases:
+            with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):
+                load_config(self.write(text), "plan01")
+
+    def test_auto_fix_review_uses_normal_layer_precedence(self):
+        self.write_user(
+            '[auto_fix.review]\nadapter = "codex"\nmodel = "core"\n'
+            'effort = "slight"\n')
+        cfg = load_config(self.write(
+            '[auto_fix.review]\nmodel = "lite"\n'), "plan01")
+        review = cfg.auto_fix_review
+        self.assertEqual(
+            (review.adapter, review.model, review.effort),
+            ("codex", "lite", "slight"))
+        self.assertEqual(cfg.source_of("auto_fix.review.adapter"), USER_LAYER)
+        self.assertEqual(cfg.source_of("auto_fix.review.model"), PROJECT_LAYER)
 
     def test_missing_file_raises(self):
         with self.assertRaises(AssentError):

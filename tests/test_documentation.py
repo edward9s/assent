@@ -151,7 +151,9 @@ class DocumentationTests(unittest.TestCase):
             "checkpoint commit and diff",
             "focused and full verification evidence",
             "evidence-based findings first",
-            "Never accept or rework automatically",
+            "This ordinary acceptance review remains human-driven",
+            "explicit `run --auto-fix`",
+            "still never accepts a folder",
             "Wait for the human decision",
             "different vendor",
         ):
@@ -161,9 +163,140 @@ class DocumentationTests(unittest.TestCase):
         chinese_review = _read(Path("README.zh-TW.md")) + _read(
             Path("docs/zh-TW/WORKFLOW.md")
         )
-        for phrase in ("不要用子代理", "絕不要自動 accept 或 rework", "等待人類決定"):
+        for phrase in (
+                "不要用子代理",
+                "這個一般驗收審查由人類主導",
+                "`run --auto-fix`",
+                "絕不自動接受 folder",
+                "等待人類決定"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, chinese_review)
+
+    def test_auto_fix_is_explicit_bounded_and_never_acceptance(self):
+        english = "\n".join(
+            _read(path) for path in (Path("README.md"), Path("docs/WORKFLOW.md"),
+                                     Path("docs/COMMANDS.md"),
+                                     Path("docs/VERIFICATION.md")))
+        for phrase in (
+                "`run --auto-fix`",
+                "selection-orthogonal",
+            "finite fixer-profile",
+            "never creates tasks",
+            "never accepts",
+            "pre-existing technical debt",
+            "directly interacting code",
+            "repository-wide debt audit",
+                "_auto_fix.toml",
+                "read-only"):
+            with self.subTest(language="English", phrase=phrase):
+                self.assertIn(phrase, english)
+        self.assertNotIn("Never accept or rework automatically", english)
+
+        chinese = "\n".join(
+            _read(path) for path in (Path("README.zh-TW.md"),
+                                     Path("docs/zh-TW/WORKFLOW.md"),
+                                     Path("docs/zh-TW/COMMANDS.md"),
+                                     Path("docs/zh-TW/VERIFICATION.md")))
+        for phrase in (
+                "`run --auto-fix`",
+                "與選取正交",
+                "有限 fixer profile",
+            "不會自動建立 task",
+            "絕不自動接受 folder",
+                "既有 technical debt",
+                "直接互動程式碼",
+                "全 repository debt audit",
+                "`_auto_fix.toml`",
+                "唯讀"):
+            with self.subTest(language="Traditional Chinese", phrase=phrase):
+                self.assertIn(phrase, chinese)
+
+    def test_auto_fix_round_budget_and_recovery_identity_stay_in_parity(self):
+        """Reader surfaces must describe round-scoped budgets and fail-closed recovery."""
+        english_paths = [
+            Path("AGENTS.md"), Path("README.md"),
+            Path("assent/templates/assent.toml"),
+            Path("assent/templates/instructions.md"),
+            Path("assent/templates/format.md"),
+            Path("docs/WORKFLOW.md"), Path("docs/COMMANDS.md"),
+            Path("docs/CONFIGURATION.md"), Path("docs/VERIFICATION.md"),
+            Path("docs/OPERATIONS.md"), Path("docs/CONSENSUS.md"),
+        ]
+        english = "\n".join(_read(path) for path in english_paths)
+        for phrase in (
+                "repair round", "multi-task", "dependency cascade",
+                "first write-capable session", "refuses repair and closeout",
+                "resolved reviewer identity", "phase"):
+            with self.subTest(language="English", phrase=phrase):
+                self.assertIn(phrase, english)
+        self.assertNotIn("before each write-capable session", english)
+
+        chinese_paths = [
+            Path("README.zh-TW.md"),
+            Path("docs/zh-TW/WORKFLOW.md"),
+            Path("docs/zh-TW/COMMANDS.md"),
+            Path("docs/zh-TW/CONFIGURATION.md"),
+            Path("docs/zh-TW/VERIFICATION.md"),
+            Path("docs/zh-TW/OPERATIONS.md"),
+            Path("docs/zh-TW/CONSENSUS.md"),
+        ]
+        chinese = "\n".join(_read(path) for path in chinese_paths)
+        for phrase in (
+                "repair round", "多 task", "dependency cascade",
+                "第一個 write-capable session", "拒絕 repair 與 closeout",
+                "resolved reviewer identity", "Version 2"):
+            with self.subTest(language="Traditional Chinese", phrase=phrase):
+                self.assertIn(phrase, chinese)
+        self.assertNotIn("每個 write-capable session 前", chinese)
+
+    def test_readme_auto_fix_contracts_stay_in_parity(self):
+        """The two onboarding pages must expose the same opt-in boundaries."""
+        readmes = {
+            "README.md": _read(Path("README.md")),
+            "README.zh-TW.md": _read(Path("README.zh-TW.md")),
+        }
+        required = {
+            "README.md": (
+                "## Optional bounded auto-fix",
+                "`[auto_fix.review]`",
+                "`assent run --auto-fix`",
+                "An ordinary `assent run` without the flag starts neither review nor repair.",
+                "read-only",
+                "pre-existing technical debt",
+                "directly interacting code",
+                "unbounded repository-wide debt audit",
+                "finite sequence of fixer profiles",
+                "never creates tasks",
+                "reverts source",
+                "deletes source",
+                "accepts a folder",
+                "`_auto_fix.toml`",
+            ),
+            "README.zh-TW.md": (
+                "## 可選的有界 auto-fix",
+                "`[auto_fix.review]`",
+                "`assent run --auto-fix`",
+                "沒有 flag 的普通 `assent run` 不會啟動 review，也不會 repair。",
+                "唯讀",
+                "既有 technical debt",
+                "直接互動的程式碼",
+                "全 repository debt audit",
+                "有限 fixer profile",
+                "不會自動建立 task",
+                "還原 source",
+                "刪 source",
+                "絕不自動接受 folder",
+                "`_auto_fix.toml`",
+            ),
+        }
+        for name, text in readmes.items():
+            compact = " ".join(text.split())
+            for phrase in required[name]:
+                with self.subTest(readme=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+
+        self.assertNotIn("Never accept or rework automatically", readmes["README.md"])
+        self.assertNotIn("絕不要自動 accept 或 rework", readmes["README.zh-TW.md"])
 
 
 if __name__ == "__main__":

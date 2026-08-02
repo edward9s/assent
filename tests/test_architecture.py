@@ -385,5 +385,37 @@ class VendorAdapterIndependence(unittest.TestCase):
         self.assertTrue(callable(process.run_subprocess))
 
 
+class AutoFixStateSchema(unittest.TestCase):
+    """The version-2 state validator and dataclass expose one exact schema."""
+
+    def test_version_and_exact_field_set_stay_in_parity(self) -> None:
+        from dataclasses import fields
+        from assent import auto_fix
+
+        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 2)
+        self.assertEqual(
+            {field.name for field in fields(auto_fix.AutoFixState)},
+            auto_fix._STATE_KEYS)
+        self.assertIn("phase", auto_fix._STATE_KEYS)
+        self.assertEqual(auto_fix.AUTO_FIX_PHASES, frozenset({
+            "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
+        }))
+
+    def test_packaged_contract_describes_the_runtime_version_two_phase_field(self) -> None:
+        contract = (ROOT / "assent" / "templates" / "format.md").read_text(
+            encoding="utf-8")
+        for phrase in (
+                "Version 2 has exactly these scalar fields",
+                "version = 2",
+                "phase = \"COMPLETE\"",
+                "NEEDS_REPAIR",
+                "REPAIRING",
+                "AWAITING_REVIEW",
+                "`COMPLETE` is valid only for a `PASS`",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, contract)
+
+
 if __name__ == "__main__":
     unittest.main()

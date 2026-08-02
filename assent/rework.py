@@ -1,5 +1,9 @@
-"""Non-destructively reopen a single task, cascading to downstream tasks when
-explicitly requested by a human."""
+"""Non-destructively reopen tasks through one guarded rework transaction.
+
+The public command acquires the lock for a human request; the execution engine
+may reuse the same transaction under its already-held lock when ``--auto-fix``
+has authorized a bounded, reason-bearing repair.
+"""
 from __future__ import annotations
 
 import json
@@ -70,6 +74,58 @@ def rework_task(cfg: Config, task_id: str, cascade: bool = False,
     return 1
 
 
+def rework_tasks_locked(cfg: Config, task_ids: list[str], reason: str) -> int:
+    """Reopen an exact automatic finding set while the caller holds the folder lock.
+
+    The existing single-task transaction remains the only mutation path.  This
+    coordinator merely removes selected descendants whose required cascade is
+    already covered by another selected task, then invokes that transaction in
+    plan order with code preservation forced on.
+    """
+    if (not isinstance(task_ids, list) or not task_ids
+            or not all(isinstance(item, str) and item for item in task_ids)):
+        print(f"{cfg.tasks_name}: automatic rework aborted "
+              "(task_ids must be a non-empty list of task ids)")
+        return 1
+    if len(task_ids) != len(set(task_ids)):
+        print(f"{cfg.tasks_name}: automatic rework aborted "
+              "(task_ids contains a duplicate)")
+        return 1
+    try:
+        plan = Plan.parse(cfg.tasks_dir)
+    except AssentError as e:
+        print(f"{cfg.tasks_name}: automatic rework aborted "
+              f"(task files could not be parsed: {e})")
+        return 1
+    selected = set(task_ids)
+    unknown = sorted(selected - {task.id for task in plan.tasks})
+    if unknown:
+        print(f"{cfg.tasks_name}: automatic rework aborted "
+              f"(exact task ids not found: {', '.join(unknown)})")
+        return 1
+    covered: set[str] = set()
+    roots: list[str] = []
+    for task in plan.tasks:
+        if task.id not in selected or task.id in covered:
+            continue
+        roots.append(task.id)
+        covered.update(item.id for item in _downstream_tasks(plan, task.id))
+
+    for task_id in roots:
+        current = Plan.parse(cfg.tasks_dir).get(task_id)
+        if current is not None and current.status == "TODO":
+            continue
+        if _rework_locked(
+                cfg, task_id, True, reason, False, automatic=True) != 0:
+            return 1
+    try:
+        write_report(cfg, Plan.parse(cfg.tasks_dir))
+    except (AssentError, OSError, ValueError) as e:
+        print(f"{cfg.tasks_name}: tasks reopened, but report update failed ({e})")
+        return 1
+    return 0
+
+
 def _downstream_tasks(plan: Plan, task_id: str) -> list[Task]:
     """Return all direct and indirect downstream tasks of the given task, in plan order."""
     reverse: dict[str, list[str]] = {task.id: [] for task in plan.tasks}
@@ -119,13 +175,15 @@ def _entry_values(task: Task, target: Task, head: str,
                   reason: str, reverted: list[str] | None = None,
                   revert_checkpoint: str | None = None,
                   revert_scope: list[str] | None = None,
-                  original_status: str | None = None) -> tuple[str, str]:
+                  original_status: str | None = None,
+                  automatic: bool = False) -> tuple[str, str]:
     """Build a verifiable summary and detail whose content stays stable across reruns."""
     status = original_status or task.status
     scope = ", ".join(item.id for item in downstream) if cascade else "disabled"
     if cascade and not scope:
         scope = "no downstream tasks"
-    summary = (f"Manual rework requested; scheduler reset status {status} "
+    kind = "Automatic repair rework" if automatic else "Manual rework requested"
+    summary = (f"{kind}; scheduler reset status {status} "
                "back to TODO")
     detail = (
         f"target id: {target.id}\n"
@@ -134,6 +192,8 @@ def _entry_values(task: Task, target: Task, head: str,
         f"cascade scope: {scope}\n"
         f"reason: {reason}"
     )
+    if automatic:
+        detail += "\nauthorization: run --auto-fix"
     if reverted is not None and revert_checkpoint is not None:
         reversed_scope = (", ".join(revert_scope or [])
                           if cascade else "disabled")
@@ -381,6 +441,7 @@ class _ReworkRequest:
     cascade: bool
     reason: str
     revert_code: bool
+    automatic: bool
     plan: Plan
     target: Task
     downstream: list[Task]
@@ -414,8 +475,20 @@ def _ensure_folder_worktree(cfg: Config, path: Path) -> None:
         raise AssentError(f"worktree is on a branch outside this folder: {shown}")
 
 
+def _folder_worktree_path(cfg: Config) -> Path:
+    """Use the caller's source worktree when execution already runs inside it."""
+    try:
+        if (gitops.is_repo_worktree(cfg.root, cfg.root)
+                and gitops.current_branch(cfg.root).startswith(cfg.branch_prefix)):
+            return cfg.root
+    except AssentError:
+        pass
+    return gitops.worktree_path(cfg.root, cfg.tasks_name)
+
+
 def _resolve_request(cfg: Config, task_id: object, cascade: object,
-                     reason: object, revert_code: object) -> _ReworkRequest | None:
+                     reason: object, revert_code: object,
+                     automatic: bool = False) -> _ReworkRequest | None:
     """Phase: validate the entry parameters, parse the plan, and resolve the target and
     its downstream scope. Prints and returns ``None`` when the request is refused."""
     name = cfg.tasks_name
@@ -451,9 +524,9 @@ def _resolve_request(cfg: Config, task_id: object, cascade: object,
     return _ReworkRequest(
         cfg=cfg, name=name, task_id=task_id, cascade=cascade,
         reason=reason.strip() or "manual rework requested",
-        revert_code=revert_code, plan=plan, target=target,
+        revert_code=revert_code, automatic=automatic, plan=plan, target=target,
         downstream=downstream, blockers=blockers,
-        path=gitops.worktree_path(cfg.root, name))
+        path=_folder_worktree_path(cfg))
 
 
 def _adopt_revert_record(request: _ReworkRequest, state: _ReworkState,
@@ -469,7 +542,7 @@ def _adopt_revert_record(request: _ReworkRequest, state: _ReworkState,
             task, request.target, record.original_head, request.downstream,
             record.cascade, record.reason, list(record.reverted),
             record.checkpoint, list(record.changed),
-            original_status=original[task.id])
+            original_status=original[task.id], automatic=request.automatic)
         for task in record_changed
     }
     entries = {
@@ -582,7 +655,9 @@ def _prepare_git_scene(request: _ReworkRequest, state: _ReworkState) -> bool:
             _ensure_folder_worktree(request.cfg, request.path)
             if gitops.commit_if_dirty(
                     request.path,
-                    f"wip({name}/{request.target.id}): manual rework pre-archive",
+                    f"wip({name}/{request.target.id}): "
+                    f"{'automatic repair' if request.automatic else 'manual rework'} "
+                    "pre-archive",
                     state.excludes):
                 print(f"{name}: {request.target.id} uncommitted changes archived "
                       "as a wip checkpoint")
@@ -628,7 +703,8 @@ def _build_log_values(request: _ReworkRequest, state: _ReworkState) -> None:
         task.id: _entry_values(
             task, request.target, state.head, request.downstream,
             request.cascade, request.reason, state.reverted,
-            state.revert_checkpoint, [item.id for item in state.changed])
+            state.revert_checkpoint, [item.id for item in state.changed],
+            automatic=request.automatic)
         for task in state.changed
     }
 
@@ -719,10 +795,12 @@ def _persist_journal_first(request: _ReworkRequest, state: _ReworkState) -> bool
 
 
 def _rework_locked(cfg: Config, task_id: object, cascade: object,
-                   reason: object, revert_code: object) -> int:
+                   reason: object, revert_code: object,
+                   automatic: bool = False) -> int:
     """After acquiring the lock, run the rework phases in the order that keeps every
     precheck ahead of the Git scene and the journal a durable completion marker."""
-    request = _resolve_request(cfg, task_id, cascade, reason, revert_code)
+    request = _resolve_request(
+        cfg, task_id, cascade, reason, revert_code, automatic)
     if request is None:
         return 1
 

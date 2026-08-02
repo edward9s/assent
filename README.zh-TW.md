@@ -11,7 +11,7 @@ Assent 是給長期專案使用的檔案式規劃格式與調度器。人類與 
 | 階段 | 內容 | 主要指令 |
 | --- | --- | --- |
 | 規劃 | 討論目標、寫入 Assent 格式任務檔、驗證計畫。 | `assent check` |
-| 執行 | 跑每個任務的 focused verify、保存 WIP/檢查點，讓調度器無人值守繼續。 | `assent run` |
+| 執行 | 跑每個任務的 focused verify、保存 WIP/檢查點，並可明示啟動有界的 folder review-and-repair loop。 | `assent run`、`assent run --auto-fix` |
 | 審查 | 讀 `_report.md`、檢查 diff 與完整驗證證據，再決定接受、重做或駁回。 | `assent report`、`assent verify`、`assent accept` |
 
 `DONE` 是執行 AI 的完成主張，不是人類批准。完整驗證 receipt 是證據；
@@ -82,6 +82,26 @@ npm test、Flutter test 或 custom argv。重跑 init 會保留現有 verifier�
 從上游 commit 開始。詳見[工作流程](docs/zh-TW/WORKFLOW.md)與
 [作業指南](docs/zh-TW/OPERATIONS.md)。
 
+## 可選的有界 auto-fix
+
+設定 `[auto_fix.review]` 會提供 folder-level review-and-repair policy；整個 loop
+都是 invocation-level opt-in，只有明示的 `assent run --auto-fix` 才會在最後 focused
+checks 後啟動唯讀 review，並授權該次 invocation 的有界 repair。沒有 flag 的普通
+`assent run` 不會啟動 review，也不會 repair。這個 flag 與選取正交，可和明示 folder、
+`...`、`--all`、`--once`、`--task`、`--verify` 合用；受限 run 若留下 incomplete
+folder，就延後整個 loop。
+
+Review 只看變更與直接互動的程式碼；既有 technical debt，只有在修正局部於
+既有 task 的 declared scope、且 focused test 能可靠驗證時才合格，不做全 repository
+debt audit。FAIL 只會自動重開 finding 所有權明確的既有 task，記錄帶理由且保留程式碼
+的 rework。每個 repair round 都依該 round 開始前尚未消耗的有限 fixer profile 選定 assignments，
+並在第一個 write-capable session 前持久化；多 task finding 或 dependency cascade 不會
+逐 task 讓 sibling 提前 escalation。它不會自動建立 task、還原 source、刪 source、
+publish Git 或接受 folder。profile 用盡、中斷或 gate 失敗會保留 state 與編輯，交人類裁決。
+之後明示的 `run --auto-fix` recovery 必須仍有相同的目前 reviewer 設定；移除或改變
+`[auto_fix.review]` 會拒絕 repair 與 closeout，直到 policy 恢復。`_auto_fix.toml` 與
+report 是 derived evidence，不是 task status 或 acceptance evidence。
+
 ## 規劃會議 prompt
 
 可把下面文字作為起點；討論由人類主導，任務 schema 以安裝的格式契約為準：
@@ -101,7 +121,7 @@ npm test、Flutter test 或 custom argv。重跑 init 會保留現有 verifier�
 需要第二意見時使用：
 
 ```text
-請擔任獨立的驗收審查者。請簡潔回答，不要用子代理。任何變更前，先檢查工作資料夾的 _report.md、相關任務與 journal 檔、checkpoint commit/diff、實作，以及 focused/full verification 證據。先回報有證據支持的發現：bug、結構問題、過度設計、缺少測試，以及說明文件與程式行為漂移。建議使用與實作者不同 vendor 的高能力模型做獨立 cross-review，但不要要求或編碼第二模型或自動 gate。絕不要自動 accept 或 rework。等待人類決定；只有人類同意後，才寫 Assent 格式的 rework 任務或說明 acceptance 動作。
+請擔任獨立的驗收審查者。請簡潔回答，不要用子代理。任何變更前，先檢查工作資料夾的 _report.md、相關任務與 journal 檔、checkpoint commit/diff、實作，以及 focused/full verification 證據。先回報有證據支持的發現：bug、結構問題、過度設計、缺少測試，以及說明文件與程式行為漂移。建議使用與實作者不同 vendor 的高能力模型做獨立 cross-review，但不要要求或編碼第二模型或自動 gate。這個一般驗收審查由人類主導，不在該審查中自動 accept 或 rework；明示的 `run --auto-fix` 是另一個有界 review-and-repair 授權，且仍絕不自動接受 folder。等待人類決定；只有人類同意後，才寫 Assent 格式的 rework 任務或說明 acceptance 動作。
 ```
 
 審查者整理發現時不修改 worktree。接受仍是人類執行
@@ -138,6 +158,10 @@ README 是入口；詳細內容放在五組英中配對指南：
   worktree 或 branch。
 - worktree 是隔離與稽核邊界，不是安全 sandbox；無人值守 AI 仍擁有 OS identity
   可存取的 credentials、網路、外部 Git writer 與 worktree 外檔案權限。
+- `[auto_fix.review]` 只提供有界 folder review policy；只有明示的
+  `run --auto-fix` 會啟動唯讀 review 與有限、保留程式碼的 repair loop。沒有 flag 的
+  普通 `run` 不會 review 或 repair；`_auto_fix.toml` 永遠不是 acceptance，`accept`
+  仍是人類動作。
 
 精確選取、receipt freshness、共享 ignored input 審閱、adapter 對應、復原與
 完整 command options，請看上方五份指南。

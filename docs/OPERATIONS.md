@@ -94,6 +94,33 @@ events plus bounded summaries and adapter classifications, not the full raw
 adapter stream. The per-folder `_assent.log` carries the rendered terminal
 session output, without a parent scheduler prefix.
 
+### Auto-fix recovery and write boundary
+
+When `[auto_fix.review]` is configured, it supplies the policy for the bounded
+loop, but only an invocation of `run --auto-fix` starts the final folder review
+and authorizes repair. The review is read-only; an ordinary `run` without the
+flag starts neither review nor repair. A failed review in an authorized run may
+reopen existing in-scope tasks with the reason-bearing automatic rework; it
+does not create tasks, revert source, delete source, or accept a folder. The
+fixer-profile assignments for a repair round are written to `_auto_fix.toml`
+before that round's first write-capable session, so a process failure cannot
+silently make a consumed profile available again and a sibling task cannot
+escalate merely because an earlier task ran.
+The finding ledger, consumed profiles, WIP checkpoints, and edits survive
+interruption, quota, adapter failure, and failed focused gates.
+
+A later `run --auto-fix` resumes the existing `FAIL` state and skips consumed
+profiles only when the current `[auto_fix.review]` exists and its resolved
+reviewer identity matches the state. Removing or changing that policy refuses
+repair and closeout. Profile exhaustion is a deliberate finite handoff to
+human adjudication, not an instruction to keep retrying or undo code. The
+report shows `NOT RUN`, `PASSED`, `FAILED`, or `STALE` auto-fix evidence as
+derived runtime information; none of these values changes task status or
+acceptance.
+The reviewer's prompt-plus-detection refusal for project writes is cooperative
+and runs with the documented `danger-full-access` default; it is not a security
+sandbox or a preventive OS permission boundary.
+
 ### Temporary integration candidates
 
 Complete verification creates a sibling candidate such as:

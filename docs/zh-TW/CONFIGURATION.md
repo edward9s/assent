@@ -209,6 +209,41 @@ Session: codex | core->gpt-5.6-terra | heavy->high
 
 左邊是 task 的抽象值，右邊是實際傳給 CLI 的 argument。
 
+## 可選的 folder review 與 auto-fix
+
+可選的 `[auto_fix.review]` table 設定 folder-level reviewer。`adapter` 必須是已註冊
+的 adapter；`model` 只能用抽象 `prime`/`core`/`lite`，`effort` 只能用抽象
+`heavy`/`normal`/`slight`。Reviewer 會重用該 adapter 自己的 model/effort mapping，
+因此明示的 reviewer 可以選 worker rotation 以外的 vendor：
+
+```toml
+[adapter]
+name = ["claude", "codex"]
+
+[auto_fix.review]
+adapter = "antigravity"       # 已註冊、但不在 worker rotation
+model = "prime"               # 抽象 tier
+effort = "heavy"              # 抽象 effort
+```
+
+設定 table 只提供 bounded read-only review-and-repair loop 的 policy；只有明示
+`assent run --auto-fix` 才啟動該次 invocation 的 review 並授權 repair。沒有 flag 的普通
+run 不會 review，也不會 repair。這個 flag 與 folder selection 正交，可和明示、remainder、
+`--all`、`--once`、`--task`、`--verify` 的 run 形式合用。`_auto_fix.toml` 保存的是
+resolved adapter 與實際 CLI model/effort，加上 finding ledger 與 consumed profile，不
+接受 reviewer 自己聲稱的 identity。唯讀 review 的 prompt-plus-detection write refusal
+仍不是 security sandbox。
+
+Repair 使用 worker rotation 的有限 abstract profile；每個 repair round 在第一個
+write-capable session 前先依 round 開始時的 consumed history 記錄整輪 assignments，所以
+多 task finding 或 dependency cascade 不會逐 task 消耗 normal profile。它只會以理由
+`Automatic repair of durable folder-review findings` 重開既有 scope 內的 task。變更或直接
+互動程式碼遇到的既有 technical debt，若局部且 focused tests 能可靠驗證，也可修正；不是
+全 repository debt audit。它不會自動建立 task、還原 source、刪 source 或 accept。profile
+用盡、中斷或 gate 失敗會保留 state 與編輯供 recovery；pending `FAIL` 只有在目前
+`[auto_fix.review]` 存在且 resolved reviewer identity 相同時才能恢復，policy 被移除或改變
+會拒絕 repair 與 closeout。
+
 ## Antigravity timeout 與排錯
 
 `print_timeout_minutes` 限制一次 AGY print；Assent watchdog 限制 session 沒有輸出的

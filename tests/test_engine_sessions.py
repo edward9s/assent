@@ -17,15 +17,278 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from assent import AssentError, engine, gitops
+from assent import AssentError, auto_fix, engine, gitops
 from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      wake_stop_waiters)
 from assent.config import load_config
-from assent.plan import append_entry, journal_path_for, parse_task_file, set_status
+from assent.plan import (append_entry, journal_path_for, parse_task_file,
+                         read_entries, set_status)
 from tests.engine_support import (EngineTestCase, ScriptedAdapter, ok_result,
                                   task_text)
 from tests.test_contracts import GlobalContractsMixin
+
+
+class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
+    def test_review_failure_reopens_repairs_and_reviews_with_one_normal_profile(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "value is stale", "expected repaired value")
+        failed = auto_fix.review_record_json(
+            auto_fix.ReviewRecord("FAIL", (finding,)))
+        passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, failed, False, None),
+            TaskResult(0, passed, False, None),
+        ])
+        worker = ScriptedAdapter([
+            self.ai_done(task_path, {"src/value.txt": "new\n"})])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        self.assertEqual(parse_task_file(task_path).status, "DONE")
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
+        self.assertEqual(state.consumed_fixer_profiles,
+                         (auto_fix.FixerProfile("claude", "lite", "normal"),))
+        self.assertEqual(len(worker.calls), 1)
+        self.assertEqual(len(reviewer.calls), 2)
+        self.assertIn("Durable finding ledger", worker.calls[0][0])
+        attempt = next(entry for entry in read_entries(journal_path_for(task_path))
+                       if entry["event"] == "auto_fix_attempt")
+        self.assertEqual((attempt["agent"], attempt["requested_model"],
+                          attempt["requested_effort"]),
+                         ("claude", "lite", "medium"))
+
+    def test_directory_scoped_focused_failure_persists_and_starts_fixer(self):
+        verify = ('python -c "import pathlib,sys;sys.exit('
+                  "0 if pathlib.Path('src/ok.txt').exists() else 1)\"")
+        task_path = self.write_task(
+            1, status="DONE", scope=("src/",), verify=verify)
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+        worker = ScriptedAdapter([
+            self.ai_done(task_path, {"src/ok.txt": "ready\n"})])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        focused = next(
+            finding for finding in state.findings
+            if finding.summary == "Final focused verification failed")
+        self.assertEqual(focused.path, "src")
+        self.assertEqual(state.phase, "COMPLETE")
+        self.assertEqual(len(worker.calls), 1)
+        self.assertEqual(len(reviewer.calls), 1)
+
+    def test_same_finding_advances_from_normal_identity_to_prime_heavy(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "still stale", "review reproduced the issue")
+        failed = auto_fix.review_record_json(
+            auto_fix.ReviewRecord("FAIL", (finding,)))
+        passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, failed, False, None),
+            TaskResult(0, failed, False, None),
+            TaskResult(0, passed, False, None),
+        ])
+        worker = ScriptedAdapter([
+            self.ai_done(task_path, {"src/value.txt": "partial\n"}),
+            self.ai_done(task_path, {"src/value.txt": "fixed\n"},
+                         requested_model="prime"),
+        ])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.consumed_fixer_profiles, (
+            auto_fix.FixerProfile("claude", "lite", "normal"),
+            auto_fix.FixerProfile("claude", "prime", "heavy"),
+        ))
+        self.assertEqual([(model, effort) for _prompt, model, effort in worker.calls],
+                         [("lite", "medium"), ("prime", "high")])
+
+    def test_multi_task_finding_round_gives_every_task_the_normal_profile(self):
+        first = self.write_task(
+            1, status="DONE", scope=("src/one.txt",))
+        second = self.write_task(
+            2, status="DONE", scope=("src/two.txt",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "one.txt").write_text("old one\n", encoding="utf-8")
+        (source / "two.txt").write_text("old two\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        failed = auto_fix.review_record_json(auto_fix.ReviewRecord("FAIL", (
+            auto_fix.ReviewFinding(
+                "t001", "src/one.txt", "first blocker", "first evidence"),
+            auto_fix.ReviewFinding(
+                "t002", "src/two.txt", "second blocker", "second evidence"),
+        )))
+        passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, failed, False, None),
+            TaskResult(0, passed, False, None),
+        ])
+        worker = ScriptedAdapter([
+            self.ai_done(first, {"src/one.txt": "new one\n"}),
+            self.ai_done(second, {"src/two.txt": "new two\n"}),
+        ])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        self.assertEqual(
+            [(model, effort) for _prompt, model, effort in worker.calls],
+            [("lite", "medium"), ("lite", "medium")])
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.consumed_fixer_profiles, (
+            auto_fix.FixerProfile("claude", "lite", "normal"),))
+
+    def test_dependency_cascade_shares_the_same_normal_repair_round(self):
+        first = self.write_task(
+            1, status="DONE", scope=("src/base.txt",))
+        second = self.write_task(
+            2, status="DONE", deps=("t001",), scope=("src/dependent.txt",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "base.txt").write_text("old base\n", encoding="utf-8")
+        (source / "dependent.txt").write_text(
+            "old dependent\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        failed = auto_fix.review_record_json(auto_fix.ReviewRecord("FAIL", (
+            auto_fix.ReviewFinding(
+                "t001", "src/base.txt", "base blocker", "base evidence"),
+        )))
+        passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, failed, False, None),
+            TaskResult(0, passed, False, None),
+        ])
+        worker = ScriptedAdapter([
+            self.ai_done(first, {"src/base.txt": "new base\n"}),
+            self.ai_done(second, {"src/dependent.txt": "new dependent\n"}),
+        ])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        self.assertEqual(
+            [(model, effort) for _prompt, model, effort in worker.calls],
+            [("lite", "medium"), ("lite", "medium")])
+        self.assertEqual(parse_task_file(second).status, "DONE")
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.consumed_fixer_profiles, (
+            auto_fix.FixerProfile("claude", "lite", "normal"),))
+
+    def test_interrupted_multi_task_round_restarts_at_the_next_profile(self):
+        first = self.write_task(
+            1, status="DONE", scope=("src/one.txt",))
+        second = self.write_task(
+            2, status="DONE", scope=("src/two.txt",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "one.txt").write_text("old one\n", encoding="utf-8")
+        (source / "two.txt").write_text("old two\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        failed = auto_fix.review_record_json(auto_fix.ReviewRecord("FAIL", (
+            auto_fix.ReviewFinding(
+                "t001", "src/one.txt", "first blocker", "first evidence"),
+            auto_fix.ReviewFinding(
+                "t002", "src/two.txt", "second blocker", "second evidence"),
+        )))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, failed, False, None),
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+
+        def interrupt_first(_prompt):
+            (self.execution_root() / "src" / "one.txt").write_text(
+                "partial one\n", encoding="utf-8")
+            raise KeyboardInterrupt
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([interrupt_first]),
+            auto_fix_adapter=reviewer, auto_fix=True), 130)
+        interrupted = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(interrupted.consumed_fixer_profiles, (
+            auto_fix.FixerProfile("claude", "lite", "normal"),))
+
+        resumed = ScriptedAdapter([
+            self.ai_done(first, {"src/one.txt": "new one\n"},
+                         requested_model="prime"),
+            self.ai_done(second, {"src/two.txt": "new two\n"},
+                         requested_model="prime"),
+        ])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=resumed, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        self.assertEqual(
+            [(model, effort) for _prompt, model, effort in resumed.calls],
+            [("prime", "high"), ("prime", "high")])
+        completed = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(completed.consumed_fixer_profiles, (
+            auto_fix.FixerProfile("claude", "lite", "normal"),
+            auto_fix.FixerProfile("claude", "prime", "heavy"),
+        ))
+
+    def test_profile_exhaustion_reopens_done_task_for_human_handoff(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "persistent blocker", "still reproducible")
+        failed = auto_fix.review_record_json(
+            auto_fix.ReviewRecord("FAIL", (finding,)))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, failed, False, None) for _ in range(3)])
+        worker = ScriptedAdapter([
+            self.ai_done(task_path, {"src/value.txt": "attempt one\n"}),
+            self.ai_done(task_path, {"src/value.txt": "attempt two\n"},
+                         requested_model="prime"),
+        ])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 1)
+        self.assertEqual(parse_task_file(task_path).status, "TODO")
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(len(state.consumed_fixer_profiles), 2)
+        self.assertEqual(len(worker.calls), 2)
+        self.assertEqual(len(reviewer.calls), 3)
 
 
 class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):

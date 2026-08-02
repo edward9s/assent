@@ -100,6 +100,36 @@ candidate or full verifier exists and writes no receipt; the refusal names the
 incomplete task IDs and statuses. This invocation-level request ignores the
 configured receipt-refresh policy.
 
+## `run --auto-fix`
+
+`--auto-fix` is an invocation-level, selection-orthogonal repair authorization.
+It can be combined with every `run` selection form: implicit selection,
+explicit one or more folders, a prefix plus `...`, `--all`, `--once`, `--task`,
+and `--verify`. The flag is forwarded to each selected folder in the command's
+existing order; it does not mean `--all`, change cardinality, or alter the
+remainder rules. With `--all`, each child folder receives the same policy.
+
+The project must configure `[auto_fix.review]` for the bounded loop. The entire
+loop is invocation-level opt-in: only a run that states `--auto-fix` performs
+the final distinct focused sweep and folder-closeout review. The reviewer is
+read-only, and a `FAIL` may enter automatic repair only in that same invocation.
+An ordinary run without `--auto-fix` starts neither the sweep/review nor repair;
+an incomplete limited run defers the loop, and a focused failure starts no
+reviewer.
+
+Automatic repair reopens only existing tasks whose declared scopes own the
+findings, records a reason-bearing code-preserving rework, and selects a finite
+fixer-profile sequence per repair round. The round's assignments are persisted
+before its first write-capable session, so multi-task findings and dependency
+cascades do not escalate one task at a time. Eligible pre-existing technical
+debt may be fixed when it is local to an existing scope and reliably testable in
+the directly interacting code; review does not search the repository for
+unrelated debt. No automatic task creation, source reversion, source deletion,
+full candidate acceptance, or Git publication occurs. `_auto_fix.toml` and the
+report are derived evidence; `accept` remains an explicit human action. A later
+opted-in recovery refuses repair and closeout if `[auto_fix.review]` was removed
+or its resolved reviewer identity changed.
+
 ## Command reference
 
 | Command | Effect and important boundaries | Token cost |
@@ -108,6 +138,7 @@ configured receipt-refresh policy.
 | `assent run A B` | Runs exactly A then B in written order and stops on the first failure. It does not verify or accept implicitly. | AI sessions only |
 | `assent run A B --all` | Runs the explicit prefix, then remaining incomplete folders in dependency order. | AI sessions only |
 | `assent run --all [--jobs N]` | Runs every incomplete folder with the dependency scheduler; `--jobs` caps concurrent folders. | AI sessions only |
+| `assent run [selection] --auto-fix` | After the completed folder's final focused sweep, authorize the configured bounded review-and-repair loop. Compatible with the run selectors; never accepts. | AI sessions plus configured review/repair |
 | `assent status [FOLDER]` | Shows progress, next task, branch, and last checkpoint. | Zero |
 | `assent check [FOLDER]` | Validates task format, dependency cycles, configuration, and environment; it is the planning adjournment gate. | Zero |
 | `assent report [FOLDER]` | Generates and displays `_report.md`. | Zero |

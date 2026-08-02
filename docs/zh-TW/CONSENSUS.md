@@ -370,6 +370,32 @@ audio 或 video 欄位,不提供 adapter 附件協定,不推測模型的媒體�
 在具體的 adapter 附件需求證明 schema 變更確有必要以前,文字契約在足夠時就是較簡單
 的做法。
 
+## 有界 folder review 與 auto-fix 共識
+
+一般 review 仍由人類主導。`[auto_fix.review]` 可設定一個 folder-level reviewer，但整個
+bounded loop 都是 invocation-level opt-in；只有明示 `run --auto-fix` 才會在 completed
+folder 的最後 distinct focused checks 通過後啟動唯讀 reviewer，並授權 repair。沒有 flag
+的普通 `run` 不會 review 或 repair。這個 flag 與選取正交，可和明示 folder、`...`、
+`--all`、`--once`、`--task`、`--verify` 等一般 run selector 合用；它不會把 review 變成
+acceptance，也不是 full candidate verification。
+
+Reviewer 依循 cumulative diff 與 directly interacting code。若既有 technical debt 的
+修正局部於既有 task 的 declared scope，且 focused test 能可靠驗證，就可回報為合格 finding；
+但不做無界的全 repository debt audit。FAIL review 只可自動重開所有權明確且已有的 task，
+自動 rework 保留程式碼、帶理由，且受 `run --auto-fix` 授權；不建立 task、不改 requirement
+或 scope、不還原 source、不刪 source、不 accept。無法唯一對應既有 task 的 finding 交給
+人類裁決。
+
+`_auto_fix.toml` 是可刪除的 derived folder memory，不是 task status 或 acceptance evidence。
+Version 2 必須有 recovery `phase`，並綁定 source/task-plan identity、review prompt、resolved
+reviewer identity、目前 `PASS`/`FAIL` findings、observed states 與 consumed fixer profiles。
+Profile selection 是 round-scoped：assignments 在該 round 第一個 write-capable session 前持久化，
+因此多 task finding 與 dependency cascade 不會逐 task 消耗 normal profile。有限 escalation
+budget、中斷、quota、gate 失敗與用盡都保留編輯與 evidence；`run --auto-fix` recovery 只在
+目前 reviewer policy 與 resolved identity 相同時恢復 WIP 並跳過已消耗 profile，移除或 drift 會
+拒絕 repair 與 closeout。Reviewer 的 write-detection snapshot 是 `danger-full-access` 下的
+cooperative rule，不是 security sandbox。人類 `accept` 仍是唯一 publication decision。
+
 ## 品質標準(取代 token 數字 KPI)
 
 **冷啟動測試**:一個零記憶的新 AI 只讀 AGENTS.md + instructions.md +
