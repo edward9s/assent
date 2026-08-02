@@ -275,6 +275,54 @@ class TestAutoFixState(unittest.TestCase):
         self.assertEqual(before.changed_paths(changed), (
             "management:plan01:t001_task.e.toml", "management:verify.py"))
 
+    def test_review_surface_protects_exact_root_management_state(self):
+        source = self.root / "source"
+        management = self.root / ".assent"
+        folder = management / "plan01"
+        source.mkdir()
+        folder.mkdir(parents=True)
+        protected = tuple(management / name for name in (
+            "manifest.toml", "_batch_verification.toml", "_archived.toml",
+            "_archive"))
+        before = snapshot_project_surface(
+            source, management, tasks_dir=folder,
+            stable_management_files=protected)
+
+        for path in protected:
+            if path.name == "_archive":
+                path.mkdir()
+                (path / "plan00.zip").write_bytes(b"reviewer archive mutation")
+            else:
+                path.write_text("mutated during review\n", encoding="utf-8")
+        changed = snapshot_project_surface(
+            source, management, tasks_dir=folder,
+            stable_management_files=protected)
+        self.assertEqual(before.changed_paths(changed), (
+            "management:_archive",
+            "management:_archive:plan00.zip",
+            "management:_archived.toml",
+            "management:_batch_verification.toml",
+            "management:manifest.toml",
+        ))
+
+    def test_review_surface_ignores_unselected_root_runtime_output(self):
+        source = self.root / "source"
+        management = self.root / ".assent"
+        folder = management / "plan01"
+        source.mkdir()
+        folder.mkdir(parents=True)
+        protected = (management / "manifest.toml",)
+        before = snapshot_project_surface(
+            source, management, tasks_dir=folder,
+            stable_management_files=protected)
+
+        (management / "parallel-runtime.tmp").write_text(
+            "unrelated scheduler output\n", encoding="utf-8")
+        after = snapshot_project_surface(
+            source, management, tasks_dir=folder,
+            stable_management_files=protected)
+        self.assertEqual(before.changed_paths(after), ())
+
 
 if __name__ == "__main__":
     unittest.main()

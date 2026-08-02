@@ -745,6 +745,13 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         resuming_auto_fix = bool(
             existing_auto_fix is not None
             and existing_auto_fix.verdict == "FAIL")
+        if resuming_auto_fix:
+            assert existing_auto_fix is not None
+            recovery_error = _auto_fix_recovery_config_error(
+                cfg, existing_auto_fix)
+            if recovery_error is not None:
+                print(f"Auto-fix recovery refused: {recovery_error}.")
+                return 1
         while not resuming_auto_fix:
             plan = Plan.parse(cfg.tasks_dir)
             if task_id is not None:
@@ -925,9 +932,34 @@ def _auto_fix_existing_state(cfg: Config) -> auto_fix.AutoFixState | None:
     return auto_fix.read_auto_fix_state(path)
 
 
+def _auto_fix_recovery_config_error(
+        cfg: Config, state: auto_fix.AutoFixState) -> str | None:
+    """Refuse stale FAIL recovery unless its reviewer is still configured."""
+    review = cfg.auto_fix_review
+    if review is None:
+        return ("the pending FAIL state requires a configured [auto_fix.review] "
+                "before repair or closeout can resume")
+    stored = (state.reviewer_adapter, state.reviewer_model,
+              state.reviewer_effort)
+    configured = (review.adapter, review.requested_model,
+                  review.requested_effort)
+    if stored != configured:
+        return ("the pending FAIL state reviewer identity no longer matches "
+                "the configured [auto_fix.review] identity "
+                f"({stored[0]}/{stored[1]}/{stored[2]} -> "
+                f"{configured[0]}/{configured[1]}/{configured[2]})")
+    return None
+
+
 def _auto_fix_surface_snapshot(cfg: Config) -> auto_fix.ProjectSurfaceSnapshot:
     """Capture only this review's protected project-management surfaces."""
-    stable = [cfg.assent_dir / "verify.py"]
+    stable = [
+        cfg.assent_dir / "verify.py",
+        cfg.assent_dir / "manifest.toml",
+        cfg.assent_dir / "_batch_verification.toml",
+        cfg.assent_dir / "_archived.toml",
+        cfg.assent_dir / "_archive",
+    ]
     management_root = cfg.assent_dir.absolute()
     for source in cfg.sources:
         if source.path is None:
@@ -1264,6 +1296,10 @@ def _run_auto_fix_repairs(
         now: Callable[[], datetime]) -> int:
     """Consume the finite worker capability sequence until review passes or hands off."""
     state_path = auto_fix.auto_fix_state_path(cfg)
+    recovery_error = _auto_fix_recovery_config_error(cfg, state)
+    if recovery_error is not None:
+        print(f"Auto-fix recovery refused: {recovery_error}.")
+        return 1
     while True:
         plan = Plan.parse(cfg.tasks_dir)
         try:
@@ -1305,24 +1341,6 @@ def _run_auto_fix_repairs(
             auto_fix.write_auto_fix_state(state_path, state)
             continue
 
-        ordinary = [_auto_fix_profile_for_task(cfg, plan.get(task_id))
-                    for task_id in implicated if plan.get(task_id) is not None]
-        candidates = tuple(ordinary) + _auto_fix_escalation_profiles(cfg)
-        available = auto_fix.next_unused_fixer_profile(state, candidates)
-        if available is None:
-            # A reviewer failure arrived after clean task closeout: make the
-            # unresolved implementation visible.  A legitimate worker BLOCKED
-            # status is already visible and must not be disguised as TODO/DONE.
-            implicated_tasks = [plan.get(task_id) for task_id in implicated]
-            if all(task is not None and task.status in ("DONE", "SKIP")
-                   for task in implicated_tasks):
-                reason = "Auto-fix profiles exhausted with unresolved findings"
-                if rework.rework_tasks_locked(cfg, implicated, reason) != 0:
-                    return 1
-            print("Auto-fix profiles exhausted; unresolved state and evidence "
-                  "were preserved for human adjudication.")
-            return 1
-
         if state.phase == "NEEDS_REPAIR":
             reason = "Automatic repair of durable folder-review findings"
             if rework.rework_tasks_locked(cfg, implicated, reason) != 0:
@@ -1339,24 +1357,46 @@ def _run_auto_fix_repairs(
             print("Auto-fix repair has no runnable TODO/WIP task; preserving "
                   "the current statuses for human adjudication.")
             return 1
-        failures: list[tuple[Task, str]] = []
+
+        # Select the capability level once for the whole repair round.  Every
+        # reopened task compares against the same pre-round history, so one
+        # task consuming a shared normal identity cannot force its siblings or
+        # dependency cascade to escalate.  Persist the complete round before
+        # its first write-capable session; an interrupted round therefore
+        # remains finite on restart.
+        used_before_round = {
+            (item.adapter, item.model, item.effort)
+            for item in state.consumed_fixer_profiles}
+        escalations = _auto_fix_escalation_profiles(cfg)
+        round_assignments: list[tuple[Task, auto_fix.FixerProfile | None]] = []
+        new_profiles: list[auto_fix.FixerProfile] = []
+        new_identities: set[tuple[str, str, str]] = set()
         for task in repair_tasks:
-            normal_profile = _auto_fix_profile_for_task(cfg, task)
-            profile = auto_fix.next_unused_fixer_profile(
-                state, (normal_profile,))
+            candidates = (_auto_fix_profile_for_task(cfg, task),) + escalations
+            profile = next((candidate for candidate in candidates
+                            if (candidate.adapter, candidate.model,
+                                candidate.effort) not in used_before_round), None)
+            round_assignments.append((task, profile))
             if profile is None:
-                profile = auto_fix.next_unused_fixer_profile(
-                    state, _auto_fix_escalation_profiles(cfg))
+                continue
+            identity = (profile.adapter, profile.model, profile.effort)
+            if identity not in new_identities:
+                new_profiles.append(profile)
+                new_identities.add(identity)
+        if all(profile is None for _task, profile in round_assignments):
+            print("Auto-fix profiles exhausted; unresolved state and evidence "
+                  "were preserved for human adjudication.")
+            return 1
+        if new_profiles:
+            state = auto_fix.replace_fixer_profiles(
+                state, state.consumed_fixer_profiles + tuple(new_profiles))
+            auto_fix.write_auto_fix_state(state_path, state)
+
+        failures: list[tuple[Task, str]] = []
+        for task, profile in round_assignments:
             if profile is None:
                 failures.append((task, "No unused fixer profile remains"))
                 continue
-
-            identity = (profile.adapter, profile.model, profile.effort)
-            consumed = {(item.adapter, item.model, item.effort)
-                        for item in state.consumed_fixer_profiles}
-            if identity not in consumed:
-                state = auto_fix.consume_fixer_profile(state, profile)
-                auto_fix.write_auto_fix_state(state_path, state)
 
             try:
                 fixer = _auto_fix_adapter(rotation, profile.adapter)
