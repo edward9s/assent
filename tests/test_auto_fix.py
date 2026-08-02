@@ -1,4 +1,5 @@
 """Tests for provider-neutral auto-fix review records and derived state."""
+import json
 import shutil
 import tempfile
 import unittest
@@ -8,13 +9,17 @@ from types import SimpleNamespace
 
 from assent import AssentError
 from assent.auto_fix import (
-    AUTO_FIX_STATE_VERSION, AutoFixState, FixerProfile, ObservedState,
-    ReviewFinding, ReviewRecord, auto_fix_state_is_fresh,
+    AUTO_FIX_STATE_VERSION, REVIEW_FINDING_KINDS, ApprovedScopeAddition,
+    AutoFixState, FixerProfile, ObservedState, PlanDigestTransition,
+    RepairBrief, ReviewFinding, ReviewRecord, ReviewTransition,
+    ReviewerRecommendation, ScopeAddition, WorkerDisposition,
+    auto_fix_state_is_fresh,
     auto_fix_state_path, consume_fixer_profile, current_review_record,
     finding_fingerprint, next_unused_fixer_profile, normalize_finding_path,
     parse_review_output, persisted_finding, read_auto_fix_state,
     review_record_json, scheduler_finding_path, snapshot_project_surface,
-    state_for_review, validate_review_findings, with_repair_phase,
+    state_for_review, validate_review_findings, validate_review_transitions,
+    with_repair_phase,
     write_auto_fix_state,
 )
 
@@ -25,6 +30,7 @@ class TestReviewRecord(unittest.TestCase):
             task_id="t001", path="assent\\config.py",
             summary="Review configuration is not validated",
             evidence="The loader accepts an unknown key.",
+            recommendation="Reject unknown review configuration keys.",
         )
 
     def test_pass_and_fail_round_trip_deterministically(self):
@@ -56,11 +62,12 @@ class TestReviewRecord(unittest.TestCase):
     def test_fingerprints_are_scheduler_computed_and_stable(self):
         normalized = ReviewFinding(
             "t001", "assent/config.py", self.finding.summary,
-            self.finding.evidence)
+            self.finding.evidence,
+            recommendation=self.finding.recommendation)
         self.assertEqual(finding_fingerprint(self.finding),
                          finding_fingerprint(normalized))
-        data = review_record_json(ReviewRecord("FAIL", (self.finding,)))
-        self.assertNotIn("fingerprint", data)
+        data = json.loads(review_record_json(ReviewRecord("FAIL", (self.finding,))))
+        self.assertNotIn("fingerprint", data["findings"][0])
 
     def test_missing_duplicate_malformed_and_trailing_records_refuse(self):
         valid = review_record_json(ReviewRecord("PASS", ()))
@@ -92,6 +99,71 @@ class TestReviewRecord(unittest.TestCase):
             with self.subTest(record=record), self.assertRaises(AssentError):
                 review_record_json(record)
 
+    def test_all_bounded_kinds_and_exact_scope_action_round_trip(self):
+        for kind in sorted(REVIEW_FINDING_KINDS - {"scope_amendment"}):
+            with self.subTest(kind=kind):
+                finding = replace(self.finding, kind=kind)
+                parsed = parse_review_output(review_record_json(
+                    ReviewRecord("FAIL", (finding,))))
+                self.assertEqual(parsed.findings[0], replace(
+                    finding, path="assent/config.py"))
+        scope = replace(
+            self.finding, kind="scope_amendment",
+            path="assent/new_config.py",
+            scope_addition=ScopeAddition("assent\\new_config.py", "new_file"))
+        parsed = parse_review_output(review_record_json(
+            ReviewRecord("FAIL", (scope,))))
+        self.assertEqual(parsed.findings[0].scope_addition,
+                         ScopeAddition("assent/new_config.py", "new_file"))
+        for bad in (
+                replace(self.finding, kind="complete_verification"),
+                replace(self.finding, kind="receipt_absence"),
+                replace(self.finding, recommendation=" "),
+                replace(self.finding, kind="scope_amendment"),
+                replace(scope, scope_addition=ScopeAddition(
+                    "assent/new_config.py", "directory"))):
+            with self.subTest(bad=bad), self.assertRaises(AssentError):
+                review_record_json(ReviewRecord("FAIL", (bad,)))
+
+    def test_recheck_transition_retains_identity_and_separates_new_proof(self):
+        first = state_for_review(
+            ReviewRecord("FAIL", (self.finding,)), source_tree="1" * 40,
+            task_plan_sha256="2" * 64, review_prompt_sha256="3" * 64,
+            reviewer_adapter="codex", reviewer_model="review-model",
+            reviewer_effort="high", review_stage="initial")
+        fingerprint = first.current_finding_fingerprints[0]
+        still_present = replace(
+            self.finding, transition="still_present",
+            prior_fingerprint=fingerprint,
+            transition_evidence="The repaired loader still accepts extra keys.")
+        validated = validate_review_transitions(
+            ReviewRecord("FAIL", (still_present,)), review_stage="recheck",
+            previous=first)
+        self.assertEqual(finding_fingerprint(validated.findings[0]), fingerprint)
+        self.assertNotEqual(
+            fingerprint,
+            finding_fingerprint(replace(
+                self.finding, recommendation="Use a materially different repair.")))
+
+        for invalid in (
+                replace(still_present, summary="Changed wording"),
+                replace(still_present, prior_fingerprint="f" * 64),
+                replace(self.finding, transition="repair_regression",
+                        transition_evidence=" "),
+                self.finding):
+            with self.subTest(invalid=invalid), self.assertRaises(AssentError):
+                validate_review_transitions(
+                    ReviewRecord("FAIL", (invalid,)), review_stage="recheck",
+                    previous=first)
+
+        new_finding = replace(
+            self.finding, path="assent/auto_fix.py",
+            transition="repair_regression", prior_fingerprint=None,
+            transition_evidence="The repair diff removed strict record parsing.")
+        validate_review_transitions(
+            ReviewRecord("FAIL", (new_finding,)), review_stage="recheck",
+            previous=first)
+
     def test_path_normalization_is_project_relative(self):
         self.assertEqual(normalize_finding_path("a\\b.py"), "a/b.py")
         for path in ("", ".", "/abs", "C:/abs", "a/../b", "a//b"):
@@ -114,6 +186,7 @@ class TestAutoFixState(unittest.TestCase):
         finding = persisted_finding(ReviewFinding(
             "t001", "assent/auto_fix.py", "State validation is missing",
             "A malformed state was accepted.",
+            recommendation="Validate every persisted state field.",
         ))
         self.state = AutoFixState(
             version=AUTO_FIX_STATE_VERSION,
@@ -131,6 +204,15 @@ class TestAutoFixState(unittest.TestCase):
                 self.tree, (finding.fingerprint,)),),
             consumed_fixer_profiles=(FixerProfile(
                 "codex", "core", "normal"),),
+            reviewer_recommendations=(ReviewerRecommendation(
+                finding.fingerprint, finding.recommendation),),
+            worker_dispositions=(WorkerDisposition(
+                "t001", "repair", "The blocker is locally repairable."),),
+            repair_briefs=(RepairBrief(
+                "t001", (finding.fingerprint,),
+                "Validate and round-trip the complete version-3 schema."),),
+            review_transitions=(ReviewTransition(
+                finding.fingerprint, "initial", None, None),),
         )
 
     def test_state_round_trip_preserves_ledger_history_and_profiles(self):
@@ -167,14 +249,14 @@ class TestAutoFixState(unittest.TestCase):
         write_auto_fix_state(self.path, self.state)
         passed = replace(
             self.state, phase="COMPLETE", verdict="PASS",
-            current_finding_fingerprints=())
+            current_finding_fingerprints=(), reviewer_recommendations=())
         write_auto_fix_state(self.path, passed)
         self.assertEqual(read_auto_fix_state(self.path), passed)
 
     def test_only_an_exact_pass_is_fresh(self):
         passed = replace(
             self.state, phase="COMPLETE", verdict="PASS",
-            current_finding_fingerprints=())
+            current_finding_fingerprints=(), reviewer_recommendations=())
         identity = dict(
             source_tree=self.tree,
             task_plan_sha256=self.plan_digest,
@@ -229,6 +311,95 @@ class TestAutoFixState(unittest.TestCase):
             reviewer_effort="high")
         write_auto_fix_state(self.path, state)
         self.assertEqual(read_auto_fix_state(self.path), state)
+
+    def test_blocked_context_actions_and_plan_transitions_round_trip(self):
+        scope_finding = ReviewFinding(
+            "t001", "tests/new_case.py", "Focused coverage is outside scope",
+            "The blocked worker named the missing regression file.",
+            kind="scope_amendment",
+            recommendation="Add the exact test file to t001 scope.",
+            scope_addition=ScopeAddition("tests/new_case.py", "new_file"))
+        state = state_for_review(
+            ReviewRecord("FAIL", (scope_finding,)), source_tree=self.tree,
+            task_plan_sha256=self.plan_digest,
+            review_prompt_sha256=self.prompt_digest,
+            reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+            reviewer_effort="high", review_context="blocked_adjudication",
+            review_stage="initial", failure_trigger="worker_blocked",
+            worker_dispositions=(WorkerDisposition(
+                "t001", "repair", "The scope omission is mechanical."),))
+        fingerprint = state.current_finding_fingerprints[0]
+        self.assertEqual(state.approved_scope_additions, (
+            ApprovedScopeAddition(
+                fingerprint, "t001", "tests/new_case.py", "new_file"),))
+
+        updated = state_for_review(
+            ReviewRecord("PASS", ()), source_tree="4" * 40,
+            task_plan_sha256="5" * 64,
+            review_prompt_sha256=self.prompt_digest,
+            reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+            reviewer_effort="high", previous=state,
+            review_context="blocked_adjudication", review_stage="recheck",
+            failure_trigger="worker_blocked")
+        self.assertEqual(updated.plan_digest_transitions, (
+            PlanDigestTransition(self.plan_digest, "5" * 64),))
+        self.assertEqual(updated.consumed_fixer_profiles,
+                         state.consumed_fixer_profiles)
+        write_auto_fix_state(self.path, updated)
+        self.assertEqual(read_auto_fix_state(self.path), updated)
+
+    def test_technical_debt_is_only_initial_completed_folder_evidence(self):
+        finding = ReviewFinding(
+            "t001", "assent/auto_fix.py", "Interacting debt blocks safety",
+            "The initial cumulative-diff review exposed the defect.",
+            kind="eligible_technical_debt",
+            recommendation="Repair the local defect and retain it for acceptance.")
+        state_for_review(
+            ReviewRecord("FAIL", (finding,)), source_tree=self.tree,
+            task_plan_sha256=self.plan_digest,
+            review_prompt_sha256=self.prompt_digest,
+            reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+            reviewer_effort="high", review_stage="initial")
+        with self.assertRaisesRegex(AssentError, "technical debt"):
+            state_for_review(
+                ReviewRecord("FAIL", (finding,)), source_tree=self.tree,
+                task_plan_sha256=self.plan_digest,
+                review_prompt_sha256=self.prompt_digest,
+                reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+                reviewer_effort="high", review_context="blocked_adjudication",
+                review_stage="initial", failure_trigger="focused_gate_failure")
+
+    def test_recheck_retains_ledger_scope_approvals_and_profile_history(self):
+        scope_finding = ReviewFinding(
+            "t001", "tests/new_case.py", "A scoped test is required",
+            "The task cannot add the required regression.",
+            kind="scope_amendment", recommendation="Authorize this test file.",
+            scope_addition=ScopeAddition("tests/new_case.py", "new_file"))
+        first = state_for_review(
+            ReviewRecord("FAIL", (scope_finding,)), source_tree=self.tree,
+            task_plan_sha256=self.plan_digest,
+            review_prompt_sha256=self.prompt_digest,
+            reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+            reviewer_effort="high", review_stage="initial")
+        first = consume_fixer_profile(
+            first, FixerProfile("codex", "prime", "heavy"))
+        changed = ReviewFinding(
+            "t001", "assent/auto_fix.py", "Repair introduced a regression",
+            "The changed parser now accepts an unknown finding key.",
+            recommendation="Restore exact-key validation.",
+            transition="repair_regression",
+            transition_evidence="The repair diff changed _FINDING_KEYS.")
+        second = state_for_review(
+            ReviewRecord("FAIL", (changed,)), source_tree="4" * 40,
+            task_plan_sha256=self.plan_digest,
+            review_prompt_sha256=self.prompt_digest,
+            reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+            reviewer_effort="high", previous=first, review_stage="recheck")
+        self.assertEqual(len(second.findings), 2)
+        self.assertEqual(second.approved_scope_additions,
+                         first.approved_scope_additions)
+        self.assertEqual(second.consumed_fixer_profiles,
+                         first.consumed_fixer_profiles)
 
     def test_surface_snapshot_reports_exact_changed_paths(self):
         source = self.root / "source"

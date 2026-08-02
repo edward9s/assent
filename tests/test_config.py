@@ -195,12 +195,16 @@ class TestLoadConfig(ConfigTestCase):
                           ".assent/parallel02/_auto_fix.toml",
                           ".assent/manifest.toml", ".assent/manifest.lock"))
 
-    def test_auto_fix_review_is_opt_in_and_resolves_defaults(self):
-        self.assertIsNone(
-            load_config(self.write(_MINIMAL), "plan01").auto_fix_review)
+    def test_auto_fix_review_policy_resolves_without_an_override_table(self):
+        builtin = load_config(self.write(_MINIMAL), "plan01").auto_fix_review
+        self.assertIsNotNone(builtin)
+        self.assertEqual(
+            (builtin.adapter, builtin.model, builtin.effort,
+             builtin.requested_model, builtin.requested_effort),
+            ("claude", "prime", "heavy", "fable", "high"))
         cfg = load_config(self.write(
             '[adapter]\nname = ["codex", "claude"]\n'
-            '[auto_fix.review]\n'), "plan01")
+            ), "plan01")
         review = cfg.auto_fix_review
         self.assertIsNotNone(review)
         self.assertEqual(review.adapter, "codex")
@@ -674,7 +678,7 @@ class TestBlankOverrideSemantics(ConfigTestCase):
     def test_project_file_of_only_empty_tables_changes_nothing(self):
         self.write_user(
             '[adapter]\nname = "claude"\n'
-            '[adapter.claude.models]\ncore = "user-core"\n'
+            '[adapter.claude.models]\nprime = "user-prime"\ncore = "user-core"\n'
             '[adapter.claude.efforts.lite]\nheavy = "user-heavy"\n')
         cfg = load_config(self.write(
             "[adapter]\n[adapter.claude]\n[adapter.claude.models]\n"
@@ -682,7 +686,8 @@ class TestBlankOverrideSemantics(ConfigTestCase):
             "[run]\n[watchdog]\n[prompt]\n[verification]\n"), "plan01")
         # the user's stated models table still replaces the built-in one whole,
         # exactly as it does without the project file
-        self.assertEqual(cfg.claude_models, {"core": "user-core"})
+        self.assertEqual(cfg.claude_models,
+                         {"prime": "user-prime", "core": "user-core"})
         self.assertEqual(cfg.claude_tier_efforts, {"lite": {"heavy": "user-heavy"}})
         self.assertEqual(cfg.claude_default_effort,
                          {"prime": "heavy", "core": "heavy", "lite": "normal"})

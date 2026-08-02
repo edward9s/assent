@@ -158,7 +158,7 @@ class AdapterSettings:
 
 @dataclass(frozen=True)
 class AutoFixReviewSettings:
-    """Resolved identity for the optional folder-level AI review."""
+    """Resolved identity for the invocation-opt-in folder AI reviewer."""
 
     adapter: str
     model: str
@@ -739,8 +739,7 @@ def load_config(path: str | Path, folder: str) -> Config:
     verification_section = _section(data, "verification")
     auto_fix = _section(data, "auto_fix")
     _known_keys(auto_fix, "auto_fix", {"review"})
-    review_enabled = "review" in auto_fix
-    review = _section(auto_fix, "review") if review_enabled else {}
+    review = _section(auto_fix, "review") if "review" in auto_fix else {}
     _known_keys(review, "auto_fix.review", {"adapter", "model", "effort"})
     guard = _BlankGuard(provenance, sources)
     adapter_names = _parse_adapter_names(adapter, guard)
@@ -837,33 +836,32 @@ def load_config(path: str | Path, folder: str) -> Config:
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
-    if review_enabled:
-        if review_adapter not in _ADAPTER_NAMES:
-            raise AssentError(
-                f"[auto_fix.review] adapter = {review_adapter!r} is not a registered"
-                f" adapter ({'/'.join(sorted(_ADAPTER_NAMES))})")
-        if review_model not in _MODEL_TIERS:
-            raise AssentError(
-                f"[auto_fix.review] model = {review_model!r} is not a valid model"
-                f" tier ({'/'.join(sorted(_MODEL_TIERS))})")
-        if review_effort not in _EFFORT_LEVELS:
-            raise AssentError(
-                f"[auto_fix.review] effort = {review_effort!r} is not a valid"
-                f" effort ({'/'.join(sorted(_EFFORT_LEVELS))})")
-        adapter_settings = cfg.adapter_settings(review_adapter)
-        requested_model = adapter_settings.resolve_model(review_model)
-        requested_effort = adapter_settings.resolve_requested_effort(
-            review_model, review_effort)
-        if requested_effort is None:
-            raise AssentError(
-                "[auto_fix.review] effort did not resolve to a requested value")
-        cfg.auto_fix_review = AutoFixReviewSettings(
-            adapter=review_adapter,
-            model=review_model,
-            effort=review_effort,
-            command=adapter_settings.command,
-            extra_args=adapter_settings.extra_args,
-            requested_model=requested_model,
-            requested_effort=requested_effort,
-        )
+    if review_adapter not in _ADAPTER_NAMES:
+        raise AssentError(
+            f"[auto_fix.review] adapter = {review_adapter!r} is not a registered"
+            f" adapter ({'/'.join(sorted(_ADAPTER_NAMES))})")
+    if review_model not in _MODEL_TIERS:
+        raise AssentError(
+            f"[auto_fix.review] model = {review_model!r} is not a valid model"
+            f" tier ({'/'.join(sorted(_MODEL_TIERS))})")
+    if review_effort not in _EFFORT_LEVELS:
+        raise AssentError(
+            f"[auto_fix.review] effort = {review_effort!r} is not a valid"
+            f" effort ({'/'.join(sorted(_EFFORT_LEVELS))})")
+    adapter_settings = cfg.adapter_settings(review_adapter)
+    requested_model = adapter_settings.resolve_model(review_model)
+    requested_effort = adapter_settings.resolve_requested_effort(
+        review_model, review_effort)
+    if requested_effort is None:
+        raise AssentError(
+            "[auto_fix.review] effort did not resolve to a requested value")
+    cfg.auto_fix_review = AutoFixReviewSettings(
+        adapter=review_adapter,
+        model=review_model,
+        effort=review_effort,
+        command=adapter_settings.command,
+        extra_args=adapter_settings.extra_args,
+        requested_model=requested_model,
+        requested_effort=requested_effort,
+    )
     return cfg

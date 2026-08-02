@@ -12,7 +12,7 @@ import os
 import re
 import stat
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Iterable
 
@@ -25,9 +25,20 @@ if TYPE_CHECKING:
     from assent.plan import Plan
 
 AUTO_FIX_STATE_NAME = "_auto_fix.toml"
-AUTO_FIX_STATE_VERSION = 2
+AUTO_FIX_STATE_VERSION = 3
 REVIEW_RECORD_TYPE = "assent.auto_fix_review"
 REVIEW_VERDICTS = frozenset({"PASS", "FAIL"})
+REVIEW_FINDING_KINDS = frozenset({
+    "correctness", "safety", "unmet_requirement", "focused_test_gap",
+    "eligible_technical_debt", "blocked_recovery", "scope_amendment",
+})
+REVIEW_TRANSITION_KINDS = frozenset({
+    "initial", "still_present", "repair_regression", "newly_exposed",
+})
+SCOPE_PATH_STATES = frozenset({"existing_file", "new_file"})
+REVIEW_CONTEXTS = frozenset({"completed_folder", "blocked_adjudication"})
+REVIEW_STAGES = frozenset({"initial", "recheck"})
+FAILURE_TRIGGERS = frozenset({"worker_blocked", "focused_gate_failure"})
 AUTO_FIX_PHASES = frozenset({
     "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
 })
@@ -38,21 +49,49 @@ MAX_FINDINGS = 100
 MAX_PATH_LENGTH = 1024
 MAX_SUMMARY_LENGTH = 500
 MAX_EVIDENCE_LENGTH = 16_000
+MAX_RECOMMENDATION_LENGTH = 4_000
 _TASK_ID_RE = re.compile(r"^t\d{3}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _REVIEW_KEYS = {"type", "verdict", "findings"}
-_FINDING_KEYS = {"task_id", "path", "summary", "evidence"}
+_FINDING_KEYS = {
+    "kind", "task_id", "path", "summary", "evidence", "recommendation",
+    "scope_addition", "transition", "prior_fingerprint",
+    "transition_evidence",
+}
+_SCOPE_ADDITION_KEYS = {"path", "path_state"}
 _STATE_KEYS = {
     "version", "source_tree", "task_plan_sha256", "review_prompt_sha256",
     "reviewer_adapter", "reviewer_model", "reviewer_effort", "phase", "verdict",
+    "review_context", "review_stage", "failure_trigger",
     "current_finding_fingerprints", "findings", "observed_states",
-    "consumed_fixer_profiles",
+    "reviewer_recommendations", "approved_scope_additions",
+    "worker_dispositions", "repair_briefs", "plan_digest_transitions",
+    "review_transitions", "consumed_fixer_profiles",
 }
 _PERSISTED_FINDING_KEYS = {
-    "fingerprint", "task_id", "path", "summary", "evidence",
+    "fingerprint", "kind", "task_id", "path", "summary", "evidence",
+    "recommendation", "scope_addition_path", "scope_addition_path_state",
 }
 _OBSERVED_STATE_KEYS = {"source_tree", "finding_fingerprints"}
 _FIXER_PROFILE_KEYS = {"adapter", "model", "effort"}
+_RECOMMENDATION_KEYS = {"fingerprint", "recommendation"}
+_APPROVED_SCOPE_ADDITION_KEYS = {
+    "fingerprint", "task_id", "path", "path_state",
+}
+_WORKER_DISPOSITION_KEYS = {"task_id", "disposition", "reason"}
+_REPAIR_BRIEF_KEYS = {"task_id", "finding_fingerprints", "brief"}
+_PLAN_DIGEST_TRANSITION_KEYS = {"before_sha256", "after_sha256"}
+_REVIEW_TRANSITION_KEYS = {
+    "fingerprint", "transition", "prior_fingerprint", "transition_evidence",
+}
+
+
+@dataclass(frozen=True)
+class ScopeAddition:
+    """One exact project-relative task-scope amendment proposed by review."""
+
+    path: str
+    path_state: str
 
 
 @dataclass(frozen=True)
@@ -63,6 +102,12 @@ class ReviewFinding:
     path: str
     summary: str
     evidence: str
+    kind: str = "correctness"
+    recommendation: str = "Repair the finding and run the focused task gate."
+    scope_addition: ScopeAddition | None = None
+    transition: str = "initial"
+    prior_fingerprint: str | None = None
+    transition_evidence: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,14 +127,25 @@ class PersistedFinding:
     """A normalized finding plus its scheduler-computed identity."""
 
     fingerprint: str
+    kind: str
     task_id: str | None
     path: str
     summary: str
     evidence: str
+    recommendation: str
+    scope_addition_path: str | None
+    scope_addition_path_state: str | None
 
     @property
     def finding(self) -> ReviewFinding:
-        return ReviewFinding(self.task_id, self.path, self.summary, self.evidence)
+        scope_addition = None
+        if self.scope_addition_path is not None:
+            scope_addition = ScopeAddition(
+                self.scope_addition_path, self.scope_addition_path_state or "")
+        return ReviewFinding(
+            self.task_id, self.path, self.summary, self.evidence,
+            kind=self.kind, recommendation=self.recommendation,
+            scope_addition=scope_addition)
 
 
 @dataclass(frozen=True)
@@ -115,6 +171,53 @@ class FixerProfile:
 
 
 @dataclass(frozen=True)
+class ReviewerRecommendation:
+    fingerprint: str
+    recommendation: str
+
+
+@dataclass(frozen=True)
+class ApprovedScopeAddition:
+    fingerprint: str
+    task_id: str
+    path: str
+    path_state: str
+
+
+@dataclass(frozen=True)
+class WorkerDisposition:
+    task_id: str
+    disposition: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class RepairBrief:
+    task_id: str
+    finding_fingerprints: tuple[str, ...]
+    brief: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.finding_fingerprints, list):
+            object.__setattr__(self, "finding_fingerprints",
+                               tuple(self.finding_fingerprints))
+
+
+@dataclass(frozen=True)
+class PlanDigestTransition:
+    before_sha256: str
+    after_sha256: str
+
+
+@dataclass(frozen=True)
+class ReviewTransition:
+    fingerprint: str
+    transition: str
+    prior_fingerprint: str | None
+    transition_evidence: str | None
+
+
+@dataclass(frozen=True)
 class AutoFixState:
     """Deletable runtime memory for one folder's bounded review/repair loop."""
 
@@ -131,10 +234,22 @@ class AutoFixState:
     findings: tuple[PersistedFinding, ...]
     observed_states: tuple[ObservedState, ...]
     consumed_fixer_profiles: tuple[FixerProfile, ...]
+    review_context: str = "completed_folder"
+    review_stage: str = "initial"
+    failure_trigger: str | None = None
+    reviewer_recommendations: tuple[ReviewerRecommendation, ...] = ()
+    approved_scope_additions: tuple[ApprovedScopeAddition, ...] = ()
+    worker_dispositions: tuple[WorkerDisposition, ...] = ()
+    repair_briefs: tuple[RepairBrief, ...] = ()
+    plan_digest_transitions: tuple[PlanDigestTransition, ...] = ()
+    review_transitions: tuple[ReviewTransition, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("current_finding_fingerprints", "findings",
-                     "observed_states", "consumed_fixer_profiles"):
+                     "observed_states", "consumed_fixer_profiles",
+                     "reviewer_recommendations", "approved_scope_additions",
+                     "worker_dispositions", "repair_briefs",
+                     "plan_digest_transitions", "review_transitions"):
             value = getattr(self, name)
             if isinstance(value, list):
                 object.__setattr__(self, name, tuple(value))
@@ -385,6 +500,17 @@ def scheduler_finding_path(scope_path: object) -> str:
     return normalize_finding_path(path)
 
 
+def _validate_scope_addition(value: object, label: str) -> ScopeAddition | None:
+    if value is None:
+        return None
+    if not isinstance(value, ScopeAddition):
+        raise AssentError(f"{label} must be null or a scope addition")
+    if not isinstance(value.path_state, str) or value.path_state not in SCOPE_PATH_STATES:
+        raise AssentError(
+            f"{label} path_state must be existing_file or new_file")
+    return ScopeAddition(normalize_finding_path(value.path), value.path_state)
+
+
 def _validate_finding(finding: ReviewFinding, label: str) -> ReviewFinding:
     if not isinstance(finding, ReviewFinding):
         raise AssentError(f"{label} must be a review finding")
@@ -392,22 +518,70 @@ def _validate_finding(finding: ReviewFinding, label: str) -> ReviewFinding:
     if task_id is not None and (not isinstance(task_id, str)
                                 or not _TASK_ID_RE.fullmatch(task_id)):
         raise AssentError(f"{label} task_id must be null or a tNNN task id")
+    if not isinstance(finding.kind, str) or finding.kind not in REVIEW_FINDING_KINDS:
+        raise AssentError(f"{label} kind is not supported")
+    scope_addition = _validate_scope_addition(
+        finding.scope_addition, f"{label} scope_addition")
+    if (finding.kind == "scope_amendment") != (scope_addition is not None):
+        raise AssentError(
+            f"{label} kind scope_amendment requires exactly one scope_addition")
+    path = normalize_finding_path(finding.path)
+    if scope_addition is not None and scope_addition.path != path:
+        raise AssentError(f"{label} scope_addition must name the finding path")
+    if (not isinstance(finding.transition, str)
+            or finding.transition not in REVIEW_TRANSITION_KINDS):
+        raise AssentError(f"{label} transition is not supported")
+    prior = finding.prior_fingerprint
+    transition_evidence = finding.transition_evidence
+    if finding.transition == "initial":
+        if prior is not None or transition_evidence is not None:
+            raise AssentError(
+                f"{label} initial transition must not cite prior or transition evidence")
+    elif finding.transition == "still_present":
+        _require_digest(prior, f"{label} prior_fingerprint")
+        transition_evidence = _require_text(
+            transition_evidence, f"{label} transition_evidence",
+            MAX_EVIDENCE_LENGTH)
+    else:
+        if prior is not None:
+            raise AssentError(
+                f"{label} {finding.transition} must not cite a prior fingerprint")
+        transition_evidence = _require_text(
+            transition_evidence, f"{label} transition_evidence",
+            MAX_EVIDENCE_LENGTH)
     return ReviewFinding(
         task_id=task_id,
-        path=normalize_finding_path(finding.path),
+        path=path,
         summary=_require_text(finding.summary, f"{label} summary",
                               MAX_SUMMARY_LENGTH),
         evidence=_require_text(finding.evidence, f"{label} evidence",
                                MAX_EVIDENCE_LENGTH),
+        kind=finding.kind,
+        recommendation=_require_text(
+            finding.recommendation, f"{label} recommendation",
+            MAX_RECOMMENDATION_LENGTH),
+        scope_addition=scope_addition,
+        transition=finding.transition,
+        prior_fingerprint=prior,
+        transition_evidence=transition_evidence,
     )
 
 
 def finding_fingerprint(finding: ReviewFinding) -> str:
     """Compute the stable identity; reviewers never supply this value."""
     finding = _validate_finding(finding, "Review finding")
+    scope_addition = None
+    if finding.scope_addition is not None:
+        scope_addition = {
+            "path": finding.scope_addition.path,
+            "path_state": finding.scope_addition.path_state,
+        }
     canonical = json.dumps(
-        {"task_id": finding.task_id, "path": finding.path,
-         "summary": finding.summary, "evidence": finding.evidence},
+        {"kind": finding.kind, "task_id": finding.task_id,
+         "path": finding.path, "summary": finding.summary,
+         "evidence": finding.evidence,
+         "recommendation": finding.recommendation,
+         "scope_addition": scope_addition},
         ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
@@ -443,8 +617,17 @@ def review_record_json(record: ReviewRecord) -> str:
         "type": REVIEW_RECORD_TYPE,
         "verdict": record.verdict,
         "findings": [
-            {"task_id": finding.task_id, "path": finding.path,
-             "summary": finding.summary, "evidence": finding.evidence}
+            {"kind": finding.kind, "task_id": finding.task_id,
+             "path": finding.path, "summary": finding.summary,
+             "evidence": finding.evidence,
+             "recommendation": finding.recommendation,
+             "scope_addition": (
+                 {"path": finding.scope_addition.path,
+                  "path_state": finding.scope_addition.path_state}
+                 if finding.scope_addition is not None else None),
+             "transition": finding.transition,
+             "prior_fingerprint": finding.prior_fingerprint,
+             "transition_evidence": finding.transition_evidence}
             for finding in record.findings
         ],
     }
@@ -469,9 +652,23 @@ def _record_from_data(data: object) -> ReviewRecord:
         if not isinstance(raw, dict):
             raise AssentError(f"Review findings[{index}] must be a JSON object")
         _require_exact_keys(raw, _FINDING_KEYS, f"Review findings[{index}]")
+        raw_scope = raw["scope_addition"]
+        scope_addition = None
+        if raw_scope is not None:
+            if not isinstance(raw_scope, dict):
+                raise AssentError(
+                    f"Review findings[{index}] scope_addition must be null or an object")
+            _require_exact_keys(
+                raw_scope, _SCOPE_ADDITION_KEYS,
+                f"Review findings[{index}] scope_addition")
+            scope_addition = ScopeAddition(**raw_scope)
         findings.append(ReviewFinding(
             task_id=raw["task_id"], path=raw["path"],
             summary=raw["summary"], evidence=raw["evidence"],
+            kind=raw["kind"], recommendation=raw["recommendation"],
+            scope_addition=scope_addition, transition=raw["transition"],
+            prior_fingerprint=raw["prior_fingerprint"],
+            transition_evidence=raw["transition_evidence"],
         ))
     return _validate_review_record(ReviewRecord(data["verdict"], tuple(findings)))
 
@@ -524,8 +721,14 @@ serialize_review_record = review_record_json
 def persisted_finding(finding: ReviewFinding) -> PersistedFinding:
     finding = _validate_finding(finding, "Review finding")
     return PersistedFinding(
-        fingerprint=finding_fingerprint(finding), task_id=finding.task_id,
+        fingerprint=finding_fingerprint(finding), kind=finding.kind,
+        task_id=finding.task_id,
         path=finding.path, summary=finding.summary, evidence=finding.evidence,
+        recommendation=finding.recommendation,
+        scope_addition_path=(finding.scope_addition.path
+                             if finding.scope_addition else None),
+        scope_addition_path_state=(finding.scope_addition.path_state
+                                   if finding.scope_addition else None),
     )
 
 
@@ -544,9 +747,8 @@ def validate_review_findings(record: ReviewRecord, plan: "Plan") -> ReviewRecord
     """Resolve every finding to exactly one existing task and its declared scope.
 
     A reviewer may omit ``task_id`` only when the path itself has one unambiguous
-    owner.  This is the authorization boundary between read-only review output
-    and a write-capable repair session: an unknown task, out-of-scope path, or
-    overlapping unowned path needs a human decision instead of widening scope.
+    owner.  A normalized, exact-path scope amendment tied to an existing task
+    is the sole exception to the ordinary declared-scope ownership rule.
     """
     record = _validate_review_record(record)
     tasks = {task.id: task for task in plan.tasks}
@@ -557,13 +759,17 @@ def validate_review_findings(record: ReviewRecord, plan: "Plan") -> ReviewRecord
             if task is None:
                 raise AssentError(
                     f"Auto-fix review finding names unknown task id: {finding.task_id}")
-            if not _path_is_in_scope(finding.path, task.scope):
+            if (not _path_is_in_scope(finding.path, task.scope)
+                    and finding.scope_addition is None):
                 raise AssentError(
                     f"Auto-fix review finding path {finding.path!r} is outside "
                     f"{finding.task_id}'s declared scope")
             resolved.append(finding)
             continue
 
+        if finding.scope_addition is not None:
+            raise AssentError(
+                "Auto-fix scope amendment must name the existing task to amend")
         owners = [task for task in plan.tasks
                   if _path_is_in_scope(finding.path, task.scope)]
         if not owners:
@@ -575,9 +781,44 @@ def validate_review_findings(record: ReviewRecord, plan: "Plan") -> ReviewRecord
             raise AssentError(
                 f"Auto-fix review finding path {finding.path!r} has ambiguous task "
                 f"ownership: {names}")
-        resolved.append(ReviewFinding(
-            owners[0].id, finding.path, finding.summary, finding.evidence))
+        resolved.append(replace(finding, task_id=owners[0].id))
     return ReviewRecord(record.verdict, tuple(resolved))
+
+
+def validate_review_transitions(
+        record: ReviewRecord, *, review_stage: str,
+        previous: AutoFixState | None = None) -> ReviewRecord:
+    """Validate scheduler-issued identity continuity for one review stage."""
+    record = _validate_review_record(record)
+    if review_stage not in REVIEW_STAGES:
+        raise AssentError("Auto-fix review stage must be initial or recheck")
+    if review_stage == "initial":
+        if previous is not None:
+            raise AssentError("An initial auto-fix review must not cite prior state")
+        if any(item.transition != "initial" for item in record.findings):
+            raise AssentError("An initial review accepts only initial findings")
+        return record
+    if previous is None:
+        raise AssentError("An auto-fix recheck requires prior durable state")
+    previous = _validate_state(previous)
+    current = set(previous.current_finding_fingerprints)
+    ledger = {item.fingerprint: item for item in previous.findings}
+    for index, item in enumerate(record.findings):
+        label = f"Review findings[{index}]"
+        fingerprint = finding_fingerprint(item)
+        if item.transition == "initial":
+            raise AssentError("An auto-fix recheck cannot contain an initial finding")
+        if item.transition == "still_present":
+            if item.prior_fingerprint not in current:
+                raise AssentError(
+                    f"{label} still_present must cite a current scheduler fingerprint")
+            if fingerprint != item.prior_fingerprint:
+                raise AssentError(
+                    f"{label} still_present changed immutable substantive fields")
+        elif fingerprint in ledger:
+            raise AssentError(
+                f"{label} {item.transition} must identify a genuinely new blocker")
+    return record
 
 
 def current_review_record(state: AutoFixState) -> ReviewRecord:
@@ -603,21 +844,7 @@ def replace_fixer_profiles(
         state: AutoFixState,
         profiles: tuple[FixerProfile, ...]) -> AutoFixState:
     """Return a state copy with a caller-supplied ordered profile history."""
-    return AutoFixState(
-        version=state.version,
-        source_tree=state.source_tree,
-        task_plan_sha256=state.task_plan_sha256,
-        review_prompt_sha256=state.review_prompt_sha256,
-        reviewer_adapter=state.reviewer_adapter,
-        reviewer_model=state.reviewer_model,
-        reviewer_effort=state.reviewer_effort,
-        phase=state.phase,
-        verdict=state.verdict,
-        current_finding_fingerprints=state.current_finding_fingerprints,
-        findings=state.findings,
-        observed_states=state.observed_states,
-        consumed_fixer_profiles=profiles,
-    )
+    return replace(state, consumed_fixer_profiles=profiles)
 
 
 def with_repair_phase(state: AutoFixState, phase: str) -> AutoFixState:
@@ -625,21 +852,7 @@ def with_repair_phase(state: AutoFixState, phase: str) -> AutoFixState:
     state = _validate_state(state)
     if phase not in {"REPAIRING", "AWAITING_REVIEW"}:
         raise AssentError("Auto-fix repair phase must be REPAIRING or AWAITING_REVIEW")
-    return _validate_state(AutoFixState(
-        version=state.version,
-        source_tree=state.source_tree,
-        task_plan_sha256=state.task_plan_sha256,
-        review_prompt_sha256=state.review_prompt_sha256,
-        reviewer_adapter=state.reviewer_adapter,
-        reviewer_model=state.reviewer_model,
-        reviewer_effort=state.reviewer_effort,
-        phase=phase,
-        verdict=state.verdict,
-        current_finding_fingerprints=state.current_finding_fingerprints,
-        findings=state.findings,
-        observed_states=state.observed_states,
-        consumed_fixer_profiles=state.consumed_fixer_profiles,
-    ))
+    return _validate_state(replace(state, phase=phase))
 
 
 def next_unused_fixer_profile(
@@ -699,12 +912,26 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         raise AssentError("Auto-fix state phase is invalid")
     if not isinstance(state.verdict, str) or state.verdict not in REVIEW_VERDICTS:
         raise AssentError("Auto-fix state verdict must be PASS or FAIL")
+    if state.review_context not in REVIEW_CONTEXTS:
+        raise AssentError("Auto-fix state review_context is invalid")
+    if state.review_stage not in REVIEW_STAGES:
+        raise AssentError("Auto-fix state review_stage is invalid")
+    if state.review_context == "completed_folder":
+        if state.failure_trigger is not None:
+            raise AssentError(
+                "A completed-folder review must not have a failure trigger")
+    elif state.failure_trigger not in FAILURE_TRIGGERS:
+        raise AssentError(
+            "A blocked adjudication requires a worker_blocked or focused_gate_failure trigger")
     if state.verdict == "PASS" and state.phase != "COMPLETE":
         raise AssentError("A PASS auto-fix state must be COMPLETE")
     if state.verdict == "FAIL" and state.phase == "COMPLETE":
         raise AssentError("A FAIL auto-fix state must not be COMPLETE")
     for name in ("current_finding_fingerprints", "findings",
-                 "observed_states", "consumed_fixer_profiles"):
+                 "observed_states", "reviewer_recommendations",
+                 "approved_scope_additions", "worker_dispositions",
+                 "repair_briefs", "plan_digest_transitions",
+                 "review_transitions", "consumed_fixer_profiles"):
         if not isinstance(getattr(state, name), tuple):
             raise AssentError(f"Auto-fix state {name} must be an ordered list")
 
@@ -722,6 +949,10 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         if item.fingerprint in ledger:
             raise AssentError("Auto-fix state finding ledger has a duplicate fingerprint")
         ledger[item.fingerprint] = item
+        scope_values = (item.scope_addition_path, item.scope_addition_path_state)
+        if (scope_values[0] is None) != (scope_values[1] is None):
+            raise AssentError(
+                f"Auto-fix state findings[{index}] has an incomplete scope addition")
 
     current = state.current_finding_fingerprints
     current_seen: set[str] = set()
@@ -737,6 +968,98 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         raise AssentError("A PASS auto-fix state must have no current findings")
     if state.verdict == "FAIL" and not current:
         raise AssentError("A FAIL auto-fix state must have current findings")
+    if any(ledger[item].kind == "eligible_technical_debt" for item in current):
+        if (state.review_context != "completed_folder"
+                or state.review_stage != "initial"):
+            raise AssentError(
+                "Eligible technical debt is limited to initial completed-folder review")
+
+    expected_recommendations = tuple(
+        ReviewerRecommendation(item, ledger[item].recommendation)
+        for item in current)
+    if state.reviewer_recommendations != expected_recommendations:
+        raise AssentError(
+            "Auto-fix state reviewer_recommendations must match current findings")
+
+    approved_seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(state.approved_scope_additions):
+        if not isinstance(item, ApprovedScopeAddition):
+            raise AssentError(
+                f"Auto-fix state approved_scope_additions[{index}] is invalid")
+        _require_digest(item.fingerprint, "Approved scope-addition fingerprint")
+        persisted = ledger.get(item.fingerprint)
+        if persisted is None or persisted.scope_addition_path is None:
+            raise AssentError("Approved scope addition is absent from the finding ledger")
+        if not isinstance(item.task_id, str) or not _TASK_ID_RE.fullmatch(item.task_id):
+            raise AssentError("Approved scope addition task_id must be a tNNN task id")
+        normalized = normalize_finding_path(item.path)
+        if item.path_state not in SCOPE_PATH_STATES:
+            raise AssentError("Approved scope addition path_state is invalid")
+        if (item.task_id != persisted.task_id or normalized != persisted.scope_addition_path
+                or item.path_state != persisted.scope_addition_path_state):
+            raise AssentError("Approved scope addition does not match its finding")
+        identity = (item.task_id, normalized)
+        if identity in approved_seen:
+            raise AssentError("Auto-fix state has a duplicate approved scope addition")
+        approved_seen.add(identity)
+
+    for index, item in enumerate(state.worker_dispositions):
+        if not isinstance(item, WorkerDisposition):
+            raise AssentError(
+                f"Auto-fix state worker_dispositions[{index}] is invalid")
+        if not isinstance(item.task_id, str) or not _TASK_ID_RE.fullmatch(item.task_id):
+            raise AssentError("Worker disposition task_id must be a tNNN task id")
+        _require_text(item.disposition, "Worker disposition", 100)
+        _require_text(item.reason, "Worker disposition reason", MAX_EVIDENCE_LENGTH)
+
+    for index, item in enumerate(state.repair_briefs):
+        if not isinstance(item, RepairBrief):
+            raise AssentError(f"Auto-fix state repair_briefs[{index}] is invalid")
+        if not isinstance(item.task_id, str) or not _TASK_ID_RE.fullmatch(item.task_id):
+            raise AssentError("Repair brief task_id must be a tNNN task id")
+        _require_text(item.brief, "Repair brief", MAX_EVIDENCE_LENGTH)
+        if not item.finding_fingerprints:
+            raise AssentError("Repair brief must cite at least one finding")
+        if len(set(item.finding_fingerprints)) != len(item.finding_fingerprints):
+            raise AssentError("Repair brief contains duplicate findings")
+        for fingerprint in item.finding_fingerprints:
+            _require_digest(fingerprint, "Repair-brief finding fingerprint")
+            if fingerprint not in ledger:
+                raise AssentError("Repair brief cites a finding absent from the ledger")
+
+    for index, item in enumerate(state.plan_digest_transitions):
+        if not isinstance(item, PlanDigestTransition):
+            raise AssentError(
+                f"Auto-fix state plan_digest_transitions[{index}] is invalid")
+        _require_digest(item.before_sha256, "Plan transition before_sha256")
+        _require_digest(item.after_sha256, "Plan transition after_sha256")
+        if item.before_sha256 == item.after_sha256:
+            raise AssentError("Plan digest transition must record an actual change")
+
+    for index, item in enumerate(state.review_transitions):
+        if not isinstance(item, ReviewTransition):
+            raise AssentError(
+                f"Auto-fix state review_transitions[{index}] is invalid")
+        _require_digest(item.fingerprint, "Review-transition fingerprint")
+        if item.fingerprint not in ledger:
+            raise AssentError("Review transition cites a finding absent from the ledger")
+        if item.transition not in REVIEW_TRANSITION_KINDS:
+            raise AssentError("Review transition kind is invalid")
+        if item.transition == "initial":
+            if item.prior_fingerprint is not None or item.transition_evidence is not None:
+                raise AssentError("Initial review transition cannot carry recheck evidence")
+        elif item.transition == "still_present":
+            _require_digest(item.prior_fingerprint,
+                            "Review-transition prior_fingerprint")
+            _require_text(item.transition_evidence,
+                          "Review-transition evidence", MAX_EVIDENCE_LENGTH)
+            if item.prior_fingerprint != item.fingerprint:
+                raise AssentError("Still-present review transition must retain identity")
+        else:
+            if item.prior_fingerprint is not None:
+                raise AssentError("New review transition cannot cite a prior fingerprint")
+            _require_text(item.transition_evidence,
+                          "Review-transition evidence", MAX_EVIDENCE_LENGTH)
 
     observed_seen: set[tuple[str, tuple[str, ...]]] = set()
     for index, observed in enumerate(state.observed_states):
@@ -794,6 +1117,9 @@ def _state_text(state: AutoFixState) -> str:
         f"reviewer_effort = {toml_string(state.reviewer_effort)}\n"
         f"phase = {toml_string(state.phase)}\n"
         f"verdict = {toml_string(state.verdict)}\n"
+        f"review_context = {toml_string(state.review_context)}\n"
+        f"review_stage = {toml_string(state.review_stage)}\n"
+        f"failure_trigger = {toml_string(state.failure_trigger or '')}\n"
         "current_finding_fingerprints = "
         f"{_toml_array(state.current_finding_fingerprints)}\n"
     )
@@ -803,14 +1129,25 @@ def _state_text(state: AutoFixState) -> str:
         text += "observed_states = []\n"
     if not state.consumed_fixer_profiles:
         text += "consumed_fixer_profiles = []\n"
+    for name in ("reviewer_recommendations", "approved_scope_additions",
+                 "worker_dispositions", "repair_briefs",
+                 "plan_digest_transitions", "review_transitions"):
+        if not getattr(state, name):
+            text += f"{name} = []\n"
     for finding in state.findings:
         text += (
             "\n[[findings]]\n"
             f"fingerprint = {toml_string(finding.fingerprint)}\n"
+            f"kind = {toml_string(finding.kind)}\n"
             f"task_id = {toml_string(finding.task_id or '')}\n"
             f"path = {toml_string(finding.path)}\n"
             f"summary = {toml_string(finding.summary)}\n"
             f"evidence = {toml_string(finding.evidence)}\n"
+            f"recommendation = {toml_string(finding.recommendation)}\n"
+            "scope_addition_path = "
+            f"{toml_string(finding.scope_addition_path or '')}\n"
+            "scope_addition_path_state = "
+            f"{toml_string(finding.scope_addition_path_state or '')}\n"
         )
     for observed in state.observed_states:
         text += (
@@ -825,6 +1162,50 @@ def _state_text(state: AutoFixState) -> str:
             f"adapter = {toml_string(profile.adapter)}\n"
             f"model = {toml_string(profile.model)}\n"
             f"effort = {toml_string(profile.effort)}\n"
+        )
+    for item in state.reviewer_recommendations:
+        text += (
+            "\n[[reviewer_recommendations]]\n"
+            f"fingerprint = {toml_string(item.fingerprint)}\n"
+            f"recommendation = {toml_string(item.recommendation)}\n"
+        )
+    for item in state.approved_scope_additions:
+        text += (
+            "\n[[approved_scope_additions]]\n"
+            f"fingerprint = {toml_string(item.fingerprint)}\n"
+            f"task_id = {toml_string(item.task_id)}\n"
+            f"path = {toml_string(item.path)}\n"
+            f"path_state = {toml_string(item.path_state)}\n"
+        )
+    for item in state.worker_dispositions:
+        text += (
+            "\n[[worker_dispositions]]\n"
+            f"task_id = {toml_string(item.task_id)}\n"
+            f"disposition = {toml_string(item.disposition)}\n"
+            f"reason = {toml_string(item.reason)}\n"
+        )
+    for item in state.repair_briefs:
+        text += (
+            "\n[[repair_briefs]]\n"
+            f"task_id = {toml_string(item.task_id)}\n"
+            "finding_fingerprints = "
+            f"{_toml_array(item.finding_fingerprints)}\n"
+            f"brief = {toml_string(item.brief)}\n"
+        )
+    for item in state.plan_digest_transitions:
+        text += (
+            "\n[[plan_digest_transitions]]\n"
+            f"before_sha256 = {toml_string(item.before_sha256)}\n"
+            f"after_sha256 = {toml_string(item.after_sha256)}\n"
+        )
+    for item in state.review_transitions:
+        text += (
+            "\n[[review_transitions]]\n"
+            f"fingerprint = {toml_string(item.fingerprint)}\n"
+            f"transition = {toml_string(item.transition)}\n"
+            f"prior_fingerprint = {toml_string(item.prior_fingerprint or '')}\n"
+            "transition_evidence = "
+            f"{toml_string(item.transition_evidence or '')}\n"
         )
     return text
 
@@ -865,6 +1246,10 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
         item = dict(item)
         if item["task_id"] == "":
             item["task_id"] = None
+        if item["scope_addition_path"] == "":
+            item["scope_addition_path"] = None
+        if item["scope_addition_path_state"] == "":
+            item["scope_addition_path_state"] = None
         try:
             findings.append(PersistedFinding(**item))
         except TypeError as e:
@@ -895,14 +1280,58 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
                 "Auto-fix state consumed_fixer_profiles"
                 f"[{index}] has an invalid structure: {e}") from e
 
+    def records(key: str, keys: set[str], record_type: type) -> list:
+        result = []
+        for index, item in enumerate(_table_list(data, key, f"Auto-fix state {key}")):
+            _require_exact_keys(item, keys, f"Auto-fix state {key}[{index}]")
+            values = dict(item)
+            if record_type is ReviewTransition:
+                for nullable in ("prior_fingerprint", "transition_evidence"):
+                    if values[nullable] == "":
+                        values[nullable] = None
+            try:
+                result.append(record_type(**values))
+            except TypeError as e:
+                raise AssentError(
+                    f"Auto-fix state {key}[{index}] has an invalid structure: {e}") from e
+        return result
+
+    recommendations = records(
+        "reviewer_recommendations", _RECOMMENDATION_KEYS,
+        ReviewerRecommendation)
+    scope_additions = records(
+        "approved_scope_additions", _APPROVED_SCOPE_ADDITION_KEYS,
+        ApprovedScopeAddition)
+    dispositions = records(
+        "worker_dispositions", _WORKER_DISPOSITION_KEYS, WorkerDisposition)
+    briefs = records("repair_briefs", _REPAIR_BRIEF_KEYS, RepairBrief)
+    plan_transitions = records(
+        "plan_digest_transitions", _PLAN_DIGEST_TRANSITION_KEYS,
+        PlanDigestTransition)
+    review_transitions = records(
+        "review_transitions", _REVIEW_TRANSITION_KEYS, ReviewTransition)
+
     scalar = dict(data)
     del scalar["findings"]
     del scalar["observed_states"]
     del scalar["consumed_fixer_profiles"]
+    del scalar["reviewer_recommendations"]
+    del scalar["approved_scope_additions"]
+    del scalar["worker_dispositions"]
+    del scalar["repair_briefs"]
+    del scalar["plan_digest_transitions"]
+    del scalar["review_transitions"]
+    if scalar["failure_trigger"] == "":
+        scalar["failure_trigger"] = None
     try:
         state = AutoFixState(
             findings=tuple(findings), observed_states=tuple(observed),
-            consumed_fixer_profiles=tuple(profiles), **scalar)
+            consumed_fixer_profiles=tuple(profiles),
+            reviewer_recommendations=tuple(recommendations),
+            approved_scope_additions=tuple(scope_additions),
+            worker_dispositions=tuple(dispositions), repair_briefs=tuple(briefs),
+            plan_digest_transitions=tuple(plan_transitions),
+            review_transitions=tuple(review_transitions), **scalar)
     except TypeError as e:
         raise AssentError(f"Auto-fix state has an invalid structure: {e}") from e
     return _validate_state(state)
@@ -911,11 +1340,15 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
 def auto_fix_state_is_fresh(
         state: AutoFixState, *, source_tree: str, task_plan_sha256: str,
         review_prompt_sha256: str, reviewer_adapter: str,
-        reviewer_model: str, reviewer_effort: str) -> bool:
+        reviewer_model: str, reviewer_effort: str,
+        review_context: str = "completed_folder",
+        failure_trigger: str | None = None) -> bool:
     """True only when an exact PASS can be reused without another review."""
     _validate_state(state)
     return (
         state.verdict == "PASS"
+        and state.review_context == review_context
+        and state.failure_trigger == failure_trigger
         and state.source_tree == source_tree
         and state.task_plan_sha256 == task_plan_sha256
         and state.review_prompt_sha256 == review_prompt_sha256
@@ -929,12 +1362,47 @@ def state_for_review(
         record: ReviewRecord, *, source_tree: str, task_plan_sha256: str,
         review_prompt_sha256: str, reviewer_adapter: str,
         reviewer_model: str, reviewer_effort: str,
-        previous: AutoFixState | None = None) -> AutoFixState:
+        previous: AutoFixState | None = None,
+        review_context: str = "completed_folder",
+        review_stage: str | None = None,
+        failure_trigger: str | None = None,
+        worker_dispositions: tuple[WorkerDisposition, ...] | None = None,
+        repair_briefs: tuple[RepairBrief, ...] | None = None,
+        plan_digest_transitions: tuple[PlanDigestTransition, ...] | None = None,
+        approved_scope_additions: tuple[ApprovedScopeAddition, ...] | None = None,
+        enforce_transitions: bool = True) -> AutoFixState:
     """Build the next durable state while retaining prior finding evidence."""
     record = _validate_review_record(record)
+    explicit_stage = review_stage is not None
+    if review_stage is None:
+        review_stage = "recheck" if previous is not None else "initial"
+    if (review_stage == "recheck" and previous is not None and not explicit_stage
+            and all(item.transition == "initial" for item in record.findings)):
+        # Compatibility for callers predating transition-aware reviewer prompts.
+        # Explicit version-3 rechecks never receive this scheduler-owned upgrade.
+        prior_current = set(previous.current_finding_fingerprints)
+        upgraded = []
+        for item in record.findings:
+            fingerprint = finding_fingerprint(item)
+            if fingerprint in prior_current:
+                upgraded.append(replace(
+                    item, transition="still_present",
+                    prior_fingerprint=fingerprint,
+                    transition_evidence=item.evidence))
+            else:
+                upgraded.append(replace(
+                    item, transition="newly_exposed",
+                    transition_evidence=(
+                        "Legacy reviewer output first exposed this blocker after repair.")))
+        record = ReviewRecord(record.verdict, tuple(upgraded))
+    if enforce_transitions:
+        record = validate_review_transitions(
+            record, review_stage=review_stage, previous=previous)
     prior_findings = previous.findings if previous is not None else ()
     prior_observed = previous.observed_states if previous is not None else ()
     prior_profiles = previous.consumed_fixer_profiles if previous is not None else ()
+    prior_scope = previous.approved_scope_additions if previous is not None else ()
+    prior_review_transitions = previous.review_transitions if previous is not None else ()
 
     ledger = {finding.fingerprint: finding for finding in prior_findings}
     current: list[str] = []
@@ -947,6 +1415,35 @@ def state_for_review(
     observations = prior_observed
     if observed not in observations:
         observations += (observed,)
+    recommendations = tuple(
+        ReviewerRecommendation(fingerprint, ledger[fingerprint].recommendation)
+        for fingerprint in current_tuple)
+    if approved_scope_additions is None:
+        additions = list(prior_scope)
+        known_additions = {(item.task_id, item.path) for item in additions}
+        for fingerprint in current_tuple:
+            finding = ledger[fingerprint]
+            if finding.scope_addition_path is None or finding.task_id is None:
+                continue
+            identity = (finding.task_id, finding.scope_addition_path)
+            if identity not in known_additions:
+                additions.append(ApprovedScopeAddition(
+                    fingerprint, finding.task_id, finding.scope_addition_path,
+                    finding.scope_addition_path_state or ""))
+                known_additions.add(identity)
+        approved_scope_additions = tuple(additions)
+    transitions = prior_review_transitions + tuple(
+        ReviewTransition(
+            finding_fingerprint(item), item.transition, item.prior_fingerprint,
+            item.transition_evidence)
+        for item in record.findings)
+    if plan_digest_transitions is None:
+        plan_digest_transitions = (
+            previous.plan_digest_transitions if previous is not None else ())
+        if (previous is not None
+                and previous.task_plan_sha256 != task_plan_sha256):
+            plan_digest_transitions += (PlanDigestTransition(
+                previous.task_plan_sha256, task_plan_sha256),)
     state = AutoFixState(
         version=AUTO_FIX_STATE_VERSION,
         source_tree=source_tree,
@@ -961,6 +1458,19 @@ def state_for_review(
         findings=tuple(ledger.values()),
         observed_states=observations,
         consumed_fixer_profiles=prior_profiles,
+        review_context=review_context,
+        review_stage=review_stage,
+        failure_trigger=failure_trigger,
+        reviewer_recommendations=recommendations,
+        approved_scope_additions=approved_scope_additions,
+        worker_dispositions=(
+            worker_dispositions if worker_dispositions is not None
+            else previous.worker_dispositions if previous is not None else ()),
+        repair_briefs=(
+            repair_briefs if repair_briefs is not None
+            else previous.repair_briefs if previous is not None else ()),
+        plan_digest_transitions=plan_digest_transitions,
+        review_transitions=transitions,
     )
     return _validate_state(state)
 
