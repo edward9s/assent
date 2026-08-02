@@ -75,21 +75,28 @@ Scheduler 不會在失敗時 revert workspace。失敗 review 的程式碼保留
 
 ### Auto-fix recovery 與寫入邊界
 
-設定 `[auto_fix.review]` 只提供 bounded loop 的 policy，只有 `run --auto-fix` invocation
-才會啟動 folder final review 並授權 repair；review 仍是唯讀。沒有 flag 的普通 `run` 不會
-review，也不會 repair。FAIL review 以帶理由的 automatic rework 重開既有 scope 內 task；
-不會建立 task、還原 source、刪 source 或 accept。每個 repair round 都在第一個 write-capable
-session 開始前把 fixer-profile assignments 寫入 `_auto_fix.toml`，因此 process failure 不會
-讓 consumed profile 悄悄恢復可用，也不會因先跑一個 task 就讓同 round sibling 提前 escalation。
+`[auto_fix.review]` 是可選的 policy override；沒有 table 時，`run --auto-fix` 用第一個
+effective worker adapter 的 `prime`/`heavy` 解析 reviewer，不需重跑 `assent init`。只有
+`run --auto-fix` invocation 才會啟動 completed-folder final review，或有 durable blocker
+證據的 quiescent blocked-adjudication review，並授權 repair；review 仍是唯讀。沒有 flag 的
+普通 `run` 不會 review，也不會 repair。FAIL review 以帶理由的 automatic rework 重開既有
+scope 內 task；不會建立 task、還原 source、刪 source 或 accept。reviewer 可核准一個精確
+scope addition，但只有 scheduler 能寫 task file；worker 與 reviewer 都禁止 task-file edit。
+每個 repair round 都在第一個 write-capable session 開始前把 fixer-profile assignments 寫入
+`_auto_fix.toml`，因此 process failure 不會讓 consumed profile 悄悄恢復可用，也不會因先跑
+一個 task 就讓同 round sibling 提前 escalation。
 Finding ledger、consumed profiles、WIP checkpoint 與編輯會在中斷、quota、adapter failure
 及 focused gate 失敗後保留。
 
-之後的 `run --auto-fix` 只有在目前 `[auto_fix.review]` 存在且 resolved reviewer identity
-相同時，才會讀取既有 FAIL state、跳過已消耗 profile 並恢復 WIP；policy 被移除或改變會
-拒絕 repair 與 closeout。Profile 用盡是有限的 human handoff，不是持續重試或撤銷程式碼的
-指令。Report 只以 derived runtime 資訊顯示 `NOT RUN`、`PASSED`、`FAILED` 或 `STALE`；不改
-task status 或 acceptance。Reviewer 的 prompt-plus-detection 寫入拒絕是在 `danger-full-access`
-預設下的 cooperative rule，不是 security sandbox 或預防性的 OS permission boundary。
+之後的 `run --auto-fix` 只有在目前 resolved reviewer identity 相同時，才會讀取既有 FAIL
+state、跳過已消耗 profile 並恢復 WIP；policy 漂移會拒絕 repair 與 closeout。Profile 用盡是
+有限的 human handoff，不是持續重試或撤銷程式碼的指令；loop 內沒有 runtime human
+adjudication gate。Report 只以 derived runtime 資訊顯示 `NOT RUN`、`PASSED`、`FAILED` 或
+`STALE`，並附 phase、blocker、findings、scope decision、acknowledgement、profiles 與
+terminal reason；不改 task status 或 acceptance。完整 verification 依成功 run 的 receipt
+policy 或明示 `--verify` 另行執行，缺 receipt 或未跑 full suite 絕不是 reviewer failure。
+Reviewer 的 prompt-plus-detection 寫入拒絕是在 `danger-full-access` 預設下的 cooperative
+rule，不是 security sandbox 或預防性的 OS permission boundary。
 
 ### 臨時 integration candidate
 

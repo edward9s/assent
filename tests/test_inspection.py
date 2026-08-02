@@ -44,6 +44,51 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(inspection.check(cfg), 0)
         self.assertIn("Result: passed", out.getvalue())
 
+    def test_check_reports_default_auto_fix_reviewer_identity_and_provenance(self):
+        self.write_task(1, model="core")
+        cfg = self.build()
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 0)
+        text = out.getvalue()
+        self.assertIn(
+            "Auto-fix reviewer (resolved): claude / prime->fable / heavy->high",
+            text)
+        self.assertIn(
+            "reviewer adapter = claude (source: project "
+            "(explicit settings layer) (first effective worker adapter fallback))",
+            text)
+        self.assertIn(
+            "reviewer model = prime -> fable (setting source: "
+            "builtin (built-in fallback)", text)
+        self.assertIn(
+            "reviewer effort = heavy -> high (setting source: "
+            "builtin (built-in fallback)", text)
+
+    def test_check_reports_explicit_auto_fix_reviewer_settings(self):
+        self.write_task(1, model="core")
+        cfg = self.build(extra_config=(
+            "[auto_fix.review]\n"
+            'model = "core"\n'
+            'effort = "slight"\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 0)
+        text = out.getvalue()
+        self.assertIn(
+            "Auto-fix reviewer (resolved): claude / core->opus / slight->low",
+            text)
+        self.assertIn(
+            "reviewer model = core -> opus (setting source: project "
+            "(explicit settings layer)", text)
+        self.assertIn(
+            "reviewer effort = slight -> low (setting source: project "
+            "(explicit settings layer)", text)
+
     def test_check_fails_on_dependency_cycle(self):
         self.write_task(1, deps=("t002",))
         self.write_task(2, deps=("t001",))
@@ -81,7 +126,8 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             '[adapter.codex.efforts.core]\n'
             'heavy = "max"\n'
             '[adapter.codex.efforts.lite]\n'
-            'heavy = "max"\n'))
+            'heavy = "max"\n'
+            '[auto_fix.review]\nmodel = "core"\n'))
         self.commit_all()
 
         out = io.StringIO()
@@ -103,7 +149,8 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         cfg = self.build(adapter_name="codex", extra_config=(
             '[adapter.codex]\ncommand = "python"\n'
             '[adapter.codex.models]\ncore = "gpt-core"\n'
-            '[adapter.codex.default_effort]\n'))
+            '[adapter.codex.default_effort]\n'
+            '[auto_fix.review]\nmodel = "core"\n'))
         self.commit_all()
 
         out = io.StringIO()
@@ -251,6 +298,113 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertIn("Folder auto-fix: STALE (reviewer configuration changed)",
                       text)
 
+    def test_report_renders_recovery_evidence_and_persistent_debt_agenda(self):
+        task_path = self.write_task(1, status="DONE")
+        cfg = self.build()
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        source_tree = gitops.tree_of(cfg.root, "HEAD")
+        task_digest = auto_fix.sha256_files(task.path for task in plan.tasks)
+        finding = auto_fix.ReviewFinding(
+            "t001", "assent/inspection.py", "Existing debt needs a follow-up",
+            "The changed inspection path has no focused regression coverage.",
+            kind="eligible_technical_debt",
+            recommendation="Add a focused report regression before acceptance.")
+        scope_finding = auto_fix.ReviewFinding(
+            "t001", "tests/test_inspection.py", "Scope needs one exact addition",
+            "The report test needs a declared existing path.",
+            kind="scope_amendment",
+            scope_addition=auto_fix.ScopeAddition(
+                "tests/test_inspection.py", "existing_file"))
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (finding, scope_finding)),
+            source_tree=source_tree,
+            task_plan_sha256=task_digest,
+            review_prompt_sha256="4" * 64,
+            reviewer_adapter=cfg.auto_fix_review.adapter,
+            reviewer_model=cfg.auto_fix_review.requested_model,
+            reviewer_effort=cfg.auto_fix_review.requested_effort)
+        fingerprint = state.current_finding_fingerprints[0]
+        state = auto_fix.with_worker_dispositions(
+            state, (auto_fix.WorkerDisposition(
+                "t001", fingerprint, "fixed", "Focused regression passes."),))
+        state = auto_fix.with_repair_briefs(
+            state, (auto_fix.RepairBrief(
+                "t001", state.current_finding_fingerprints,
+                "Original blocker evidence:\nThe old report omitted debt.\n\n"
+                "Focused command evidence:\nThe focused test passes."),))
+        state = auto_fix.consume_fixer_profile(
+            state, auto_fix.FixerProfile("claude", "core", "heavy"))
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg), state)
+
+        inspection.write_report(cfg, plan)
+        report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        debt = (cfg.tasks_dir / "_technical_debt.md").read_text(encoding="utf-8")
+        self.assertIn("Phase: NEEDS_REPAIR", report)
+        self.assertIn("Original blocker evidence (t001): The old report omitted debt.",
+                      report)
+        self.assertIn("Current findings and recommendations:", report)
+        self.assertIn("Add a focused report regression before acceptance.", report)
+        self.assertIn("Approved scope additions:", report)
+        self.assertIn("Repair acknowledgements:", report)
+        self.assertIn("fixed; Focused regression passes.", report)
+        self.assertIn("Consumed fixer profiles:", report)
+        self.assertIn("claude/core/heavy", report)
+        self.assertIn("TECHNICAL DEBT REVIEW REQUIRED", report)
+        self.assertIn("Existing debt needs a follow-up", debt)
+        self.assertIn("CURRENT / unresolved in the latest review", debt)
+        self.assertIn("Add a focused report regression before acceptance.", debt)
+
+        passed = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("PASS", ()),
+            source_tree=source_tree,
+            task_plan_sha256=task_digest,
+            review_prompt_sha256="4" * 64,
+            reviewer_adapter=cfg.auto_fix_review.adapter,
+            reviewer_model=cfg.auto_fix_review.requested_model,
+            reviewer_effort=cfg.auto_fix_review.requested_effort,
+            previous=state, review_stage="recheck")
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg), passed)
+        inspection.write_report(cfg, Plan.parse(cfg.tasks_dir))
+        report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        debt = (cfg.tasks_dir / "_technical_debt.md").read_text(encoding="utf-8")
+        self.assertIn("Folder auto-fix: PASSED (fresh)", report)
+        self.assertIn("prior findings cleared", report)
+        self.assertIn("TECHNICAL DEBT REVIEW REQUIRED", report)
+        self.assertIn("RESOLVED / absent from the latest current findings", debt)
+
+        blocked_debt = auto_fix.ReviewFinding(
+            "t001", "assent/inspection.py", "Blocked debt", "blocked evidence",
+            kind="eligible_technical_debt")
+        with self.assertRaisesRegex(AssentError, "limited to initial completed-folder"):
+            auto_fix.state_for_review(
+                auto_fix.ReviewRecord("FAIL", (blocked_debt,)),
+                source_tree=source_tree,
+                task_plan_sha256=task_digest,
+                review_prompt_sha256="4" * 64,
+                reviewer_adapter=cfg.auto_fix_review.adapter,
+                reviewer_model=cfg.auto_fix_review.requested_model,
+                reviewer_effort=cfg.auto_fix_review.requested_effort,
+                review_context="blocked_adjudication",
+                failure_trigger="worker_blocked")
+
+        recheck_debt = auto_fix.ReviewFinding(
+            "t001", "assent/inspection.py", "New debt", "new evidence",
+            kind="eligible_technical_debt", transition="newly_exposed",
+            transition_evidence="t001 existing requirement exposed by repair")
+        with self.assertRaisesRegex(AssentError, "limited to initial completed-folder"):
+            auto_fix.state_for_review(
+                auto_fix.ReviewRecord("FAIL", (recheck_debt,)),
+                source_tree=source_tree,
+                task_plan_sha256=task_digest,
+                review_prompt_sha256="4" * 64,
+                reviewer_adapter=cfg.auto_fix_review.adapter,
+                reviewer_model=cfg.auto_fix_review.requested_model,
+                reviewer_effort=cfg.auto_fix_review.requested_effort,
+                previous=passed, review_stage="recheck")
+
     def test_report_isolates_namespaced_checkpoints(self):
         self.write_task(1, status="DONE", title="目前一")
         self.write_task(3, status="DONE", title="目前三")
@@ -361,7 +515,8 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
         self.write_user_config(
             '[adapter]\nname = "codex"\n'
             '[adapter.codex]\ncommand = "python"\n'
-            '[adapter.codex.models]\ncore = "gpt-from-user"\n')
+            '[adapter.codex.models]\ncore = "gpt-from-user"\n'
+            '[auto_fix.review]\nmodel = "core"\n')
         cfg = self.load()
         self.commit_all()
 
@@ -381,7 +536,8 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
             '[adapter]\nname = "codex"\n'
             '[adapter.codex]\ncommand = "python"\n'
             '[adapter.codex.models]\ncore = "gpt-from-user"\n'
-            '[adapter.codex.default_effort]\ncore = "slight"\n')
+            '[adapter.codex.default_effort]\ncore = "slight"\n'
+            '[auto_fix.review]\nmodel = "core"\n')
         (self.root / ".assent" / "assent.toml").write_text(
             '[adapter.codex.models]\ncore = "gpt-from-project"\n',
             encoding="utf-8")
@@ -406,6 +562,7 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
             '[adapter.claude]\ncommand = "python"\n'
             '[adapter.claude.models]\nlite = "haiku-from-user"\n'
             '[adapter.codex]\ncommand = "python"\n'
+            '[auto_fix.review]\nmodel = "lite"\n'
             '[run]\nretry_per_task = 3\n')
         cfg = self.load()
         self.commit_all()

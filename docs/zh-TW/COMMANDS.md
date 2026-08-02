@@ -84,26 +84,40 @@ snapshot，不是 `--all` 的別名。和 `--all` 合用、重複、或不在最
 
 ## `run --auto-fix`
 
-`--auto-fix` 是 invocation-level、與選取正交的 repair 授權。它可和所有 `run` 選取
+`--auto-fix` 是唯一的 invocation-level、與選取正交的 review/repair 授權。它可和所有 `run` 選取
 形式合用：自動選取、明示一個或多個 folder、prefix 加 `...`、`--all`、`--once`、
 `--task` 與 `--verify`。它不代表 `--all`、不改變 cardinality 或 remainder 規則，會
 依 command 原本順序傳給每個選取 folder；`--all` 的每個 child folder 都收到同一 policy。
 
-專案必須設定 `[auto_fix.review]` 才有這個 bounded loop 的 policy。整個 loop 是
-invocation-level opt-in，只有明示 `--auto-fix` 的 run 才會在所有 task-focused gate 與
-最後 distinct focused sweep 通過後做 folder-level 唯讀 review；同一次 invocation 的
-FAIL 才能進入 automatic repair。沒有 `--auto-fix` 的普通 run 不會做 final sweep、review
-或 repair；受限執行不完整會延後，focused failure 不會開 reviewer。
+`[auto_fix.review]` 是可選的 policy override；沒有 table 時，會用第一個 effective worker
+adapter 的 `prime`/`heavy` 自動解析 reviewer，不需重跑 `assent init` 或編輯
+`~/.assent/assent.toml`。整個 loop 是 invocation-level opt-in，只有明示 `--auto-fix` 的
+run 才會在所有 task-focused gate 與最後 distinct focused sweep 通過後做 completed-folder
+唯讀 review；有 durable worker `BLOCKED` 或 focused-gate 證據的 quiescent blocked dependency
+則走 blocked-adjudication entry point；同一次 invocation 的 FAIL 才能進入 automatic repair。
+沒有 `--auto-fix` 的普通 run 不會做 final sweep、review 或 repair；`--once`/`--task` 受限執行
+不完整會延後 completed-folder loop，focused failure 不會開 completed-folder reviewer。
 
 自動修正只重開 finding 所有權明確且位於 declared scope 的既有 task，記錄帶理由且
 保留程式碼的 rework；每個 repair round 依 round 開始前未消耗的有限 fixer profile 選定
 assignments，並在第一個 write-capable session 前持久化。因此多 task finding 與 dependency
-cascade 不會逐 task escalation。變更或直接互動程式碼中的既有 technical debt，只在局部且
-focused test 可可靠驗證時才合格；review 不做全 repository debt audit。不會自動建立 task、
-還原 source、刪 source、做完整 candidate acceptance 或 publish Git。`_auto_fix.toml` 與
-report 都是 derived evidence；`accept` 仍是人類明示動作。Pending `FAIL` 的 opted-in
-recovery 若 `[auto_fix.review]` 被移除或 resolved reviewer identity 漂移，repair 與 closeout
-會拒絕。
+cascade 不會逐 task escalation。既有 technical debt 只有 `COMPLETED_FOLDER + INITIAL`
+引入、局部且 focused test 可可靠驗證時才合格；blocked adjudication 與 `RECHECK` 可以保留
+或解決，但不能新增。review 不做全 repository debt audit。reviewer 可核准一個精確 scope
+addition，但只有 scheduler 修改 task file；worker 與 reviewer 都禁止 task-file edits。
+不會自動建立 task、還原 source、刪 source、做完整 candidate acceptance 或 publish Git。
+recheck 會保留仍存在 finding 的 fingerprint，新的 finding 只接受有證據的 repair regression
+或 newly exposed existing requirement；原集合清空後必須 PASS，optional improvement 與
+speculation 不會讓 loop 繼續。profile 用盡、中斷或 gate 失敗會保留 evidence，loop 內沒有
+runtime human adjudication gate。`_auto_fix.toml` 與 report 都是 derived evidence；`accept`
+仍是人類明示動作。Pending `FAIL` 的 recovery 若 resolved reviewer identity 漂移，repair
+與 closeout 會拒絕。完整 verification 仍依成功 run 的 receipt policy 或明示 `--verify`，缺
+receipt 或未跑 full suite 絕不是 reviewer failure。
+
+Review 或 acceptance meeting 先讀 `_report.md`。若有 `TECHNICAL DEBT REVIEW REQUIRED`，
+必須讀 `_technical_debt.md`，在建議 accept 前主動告訴人類並列舉每一項，逐項取得完成
+local repair 足夠、追加/rework task，或提升成 `AGENTS.md` durable project rule 的明確
+disposition；默讀檔案不算完成，也不是新增的 approval state。
 
 ## 指令速查
 
@@ -113,7 +127,7 @@ recovery 若 `[auto_fix.review]` 被移除或 resolved reviewer identity 漂移�
 | `assent run A B` | 依寫出順序跑 A、B，第一個失敗即停止；不暗中驗證或接受。 | 只有 AI session |
 | `assent run A B --all` | 先跑明示前綴，再依 dependency order 跑剩餘 incomplete folder。 | 只有 AI session |
 | `assent run --all [--jobs N]` | 用 dependency scheduler 跑所有 incomplete folder，`--jobs` 限制並行數。 | 只有 AI session |
-| `assent run [selection] --auto-fix` | 在 completed folder 的最後 focused sweep 後，授權設定好的有界 review-and-repair loop；與 run selectors 相容，絕不 accept。 | AI session 加設定好的 review/repair |
+| `assent run [selection] --auto-fix` | 在 completed folder 的最後 focused sweep 後，或有 quiescent blocked-review evidence 時，授權設定好的有界 review-and-repair loop；與 run selectors 相容，絕不 accept。 | AI session 加設定好的 review/repair |
 | `assent status [FOLDER]` | 顯示進度、下一個 task、branch 與最後 checkpoint。 | 零 |
 | `assent check [FOLDER]` | 檢查 task format、dependency cycle、設定與環境；是規劃散會 gate。 | 零 |
 | `assent report [FOLDER]` | 產生並顯示 `_report.md`。 | 零 |

@@ -488,38 +488,61 @@ suffices.
 
 ## Opt-in folder review and bounded repair consensus
 
-The ordinary review path remains human-driven. `[auto_fix.review]` may configure
-one folder-level reviewer, but the entire bounded loop is invocation-level
-opt-in: only `run --auto-fix` starts the read-only reviewer after a completed
-folder's final distinct focused checks pass and authorizes the repair half. An
-ordinary `run` without the flag starts neither review nor repair. The flag is
-selection-orthogonal and works with the normal run selectors, including
-explicit folders, `...`, `--all`, `--once`, `--task`, and `--verify`. It never
-turns review into acceptance or a full candidate verification.
+The ordinary review path remains human-driven. An optional
+`[auto_fix.review]` table overrides one folder-level reviewer; without it, the
+first effective worker adapter resolves at `prime`/`heavy`. The entire bounded
+loop is invocation-level opt-in: only `run --auto-fix` starts the read-only
+review after a completed folder's final distinct focused checks pass, or enters
+the quiescent blocked-adjudication path with durable blocker evidence, and
+authorizes the repair half. An ordinary `run` without the flag starts neither
+review nor repair. The flag is selection-orthogonal and works with the normal
+run selectors, including explicit folders, `...`, `--all`, `--once`, `--task`,
+and `--verify`. It never turns review into acceptance or a full candidate
+verification.
 
 The reviewer follows the cumulative diff and directly interacting code. It may
-report eligible pre-existing technical debt when a local repair fits an
-existing task's declared scope and focused tests can reliably verify it, but it
-does not perform an unbounded repository-wide debt audit. A failed review can
-automatically reopen only existing tasks whose scopes own the findings. The
-rework is code-preserving, reason-bearing, and authorized by `run --auto-fix`;
-it never creates tasks, changes requirements or scope, reverts source, deletes
-source, or accepts a folder. A finding without one unambiguous existing task
-owner remains a human decision.
+report eligible pre-existing technical debt only when `COMPLETED_FOLDER +
+INITIAL` introduces it, a local repair fits an existing task's declared scope,
+and focused tests can reliably verify it; blocked adjudication and `RECHECK`
+may retain or resolve debt but cannot add it. It does not perform an unbounded
+repository-wide debt audit. A failed review can automatically reopen only
+existing tasks whose scopes own the findings. The rework is code-preserving,
+reason-bearing, and authorized by `run --auto-fix`; it never creates tasks,
+changes requirements, reverts source, deletes source, or accepts a folder. A
+reviewer may propose one exact scope addition, but the scheduler alone appends
+it; worker and reviewer task-file edits remain forbidden. A finding without one
+unambiguous existing task owner remains a human decision.
+
+Re-review is soft convergence: prior current findings are considered first, a
+still-present blocker retains its fingerprint, and a new blocker requires an
+evidenced repair regression or newly exposed existing requirement. Clearing the
+prior set requires `PASS`; optional improvements, speculation, and repeated
+debt discovery cannot keep the loop open. Complete verification follows only a
+successful run under receipt policy or explicit `--verify`; missing receipts,
+an unrun full suite, and absent complete verification are never review failures.
 
 `_auto_fix.toml` is deletable derived folder memory, not a task status or
-acceptance evidence. The version-2 record requires its recovery `phase` and
-binds source and task-plan identity, the review prompt, the resolved reviewer
-identity, the current `PASS`/`FAIL` findings, observed states, and consumed
-fixer profiles. Profile selection is round-scoped: assignments are persisted
-before the first write-capable session in a round, so multi-task findings and
-dependency cascades do not consume the normal profile once per task. The finite
-escalation budget, interruption, quota, and failed gates preserve all edits and
-evidence. Recovery with `run --auto-fix` resumes WIP work and unused profiles
-only while the current reviewer policy and resolved identity still match;
-removal or drift refuses repair and closeout. The reviewer write-detection
-snapshot is a cooperative rule under `danger-full-access`, not a security
-sandbox. Human `accept` remains the only publication decision.
+acceptance evidence. The version-3 record requires its recovery `phase`,
+context/stage dimensions, failure trigger, and binds source and task-plan
+identity, the review prompt, the resolved reviewer identity, current and
+historical findings, recommendations, scope decisions, repair briefs,
+acknowledgements, transitions, observed states, and consumed fixer profiles.
+Profile selection is round-scoped: assignments are persisted before the first
+write-capable session in a round, so multi-task findings and dependency
+cascades do not consume the normal profile once per task. The finite escalation
+budget, interruption, quota, and failed gates preserve all edits and evidence.
+Recovery with `run --auto-fix` resumes WIP work and unused profiles only while
+the current resolved identity still matches; removal or drift refuses repair and
+closeout. The reviewer write-detection snapshot is a cooperative rule under
+`danger-full-access`, not a security sandbox. Human `accept` remains the only
+publication decision.
+
+When a debt finding first enters through `COMPLETED_FOLDER + INITIAL`, zero-token
+reporting creates `_technical_debt.md` and points to it from `_report.md`.
+Meetings must proactively tell the human, enumerate every item, and obtain a
+sufficient-repair, follow-up-task/rework, or durable `AGENTS.md` rule decision
+for each before recommending acceptance. The agenda is not a second approval
+state.
 
 ## Quality standard (replacing token-count KPIs)
 

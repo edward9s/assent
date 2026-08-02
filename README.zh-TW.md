@@ -84,23 +84,34 @@ npm test、Flutter test 或 custom argv。重跑 init 會保留現有 verifier�
 
 ## 可選的有界 auto-fix
 
-設定 `[auto_fix.review]` 會提供 folder-level review-and-repair policy；整個 loop
-都是 invocation-level opt-in，只有明示的 `assent run --auto-fix` 才會在最後 focused
-checks 後啟動唯讀 review，並授權該次 invocation 的有界 repair。沒有 flag 的普通
-`assent run` 不會啟動 review，也不會 repair。這個 flag 與選取正交，可和明示 folder、
-`...`、`--all`、`--once`、`--task`、`--verify` 合用；受限 run 若留下 incomplete
-folder，就延後整個 loop。
+設定 `[auto_fix.review]` 會 override folder-level review-and-repair policy；沒有這個
+table 時，明示的 `assent run --auto-fix` 會用第一個 effective worker adapter 的
+`prime`/`heavy` 解析 reviewer，不需要重跑 `assent init` 或編輯
+`~/.assent/assent.toml`。整個 loop 都是 invocation-level opt-in，只有明示的
+`assent run --auto-fix` 才會在最後 focused checks 後啟動唯讀 completed-folder review，
+或在有 durable blocker 證據的 quiescent blocked dependency 進入 blocked-adjudication
+入口，並授權該次 invocation 的有界 repair。沒有 flag 的普通 `assent run` 不會啟動
+review，也不會 repair。這個 flag 與選取正交，可和明示 folder、`...`、`--all`、
+`--once`、`--task`、`--verify` 合用；受限 run 若留下 incomplete folder，就延後
+completed-folder loop。
 
-Review 只看變更與直接互動的程式碼；既有 technical debt，只有在修正局部於
-既有 task 的 declared scope、且 focused test 能可靠驗證時才合格，不做全 repository
-debt audit。FAIL 只會自動重開 finding 所有權明確的既有 task，記錄帶理由且保留程式碼
-的 rework。每個 repair round 都依該 round 開始前尚未消耗的有限 fixer profile 選定 assignments，
+Review 只看變更與直接互動的程式碼；既有 technical debt 只有在
+`COMPLETED_FOLDER + INITIAL` 引入、修正局部於既有 task 的 declared scope、且 focused
+test 能可靠驗證時才合格，不做全 repository debt audit。blocked adjudication 與
+`RECHECK` 可以保留或解決該 ledger entry，但不能新增 debt。FAIL 只會自動重開 finding
+所有權明確的既有 task，記錄帶理由且保留程式碼的 rework。reviewer 可以核准一個精確的
+scope addition，但只有 scheduler 能修改 task file；worker 與 reviewer 都禁止編輯 task
+file。每個 repair round 都依該 round 開始前尚未消耗的有限 fixer profile 選定 assignments，
 並在第一個 write-capable session 前持久化；多 task finding 或 dependency cascade 不會
-逐 task 讓 sibling 提前 escalation。它不會自動建立 task、還原 source、刪 source、
-publish Git 或接受 folder。profile 用盡、中斷或 gate 失敗會保留 state 與編輯，交人類裁決。
-之後明示的 `run --auto-fix` recovery 必須仍有相同的目前 reviewer 設定；移除或改變
-`[auto_fix.review]` 會拒絕 repair 與 closeout，直到 policy 恢復。`_auto_fix.toml` 與
-report 是 derived evidence，不是 task status 或 acceptance evidence。
+逐 task 讓 sibling 提前 escalation。recheck 會保留仍存在 finding 的 fingerprint，只有
+有證據的 repair regression 或 newly exposed existing requirement 才能有新 finding；先前
+集合清空後必須 PASS，optional improvement 與 speculation 不會讓 loop 繼續。它不會自動建立 task、
+還原 source、刪 source、publish Git 或接受 folder。profile 用盡、中斷或 gate
+失敗會保留 state 與編輯，交人類事後檢視；loop 內沒有 runtime human adjudication gate。
+之後明示的 `run --auto-fix` recovery 必須仍有相同的目前 reviewer identity；移除或改變
+policy 會拒絕 repair 與 closeout。`_auto_fix.toml` 與 report 是 derived evidence，不是
+task status 或 acceptance evidence。完整 verification 仍依成功 run 的 receipt policy 或
+明示 `--verify` 另行執行；缺 receipt 或尚未跑 full suite 絕不是 reviewer failure。
 
 ## 規劃會議 prompt
 
@@ -121,7 +132,7 @@ report 是 derived evidence，不是 task status 或 acceptance evidence。
 需要第二意見時使用：
 
 ```text
-請擔任獨立的驗收審查者。請簡潔回答，不要用子代理。任何變更前，先檢查工作資料夾的 _report.md、相關任務與 journal 檔、checkpoint commit/diff、實作，以及 focused/full verification 證據。先回報有證據支持的發現：bug、結構問題、過度設計、缺少測試，以及說明文件與程式行為漂移。建議使用與實作者不同 vendor 的高能力模型做獨立 cross-review，但不要要求或編碼第二模型或自動 gate。這個一般驗收審查由人類主導，不在該審查中自動 accept 或 rework；明示的 `run --auto-fix` 是另一個有界 review-and-repair 授權，且仍絕不自動接受 folder。等待人類決定；只有人類同意後，才寫 Assent 格式的 rework 任務或說明 acceptance 動作。
+請擔任獨立的驗收審查者。請簡潔回答，不要用子代理。任何變更前，先檢查工作資料夾的 _report.md；如果有 `TECHNICAL DEBT REVIEW REQUIRED`，讀取 _technical_debt.md，在建議 accept 前主動告訴人類，並列出每一項 debt，逐項取得「已完成的 local repair 足夠」、「追加/rework task 做具體追蹤」，或「提升成 AGENTS.md 的 durable project rule」的明確 disposition。接著檢查相關任務與 journal 檔、checkpoint commit/diff、實作，以及 focused/full verification 證據。先回報有證據支持的發現：bug、結構問題、過度設計、缺少測試，以及說明文件與程式行為漂移。建議使用與實作者不同 vendor 的高能力模型做獨立 cross-review，但不要要求或編碼第二模型或自動 gate。這個一般驗收審查由人類主導，不在該審查中自動 accept 或 rework；明示的 `run --auto-fix` 是另一個有界 review-and-repair 授權，且仍絕不自動接受 folder。等待人類決定；只有人類同意後，才寫 Assent 格式的 rework 任務或說明 acceptance 動作。
 ```
 
 審查者整理發現時不修改 worktree。接受仍是人類執行

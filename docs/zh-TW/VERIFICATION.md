@@ -20,12 +20,14 @@
 
 ### Folder auto-fix review gate
 
-若設定 `[auto_fix.review]`，且 invocation 明示 `run --auto-fix`，completed folder 才會在
-最後 focused gate 後做 folder-level 唯讀 review。Scheduler 先再跑每個 distinct `DONE` task
-的 `verify` 一次；任何 failure 都只寫 focused finding evidence，不啟動 reviewer。`--once`
-或 `--task` 若留下 incomplete folder，會延後整個 loop 且不消耗 token；只有 `SKIP` 的
-folder 不需要 implementation review。沒有 `--auto-fix` 的普通 run 不會做這次 final
-sweep/review，也不會 repair，即使已設定 policy。
+`[auto_fix.review]` 是可選的 reviewer override；若沒有 table，會用第一個 effective worker
+adapter 的 `prime`/`heavy` 自動解析。Invocation 明示 `run --auto-fix` 時，completed folder
+才會在最後 focused gate 後做 folder-level 唯讀 review。Scheduler 先再跑每個 distinct `DONE`
+task 的 `verify` 一次；任何 failure 都只寫 focused finding evidence，不啟動 completed-folder
+reviewer。`--once` 或 `--task` 若留下 incomplete folder，會延後這個 loop 且不消耗 token；有
+durable worker `BLOCKED` 或 focused-gate 證據的 quiescent blocked dependency 走另一個
+blocked-adjudication entry point；只有 `SKIP` 的 folder 不需要 implementation review。沒有
+`--auto-fix` 的普通 run 不會做這次 final sweep/review，也不會 repair，即使已有 policy。
 
 `run --auto-fix` 是該次 invocation 修正 FAIL review 的授權，與 run selection 正交，可和
 明示 folder、`...`、`--all`、`--once`、`--task`、`--verify` 合用。它不跑 full candidate、
@@ -34,12 +36,22 @@ sweep/review，也不會 repair，即使已設定 policy。
 repair round 選定有限 fixer-profile assignment，在該 round 第一個 write-capable session
 前持久化。多 task finding 與 dependency cascade 不會逐 task 提前 escalation。
 
-Review 依循 changed 與 directly interacting code；既有 technical debt 只有在修正局部於
-既有 scope 且 focused gate 能可靠測試時才合格，不做全 repository audit。未知、含糊或越界
-finding 交人類。不會自動建立 task、改 task requirement/scope、還原 source、刪 source、
-accept，也不把 `_auto_fix.toml` 當 task status。Reviewer 不得寫 project 或 management file；
-Assent 以 before/after surface snapshot 偵測並拒絕寫入、保留原編輯。這是在
-`danger-full-access` 預設下的 cooperative rule，不是 security sandbox。
+Review 依循 changed 與 directly interacting code；既有 technical debt 只有在
+`COMPLETED_FOLDER + INITIAL` 引入、修正局部於既有 scope 且 focused gate 能可靠測試時才
+合格，不做全 repository audit。blocked adjudication 與 `RECHECK` 可以保留或解決 debt，
+但不能新增。未知、含糊或越界 finding 交 scheduler 作決定。reviewer 可核准一個精確 scope
+addition，但只有 scheduler 修改 task file；worker 與 reviewer 都禁止 task-file edits。
+不會自動建立 task、改 task requirement、還原 source、刪 source、accept，也不把
+`_auto_fix.toml` 當 task status。Reviewer 不得寫 project 或 management file；Assent 以
+before/after surface snapshot 偵測並拒絕寫入、保留原編輯。這是在 `danger-full-access` 預設
+下的 cooperative rule，不是 security sandbox，loop 內沒有 runtime human adjudication gate。
+
+Review context 是 `COMPLETED_FOLDER` 或 `BLOCKED_ADJUDICATION`，stage 是 `INITIAL` 或
+`RECHECK`。Recheck 先處理 prior current findings；仍存在 blocker 保留 fingerprint，新
+blocker 只能有 repair regression 或 newly exposed existing requirement 的證據；prior set
+清空後必須 PASS。Optional improvement、speculation 與重複 debt discovery 不會讓 loop 繼續。
+與 task requirement 直接相關的具體 local focused-test gap 才能是 review evidence；缺完整
+verification、缺 receipt 或未跑 full suite 都不是 reviewer failure。
 
 ### 完整 candidate verification
 
@@ -74,11 +86,21 @@ fresh reuse、malformed refusal、incomplete no-op 與 interrupt，但不改變�
 Folder report 也會以零 token 顯示 derived `_auto_fix.toml`：沒有檔案是
 `Folder auto-fix: NOT RUN (no review state)`；malformed 或 source/task binding 改變是
 `STALE`；新鮮 review PASS 是 `PASSED (fresh)`；新鮮 FAIL 是 `FAILED (fresh)` 並列出
-current blocking findings。Version 2 的 state 必須有 `phase`，綁定 source tree、task-plan
-digest、review-prompt digest 與 resolved reviewer adapter/model/effort，保留 finding ledger、
-observed states 與 consumed fixer profiles；`NEEDS_REPAIR`、`REPAIRING`、`AWAITING_REVIEW`、
-`COMPLETE` 明確表示 restart boundary。它可刪除重建，不是 receipt、task status 或 acceptance
-gate。Pending FAIL 若沒有目前 reviewer policy 或 identity 漂移，repair 與 closeout 會拒絕。
+phase、context、stage、original blocker、current findings/recommendations、scope decision、
+acknowledgement、profiles 與 terminal reason。Version 3 的 state 必須有 `phase`、
+`review_context`、`review_stage`、`failure_trigger`，綁定 source tree、task-plan digest、
+review-prompt digest 與 resolved reviewer adapter/model/effort，保留 finding ledger、
+recommendations、scope additions、repair briefs、dispositions、transitions、observed states
+與 consumed fixer profiles；`NEEDS_REPAIR`、`REPAIRING`、`AWAITING_REVIEW`、`COMPLETE` 明確
+表示 restart boundary。它可刪除重建，不是 receipt、task status 或 acceptance gate。Pending
+FAIL 若沒有目前 reviewer policy 或 identity 漂移，repair 與 closeout 會拒絕。
+
+若 eligible debt 曾由 `COMPLETED_FOLDER + INITIAL` 引入，report generation 會建立同層
+`_technical_debt.md`，並在 `_report.md` 標示 `TECHNICAL DEBT REVIEW REQUIRED`；它保留
+recheck 後已解決的 finding 及 task、path、evidence、recommendation、repair disposition、
+current/resolved outcome、scope decision。blocked adjudication 與 recheck 不能新增 entry。
+Acceptance 前 meeting 必須主動告訴人類、列舉每項，逐項取得完成 repair 足夠、follow-up
+task/rework，或 durable `AGENTS.md` rule 的 disposition；這不是第二個 approval state。
 
 `[verification] receipt_refresh = "manual"`（預設）讓普通 run closeout 延後 folder
 receipt；`"auto"` 在 folder 所有 task 完成時刷新。`assent run --verify` 不受這個設定

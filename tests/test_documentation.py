@@ -244,7 +244,7 @@ class DocumentationTests(unittest.TestCase):
         for phrase in (
                 "repair round", "多 task", "dependency cascade",
                 "第一個 write-capable session", "拒絕 repair 與 closeout",
-                "resolved reviewer identity", "Version 2"):
+                "resolved reviewer identity", "Version 3"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(phrase, chinese)
         self.assertNotIn("每個 write-capable session 前", chinese)

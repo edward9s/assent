@@ -52,14 +52,18 @@ receipt_refresh` 預設為 `"manual"`，需要之後顯式 `assent verify`；設
 
 #### 可選的有界 auto-fix
 
-若設定 `[auto_fix.review]`，它只提供有界 loop 的 policy；整個 loop 是 invocation-level
-opt-in，只有明示 `run --auto-fix` 的 invocation 才會在 folder 完成後做 folder-level 唯讀
-review。順序固定為：普通 task-focused verification、每個 distinct `DONE` task 的最後
-一次 focused sweep，然後才啟動 reviewer；`--once`/`--task` 若留下 incomplete folder，
-就延後整個 loop 且不消耗 review token。focused failure 不會啟動 reviewer。沒有
-`--auto-fix` 的普通 `run` 不會做這次 final sweep、review 或 repair。
+`[auto_fix.review]` 是可選的 reviewer override；若沒有 table，`run --auto-fix` 會用第一個
+effective worker adapter 的 `prime`/`heavy` 自動解析 reviewer，不需重跑 `assent init` 或
+編輯 `~/.assent/assent.toml`。整個 loop 是 invocation-level opt-in，只有明示 `run --auto-fix`
+的 invocation 才會在 folder 完成後做 folder-level 唯讀 review。順序固定為：普通
+task-focused verification、每個 distinct `DONE` task 的最後一次 focused sweep，然後才啟動
+completed-folder reviewer；`--once`/`--task` 若留下 incomplete folder，就延後這個 loop 且
+不消耗 review token。有 durable worker `BLOCKED` 或 focused-gate 證據的 quiescent blocked
+dependency，會走另一個 blocked-adjudication entry point。focused failure 不會啟動
+completed-folder reviewer。沒有 `--auto-fix` 的普通 `run` 不會做這次 final sweep、review 或
+repair。
 
-`assent run --auto-fix` 是該次 invocation 進入 repair 的授權，與選取正交，可和自動
+`assent run --auto-fix` 是該次 invocation 進入 repair 的唯一授權，與選取正交，可和自動
 選取、明示 folder、`...`、`--all`、`--once`、`--task`、`--verify` 合用。`--all` 會把
 同一 policy 傳給每個 child folder；`--verify` 仍只在 run 與 auto-fix loop 成功後做
 完整 verification。auto-fix 自己不建立 full candidate，也不 publish 或 accept。
@@ -70,22 +74,46 @@ task 且位於其 declared scope 的 finding，才可自動 code-preserving rewo
 `authorization: run --auto-fix`，並在該 repair round 的第一個 write-capable session 前
 持久化整輪的 fixer-profile assignments。多 task finding 與 dependency cascade 不會逐 task
 消耗 normal profile，讓 sibling 提前 escalation。變更或直接互動程式碼中遇到的既有
-technical debt，若修正局部且 focused test 可可靠驗證，也可合格；review 不做全 repository
-debt audit。未知、含糊或越界 finding 交人類處理。不會自動建立 task、還原 source、刪 source，
-絕不自動接受 folder。用盡、quota、中斷或 gate 失敗都保留 state 與編輯，之後可用
-`run --auto-fix` recovery 或交人類裁決；但若目前 `[auto_fix.review]` 被移除或 resolved
-reviewer identity 改變，repair 與 closeout 會 fail closed。
+technical debt 只有在 `COMPLETED_FOLDER + INITIAL` 引入、修正局部且 focused test 可可靠
+驗證時才合格；blocked adjudication 與 `RECHECK` 可以保留或解決 debt，但不能新增。review
+不做全 repository debt audit。reviewer 可以核准一個精確 scope addition，但只有 scheduler
+能修改 task file；worker 與 reviewer 都禁止 task-file edits。未知、含糊或越界 finding 交
+scheduler 作決定。不會自動建立 task、還原 source、刪 source，絕不自動接受 folder。用盡、
+quota、中斷或 gate 失敗都保留 state 與編輯，之後可用 `run --auto-fix` recovery 或交人類
+事後檢視；loop 內沒有 runtime human adjudication gate。若 resolved reviewer identity 改變，
+repair 與 closeout 會 fail closed。
+
+Worker 必須在 repair task journal detail 以每個 current fingerprint 一行回覆下列 exact
+provider-neutral acknowledgement；`still_blocked` 只能搭配 `BLOCKED` task，scheduler 會驗證
+JSON 與 fingerprint，且這不是改 task file、改 scope 或接受 folder 的授權：
+
+```text
+ASSENT_REPAIR_DISPOSITION {"fingerprint":"<64 lowercase hex>","disposition":"fixed|not_reproducible|still_blocked","detail":"concrete bounded evidence"}
+```
+
+Recheck 先處理之前的 current findings；仍存在的 blocker 保留原 fingerprint，新的 blocker
+必須有 repair regression 或 newly exposed existing requirement 的證據。之前集合清空後必須
+PASS；optional improvement、speculation 與重複 debt discovery 不會讓 loop 繼續。完整
+verification 仍依成功 run 的 receipt policy 或明示 `--verify` 另行執行；缺 receipt、未跑
+full suite 或沒有 complete verification 都不是 reviewer failure，只有與 task requirement
+直接相關的具體 local focused-test gap 才能是 review finding。
 
 ### 第三幕：人類審查與裁決
 
-先讀產生的 `.assent/<work folder>/_report.md`；它是零 token 的議程，包含進度、
-阻塞、checkpoint hash 與驗證狀態。再檢查相關任務與 journal、checkpoint commit
-與 diff、實作，以及 focused/full verification 證據。
+先讀產生的 `.assent/<work folder>/_report.md`；它是零 token 的議程，包含進度、阻塞、
+checkpoint hash 與驗證狀態。如果有 `TECHNICAL DEBT REVIEW REQUIRED`，讀同層的
+`_technical_debt.md`，在建議 accept 前主動告訴人類並列舉每一項 debt；每一項都要取得
+「完成的 local repair 足夠」、「追加/rework task 做具體追蹤」，或「提升成 `AGENTS.md`
+durable project rule」的明確 disposition。只默讀檔案不算完成程序。接著才檢查相關任務與
+journal、checkpoint commit 與 diff、實作，以及 focused/full verification 證據。
 
 Report 的 `Folder auto-fix` 是零 token 的 derived evidence：沒有 state file 是
 `NOT RUN`，新鮮的 review pass/fail 分別是 `PASSED (fresh)` 與 `FAILED (fresh)`，
-malformed state 或 source/task binding 改變則是 `STALE`。`FAIL` 的 current findings
-會列出，但 state 或 review `PASS` 都不是 acceptance evidence。
+malformed state 或 source/task binding 改變則是 `STALE`。它也會列出 phase、context、stage、
+original blocker、current findings/recommendations、scope decision、acknowledgement、
+profiles 與 terminal reason。如果曾有 `COMPLETED_FOLDER + INITIAL` 引入的 eligible debt，
+`_report.md` 會指向 generated `_technical_debt.md`。`FAIL` 的 current findings 會列出，
+但 state 或 review `PASS` 都不是 acceptance evidence。
 
 `DONE` 代表執行 AI 主張任務完成，不是第二個 review state，也不是人類批准。
 人類批准是明示的 `assent accept` 加上受保護的 Git integration。直接與 selected

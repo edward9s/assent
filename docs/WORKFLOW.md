@@ -70,21 +70,26 @@ receipt, and report rules are in [Verification](VERIFICATION.md).
 
 #### Optional bounded auto-fix
 
-If `[auto_fix.review]` is configured and the invocation states
-`--auto-fix`, the completed folder enters a bounded folder-level review-and-
-repair loop. The final gate order is ordinary task-focused verification, one
-final run of each distinct `DONE`-task `verify` command, then the read-only
-reviewer; an incomplete `--once`/`--task` run defers the loop and spends no
-review token. A focused failure prevents the reviewer from starting. An
-ordinary `run` without `--auto-fix` stops after its ordinary task execution and
-does not run this final sweep, review, or repair.
+If the invocation states `--auto-fix`, the completed folder enters a bounded
+folder-level review-and-repair loop. An optional `[auto_fix.review]` table
+overrides the reviewer; when absent, the first effective worker adapter at
+`prime`/`heavy` is resolved automatically. The final gate order is ordinary
+task-focused verification, one final run of each distinct `DONE`-task `verify`
+command, then the read-only reviewer; an incomplete `--once`/`--task` run
+defers this completed-folder loop and spends no review token. A quiescent
+blocked dependency with durable worker `BLOCKED` or focused-gate evidence uses
+the separate blocked-adjudication entry point. A focused failure prevents the
+completed-folder reviewer from starting. An ordinary `run` without
+`--auto-fix` stops after its ordinary task execution and does not run this
+final sweep, review, or repair.
 
 `assent run --auto-fix` is an invocation-level authorization for the repair
-half of that loop. It is orthogonal to selection and works with the implicit
-folder, explicit folders, `...`, `--all`, `--once`, `--task`, and `--verify`
-forms. With `--all`, every launched folder receives the same policy. With
-`--verify`, complete verification still happens only after the run and bounded
-loop succeed; auto-fix itself never verifies a full candidate or accepts.
+half of either entry point. It is orthogonal to selection and works with the
+implicit folder, explicit folders, `...`, `--all`, `--once`, `--task`, and
+`--verify` forms. With `--all`, every launched folder receives the same policy.
+With `--verify`, complete verification still happens only after the run and
+bounded loop succeed; auto-fix itself never verifies a full candidate or
+accepts.
 
 A failed review is written to the folder's derived `_auto_fix.toml` state and
 report. With `--auto-fix`, only findings resolved to existing tasks and their
@@ -94,27 +99,51 @@ records the reason `Automatic repair of durable folder-review findings` and
 fixer-profile assignments for the whole repair round before its first
 write-capable session. Multi-task findings and dependency cascades therefore do
 not consume the normal profile once per task. A pre-existing technical-debt
-finding is eligible when it is encountered in changed or directly interacting
-code, local to an existing task scope, and reliably testable; the review is not
-a repository-wide debt audit. Unknown, ambiguous, or out-of-scope findings stop
-for a human. No automatic task creation, source reversion, source deletion, or
-acceptance occurs. Exhaustion, interruption, quota, and failed repair gates
-preserve state and edits for a later `run --auto-fix` recovery or human
-adjudication. Recovery refuses repair and closeout if the current
-`[auto_fix.review]` is missing or its resolved reviewer identity drifted.
+finding is eligible only when it is introduced by `COMPLETED_FOLDER + INITIAL`,
+encountered in changed or directly interacting code, local to an existing task
+scope, and reliably testable; the review is not a repository-wide debt audit.
+Blocked adjudication and `RECHECK` may retain or resolve such a ledger entry
+but cannot add one. Unknown, ambiguous, or out-of-scope findings stop for a
+scheduler-owned decision. A reviewer may approve one exact scope addition, but
+only the scheduler edits the task contract; worker and reviewer task-file edits
+remain forbidden. No automatic task creation, source reversion, source
+deletion, or acceptance occurs. Exhaustion, interruption, quota, and failed
+repair gates preserve state and edits for a later opted-in recovery or human
+review; no runtime human gate is inserted into the loop. Recovery refuses
+repair and closeout if the current reviewer identity drifted.
+
+Re-review follows soft convergence: prior current findings are considered first,
+a still-present blocker keeps its fingerprint, and a new blocker needs evidence
+of a repair regression or a newly exposed existing requirement. Clearing the
+prior set requires `PASS`; optional improvements, speculation, and repeated debt
+discovery never keep the loop open. Complete verification remains a separate
+stage after a successful run under the receipt policy or explicit `--verify`.
+Missing receipts, an unrun full suite, or absent complete verification are never
+reviewer failures; only a concrete local focused-test gap tied to a task
+requirement qualifies.
 
 ### Act 3: human review and decision
 
 Start with the generated `.assent/<work folder>/_report.md`; it is the zero-token
 agenda containing progress, blockers, checkpoint hashes, and verification
-status. Then inspect the relevant task and journal files, the checkpoint commit
-and diff, the implementation, and focused/full verification evidence.
+status. If it says `TECHNICAL DEBT REVIEW REQUIRED`, read the sibling
+`_technical_debt.md`, proactively tell the human before recommending `accept`,
+and enumerate every debt item. Obtain an explicit disposition for each: the
+completed local repair is sufficient, append/rework a task for concrete
+follow-up, or promote a genuinely durable project rule to `AGENTS.md`. Merely
+reading the agenda silently is not enough. Then inspect the relevant task and
+journal files, the checkpoint commit and diff, the implementation, and
+focused/full verification evidence.
 
-The report's `Folder auto-fix` line is zero-token derived evidence: `NOT RUN`
+The report's `Folder auto-fix` section is zero-token derived evidence: `NOT RUN`
 means no state file, `PASSED (fresh)` and `FAILED (fresh)` show the current
 review verdict, and `STALE` means malformed state or a changed source/task
-binding. A `FAIL` report lists current findings, but neither that state nor a
-review `PASS` is acceptance evidence.
+binding. It also shows phase, context, stage, original blocker, findings and
+recommendations, scope decisions, acknowledgements, profiles, and terminal
+exhaustion evidence. When eligible debt has ever entered through
+`COMPLETED_FOLDER + INITIAL`, `_report.md` points to the mechanically generated
+`_technical_debt.md` agenda. Neither that state nor a review `PASS` is
+acceptance evidence.
 
 `DONE` means that the executing AI claims the task is complete. It is not a
 second review state and it is not human approval. Human approval is the

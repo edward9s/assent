@@ -143,6 +143,7 @@ def write_report(cfg: Config, plan: Plan,
     """Write the report to the task folder's _report.md (a runtime artifact, not version-controlled)."""
     path = cfg.tasks_dir / "_report.md"
     path.write_text(render_report(cfg, plan, now), encoding="utf-8")
+    _write_technical_debt_report(cfg)
     return path
 
 
@@ -205,19 +206,268 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
         freshness = "fresh"
 
     lines = [f"Folder auto-fix: {status} ({freshness})",
-             f"  Source tree: {state.source_tree}"]
+             f"  Source tree: {state.source_tree}",
+             f"  Phase: {state.phase}",
+             f"  Verdict: {state.verdict}",
+             f"  Review context: {state.review_context.upper()}",
+             f"  Review stage: {state.review_stage.upper()}",
+             f"  Original blocker: {_auto_fix_blocker_label(state)}"]
     if current_tree is not None and current_tree != state.source_tree:
         lines.append(f"  Current source tree: {current_tree}")
 
-    if state.verdict == "FAIL":
-        record = auto_fix.current_review_record(state)
-        if record.findings:
-            lines.append("  Blocking findings:")
-            for finding in record.findings:
-                owner = finding.task_id or "unassigned"
+    if state.repair_briefs:
+        for brief in state.repair_briefs:
+            evidence = _repair_brief_section(brief.brief,
+                                              "Original blocker evidence:",
+                                              "Focused command evidence:")
+            if evidence:
                 lines.append(
-                    f"    - {owner} {finding.path}: {finding.summary}")
+                    f"  Original blocker evidence ({brief.task_id}): "
+                    f"{_compact_report_text(evidence)}")
+
+    ledger = {item.fingerprint: item for item in state.findings}
+    lines.append("  Current findings and recommendations:")
+    if not state.current_finding_fingerprints:
+        lines.append("    - none (PASS / prior findings cleared)")
+    else:
+        for fingerprint in state.current_finding_fingerprints:
+            finding = ledger[fingerprint]
+            owner = finding.task_id or "unassigned"
+            lines.append(
+                f"    - {fingerprint} {owner} {finding.path}: "
+                f"{_compact_report_text(finding.summary)}")
+            lines.append(
+                f"      evidence: {_compact_report_text(finding.evidence)}")
+            lines.append(
+                f"      recommendation: "
+                f"{_compact_report_text(finding.recommendation)}")
+
+    lines.append("  Approved scope additions:")
+    if not state.approved_scope_additions:
+        lines.append("    - none")
+    else:
+        for addition in state.approved_scope_additions:
+            lines.append(
+                f"    - {addition.fingerprint} {addition.task_id}: "
+                f"{addition.path} ({addition.path_state})")
+
+    current_scope_findings = [
+        item for item in state.findings
+        if item.fingerprint in state.current_finding_fingerprints
+        and item.kind == "scope_amendment"
+    ]
+    if state.approved_scope_additions:
+        scope_status = "APPROVED (scheduler-owned exact transaction)"
+    elif current_scope_findings:
+        scope_status = "PENDING (reviewed exact decision not yet applied)"
+    else:
+        scope_status = "NONE"
+    lines.append(f"  Scope amendment: {scope_status}")
+
+    lines.append("  Repair acknowledgements:")
+    if not state.worker_dispositions:
+        lines.append("    - none recorded")
+    else:
+        for disposition in state.worker_dispositions:
+            lines.append(
+                f"    - {disposition.task_id} {disposition.fingerprint}: "
+                f"{disposition.disposition}; "
+                f"{_compact_report_text(disposition.detail)}")
+
+    lines.append("  Repair briefs:")
+    if not state.repair_briefs:
+        lines.append("    - none recorded")
+    else:
+        for brief in state.repair_briefs:
+            lines.append(
+                f"    - {brief.task_id}: "
+                f"{_compact_report_text(brief.brief)}")
+
+    lines.append("  Consumed fixer profiles:")
+    if not state.consumed_fixer_profiles:
+        lines.append("    - none")
+    else:
+        lines.extend(
+            f"    - {profile.adapter}/{profile.model}/{profile.effort}"
+            for profile in state.consumed_fixer_profiles)
+
+    if state.plan_digest_transitions:
+        lines.append("  Plan digest transitions:")
+        lines.extend(
+            f"    - {item.before_sha256} -> {item.after_sha256}"
+            for item in state.plan_digest_transitions)
+    if state.review_transitions:
+        lines.append("  Review finding transitions:")
+        lines.extend(
+            f"    - {item.fingerprint}: {item.transition}"
+            for item in state.review_transitions)
+
+    exhaustion = _auto_fix_exhaustion(plan)
+    if exhaustion is not None:
+        lines.append(f"  Exhaustion reason: {_compact_report_text(exhaustion)}")
+        lines.append("  Terminal: NONZERO / EXHAUSTED")
+    elif state.verdict == "PASS":
+        lines.append("  Terminal: PASS (acceptance still requires the human accept action)")
+    elif state.review_context == "blocked_adjudication":
+        lines.append("  Terminal: NONZERO / PENDING BLOCKED ADJUDICATION")
+    elif state.phase == "NEEDS_REPAIR":
+        lines.append("  Terminal: NONZERO / PENDING REPAIR")
+    elif state.phase == "REPAIRING":
+        lines.append("  Terminal: NONZERO / REPAIRING")
+    elif state.phase == "AWAITING_REVIEW":
+        lines.append("  Terminal: NONZERO / AWAITING REVIEW")
+    else:
+        lines.append("  Terminal: NONZERO / UNRESOLVED FINDINGS")
+
+    if _eligible_technical_debt(state):
+        lines.append(
+            "  TECHNICAL DEBT REVIEW REQUIRED: read _technical_debt.md before "
+            "recommending acceptance and enumerate every item with the human.")
     return lines
+
+
+_REPORT_TEXT_LIMIT = 360
+
+
+def _compact_report_text(value: object, limit: int = _REPORT_TEXT_LIMIT) -> str:
+    """Keep durable evidence readable in a zero-token report without losing its identity."""
+    text = " ".join(str(value).split())
+    if not text:
+        return "(none)"
+    if len(text) <= limit:
+        return text
+    return text[:limit - 15].rstrip() + " ... [truncated]"
+
+
+def _repair_brief_section(brief: str, start: str, end: str) -> str:
+    """Extract one bounded section from a scheduler-generated repair brief."""
+    if start not in brief:
+        return ""
+    section = brief.split(start, 1)[1]
+    if end in section:
+        section = section.split(end, 1)[0]
+    return section.strip()
+
+
+def _auto_fix_blocker_label(state: auto_fix.AutoFixState) -> str:
+    if state.failure_trigger == "worker_blocked":
+        return "worker BLOCKED durable evidence"
+    if state.failure_trigger == "focused_gate_failure":
+        return "focused task gate failure durable evidence"
+    if state.review_context == "completed_folder":
+        return "none (completed-folder review)"
+    return "durable blocked-review evidence"
+
+
+def _auto_fix_exhaustion(plan: Plan) -> str | None:
+    """Find the scheduler's durable finite-termination reason without starting work."""
+    for task in plan.tasks:
+        for entry in read_entries(task.journal_path):
+            if entry.get("event") != "auto_fix_exhausted":
+                continue
+            summary = str(entry.get("summary", "")).strip()
+            detail = str(entry.get("detail", "")).strip()
+            return summary or detail or "automatic repair profiles exhausted"
+    return None
+
+
+def _eligible_technical_debt(state: auto_fix.AutoFixState) -> list[auto_fix.PersistedFinding]:
+    """Return debt first introduced by an INITIAL completed-folder review.
+
+    The ledger intentionally retains resolved findings.  A transition marked
+    ``initial`` is the durable proof that the debt entered through the only
+    context allowed to introduce it; later rechecks and blocked adjudications
+    can only preserve or resolve that entry.
+    """
+    initial = {
+        item.fingerprint for item in state.review_transitions
+        if item.transition == "initial"
+    }
+    return [item for item in state.findings
+            if item.kind == "eligible_technical_debt"
+            and item.fingerprint in initial]
+
+
+def _technical_debt_report_text(
+        state: auto_fix.AutoFixState, folder: str) -> str:
+    """Render the derived human debt agenda from the durable ledger."""
+    current = set(state.current_finding_fingerprints)
+    approved = {item.fingerprint: item
+                for item in state.approved_scope_additions}
+    dispositions: dict[str, list[auto_fix.WorkerDisposition]] = {}
+    for item in state.worker_dispositions:
+        dispositions.setdefault(item.fingerprint, []).append(item)
+    transitions: dict[str, list[auto_fix.ReviewTransition]] = {}
+    for item in state.review_transitions:
+        transitions.setdefault(item.fingerprint, []).append(item)
+
+    lines = [
+        "# Technical debt review agenda (auto-generated; do not edit by hand)",
+        "",
+        "TECHNICAL DEBT REVIEW REQUIRED",
+        "",
+        f"Plan folder: {folder}",
+        "This zero-token agenda preserves eligible debt first introduced by an "
+        "INITIAL completed-folder review. It is not task status, acceptance "
+        "evidence, or permission to start another repair round.",
+    ]
+    for index, finding in enumerate(_eligible_technical_debt(state), 1):
+        outcome = ("CURRENT / unresolved in the latest review"
+                   if finding.fingerprint in current
+                   else "RESOLVED / absent from the latest current findings")
+        lines.extend([
+            "",
+            f"## Debt finding {index}: {finding.fingerprint}",
+            f"- Task: {finding.task_id or 'unassigned'}",
+            f"- Path: {finding.path}",
+            f"- Finding: {_compact_report_text(finding.summary)}",
+            f"- Evidence: {_compact_report_text(finding.evidence)}",
+            f"- Recommendation: {_compact_report_text(finding.recommendation)}",
+            f"- Outcome: {outcome}",
+        ])
+        records = dispositions.get(finding.fingerprint, [])
+        lines.append("- Repair dispositions:")
+        if records:
+            lines.extend(
+                f"  - {item.task_id}: {item.disposition}; "
+                f"{_compact_report_text(item.detail)}"
+                for item in records)
+        else:
+            lines.append("  - none recorded")
+        addition = approved.get(finding.fingerprint)
+        if addition is not None:
+            lines.append(
+                f"- Scope decision: approved exact addition "
+                f"{addition.path} ({addition.path_state}) for {addition.task_id}")
+        elif finding.scope_addition_path is not None:
+            lines.append(
+                f"- Scope decision: proposed "
+                f"{finding.scope_addition_path} ({finding.scope_addition_path_state}); "
+                "no approved transaction recorded")
+        else:
+            lines.append("- Scope decision: no scope addition")
+        history = transitions.get(finding.fingerprint, [])
+        lines.append("- Review history: " + ", ".join(
+            item.transition for item in history) if history else
+                     "- Review history: initial")
+    return "\n".join(lines) + "\n"
+
+
+def _write_technical_debt_report(cfg: Config) -> Path | None:
+    """Write the derived debt agenda when the durable state contains eligible debt."""
+    state_path = auto_fix.auto_fix_state_path(cfg)
+    if not state_path.is_file():
+        return None
+    try:
+        state = auto_fix.read_auto_fix_state(state_path)
+    except AssentError:
+        return None
+    if not _eligible_technical_debt(state):
+        return None
+    path = cfg.tasks_dir / "_technical_debt.md"
+    path.write_text(_technical_debt_report_text(state, cfg.tasks_name),
+                    encoding="utf-8")
+    return path
 
 
 def try_write_report(cfg: Config) -> None:
@@ -355,12 +605,63 @@ def _assignment_source_lines(
     return lines
 
 
+def _setting_source_label(cfg: Config, key: str) -> str:
+    """Render both the winning layer and whether it is an implicit fallback."""
+    layer = cfg.source_of(key)
+    if layer == "builtin":
+        return "builtin (built-in fallback)"
+    return f"{layer} (explicit settings layer)"
+
+
+def _review_effort_source_key(cfg: Config, review) -> str:
+    settings = cfg.adapter_settings(review.adapter)
+    tier = settings.tier_efforts.get(review.model, {})
+    if review.effort in tier:
+        return f"adapter.{review.adapter}.efforts.{review.model}.{review.effort}"
+    if review.effort in settings.efforts:
+        return f"adapter.{review.adapter}.efforts.{review.effort}"
+    return "adapter.%s.efforts.%s" % (review.adapter, review.effort)
+
+
+def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
+    """Show the fully resolved reviewer identity and each contributing layer."""
+    review = cfg.auto_fix_review
+    if review is None:
+        return ["Auto-fix reviewer: unavailable (no resolved reviewer policy)"]
+
+    if "auto_fix.review.adapter" in cfg.provenance:
+        adapter_source = _setting_source_label(
+            cfg, "auto_fix.review.adapter")
+    else:
+        adapter_source = (
+            f"{_setting_source_label(cfg, 'adapter.name')} "
+            "(first effective worker adapter fallback)")
+    model_mapping_key = (
+        f"adapter.{review.adapter}.models.{review.model}")
+    effort_mapping_key = _review_effort_source_key(cfg, review)
+    return [
+        "Auto-fix reviewer (resolved): "
+        f"{review.adapter} / {review.model}->{review.requested_model} / "
+        f"{review.effort}->{review.requested_effort}",
+        f"  reviewer adapter = {review.adapter} "
+        f"(source: {adapter_source})",
+        f"  reviewer model = {review.model} -> {review.requested_model} "
+        f"(setting source: {_setting_source_label(cfg, 'auto_fix.review.model')}; "
+        f"model mapping source: {_setting_source_label(cfg, model_mapping_key)})",
+        f"  reviewer effort = {review.effort} -> {review.requested_effort} "
+        f"(setting source: {_setting_source_label(cfg, 'auto_fix.review.effort')}; "
+        f"effort mapping source: {_setting_source_label(cfg, effort_mapping_key)})",
+    ]
+
+
 def check(cfg: Config) -> int:
     if not has_git_marker(cfg.root):
         print(GIT_REQUIRED_MESSAGE)
         return 1
 
     for line in _config_source_lines(cfg):
+        print(line)
+    for line in _auto_fix_review_source_lines(cfg):
         print(line)
 
     # The same contracts `run` refuses to start a session without.

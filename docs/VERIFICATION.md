@@ -26,14 +26,17 @@ check starts.
 
 ### Folder auto-fix review gate
 
-When `[auto_fix.review]` is configured and the invocation states
-`run --auto-fix`, the completed folder performs a folder-level read-only review
-after the final focused gate. The scheduler runs each distinct `DONE`-task
-`verify` command once more first; a failure writes the focused finding evidence
-and starts no reviewer. An incomplete `--once` or `--task` run defers the loop
-and spends no review token. A folder containing only `SKIP` tasks needs no
-implementation review. An ordinary `run` without `--auto-fix` starts neither
-this final sweep/review nor repair, even when the policy is configured.
+When the invocation states `run --auto-fix`, the completed folder performs a
+folder-level read-only review after the final focused gate. An optional
+`[auto_fix.review]` table overrides the reviewer; without it the first effective
+worker adapter at `prime`/`heavy` is resolved automatically. The scheduler runs
+each distinct `DONE`-task `verify` command once more first; a failure writes the
+focused finding evidence and starts no completed-folder reviewer. An incomplete
+`--once` or `--task` run defers that loop and spends no review token. A quiescent
+blocked dependency with durable worker `BLOCKED` or focused-gate evidence uses
+the separate blocked-adjudication entry point. A folder containing only `SKIP`
+tasks needs no implementation review. An ordinary `run` without `--auto-fix`
+starts neither this final sweep/review nor repair, even when policy is present.
 
 `run --auto-fix` is the per-invocation authorization to repair a failed review.
 It is orthogonal to run selection and remains compatible with explicit folders,
@@ -46,15 +49,30 @@ The round's assignments are persisted before its first repair session, so
 multi-task findings and dependency cascades do not escalate one task at a time.
 
 The review follows changed and directly interacting code and may report
-pre-existing technical debt only when repair is local to an existing task's
-scope and reliably tested by its focused gate. It is not a repository-wide debt
-audit. Unknown, ambiguous, or out-of-scope findings stop for a human. Automatic
-repair never creates tasks, changes task requirements or scope, reverts source,
-deletes source, accepts work, or treats `_auto_fix.toml` as a task status.
+pre-existing technical debt only when it is introduced by
+`COMPLETED_FOLDER + INITIAL`, repair is local to an existing task's scope, and
+the focused gate reliably tests it. It is not a repository-wide debt audit.
+Blocked adjudication and `RECHECK` may retain or resolve a debt entry but cannot
+add one. Unknown, ambiguous, or out-of-scope findings stop for a scheduler-owned
+decision. Automatic repair never creates tasks, changes task requirements,
+reverts source, deletes source, accepts work, or treats `_auto_fix.toml` as a
+task status. A reviewer may approve one exact scope addition, but only the
+scheduler appends it; worker and reviewer task-file edits remain forbidden.
 The reviewer must not write project or management files; Assent's before/after
 surface snapshot refuses any detected write and preserves the exact edits.
 This is cooperative prompt-plus-detection behavior under the documented
-`danger-full-access` default, not a security sandbox.
+`danger-full-access` default, not a security sandbox. There is no runtime human
+adjudication step inside the loop.
+
+The review context is either `COMPLETED_FOLDER` or `BLOCKED_ADJUDICATION`, and
+the stage is `INITIAL` or `RECHECK`. A recheck reviews prior current findings
+first, retains the fingerprint of a blocker that remains, permits a new blocker
+only for an evidenced repair regression or newly exposed existing requirement,
+and must return `PASS` once the prior set is clear. Optional improvements,
+speculative concerns, and repeated debt discovery do not keep the loop open. A
+concrete local focused-test gap tied to a task requirement may be review
+evidence; absent complete verification, a missing receipt, or an unrun full
+suite is never a reviewer failure.
 
 ### Complete candidate verification
 
@@ -98,14 +116,28 @@ The folder report also renders the derived `_auto_fix.toml` memory without
 opening an AI session. No file means `Folder auto-fix: NOT RUN (no review
 state)`; malformed state or a changed source/task binding is `STALE`; a fresh
 review `PASS` is `PASSED (fresh)`; and a fresh `FAIL` is `FAILED (fresh)` with
-its current blocking findings. The version-2 state requires `phase` and binds
-the source tree, task-plan digest, review-prompt digest, and resolved reviewer
-adapter/model/effort; it retains the finding ledger, observed states, and
+its current findings, recommendations, phase, original blocker, scope
+decisions, acknowledgements, profiles, and terminal reason. The version-3 state
+requires `phase`, `review_context`, `review_stage`, and `failure_trigger`, and
+binds the source tree, task-plan digest, review-prompt digest, and resolved
+reviewer adapter/model/effort; it retains the finding ledger, observed states,
+recommendations, scope additions, repair briefs, dispositions, transitions, and
 consumed fixer profiles. Its `NEEDS_REPAIR`, `REPAIRING`, `AWAITING_REVIEW`, and
 `COMPLETE` phases make restart boundaries explicit. It is deletable derived
 evidence, never a receipt, task status, or acceptance gate. Repair and closeout
 refuse when a pending `FAIL` has no current reviewer policy or its resolved
 reviewer identity has drifted.
+
+When an eligible debt finding was first introduced by `COMPLETED_FOLDER +
+INITIAL`, report generation creates the sibling `_technical_debt.md` agenda
+and `_report.md` says `TECHNICAL DEBT REVIEW REQUIRED`. The agenda retains the
+finding after recheck resolution and lists task, path, evidence,
+recommendation, repair disposition, current/resolved outcome, and scope
+decision. Blocked adjudication and recheck cannot create new entries. Before
+recommending acceptance, the meeting must tell the human about the flag,
+enumerate every item, and obtain a sufficient-repair, follow-up-task/rework, or
+durable-`AGENTS.md`-rule disposition for each; this is not a second approval
+state.
 
 The configured `[verification] receipt_refresh = "manual"` (the default)
 defers a folder receipt after ordinary `run` closeout. `"auto"` refreshes it
