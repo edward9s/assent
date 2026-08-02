@@ -9,18 +9,44 @@ now requires.
 Chinese literals that remain are deliberate user/upstream passthrough data."""
 import contextlib
 import io
+import json
+import re
 import subprocess
 import unittest
 from unittest import mock
 
 from assent import auto_fix, engine, gitops
 from assent.adapters import TaskResult
-from assent.plan import journal_path_for, parse_task_file, read_entries
+from assent.plan import (append_entry, journal_path_for, parse_task_file,
+                         read_entries, set_status)
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
 from tests.test_contracts import GlobalContractsMixin
 
 
 class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
+    def repair_done(self, task_path, files=None, *, requested_model="lite"):
+        def step(prompt):
+            for rel, content in (files or {}).items():
+                path = self.execution_root() / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            fingerprints = tuple(dict.fromkeys(re.findall(
+                r"(?m)^- fingerprint: ([0-9a-f]{64})$", prompt)))
+            detail = "\n".join(
+                "ASSENT_REPAIR_DISPOSITION " + json.dumps({
+                    "fingerprint": fingerprint,
+                    "disposition": "fixed",
+                    "detail": "The recovered repair now passes its focused gate.",
+                }, separators=(",", ":"), sort_keys=True)
+                for fingerprint in fingerprints)
+            set_status(task_path, "DONE")
+            append_entry(
+                journal_path_for(task_path), by="claude",
+                requested_model=requested_model, event="done",
+                summary="Recovered repair completed", detail=detail)
+            return ok_result()
+        return step
+
     def test_interrupt_preserves_edits_and_restart_uses_next_profile(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
@@ -49,9 +75,13 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
             cfg, adapter=first_worker, auto_fix_adapter=reviewer,
             auto_fix=True), 130)
         self.assertEqual(parse_task_file(task_path).status, "WIP")
+        interrupted_state = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg))
+        durable_brief = interrupted_state.repair_briefs[0].brief
+        self.assertIn(durable_brief, first_worker.calls[0][0])
 
         second_worker = ScriptedAdapter([
-            self.ai_done(task_path, {"src/value.txt": "fixed\n"},
+            self.repair_done(task_path, {"src/value.txt": "fixed\n"},
                          requested_model="prime")])
         self.assertEqual(self.run_quiet(
             cfg, adapter=second_worker, auto_fix_adapter=reviewer,
@@ -63,6 +93,11 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
         ))
         self.assertEqual((self.execution_root() / "src" / "value.txt").read_text(
             encoding="utf-8"), "fixed\n")
+        self.assertIn(durable_brief, second_worker.calls[0][0])
+        self.assertEqual(state.repair_briefs[0].brief, durable_brief)
+        self.assertEqual(
+            {item.fingerprint for item in state.worker_dispositions},
+            {auto_fix.finding_fingerprint(finding)})
 
     def test_crash_after_fixer_checkpoint_restarts_with_review_not_rework(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
@@ -79,7 +114,7 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
                 auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
         ])
         worker = ScriptedAdapter([
-            self.ai_done(task_path, {"src/value.txt": "fixed\n"})])
+            self.repair_done(task_path, {"src/value.txt": "fixed\n"})])
         original_phase_change = auto_fix.with_repair_phase
 
         def crash_before_awaiting_review(state, phase):
@@ -122,6 +157,57 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
             entry for entry in read_entries(journal_path_for(task_path))
             if entry["event"] == "auto_fix_attempt"]
         self.assertEqual(len(attempts), 1)
+
+    def test_crash_after_worker_journal_recovers_dispositions_before_recheck(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "stale value", "review evidence")
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+        ])
+        worker = ScriptedAdapter([
+            self.repair_done(task_path, {"src/value.txt": "fixed\n"})])
+        real_write = auto_fix.write_auto_fix_state
+
+        def crash_on_dispositions(path, state):
+            if state.phase == "REPAIRING" and state.worker_dispositions:
+                raise RuntimeError("simulated crash after disposition journal")
+            return real_write(path, state)
+
+        with mock.patch.object(
+                auto_fix, "write_auto_fix_state",
+                side_effect=crash_on_dispositions):
+            with self.assertRaisesRegex(RuntimeError, "disposition journal"):
+                self.run_quiet(
+                    cfg, adapter=worker, auto_fix_adapter=reviewer,
+                    auto_fix=True)
+
+        crashed = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(crashed.phase, "REPAIRING")
+        self.assertEqual(crashed.worker_dispositions, ())
+        self.assertEqual(parse_task_file(task_path).status, "DONE")
+
+        def pass_after_recovery(prompt):
+            self.assertIn(auto_fix.finding_fingerprint(finding), prompt)
+            self.assertIn(
+                "fixed; The recovered repair now passes its focused gate.",
+                prompt)
+            return TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)
+
+        restart_reviewer = ScriptedAdapter([pass_after_recovery])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([]),
+            auto_fix_adapter=restart_reviewer, auto_fix=True), 0)
+        recovered = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(len(recovered.worker_dispositions), 1)
+        self.assertEqual(len(restart_reviewer.calls), 1)
 
 
 class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):

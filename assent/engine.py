@@ -211,7 +211,10 @@ without semantic rewording, using transition = \"still_present\" and its exact
 scheduler prior_fingerprint. A new blocker is allowed only as a concrete repair
 regression (transition = \"repair_regression\") or a newly exposed violation of
 an existing task requirement (transition = \"newly_exposed\"), with concrete
-transition_evidence. Repeated technical-debt discovery is forbidden. When no
+transition_evidence. For repair_regression, that evidence must name the exact
+path changed by the repair. For newly_exposed, it must name the existing task id
+and whether the origin is its goal, behavior, acceptance, or other requirement.
+Repeated technical-debt discovery is forbidden. When no
 prior blocker remains and no qualifying new blocker is evidenced, the evidence
 is sufficient and you must immediately PASS rather than continue searching for
 improvements."""
@@ -221,19 +224,19 @@ _AUTO_FIX_REPAIR_SUFFIX = """
 This is an Assent-authorized bounded auto-fix attempt. Preserve the current
 implementation and repair the findings owned by this task; do not create tasks,
 change task requirements or scope, revert code, accept work, or delete sources.
-The complete durable folder finding ledger and all prior capability attempts
-are reproduced below. Re-evaluate current code rather than assuming an older
-finding is still present, and run this task's ordinary focused gate before
-closeout.
+The exact durable repair brief is reproduced below. Re-evaluate current code
+rather than assuming a finding is still present, and run this task's ordinary
+focused gate before closeout.
 
-Current cumulative diff relevant to this task:
-{diff_evidence}
+Durable repair brief (preserved verbatim across restart):
+{repair_brief}
 
-Durable finding ledger (current blockers are marked CURRENT):
-{finding_ledger}
-
-Previously consumed fixer profiles:
-{prior_attempts}
+Your closeout journal detail must contain exactly one line for every fingerprint
+listed under Current findings, with no unknown or duplicate fingerprint:
+ASSENT_REPAIR_DISPOSITION {{"fingerprint":"<scheduler fingerprint>","disposition":"fixed|not_reproducible|still_blocked","detail":"<nonempty concrete evidence or reason>"}}
+Use only those three JSON string fields. DONE permits fixed or
+not_reproducible; still_blocked requires BLOCKED. These acknowledgement lines
+do not replace any structural, scope, focused, or independent-review gate.
 """
 
 _AUTO_FIX_EVIDENCE_LIMIT = 64_000
@@ -1112,6 +1115,19 @@ def _auto_fix_diff(cfg: Config, old_ref: str, new_ref: str = "HEAD") -> str:
     return text.rstrip()
 
 
+def _auto_fix_changed_paths(cfg: Config, old_ref: str) -> tuple[str, ...]:
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{old_ref}..HEAD", "--"],
+        cwd=str(cfg.root), capture_output=True, encoding="utf-8",
+        errors="replace")
+    if result.returncode != 0:
+        raise AssentError(
+            "Unable to validate auto-fix repair delta paths: "
+            + _bounded_adapter_diagnostic(result.stderr or result.stdout))
+    return tuple(line.strip().replace("\\", "/")
+                 for line in result.stdout.splitlines() if line.strip())
+
+
 def _auto_fix_dependency_state(plan: Plan) -> str:
     status_by_id = {task.id: task.status for task in plan.tasks}
     lines = []
@@ -1150,7 +1166,8 @@ def _auto_fix_prior_evidence(
             f"  recommendation: {finding.recommendation}")
     lines.append("Worker dispositions:")
     lines.extend(
-        f"- {item.task_id}: {item.disposition}; {item.reason}"
+        f"- {item.task_id} {item.fingerprint}: "
+        f"{item.disposition}; {item.detail}"
         for item in state.worker_dispositions)
     if not state.worker_dispositions:
         lines.append("- none recorded")
@@ -1159,6 +1176,12 @@ def _auto_fix_prior_evidence(
         f"- {item.task_id}: {item.path} ({item.path_state})"
         for item in state.approved_scope_additions)
     if not state.approved_scope_additions:
+        lines.append("- none")
+    lines.append("Durable repair briefs:")
+    lines.extend(
+        f"--- {item.task_id} ---\n{item.brief}"
+        for item in state.repair_briefs)
+    if not state.repair_briefs:
         lines.append("- none")
     lines.append("Repair-only relevant diff:")
     lines.append(_auto_fix_diff(cfg, state.source_tree))
@@ -1436,6 +1459,10 @@ def _run_auto_fix_review_once(
                 reviewer_adapter=review.adapter,
                 reviewer_model=review.requested_model,
                 reviewer_effort=review.requested_effort)
+            state = _auto_fix_attach_repair_briefs(
+                cfg, plan, state,
+                blocker_evidence=_auto_fix_blocker_text(blockers),
+                focused_evidence="\n".join(focused_lines))
             auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
             print("Auto-fix folder review: focused verification failed; "
                   "scheduler findings were preserved and the reviewer was not started.")
@@ -1586,7 +1613,11 @@ def _run_auto_fix_review_once(
             resolved_record = auto_fix.validate_review_findings(record, plan)
             resolved_record = auto_fix.validate_review_transitions(
                 resolved_record, review_stage=review_stage,
-                previous=review_previous)
+                previous=review_previous,
+                repair_changed_paths=(
+                    _auto_fix_changed_paths(cfg, review_previous.source_tree)
+                    if review_stage == "recheck"
+                    and review_previous is not None else None))
         except AssentError as e:
             # Preserve the reviewer's concrete output even though it cannot
             # authorize a write-capable task session.
@@ -1606,6 +1637,10 @@ def _run_auto_fix_review_once(
         state = auto_fix.state_for_review(
             resolved_record, previous=review_previous, review_stage=review_stage,
             **freshness)
+        state = _auto_fix_attach_repair_briefs(
+            cfg, plan, state,
+            blocker_evidence=_auto_fix_blocker_text(blockers),
+            focused_evidence="\n".join(focused_lines))
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
         if resolved_record.verdict == "PASS":
             print("Auto-fix folder review: PASS.")
@@ -1652,22 +1687,8 @@ def _auto_fix_adapter(
             f"{adapter_name}") from e
 
 
-def _auto_fix_repair_context(
-        cfg: Config, task: Task, state: auto_fix.AutoFixState) -> str:
-    """Render the complete durable ledger, attempts, and task-relevant diff."""
-    current = set(state.current_finding_fingerprints)
-    ledger_lines = []
-    for finding in state.findings:
-        marker = "CURRENT" if finding.fingerprint in current else "HISTORY"
-        owner = finding.task_id or "unassigned"
-        ledger_lines.append(
-            f"- [{marker}] {finding.fingerprint} {owner} {finding.path}: "
-            f"{finding.summary}\n  evidence: {finding.evidence}")
-    ledger = "\n".join(ledger_lines) or "- none"
-    attempts = "\n".join(
-        f"- {item.adapter}/{item.model}/{item.effort}"
-        for item in state.consumed_fixer_profiles) or "- none"
-
+def _auto_fix_task_diff(cfg: Config, task: Task) -> str:
+    """Render the bounded cumulative source delta relevant to one task."""
     base = resolve_stack_state(cfg).base.resolved_base
     merge_base = gitops.merge_base(cfg.root, base, "HEAD")
     result = subprocess.run(
@@ -1681,9 +1702,85 @@ def _auto_fix_repair_context(
                 f"{_bounded_adapter_diagnostic(result.stderr or result.stdout)})")
     if len(diff) > _AUTO_FIX_EVIDENCE_LIMIT:
         diff = diff[:_AUTO_FIX_EVIDENCE_LIMIT] + "\n... [diff truncated]"
-    return _AUTO_FIX_REPAIR_SUFFIX.format(
-        diff_evidence=diff.rstrip(), finding_ledger=ledger,
-        prior_attempts=attempts)
+    return diff.rstrip()
+
+
+def _auto_fix_repair_briefs(
+        cfg: Config, plan: Plan, state: auto_fix.AutoFixState, *,
+        blocker_evidence: str, focused_evidence: str,
+        ) -> tuple[auto_fix.RepairBrief, ...]:
+    """Build the exact durable reviewer-to-worker handoff for this decision."""
+    current = set(state.current_finding_fingerprints)
+    finding_lines: list[str] = []
+    for finding in state.findings:
+        if finding.fingerprint not in current:
+            continue
+        addition = "none"
+        if finding.scope_addition_path is not None:
+            addition = (
+                f"{finding.scope_addition_path} "
+                f"({finding.scope_addition_path_state})")
+        finding_lines.append(
+            f"- fingerprint: {finding.fingerprint}\n"
+            f"  kind: {finding.kind}\n"
+            f"  owner: {finding.task_id or 'unassigned'}\n"
+            f"  path: {finding.path}\n"
+            f"  problem: {finding.summary}\n"
+            f"  evidence: {finding.evidence}\n"
+            f"  reviewer recommendation: {finding.recommendation}\n"
+            f"  approved scope addition: {addition}")
+    findings = "\n".join(finding_lines) or "- none"
+    additions = "\n".join(
+        f"- {item.fingerprint} {item.task_id}: {item.path} ({item.path_state})"
+        for item in state.approved_scope_additions) or "- none"
+    profiles = "\n".join(
+        f"- {item.adapter}/{item.model}/{item.effort}"
+        for item in state.consumed_fixer_profiles) or "- none"
+    fingerprints = state.current_finding_fingerprints
+    briefs = []
+    implicated = list(dict.fromkeys(
+        finding.task_id for finding in state.findings
+        if finding.fingerprint in current and finding.task_id is not None))
+    for task in _auto_fix_cascade_tasks(plan, implicated):
+        brief = (
+            f"Task: {task.id}\n"
+            f"Current findings:\n{findings}\n\n"
+            "Original blocker evidence:\n"
+            f"{blocker_evidence or '(none)'}\n\n"
+            "Focused command evidence:\n"
+            f"{focused_evidence or '(none)'}\n\n"
+            f"Approved scope additions:\n{additions}\n\n"
+            "Relevant cumulative diff:\n"
+            f"{_auto_fix_task_diff(cfg, task)}\n\n"
+            f"Prior fixer identities:\n{profiles}"
+        )
+        briefs.append(auto_fix.RepairBrief(task.id, fingerprints, brief))
+    return tuple(briefs)
+
+
+def _auto_fix_attach_repair_briefs(
+        cfg: Config, plan: Plan, state: auto_fix.AutoFixState, *,
+        blocker_evidence: str, focused_evidence: str) -> auto_fix.AutoFixState:
+    if state.verdict != "FAIL":
+        return state
+    return auto_fix.with_repair_briefs(
+        state, _auto_fix_repair_briefs(
+            cfg, plan, state, blocker_evidence=blocker_evidence,
+            focused_evidence=focused_evidence))
+
+
+def _auto_fix_repair_context(
+        task: Task, state: auto_fix.AutoFixState) -> str:
+    """Inject the exact durable brief; never reconstruct it from memory."""
+    matches = [item for item in state.repair_briefs if item.task_id == task.id]
+    if len(matches) != 1:
+        raise AssentError(
+            f"Auto-fix state has no exact durable repair brief for {task.id}")
+    brief = matches[0]
+    if brief.finding_fingerprints != state.current_finding_fingerprints:
+        raise AssentError(
+            f"Auto-fix durable repair brief for {task.id} is stale")
+    return _AUTO_FIX_REPAIR_SUFFIX.format(repair_brief=brief.brief)
 
 
 def _auto_fix_failure_state(
@@ -1900,6 +1997,101 @@ def _apply_reviewed_scope_amendments(
     return state, amended_plan, amended_contracts
 
 
+def _auto_fix_cascade_tasks(plan: Plan, implicated: list[str]) -> list[Task]:
+    """Return the finite automatic-rework dependency closure in plan order."""
+    selected = set(implicated)
+    changed = True
+    while changed:
+        changed = False
+        for task in plan.tasks:
+            if task.id in selected or not any(dep in selected for dep in task.deps):
+                continue
+            selected.add(task.id)
+            changed = True
+    return [task for task in plan.tasks
+            if task.id in selected and task.status != "SKIP"]
+
+
+def _auto_fix_profiles_are_exhausted(
+        cfg: Config, state: auto_fix.AutoFixState,
+        tasks: list[Task]) -> bool:
+    used = {(item.adapter, item.model, item.effort)
+            for item in state.consumed_fixer_profiles}
+    escalations = _auto_fix_escalation_profiles(cfg)
+    return bool(tasks) and all(not any(
+        (candidate.adapter, candidate.model, candidate.effort) not in used
+        for candidate in ((_auto_fix_profile_for_task(cfg, task),)
+                          + escalations))
+        for task in tasks)
+
+
+def _auto_fix_finish_exhausted(
+        cfg: Config, tasks: list[Task], now: Callable[[], datetime]) -> int:
+    """Terminate nonzero with durable BLOCKED evidence and no new repair round."""
+    for task in tasks:
+        fresh = parse_task_file(task.path)
+        if fresh.status != "BLOCKED":
+            set_status(task.path, "BLOCKED")
+        if not any(entry.get("event") == "auto_fix_exhausted"
+                   for entry in read_entries(task.journal_path)):
+            append_entry(
+                task.journal_path, by="scheduler", event="auto_fix_exhausted",
+                summary="Automatic repair profiles exhausted; task remains BLOCKED",
+                detail=("The folder-global finite fixer sequence has no unused "
+                        "profile. Source edits, scope amendments, findings, repair "
+                        "briefs, and journals were preserved; no further mutation "
+                        "round or interactive adjudication was started."),
+                time_str=now().isoformat(timespec="seconds"))
+    gitops.commit_if_dirty(
+        cfg.root,
+        _checkpoint_subject(
+            cfg, "auto", tasks[0], "BLOCKED (auto-fix profiles exhausted)"),
+        cfg.git_excludes)
+    print("Auto-fix profiles exhausted; unresolved tasks remain BLOCKED and "
+          "all evidence was preserved without another mutation round.")
+    return 1
+
+
+def _auto_fix_recover_dispositions(
+        state: auto_fix.AutoFixState, plan: Plan) -> auto_fix.AutoFixState:
+    """Rebuild valid post-checkpoint disposition evidence after a hard crash."""
+    expected = state.current_finding_fingerprints
+    dispositions = list(state.worker_dispositions)
+    recorded = {(item.task_id, item.fingerprint) for item in dispositions}
+    changed = False
+    for task in plan.tasks:
+        if task.status not in {"DONE", "BLOCKED"}:
+            continue
+        if all((task.id, fingerprint) in recorded for fingerprint in expected):
+            continue
+        try:
+            entries = read_entries(task.journal_path)
+        except AssentError:
+            continue
+        recovered = None
+        for entry in reversed(entries):
+            if entry.get("by") == "scheduler":
+                continue
+            try:
+                recovered = auto_fix.parse_repair_dispositions(
+                    entry.get("detail", ""), task_id=task.id,
+                    task_status=task.status,
+                    expected_fingerprints=expected)
+            except AssentError:
+                continue
+            break
+        if recovered is None:
+            continue
+        dispositions = [item for item in dispositions if item.task_id != task.id]
+        dispositions.extend(recovered)
+        recorded.update((item.task_id, item.fingerprint)
+                        for item in recovered)
+        changed = True
+    if not changed:
+        return state
+    return auto_fix.with_worker_dispositions(state, tuple(dispositions))
+
+
 def _run_auto_fix_repairs(
         cfg: Config, state: auto_fix.AutoFixState,
         rotation: _AdapterRotation, active: _ActiveTask, *,
@@ -1914,6 +2106,15 @@ def _run_auto_fix_repairs(
     if recovery_error is not None:
         print(f"Auto-fix recovery refused: {recovery_error}.")
         return 1
+    if not state.repair_briefs:
+        recovery_plan = Plan.parse(cfg.tasks_dir)
+        state = _auto_fix_attach_repair_briefs(
+            cfg, recovery_plan, state,
+            blocker_evidence="Recovered from the durable finding ledger.",
+            focused_evidence=(
+                "Recovered focused or blocker evidence is embedded in each "
+                "current finding."))
+        auto_fix.write_auto_fix_state(state_path, state)
     if state.phase == "NEEDS_REPAIR" and state.approved_scope_additions:
         authoritative_plan = (
             _authoritative_status_plan(trusted_plan)
@@ -1927,6 +2128,10 @@ def _run_auto_fix_repairs(
                 cfg, state, authoritative_plan, authoritative_contracts, now))
     while True:
         plan = Plan.parse(cfg.tasks_dir)
+        recovered_state = _auto_fix_recover_dispositions(state, plan)
+        if recovered_state != state:
+            state = recovered_state
+            auto_fix.write_auto_fix_state(state_path, state)
         try:
             record = auto_fix.validate_review_findings(
                 auto_fix.current_review_record(state), plan)
@@ -1969,6 +2174,12 @@ def _run_auto_fix_repairs(
             continue
 
         if state.phase == "NEEDS_REPAIR":
+            prospective = _auto_fix_cascade_tasks(plan, implicated)
+            if _auto_fix_profiles_are_exhausted(cfg, state, prospective):
+                owners = [task for task in prospective
+                          if task.id in set(implicated)]
+                return _auto_fix_finish_exhausted(
+                    cfg, owners or prospective, now)
             reason = "Automatic repair of durable folder-review findings"
             if rework.rework_tasks_locked(cfg, implicated, reason) != 0:
                 return 1
@@ -2017,10 +2228,12 @@ def _run_auto_fix_repairs(
         if new_profiles:
             state = auto_fix.replace_fixer_profiles(
                 state, state.consumed_fixer_profiles + tuple(new_profiles))
-            auto_fix.write_auto_fix_state(state_path, state)
+        state = auto_fix.with_worker_dispositions(state, ())
+        auto_fix.write_auto_fix_state(state_path, state)
 
         failures: list[tuple[Task, str]] = []
         round_blockers: list[_AutoFixBlockerEvidence] = []
+        round_dispositions: list[auto_fix.WorkerDisposition] = []
         for task, profile in round_assignments:
             if profile is None:
                 failures.append((task, "No unused fixer profile remains"))
@@ -2056,11 +2269,17 @@ def _run_auto_fix_repairs(
                     resumed=task.status == "WIP",
                     session_override=session,
                     profile_model=profile.model,
-                    auto_fix_context=_auto_fix_repair_context(cfg, task, state),
+                    auto_fix_context=_auto_fix_repair_context(task, state),
                     retry_limit=0, billing_is_failure=True,
-                    blocker_evidence=round_blockers)
+                    blocker_evidence=round_blockers,
+                    auto_fix_fingerprints=state.current_finding_fingerprints,
+                    repair_dispositions=round_dispositions)
                 active.task = None
                 active.session = None
+                if round_dispositions:
+                    state = auto_fix.with_worker_dispositions(
+                        state, tuple(round_dispositions))
+                    auto_fix.write_auto_fix_state(state_path, state)
                 if failure is not None:
                     failures.append((task, failure))
             except OSError as e:
@@ -2403,6 +2622,24 @@ def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
     return f"session wrote outside the isolated worktree; changes ported back ({shown})"
 
 
+def _repair_dispositions_from_journal(
+        task: Task, journal_start: int,
+        expected_fingerprints: tuple[str, ...]) -> tuple[auto_fix.WorkerDisposition, ...]:
+    """Validate the final worker-authored closeout entry for one repair session."""
+    entries = read_entries(task.journal_path)
+    worker_entries = [
+        item for item in entries[journal_start:]
+        if item.get("by") != "scheduler"
+    ]
+    if not worker_entries:
+        raise AssentError("Repair closeout has no worker-authored journal entry")
+    fresh = parse_task_file(task.path)
+    return auto_fix.parse_repair_dispositions(
+        worker_entries[-1].get("detail", ""), task_id=task.id,
+        task_status=fresh.status,
+        expected_fingerprints=expected_fingerprints)
+
+
 def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   sleep: Callable[[float], None],
                   now: Callable[[], datetime], session_state: _SessionState,
@@ -2413,6 +2650,8 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   retry_limit: int | None = None,
                   billing_is_failure: bool = False,
                   blocker_evidence: list[_AutoFixBlockerEvidence] | None = None,
+                  auto_fix_fingerprints: tuple[str, ...] = (),
+                  repair_dispositions: list[auto_fix.WorkerDisposition] | None = None,
                   ) -> str | None:
     """Run a single task's full lifecycle; internally handles quota/control resumption and
     retries, and by the end the task is DONE/BLOCKED.
@@ -2432,6 +2671,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     attempts_used = 0
     failure_reason: str | None = None
     attempted_failures: list[tuple[str, str]] = []
+    journal_start = len(read_entries(task.journal_path))
     while True:
         adapter = rotation.adapter
         adapter_name = rotation.name
@@ -2559,6 +2799,16 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 "NOT RUN: the worker adapter or structural safety gate failed first.")
         else:
             outcome, reason, focused_evidence = _evaluate(cfg, task, start_ref)
+        if outcome in {"done", "self_blocked"} and auto_fix_fingerprints:
+            try:
+                dispositions = _repair_dispositions_from_journal(
+                    task, journal_start, auto_fix_fingerprints)
+            except AssentError as e:
+                outcome = "fail"
+                reason = f"Repair disposition gate failed: {e}"
+            else:
+                if repair_dispositions is not None:
+                    repair_dispositions.extend(dispositions)
         if outcome == "done":
             print("  Acceptance passed -> creating checkpoint")
             committed = _commit_terminal_checkpoint(
@@ -2580,8 +2830,15 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                     cfg, "auto", task, "BLOCKED (execution AI self-marked)"),
                 cfg.git_excludes)
             if blocker_evidence is not None:
+                worker_entries = [
+                    item for item in read_entries(task.journal_path)[journal_start:]
+                    if item.get("by") != "scheduler"
+                ]
+                worker_reason = str(
+                    worker_entries[-1].get("summary")
+                    if worker_entries else "Execution AI self-marked BLOCKED")
                 evidence = _AutoFixBlockerEvidence(
-                    task, "worker_blocked", "Execution AI self-marked BLOCKED",
+                    task, "worker_blocked", worker_reason,
                     "NOT RUN: self-marked BLOCKED closeout legitimately skips the focused gate.")
                 blocker_evidence.append(evidence)
                 append_entry(

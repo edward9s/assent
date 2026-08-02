@@ -39,6 +39,10 @@ SCOPE_PATH_STATES = frozenset({"existing_file", "new_file"})
 REVIEW_CONTEXTS = frozenset({"completed_folder", "blocked_adjudication"})
 REVIEW_STAGES = frozenset({"initial", "recheck"})
 FAILURE_TRIGGERS = frozenset({"worker_blocked", "focused_gate_failure"})
+REPAIR_DISPOSITIONS = frozenset({
+    "fixed", "not_reproducible", "still_blocked",
+})
+REPAIR_DISPOSITION_PREFIX = "ASSENT_REPAIR_DISPOSITION "
 AUTO_FIX_PHASES = frozenset({
     "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
 })
@@ -78,7 +82,9 @@ _RECOMMENDATION_KEYS = {"fingerprint", "recommendation"}
 _APPROVED_SCOPE_ADDITION_KEYS = {
     "fingerprint", "task_id", "path", "path_state",
 }
-_WORKER_DISPOSITION_KEYS = {"task_id", "disposition", "reason"}
+_WORKER_DISPOSITION_KEYS = {
+    "task_id", "fingerprint", "disposition", "detail",
+}
 _REPAIR_BRIEF_KEYS = {"task_id", "finding_fingerprints", "brief"}
 _PLAN_DIGEST_TRANSITION_KEYS = {"before_sha256", "after_sha256"}
 _REVIEW_TRANSITION_KEYS = {
@@ -187,8 +193,9 @@ class ApprovedScopeAddition:
 @dataclass(frozen=True)
 class WorkerDisposition:
     task_id: str
+    fingerprint: str
     disposition: str
-    reason: str
+    detail: str
 
 
 @dataclass(frozen=True)
@@ -468,6 +475,18 @@ def _require_text(value: object, label: str, limit: int) -> str:
         raise AssentError(f"{label} must not be blank")
     if _CONTROL_RE.search(value):
         raise AssentError(f"{label} must not contain control characters")
+    if len(value) > limit:
+        raise AssentError(f"{label} exceeds the size limit")
+    return value
+
+
+def _require_multiline_text(value: object, label: str, limit: int) -> str:
+    if not isinstance(value, str):
+        raise AssentError(f"{label} must be a string")
+    if not value.strip():
+        raise AssentError(f"{label} must not be blank")
+    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", value):
+        raise AssentError(f"{label} must not contain unsafe control characters")
     if len(value) > limit:
         raise AssentError(f"{label} exceeds the size limit")
     return value
@@ -906,7 +925,8 @@ def validate_scope_additions(
 
 def validate_review_transitions(
         record: ReviewRecord, *, review_stage: str,
-        previous: AutoFixState | None = None) -> ReviewRecord:
+        previous: AutoFixState | None = None,
+        repair_changed_paths: Iterable[str] | None = None) -> ReviewRecord:
     """Validate scheduler-issued identity continuity for one review stage."""
     record = _validate_review_record(record)
     if review_stage not in REVIEW_STAGES:
@@ -922,6 +942,15 @@ def validate_review_transitions(
     previous = _validate_state(previous)
     current = set(previous.current_finding_fingerprints)
     ledger = {item.fingerprint: item for item in previous.findings}
+    current_locations = {
+        (ledger[fingerprint].task_id, ledger[fingerprint].path,
+         ledger[fingerprint].kind)
+        for fingerprint in current
+    }
+    changed_paths = None
+    if repair_changed_paths is not None:
+        changed_paths = tuple(
+            normalize_finding_path(path) for path in repair_changed_paths)
     for index, item in enumerate(record.findings):
         label = f"Review findings[{index}]"
         fingerprint = finding_fingerprint(item)
@@ -937,6 +966,26 @@ def validate_review_transitions(
         elif fingerprint in ledger:
             raise AssentError(
                 f"{label} {item.transition} must identify a genuinely new blocker")
+        elif (item.task_id, item.path, item.kind) in current_locations:
+            raise AssentError(
+                f"{label} is an unsupported wording variant of a current finding")
+        elif item.transition == "repair_regression" and changed_paths is not None:
+            path = item.path.rstrip("/")
+            if not any(
+                    changed == path or changed.startswith(path + "/")
+                    or path.startswith(changed.rstrip("/") + "/")
+                    for changed in changed_paths):
+                raise AssentError(
+                    f"{label} repair_regression is not tied to the repair delta")
+        elif (item.transition == "newly_exposed"
+              and repair_changed_paths is not None):
+            origin = (item.transition_evidence or "").lower()
+            task_token = (item.task_id or "").lower()
+            if (not task_token or task_token not in origin
+                    or not any(word in origin for word in (
+                        "requirement", "acceptance", "behavior", "goal"))):
+                raise AssentError(
+                    f"{label} newly_exposed does not identify an existing requirement")
     return record
 
 
@@ -972,6 +1021,22 @@ def with_repair_phase(state: AutoFixState, phase: str) -> AutoFixState:
     if phase not in {"REPAIRING", "AWAITING_REVIEW"}:
         raise AssentError("Auto-fix repair phase must be REPAIRING or AWAITING_REVIEW")
     return _validate_state(replace(state, phase=phase))
+
+
+def with_repair_briefs(
+        state: AutoFixState,
+        briefs: tuple[RepairBrief, ...]) -> AutoFixState:
+    """Persist the exact current reviewer-to-worker handoff before mutation."""
+    state = _validate_state(state)
+    return _validate_state(replace(state, repair_briefs=briefs))
+
+
+def with_worker_dispositions(
+        state: AutoFixState,
+        dispositions: tuple[WorkerDisposition, ...]) -> AutoFixState:
+    """Persist validated worker acknowledgement evidence for the next recheck."""
+    state = _validate_state(state)
+    return _validate_state(replace(state, worker_dispositions=dispositions))
 
 
 def with_plan_digest_transition(
@@ -1029,6 +1094,83 @@ def _require_digest(value: object, label: str) -> str:
     if not isinstance(value, str) or not DIGEST_RE.fullmatch(value):
         raise AssentError(f"{label} must be a 64-character lowercase hexadecimal digest")
     return value
+
+
+def parse_repair_dispositions(
+        detail: object, *, task_id: str, task_status: str,
+        expected_fingerprints: Iterable[str]) -> tuple[WorkerDisposition, ...]:
+    """Parse the exact per-finding acknowledgement contract from journal detail.
+
+    The acknowledgement is deliberately only audit evidence.  Callers still run
+    the ordinary structural, scope, focused, and independent-review gates.
+    """
+    if not isinstance(task_id, str) or not _TASK_ID_RE.fullmatch(task_id):
+        raise AssentError("Repair disposition task_id must be a tNNN task id")
+    if task_status not in {"DONE", "BLOCKED"}:
+        raise AssentError(
+            "Repair dispositions require a DONE or BLOCKED task closeout")
+    if not isinstance(detail, str):
+        raise AssentError("Repair closeout journal detail must be a string")
+    expected = tuple(expected_fingerprints)
+    if not expected:
+        raise AssentError("Repair disposition gate requires current findings")
+    if len(set(expected)) != len(expected):
+        raise AssentError("Repair disposition gate received duplicate findings")
+    for fingerprint in expected:
+        _require_digest(fingerprint, "Expected repair finding fingerprint")
+
+    parsed: dict[str, WorkerDisposition] = {}
+    token = REPAIR_DISPOSITION_PREFIX.rstrip()
+    for line_number, line in enumerate(detail.splitlines(), 1):
+        if token not in line:
+            continue
+        if not line.startswith(REPAIR_DISPOSITION_PREFIX):
+            raise AssentError(
+                f"Malformed repair disposition line {line_number}")
+        payload = line[len(REPAIR_DISPOSITION_PREFIX):]
+        try:
+            raw = json.loads(payload)
+        except json.JSONDecodeError as e:
+            raise AssentError(
+                f"Repair disposition line {line_number} is not valid JSON: {e}") from e
+        if not isinstance(raw, dict):
+            raise AssentError(
+                f"Repair disposition line {line_number} must contain a JSON object")
+        _require_exact_keys(
+            raw, {"fingerprint", "disposition", "detail"},
+            f"Repair disposition line {line_number}")
+        fingerprint = _require_digest(
+            raw["fingerprint"],
+            f"Repair disposition line {line_number} fingerprint")
+        disposition = _require_text(
+            raw["disposition"],
+            f"Repair disposition line {line_number} disposition", 100)
+        concrete_detail = _require_text(
+            raw["detail"],
+            f"Repair disposition line {line_number} detail",
+            MAX_EVIDENCE_LENGTH)
+        if disposition not in REPAIR_DISPOSITIONS:
+            raise AssentError(
+                f"Repair disposition line {line_number} has an unknown disposition")
+        if fingerprint not in expected:
+            raise AssentError(
+                f"Repair disposition line {line_number} names an unknown fingerprint")
+        if fingerprint in parsed:
+            raise AssentError(
+                f"Repair disposition line {line_number} duplicates a fingerprint")
+        if disposition == "still_blocked" and task_status != "BLOCKED":
+            raise AssentError(
+                "A still_blocked repair disposition requires BLOCKED closeout")
+        parsed[fingerprint] = WorkerDisposition(
+            task_id, fingerprint, disposition, concrete_detail)
+
+    missing = [fingerprint for fingerprint in expected
+               if fingerprint not in parsed]
+    if missing:
+        raise AssentError(
+            "Repair closeout is missing disposition fingerprints: "
+            + ", ".join(missing))
+    return tuple(parsed[fingerprint] for fingerprint in expected)
 
 
 def _require_tree(value: object, label: str) -> str:
@@ -1144,21 +1286,35 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
             raise AssentError("Auto-fix state has a duplicate approved scope addition")
         approved_seen.add(identity)
 
+    disposition_seen: set[tuple[str, str]] = set()
     for index, item in enumerate(state.worker_dispositions):
         if not isinstance(item, WorkerDisposition):
             raise AssentError(
                 f"Auto-fix state worker_dispositions[{index}] is invalid")
         if not isinstance(item.task_id, str) or not _TASK_ID_RE.fullmatch(item.task_id):
             raise AssentError("Worker disposition task_id must be a tNNN task id")
-        _require_text(item.disposition, "Worker disposition", 100)
-        _require_text(item.reason, "Worker disposition reason", MAX_EVIDENCE_LENGTH)
+        _require_digest(item.fingerprint, "Worker disposition fingerprint")
+        if item.fingerprint not in ledger:
+            raise AssentError("Worker disposition finding is absent from the ledger")
+        if item.disposition not in REPAIR_DISPOSITIONS:
+            raise AssentError("Worker disposition value is invalid")
+        _require_text(item.detail, "Worker disposition detail", MAX_EVIDENCE_LENGTH)
+        identity = (item.task_id, item.fingerprint)
+        if identity in disposition_seen:
+            raise AssentError("Auto-fix state has a duplicate worker disposition")
+        disposition_seen.add(identity)
 
+    brief_tasks: set[str] = set()
     for index, item in enumerate(state.repair_briefs):
         if not isinstance(item, RepairBrief):
             raise AssentError(f"Auto-fix state repair_briefs[{index}] is invalid")
         if not isinstance(item.task_id, str) or not _TASK_ID_RE.fullmatch(item.task_id):
             raise AssentError("Repair brief task_id must be a tNNN task id")
-        _require_text(item.brief, "Repair brief", MAX_EVIDENCE_LENGTH)
+        if item.task_id in brief_tasks:
+            raise AssentError("Auto-fix state has duplicate task repair briefs")
+        brief_tasks.add(item.task_id)
+        _require_multiline_text(
+            item.brief, "Repair brief", MAX_REVIEW_RECORD_BYTES)
         if not item.finding_fingerprints:
             raise AssentError("Repair brief must cite at least one finding")
         if len(set(item.finding_fingerprints)) != len(item.finding_fingerprints):
@@ -1322,8 +1478,9 @@ def _state_text(state: AutoFixState) -> str:
         text += (
             "\n[[worker_dispositions]]\n"
             f"task_id = {toml_string(item.task_id)}\n"
+            f"fingerprint = {toml_string(item.fingerprint)}\n"
             f"disposition = {toml_string(item.disposition)}\n"
-            f"reason = {toml_string(item.reason)}\n"
+            f"detail = {toml_string(item.detail)}\n"
         )
     for item in state.repair_briefs:
         text += (

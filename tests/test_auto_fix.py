@@ -17,7 +17,8 @@ from assent.auto_fix import (
     auto_fix_state_is_fresh,
     auto_fix_state_path, consume_fixer_profile, current_review_record,
     finding_fingerprint, next_unused_fixer_profile, normalize_finding_path,
-    parse_review_output, persisted_finding, read_auto_fix_state,
+    parse_repair_dispositions, parse_review_output, persisted_finding,
+    read_auto_fix_state,
     review_record_json, scheduler_finding_path, snapshot_project_surface,
     state_for_review, validate_review_findings, validate_review_transitions,
     validate_scope_additions,
@@ -158,13 +159,28 @@ class TestReviewRecord(unittest.TestCase):
                     ReviewRecord("FAIL", (invalid,)), review_stage="recheck",
                     previous=first)
 
+        wording_variant = replace(
+            self.finding, summary="Same blocker, cosmetically reworded",
+            transition="newly_exposed", prior_fingerprint=None,
+            transition_evidence=(
+                "t001 acceptance requirement allegedly exposes the same issue."))
+        with self.assertRaisesRegex(AssentError, "wording variant"):
+            validate_review_transitions(
+                ReviewRecord("FAIL", (wording_variant,)),
+                review_stage="recheck", previous=first)
+
         new_finding = replace(
             self.finding, path="assent/auto_fix.py",
             transition="repair_regression", prior_fingerprint=None,
             transition_evidence="The repair diff removed strict record parsing.")
         validate_review_transitions(
             ReviewRecord("FAIL", (new_finding,)), review_stage="recheck",
-            previous=first)
+            previous=first, repair_changed_paths=("assent/auto_fix.py",))
+        with self.assertRaisesRegex(AssentError, "repair delta"):
+            validate_review_transitions(
+                ReviewRecord("FAIL", (new_finding,)), review_stage="recheck",
+                previous=first,
+                repair_changed_paths=("tests/test_auto_fix.py",))
 
     def test_path_normalization_is_project_relative(self):
         self.assertEqual(normalize_finding_path("a\\b.py"), "a/b.py")
@@ -175,6 +191,39 @@ class TestReviewRecord(unittest.TestCase):
     def test_scheduler_directory_scope_becomes_a_canonical_finding_path(self):
         self.assertEqual(scheduler_finding_path("src/"), "src")
         self.assertEqual(scheduler_finding_path("src\\"), "src")
+
+    def test_repair_dispositions_are_exact_complete_and_status_compatible(self):
+        first = "1" * 64
+        second = "2" * 64
+        detail = "\n".join((
+            "Implementation notes.",
+            'ASSENT_REPAIR_DISPOSITION {"fingerprint":"' + first
+            + '","disposition":"fixed","detail":"focused case passes"}',
+            'ASSENT_REPAIR_DISPOSITION {"fingerprint":"' + second
+            + '","disposition":"not_reproducible","detail":"trace disproves it"}',
+        ))
+        parsed = parse_repair_dispositions(
+            detail, task_id="t001", task_status="DONE",
+            expected_fingerprints=(first, second))
+        self.assertEqual(
+            [(item.fingerprint, item.disposition) for item in parsed],
+            [(first, "fixed"), (second, "not_reproducible")])
+
+        invalid = (
+            detail.replace(second, first),
+            detail.splitlines()[1],
+            detail.replace('"detail":"trace disproves it"',
+                           '"detail":""'),
+            detail.replace('"disposition":"fixed"',
+                           '"disposition":"still_blocked"'),
+            detail.replace('"detail":"focused case passes"',
+                           '"detail":"focused case passes","extra":"x"'),
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(AssentError):
+                parse_repair_dispositions(
+                    value, task_id="t001", task_status="DONE",
+                    expected_fingerprints=(first, second))
 
 
 class TestScopeAdditionValidation(unittest.TestCase):
@@ -265,7 +314,8 @@ class TestAutoFixState(unittest.TestCase):
             reviewer_recommendations=(ReviewerRecommendation(
                 finding.fingerprint, finding.recommendation),),
             worker_dispositions=(WorkerDisposition(
-                "t001", "repair", "The blocker is locally repairable."),),
+                "t001", finding.fingerprint, "fixed",
+                "The focused regression now passes."),),
             repair_briefs=(RepairBrief(
                 "t001", (finding.fingerprint,),
                 "Validate and round-trip the complete version-3 schema."),),
@@ -385,7 +435,8 @@ class TestAutoFixState(unittest.TestCase):
             reviewer_effort="high", review_context="blocked_adjudication",
             review_stage="initial", failure_trigger="worker_blocked",
             worker_dispositions=(WorkerDisposition(
-                "t001", "repair", "The scope omission is mechanical."),))
+                "t001", finding_fingerprint(scope_finding), "still_blocked",
+                "The exact required path was outside scope."),))
         fingerprint = state.current_finding_fingerprints[0]
         self.assertEqual(state.approved_scope_additions, (
             ApprovedScopeAddition(

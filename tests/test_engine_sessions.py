@@ -10,6 +10,8 @@ Chinese literals that remain are deliberate user/upstream passthrough data."""
 import _thread
 import contextlib
 import io
+import json
+import re
 import threading
 import time
 import unittest
@@ -30,6 +32,30 @@ from tests.test_contracts import GlobalContractsMixin
 
 
 class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
+    def repair_done(self, task_path, files=None, *, requested_model="lite"):
+        def step(prompt):
+            for rel, content in (files or {}).items():
+                path = self.execution_root() / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            fingerprints = tuple(dict.fromkeys(re.findall(
+                r"(?m)^- fingerprint: ([0-9a-f]{64})$", prompt)))
+            self.assertTrue(fingerprints)
+            detail = "\n".join(
+                "ASSENT_REPAIR_DISPOSITION " + json.dumps({
+                    "fingerprint": fingerprint,
+                    "disposition": "fixed",
+                    "detail": "The task-focused repair and regression pass.",
+                }, separators=(",", ":"), sort_keys=True)
+                for fingerprint in fingerprints)
+            set_status(task_path, "DONE")
+            append_entry(
+                journal_path_for(task_path), by="claude",
+                requested_model=requested_model, event="done",
+                summary="Repair completed", detail=detail)
+            return ok_result()
+        return step
+
     @staticmethod
     def recheck_record(finding):
         fingerprint = auto_fix.finding_fingerprint(finding)
@@ -63,6 +89,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             self.assertIn(finding.summary, prompt)
             self.assertIn(finding.recommendation, prompt)
             self.assertIn("Worker dispositions:", prompt)
+            self.assertIn(auto_fix.finding_fingerprint(finding), prompt)
+            self.assertIn("fixed; The task-focused repair and regression pass.",
+                          prompt)
             self.assertIn("Approved scope additions:", prompt)
             self.assertIn("Repair-only relevant diff:", prompt)
             self.assertIn("Scheduler-supplied focused evidence:", prompt)
@@ -75,7 +104,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             recheck,
         ])
         worker = ScriptedAdapter([
-            self.ai_done(task_path, {"src/value.txt": "new\n"})])
+            self.repair_done(task_path, {"src/value.txt": "new\n"})])
 
         self.assertEqual(self.run_quiet(
             cfg, adapter=worker, auto_fix_adapter=reviewer,
@@ -87,12 +116,70 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                          (auto_fix.FixerProfile("claude", "lite", "normal"),))
         self.assertEqual(len(worker.calls), 1)
         self.assertEqual(len(reviewer.calls), 2)
-        self.assertIn("Durable finding ledger", worker.calls[0][0])
+        repair_prompt = worker.calls[0][0]
+        self.assertIn("Durable repair brief", repair_prompt)
+        self.assertIn(auto_fix.finding_fingerprint(finding), repair_prompt)
+        self.assertIn(finding.summary, repair_prompt)
+        self.assertIn(finding.evidence, repair_prompt)
+        self.assertIn(finding.recommendation, repair_prompt)
+        self.assertIn("Focused command evidence", repair_prompt)
+        self.assertIn("Prior fixer identities", repair_prompt)
         attempt = next(entry for entry in read_entries(journal_path_for(task_path))
                        if entry["event"] == "auto_fix_attempt")
         self.assertEqual((attempt["agent"], attempt["requested_model"],
                           attempt["requested_effort"]),
                          ("claude", "lite", "medium"))
+
+    def test_invalid_or_status_incompatible_disposition_consumes_attempt(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "value is stale", "review reproduced it")
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+            TaskResult(0, self.recheck_record(finding), False, None),
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+
+        def incompatible(prompt):
+            fingerprint = auto_fix.finding_fingerprint(finding)
+            self.assertIn(fingerprint, prompt)
+            set_status(task_path, "DONE")
+            append_entry(
+                journal_path_for(task_path), by="claude",
+                requested_model="lite", event="done", summary="Not repaired",
+                detail=("ASSENT_REPAIR_DISPOSITION " + json.dumps({
+                    "fingerprint": fingerprint,
+                    "disposition": "still_blocked",
+                    "detail": "The reproduced blocker remains.",
+                }, separators=(",", ":"), sort_keys=True)))
+            return ok_result()
+
+        worker = ScriptedAdapter([
+            incompatible,
+            self.repair_done(
+                task_path, {"src/value.txt": "fixed\n"},
+                requested_model="prime"),
+        ])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.consumed_fixer_profiles, (
+            auto_fix.FixerProfile("claude", "lite", "normal"),
+            auto_fix.FixerProfile("claude", "prime", "heavy"),
+        ))
+        self.assertEqual(len(worker.calls), 2)
+        entries = read_entries(journal_path_for(task_path))
+        self.assertTrue(any(
+            "Repair disposition gate failed" in str(item.get("summary", ""))
+            for item in entries if item.get("event") == "auto_fix_blocker"))
 
     def test_blocked_scope_omission_is_amended_before_fixer_without_handoff(self):
         task_path = self.write_task(
@@ -128,7 +215,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
         worker = ScriptedAdapter([
             blocked,
-            self.ai_done(task_path, {"src/needed.py": "value = 2\n"}),
+            self.repair_done(task_path, {"src/needed.py": "value = 2\n"}),
         ])
         self.assertEqual(self.run_quiet(
             cfg, adapter=worker, auto_fix_adapter=reviewer,
@@ -152,6 +239,14 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(state.verdict, "PASS")
         self.assertTrue(state.plan_digest_transitions)
         self.assertEqual(len(worker.calls), 2)
+        repair_prompt = worker.calls[1][0]
+        self.assertIn(auto_fix.finding_fingerprint(finding), repair_prompt)
+        self.assertIn(finding.summary, repair_prompt)
+        self.assertIn(finding.evidence, repair_prompt)
+        self.assertIn(finding.recommendation, repair_prompt)
+        self.assertIn("Exact source path is outside scope", repair_prompt)
+        self.assertIn("NOT RUN: self-marked BLOCKED", repair_prompt)
+        self.assertIn("src/needed.py (existing_file)", repair_prompt)
 
     def test_scope_amendment_resumes_after_task_write_before_state_write(self):
         task_path = self.write_task(
@@ -254,7 +349,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 auto_fix.ReviewRecord("PASS", ())), False, None),
         ])
         worker = ScriptedAdapter([
-            self.ai_done(task_path, {"src/ok.txt": "ready\n"})])
+            self.repair_done(task_path, {"src/ok.txt": "ready\n"})])
 
         self.assertEqual(self.run_quiet(
             cfg, adapter=worker, auto_fix_adapter=reviewer,
@@ -287,8 +382,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             TaskResult(0, passed, False, None),
         ])
         worker = ScriptedAdapter([
-            self.ai_done(task_path, {"src/value.txt": "partial\n"}),
-            self.ai_done(task_path, {"src/value.txt": "fixed\n"},
+            self.repair_done(task_path, {"src/value.txt": "partial\n"}),
+            self.repair_done(task_path, {"src/value.txt": "fixed\n"},
                          requested_model="prime"),
         ])
 
@@ -326,8 +421,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             TaskResult(0, passed, False, None),
         ])
         worker = ScriptedAdapter([
-            self.ai_done(first, {"src/one.txt": "new one\n"}),
-            self.ai_done(second, {"src/two.txt": "new two\n"}),
+            self.repair_done(first, {"src/one.txt": "new one\n"}),
+            self.repair_done(second, {"src/two.txt": "new two\n"}),
         ])
 
         self.assertEqual(self.run_quiet(
@@ -362,8 +457,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             TaskResult(0, passed, False, None),
         ])
         worker = ScriptedAdapter([
-            self.ai_done(first, {"src/base.txt": "new base\n"}),
-            self.ai_done(second, {"src/dependent.txt": "new dependent\n"}),
+            self.repair_done(first, {"src/base.txt": "new base\n"}),
+            self.repair_done(second, {"src/dependent.txt": "new dependent\n"}),
         ])
 
         self.assertEqual(self.run_quiet(
@@ -414,9 +509,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             auto_fix.FixerProfile("claude", "lite", "normal"),))
 
         resumed = ScriptedAdapter([
-            self.ai_done(first, {"src/one.txt": "new one\n"},
+            self.repair_done(first, {"src/one.txt": "new one\n"},
                          requested_model="prime"),
-            self.ai_done(second, {"src/two.txt": "new two\n"},
+            self.repair_done(second, {"src/two.txt": "new two\n"},
                          requested_model="prime"),
         ])
         self.assertEqual(self.run_quiet(
@@ -432,7 +527,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             auto_fix.FixerProfile("claude", "prime", "heavy"),
         ))
 
-    def test_profile_exhaustion_reopens_done_task_for_human_handoff(self):
+    def test_profile_exhaustion_ends_blocked_without_another_mutation_round(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
         source.parent.mkdir()
@@ -450,19 +545,24 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             TaskResult(0, self.recheck_record(finding), False, None),
         ])
         worker = ScriptedAdapter([
-            self.ai_done(task_path, {"src/value.txt": "attempt one\n"}),
-            self.ai_done(task_path, {"src/value.txt": "attempt two\n"},
+            self.repair_done(task_path, {"src/value.txt": "attempt one\n"}),
+            self.repair_done(task_path, {"src/value.txt": "attempt two\n"},
                          requested_model="prime"),
         ])
 
         self.assertEqual(self.run_quiet(
             cfg, adapter=worker, auto_fix_adapter=reviewer,
             auto_fix=True), 1)
-        self.assertEqual(parse_task_file(task_path).status, "TODO")
+        self.assertEqual(parse_task_file(task_path).status, "BLOCKED")
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(len(state.consumed_fixer_profiles), 2)
         self.assertEqual(len(worker.calls), 2)
         self.assertEqual(len(reviewer.calls), 3)
+        entries = read_entries(journal_path_for(task_path))
+        self.assertEqual(sum(
+            item.get("event") == "rework_requested" for item in entries), 2)
+        self.assertEqual(sum(
+            item.get("event") == "auto_fix_exhausted" for item in entries), 1)
 
 
 class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
