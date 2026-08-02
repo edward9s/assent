@@ -1171,6 +1171,24 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
             auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(drifted)),
             before)
 
+    def test_pending_fail_cannot_close_an_ordinary_run_without_auto_fix(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build_review()
+        self.commit_all()
+        before = self.write_pending_fail(cfg)
+        ordinary = self.build()
+        worker = ScriptedAdapter([])
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(ordinary, adapter=worker), 1)
+
+        self.assertEqual(worker.calls, [])
+        self.assertIn("pending FAIL state", out.getvalue())
+        self.assertEqual(
+            auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(ordinary)),
+            before)
+
     def test_invalid_response_retries_then_persists_valid_fail(self):
         self.write_task(1, status="DONE")
         cfg = self.build_review(retry=1)

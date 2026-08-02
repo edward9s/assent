@@ -180,14 +180,20 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             auto_fix.ReviewFinding(
                 "t001", "src/main.py", "Blocking implementation issue",
                 "The implementation does not satisfy the task contract."),)
+        review = cfg.auto_fix_review
+        reviewer_adapter = review.adapter if review is not None else "codex"
+        reviewer_model = (review.requested_model
+                          if review is not None else "gpt-5.6-sol")
+        reviewer_effort = (review.requested_effort
+                           if review is not None else "max")
         state = auto_fix.state_for_review(
             auto_fix.ReviewRecord(verdict, findings),
             source_tree=source_tree,
             task_plan_sha256=auto_fix.sha256_files(
                 task.path for task in plan.tasks),
             review_prompt_sha256="3" * 64,
-            reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
-            reviewer_effort="max")
+            reviewer_adapter=reviewer_adapter, reviewer_model=reviewer_model,
+            reviewer_effort=reviewer_effort)
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), state)
 
@@ -224,6 +230,26 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.commit_all("source change")
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("Folder auto-fix: STALE (source tree changed)", text)
+
+    def test_report_marks_reviewer_configuration_drift_stale(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build(extra_config=(
+            '[auto_fix.review]\n'
+            'adapter = "codex"\n'
+            'model = "prime"\n'
+            'effort = "heavy"\n'))
+        self.commit_all()
+        self._write_auto_fix_state(cfg, "PASS")
+
+        drifted = self.build(extra_config=(
+            '[auto_fix.review]\n'
+            'adapter = "codex"\n'
+            'model = "core"\n'
+            'effort = "heavy"\n'))
+        text = inspection.render_report(
+            drifted, Plan.parse(drifted.tasks_dir))
+        self.assertIn("Folder auto-fix: STALE (reviewer configuration changed)",
+                      text)
 
     def test_report_isolates_namespaced_checkpoints(self):
         self.write_task(1, status="DONE", title="目前一")

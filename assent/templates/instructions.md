@@ -221,17 +221,20 @@ not a security sandbox: the configured `danger-full-access` default remains in
 force and cannot intercept external effects.
 
 `_auto_fix.toml` is derived, deletable folder runtime memory, never a task
-file, status, source-of-truth, or acceptance record. The version-1 record
+file, status, source-of-truth, or acceptance record. The version-2 record
 contains `source_tree`, `task_plan_sha256`, `review_prompt_sha256`, the
-resolved `reviewer_adapter`, `reviewer_model`, and `reviewer_effort`, a
-`PASS`/`FAIL` `verdict`, `current_finding_fingerprints`, the cumulative
-`findings` ledger, `observed_states`, and `consumed_fixer_profiles`. Its
-finding fingerprints are scheduler identities; its consumed fixer profiles
-are ordered abstract adapter/model/effort triples. A malformed record refuses,
-and a cached `PASS` is reusable only when the source tree, task contracts,
-review prompt, and resolved reviewer identity all match exactly. The ledger
-and consumed profiles survive later observations so recovery cannot repeat a
-profile silently.
+resolved `reviewer_adapter`, `reviewer_model`, and `reviewer_effort`, the
+required recovery `phase`, a `PASS`/`FAIL` `verdict`,
+`current_finding_fingerprints`, the cumulative `findings` ledger,
+`observed_states`, and `consumed_fixer_profiles`. Its finding fingerprints are
+scheduler identities; its consumed fixer profiles are ordered abstract
+adapter/model/effort triples. The phases are `NEEDS_REPAIR`, `REPAIRING`,
+`AWAITING_REVIEW`, and `COMPLETE`; restart resumes the durable repair or
+review boundary, and a missing or drifted reviewer configuration refuses
+repair and closeout. A malformed record refuses, and a cached `PASS` is
+reusable only when the source tree, task contracts, review prompt, and resolved
+reviewer identity all match exactly. The ledger and consumed profiles survive
+later observations so recovery cannot repeat a profile silently.
 
 A `FAIL` record may be repaired only when `--auto-fix` was stated. Every
 finding must resolve to one existing task and that task's declared scope;

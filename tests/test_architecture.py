@@ -401,6 +401,21 @@ class AutoFixStateSchema(unittest.TestCase):
             "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
         }))
 
+    def test_packaged_contract_describes_the_runtime_version_two_phase_field(self) -> None:
+        contract = (ROOT / "assent" / "templates" / "format.md").read_text(
+            encoding="utf-8")
+        for phrase in (
+                "Version 2 has exactly these scalar fields",
+                "version = 2",
+                "phase = \"COMPLETE\"",
+                "NEEDS_REPAIR",
+                "REPAIRING",
+                "AWAITING_REVIEW",
+                "`COMPLETE` is valid only for a `PASS`",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, contract)
+
 
 if __name__ == "__main__":
     unittest.main()

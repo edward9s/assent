@@ -740,10 +740,15 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
 
     active = _ActiveTask()
     try:
-        existing_auto_fix = (_auto_fix_existing_state(cfg)
-                             if auto_fix_enabled else None)
+        # Read the durable state even for an ordinary run.  A pending FAIL is
+        # not an additional task status and ordinary execution may still make
+        # limited progress, but a complete folder must not silently close over
+        # unresolved review evidence just because the invocation omitted the
+        # repair authorization.
+        existing_auto_fix = _auto_fix_existing_state(cfg)
         resuming_auto_fix = bool(
-            existing_auto_fix is not None
+            auto_fix_enabled
+            and existing_auto_fix is not None
             and existing_auto_fix.verdict == "FAIL")
         if resuming_auto_fix:
             assert existing_auto_fix is not None
@@ -884,7 +889,20 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         try_write_report(cfg)
         return 1
 
-    _print_summary(Plan.parse(cfg.tasks_dir))
+    final_plan = Plan.parse(cfg.tasks_dir)
+    if not auto_fix_enabled and any(
+            task.status not in ("DONE", "SKIP") for task in final_plan.tasks):
+        _print_summary(final_plan)
+        try_write_report(cfg)
+        return 0
+    pending = _auto_fix_existing_state(cfg)
+    if pending is not None and pending.verdict == "FAIL":
+        print("Auto-fix closeout refused: the folder has a pending FAIL state; "
+              "rerun with --auto-fix and its current [auto_fix.review] policy.")
+        _print_summary(final_plan)
+        try_write_report(cfg)
+        return 1
+    _print_summary(final_plan)
     try_write_report(cfg)
     return 0
 

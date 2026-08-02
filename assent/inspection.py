@@ -182,6 +182,18 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
         if task_plan_digest != state.task_plan_sha256:
             reasons.append("task contracts changed")
 
+    # A configured reviewer identity is part of the state binding.  Keep the
+    # no-policy case readable for historical reports, but never call evidence
+    # fresh after an active policy changes underneath it.
+    review = cfg.auto_fix_review
+    if review is not None:
+        configured_reviewer = (
+            review.adapter, review.requested_model, review.requested_effort)
+        stored_reviewer = (
+            state.reviewer_adapter, state.reviewer_model, state.reviewer_effort)
+        if stored_reviewer != configured_reviewer:
+            reasons.append("reviewer configuration changed")
+
     if reasons:
         status = "STALE"
         freshness = "; ".join(reasons)

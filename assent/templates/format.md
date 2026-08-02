@@ -1001,16 +1001,19 @@ artifact. It is included in the runtime exclusions with `_assent.log`,
 `_report.md`, locks, and verification receipts; it is not a task file, a new
 task status, acceptance evidence, or a source-of-truth database. It may be
 rebuilt from the current folder run and must never be staged or committed.
-Version 1 has exactly these scalar fields and ordered table collections:
+Version 2 has exactly these scalar fields and ordered table collections. The
+`phase` field is required; it makes crash recovery explicit rather than
+inferring a repair boundary from task statuses alone:
 
 ```toml
-version = 1
+version = 2
 source_tree = "<40-or-64 lowercase hexadecimal tree id>"
 task_plan_sha256 = "<64 lowercase hexadecimal digest>"
 review_prompt_sha256 = "<64 lowercase hexadecimal digest>"
 reviewer_adapter = "<registered adapter>"
 reviewer_model = "<resolved requested model>"
 reviewer_effort = "<resolved requested effort>"
+phase = "COMPLETE"              # NEEDS_REPAIR / REPAIRING / AWAITING_REVIEW / COMPLETE
 verdict = "PASS"                 # PASS or FAIL
 current_finding_fingerprints = []
 findings = []
@@ -1041,6 +1044,15 @@ computes its identity from `task_id`, path, summary, and evidence. A `PASS`
 has no current findings; a `FAIL` has at least one. The findings ledger and
 `observed_states` retain prior evidence, while `consumed_fixer_profiles` is an
 ordered set and cannot contain duplicates.
+
+The recovery phases have fixed meanings. `NEEDS_REPAIR` is a durable `FAIL`
+awaiting an authorized rework round; `REPAIRING` means the current bounded
+fixer round was selected and its profile was persisted before any write-capable
+session; `AWAITING_REVIEW` means that round's task work completed and the same
+current reviewer must run again; and `COMPLETE` is valid only for a `PASS` with
+no current findings. A restart resumes `REPAIRING` or `AWAITING_REVIEW` from
+the stored evidence, while a missing or drifted reviewer configuration refuses
+repair and closeout rather than treating the state as a cache miss.
 
 An exact fresh `PASS` requires all of `source_tree`, `task_plan_sha256`,
 `review_prompt_sha256`, `reviewer_adapter`, `reviewer_model`, and
