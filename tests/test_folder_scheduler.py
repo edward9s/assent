@@ -266,6 +266,34 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(policies, {"alpha": True, "beta": True})
 
+    def test_parallel_auto_fix_children_receive_one_flag_each(self):
+        tasks = {
+            "alpha": self.make_folder("alpha"),
+            "beta": self.make_folder("beta"),
+        }
+        commands = []
+        real_popen = subprocess.Popen
+
+        def fake_popen(command, *args, **options):
+            if command and command[0] == "git":
+                return real_popen(command, *args, **options)
+            commands.append(command)
+            return FinishedProcess(tasks[command[4]])
+
+        with patch("assent.folder_scheduler.subprocess.Popen",
+                   side_effect=fake_popen):
+            code = run_all(str(self.config), self.assent_dir,
+                           jobs=2, auto_fix=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual({command[4] for command in commands},
+                         {"alpha", "beta"})
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            self.assertEqual(command.count("--auto-fix"), 1)
+            self.assertLess(command.index("--auto-fix"),
+                            command.index("--config"))
+
     def test_merged_stderr_bad_utf8_and_unterminated_line_are_forwarded(self):
         task = self.make_folder("encoded")
         out = io.StringIO()
