@@ -941,26 +941,31 @@ never deletes source before that proof.
 
 ### Opt-in folder review and bounded repair
 
-The optional `[auto_fix.review]` table configures one folder-level reviewer.
-Its presence enables a read-only review after a completed `run`; the command
-flag is the separate invocation-level authorization for repair:
+The optional `[auto_fix.review]` table supplies the policy for one folder-level
+reviewer. The entire bounded review-and-repair loop is invocation-level opt-in:
+only a `run` that states `--auto-fix` starts the read-only review and authorizes
+repair:
 
 ```text
 assent run FOLDER --auto-fix
 ```
 
-`--auto-fix` is selection-orthogonal. It is forwarded unchanged for an
+`--auto-fix` is selection-orthogonal. It is the opt-in for the entire loop and
+is forwarded unchanged for an
 automatically selected folder, an explicit one-folder or multi-folder
 selection, a prefix plus `...`, and `--all`; it is also compatible with
 `--once`, `--task`, and `--verify`. Those selectors retain their own ordering,
 limited-run, and complete-verification contracts. A limited run that leaves
-the folder incomplete defers the folder review and spends no reviewer token.
-With `--verify`, the optional complete verification remains after a successful
-run and successful auto-fix loop; auto-fix itself is not full verification and
+the folder incomplete defers the loop and spends no reviewer token. An
+ordinary `run` without `--auto-fix` starts neither the final focused sweep,
+review, nor repair, even when `[auto_fix.review]` is configured. With
+`--verify`, the optional complete verification remains after a successful run
+and successful auto-fix loop; auto-fix itself is not full verification and
 never accepts. Without `[auto_fix.review]`, `--auto-fix` has no configured
 reviewer or repair policy to run.
 
-The lifecycle is deliberately folder-level and ordered:
+For an invocation that states `--auto-fix`, the bounded lifecycle is
+deliberately folder-level and ordered:
 
 1. Run each selected task session and its ordinary focused gate.
 2. Once every task is `DONE` or `SKIP`, run each distinct `DONE`-task `verify`
@@ -1084,13 +1089,15 @@ An interruption, quota wait, adapter failure, or failed focused repair keeps
 the edits and runtime state. A later `run --auto-fix` resumes an existing
 `FAIL` state, carries its durable ledger into the next repair prompt, resumes
 WIP work, and skips profiles already consumed. Running without the flag can
-continue ordinary task execution and read-only review, but never authorizes a
-repair. The full lifecycle remains:
+continue ordinary task execution, but neither starts this review nor
+authorizes repair. The full lifecycle for an explicitly opted-in invocation
+remains:
 
 ```text
-run -> focused task gates -> final focused sweep -> read-only folder review
-     -> (optional --auto-fix: reason-bearing rework -> repair -> focused sweep
-         -> review, within finite profiles)
+run -> focused task gates
+     -> (explicit --auto-fix: final focused sweep -> read-only folder review
+         -> reason-bearing rework -> repair -> focused sweep -> review,
+            within finite profiles)
      -> optional complete verify -> human review -> accept -> clean
 ```
 

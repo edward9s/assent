@@ -96,14 +96,16 @@ session output, without a parent scheduler prefix.
 
 ### Auto-fix recovery and write boundary
 
-When `[auto_fix.review]` is configured, the final folder review is read-only.
-`run --auto-fix` authorizes a failed review to reopen existing in-scope tasks
-with the reason-bearing automatic rework; it does not create tasks, revert
-source, delete source, or accept a folder. Each fixer profile is written to
-`_auto_fix.toml` before its write-capable session starts, so a process failure
-cannot silently make a profile available again. The finding ledger, consumed
-profiles, WIP checkpoints, and edits survive interruption, quota, adapter
-failure, and failed focused gates.
+When `[auto_fix.review]` is configured, it supplies the policy for the bounded
+loop, but only an invocation of `run --auto-fix` starts the final folder review
+and authorizes repair. The review is read-only; an ordinary `run` without the
+flag starts neither review nor repair. A failed review in an authorized run may
+reopen existing in-scope tasks with the reason-bearing automatic rework; it
+does not create tasks, revert source, delete source, or accept a folder. Each
+fixer profile is written to `_auto_fix.toml` before its write-capable session
+starts, so a process failure cannot silently make a profile available again.
+The finding ledger, consumed profiles, WIP checkpoints, and edits survive
+interruption, quota, adapter failure, and failed focused gates.
 
 A later `run --auto-fix` resumes the existing `FAIL` state and skips consumed
 profiles. Profile exhaustion is a deliberate finite handoff to human

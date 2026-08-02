@@ -598,6 +598,8 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(document=name):
                 self.assertIn("run --auto-fix", compact)
                 self.assertIn("read-only", compact)
+                self.assertIn("without", compact)
+                self.assertIn("repair", compact)
         english_contract = " ".join(" ".join(text.split())
                                     for text in english.values())
         for phrase in required:
@@ -629,6 +631,9 @@ class TestContractContent(unittest.TestCase):
         self.assertIn('# model = "prime"', configuration)
         self.assertIn('# effort = "heavy"', configuration)
         self.assertIn("different vendor from the worker rotation", configuration)
+        self.assertIn("only an explicit `run --auto-fix` invocation starts the review",
+                      configuration)
+        self.assertIn("ordinary run without the flag does neither", configuration)
 
         chinese = {
             "WORKFLOW.zh-TW.md": (root / "docs/zh-TW/WORKFLOW.md").read_text(

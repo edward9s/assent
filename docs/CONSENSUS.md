@@ -489,12 +489,13 @@ suffices.
 ## Opt-in folder review and bounded repair consensus
 
 The ordinary review path remains human-driven. `[auto_fix.review]` may configure
-one folder-level reviewer, but the reviewer is read-only and runs only after a
-completed folder's final distinct focused checks pass. `run --auto-fix` is the
-invocation-level, selection-orthogonal authorization for the repair half; it
-works with the normal run selectors, including explicit folders, `...`,
-`--all`, `--once`, `--task`, and `--verify`. It never turns review into
-acceptance or a full candidate verification.
+one folder-level reviewer, but the entire bounded loop is invocation-level
+opt-in: only `run --auto-fix` starts the read-only reviewer after a completed
+folder's final distinct focused checks pass and authorizes the repair half. An
+ordinary `run` without the flag starts neither review nor repair. The flag is
+selection-orthogonal and works with the normal run selectors, including
+explicit folders, `...`, `--all`, `--once`, `--task`, and `--verify`. It never
+turns review into acceptance or a full candidate verification.
 
 The reviewer follows the cumulative diff and directly interacting code. It may
 report eligible pre-existing technical debt when a local repair fits an

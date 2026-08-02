@@ -75,12 +75,13 @@ Scheduler 不會在失敗時 revert workspace。失敗 review 的程式碼保留
 
 ### Auto-fix recovery 與寫入邊界
 
-設定 `[auto_fix.review]` 後，folder final review 仍是唯讀。`run --auto-fix` 才授權 FAIL
-review 以帶理由的 automatic rework 重開既有 scope 內 task；不會建立 task、還原 source、
-刪 source 或 accept。每個 fixer profile 都在 write-capable session 開始前寫入
-`_auto_fix.toml`，因此 process failure 不會讓 profile 悄悄恢復可用。Finding ledger、
-consumed profiles、WIP checkpoint 與編輯會在中斷、quota、adapter failure 及 focused gate
-失敗後保留。
+設定 `[auto_fix.review]` 只提供 bounded loop 的 policy，只有 `run --auto-fix` invocation
+才會啟動 folder final review 並授權 repair；review 仍是唯讀。沒有 flag 的普通 `run` 不會
+review，也不會 repair。FAIL review 以帶理由的 automatic rework 重開既有 scope 內 task；
+不會建立 task、還原 source、刪 source 或 accept。每個 fixer profile 都在 write-capable
+session 開始前寫入 `_auto_fix.toml`，因此 process failure 不會讓 profile 悄悄恢復可用。
+Finding ledger、consumed profiles、WIP checkpoint 與編輯會在中斷、quota、adapter failure
+及 focused gate 失敗後保留。
 
 之後的 `run --auto-fix` 會讀取既有 FAIL state、跳過已消耗 profile 並恢復 WIP。Profile
 用盡是有限的 human handoff，不是持續重試或撤銷程式碼的指令。Report 只以 derived runtime

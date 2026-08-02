@@ -109,11 +109,13 @@ and `--verify`. The flag is forwarded to each selected folder in the command's
 existing order; it does not mean `--all`, change cardinality, or alter the
 remainder rules. With `--all`, each child folder receives the same policy.
 
-The project must configure `[auto_fix.review]` for a reviewer. A configured
-review runs at folder closeout only after all task-focused gates and the final
-distinct focused sweep pass. The reviewer is read-only. A `FAIL` may enter
-automatic repair only when this invocation stated `--auto-fix`; an incomplete
-limited run defers the review, and a focused failure starts no reviewer.
+The project must configure `[auto_fix.review]` for the bounded loop. The entire
+loop is invocation-level opt-in: only a run that states `--auto-fix` performs
+the final distinct focused sweep and folder-closeout review. The reviewer is
+read-only, and a `FAIL` may enter automatic repair only in that same invocation.
+An ordinary run without `--auto-fix` starts neither the sweep/review nor repair;
+an incomplete limited run defers the loop, and a focused failure starts no
+reviewer.
 
 Automatic repair reopens only existing tasks whose declared scopes own the
 findings, records a reason-bearing code-preserving rework, and consumes a

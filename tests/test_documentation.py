@@ -211,6 +211,55 @@ class DocumentationTests(unittest.TestCase):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(phrase, chinese)
 
+    def test_readme_auto_fix_contracts_stay_in_parity(self):
+        """The two onboarding pages must expose the same opt-in boundaries."""
+        readmes = {
+            "README.md": _read(Path("README.md")),
+            "README.zh-TW.md": _read(Path("README.zh-TW.md")),
+        }
+        required = {
+            "README.md": (
+                "## Optional bounded auto-fix",
+                "`[auto_fix.review]`",
+                "`assent run --auto-fix`",
+                "An ordinary `assent run` without the flag starts neither review nor repair.",
+                "read-only",
+                "pre-existing technical debt",
+                "directly interacting code",
+                "unbounded repository-wide debt audit",
+                "finite sequence of fixer profiles",
+                "never creates tasks",
+                "reverts source",
+                "deletes source",
+                "accepts a folder",
+                "`_auto_fix.toml`",
+            ),
+            "README.zh-TW.md": (
+                "## 可選的有界 auto-fix",
+                "`[auto_fix.review]`",
+                "`assent run --auto-fix`",
+                "沒有 flag 的普通 `assent run` 不會啟動 review，也不會 repair。",
+                "唯讀",
+                "既有 technical debt",
+                "直接互動的程式碼",
+                "全 repository debt audit",
+                "有限 fixer profile",
+                "不會自動建立 task",
+                "還原 source",
+                "刪 source",
+                "絕不自動接受 folder",
+                "`_auto_fix.toml`",
+            ),
+        }
+        for name, text in readmes.items():
+            compact = " ".join(text.split())
+            for phrase in required[name]:
+                with self.subTest(readme=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+
+        self.assertNotIn("Never accept or rework automatically", readmes["README.md"])
+        self.assertNotIn("絕不要自動 accept 或 rework", readmes["README.zh-TW.md"])
+
 
 if __name__ == "__main__":
     unittest.main()

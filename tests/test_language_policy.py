@@ -251,6 +251,7 @@ class LanguagePolicyTests(unittest.TestCase):
                 self.assertIn("run --auto-fix", text)
 
         chinese_paths = [
+            Path("README.zh-TW.md"),
             Path("docs/zh-TW/WORKFLOW.md"),
             Path("docs/zh-TW/COMMANDS.md"),
             Path("docs/zh-TW/CONFIGURATION.md"),

@@ -89,11 +89,13 @@ upstream commit. See [Workflow](docs/WORKFLOW.md) and
 ## Optional bounded auto-fix
 
 Configure `[auto_fix.review]` when a project wants a final, folder-level AI
-review. The reviewer runs read-only after all task-focused checks and the final
-distinct focused sweep pass. An explicit `assent run --auto-fix` authorizes the
-bounded repair loop for that invocation; it is compatible with the normal run
-selectors, including explicit folders, `...`, `--all`, `--once`, `--task`, and
-`--verify`. A limited run that leaves work incomplete defers the review.
+review-and-repair loop. The configuration supplies the policy; only an explicit
+`assent run --auto-fix` starts the read-only review after all task-focused checks
+and the final distinct focused sweep, and authorizes bounded repair for that
+invocation. An ordinary `assent run` without the flag starts neither review nor
+repair. The flag is compatible with the normal run selectors, including
+explicit folders, `...`, `--all`, `--once`, `--task`, and `--verify`. A limited
+run that leaves work incomplete defers the loop.
 
 The reviewer may identify a regression, an unmet requirement, or eligible
 pre-existing technical debt encountered in the changed and directly
@@ -151,8 +153,9 @@ authorization; it still never accepts a folder.
 ```
 
 The ordinary reviewer does not mutate the worktree while forming findings. The
-configured auto-fix reviewer is also read-only and uses prompt-plus-detection
-write refusal before any repair session. Human acceptance remains
+configured auto-fix reviewer is also read-only, runs only for an explicit
+`run --auto-fix`, and uses prompt-plus-detection write refusal before any repair
+session. Human acceptance remains
 `assent accept <FOLDER>` (or an explicitly selected batch), and human rework
 remains `assent rework <FOLDER> <TASK>`.
 
@@ -190,9 +193,10 @@ translations and identify English as the source of truth. The specialized
 - A worktree is an isolation and audit boundary, not a security sandbox:
   unattended AI still has the OS identity's access to credentials, network,
   external Git writers, and files outside the worktree.
-- `[auto_fix.review]` is a configured read-only folder review; only an explicit
-  `run --auto-fix` authorizes its finite, code-preserving repair loop. Its
-  derived `_auto_fix.toml` state is never acceptance, and `accept` remains a
+- `[auto_fix.review]` supplies the bounded folder-review policy; only an
+  explicit `run --auto-fix` starts its read-only review and finite,
+  code-preserving repair loop. An ordinary `run` without the flag does neither.
+  Its derived `_auto_fix.toml` state is never acceptance, and `accept` remains a
   human action.
 
 For exact selection rules, receipt freshness, shared ignored-input review,

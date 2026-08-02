@@ -25,9 +25,10 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 # whether the integration candidate is green.
 # receipt_refresh = "manual"
 
-# Optional folder-level AI review. The table's presence enables the configured
-# read-only review after a folder's completed task run; `run --auto-fix` is the
-# invocation-level authorization to repair a failed review. It never accepts.
+# Optional bounded folder-level AI review and repair. The table supplies the
+# policy, but only an explicit `run --auto-fix` invocation starts the review
+# and authorizes repair; an ordinary run without the flag does neither. It
+# never accepts.
 # [auto_fix.review]
 # adapter = "antigravity"        # any registered adapter; may differ from the worker rotation
 # model = "prime"                # abstract tier only: prime | core | lite

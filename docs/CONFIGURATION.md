@@ -259,15 +259,15 @@ model = "prime"               # abstract tier
 effort = "heavy"              # abstract effort
 ```
 
-The table enables a read-only review after a complete folder run. The
-invocation-level `assent run --auto-fix` flag authorizes the bounded repair
-half; without the flag, a failed review is preserved for human adjudication.
-The flag is independent of folder selection and can accompany explicit,
-remainder, `--all`, `--once`, `--task`, and `--verify` run forms. The reviewer
-identity stored in `_auto_fix.toml` is the resolved adapter plus actual CLI
-model and effort, not an unverified reviewer-supplied identity. A configured
-reviewer remains read-only, and prompt-plus-detection write refusal is not a
-security sandbox.
+The table supplies the policy for a bounded read-only review-and-repair loop;
+only the invocation-level `assent run --auto-fix` flag starts the loop and
+authorizes its repair half. An ordinary run without the flag starts neither the
+review nor repair. The flag is independent of folder selection and can
+accompany explicit, remainder, `--all`, `--once`, `--task`, and `--verify` run
+forms. The reviewer identity stored in `_auto_fix.toml` is the resolved adapter
+plus actual CLI model and effort, not an unverified reviewer-supplied identity.
+A configured reviewer remains read-only, and prompt-plus-detection write
+refusal is not a security sandbox.
 
 Automatic repair uses the worker rotation's finite abstract profiles, records
 each profile before its write-capable session, and reopens only existing

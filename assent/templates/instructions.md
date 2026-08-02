@@ -192,16 +192,18 @@ and account environments; Assent does not create a container or VM sandbox.
 
 ## Opt-in folder review and bounded repair
 
-When `[auto_fix.review]` is configured, a completed folder run performs one
-folder-level, read-only review after the final focused checks. The reviewer is
-configured by a registered adapter plus the abstract `prime`/`core`/`lite`
-model and `heavy`/`normal`/`slight` effort values; the adapter mapping resolves
-the actual CLI identity and may name a vendor outside the worker rotation.
-`run --auto-fix` is the invocation-level authorization to continue from a
-failed review into repair. It is orthogonal to selection and may accompany an
-implicit folder, explicit folders, `...`, `--all`, `--once`, `--task`, or
-`--verify`; the ordinary selection and verification rules still apply. Without
-`[auto_fix.review]`, the flag has no reviewer or repair policy to authorize.
+When `[auto_fix.review]` is configured, it supplies the policy for the bounded
+folder review-and-repair loop. The entire loop is invocation-level opt-in:
+only `run --auto-fix` starts its folder-level, read-only review after the final
+focused checks and authorizes repair. An ordinary `run` without the flag starts
+neither the review nor repair. The reviewer is configured by a registered
+adapter plus the abstract `prime`/`core`/`lite` model and
+`heavy`/`normal`/`slight` effort values; the adapter mapping resolves the actual
+CLI identity and may name a vendor outside the worker rotation. The flag is
+orthogonal to selection and may accompany an implicit folder, explicit folders,
+`...`, `--all`, `--once`, `--task`, or `--verify`; the ordinary selection and
+verification rules still apply. Without `[auto_fix.review]`, the flag has no
+reviewer or repair policy to authorize.
 
 The order is fixed: task sessions run their ordinary focused gates; when the
 folder is complete, each distinct `DONE`-task `verify` command runs once more;
@@ -254,9 +256,10 @@ automatic code reversion or task creation follows.
 Interruption, quota exhaustion, adapter failure, and a failed repair gate keep
 all edits and state. A later `run --auto-fix` reads the existing `FAIL` state,
 resumes WIP work, and consumes only unused profiles. Running without the flag
-does not authorize repair. A human may inspect the report and use explicit
-`rework`, `reject`, `verify`, or `accept` actions; a review `PASS`, an auto-fix
-state, or a full verification receipt never accepts a folder.
+continues ordinary task execution only; it neither starts this review nor
+authorizes repair. A human may inspect the report and use explicit `rework`,
+`reject`, `verify`, or `accept` actions; a review `PASS`, an auto-fix state, or
+a full verification receipt never accepts a folder.
 
 ## Task session closeout (when scheduled by assent)
 

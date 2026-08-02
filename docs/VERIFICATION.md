@@ -26,12 +26,14 @@ check starts.
 
 ### Folder auto-fix review gate
 
-When `[auto_fix.review]` is configured, a completed folder run performs a
-folder-level read-only review after the final focused gate. The scheduler runs
-each distinct `DONE`-task `verify` command once more first; a failure writes
-the focused finding evidence and starts no reviewer. An incomplete `--once` or
-`--task` run defers the review and spends no review token. A folder containing
-only `SKIP` tasks needs no implementation review.
+When `[auto_fix.review]` is configured and the invocation states
+`run --auto-fix`, the completed folder performs a folder-level read-only review
+after the final focused gate. The scheduler runs each distinct `DONE`-task
+`verify` command once more first; a failure writes the focused finding evidence
+and starts no reviewer. An incomplete `--once` or `--task` run defers the loop
+and spends no review token. A folder containing only `SKIP` tasks needs no
+implementation review. An ordinary `run` without `--auto-fix` starts neither
+this final sweep/review nor repair, even when the policy is configured.
 
 `run --auto-fix` is the per-invocation authorization to repair a failed review.
 It is orthogonal to run selection and remains compatible with explicit folders,

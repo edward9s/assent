@@ -75,11 +75,13 @@ while operating an assent-managed session live in
 - Human approval is the explicit `assent accept FOLDER` action plus the resulting
   Git integration; do not add a second per-task `review` state alongside task
   execution status.
-- `run --auto-fix` is an invocation-level, selection-orthogonal opt-in. A
-  configured folder review is folder-level and read-only; it runs only after
-  the completed folder's distinct focused checks pass. Repair may automatically
-  reopen only existing tasks implicated by a finding, and may include
-  pre-existing technical debt encountered in the changed and directly
+- `run --auto-fix` is the invocation-level, selection-orthogonal opt-in for the
+  entire bounded folder review-and-repair loop. A configured folder review is
+  folder-level and read-only; it runs only for an invocation that states
+  `--auto-fix`, after the completed folder's distinct focused checks pass. An
+  ordinary `run` without the flag starts neither the review nor repair. Repair
+  may automatically reopen only existing tasks implicated by a finding, and may
+  include pre-existing technical debt encountered in the changed and directly
   interacting code when the repair is local to that task's scope and reliably
   testable. Each automatic rework carries its reason, consumes a finite fixer
   profile before the write-capable session starts, and preserves code by

@@ -226,13 +226,13 @@ model = "prime"               # 抽象 tier
 effort = "heavy"              # 抽象 effort
 ```
 
-設定 table 後，completed folder run 才會在最後 focused gate 後做唯讀 review；明示
-`assent run --auto-fix` 才授權該次 invocation 進入有界 repair，沒有 flag 時 FAIL 只
-留給人類裁決。這個 flag 與 folder selection 正交，可和明示、remainder、`--all`、
-`--once`、`--task`、`--verify` 的 run 形式合用。`_auto_fix.toml` 保存的是 resolved
-adapter 與實際 CLI model/effort，加上 finding ledger 與 consumed profile，不接受 reviewer
-自己聲稱的 identity。唯讀 review 的 prompt-plus-detection write refusal 仍不是 security
-sandbox。
+設定 table 只提供 bounded read-only review-and-repair loop 的 policy；只有明示
+`assent run --auto-fix` 才啟動該次 invocation 的 review 並授權 repair。沒有 flag 的普通
+run 不會 review，也不會 repair。這個 flag 與 folder selection 正交，可和明示、remainder、
+`--all`、`--once`、`--task`、`--verify` 的 run 形式合用。`_auto_fix.toml` 保存的是
+resolved adapter 與實際 CLI model/effort，加上 finding ledger 與 consumed profile，不
+接受 reviewer 自己聲稱的 identity。唯讀 review 的 prompt-plus-detection write refusal
+仍不是 security sandbox。
 
 Repair 使用 worker rotation 的有限 abstract profile，每個 write-capable session 前先
 記錄 profile，只會以理由 `Automatic repair of durable folder-review findings` 重開既有

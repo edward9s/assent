@@ -89,9 +89,11 @@ snapshot，不是 `--all` 的別名。和 `--all` 合用、重複、或不在最
 `--task` 與 `--verify`。它不代表 `--all`、不改變 cardinality 或 remainder 規則，會
 依 command 原本順序傳給每個選取 folder；`--all` 的每個 child folder 都收到同一 policy。
 
-專案必須設定 `[auto_fix.review]` 才有 reviewer。所有 task-focused gate 與最後 distinct
-focused sweep 通過後才做 folder-level 唯讀 review；受限執行不完整會延後，focused
-failure 不會開 reviewer。沒有明示 `--auto-fix` 時，FAIL 只保留給人類裁決。
+專案必須設定 `[auto_fix.review]` 才有這個 bounded loop 的 policy。整個 loop 是
+invocation-level opt-in，只有明示 `--auto-fix` 的 run 才會在所有 task-focused gate 與
+最後 distinct focused sweep 通過後做 folder-level 唯讀 review；同一次 invocation 的
+FAIL 才能進入 automatic repair。沒有 `--auto-fix` 的普通 run 不會做 final sweep、review
+或 repair；受限執行不完整會延後，focused failure 不會開 reviewer。
 
 自動修正只重開 finding 所有權明確且位於 declared scope 的既有 task，記錄帶理由且
 保留程式碼的 rework，並在每個 write-capable session 前消耗有限 fixer profile。變更或

@@ -372,11 +372,12 @@ audio 或 video 欄位,不提供 adapter 附件協定,不推測模型的媒體�
 
 ## 有界 folder review 與 auto-fix 共識
 
-一般 review 仍由人類主導。`[auto_fix.review]` 可設定一個 folder-level reviewer，但
-reviewer 必須唯讀，且只有在 completed folder 的最後 distinct focused checks 通過後才
-啟動。`run --auto-fix` 是 invocation-level、與選取正交的 repair 授權，可和明示 folder、
-`...`、`--all`、`--once`、`--task`、`--verify` 等一般 run selector 合用；它不會把 review
-變成 acceptance，也不是 full candidate verification。
+一般 review 仍由人類主導。`[auto_fix.review]` 可設定一個 folder-level reviewer，但整個
+bounded loop 都是 invocation-level opt-in；只有明示 `run --auto-fix` 才會在 completed
+folder 的最後 distinct focused checks 通過後啟動唯讀 reviewer，並授權 repair。沒有 flag
+的普通 `run` 不會 review 或 repair。這個 flag 與選取正交，可和明示 folder、`...`、
+`--all`、`--once`、`--task`、`--verify` 等一般 run selector 合用；它不會把 review 變成
+acceptance，也不是 full candidate verification。
 
 Reviewer 依循 cumulative diff 與 directly interacting code。若既有 technical debt 的
 修正局部於既有 task 的 declared scope，且 focused test 能可靠驗證，就可回報為合格 finding；

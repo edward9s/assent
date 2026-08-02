@@ -20,10 +20,12 @@
 
 ### Folder auto-fix review gate
 
-若設定 `[auto_fix.review]`，completed folder run 會在最後 focused gate 後做 folder-level
-唯讀 review。Scheduler 先再跑每個 distinct `DONE` task 的 `verify` 一次；任何 failure
-都只寫 focused finding evidence，不啟動 reviewer。`--once` 或 `--task` 若留下 incomplete
-folder，會延後 review 且不消耗 token；只有 `SKIP` 的 folder 不需要 implementation review。
+若設定 `[auto_fix.review]`，且 invocation 明示 `run --auto-fix`，completed folder 才會在
+最後 focused gate 後做 folder-level 唯讀 review。Scheduler 先再跑每個 distinct `DONE` task
+的 `verify` 一次；任何 failure 都只寫 focused finding evidence，不啟動 reviewer。`--once`
+或 `--task` 若留下 incomplete folder，會延後整個 loop 且不消耗 token；只有 `SKIP` 的
+folder 不需要 implementation review。沒有 `--auto-fix` 的普通 run 不會做這次 final
+sweep/review，也不會 repair，即使已設定 policy。
 
 `run --auto-fix` 是該次 invocation 修正 FAIL review 的授權，與 run selection 正交，可和
 明示 folder、`...`、`--all`、`--once`、`--task`、`--verify` 合用。它不跑 full candidate、

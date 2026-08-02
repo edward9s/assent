@@ -70,11 +70,14 @@ receipt, and report rules are in [Verification](VERIFICATION.md).
 
 #### Optional bounded auto-fix
 
-If `[auto_fix.review]` is configured, a completed folder run performs a
-folder-level read-only review. The final gate order is ordinary task-focused
-verification, one final run of each distinct `DONE`-task `verify` command,
-then the reviewer; an incomplete `--once`/`--task` run defers the review and
-spends no review token. A focused failure prevents the reviewer from starting.
+If `[auto_fix.review]` is configured and the invocation states
+`--auto-fix`, the completed folder enters a bounded folder-level review-and-
+repair loop. The final gate order is ordinary task-focused verification, one
+final run of each distinct `DONE`-task `verify` command, then the read-only
+reviewer; an incomplete `--once`/`--task` run defers the loop and spends no
+review token. A focused failure prevents the reviewer from starting. An
+ordinary `run` without `--auto-fix` stops after its ordinary task execution and
+does not run this final sweep, review, or repair.
 
 `assent run --auto-fix` is an invocation-level authorization for the repair
 half of that loop. It is orthogonal to selection and works with the implicit

@@ -52,10 +52,12 @@ receipt_refresh` 預設為 `"manual"`，需要之後顯式 `assent verify`；設
 
 #### 可選的有界 auto-fix
 
-若設定 `[auto_fix.review]`，folder 完成後會做 folder-level 唯讀 review。順序固定為：
-普通 task-focused verification、每個 distinct `DONE` task 的最後一次 focused sweep，
-然後才啟動 reviewer；`--once`/`--task` 若留下 incomplete folder，就延後 review 且不
-消耗 review token。focused failure 不會啟動 reviewer。
+若設定 `[auto_fix.review]`，它只提供有界 loop 的 policy；整個 loop 是 invocation-level
+opt-in，只有明示 `run --auto-fix` 的 invocation 才會在 folder 完成後做 folder-level 唯讀
+review。順序固定為：普通 task-focused verification、每個 distinct `DONE` task 的最後
+一次 focused sweep，然後才啟動 reviewer；`--once`/`--task` 若留下 incomplete folder，
+就延後整個 loop 且不消耗 review token。focused failure 不會啟動 reviewer。沒有
+`--auto-fix` 的普通 `run` 不會做這次 final sweep、review 或 repair。
 
 `assent run --auto-fix` 是該次 invocation 進入 repair 的授權，與選取正交，可和自動
 選取、明示 folder、`...`、`--all`、`--once`、`--task`、`--verify` 合用。`--all` 會把
