@@ -30,6 +30,20 @@ from tests.test_contracts import GlobalContractsMixin
 
 
 class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
+    @staticmethod
+    def recheck_record(finding):
+        fingerprint = auto_fix.finding_fingerprint(finding)
+        return auto_fix.review_record_json(auto_fix.ReviewRecord("FAIL", (
+            auto_fix.ReviewFinding(
+                finding.task_id, finding.path, finding.summary,
+                finding.evidence, kind=finding.kind,
+                recommendation=finding.recommendation,
+                scope_addition=finding.scope_addition,
+                transition="still_present",
+                prior_fingerprint=fingerprint,
+                transition_evidence="The repair diff still reproduces the issue."),
+        )))
+
     def test_review_failure_reopens_repairs_and_reviews_with_one_normal_profile(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
@@ -43,9 +57,22 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         failed = auto_fix.review_record_json(
             auto_fix.ReviewRecord("FAIL", (finding,)))
         passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+
+        def recheck(prompt):
+            self.assertIn("Review stage: RECHECK", prompt)
+            self.assertIn(finding.summary, prompt)
+            self.assertIn(finding.recommendation, prompt)
+            self.assertIn("Worker dispositions:", prompt)
+            self.assertIn("Approved scope additions:", prompt)
+            self.assertIn("Repair-only relevant diff:", prompt)
+            self.assertIn("Scheduler-supplied focused evidence:", prompt)
+            self.assertIn("Prior observed states:", prompt)
+            self.assertIn("must immediately PASS", prompt)
+            return TaskResult(0, passed, False, None)
+
         reviewer = ScriptedAdapter([
             TaskResult(0, failed, False, None),
-            TaskResult(0, passed, False, None),
+            recheck,
         ])
         worker = ScriptedAdapter([
             self.ai_done(task_path, {"src/value.txt": "new\n"})])
@@ -112,7 +139,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
         reviewer = ScriptedAdapter([
             TaskResult(0, failed, False, None),
-            TaskResult(0, failed, False, None),
+            TaskResult(0, self.recheck_record(finding), False, None),
             TaskResult(0, passed, False, None),
         ])
         worker = ScriptedAdapter([
@@ -274,7 +301,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         failed = auto_fix.review_record_json(
             auto_fix.ReviewRecord("FAIL", (finding,)))
         reviewer = ScriptedAdapter([
-            TaskResult(0, failed, False, None) for _ in range(3)])
+            TaskResult(0, failed, False, None),
+            TaskResult(0, self.recheck_record(finding), False, None),
+            TaskResult(0, self.recheck_record(finding), False, None),
+        ])
         worker = ScriptedAdapter([
             self.ai_done(task_path, {"src/value.txt": "attempt one\n"}),
             self.ai_done(task_path, {"src/value.txt": "attempt two\n"},

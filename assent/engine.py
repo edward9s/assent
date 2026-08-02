@@ -35,7 +35,7 @@ import shlex
 import subprocess
 import sys
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, TextIO
 
@@ -109,40 +109,100 @@ _CLOSEOUT_RETRY_SUFFIX = (
 
 _AUTO_FIX_REVIEW_PROMPT = """You are the read-only Assent folder reviewer.
 
-Inspect the complete cumulative implementation for folder {folder}. This is a
-blocking review gate, not an implementation session: do not edit, create,
-delete, rename, format, or otherwise write any project or management-plane
-file. This cooperative write check does not make the worktree a security
-sandbox and cannot intercept effects outside the project.
+Review context: {review_context}
+Review stage: {review_stage}
+
+This is a blocking decision gate, never an implementation session. Do not
+edit, create, delete, rename, format, or otherwise write any project or
+management-plane file. Do not run tests, formatters, generators, or any other
+command that may write. Perform read-only inspection and rely on the exact
+scheduler-supplied focused evidence below. This cooperative write check does
+not make the worktree a security sandbox and cannot intercept effects outside
+the project.
+
+Complete verification has deliberately not run yet. The absence of a full
+suite result, integration candidate, verification receipt, or any other
+complete-verification evidence is never a finding. Do not run or request
+complete verification.
+
+{context_policy}
+
+{stage_policy}
 
 Review all of the following before deciding:
-- the cumulative checkpoint diff: `git diff --find-renames {base_ref}..HEAD --`
-- every task contract and relevant journal reproduced below
-- the implementation and tests named by those contracts and changed by the diff
-- directly interacting code encountered while tracing those changes
-- the final focused evidence, whose distinct commands all exited zero
+- the scheduler-supplied cumulative checkpoint diff
+- every authoritative checkpoint task contract and relevant journal below
+- any current on-disk task text explicitly labelled UNTRUSTED evidence
+- the exact scheduler blocker reasons and focused-command evidence
+- the remaining folder dependency state
+- implementation and tests named by those contracts, plus directly necessary
+  interacting code encountered through read-only inspection
 
-Report only blocking correctness, safety, unmet-requirement, or missing-test
-findings. Also report concrete technical debt encountered during this bounded
-review, even when it is pre-existing, when its repair is local to an existing
-task's declared scope and can be reliably verified by relevant focused tests;
-such eligible debt is a blocking finding for this gate. Do not conduct a
-repository-wide debt search or report style, preference, optional cleanup,
-speculative refactoring, or work requiring unrelated scope expansion. Finish
-with exactly one provider-neutral JSON object on the last non-empty output line
-and no later text:
-PASS: {{"type":"assent.auto_fix_review","verdict":"PASS","findings":[]}}
-FAIL: {{"type":"assent.auto_fix_review","verdict":"FAIL","findings":[{{"task_id":"tNNN or null","path":"project/relative/path","summary":"concise blocker","evidence":"specific evidence"}}]}}
+Report only blocking correctness, safety, unmet-requirement, or focused-test-gap
+findings allowed by the context and stage policies. A focused-test-gap finding
+must identify one concrete task requirement that lacks a local, reliably
+runnable focused regression test. Speculation, uncertainty without evidence,
+idealized design, style, preference, optional improvement, and unrelated scope
+expansion cannot block PASS.
 
+Finish with exactly one provider-neutral `assent.auto_fix_review` JSON object
+on the last non-empty output line and no later text. PASS has an empty findings
+array. Every FAIL finding must supply all schema fields: kind, task_id, path,
+summary, evidence, recommendation, scope_addition, transition,
+prior_fingerprint, and transition_evidence. Use null where an optional field is
+absent.
+
+Folder: {folder}
 Source tree: {source_tree}
 Base commit: {base_ref}
 
-Final focused evidence:
+Scheduler-supplied cumulative checkpoint diff:
+{cumulative_diff}
+
+Exact durable blocker evidence:
+{blocker_evidence}
+
+Scheduler-supplied focused evidence:
 {focused_evidence}
+
+Remaining folder dependency state:
+{dependency_state}
+
+Prior review and repair evidence:
+{prior_evidence}
 
 Task contracts and journals:
 {management_evidence}
 """
+
+_AUTO_FIX_COMPLETED_POLICY = """This COMPLETED_FOLDER review examines the
+bounded cumulative implementation. Only COMPLETED_FOLDER + INITIAL may report
+eligible technical debt: it must be concrete, encountered in changed or
+directly interacting code, local to an existing task's declared scope, and
+reliably testable by that task's focused gate. Do not conduct a repository-wide
+debt search."""
+
+_AUTO_FIX_BLOCKED_POLICY = """This BLOCKED_ADJUDICATION reviews only the durable
+blockers, their trusted requirements, and directly necessary interacting code.
+Unfinished tasks, TODO work, and the incomplete folder state are expected and
+cannot be findings. Technical debt is not eligible in this context. A
+self-marked BLOCKED task legitimately has no focused result because ordinary
+closeout skips that gate; that absence is not a finding."""
+
+_AUTO_FIX_INITIAL_POLICY = """This INITIAL review has no prior reviewer finding
+to resolve. Findings must use transition = \"initial\" and must not cite a prior
+fingerprint."""
+
+_AUTO_FIX_RECHECK_POLICY = """This RECHECK must decide the prior current
+findings first. Omit resolved findings. Reproduce a still-present finding
+without semantic rewording, using transition = \"still_present\" and its exact
+scheduler prior_fingerprint. A new blocker is allowed only as a concrete repair
+regression (transition = \"repair_regression\") or a newly exposed violation of
+an existing task requirement (transition = \"newly_exposed\"), with concrete
+transition_evidence. Repeated technical-debt discovery is forbidden. When no
+prior blocker remains and no qualifying new blocker is evidenced, the evidence
+is sufficient and you must immediately PASS rather than continue searching for
+improvements."""
 
 _AUTO_FIX_REPAIR_SUFFIX = """
 
@@ -210,6 +270,16 @@ class _AutoFixReviewOutcome:
     code: int
     state: auto_fix.AutoFixState | None = None
     human_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class _AutoFixBlockerEvidence:
+    """One terminal task failure supplied to blocked adjudication."""
+
+    task: Task
+    trigger: str
+    reason: str
+    focused_evidence: str
 
 
 @dataclass
@@ -689,6 +759,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         # Validate the requested folder itself before stack discovery.  This
         # preserves the task-file error as the primary zero-token diagnostic.
         plan = Plan.parse(cfg.tasks_dir)
+        trusted_plan = plan
+        trusted_contracts = _task_contract_snapshots(plan)
     except AssentError as e:
         print(f"Failed to parse task folder: {e}")
         return 1
@@ -739,6 +811,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         return 1
 
     active = _ActiveTask()
+    blocker_evidence: list[_AutoFixBlockerEvidence] = []
     try:
         # Read the durable state even for an ordinary run.  A pending FAIL is
         # not an additional task status and ordinary execution may still make
@@ -758,7 +831,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 print(f"Auto-fix recovery refused: {recovery_error}.")
                 return 1
         while not resuming_auto_fix:
-            plan = Plan.parse(cfg.tasks_dir)
+            plan = _authoritative_status_plan(
+                trusted_plan, Plan.parse(cfg.tasks_dir))
             if task_id is not None:
                 task = plan.get(task_id)
                 if task is None:
@@ -784,7 +858,11 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             session = _SessionState()
             active.task = task
             active.session = session
-            _process_task(cfg, task, rotation, sleep, now, session, resumed)
+            _process_task(
+                cfg, task, rotation, sleep, now, session, resumed,
+                blocker_evidence=(blocker_evidence
+                                  if auto_fix_enabled
+                                  and cfg.auto_fix_review is not None else None))
             active.task = None
             active.session = None
 
@@ -795,19 +873,27 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             assert existing_auto_fix is not None
             return _run_auto_fix_repairs(
                 cfg, existing_auto_fix, rotation, active,
-                injected_reviewer=auto_fix_adapter, sleep=sleep, now=now)
+                injected_reviewer=auto_fix_adapter, sleep=sleep, now=now,
+                trusted_plan=trusted_plan,
+                trusted_contracts=trusted_contracts)
 
         if auto_fix_enabled and cfg.auto_fix_review is not None:
             review_outcome = _run_auto_fix_review_once(
                 cfg, once=once, task_id=task_id,
-                injected_adapter=auto_fix_adapter, sleep=sleep, now=now)
+                injected_adapter=auto_fix_adapter, sleep=sleep, now=now,
+                blockers=tuple(blocker_evidence),
+                trusted_plan=trusted_plan,
+                trusted_contracts=trusted_contracts)
             if review_outcome.code != 0:
                 if (auto_fix_enabled and review_outcome.state is not None
-                        and review_outcome.human_reason is None):
+                        and review_outcome.human_reason is None
+                        and not (once or task_id is not None)):
                     return _run_auto_fix_repairs(
                         cfg, review_outcome.state, rotation, active,
                         injected_reviewer=auto_fix_adapter,
-                        sleep=sleep, now=now)
+                        sleep=sleep, now=now,
+                        trusted_plan=trusted_plan,
+                        trusted_contracts=trusted_contracts)
                 return review_outcome.code
     except KeyboardInterrupt:
         # Ctrl+C on the Windows console reaches the child process (the AI session) too, so
@@ -907,38 +993,209 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     return 0
 
 
-def _auto_fix_management_evidence(plan: Plan) -> str:
-    """Reproduce the reviewed contracts and journals in deterministic order."""
+def _task_contract_snapshots(plan: Plan) -> dict[str, str]:
+    """Capture the scheduler-trusted task contracts before a worker can edit them."""
+    snapshots: dict[str, str] = {}
+    for task in plan.tasks:
+        try:
+            snapshots[task.id] = task.path.read_text(encoding="utf-8")
+        except OSError as e:
+            raise AssentError(
+                f"Unable to read trusted task contract {task.path}: {e}") from e
+    return snapshots
+
+
+def _contract_text_with_status(text: str, status: str) -> str:
+    pattern = re.compile(
+        r'^(\s*status\s*=\s*")(TODO|WIP|DONE|BLOCKED|SKIP)("\s*(?:#.*)?)$',
+        re.MULTILINE)
+    replaced, count = pattern.subn(
+        lambda match: f"{match.group(1)}{status}{match.group(3)}", text,
+        count=1)
+    if count != 1:
+        raise AssentError("Trusted task contract has no unique writable status line")
+    return replaced
+
+
+def _authoritative_status_plan(plan: Plan, current: Plan | None = None) -> Plan:
+    """Refresh statuses while retaining every checkpoint-trusted structural field."""
+    if current is None:
+        current = Plan.parse(plan.dir)
+    tasks: list[Task] = []
+    for task in plan.tasks:
+        fresh = current.get(task.id)
+        if fresh is None:
+            raise AssentError(
+                f"Trusted task disappeared during execution: {task.id}")
+        tasks.append(replace(task, status=fresh.status))
+    return Plan(tasks, plan.dir)
+
+
+def _authoritative_contracts(
+        plan: Plan, trusted_contracts: dict[str, str]) -> dict[str, str]:
+    return {
+        task.id: _contract_text_with_status(trusted_contracts[task.id], task.status)
+        for task in plan.tasks
+    }
+
+
+def _contracts_digest(plan: Plan, contracts_by_id: dict[str, str]) -> str:
+    digest = hashlib.sha256()
+    for task in sorted(plan.tasks, key=lambda item: item.path.name):
+        data = contracts_by_id[task.id].encode("utf-8")
+        digest.update(task.path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(len(data)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(data)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _auto_fix_management_evidence(
+        plan: Plan, contracts_by_id: dict[str, str]) -> str:
+    """Reproduce authoritative contracts, untrusted tampering, and journals."""
     sections: list[str] = []
     for task in plan.tasks:
-        for label, path in (("task contract", task.path),
-                            ("journal", task.journal_path)):
-            if label == "journal" and not path.is_file():
-                text = "(journal does not exist)"
-            else:
-                try:
-                    text = path.read_text(encoding="utf-8")
-                except OSError as e:
-                    raise AssentError(
-                        f"Unable to read auto-fix review {label} {path}: {e}") from e
-            sections.append(f"--- {task.id} {label}: {path} ---\n{text.rstrip()}")
+        trusted = contracts_by_id[task.id]
+        sections.append(
+            f"--- {task.id} task contract (trusted checkpoint; AUTHORITATIVE): "
+            f"{task.path} ---\n{trusted.rstrip()}")
+        try:
+            on_disk = task.path.read_text(encoding="utf-8")
+        except OSError as e:
+            raise AssentError(
+                f"Unable to read auto-fix review task contract {task.path}: {e}") from e
+        if on_disk != trusted:
+            sections.append(
+                f"--- {task.id} current on-disk contract (UNTRUSTED EVIDENCE; "
+                "the checkpoint contract remains authoritative) ---\n"
+                f"{on_disk.rstrip()}")
+        if not task.journal_path.is_file():
+            journal = "(journal does not exist)"
+        else:
+            try:
+                journal = task.journal_path.read_text(encoding="utf-8")
+            except OSError as e:
+                raise AssentError(
+                    f"Unable to read auto-fix review journal "
+                    f"{task.journal_path}: {e}") from e
+        sections.append(
+            f"--- {task.id} journal: {task.journal_path} ---\n"
+            f"{journal.rstrip()}")
     return "\n\n".join(sections)
 
 
-def _auto_fix_review_identity(cfg: Config, plan: Plan,
-                              focused_evidence: str) -> tuple[str, str, str, str]:
+def _auto_fix_diff(cfg: Config, old_ref: str, new_ref: str = "HEAD") -> str:
+    result = subprocess.run(
+        ["git", "diff", "--find-renames", f"{old_ref}..{new_ref}", "--"],
+        cwd=str(cfg.root), capture_output=True, encoding="utf-8",
+        errors="replace")
+    if result.returncode != 0:
+        return ("(unable to render diff: "
+                f"{_bounded_adapter_diagnostic(result.stderr or result.stdout)})")
+    text = result.stdout or "(no cumulative checkpoint diff)"
+    if len(text) > _AUTO_FIX_EVIDENCE_LIMIT:
+        text = text[:_AUTO_FIX_EVIDENCE_LIMIT] + "\n... [diff truncated]"
+    return text.rstrip()
+
+
+def _auto_fix_dependency_state(plan: Plan) -> str:
+    status_by_id = {task.id: task.status for task in plan.tasks}
+    lines = []
+    for task in plan.tasks:
+        unmet = [dep for dep in task.deps
+                 if status_by_id.get(dep) not in ("DONE", "SKIP")]
+        suffix = f"; unmet deps: {', '.join(unmet)}" if unmet else ""
+        lines.append(f"- {task.id}: {task.status}; deps: "
+                     f"{', '.join(task.deps) or 'none'}{suffix}")
+    return "\n".join(lines)
+
+
+def _auto_fix_blocker_text(
+        blockers: tuple[_AutoFixBlockerEvidence, ...]) -> str:
+    if not blockers:
+        return "(none; this is a completed-folder review)"
+    return "\n".join(
+        f"- {item.task.id} [{item.trigger}]: {item.reason}\n"
+        f"  focused evidence: {item.focused_evidence}"
+        for item in blockers)
+
+
+def _auto_fix_prior_evidence(
+        cfg: Config, state: auto_fix.AutoFixState | None) -> str:
+    if state is None:
+        return "(none; INITIAL review)"
+    current = set(state.current_finding_fingerprints)
+    lines = ["Prior current findings and recommendations:"]
+    for finding in state.findings:
+        if finding.fingerprint not in current:
+            continue
+        lines.append(
+            f"- {finding.fingerprint} {finding.task_id or 'unassigned'} "
+            f"{finding.path}: {finding.summary}\n"
+            f"  evidence: {finding.evidence}\n"
+            f"  recommendation: {finding.recommendation}")
+    lines.append("Worker dispositions:")
+    lines.extend(
+        f"- {item.task_id}: {item.disposition}; {item.reason}"
+        for item in state.worker_dispositions)
+    if not state.worker_dispositions:
+        lines.append("- none recorded")
+    lines.append("Approved scope additions:")
+    lines.extend(
+        f"- {item.task_id}: {item.path} ({item.path_state})"
+        for item in state.approved_scope_additions)
+    if not state.approved_scope_additions:
+        lines.append("- none")
+    lines.append("Repair-only relevant diff:")
+    lines.append(_auto_fix_diff(cfg, state.source_tree))
+    lines.append("Prior observed states:")
+    lines.extend(
+        f"- {item.source_tree}: {', '.join(item.finding_fingerprints) or 'PASS'}"
+        for item in state.observed_states)
+    return "\n".join(lines)
+
+
+def _auto_fix_review_identity(
+        cfg: Config, plan: Plan, focused_evidence: str, *,
+        contracts_by_id: dict[str, str] | None = None,
+        review_context: str = "completed_folder",
+        review_stage: str = "initial",
+        blockers: tuple[_AutoFixBlockerEvidence, ...] = (),
+        previous: auto_fix.AutoFixState | None = None,
+        ) -> tuple[str, str, str, str]:
     """Return source tree, task-plan digest, prompt text, and prompt digest."""
     source_tree = gitops.tree_of(cfg.root, "HEAD")
     resolved_base = resolve_stack_state(cfg).base.resolved_base
     base_ref = gitops.merge_base(cfg.root, resolved_base, "HEAD")
+    if contracts_by_id is None:
+        contracts_by_id = {
+            task.id: task.path.read_text(encoding="utf-8")
+            for task in plan.tasks
+        }
     prompt = _AUTO_FIX_REVIEW_PROMPT.format(
         folder=cfg.tasks_name,
         base_ref=base_ref,
         source_tree=source_tree,
+        review_context=review_context.upper(),
+        review_stage=review_stage.upper(),
+        context_policy=(
+            _AUTO_FIX_BLOCKED_POLICY
+            if review_context == "blocked_adjudication"
+            else _AUTO_FIX_COMPLETED_POLICY),
+        stage_policy=(
+            _AUTO_FIX_RECHECK_POLICY
+            if review_stage == "recheck" else _AUTO_FIX_INITIAL_POLICY),
+        cumulative_diff=_auto_fix_diff(cfg, base_ref),
+        blocker_evidence=_auto_fix_blocker_text(blockers),
         focused_evidence=focused_evidence,
-        management_evidence=_auto_fix_management_evidence(plan),
+        dependency_state=_auto_fix_dependency_state(plan),
+        prior_evidence=_auto_fix_prior_evidence(cfg, previous),
+        management_evidence=_auto_fix_management_evidence(
+            plan, contracts_by_id),
     )
-    plan_digest = auto_fix.sha256_files(task.path for task in plan.tasks)
+    plan_digest = _contracts_digest(plan, contracts_by_id)
     prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     return source_tree, plan_digest, prompt, prompt_digest
 
@@ -1013,34 +1270,129 @@ def _auto_fix_surface_change(
     return tuple(sorted(set(changed)))
 
 
+def _blocked_evidence_from_journals(plan: Plan) -> tuple[_AutoFixBlockerEvidence, ...]:
+    """Recover durable blocker reasons for a later full auto-fix invocation."""
+    blockers: list[_AutoFixBlockerEvidence] = []
+    for task in plan.tasks:
+        if task.status != "BLOCKED":
+            continue
+        reason = "Task is durably BLOCKED; no scheduler reason was readable."
+        focused = ("NOT RUN: no captured focused result is present; this is "
+                   "legitimate for a self-marked BLOCKED closeout.")
+        try:
+            entries = read_entries(task.journal_path)
+        except (AssentError, OSError):
+            entries = []
+        for entry in reversed(entries):
+            if entry.get("event") not in ("auto_fix_blocker", "blocked"):
+                continue
+            reason = str(entry.get("summary") or reason)
+            detail = str(entry.get("detail") or "")
+            if "Focused evidence:\n" in detail:
+                focused = detail.split("Focused evidence:\n", 1)[1]
+            elif "Verify command exit code is non-zero" in reason:
+                focused = reason
+            break
+        focused_lower = focused.lower()
+        trigger = ("focused_gate_failure"
+                   if ("focused" in focused_lower
+                       or "verify command" in focused_lower)
+                   and not focused.startswith("NOT RUN")
+                   else "worker_blocked")
+        blockers.append(_AutoFixBlockerEvidence(
+            task, trigger, reason, focused))
+    return tuple(blockers)
+
+
+def _restore_trusted_contracts_after_adjudication(
+        plan: Plan, contracts_by_id: dict[str, str],
+        now: Callable[[], datetime]) -> None:
+    """Discard no source output while refusing to adopt worker contract tampering."""
+    for trusted in plan.tasks:
+        current = parse_task_file(trusted.path)
+        changed_fields = same_except_status(trusted, current)
+        if not changed_fields:
+            continue
+        authoritative = contracts_by_id[trusted.id]
+        try:
+            trusted.path.write_text(
+                authoritative, encoding="utf-8", newline="")
+        except OSError as e:
+            raise AssentError(
+                f"Unable to restore trusted checkpoint contract {trusted.path}: {e}") from e
+        restored = parse_task_file(trusted.path)
+        if same_except_status(trusted, restored) or restored.status != trusted.status:
+            raise AssentError(
+                f"Trusted checkpoint contract restoration failed: {trusted.path}")
+        append_entry(
+            trusted.journal_path, by="scheduler",
+            event="auto_fix_contract_restore",
+            summary=("Restored the trusted checkpoint task contract after "
+                     "blocked adjudication"),
+            detail=("The worker's on-disk structural edits were reviewed only as "
+                    "untrusted evidence and were not adopted; changed fields: "
+                    + ", ".join(changed_fields)),
+            time_str=now().isoformat(timespec="seconds"))
+
+
 def _run_auto_fix_review_once(
         cfg: Config, *, once: bool, task_id: str | None,
         injected_adapter: Adapter | None,
         sleep: Callable[[float], None],
-        now: Callable[[], datetime]) -> _AutoFixReviewOutcome:
-    """Run one final-focused and read-only review cycle under the folder lock."""
+        now: Callable[[], datetime],
+        blockers: tuple[_AutoFixBlockerEvidence, ...] = (),
+        trusted_plan: Plan | None = None,
+        trusted_contracts: dict[str, str] | None = None,
+        ) -> _AutoFixReviewOutcome:
+    """Run one completed-folder review or quiescent blocked adjudication."""
     review = cfg.auto_fix_review
     if review is None:
         return _AutoFixReviewOutcome(0)
 
-    plan = Plan.parse(cfg.tasks_dir)
+    plan = (_authoritative_status_plan(trusted_plan)
+            if trusted_plan is not None else Plan.parse(cfg.tasks_dir))
+    if trusted_contracts is None:
+        trusted_contracts = _task_contract_snapshots(plan)
+    contracts_by_id = _authoritative_contracts(plan, trusted_contracts)
     incomplete = [task for task in plan.tasks
                   if task.status not in ("DONE", "SKIP")]
+    blocked = [task for task in incomplete if task.status == "BLOCKED"]
+    runnable = plan.next_task()
+    limited = once or task_id is not None
+    review_context = "completed_folder"
     if incomplete:
-        limited = " after the limited run" if once or task_id is not None else ""
-        shown = ", ".join(f"{task.id}={task.status}" for task in incomplete)
-        print(f"Auto-fix folder review deferred{limited}; folder is incomplete ({shown}).")
-        return _AutoFixReviewOutcome(0)
+        selected_blocker = bool(blockers)
+        if (not blocked or runnable is not None
+                or (limited and not selected_blocker)):
+            suffix = " after the limited run" if limited else ""
+            shown = ", ".join(f"{task.id}={task.status}" for task in incomplete)
+            print(f"Auto-fix folder review deferred{suffix}; folder is incomplete "
+                  f"({shown}).")
+            return _AutoFixReviewOutcome(0)
+        review_context = "blocked_adjudication"
+        if not blockers:
+            blockers = _blocked_evidence_from_journals(plan)
+        if not blockers:
+            print("Auto-fix blocked adjudication refused: durable BLOCKED tasks "
+                  "have no readable scheduler evidence.")
+            return _AutoFixReviewOutcome(
+                1, human_reason="blocked tasks have no durable scheduler evidence")
 
     done = [task for task in plan.tasks if task.status == "DONE"]
-    if not done:
+    if review_context == "completed_folder" and not done:
         print("Auto-fix folder review: all tasks are SKIP; no implementation review session needed.")
         return _AutoFixReviewOutcome(0)
 
     focused_lines: list[str] = []
     seen: set[str] = set()
-    print("Auto-fix folder review: running final distinct focused checks.")
-    for task in done:
+    if review_context == "completed_folder":
+        print("Auto-fix folder review: running final distinct focused checks.")
+    else:
+        print("Auto-fix blocked adjudication: using durable task failure evidence; "
+              "no focused command is run by the reviewer gate.")
+        focused_lines.extend(
+            f"- {item.task.id}: {item.focused_evidence}" for item in blockers)
+    for task in done if review_context == "completed_folder" else ():
         if task.verify in seen:
             continue
         seen.add(task.verify)
@@ -1061,7 +1413,8 @@ def _run_auto_fix_review_once(
             record = auto_fix.validate_review_findings(record, plan)
             source_tree, plan_digest, _prompt, prompt_digest = (
                 _auto_fix_review_identity(
-                    cfg, plan, "\n".join(focused_lines)))
+                    cfg, plan, "\n".join(focused_lines),
+                    contracts_by_id=contracts_by_id))
             previous = _auto_fix_existing_state(cfg)
             state = auto_fix.state_for_review(
                 record, previous=previous,
@@ -1086,9 +1439,24 @@ def _run_auto_fix_review_once(
         return _AutoFixReviewOutcome(
             1, human_reason="focused verification changed the source worktree")
 
-    source_tree, plan_digest, prompt, prompt_digest = _auto_fix_review_identity(
-        cfg, plan, "\n".join(focused_lines))
     existing = _auto_fix_existing_state(cfg)
+    review_stage = ("recheck"
+                    if existing is not None and existing.verdict == "FAIL"
+                    else "initial")
+    review_previous = existing if review_stage == "recheck" else None
+    if review_stage == "recheck":
+        review_context = existing.review_context
+    failure_trigger = None
+    if review_context == "blocked_adjudication":
+        failure_trigger = (
+            "focused_gate_failure"
+            if any(item.trigger == "focused_gate_failure" for item in blockers)
+            else "worker_blocked")
+    source_tree, plan_digest, prompt, prompt_digest = _auto_fix_review_identity(
+        cfg, plan, "\n".join(focused_lines),
+        contracts_by_id=contracts_by_id,
+        review_context=review_context, review_stage=review_stage,
+        blockers=blockers, previous=review_previous)
     freshness = dict(
         source_tree=source_tree,
         task_plan_sha256=plan_digest,
@@ -1096,6 +1464,8 @@ def _run_auto_fix_review_once(
         reviewer_adapter=review.adapter,
         reviewer_model=review.requested_model,
         reviewer_effort=review.requested_effort,
+        review_context=review_context,
+        failure_trigger=failure_trigger,
     )
     if existing is not None and auto_fix.auto_fix_state_is_fresh(
             existing, **freshness):
@@ -1187,6 +1557,10 @@ def _run_auto_fix_review_once(
 
         try:
             record = auto_fix.parse_review_output(result.output)
+            if (review_context == "blocked_adjudication"
+                    and record.verdict == "PASS" and blocked):
+                raise AssentError(
+                    "A blocked adjudication cannot PASS while a task remains BLOCKED")
         except AssentError as e:
             if invalid_attempts < cfg.retry_per_task:
                 invalid_attempts += 1
@@ -1198,22 +1572,40 @@ def _run_auto_fix_review_once(
 
         try:
             resolved_record = auto_fix.validate_review_findings(record, plan)
+            resolved_record = auto_fix.validate_review_transitions(
+                resolved_record, review_stage=review_stage,
+                previous=review_previous)
         except AssentError as e:
             # Preserve the reviewer's concrete output even though it cannot
             # authorize a write-capable task session.
-            state = auto_fix.state_for_review(
-                record, previous=existing, **freshness)
-            auto_fix.write_auto_fix_state(
-                auto_fix.auto_fix_state_path(cfg), state)
+            try:
+                state = auto_fix.state_for_review(
+                    record, previous=review_previous, review_stage=review_stage,
+                    enforce_transitions=False, **freshness)
+                auto_fix.write_auto_fix_state(
+                    auto_fix.auto_fix_state_path(cfg), state)
+            except AssentError as state_error:
+                print("Auto-fix invalid reviewer evidence could not be encoded "
+                      f"as repair state: {state_error}")
+                return _AutoFixReviewOutcome(1, human_reason=str(e))
             print(f"Auto-fix findings require a human scope/plan decision: {e}")
             return _AutoFixReviewOutcome(1, state, str(e))
 
         state = auto_fix.state_for_review(
-            resolved_record, previous=existing, **freshness)
+            resolved_record, previous=review_previous, review_stage=review_stage,
+            **freshness)
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
         if resolved_record.verdict == "PASS":
             print("Auto-fix folder review: PASS.")
             return _AutoFixReviewOutcome(0, state)
+        if review_context == "blocked_adjudication":
+            try:
+                _restore_trusted_contracts_after_adjudication(
+                    plan, contracts_by_id, now)
+            except AssentError as e:
+                print(f"Auto-fix repair authorization preserved, but trusted "
+                      f"contract restoration failed: {e}")
+                return _AutoFixReviewOutcome(1, state, str(e))
         print("Auto-fix folder review: FAIL; blocking findings were preserved for repair.")
         for finding in resolved_record.findings:
             owner = f"{finding.task_id}: " if finding.task_id else ""
@@ -1311,7 +1703,9 @@ def _run_auto_fix_repairs(
         rotation: _AdapterRotation, active: _ActiveTask, *,
         injected_reviewer: Adapter | None,
         sleep: Callable[[float], None],
-        now: Callable[[], datetime]) -> int:
+        now: Callable[[], datetime],
+        trusted_plan: Plan | None = None,
+        trusted_contracts: dict[str, str] | None = None) -> int:
     """Consume the finite worker capability sequence until review passes or hands off."""
     state_path = auto_fix.auto_fix_state_path(cfg)
     recovery_error = _auto_fix_recovery_config_error(cfg, state)
@@ -1344,7 +1738,9 @@ def _run_auto_fix_repairs(
                 return 1
             outcome = _run_auto_fix_review_once(
                 cfg, once=False, task_id=None,
-                injected_adapter=injected_reviewer, sleep=sleep, now=now)
+                injected_adapter=injected_reviewer, sleep=sleep, now=now,
+                trusted_plan=trusted_plan,
+                trusted_contracts=trusted_contracts)
             if outcome.code == 0:
                 return 0
             if outcome.state is None or outcome.human_reason is not None:
@@ -1411,6 +1807,7 @@ def _run_auto_fix_repairs(
             auto_fix.write_auto_fix_state(state_path, state)
 
         failures: list[tuple[Task, str]] = []
+        round_blockers: list[_AutoFixBlockerEvidence] = []
         for task, profile in round_assignments:
             if profile is None:
                 failures.append((task, "No unused fixer profile remains"))
@@ -1447,7 +1844,8 @@ def _run_auto_fix_repairs(
                     session_override=session,
                     profile_model=profile.model,
                     auto_fix_context=_auto_fix_repair_context(cfg, task, state),
-                    retry_limit=0, billing_is_failure=True)
+                    retry_limit=0, billing_is_failure=True,
+                    blocker_evidence=round_blockers)
                 active.task = None
                 active.session = None
                 if failure is not None:
@@ -1463,7 +1861,16 @@ def _run_auto_fix_repairs(
                 active.session = None
 
         if failures:
-            state = _auto_fix_failure_state(cfg, state, failures)
+            if round_blockers:
+                outcome = _run_auto_fix_review_once(
+                    cfg, once=False, task_id=None,
+                    injected_adapter=injected_reviewer, sleep=sleep, now=now,
+                    blockers=tuple(round_blockers))
+                if outcome.state is None or outcome.human_reason is not None:
+                    return outcome.code
+                state = outcome.state
+            else:
+                state = _auto_fix_failure_state(cfg, state, failures)
             continue
         state = auto_fix.with_repair_phase(state, "AWAITING_REVIEW")
         auto_fix.write_auto_fix_state(state_path, state)
@@ -1791,7 +2198,9 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   profile_model: str | None = None,
                   auto_fix_context: str = "",
                   retry_limit: int | None = None,
-                  billing_is_failure: bool = False) -> str | None:
+                  billing_is_failure: bool = False,
+                  blocker_evidence: list[_AutoFixBlockerEvidence] | None = None,
+                  ) -> str | None:
     """Run a single task's full lifecycle; internally handles quota/control resumption and
     retries, and by the end the task is DONE/BLOCKED.
 
@@ -1809,6 +2218,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
 
     attempts_used = 0
     failure_reason: str | None = None
+    attempted_failures: list[tuple[str, str]] = []
     while True:
         adapter = rotation.adapter
         adapter_name = rotation.name
@@ -1833,6 +2243,8 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         if escape_reason is not None:
             print(f"  {escape_reason}")
             outcome, reason = "fail", escape_reason
+            focused_evidence = (
+                "NOT RUN: the isolated-worktree escape safety gate failed first.")
         elif (result.checkpoint_resume and not result.quota_exhausted
               and not result.stalled and result.exit_code != 0):
             print("  Checkpoint-resume control received -> keep progress (wip checkpoint).")
@@ -1911,6 +2323,8 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 task, session, result.exit_code, result.stalled, reason, now,
                 failure_kind=result.failure_kind)
             outcome = "fail"
+            focused_evidence = (
+                "NOT RUN: the worker adapter failed before focused closeout.")
         elif result.exit_code != 0 or result.stalled:
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output,
@@ -1928,8 +2342,10 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             if safety_reason:
                 reason = f"{reason}; safety inspection failed: {safety_reason}"
             outcome = "fail"
+            focused_evidence = (
+                "NOT RUN: the worker adapter or structural safety gate failed first.")
         else:
-            outcome, reason = _evaluate(cfg, task, start_ref)
+            outcome, reason, focused_evidence = _evaluate(cfg, task, start_ref)
         if outcome == "done":
             print("  Acceptance passed -> creating checkpoint")
             committed = _commit_terminal_checkpoint(
@@ -1950,6 +2366,19 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 cfg.root, _checkpoint_subject(
                     cfg, "auto", task, "BLOCKED (execution AI self-marked)"),
                 cfg.git_excludes)
+            if blocker_evidence is not None:
+                evidence = _AutoFixBlockerEvidence(
+                    task, "worker_blocked", "Execution AI self-marked BLOCKED",
+                    "NOT RUN: self-marked BLOCKED closeout legitimately skips the focused gate.")
+                blocker_evidence.append(evidence)
+                append_entry(
+                    task.journal_path, by="scheduler", event="auto_fix_blocker",
+                    summary=evidence.reason,
+                    detail=f"Focused evidence:\n{evidence.focused_evidence}",
+                    agent=session.agent,
+                    requested_model=session.requested_model,
+                    requested_effort=session.requested_effort,
+                    time_str=now().isoformat(timespec="seconds"))
             try_write_report(cfg)
             return "Execution AI self-marked BLOCKED"
 
@@ -1957,6 +2386,8 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         # exhausted the scheduler marks BLOCKED, and the not-yet-passing work is committed
         # together with the BLOCKED mark for a human to make the final call.
         print(f"  Acceptance failed: {reason}")
+        attempted_failures.append((reason or "acceptance failed",
+                                   focused_evidence))
         allowed_retries = (cfg.retry_per_task
                            if retry_limit is None else retry_limit)
         if attempts_used < allowed_retries:
@@ -1967,6 +2398,27 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         print("  Retries exhausted -> scheduler marks BLOCKED (the not-yet-passing work is kept too)")
         _mark_blocked(cfg, task, session, reason or "acceptance failed", now,
                       attempts=attempts_used)
+        if blocker_evidence is not None:
+            combined_reason = " | ".join(dict.fromkeys(
+                item[0] for item in attempted_failures))
+            focused_items = list(dict.fromkeys(
+                item[1] for item in attempted_failures))
+            combined_focused = "\n".join(focused_items)
+            trigger = ("focused_gate_failure"
+                       if any(item.startswith("FAIL:")
+                              for item in focused_items)
+                       else "worker_blocked")
+            evidence = _AutoFixBlockerEvidence(
+                task, trigger, combined_reason, combined_focused)
+            blocker_evidence.append(evidence)
+            append_entry(
+                task.journal_path, by="scheduler", event="auto_fix_blocker",
+                summary=combined_reason,
+                detail=f"Focused evidence:\n{combined_focused}",
+                agent=session.agent,
+                requested_model=session.requested_model,
+                requested_effort=session.requested_effort,
+                time_str=now().isoformat(timespec="seconds"))
         try_write_report(cfg)
         return reason or "acceptance failed"
 
@@ -2001,9 +2453,10 @@ def _inspect_task_safety(cfg: Config, task: Task,
 
 
 def _evaluate(cfg: Config, task: Task,
-              start_ref: str | None = None) -> tuple[str, str | None]:
-    """Acceptance: structural/scope safety -> status -> verify. Returns
-    (outcome, reason).
+              start_ref: str | None = None) -> tuple[str, str | None, str]:
+    """Acceptance: structural/scope safety -> status -> verify.
+
+    Returns ``(outcome, reason, focused_evidence)``.
 
     outcome in {"done", "self_blocked", "fail"}. scope/verify and all fields come from the
     trusted checkpoint version `task`; the on-disk version is only allowed to change the
@@ -2011,26 +2464,34 @@ def _evaluate(cfg: Config, task: Task,
     """
     fresh, safety_reason = _inspect_task_safety(cfg, task, start_ref)
     if safety_reason:
-        return "fail", safety_reason
+        return ("fail", safety_reason,
+                "NOT RUN: structural/scope safety failed before the focused gate.")
     assert fresh is not None
 
     # status check
     if fresh.status == "BLOCKED":
-        return "self_blocked", None
+        return ("self_blocked", None,
+                "NOT RUN: self-marked BLOCKED closeout skips the focused gate.")
     if fresh.status != "DONE":
         # Structure and scope are already clean here; the only remaining acceptance gap is
         # the status line. Probe the focused verify once (quietly, so a still-failing verify
         # leaves this path's output byte-for-byte identical to before) to tell a genuine
         # implementation gap apart from a session that simply dropped off before closeout.
         if _run_verify_quiet(cfg, task.verify) == 0:
-            return "fail", _CLOSEOUT_ONLY_REASON_TEMPLATE.format(
-                status=fresh.status, verify_command=task.verify)
-        return "fail", f"Status not updated to DONE/BLOCKED (currently {fresh.status})"
+            return ("fail", _CLOSEOUT_ONLY_REASON_TEMPLATE.format(
+                status=fresh.status, verify_command=task.verify),
+                f"PASS (closeout probe): {task.verify}")
+        return ("fail", f"Status not updated to DONE/BLOCKED (currently {fresh.status})",
+                f"FAIL (closeout probe): {task.verify}")
 
     # verify command (against the trusted checkpoint verify)
     rc = _run_verify(cfg, task.verify)
+    focused_evidence = (f"{'PASS' if rc == 0 else 'FAIL'}: exit {rc}: "
+                        f"{task.verify}")
     if rc != 0:
-        return "fail", f"Verify command exit code is non-zero (={rc}): {task.verify}"
+        return ("fail", "Verify command exit code is non-zero "
+                f"(={rc}): {task.verify}",
+                focused_evidence)
 
     # A session handed the bounded shared-path review clause must have run the
     # controlled operation; a source snapshot that is still UNKNOWN or STALE is
@@ -2038,12 +2499,13 @@ def _evaluate(cfg: Config, task: Task,
     try:
         contract = _shared_paths_contract(cfg)
     except AssentError as e:
-        return "fail", f"Shared-path contract could not be classified: {e}"
+        return ("fail", f"Shared-path contract could not be classified: {e}",
+                focused_evidence)
     refusal = shared_paths.closeout_refusal(contract)
     if refusal:
-        return "fail", refusal[:1].upper() + refusal[1:]
+        return "fail", refusal[:1].upper() + refusal[1:], focused_evidence
 
-    return "done", None
+    return "done", None, focused_evidence
 
 
 def _verify_subprocess(cfg: Config, command: str) -> subprocess.CompletedProcess:
