@@ -110,8 +110,11 @@ journal、checkpoint commit 與 diff、實作，以及 focused/full verification
 Report 的 `Folder auto-fix` 是零 token 的 derived evidence：沒有 state file 是
 `NOT RUN`，新鮮的 review pass/fail 分別是 `PASSED (fresh)` 與 `FAILED (fresh)`，
 malformed state 或 source/task binding 改變則是 `STALE`。它也會列出 phase、context、stage、
-original blocker、current findings/recommendations、scope decision、acknowledgement、
-profiles 與 terminal reason。如果曾有 `COMPLETED_FOLDER + INITIAL` 引入的 eligible debt，
+original blocker、current findings/recommendations、scope decision 與 exact scope-amendment
+transaction、repair acknowledgement 與 brief、repair-round assignment、profiles 與
+terminal reason。Scheduler 在 rework、中斷、repair closeout 或 profile 用盡時的 status-only
+transition 不會單獨讓 evidence stale；真正的 task-contract structural edit 才會。若曾有
+`COMPLETED_FOLDER + INITIAL` 引入的 eligible debt，
 `_report.md` 會指向 generated `_technical_debt.md`。`FAIL` 的 current findings 會列出，
 但 state 或 review `PASS` 都不是 acceptance evidence。
 

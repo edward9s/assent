@@ -298,6 +298,24 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertIn("Folder auto-fix: STALE (reviewer configuration changed)",
                       text)
 
+    def test_report_ignores_scheduler_status_transitions_but_detects_contract_edits(self):
+        task_path = self.write_task(1, status="DONE")
+        cfg = self.build()
+        self.commit_all()
+        self._write_auto_fix_state(cfg, "PASS")
+
+        set_status(task_path, "WIP")
+        text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
+        self.assertIn("Folder auto-fix: PASSED (fresh)", text)
+        self.assertNotIn("STALE (task contracts changed)", text)
+
+        task_path.write_text(
+            task_path.read_text(encoding="utf-8").replace(
+                'title = "任務"', 'title = "structural contract edit"'),
+            encoding="utf-8")
+        text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
+        self.assertIn("Folder auto-fix: STALE (task contracts changed)", text)
+
     def test_report_renders_recovery_evidence_and_persistent_debt_agenda(self):
         task_path = self.write_task(1, status="DONE")
         cfg = self.build()
@@ -333,8 +351,16 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 "t001", state.current_finding_fingerprints,
                 "Original blocker evidence:\nThe old report omitted debt.\n\n"
                 "Focused command evidence:\nThe focused test passes."),))
+        state = auto_fix.with_scope_amendments(
+            state, (auto_fix.ScopeAmendment(
+                (auto_fix.finding_fingerprint(scope_finding),), "t001",
+                ("tests/test_inspection.py",), ("existing_file",),
+                "1" * 64, "2" * 64, "3" * 64, "4" * 64),))
         state = auto_fix.consume_fixer_profile(
             state, auto_fix.FixerProfile("claude", "core", "heavy"))
+        state = auto_fix.with_repair_round_assignments(
+            state, (auto_fix.RepairRoundAssignment(
+                "t001", "claude", "core", "heavy", False),))
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), state)
 
@@ -351,6 +377,10 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertIn("fixed; Focused regression passes.", report)
         self.assertIn("Consumed fixer profiles:", report)
         self.assertIn("claude/core/heavy", report)
+        self.assertIn("Scope amendment transactions:", report)
+        self.assertIn("tests/test_inspection.py (existing_file)", report)
+        self.assertIn("Repair-round assignments:", report)
+        self.assertIn("claude/core/heavy (not started)", report)
         self.assertIn("TECHNICAL DEBT REVIEW REQUIRED", report)
         self.assertIn("Existing debt needs a follow-up", debt)
         self.assertIn("CURRENT / unresolved in the latest review", debt)

@@ -659,7 +659,7 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(chinese_contract=phrase):
                 self.assertIn("".join(phrase.split()), chinese_contract)
 
-    def test_auto_fix_state_schema_matches_the_version_three_contract(self):
+    def test_auto_fix_state_schema_matches_the_version_five_contract(self):
         """The executable state shape and packaged contract must advance together."""
         install_global_contracts(self)
         from dataclasses import fields
@@ -667,13 +667,13 @@ class TestContractContent(unittest.TestCase):
         from assent import auto_fix
 
         format_text = contracts.installed_contract_text("format.md")
-        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 3)
+        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 5)
         self.assertEqual(
             {field.name for field in fields(auto_fix.AutoFixState)},
             auto_fix._STATE_KEYS)
         for phrase in (
-                "Version 3 has exactly these scalar fields",
-                "version = 3",
+                "Version 5 has exactly these scalar fields",
+                "version = 5",
                 "phase = \"COMPLETE\"",
                 "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
                 "A restart resumes `REPAIRING` or `AWAITING_REVIEW`",
@@ -686,7 +686,8 @@ class TestContractContent(unittest.TestCase):
         for field in (
                 "review_context", "review_stage", "failure_trigger",
                 "reviewer_recommendations", "approved_scope_additions",
-                "worker_dispositions", "repair_briefs",
+                "scope_amendments", "worker_dispositions", "repair_briefs",
+                "repair_round_assignments",
                 "plan_digest_transitions", "review_transitions"):
             with self.subTest(state_field=field):
                 self.assertIn(field, format_text)

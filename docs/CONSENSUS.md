@@ -522,11 +522,12 @@ successful run under receipt policy or explicit `--verify`; missing receipts,
 an unrun full suite, and absent complete verification are never review failures.
 
 `_auto_fix.toml` is deletable derived folder memory, not a task status or
-acceptance evidence. The version-3 record requires its recovery `phase`,
+acceptance evidence. The version-5 record requires its recovery `phase`,
 context/stage dimensions, failure trigger, and binds source and task-plan
 identity, the review prompt, the resolved reviewer identity, current and
-historical findings, recommendations, scope decisions, repair briefs,
-acknowledgements, transitions, observed states, and consumed fixer profiles.
+historical findings, recommendations, scope decisions, exact scope-amendment
+transactions, repair-round assignments, repair briefs, acknowledgements,
+transitions, observed states, and consumed fixer profiles.
 Profile selection is round-scoped: assignments are persisted before the first
 write-capable session in a round, so multi-task findings and dependency
 cascades do not consume the normal profile once per task. The finite escalation

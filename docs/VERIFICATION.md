@@ -117,12 +117,14 @@ opening an AI session. No file means `Folder auto-fix: NOT RUN (no review
 state)`; malformed state or a changed source/task binding is `STALE`; a fresh
 review `PASS` is `PASSED (fresh)`; and a fresh `FAIL` is `FAILED (fresh)` with
 its current findings, recommendations, phase, original blocker, scope
-decisions, acknowledgements, profiles, and terminal reason. The version-3 state
+decisions, acknowledgements, profiles, terminal reason, exact scope-amendment
+transactions, and repair-round assignments. The version-5 state
 requires `phase`, `review_context`, `review_stage`, and `failure_trigger`, and
 binds the source tree, task-plan digest, review-prompt digest, and resolved
 reviewer adapter/model/effort; it retains the finding ledger, observed states,
-recommendations, scope additions, repair briefs, dispositions, transitions, and
-consumed fixer profiles. Its `NEEDS_REPAIR`, `REPAIRING`, `AWAITING_REVIEW`, and
+recommendations, scope additions, exact scope-amendment transactions, repair
+briefs, repair-round assignments, dispositions, transitions, and consumed fixer
+profiles. Its `NEEDS_REPAIR`, `REPAIRING`, `AWAITING_REVIEW`, and
 `COMPLETE` phases make restart boundaries explicit. It is deletable derived
 evidence, never a receipt, task status, or acceptance gate. Repair and closeout
 refuse when a pending `FAIL` has no current reviewer policy or its resolved
@@ -138,6 +140,12 @@ recommending acceptance, the meeting must tell the human about the flag,
 enumerate every item, and obtain a sufficient-repair, follow-up-task/rework, or
 durable-`AGENTS.md`-rule disposition for each; this is not a second approval
 state.
+
+Scheduler-owned status-only transitions during automatic rework, interruption,
+repair closeout, or finite profile exhaustion are normal lifecycle evidence and
+do not by themselves make the auto-fix report stale. A real change to task
+requirements, scope, verification, or other contract structure does make the
+binding stale. Both outcomes remain zero-token report evidence.
 
 The configured `[verification] receipt_refresh = "manual"` (the default)
 defers a folder receipt after ordinary `run` closeout. `"auto"` refreshes it

@@ -139,8 +139,11 @@ The report's `Folder auto-fix` section is zero-token derived evidence: `NOT RUN`
 means no state file, `PASSED (fresh)` and `FAILED (fresh)` show the current
 review verdict, and `STALE` means malformed state or a changed source/task
 binding. It also shows phase, context, stage, original blocker, findings and
-recommendations, scope decisions, acknowledgements, profiles, and terminal
-exhaustion evidence. When eligible debt has ever entered through
+recommendations, scope decisions and exact scope-amendment transactions,
+repair acknowledgements and briefs, repair-round assignments, profiles, and
+terminal exhaustion evidence. Scheduler-owned status-only transitions during
+rework, interruption, repair closeout, or exhaustion do not by themselves make
+this evidence stale; structural task-contract edits do. When eligible debt has ever entered through
 `COMPLETED_FOLDER + INITIAL`, `_report.md` points to the mechanically generated
 `_technical_debt.md` agenda. Neither that state nor a review `PASS` is
 acceptance evidence.

@@ -95,6 +95,8 @@ adjudication gate。Report 只以 derived runtime 資訊顯示 `NOT RUN`、`PASS
 `STALE`，並附 phase、blocker、findings、scope decision、acknowledgement、profiles 與
 terminal reason；不改 task status 或 acceptance。完整 verification 依成功 run 的 receipt
 policy 或明示 `--verify` 另行執行，缺 receipt 或未跑 full suite 絕不是 reviewer failure。
+Report 的 scope-amendment transaction 與 repair-round assignment 是 zero-token evidence；
+scheduler 的 status-only lifecycle transition 也不會單獨讓 evidence stale。
 Reviewer 的 prompt-plus-detection 寫入拒絕是在 `danger-full-access` 預設下的 cooperative
 rule，不是 security sandbox 或預防性的 OS permission boundary。
 

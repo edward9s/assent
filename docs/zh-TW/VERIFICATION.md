@@ -87,11 +87,13 @@ Folder report 也會以零 token 顯示 derived `_auto_fix.toml`：沒有檔案�
 `Folder auto-fix: NOT RUN (no review state)`；malformed 或 source/task binding 改變是
 `STALE`；新鮮 review PASS 是 `PASSED (fresh)`；新鮮 FAIL 是 `FAILED (fresh)` 並列出
 phase、context、stage、original blocker、current findings/recommendations、scope decision、
-acknowledgement、profiles 與 terminal reason。Version 3 的 state 必須有 `phase`、
+acknowledgement、profiles、terminal reason、exact scope-amendment transaction 與
+repair-round assignment。Version 5 的 state 必須有 `phase`、
 `review_context`、`review_stage`、`failure_trigger`，綁定 source tree、task-plan digest、
 review-prompt digest 與 resolved reviewer adapter/model/effort，保留 finding ledger、
-recommendations、scope additions、repair briefs、dispositions、transitions、observed states
-與 consumed fixer profiles；`NEEDS_REPAIR`、`REPAIRING`、`AWAITING_REVIEW`、`COMPLETE` 明確
+recommendations、scope additions、exact scope-amendment transactions、repair briefs、
+repair-round assignments、dispositions、transitions、observed states 與 consumed fixer
+profiles；`NEEDS_REPAIR`、`REPAIRING`、`AWAITING_REVIEW`、`COMPLETE` 明確
 表示 restart boundary。它可刪除重建，不是 receipt、task status 或 acceptance gate。Pending
 FAIL 若沒有目前 reviewer policy 或 identity 漂移，repair 與 closeout 會拒絕。
 
@@ -101,6 +103,11 @@ recheck 後已解決的 finding 及 task、path、evidence、recommendation、re
 current/resolved outcome、scope decision。blocked adjudication 與 recheck 不能新增 entry。
 Acceptance 前 meeting 必須主動告訴人類、列舉每項，逐項取得完成 repair 足夠、follow-up
 task/rework，或 durable `AGENTS.md` rule 的 disposition；這不是第二個 approval state。
+
+Scheduler 在 automatic rework、中斷、repair closeout 或有限 profile 用盡時造成的
+status-only transition 是正常 lifecycle evidence，不會單獨讓 auto-fix report stale。
+真正改動 task requirement、scope、verification 或其他 contract structure 才會讓 binding
+stale；兩者都只是 zero-token report evidence。
 
 `[verification] receipt_refresh = "manual"`（預設）讓普通 run closeout 延後 folder
 receipt；`"auto"` 在 folder 所有 task 完成時刷新。`assent run --verify` 不受這個設定

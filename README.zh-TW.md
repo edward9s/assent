@@ -112,6 +112,9 @@ file。每個 repair round 都依該 round 開始前尚未消耗的有限 fixer 
 policy 會拒絕 repair 與 closeout。`_auto_fix.toml` 與 report 是 derived evidence，不是
 task status 或 acceptance evidence。完整 verification 仍依成功 run 的 receipt policy 或
 明示 `--verify` 另行執行；缺 receipt 或尚未跑 full suite 絕不是 reviewer failure。
+Report 也會顯示 exact scope-amendment transaction 與 repair-round assignment。Scheduler 在
+rework、中斷、repair closeout 或 profile 用盡時的 status-only transition 不會單獨讓 evidence
+stale；真正的 task-contract structural edit 才會。
 
 ## 規劃會議 prompt
 

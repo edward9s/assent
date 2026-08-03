@@ -123,8 +123,12 @@ later human review; no runtime human adjudication step is inserted. A later
 opted-in recovery requires the same current reviewer identity. `_auto_fix.toml`
 is derived runtime memory, not a task status or acceptance evidence; complete
 verification remains a separate successful-run/receipt-policy or explicit
-`--verify` stage, and its absence is never a reviewer failure. See the
-[Workflow](docs/WORKFLOW.md) and [Verification](docs/VERIFICATION.md) guides.
+`--verify` stage, and its absence is never a reviewer failure. Report generation
+also shows exact scope-amendment transactions and repair-round
+assignments. Scheduler-owned status-only transitions during rework, interruption,
+repair closeout, or exhaustion do not by themselves make that evidence stale;
+structural task-contract edits do. See the [Workflow](docs/WORKFLOW.md) and
+[Verification](docs/VERIFICATION.md) guides.
 
 ## Planning-meeting prompt
 

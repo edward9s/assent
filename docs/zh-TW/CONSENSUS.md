@@ -394,10 +394,11 @@ speculation 與重複 debt discovery 不會讓 loop 繼續。無法唯一對應�
 scheduler 作決定，loop 內沒有 runtime human adjudication gate。
 
 `_auto_fix.toml` 是可刪除的 derived folder memory，不是 task status 或 acceptance evidence。
-Version 3 必須有 recovery `phase`、context/stage/failure trigger，並綁定 source/task-plan
+Version 5 必須有 recovery `phase`、context/stage/failure trigger，並綁定 source/task-plan
 identity、review prompt、resolved reviewer identity、目前與歷史 `PASS`/`FAIL` findings、
-recommendations、scope decisions、repair briefs、acknowledgements、transitions、observed
-states 與 consumed fixer profiles。
+recommendations、scope decisions、exact scope-amendment transactions、repair-round
+assignments、repair briefs、acknowledgements、transitions、observed states 與 consumed
+fixer profiles。
 Profile selection 是 round-scoped：assignments 在該 round 第一個 write-capable session 前持久化，
 因此多 task finding 與 dependency cascade 不會逐 task 消耗 normal profile。有限 escalation
 budget、中斷、quota、gate 失敗與用盡都保留編輯與 evidence；`run --auto-fix` recovery 只在

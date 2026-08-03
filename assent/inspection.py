@@ -19,6 +19,8 @@ side effect, and the dependency runs that way only.
 """
 from __future__ import annotations
 
+import hashlib
+import re
 import subprocess
 from collections import Counter
 from datetime import datetime, timezone
@@ -37,6 +39,12 @@ from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               resolve_requested_effort, resolve_stack_state,
                               resolve_task_assignments,
                               worktree_configuration_errors)
+
+
+_TASK_STATUS_LINE_RE = re.compile(
+    rb'^(\s*status\s*=\s*")(TODO|WIP|DONE|BLOCKED|SKIP)'
+    rb'("[^\r\n]*)(\r?\n)?$')
+_TASK_STATUSES = frozenset(("TODO", "WIP", "DONE", "BLOCKED", "SKIP"))
 
 
 def _git_read(root, *args: str) -> str | None:
@@ -175,13 +183,10 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
             reasons.append("source tree changed")
 
     try:
-        task_plan_digest = auto_fix.sha256_files(
-            task.path for task in plan.tasks)
+        if not _task_plan_matches_state(plan, state):
+            reasons.append("task contracts changed")
     except AssentError as e:
         reasons.append(f"task contracts unavailable: {e}")
-    else:
-        if task_plan_digest != state.task_plan_sha256:
-            reasons.append("task contracts changed")
 
     # A configured reviewer identity is part of the state binding.  Keep the
     # no-policy case readable for historical reports, but never call evidence
@@ -291,6 +296,33 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
             f"    - {profile.adapter}/{profile.model}/{profile.effort}"
             for profile in state.consumed_fixer_profiles)
 
+    lines.append("  Scope amendment transactions:")
+    if not state.scope_amendments:
+        lines.append("    - none recorded")
+    else:
+        for amendment in state.scope_amendments:
+            paths = ", ".join(amendment.paths)
+            lines.append(
+                f"    - {amendment.task_id}: {paths}"
+                f" ({', '.join(amendment.path_states)})")
+            lines.append(
+                f"      task contract: {amendment.task_before_sha256}"
+                f" -> {amendment.task_after_sha256}")
+            lines.append(
+                f"      task plan: {amendment.plan_before_sha256}"
+                f" -> {amendment.plan_after_sha256}")
+
+    lines.append("  Repair-round assignments:")
+    if not state.repair_round_assignments:
+        lines.append("    - none active")
+    else:
+        for assignment in state.repair_round_assignments:
+            attempted = "attempted" if assignment.attempted else "not started"
+            lines.append(
+                f"    - {assignment.task_id}: "
+                f"{assignment.adapter}/{assignment.model}/{assignment.effort} "
+                f"({attempted})")
+
     if state.plan_digest_transitions:
         lines.append("  Plan digest transitions:")
         lines.extend(
@@ -327,6 +359,108 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
 
 
 _REPORT_TEXT_LIMIT = 360
+
+
+def _task_plan_digest_for_statuses(
+        plan: Plan, statuses: dict[str, str], *, normalize_text: bool = False
+        ) -> str | None:
+    """Hash current task bytes after replacing only their status lines.
+
+    The scheduler's auto-fix binding includes exact task-contract bytes.  A
+    status-only transition is scheduler-owned lifecycle evidence, however, so
+    report freshness checks the original completed/blocked status shape while
+    still treating every other byte as a structural contract change.
+    """
+    digest = hashlib.sha256()
+    for task in sorted(plan.tasks, key=lambda item: item.path.name):
+        status = statuses.get(task.id)
+        if status not in _TASK_STATUSES:
+            return None
+        try:
+            data = (task.path.read_text(encoding="utf-8").encode("utf-8")
+                    if normalize_text else task.path.read_bytes())
+        except OSError as e:
+            raise AssentError(
+                f"Unable to hash auto-fix task contract {task.path}: {e}") from e
+        replacement = status.encode("ascii")
+        chunks: list[bytes] = []
+        matches = 0
+        for line in data.splitlines(keepends=True):
+            match = _TASK_STATUS_LINE_RE.match(line)
+            if match is None:
+                chunks.append(line)
+                continue
+            matches += 1
+            chunks.append(
+                match.group(1) + replacement + match.group(3)
+                + (match.group(4) or b""))
+        if matches != 1:
+            return None
+        normalized = b"".join(chunks)
+        digest.update(task.path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(len(normalized)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(normalized)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _task_status_baseline(
+        plan: Plan, state: auto_fix.AutoFixState) -> dict[str, str]:
+    """Infer the status shape bound by the review without trusting status edits.
+
+    Completed-folder reviews bind DONE/SKIP contracts.  A blocked review keeps
+    the live status for unaffected tasks, while an exact automatic rework
+    journal records the status that preceded its scheduler reset.
+    """
+    statuses: dict[str, str] = {}
+    for task in plan.tasks:
+        if state.review_context == "completed_folder":
+            statuses[task.id] = "SKIP" if task.status == "SKIP" else "DONE"
+        else:
+            statuses[task.id] = task.status
+        try:
+            entries = read_entries(task.journal_path)
+        except AssentError:
+            continue
+        if state.review_context != "blocked_adjudication":
+            continue
+        for entry in entries:
+            if entry.get("event") != "rework_requested":
+                continue
+            detail = entry.get("detail")
+            if not isinstance(detail, str):
+                continue
+            match = re.search(
+                r"(?m)^original status:\s*(TODO|WIP|DONE|BLOCKED|SKIP)\s*$",
+                detail)
+            if match:
+                statuses[task.id] = match.group(1)
+    return statuses
+
+
+def _task_plan_matches_state(
+        plan: Plan, state: auto_fix.AutoFixState) -> bool:
+    """Accept exact bytes or a scheduler-owned status-only task transition."""
+    try:
+        exact = auto_fix.sha256_files(task.path for task in plan.tasks)
+    except AssentError:
+        raise
+    if exact == state.task_plan_sha256:
+        return True
+    current_statuses = {task.id: task.status for task in plan.tasks}
+    normalized_exact = _task_plan_digest_for_statuses(
+        plan, current_statuses, normalize_text=True)
+    if normalized_exact == state.task_plan_sha256:
+        return True
+    baseline = _task_status_baseline(plan, state)
+    normalized = _task_plan_digest_for_statuses(plan, baseline)
+    if normalized == state.task_plan_sha256:
+        return True
+    normalized_text = _task_plan_digest_for_statuses(
+        plan, baseline, normalize_text=True)
+    return normalized_text == state.task_plan_sha256
 
 
 def _compact_report_text(value: object, limit: int = _REPORT_TEXT_LIMIT) -> str:

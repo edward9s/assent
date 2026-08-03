@@ -124,6 +124,9 @@ acknowledgements, profiles, and terminal reason as derived runtime information;
 none of these values changes task status or acceptance. Complete verification
 remains separate after a successful run under receipt policy or explicit
 `--verify`; a missing receipt or unrun full suite is never a reviewer failure.
+The report's scope-amendment transactions and repair-round assignments remain
+zero-token evidence, and scheduler-owned status-only lifecycle transitions do
+not by themselves make that evidence stale.
 The reviewer's prompt-plus-detection refusal for project writes is cooperative
 and runs with the documented `danger-full-access` default; it is not a security
 sandbox or a preventive OS permission boundary.

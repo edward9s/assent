@@ -877,12 +877,12 @@ artifact. It is included in the runtime exclusions with `_assent.log`,
 `_report.md`, locks, and verification receipts; it is not a task file, a new
 task status, acceptance evidence, or a source-of-truth database. It may be
 rebuilt from the current folder run and must never be staged or committed.
-Version 3 has exactly these scalar fields and ordered table collections. The
+Version 5 has exactly these scalar fields and ordered table collections. The
 `phase` field is required; it makes crash recovery explicit rather than
 inferring a repair boundary from task statuses alone:
 
 ```toml
-version = 3
+version = 5
 source_tree = "<40-or-64 lowercase hexadecimal tree id>"
 task_plan_sha256 = "<64 lowercase hexadecimal digest>"
 review_prompt_sha256 = "<64 lowercase hexadecimal digest>"
@@ -899,8 +899,10 @@ findings = []
 observed_states = []
 reviewer_recommendations = []
 approved_scope_additions = []
+scope_amendments = []
 worker_dispositions = []
 repair_briefs = []
+repair_round_assignments = []
 plan_digest_transitions = []
 review_transitions = []
 consumed_fixer_profiles = []
@@ -929,6 +931,16 @@ task_id = "t001"
 path = "project/relative/new-file.py"
 path_state = "new_file"       # existing_file | new_file
 
+[[scope_amendments]]
+finding_fingerprints = ["<64 lowercase hexadecimal digest>"]
+task_id = "t001"
+paths = ["project/relative/new-file.py"]
+path_states = ["new_file"]
+task_before_sha256 = "<64 lowercase hexadecimal digest>"
+task_after_sha256 = "<64 lowercase hexadecimal digest>"
+plan_before_sha256 = "<64 lowercase hexadecimal digest>"
+plan_after_sha256 = "<64 lowercase hexadecimal digest>"
+
 [[worker_dispositions]]
 task_id = "t001"
 fingerprint = "<64 lowercase hexadecimal digest>"
@@ -939,6 +951,13 @@ detail = "bounded acknowledgement evidence"
 task_id = "t001"
 finding_fingerprints = ["<64 lowercase hexadecimal digest>"]
 brief = "scheduler-persisted reviewer-to-worker repair brief"
+
+[[repair_round_assignments]]
+task_id = "t001"
+adapter = "codex"
+model = "prime"
+effort = "heavy"
+attempted = false
 
 [[plan_digest_transitions]]
 before_sha256 = "<64 lowercase hexadecimal digest>"
@@ -963,6 +982,14 @@ computes its identity from `task_id`, path, summary, and evidence. A `PASS`
 has no current findings; a `FAIL` has at least one. The findings ledger and
 `observed_states` retain prior evidence, while `consumed_fixer_profiles` is an
 ordered set and cannot contain duplicates.
+
+Version 5 adds the crash-resumable `scope_amendments` records for the one
+scheduler-owned exact scope transaction and `repair_round_assignments` records
+for the complete profile assignment made before a write-capable fixer session.
+An assignment with `attempted = false` is retried with the same profile after a
+pre-child process-creation failure; it does not silently consume another
+profile. These records are evidence, not worker or reviewer permission to edit
+task files.
 
 The recovery phases have fixed meanings. `NEEDS_REPAIR` is a durable `FAIL`
 awaiting an authorized rework round; `REPAIRING` means the current bounded
@@ -1391,6 +1418,12 @@ matches the current work folder and task id; an old `auto(tNNN)` cannot be
 attributed safely, so its hash is not shown. `_report.md` is a runtime artifact:
 not versioned, not part of the clean/scope checks, and fully rewritten on each
 generation.
+
+Scheduler-owned status changes during rework, interruption, repair closeout,
+or finite exhaustion are normal lifecycle evidence; they do not by themselves
+make the report `STALE (task contracts changed)`. A real edit to task structure,
+scope, requirements, verification, or other contract bytes does make the
+binding stale. The report remains zero-token and informational in either case.
 
 When the durable ledger contains a finding first introduced by
 `COMPLETED_FOLDER + INITIAL` as eligible technical debt, report generation also
