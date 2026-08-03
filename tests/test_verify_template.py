@@ -3,6 +3,7 @@ its run() command resolution, and its run_unittest_parallel() helper."""
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,17 @@ _UNICODE_FAIL_MODULE = (
     "        print('繁體中文錯誤輸出', file=sys.stderr)\n"
     "        self.fail('繁體中文失敗診斷')\n"
 )
+
+
+def _sleep_module(seconds: float) -> str:
+    return (
+        "import time\n"
+        "import unittest\n\n"
+        "class T(unittest.TestCase):\n"
+        "    def test_ok(self):\n"
+        f"        time.sleep({seconds})\n"
+    )
+
 
 _INVALID_BYTES_MODULE = (
     "import os\n"
@@ -97,6 +109,25 @@ class VerifyTemplateFixture(unittest.TestCase):
             [sys.executable, str(self.script)], cwd=self.root,
             capture_output=True, encoding="utf-8", errors="strict", env=env)
 
+    _RANK_LINE = re.compile(r"^ {2}(\d+)\. (\S+) (\d+\.\d\d)s (PASS|FAIL)$")
+    RANKING_HEADER = "Slowest test modules:"
+
+    def _ranking(self, stdout: str) -> list[tuple[int, str, float, str]]:
+        """Parse the ranking block into (rank, module, seconds, status) rows."""
+        self.assertIn(self.RANKING_HEADER, stdout)
+        tail = stdout[stdout.index(self.RANKING_HEADER)
+                      + len(self.RANKING_HEADER):]
+        entries = []
+        for line in tail.splitlines():
+            match = self._RANK_LINE.match(line)
+            if match is None:
+                if line.strip():
+                    break
+                continue
+            entries.append((int(match.group(1)), match.group(2),
+                            float(match.group(3)), match.group(4)))
+        return entries
+
 
 class RunUnittestParallelCase(VerifyTemplateFixture):
     def test_packaged_project_test_examples_are_all_commented(self) -> None:
@@ -121,7 +152,7 @@ class RunUnittestParallelCase(VerifyTemplateFixture):
         self.assertIn("no test_*.py modules found", result.stdout)
         self.assertNotIn("verify: OK", result.stdout)
 
-    def test_all_green_exits_zero_with_sorted_summary(self) -> None:
+    def test_all_green_exits_zero_and_reports_every_module(self) -> None:
         self._write_module("test_b", _PASS_MODULE)
         self._write_module("test_a", _PASS_MODULE)
         self._commit("all green fixture")
@@ -129,12 +160,110 @@ class RunUnittestParallelCase(VerifyTemplateFixture):
         result = self._run()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        line_a = f"test_a: pass ("
-        line_b = f"test_b: pass ("
-        pos_a = result.stdout.index(line_a)
-        pos_b = result.stdout.index(line_b)
-        self.assertLess(pos_a, pos_b)
+        for line in ("test_a: pass (", "test_b: pass ("):
+            self.assertIn(line, result.stdout)
+            self.assertLess(result.stdout.index(line),
+                            result.stdout.index(self.RANKING_HEADER))
+        ranking = self._ranking(result.stdout)
+        self.assertEqual([entry[1] for entry in ranking].count("test_a"), 1)
+        self.assertEqual([entry[1] for entry in ranking].count("test_b"), 1)
         self.assertIn("verify: OK", result.stdout)
+
+    def test_live_lines_follow_completion_order_before_the_ranking(self) -> None:
+        # test_a_slow sorts first by name but finishes last, so a live line
+        # ordered by completion is the only way test_z_fast can come first.
+        self._write_module("test_a_slow", _sleep_module(1.5))
+        self._write_module("test_z_fast", _PASS_MODULE)
+        self._commit("live timing fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        slow_live = result.stdout.index("test_a_slow: pass (")
+        fast_live = result.stdout.index("test_z_fast: pass (")
+        self.assertLess(fast_live, slow_live)
+        self.assertLess(slow_live, result.stdout.index(self.RANKING_HEADER))
+
+        ranking = self._ranking(result.stdout)
+        self.assertEqual([entry[1] for entry in ranking],
+                         ["test_a_slow", "test_z_fast"])
+        self.assertEqual([entry[0] for entry in ranking], [1, 2])
+        self.assertGreater(ranking[0][2], ranking[1][2])
+        self.assertGreaterEqual(ranking[0][2], 1.5)
+
+    def test_ranking_is_descending_and_breaks_ties_by_module_name(self) -> None:
+        for name in ("test_c", "test_a", "test_b"):
+            self._write_module(name, _PASS_MODULE)
+        self._write_module("test_slowest", _sleep_module(1.0))
+        self._commit("tie break fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        ranking = self._ranking(result.stdout)
+        self.assertEqual(len(ranking), 4)
+        self.assertEqual(ranking[0][1], "test_slowest")
+        durations = [entry[2] for entry in ranking]
+        self.assertEqual(durations, sorted(durations, reverse=True))
+        # Whatever the fast modules measured, equal durations stay name-ordered.
+        for earlier, later in zip(ranking, ranking[1:]):
+            if earlier[2] == later[2]:
+                self.assertLess(earlier[1], later[1])
+
+    def test_twelve_modules_rank_exactly_the_slowest_ten(self) -> None:
+        for index in range(12):
+            self._write_module(f"test_m{index:02d}", _PASS_MODULE)
+        self._commit("twelve module fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        ranking = self._ranking(result.stdout)
+        self.assertEqual(len(ranking), 10)
+        self.assertEqual([entry[0] for entry in ranking], list(range(1, 11)))
+        durations = [entry[2] for entry in ranking]
+        self.assertEqual(durations, sorted(durations, reverse=True))
+        self.assertIn("across 12 module(s)", result.stdout)
+        self.assertIn("verify: OK", result.stdout)
+
+    def test_totals_are_reported_on_success_and_failure(self) -> None:
+        self._write_module("test_a", _PASS_MODULE)
+        self._commit("success totals fixture")
+
+        passing = self._run()
+
+        self.assertEqual(passing.returncode, 0, passing.stdout + passing.stderr)
+        self.assertRegex(passing.stdout,
+                         r"unittest phase: \d+\.\d\ds across 1 module\(s\) "
+                         r"on \d+ worker\(s\)")
+        self.assertRegex(passing.stdout, r"verifier total: \d+\.\d\ds")
+
+        self._write_module("test_b", _FAIL_MODULE)
+        self._commit("failure totals fixture")
+
+        failing = self._run()
+
+        self.assertEqual(failing.returncode, 1)
+        self.assertRegex(failing.stdout,
+                         r"unittest phase: \d+\.\d\ds across 2 module\(s\) "
+                         r"on \d+ worker\(s\)")
+        self.assertRegex(failing.stdout, r"verifier total: \d+\.\d\ds")
+        self.assertIn("verify: FAIL", failing.stdout)
+
+    def test_ranking_reports_pass_and_fail_with_diagnostics(self) -> None:
+        self._write_module("test_a", _PASS_MODULE)
+        self._write_module("test_b", _FAIL_MODULE)
+        self._commit("pass and fail ranking fixture")
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1)
+        ranking = self._ranking(result.stdout)
+        statuses = {entry[1]: entry[3] for entry in ranking}
+        self.assertEqual(statuses, {"test_a": "PASS", "test_b": "FAIL"})
+        self.assertIn("deliberate fixture failure marker",
+                      result.stdout + result.stderr)
+        self.assertIn("--- test_b output ---", result.stdout)
 
     def test_one_red_one_green_runs_both_and_shows_failure_output(self) -> None:
         self._write_module("test_a", _PASS_MODULE)
