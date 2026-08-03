@@ -30,13 +30,13 @@ _BILLING_TEXT_RE = re.compile(
 
 def build_command(cfg: "Config", prompt: str, requested_model: str,
                   requested_effort: str | None) -> list[str]:
-    """Build a non-interactive, programmatically parseable Codex command."""
+    """Build a Codex command whose prompt is supplied through stdin."""
     cmd = [cfg.codex_command, "exec", "--json", "--color", "never",
            "--model", requested_model]
     if requested_effort:
         cmd += ["-c", f'model_reasoning_effort="{requested_effort}"']
     cmd += list(cfg.codex_extra_args)
-    cmd.append(prompt)
+    cmd.append("-")
     return cmd
 
 
@@ -200,7 +200,8 @@ class CodexAdapter(Adapter):
             self.cfg, prompt, requested_model, requested_effort)
         stall_seconds = self.cfg.stall_minutes * 60 if self.cfg.stall_minutes else 0
         returncode, output, stalled = run_subprocess(
-            command, cwd, stall_seconds, echo=self._echo_line)
+            command, cwd, stall_seconds, echo=self._echo_line,
+            input_text=prompt)
         exhausted = (
             not stalled and returncode != 0 and parse_output_for_quota(output))
         billing = (not stalled and not exhausted and returncode != 0
