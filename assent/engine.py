@@ -2363,18 +2363,24 @@ def _run_auto_fix_repairs(
                 "Recovered focused or blocker evidence is embedded in each "
                 "current finding."))
         auto_fix.write_auto_fix_state(state_path, state)
-    if state.phase == "NEEDS_REPAIR" and state.approved_scope_additions:
-        authoritative_plan = (
-            _authoritative_status_plan(trusted_plan)
-            if trusted_plan is not None else Plan.parse(cfg.tasks_dir))
-        authoritative_contracts = (
-            _authoritative_contracts(authoritative_plan, trusted_contracts)
-            if trusted_contracts is not None
-            else _task_contract_snapshots(authoritative_plan))
-        state, trusted_plan, trusted_contracts = (
-            _apply_reviewed_scope_amendments(
-                cfg, state, authoritative_plan, authoritative_contracts, now))
     while True:
+        # Every reviewer decision that enters NEEDS_REPAIR is amended here,
+        # not only the first one: a recheck may be what first exposes the
+        # omitted path, and its addition must be durable before that decision
+        # reopens the task or dispatches the next fixer round.  Re-entering
+        # with nothing new left to apply is a validated no-op.
+        if state.phase == "NEEDS_REPAIR" and state.approved_scope_additions:
+            authoritative_plan = (
+                _authoritative_status_plan(trusted_plan)
+                if trusted_plan is not None else Plan.parse(cfg.tasks_dir))
+            authoritative_contracts = (
+                _authoritative_contracts(authoritative_plan, trusted_contracts)
+                if trusted_contracts is not None
+                else _task_contract_snapshots(authoritative_plan))
+            state, trusted_plan, trusted_contracts = (
+                _apply_reviewed_scope_amendments(
+                    cfg, state, authoritative_plan, authoritative_contracts,
+                    now))
         plan = Plan.parse(cfg.tasks_dir)
         recovered_state = _auto_fix_recover_dispositions(state, plan)
         if recovered_state != state:

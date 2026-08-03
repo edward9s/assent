@@ -248,6 +248,68 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertIn("NOT RUN: self-marked BLOCKED", repair_prompt)
         self.assertIn("src/needed.py (existing_file)", repair_prompt)
 
+    def test_recheck_approved_scope_addition_is_applied_before_its_fixer(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/base.py",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "base.py").write_text("old\n", encoding="utf-8")
+        (source / "needed.py").write_text("value = 1\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+
+        stale = auto_fix.ReviewFinding(
+            "t001", "src/base.py", "base value is stale",
+            "The review reproduced the stale value.")
+        exposed = auto_fix.ReviewFinding(
+            "t001", "src/needed.py",
+            "Required source file was omitted from scope",
+            "The repair diff proves the remaining fix lives in src/needed.py.",
+            kind="scope_amendment",
+            recommendation="Append the exact existing file to t001 scope.",
+            scope_addition=auto_fix.ScopeAddition(
+                "src/needed.py", "existing_file"),
+            transition="newly_exposed",
+            transition_evidence=(
+                "t001 acceptance requires the repaired value that only "
+                "src/needed.py can supply."))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (stale,))), False, None),
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (exposed,))), False, None),
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+
+        def amended_repair(prompt):
+            # The recheck-approved path is already part of the trusted contract
+            # this fixer receives, so writing it stays inside the scope check.
+            self.assertIn("src/needed.py (existing_file)", prompt)
+            self.assertIn("src/needed.py", parse_task_file(task_path).scope)
+            return self.repair_done(
+                task_path, {"src/needed.py": "value = 2\n"},
+                requested_model="prime")(prompt)
+
+        worker = ScriptedAdapter([
+            self.repair_done(task_path, {"src/base.py": "new\n"}),
+            amended_repair,
+        ])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        self.assertEqual(parse_task_file(task_path).scope,
+                         ["src/base.py", "src/needed.py"])
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
+        self.assertEqual(len(worker.calls), 2)
+        events = [item["event"]
+                  for item in read_entries(journal_path_for(task_path))]
+        self.assertEqual(events.count("auto_fix_scope_amendment"), 1)
+        self.assertLess(
+            events.index("auto_fix_scope_amendment"),
+            len(events) - 1 - events[::-1].index("rework_requested"))
+
     def test_scope_amendment_resumes_after_task_write_before_state_write(self):
         task_path = self.write_task(
             1, scope=("src/base.py",), status="BLOCKED")

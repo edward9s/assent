@@ -46,6 +46,14 @@ REPAIR_DISPOSITION_PREFIX = "ASSENT_REPAIR_DISPOSITION "
 AUTO_FIX_PHASES = frozenset({
     "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
 })
+# Basenames no reviewed scope amendment may authorize, at any directory depth:
+# the instruction and Git-control files that govern how a session behaves, and
+# Assent's own derived management artifacts.
+_PROTECTED_SCOPE_BASENAMES = frozenset({
+    "agents.md", ".gitignore", ".gitattributes", ".gitmodules",
+    "_auto_fix.toml", "_verification.toml", "_batch_verification.toml",
+    "_archived.toml", "_report.md", "assent.lock",
+})
 
 MAX_REVIEW_OUTPUT_BYTES = 1_048_576
 MAX_REVIEW_RECORD_BYTES = 262_144
@@ -900,18 +908,11 @@ def validate_scope_additions(
             raise AssentError(
                 f"Auto-fix scope path targets a protected control surface: "
                 f"{normalized}")
-        if (len(parts) == 1
-                and parts[0].casefold() in {
-                    "agents.md", ".gitignore", ".gitattributes", ".gitmodules",
-                }):
-            raise AssentError(
-                f"Auto-fix scope path targets a protected control surface: "
-                f"{normalized}")
+        # A protected basename is refused wherever it sits: a nested AGENTS.md
+        # or .gitignore governs its own subtree exactly as the root one does.
         leaf = parts[-1].casefold()
         if (re.fullmatch(r"t\d{3}_.+\.(?:e|r)\.toml", leaf)
-                or leaf in {"_auto_fix.toml", "_verification.toml",
-                            "_batch_verification.toml", "_archived.toml",
-                            "_report.md", "assent.lock"}):
+                or leaf in _PROTECTED_SCOPE_BASENAMES):
             raise AssentError(
                 f"Auto-fix scope path targets a protected control surface: "
                 f"{normalized}")

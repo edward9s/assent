@@ -269,6 +269,20 @@ class TestScopeAdditionValidation(unittest.TestCase):
             with self.subTest(path=addition.path), self.assertRaises(AssentError):
                 validate_scope_additions(self.root, self.plan, (addition,))
 
+    def test_nested_instruction_and_git_control_files_are_protected(self):
+        # Each nested target has an existing ordinary parent directory, so only
+        # the depth-independent basename rule can refuse it.
+        cases = (
+            self.addition("src/AGENTS.md", "new_file"),
+            self.addition("src/.gitignore", "new_file"),
+            self.addition("tests/.gitattributes", "new_file"),
+            self.addition("tests/.gitmodules", "new_file"),
+        )
+        for addition in cases:
+            with self.subTest(path=addition.path), self.assertRaisesRegex(
+                    AssentError, "protected control surface"):
+                validate_scope_additions(self.root, self.plan, (addition,))
+
     def test_link_mediated_parent_refuses_without_traversal(self):
         target = self.root / "outside"
         target.mkdir()
