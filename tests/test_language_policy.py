@@ -126,6 +126,10 @@ def _is_audited_old_brand_exception(path: str, text: str) -> bool:
         return True  # Verbatim external-protocol fixture.
     if "AGENTS" in text and ".agents" not in text:
         return True  # The standard agent-tool instruction filename.
+    if (path == "assent/auto_fix.py"
+            and '"agents.md", ".gitignore", ".gitattributes", ".gitmodules"'
+            in text):
+        return True  # Runtime comparison for protected control-surface filenames.
     if path == "tests/test_language_policy.py":
         return True  # This audit's patterns and its narrow exception definitions.
     return False

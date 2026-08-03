@@ -372,29 +372,46 @@ audio 或 video 欄位,不提供 adapter 附件協定,不推測模型的媒體�
 
 ## 有界 folder review 與 auto-fix 共識
 
-一般 review 仍由人類主導。`[auto_fix.review]` 可設定一個 folder-level reviewer，但整個
-bounded loop 都是 invocation-level opt-in；只有明示 `run --auto-fix` 才會在 completed
-folder 的最後 distinct focused checks 通過後啟動唯讀 reviewer，並授權 repair。沒有 flag
-的普通 `run` 不會 review 或 repair。這個 flag 與選取正交，可和明示 folder、`...`、
-`--all`、`--once`、`--task`、`--verify` 等一般 run selector 合用；它不會把 review 變成
-acceptance，也不是 full candidate verification。
+一般 review 仍由人類主導。`[auto_fix.review]` 可 override folder-level reviewer；沒有
+table 時，第一個 effective worker adapter 以 `prime`/`heavy` 自動解析。整個 bounded loop
+都是 invocation-level opt-in；只有明示 `run --auto-fix` 才會在 completed folder 的最後
+distinct focused checks 通過後啟動唯讀 reviewer，或在 durable blocker 證據的 quiescent
+blocked dependency 進入 blocked-adjudication entry point，並授權 repair。沒有 flag 的普通
+`run` 不會 review 或 repair。這個 flag 與選取正交，可和明示 folder、`...`、`--all`、
+`--once`、`--task`、`--verify` 等一般 run selector 合用；它不會把 review 變成 acceptance，
+也不是 full candidate verification。
 
-Reviewer 依循 cumulative diff 與 directly interacting code。若既有 technical debt 的
-修正局部於既有 task 的 declared scope，且 focused test 能可靠驗證，就可回報為合格 finding；
-但不做無界的全 repository debt audit。FAIL review 只可自動重開所有權明確且已有的 task，
-自動 rework 保留程式碼、帶理由，且受 `run --auto-fix` 授權；不建立 task、不改 requirement
-或 scope、不還原 source、不刪 source、不 accept。無法唯一對應既有 task 的 finding 交給
-人類裁決。
+Reviewer 依循 cumulative diff 與 directly interacting code。既有 technical debt 只有由
+`COMPLETED_FOLDER + INITIAL` 引入、修正局部於既有 task 的 declared scope，且 focused test
+能可靠驗證，才可回報為合格 finding；blocked adjudication 與 `RECHECK` 可以保留或解決，
+但不能新增；也不做無界的全 repository debt audit。FAIL review 只可自動重開所有權明確且
+已有的 task，自動 rework 保留程式碼、帶理由，且受 `run --auto-fix` 授權；reviewer 可核准
+一個精確 scope addition，但只有 scheduler 修改 task file，worker 與 reviewer 都禁止
+task-file edit。不建立 task、不改 requirement、不還原 source、不刪 source、不 accept。
+Recheck 保留仍存在 finding 的 fingerprint，新 finding 只接受 repair regression 或 newly
+exposed existing requirement 的證據；原集合清空後必須 PASS，optional improvement、
+speculation 與重複 debt discovery 不會讓 loop 繼續。無法唯一對應既有 task 的 finding 交給
+scheduler 作決定，loop 內沒有 runtime human adjudication gate。
 
 `_auto_fix.toml` 是可刪除的 derived folder memory，不是 task status 或 acceptance evidence。
-Version 2 必須有 recovery `phase`，並綁定 source/task-plan identity、review prompt、resolved
-reviewer identity、目前 `PASS`/`FAIL` findings、observed states 與 consumed fixer profiles。
+Version 5 必須有 recovery `phase`、context/stage/failure trigger，並綁定 source/task-plan
+identity、review prompt、resolved reviewer identity、目前與歷史 `PASS`/`FAIL` findings、
+recommendations、scope decisions、exact scope-amendment transactions、repair-round
+assignments、repair briefs、acknowledgements、transitions、observed states 與 consumed
+fixer profiles。
 Profile selection 是 round-scoped：assignments 在該 round 第一個 write-capable session 前持久化，
 因此多 task finding 與 dependency cascade 不會逐 task 消耗 normal profile。有限 escalation
 budget、中斷、quota、gate 失敗與用盡都保留編輯與 evidence；`run --auto-fix` recovery 只在
 目前 reviewer policy 與 resolved identity 相同時恢復 WIP 並跳過已消耗 profile，移除或 drift 會
 拒絕 repair 與 closeout。Reviewer 的 write-detection snapshot 是 `danger-full-access` 下的
-cooperative rule，不是 security sandbox。人類 `accept` 仍是唯一 publication decision。
+cooperative rule，不是 security sandbox；loop 內沒有 runtime human adjudication gate。完整
+verification 只在 successful run 後按 receipt policy 或明示 `--verify` 進行，缺 receipt 或未
+跑 full suite 都不是 reviewer failure。人類 `accept` 仍是唯一 publication decision。
+
+若 debt finding 由 `COMPLETED_FOLDER + INITIAL` 首次引入，zero-token report 會建立
+`_technical_debt.md` 並在 `_report.md` 指示 `TECHNICAL DEBT REVIEW REQUIRED`。Meeting 在建議
+accept 前必須主動告訴人類、列舉每一項，逐項取得完成 repair 足夠、follow-up task/rework，
+或提升成 `AGENTS.md` durable rule 的 disposition；這不是第二個 approval state。
 
 ## 品質標準(取代 token 數字 KPI)
 

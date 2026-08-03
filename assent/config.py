@@ -158,7 +158,7 @@ class AdapterSettings:
 
 @dataclass(frozen=True)
 class AutoFixReviewSettings:
-    """Resolved identity for the optional folder-level AI review."""
+    """Resolved identity for the invocation-opt-in folder AI reviewer."""
 
     adapter: str
     model: str
@@ -739,8 +739,7 @@ def load_config(path: str | Path, folder: str) -> Config:
     verification_section = _section(data, "verification")
     auto_fix = _section(data, "auto_fix")
     _known_keys(auto_fix, "auto_fix", {"review"})
-    review_enabled = "review" in auto_fix
-    review = _section(auto_fix, "review") if review_enabled else {}
+    review = _section(auto_fix, "review") if "review" in auto_fix else {}
     _known_keys(review, "auto_fix.review", {"adapter", "model", "effort"})
     guard = _BlankGuard(provenance, sources)
     adapter_names = _parse_adapter_names(adapter, guard)
@@ -837,7 +836,14 @@ def load_config(path: str | Path, folder: str) -> Config:
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
-    if review_enabled:
+    if review_adapter not in _ADAPTER_NAMES and "adapter" not in review:
+        # An unspecified reviewer defaults to the primary run adapter, whose
+        # validity the single-name [adapter].name path defers to
+        # adapter_settings() at point of use (see its docstring) so run/check
+        # can report their own unknown-adapter error. The default must defer
+        # the same way instead of failing config load on an unrelated label.
+        pass
+    else:
         if review_adapter not in _ADAPTER_NAMES:
             raise AssentError(
                 f"[auto_fix.review] adapter = {review_adapter!r} is not a registered"

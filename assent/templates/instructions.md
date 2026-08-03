@@ -199,18 +199,24 @@ focused checks and authorizes repair. An ordinary `run` without the flag starts
 neither the review nor repair. The reviewer is configured by a registered
 adapter plus the abstract `prime`/`core`/`lite` model and
 `heavy`/`normal`/`slight` effort values; the adapter mapping resolves the actual
-CLI identity and may name a vendor outside the worker rotation. The flag is
-orthogonal to selection and may accompany an implicit folder, explicit folders,
-`...`, `--all`, `--once`, `--task`, or `--verify`; the ordinary selection and
-verification rules still apply. Without `[auto_fix.review]`, the flag has no
-reviewer or repair policy to authorize.
+CLI identity and may name a vendor outside the worker rotation. If the optional
+table is absent, the first effective worker adapter at `prime`/`heavy` is the
+resolved reviewer policy; `assent init` need not be rerun and
+`~/.assent/assent.toml` need not be edited. The flag is orthogonal to selection
+and may accompany an implicit folder, explicit folders, `...`, `--all`,
+`--once`, `--task`, or `--verify`; the ordinary selection and verification rules
+still apply.
 
 The order is fixed: task sessions run their ordinary focused gates; when the
 folder is complete, each distinct `DONE`-task `verify` command runs once more;
-only if all of those checks pass and the source remains clean does the reviewer
-start. An incomplete limited run defers the folder review and spends no review
-token. A folder containing only `SKIP` tasks needs no implementation review.
-Focused failure writes the scheduler's finding evidence and starts no reviewer.
+only if all of those checks pass and the source remains clean does the completed-
+folder reviewer start. A limited `--once`/`--task` run that remains incomplete
+defers that review and spends no review token. A quiescent blocked dependency
+with durable worker `BLOCKED` or task-focused-gate evidence enters the separate
+blocked-adjudication reviewer path; it does not run a new focused command just
+to create evidence. A folder containing only `SKIP` tasks needs no
+implementation review. Focused failure writes the scheduler's finding evidence
+and starts no completed-folder reviewer.
 
 The reviewer receives a read-only prompt and must not edit, create, delete,
 rename, or format project or management files. Assent snapshots the protected
@@ -221,12 +227,16 @@ not a security sandbox: the configured `danger-full-access` default remains in
 force and cannot intercept external effects.
 
 `_auto_fix.toml` is derived, deletable folder runtime memory, never a task
-file, status, source-of-truth, or acceptance record. The version-2 record
+file, status, source-of-truth, or acceptance record. The version-5 record
 contains `source_tree`, `task_plan_sha256`, `review_prompt_sha256`, the
 resolved `reviewer_adapter`, `reviewer_model`, and `reviewer_effort`, the
 required recovery `phase`, a `PASS`/`FAIL` `verdict`,
+`review_context`, `review_stage`, and `failure_trigger`,
 `current_finding_fingerprints`, the cumulative `findings` ledger,
-`observed_states`, and `consumed_fixer_profiles`. Its finding fingerprints are
+`reviewer_recommendations`, `approved_scope_additions`, `scope_amendments`,
+`worker_dispositions`, `repair_briefs`, `repair_round_assignments`,
+`plan_digest_transitions`, `review_transitions`, `observed_states`, and
+`consumed_fixer_profiles`. Its finding fingerprints are
 scheduler identities; its consumed fixer profiles are ordered abstract
 adapter/model/effort triples. The phases are `NEEDS_REPAIR`, `REPAIRING`,
 `AWAITING_REVIEW`, and `COMPLETE`; restart resumes the durable repair or
@@ -234,20 +244,35 @@ review boundary, and a missing or drifted reviewer configuration refuses
 repair and closeout. A malformed record refuses, and a cached `PASS` is
 reusable only when the source tree, task contracts, review prompt, and resolved
 reviewer identity all match exactly. The ledger and consumed profiles survive
-later observations so recovery cannot repeat a profile silently.
+later observations so recovery cannot repeat a profile silently. Scheduler-owned
+status-only transitions during rework, interruption, repair closeout, or finite
+exhaustion are normal lifecycle evidence and do not by themselves make a report
+stale; edits to task requirements, scope, verification, or other contract bytes
+remain structural drift.
 
 A `FAIL` record may be repaired only when `--auto-fix` was stated. Every
 finding must resolve to one existing task and that task's declared scope;
-unknown, ambiguous, or out-of-scope findings stop for a human. Automatic
-repair invokes the normal task session with the durable finding ledger and
-prior profile list, reopens only the implicated existing tasks, and records the
-reason-bearing rework reason `Automatic repair of durable folder-review
-findings` plus `authorization: run --auto-fix`. It keeps code by default and
-never creates a task, changes task requirements or scope, reverts source,
+unknown or ambiguous findings stop for a human. The reviewer may return one
+exact mechanically valid scope addition, but only the scheduler may append it
+to a task contract; worker and reviewer task-file edits remain forbidden.
+Automatic repair invokes the normal task session with the durable finding
+ledger and prior profile list, reopens only the implicated existing tasks, and
+records the reason-bearing rework reason `Automatic repair of durable
+folder-review findings` plus `authorization: run --auto-fix`. It keeps code by
+default and never creates a task, changes task requirements, reverts source,
 accepts work, deletes source, or performs an unbounded repository-wide debt
-audit. A pre-existing technical-debt finding is eligible only when it is in the
-changed or directly interacting code, local to an existing task scope, and
-reliably tested by that task's focused gate.
+audit. A pre-existing technical-debt finding is eligible only when it is first
+introduced in `COMPLETED_FOLDER + INITIAL`, is in changed or directly
+interacting code, local to an existing task scope, and reliably tested by that
+task's focused gate. Blocked adjudication and `RECHECK` may retain or resolve
+that ledger entry but cannot add another.
+
+The recheck has a soft-convergence rule: it reviews prior current findings
+first, keeps the same fingerprint for a blocker that is still present, and
+accepts a new blocker only for an evidenced repair regression or a newly
+exposed existing requirement. When the prior set is cleared it must return
+`PASS`; optional improvements, speculative concerns, and repeated debt
+discovery do not keep the loop open.
 
 Each repair round selects its profile assignments from the consumed-profile
 history that existed when that round began, then persists every newly selected
@@ -257,7 +282,21 @@ profile is tried first, followed by the finite configured worker rotation at
 consume a sibling's normal slot and force it to escalate. A profile is never
 silently reused. Repair runs the ordinary focused gate before reviewing again.
 If profiles are exhausted, the unresolved finding ledger and all edits remain
-for human adjudication; no automatic code reversion or task creation follows.
+for later human review; no automatic code reversion or task creation follows.
+
+The repair brief requires one acknowledgement line for every current finding
+in the task's closeout journal detail, using exactly this provider-neutral
+syntax (the scheduler validates the JSON and fingerprint set):
+
+```text
+ASSENT_REPAIR_DISPOSITION {"fingerprint":"<64 lowercase hex>","disposition":"fixed|not_reproducible|still_blocked","detail":"concrete bounded evidence"}
+```
+
+Use one line per fingerprint, in the durable brief's order. `still_blocked`
+requires the task to close `BLOCKED`; the line is acknowledgement evidence, not
+permission to edit the task contract, change scope, accept the folder, or start
+a human gate. The scheduler owns task status, the one reviewed exact-scope
+amendment, and all Git state.
 
 Interruption, quota exhaustion, adapter failure, and a failed repair gate keep
 all edits and state. A later `run --auto-fix` reads the existing `FAIL` state,
@@ -268,6 +307,24 @@ without the flag continues ordinary task execution only; it neither starts this
 review nor authorizes repair. A human may inspect the report and use explicit
 `rework`, `reject`, `verify`, or `accept` actions; a review `PASS`, an auto-fix
 state, or a full verification receipt never accepts a folder.
+
+Complete verification still follows a successful run under the configured
+receipt policy or an explicit `--verify`. Its absence, a missing receipt, or an
+unrun full suite is never a reviewer failure; only a concrete local focused-test
+gap tied to an existing task requirement may be considered by review.
+
+## Review and acceptance meeting handoff
+
+In a review or acceptance meeting, first inspect the folder's `_report.md`.
+If it carries `TECHNICAL DEBT REVIEW REQUIRED`, read the sibling
+`_technical_debt.md`, proactively tell the human about the flag before
+recommending `accept`, enumerate every listed finding, and obtain an explicit
+disposition for each: accept the completed local repair as sufficient, append or
+rework a task for concrete follow-up, or promote a genuinely durable project
+rule to `AGENTS.md`. Merely reading the agenda silently does not satisfy this
+procedure. Persist a requested change in its canonical owner; a no-further-
+change disposition remains part of the existing explicit human `accept`
+decision, not a second debt-approval state.
 
 ## Task session closeout (when scheduled by assent)
 

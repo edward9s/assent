@@ -7,8 +7,11 @@ import unittest
 from pathlib import Path
 
 from assent import AssentError
-from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
-                         read_entries, same_except_status, set_status)
+from assent.plan import (Plan, add_scope_entries, append_entry,
+                         journal_path_for, parse_task_file, read_entries,
+                         same_except_status, scope_text_with_entries,
+                         scope_text_without_entries,
+                         set_status, task_text_sha256)
 
 _OK = 'python -c "raise SystemExit(0)"'
 
@@ -338,6 +341,38 @@ class TestSetStatus(PlanTestCase):
         path = self.write("t001_x.e.toml", task_text())
         with self.assertRaises(AssentError):
             set_status(path, "DOING")
+
+
+class TestAddScopeEntries(PlanTestCase):
+    def test_append_is_atomic_reversible_and_preserves_unrelated_bytes(self):
+        path = self.write("t001_x.e.toml", task_text(
+            scope=("src/base.py",), notes="scope = [\"not-real.py\"]"))
+        before = path.read_text(encoding="utf-8")
+        predicted = scope_text_with_entries(
+            before, ["src/existing.py", "tests/new_case.py"])
+        before_sha, after_sha = add_scope_entries(
+            path, ["src/existing.py", "tests/new_case.py"],
+            expected_sha256=task_text_sha256(before))
+        after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(before_sha, task_text_sha256(before))
+        self.assertEqual(after_sha, task_text_sha256(after))
+        self.assertEqual(after, predicted)
+        self.assertEqual(parse_task_file(path).scope, [
+            "src/base.py", "src/existing.py", "tests/new_case.py"])
+        self.assertEqual(scope_text_without_entries(
+            after, ["src/existing.py", "tests/new_case.py"]), before)
+        self.assertIn('scope = ["not-real.py"]', after)
+
+    def test_compare_and_swap_and_duplicate_refuse_without_mutation(self):
+        path = self.write("t001_x.e.toml", task_text(scope=("src/base.py",)))
+        before = path.read_bytes()
+        with self.assertRaisesRegex(AssentError, "changed before"):
+            add_scope_entries(path, ["tests/new.py"], expected_sha256="0" * 64)
+        self.assertEqual(path.read_bytes(), before)
+        with self.assertRaisesRegex(AssentError, "duplicate"):
+            add_scope_entries(path, ["src/base.py"])
+        self.assertEqual(path.read_bytes(), before)
 
 
 class TestStructuralCompare(PlanTestCase):

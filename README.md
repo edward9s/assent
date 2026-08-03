@@ -88,31 +88,46 @@ upstream commit. See [Workflow](docs/WORKFLOW.md) and
 
 ## Optional bounded auto-fix
 
-Configure `[auto_fix.review]` when a project wants a final, folder-level AI
-review-and-repair loop. The configuration supplies the policy; only an explicit
-`assent run --auto-fix` starts the read-only review after all task-focused checks
-and the final distinct focused sweep, and authorizes bounded repair for that
-invocation. An ordinary `assent run` without the flag starts neither review nor
-repair. The flag is compatible with the normal run selectors, including
-explicit folders, `...`, `--all`, `--once`, `--task`, and `--verify`. A limited
-run that leaves work incomplete defers the loop.
+Configure `[auto_fix.review]` when a project wants to override a final,
+folder-level AI review-and-repair loop. With no table, `assent run --auto-fix`
+resolves the first effective worker adapter at `prime`/`heavy`; no `assent init`
+rerun or `~/.assent/assent.toml` edit is needed. Only an explicit
+`assent run --auto-fix` starts the read-only completed-folder review after all
+task-focused checks and the final distinct focused sweep, or enters the
+quiescent blocked-adjudication path with durable blocker evidence, and
+authorizes bounded repair for that invocation. An ordinary `assent run` without
+the flag starts neither review nor repair. The flag is compatible with the
+normal run selectors, including explicit folders, `...`, `--all`, `--once`,
+`--task`, and `--verify`. A limited run that leaves work incomplete defers the
+completed-folder loop.
 
 The reviewer may identify a regression, an unmet requirement, or eligible
 pre-existing technical debt encountered in the changed and directly
-interacting code. Debt is eligible only when repair stays inside an existing
-task's scope and its focused tests can verify the result; this is not an
-unbounded repository-wide debt audit. A failed review automatically reopens
-only implicated existing tasks, records a reason-bearing rework, and tries a
-finite sequence of fixer profiles. Each repair round selects its assignments
-from the profiles unused before that round and persists them before the first
-write-capable session, so a multi-task finding or dependency cascade does not
-escalate sibling tasks one at a time. It keeps code by default and never
-creates tasks, reverts source, deletes source, or accepts a folder. Profile
-exhaustion preserves the findings and edits for human adjudication. A later
-opted-in recovery requires the same current reviewer configuration; removing or
-changing `[auto_fix.review]` refuses repair and closeout until the policy is
-restored. `_auto_fix.toml` is derived runtime memory, not a task status or
-acceptance evidence; see the [Workflow](docs/WORKFLOW.md) and
+interacting code. Debt may be introduced only by `COMPLETED_FOLDER + INITIAL`,
+when repair stays inside an existing task's scope and its focused tests can
+verify the result; blocked adjudication and `RECHECK` may retain or resolve it
+but cannot add another. This is not an unbounded repository-wide debt audit. A
+failed review automatically reopens only implicated existing tasks, records a
+reason-bearing rework, and tries a finite sequence of fixer profiles. Each
+repair round selects its assignments from the profiles unused before that round
+and persists them before the first write-capable session, so a multi-task
+finding or dependency cascade does not escalate sibling tasks one at a time. A
+reviewer may approve one exact scope addition, but only the scheduler edits the
+task file; worker and reviewer task-file edits remain forbidden. It keeps code
+by default and never creates tasks, reverts source, deletes source, or accepts
+a folder. Re-review keeps still-present fingerprints, admits new findings only
+for evidenced repair regression or newly exposed existing requirements, and
+must PASS once the prior set clears. Optional improvements and speculation do
+not keep the loop open. Profile exhaustion preserves the findings and edits for
+later human review; no runtime human adjudication step is inserted. A later
+opted-in recovery requires the same current reviewer identity. `_auto_fix.toml`
+is derived runtime memory, not a task status or acceptance evidence; complete
+verification remains a separate successful-run/receipt-policy or explicit
+`--verify` stage, and its absence is never a reviewer failure. Report generation
+also shows exact scope-amendment transactions and repair-round
+assignments. Scheduler-owned status-only transitions during rework, interruption,
+repair closeout, or exhaustion do not by themselves make that evidence stale;
+structural task-contract edits do. See the [Workflow](docs/WORKFLOW.md) and
 [Verification](docs/VERIFICATION.md) guides.
 
 ## Planning-meeting prompt
@@ -144,9 +159,12 @@ Use this after execution when a second opinion is useful:
 
 ```text
 Act as an independent acceptance reviewer. Answer concisely and do not use
-subagents. Before changing anything, inspect the work folder's _report.md, the
-relevant task and journal files, the checkpoint commit and diff, the
-implementation, and the focused and full verification evidence. Report
+subagents. Before changing anything, inspect the work folder's _report.md. If
+it says TECHNICAL DEBT REVIEW REQUIRED, read _technical_debt.md, tell the human
+about the flag before recommending accept, and enumerate every debt item with
+an explicit sufficient-repair, follow-up-task/rework, or durable AGENTS.md-rule
+disposition. Then inspect the relevant task and journal files, the checkpoint
+commit and diff, the implementation, and the focused and full verification evidence. Report
 evidence-based findings first: bugs, structural problems, overengineering,
 missing tests, and documentation/runtime drift. Recommend a high-capability
 model from a different vendor than the implementer for an independent

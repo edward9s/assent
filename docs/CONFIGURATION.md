@@ -242,12 +242,14 @@ CLI argument.
 
 ## Optional folder review and auto-fix
 
-The optional `[auto_fix.review]` table configures the folder-level reviewer.
+The optional `[auto_fix.review]` table overrides the folder-level reviewer.
 Its `adapter` must be a registered adapter name; `model` and `effort` remain
-the abstract `prime`/`core`/`lite` and `heavy`/`normal`/`slight` values. The
-reviewer reuses that adapter's normal model and effort mappings, so an
-explicit reviewer adapter may select a different vendor from the worker
-rotation in `[adapter].name`:
+the abstract `prime`/`core`/`lite` and `heavy`/`normal`/`slight` values. With no
+table, the first effective worker adapter from `[adapter].name` resolves at
+`prime`/`heavy`; this works without rerunning `assent init` or editing
+`~/.assent/assent.toml`. The reviewer reuses its adapter's normal model and
+effort mappings, so an explicit reviewer adapter may select a different vendor
+from the worker rotation:
 
 ```toml
 [adapter]
@@ -259,15 +261,18 @@ model = "prime"               # abstract tier
 effort = "heavy"              # abstract effort
 ```
 
-The table supplies the policy for a bounded read-only review-and-repair loop;
-only the invocation-level `assent run --auto-fix` flag starts the loop and
-authorizes its repair half. An ordinary run without the flag starts neither the
-review nor repair. The flag is independent of folder selection and can
-accompany explicit, remainder, `--all`, `--once`, `--task`, and `--verify` run
-forms. The reviewer identity stored in `_auto_fix.toml` is the resolved adapter
-plus actual CLI model and effort, not an unverified reviewer-supplied identity.
-A configured reviewer remains read-only, and prompt-plus-detection write
-refusal is not a security sandbox.
+The table or built-in fallback supplies the policy for a bounded read-only
+review-and-repair loop; only the invocation-level `assent run --auto-fix` flag
+starts the loop and authorizes its repair half. An ordinary run without the flag
+starts neither the review nor repair. The flag is independent of folder
+selection and can accompany explicit, remainder, `--all`, `--once`, `--task`,
+and `--verify` run forms. `assent check` prints the resolved reviewer adapter,
+abstract model and effort, actual CLI model and effort, and the provenance of
+each abstract setting and mapping as either a built-in fallback or an explicit
+user/project settings layer. The reviewer identity stored in `_auto_fix.toml`
+is the resolved adapter plus actual CLI model and effort, not an unverified
+reviewer-supplied identity. A configured reviewer remains read-only, and
+prompt-plus-detection write refusal is not a security sandbox.
 
 Automatic repair uses the worker rotation's finite abstract profiles. It selects
 and records the round's profile assignments before the first write-capable
@@ -276,13 +281,19 @@ consume the normal profile one task at a time. It reopens only existing
 in-scope tasks with the reason `Automatic repair of durable folder-review
 findings`. It preserves code by default and never creates tasks, reverts
 source, deletes source, or accepts work. Existing technical debt is eligible
-only when encountered in changed or directly interacting code, local to an
-existing task scope, and reliably covered by focused tests; this is not a
-repository-wide debt audit. Profile exhaustion, interruption, or a failed
-repair gate preserves the edits and state for recovery. A pending `FAIL` can
-resume only with the same current `[auto_fix.review]` identity; removing or
-changing that policy refuses repair and closeout. See [Workflow](WORKFLOW.md)
-and [Verification](VERIFICATION.md) for the state and report contract.
+only when introduced by `COMPLETED_FOLDER + INITIAL`, encountered in changed or
+directly interacting code, local to an existing task scope, and reliably
+covered by focused tests; blocked adjudication and `RECHECK` cannot add debt.
+The soft-convergence recheck preserves still-present fingerprints, allows a new
+finding only for evidenced repair regression or newly exposed existing
+requirements, and must PASS once the prior set clears. Profile exhaustion,
+interruption, or a failed repair gate preserves the edits and state for
+recovery; no runtime human adjudication step is inserted. A pending `FAIL` can
+resume only with the same current reviewer identity; removing or changing that
+policy refuses repair and closeout. Complete verification follows a successful
+run according to receipt policy or explicit `--verify`; missing receipts and an
+unrun full suite are never reviewer failures. See [Workflow](WORKFLOW.md) and
+[Verification](VERIFICATION.md) for the state and report contract.
 
 ## Antigravity timeout and troubleshooting
 

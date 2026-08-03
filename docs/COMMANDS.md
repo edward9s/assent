@@ -102,33 +102,55 @@ configured receipt-refresh policy.
 
 ## `run --auto-fix`
 
-`--auto-fix` is an invocation-level, selection-orthogonal repair authorization.
-It can be combined with every `run` selection form: implicit selection,
-explicit one or more folders, a prefix plus `...`, `--all`, `--once`, `--task`,
-and `--verify`. The flag is forwarded to each selected folder in the command's
-existing order; it does not mean `--all`, change cardinality, or alter the
-remainder rules. With `--all`, each child folder receives the same policy.
+`--auto-fix` is the sole invocation-level, selection-orthogonal review and
+repair authorization. It can be combined with every `run` selection form:
+implicit selection, explicit one or more folders, a prefix plus `...`, `--all`,
+`--once`, `--task`, and `--verify`. The flag is forwarded to each selected
+folder in the command's existing order; it does not mean `--all`, change
+cardinality, or alter the remainder rules. With `--all`, each child folder
+receives the same policy.
 
-The project must configure `[auto_fix.review]` for the bounded loop. The entire
-loop is invocation-level opt-in: only a run that states `--auto-fix` performs
-the final distinct focused sweep and folder-closeout review. The reviewer is
-read-only, and a `FAIL` may enter automatic repair only in that same invocation.
-An ordinary run without `--auto-fix` starts neither the sweep/review nor repair;
-an incomplete limited run defers the loop, and a focused failure starts no
-reviewer.
+The optional `[auto_fix.review]` table overrides the reviewer. With no table,
+the first effective worker adapter at `prime`/`heavy` is resolved automatically;
+`assent init` and `~/.assent/assent.toml` need no change. The entire loop is
+invocation-level opt-in: only a run that states `--auto-fix` performs the final
+distinct focused sweep and folder-closeout review. The reviewer is read-only,
+and a `FAIL` may enter automatic repair only in that same invocation. An
+ordinary run without `--auto-fix` starts neither the sweep/review nor repair; an
+incomplete `--once`/`--task` run defers the completed-folder loop, while a
+quiescent blocked dependency with durable worker `BLOCKED` or focused-gate
+evidence uses the blocked-adjudication entry point. A focused failure starts no
+completed-folder reviewer.
 
 Automatic repair reopens only existing tasks whose declared scopes own the
 findings, records a reason-bearing code-preserving rework, and selects a finite
 fixer-profile sequence per repair round. The round's assignments are persisted
 before its first write-capable session, so multi-task findings and dependency
 cascades do not escalate one task at a time. Eligible pre-existing technical
-debt may be fixed when it is local to an existing scope and reliably testable in
-the directly interacting code; review does not search the repository for
-unrelated debt. No automatic task creation, source reversion, source deletion,
-full candidate acceptance, or Git publication occurs. `_auto_fix.toml` and the
-report are derived evidence; `accept` remains an explicit human action. A later
-opted-in recovery refuses repair and closeout if `[auto_fix.review]` was removed
-or its resolved reviewer identity changed.
+debt may be introduced only by `COMPLETED_FOLDER + INITIAL`, when local to an
+existing scope and reliably testable in directly interacting code; blocked
+adjudication and `RECHECK` may resolve it but cannot add another. Review does
+not search the repository for unrelated debt. A reviewer may approve one exact
+scope addition, but the scheduler alone amends the task file; worker and
+reviewer edits remain forbidden. No automatic task creation, source reversion,
+source deletion, full candidate acceptance, or Git publication occurs. There
+is no runtime human adjudication step inside the loop. `_auto_fix.toml` and the
+report are derived evidence; `accept` remains an explicit human action. A
+recheck keeps a still-present finding's fingerprint, accepts new findings only
+for evidenced repair regression or newly exposed existing requirements, and
+must PASS when the prior set is cleared. Optional improvements and speculation
+do not keep it open. A later opted-in recovery refuses repair and closeout if
+the resolved reviewer identity changed. Complete verification remains separate:
+it follows successful run/loop according to receipt policy or explicit
+`--verify`; missing receipts and an unrun full suite are never review failures.
+
+Review and acceptance meetings first inspect `_report.md`. When it says
+`TECHNICAL DEBT REVIEW REQUIRED`, read `_technical_debt.md`, proactively tell the
+human before recommending `accept`, enumerate every item, and obtain an explicit
+disposition for each: the completed local repair is sufficient, append or
+rework a task for concrete follow-up, or promote a durable project rule to
+`AGENTS.md`. Silent reading does not satisfy the procedure, and the disposition
+is not a second approval state.
 
 ## Command reference
 
@@ -138,7 +160,7 @@ or its resolved reviewer identity changed.
 | `assent run A B` | Runs exactly A then B in written order and stops on the first failure. It does not verify or accept implicitly. | AI sessions only |
 | `assent run A B --all` | Runs the explicit prefix, then remaining incomplete folders in dependency order. | AI sessions only |
 | `assent run --all [--jobs N]` | Runs every incomplete folder with the dependency scheduler; `--jobs` caps concurrent folders. | AI sessions only |
-| `assent run [selection] --auto-fix` | After the completed folder's final focused sweep, authorize the configured bounded review-and-repair loop. Compatible with the run selectors; never accepts. | AI sessions plus configured review/repair |
+| `assent run [selection] --auto-fix` | After the completed folder's final focused sweep, or with quiescent blocked-review evidence, authorize the configured bounded review-and-repair loop. Compatible with the run selectors; never accepts. | AI sessions plus configured review/repair |
 | `assent status [FOLDER]` | Shows progress, next task, branch, and last checkpoint. | Zero |
 | `assent check [FOLDER]` | Validates task format, dependency cycles, configuration, and environment; it is the planning adjournment gate. | Zero |
 | `assent report [FOLDER]` | Generates and displays `_report.md`. | Zero |

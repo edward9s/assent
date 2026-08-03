@@ -4,13 +4,14 @@
   are an error; if a task folder still has a legacy tNNN_name.toml, parsing
   is refused and the caller must move it.
 - Journal file: tNNN_name.r.toml, append-only [[entry]] blocks.
-- There is exactly one machine write to a task file: set_status replaces the
-  status line precisely, leaving every other byte untouched; after writing it
-  is re-parsed with tomllib to guard against matching a fake status line
-  inside a multi-line string.
+- There are exactly two scheduler-owned task-file writes: set_status replaces
+  the status line precisely, and add_scope_entries appends reviewed exact paths
+  to the one-line scope array. Both leave every unrelated byte untouched and
+  validate the result before it becomes authoritative.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tomllib
@@ -19,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from assent import AssentError
+from assent.verification_common import atomic_write_text
 
 _FORMAL_FILENAME_RE = re.compile(r"^t(\d{3})_(.+)\.e\.toml$")
 _RETIRED_FILENAME_RE = re.compile(r"^t\d{3}_.+\.toml$")
@@ -36,6 +38,9 @@ _ENTRY_AGENT = {"antigravity", "codex", "claude"}
 # Status line: leading status = "VALUE" (tolerates leading whitespace and a trailing comment)
 _STATUS_LINE_RE = re.compile(
     r'^(\s*status\s*=\s*")(TODO|WIP|DONE|BLOCKED|SKIP)("\s*(?:#.*)?)$')
+_SCOPE_LINE_RE = re.compile(
+    r'^(?P<prefix>\s*scope\s*=\s*)\[(?P<body>.*)\]'
+    r'(?P<suffix>\s*(?:#.*)?)$')
 
 
 @dataclass
@@ -308,6 +313,118 @@ def set_status(path: Path, new_status: str) -> None:
         raise AssentError(
             f"Task file {path.name} failed validation after the status writeback"
             " (a disguised status line?); inspect the file manually")
+
+
+def task_text_sha256(text: str) -> str:
+    """Return the digest used to bind one exact UTF-8 task contract."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _scope_line_edit(text: str, entries: list[str], *, remove: bool) -> str:
+    """Render the reversible exact-suffix edit used by scope amendment recovery."""
+    if not entries:
+        return text
+    try:
+        document_scope = tomllib.loads(text).get("scope")
+    except tomllib.TOMLDecodeError as e:
+        raise AssentError(f"Task contract is not valid TOML: {e}") from e
+    lines = text.splitlines(keepends=True)
+    matches: list[tuple[int, re.Match[str], str]] = []
+    for index, line in enumerate(lines):
+        body = line.rstrip("\r\n")
+        match = _SCOPE_LINE_RE.match(body)
+        if match is None:
+            continue
+        try:
+            parsed = tomllib.loads(body).get("scope")
+        except tomllib.TOMLDecodeError:
+            continue
+        if (parsed == document_scope and isinstance(parsed, list)
+                and all(isinstance(item, str) for item in parsed)):
+            matches.append((index, match, line[len(body):]))
+    if len(matches) != 1:
+        raise AssentError(
+            "Task contract must contain one writable single-line scope array")
+
+    index, match, eol = matches[0]
+    body = match.group("body")
+    core = body.rstrip()
+    spacing = body[len(core):]
+    encoded = ", ".join(json.dumps(item, ensure_ascii=False) for item in entries)
+    if remove:
+        addition = (f" {encoded}," if core.endswith(",")
+                    else f", {encoded}")
+        if not core.endswith(addition):
+            raise AssentError(
+                "Task scope does not contain the scheduler amendment as its exact suffix")
+        core = core[:-len(addition)]
+    else:
+        addition = (f" {encoded}," if core.endswith(",")
+                    else f", {encoded}")
+        core += addition
+    lines[index] = (
+        f"{match.group('prefix')}[{core}{spacing}]"
+        f"{match.group('suffix')}{eol}")
+    return "".join(lines)
+
+
+def scope_text_without_entries(text: str, entries: list[str]) -> str:
+    """Reconstruct exact pre-amendment bytes from a scheduler-written suffix."""
+    return _scope_line_edit(text, entries, remove=True)
+
+
+def scope_text_with_entries(text: str, entries: list[str]) -> str:
+    """Precompute the exact scheduler amendment without writing a task file."""
+    if not isinstance(entries, list) or not entries or not all(
+            isinstance(item, str) and item for item in entries):
+        raise AssentError("Scope amendment entries must be a non-empty string list")
+    if len(entries) != len(set(entries)):
+        raise AssentError("Scope amendment entries contain a duplicate")
+    return _scope_line_edit(text, entries, remove=False)
+
+
+def add_scope_entries(path: Path, entries: list[str], *,
+                      expected_sha256: str | None = None) -> tuple[str, str]:
+    """Atomically append exact paths without changing any unrelated task bytes.
+
+    Filesystem/path policy is owned by ``auto_fix``. This lower-level writer
+    enforces compare-and-swap bytes, addition-only semantics, and a valid task
+    contract before replacing the file.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise AssentError(f"Cannot read task file {path}: {e}") from e
+    before = task_text_sha256(text)
+    if expected_sha256 is not None and before != expected_sha256:
+        raise AssentError(
+            f"Task contract changed before the scope amendment: {path.name}")
+    original = parse_task_file(path)
+    if any(item in original.scope for item in entries):
+        raise AssentError("Scope amendment would duplicate an existing entry")
+
+    amended = scope_text_with_entries(text, entries)
+    try:
+        old_data = tomllib.loads(text)
+        new_data = tomllib.loads(amended)
+    except tomllib.TOMLDecodeError as e:
+        raise AssentError(
+            f"Task scope amendment did not produce valid TOML: {e}") from e
+    expected_data = dict(old_data)
+    expected_data["scope"] = list(original.scope) + entries
+    if new_data != expected_data:
+        raise AssentError(
+            "Task scope amendment would alter fields other than appending scope")
+
+    atomic_write_text(path, amended)
+    fresh = parse_task_file(path)
+    if same_except_status(original, fresh) != ["scope"]:
+        raise AssentError(
+            f"Task file {path.name} failed validation after scope amendment")
+    if fresh.status != original.status or fresh.scope != original.scope + entries:
+        raise AssentError(
+            f"Task file {path.name} has an unexpected scope amendment result")
+    return before, task_text_sha256(amended)
 
 
 def same_except_status(a: Task, b: Task) -> list[str]:

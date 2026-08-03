@@ -6,8 +6,10 @@ the CLI, engine and inspection test modules share to put a temporary user home
 with current contracts in place.
 """
 import os
+import re
 import shutil
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -659,7 +661,7 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(chinese_contract=phrase):
                 self.assertIn("".join(phrase.split()), chinese_contract)
 
-    def test_auto_fix_state_schema_matches_the_version_two_contract(self):
+    def test_auto_fix_state_schema_matches_the_version_five_contract(self):
         """The executable state shape and packaged contract must advance together."""
         install_global_contracts(self)
         from dataclasses import fields
@@ -667,13 +669,13 @@ class TestContractContent(unittest.TestCase):
         from assent import auto_fix
 
         format_text = contracts.installed_contract_text("format.md")
-        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 2)
+        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 5)
         self.assertEqual(
             {field.name for field in fields(auto_fix.AutoFixState)},
             auto_fix._STATE_KEYS)
         for phrase in (
-                "Version 2 has exactly these scalar fields",
-                "version = 2",
+                "Version 5 has exactly these scalar fields",
+                "version = 5",
                 "phase = \"COMPLETE\"",
                 "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
                 "A restart resumes `REPAIRING` or `AWAITING_REVIEW`",
@@ -683,6 +685,33 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(format_phrase=phrase):
                 self.assertIn(phrase, format_text)
         self.assertNotIn("Version 1 has", format_text)
+        for field in (
+                "review_context", "review_stage", "failure_trigger",
+                "reviewer_recommendations", "approved_scope_additions",
+                "scope_amendments", "worker_dispositions", "repair_briefs",
+                "repair_round_assignments",
+                "plan_digest_transitions", "review_transitions"):
+            with self.subTest(state_field=field):
+                self.assertIn(field, format_text)
+        self.assertIn("ASSENT_REPAIR_DISPOSITION", format_text)
+
+    def test_version_five_example_is_parseable_and_finding_identity_is_complete(self):
+        """The packaged state example must be usable as TOML and describe its full identity."""
+        format_text = contracts.installed_contract_text("format.md")
+        match = re.search(
+            r"```toml\n(version = 5\n.*?)(?:\n```)", format_text, re.DOTALL)
+        self.assertIsNotNone(match)
+        assert match is not None
+        example = tomllib.loads(match.group(1))
+        from assent import auto_fix
+        self.assertEqual(
+            set(example["findings"][0]), auto_fix._PERSISTED_FINDING_KEYS)
+        self.assertIn(
+            "`kind`, `task_id`, `path`, `summary`, `evidence`,", format_text)
+        self.assertIn(
+            "`recommendation`, and the optional `scope_addition` path", format_text)
+        self.assertIn("one additional, separately reviewed exception", format_text)
+        self.assertIn("append the exact approved paths", format_text)
 
     def test_reader_recovery_never_recommends_raw_recursive_worktree_removal(self):
         paths = (

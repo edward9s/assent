@@ -436,9 +436,14 @@ capabilities.
 | `SKIP` | not doing it this round |
 
 Status has no write-permission model: humans only review and issue directions;
-file changes are always made by the AI following those directions. The
-scheduler's machine write-back to a task file is limited to the single status
-line, replaced precisely, leaving every other byte untouched.
+file changes are made by the AI following those directions. During an ordinary
+task session, the executing AI may change only its own status line; the
+scheduler replaces that line precisely, leaving every other byte untouched.
+The scheduler has one additional, separately reviewed exception: after a
+validated auto-fix scope decision it may append the exact approved paths to
+the named existing task's `scope` array in one transaction. The worker and
+reviewer never edit task files, requirements, or scope, and this exception does
+not grant either AI permission to do so.
 
 ## Log file (tNNN_name.r.toml)
 
@@ -815,8 +820,11 @@ never deletes source before that proof.
 
 ### Opt-in folder review and bounded repair
 
-The optional `[auto_fix.review]` table configures one folder reviewer; only
-`run --auto-fix` starts its read-only review and authorizes bounded repair:
+The optional `[auto_fix.review]` table overrides the folder reviewer identity;
+only `run --auto-fix` starts its read-only review and authorizes bounded repair.
+When the table is absent, the first effective worker adapter is resolved at
+`prime`/`heavy` by the normal settings layer. This default works without
+rerunning `assent init` or editing `~/.assent/assent.toml`:
 
 ```text
 assent run FOLDER --auto-fix
@@ -825,11 +833,15 @@ assent run FOLDER --auto-fix
 The flag is selection-orthogonal: it is forwarded for automatic, explicit
 single/multi-folder, prefix-plus-`...`, and `--all` selections and is compatible
 with `--once`, `--task`, and `--verify`, whose own ordering and scope rules do
-not change. An incomplete limited run defers the loop without spending a review
-token. Without the flag, configured review is inert; without the table, the
-flag has no reviewer or repair policy. Complete verification requested by
-`--verify` follows only a successful run and loop; auto-fix neither performs
-that verification nor accepts.
+not change. A limited run defers the completed-folder loop when it leaves work
+incomplete; a quiescent blocked dependency with durable worker or focused-gate
+evidence may enter the separate blocked-adjudication review. Neither path
+spends a review token before its own evidence gate. Without the flag, configured
+review is inert. Complete verification requested by `--verify` follows only a
+successful run and loop according to the existing receipt policy; auto-fix
+neither performs that verification nor accepts. A missing receipt, an unrun
+full suite, or the absence of complete verification is never a reviewer
+failure.
 
 The folder-level order is:
 
@@ -840,12 +852,19 @@ The folder-level order is:
 3. If every final focused command passes and the source remains clean, start
    the configured reviewer with the cumulative checkpoint diff, all task
    contracts and journals, directly interacting code, and the focused evidence.
-4. Accept exactly one provider-neutral `PASS` or `FAIL`: PASS ends the loop;
+4. For a quiescent blocked folder, use the durable BLOCKED worker or
+   task-focused-gate evidence as the blocker input; this blocked-adjudication
+   entry point does not run a new focused command merely to manufacture one.
+5. Accept exactly one provider-neutral `PASS` or `FAIL`: PASS ends the loop;
    FAIL is persisted and only this invocation's flag authorizes repair.
-5. Resolve every finding to one existing task and its scope, reopen only those
-   tasks, repair, then repeat the task gate, final sweep, and review.
-6. Stop on PASS, adapter/infrastructure failure, a human-scope decision, or
-   finite profile exhaustion, always retaining edits and evidence.
+6. Resolve every finding to one existing task and its declared scope. The
+   reviewer may approve one exact mechanically valid scope addition, but the
+   scheduler alone performs that one transaction; the worker and reviewer
+   never edit task files. Reopen only existing implicated tasks, repair, then
+   repeat the task gate, final sweep when applicable, and review.
+7. Stop on PASS, adapter/infrastructure failure, an unresolved ownership or
+   scope decision, or finite profile exhaustion, always retaining edits and
+   evidence. No runtime human adjudication step is inserted into the loop.
 
 The reviewer is read-only by contract: it must not edit, create, delete,
 rename, format, or otherwise write project or management-plane files. Assent
@@ -863,12 +882,12 @@ artifact. It is included in the runtime exclusions with `_assent.log`,
 `_report.md`, locks, and verification receipts; it is not a task file, a new
 task status, acceptance evidence, or a source-of-truth database. It may be
 rebuilt from the current folder run and must never be staged or committed.
-Version 2 has exactly these scalar fields and ordered table collections. The
+Version 5 has exactly these scalar fields and ordered table collections. The
 `phase` field is required; it makes crash recovery explicit rather than
 inferring a repair boundary from task statuses alone:
 
 ```toml
-version = 2
+version = 5
 source_tree = "<40-or-64 lowercase hexadecimal tree id>"
 task_plan_sha256 = "<64 lowercase hexadecimal digest>"
 review_prompt_sha256 = "<64 lowercase hexadecimal digest>"
@@ -877,21 +896,73 @@ reviewer_model = "<resolved requested model>"
 reviewer_effort = "<resolved requested effort>"
 phase = "COMPLETE"              # NEEDS_REPAIR / REPAIRING / AWAITING_REVIEW / COMPLETE
 verdict = "PASS"                 # PASS or FAIL
+review_context = "completed_folder" # completed_folder / blocked_adjudication
+review_stage = "initial"          # initial / recheck
+failure_trigger = ""              # worker_blocked / focused_gate_failure / empty
 current_finding_fingerprints = []
-findings = []
-observed_states = []
-consumed_fixer_profiles = []
 
 [[findings]]
 fingerprint = "<64 lowercase hexadecimal digest>"
+kind = "correctness"            # correctness | safety | unmet_requirement | focused_test_gap | eligible_technical_debt | blocked_recovery | scope_amendment
 task_id = "t001"                 # empty string represents a null reviewer id
 path = "project/relative/path"
 summary = "concise blocker"
 evidence = "specific evidence"
+recommendation = "focused repair recommendation"
+scope_addition_path = ""
+scope_addition_path_state = ""
 
 [[observed_states]]
 source_tree = "<40-or-64 lowercase hexadecimal tree id>"
 finding_fingerprints = []
+
+[[reviewer_recommendations]]
+fingerprint = "<64 lowercase hexadecimal digest>"
+recommendation = "the current review recommendation"
+
+[[approved_scope_additions]]
+fingerprint = "<64 lowercase hexadecimal digest>"
+task_id = "t001"
+path = "project/relative/new-file.py"
+path_state = "new_file"       # existing_file | new_file
+
+[[scope_amendments]]
+finding_fingerprints = ["<64 lowercase hexadecimal digest>"]
+task_id = "t001"
+paths = ["project/relative/new-file.py"]
+path_states = ["new_file"]
+task_before_sha256 = "<64 lowercase hexadecimal digest>"
+task_after_sha256 = "<64 lowercase hexadecimal digest>"
+plan_before_sha256 = "<64 lowercase hexadecimal digest>"
+plan_after_sha256 = "<64 lowercase hexadecimal digest>"
+
+[[worker_dispositions]]
+task_id = "t001"
+fingerprint = "<64 lowercase hexadecimal digest>"
+disposition = "fixed"         # fixed | not_reproducible | still_blocked
+detail = "bounded acknowledgement evidence"
+
+[[repair_briefs]]
+task_id = "t001"
+finding_fingerprints = ["<64 lowercase hexadecimal digest>"]
+brief = "scheduler-persisted reviewer-to-worker repair brief"
+
+[[repair_round_assignments]]
+task_id = "t001"
+adapter = "codex"
+model = "prime"
+effort = "heavy"
+attempted = false
+
+[[plan_digest_transitions]]
+before_sha256 = "<64 lowercase hexadecimal digest>"
+after_sha256 = "<64 lowercase hexadecimal digest>"
+
+[[review_transitions]]
+fingerprint = "<64 lowercase hexadecimal digest>"
+transition = "initial"        # initial | still_present | repair_regression | newly_exposed
+prior_fingerprint = ""
+transition_evidence = ""
 
 [[consumed_fixer_profiles]]
 adapter = "codex"
@@ -902,18 +973,30 @@ effort = "heavy"                 # abstract effort
 The actual file may use empty arrays instead of the example tables. The
 serializer writes a null `task_id` as `""`; readers restore it to null. The
 reviewer never supplies a fingerprint: Assent normalizes each finding and
-computes its identity from `task_id`, path, summary, and evidence. A `PASS`
+computes its identity from `kind`, `task_id`, `path`, `summary`, `evidence`,
+`recommendation`, and the optional `scope_addition` path and path state using
+canonical JSON. A `PASS`
 has no current findings; a `FAIL` has at least one. The findings ledger and
 `observed_states` retain prior evidence, while `consumed_fixer_profiles` is an
 ordered set and cannot contain duplicates.
+
+Version 5 adds the crash-resumable `scope_amendments` records for the one
+scheduler-owned exact scope transaction and `repair_round_assignments` records
+for the complete profile assignment made before a write-capable fixer session.
+An assignment with `attempted = false` is retried with the same profile after a
+pre-child process-creation failure; it does not silently consume another
+profile. These records are evidence, not worker or reviewer permission to edit
+task files.
 
 The recovery phases have fixed meanings. `NEEDS_REPAIR` is a durable `FAIL`
 awaiting an authorized rework round; `REPAIRING` means the current bounded
 fixer round was selected and its profile was persisted before any write-capable
 session; `AWAITING_REVIEW` means that round's task work completed and the same
 current reviewer must run again; and `COMPLETE` is valid only for a `PASS` with
-no current findings. A restart resumes `REPAIRING` or `AWAITING_REVIEW` from
-the stored evidence, while a missing or drifted reviewer configuration refuses
+no current findings. `review_context` distinguishes a completed-folder review
+from blocked adjudication, and `review_stage` distinguishes the first review
+from a recheck. A restart resumes `REPAIRING` or `AWAITING_REVIEW` from the
+stored evidence, while a missing or drifted reviewer configuration refuses
 repair and closeout rather than treating the state as a cache miss.
 
 An exact fresh `PASS` requires all of `source_tree`, `task_plan_sha256`,
@@ -930,16 +1013,32 @@ evidence only:
 - fresh `PASS`: `PASSED (fresh)`;
 - fresh `FAIL`: `FAILED (fresh)` plus the current blocking findings.
 
-The report is informational and never authorizes acceptance.
+The report is informational and never authorizes acceptance. It renders the
+phase, original blocker, current findings and recommendations, approved scope
+additions, worker acknowledgements, repair briefs, consumed profiles, and the
+terminal `PASS` or nonzero exhaustion/unresolved reason without starting an AI
+session or mutating state.
 
 #### Review findings, repair, escalation, and recovery
 
 Findings may cover correctness, safety, unmet requirements, missing tests, or
 eligible technical debt in the cumulative diff and directly interacting code,
-never a repository-wide search. Pre-existing technical debt is eligible only
-when local to an existing task's scope and reliably checked by relevant focused
-tests. Unknown or ambiguous ownership, an out-of-scope path, or plan widening
-requires a human decision.
+never a repository-wide search. A concrete local focused-test gap tied to an
+existing task requirement is eligible; absent or unrun complete verification is
+not. The review has two dimensions: `COMPLETED_FOLDER` or
+`BLOCKED_ADJUDICATION` context, and `INITIAL` or `RECHECK` stage. Only
+`COMPLETED_FOLDER + INITIAL` may introduce eligible technical debt. Blocked
+adjudication and recheck may retain and resolve a debt entry but may not add
+one. Unknown or ambiguous ownership, an out-of-scope path, or plan widening
+requires a scheduler-owned exact decision, not a worker edit.
+
+Re-review handles the prior current findings first. A blocker that remains
+must retain its scheduler fingerprint and be recorded as `still_present`.
+`repair_regression` is valid only when the repair delta evidences the blocker;
+`newly_exposed` is valid only when it names an existing requirement exposed by
+the repair. Once the prior set is cleared, the reviewer must return `PASS`.
+Optional improvements, speculative concerns, and repeated debt discovery never
+keep the loop open.
 
 Automatic repair invokes ordinary code-preserving rework with reason
 `Automatic repair of durable folder-review findings` and journal marker
@@ -948,14 +1047,28 @@ never creates tasks, edits requirements or scope, sweeps repository-wide debt,
 reverts or deletes source, accepts, or creates a second task status. Only a
 later explicit human `rework --revert-code` may remove the preserved code.
 
+The durable repair brief is acknowledged in the worker task's journal detail
+with one line per current finding, using exactly this provider-neutral syntax:
+
+```text
+ASSENT_REPAIR_DISPOSITION {"fingerprint":"<64 lowercase hex>","disposition":"fixed|not_reproducible|still_blocked","detail":"concrete bounded evidence"}
+```
+
+The scheduler validates every fingerprint and disposition before closeout;
+`still_blocked` requires a `BLOCKED` task. This is acknowledgement evidence,
+not permission for a worker or reviewer to edit a task file, change scope,
+accept the folder, or start a human gate. The scheduler owns task status, one
+reviewed exact-scope transaction, and Git state.
+
 Profile selection is repair-round scoped: every reopened task compares its
 ordinary adapter/model/effort and then the worker rotation's unique
 `prime`/`heavy` profiles against the same pre-round history. The scheduler fixes
 all multi-task/dependency-cascade assignments and persists new profiles before
 the first write-capable session, preventing sibling-by-sibling escalation. The
 finite sequence bounds modification; exhaustion preserves the ledger, consumed
-profiles, journals, WIP/checkpoint edits, and unresolved statuses for human
-adjudication without reverting code or inventing tasks.
+profiles, journals, WIP/checkpoint edits, and unresolved statuses for later human
+review without reverting code or inventing tasks. There is no runtime human
+adjudication prompt inside the loop.
 
 Interruption, quota wait, adapter/focused failure retains edits and state. A
 later `run --auto-fix` resumes the FAIL ledger, WIP, and unused-profile cursor
@@ -963,7 +1076,9 @@ only when `[auto_fix.review]` still resolves to the stored reviewer identity;
 missing or drifted policy refuses repair and closeout. A run without the flag
 may continue ordinary tasks but starts no review or repair. Successful flow
 remains focused task gates, optional auto-fix review/repair/final focused sweep,
-optional complete verification, human review, accept, then clean.
+optional complete verification after a successful run or explicit `--verify`,
+human review, accept, then clean. A reviewer never treats the missing receipt
+or an unrun full suite as its own failure.
 
 ## Lifecycle and review (the objective gate)
 
@@ -1301,6 +1416,22 @@ attributed safely, so its hash is not shown. `_report.md` is a runtime artifact:
 not versioned, not part of the clean/scope checks, and fully rewritten on each
 generation.
 
+Scheduler-owned status changes during rework, interruption, repair closeout,
+or finite exhaustion are normal lifecycle evidence; they do not by themselves
+make the report `STALE (task contracts changed)`. A real edit to task structure,
+scope, requirements, verification, or other contract bytes does make the
+binding stale. The report remains zero-token and informational in either case.
+
+When the durable ledger contains a finding first introduced by
+`COMPLETED_FOLDER + INITIAL` as eligible technical debt, report generation also
+writes the sibling `_technical_debt.md` agenda. It preserves that finding after
+later `RECHECK` resolution and records its task, path, evidence, recommendation,
+repair dispositions, outcome, and scope decision. Blocked adjudication and
+recheck cannot introduce a new debt entry. `_technical_debt.md` is derived,
+zero-token meeting aid only; it is not task status, acceptance evidence, or
+authorization for another repair round. `_report.md` prominently says
+`TECHNICAL DEBT REVIEW REQUIRED` when the agenda exists.
+
 ## Meeting conventions
 
 - Opening meeting: read AGENTS.md + instructions.md + this file, and settle
@@ -1320,6 +1451,15 @@ generation.
   clarifications, or marking SKIP are still made by the AI per the
   adjudication; a mismatch between status and code facts means unfinished, and
   adjourning still requires `assent check` to pass.
+- Review or acceptance meeting: first inspect `_report.md`. If it says
+  `TECHNICAL DEBT REVIEW REQUIRED`, read `_technical_debt.md`, proactively tell
+  the human about it before recommending `accept`, enumerate every listed item,
+  and obtain an explicit disposition for each: the completed local repair is
+  sufficient; append or rework a task for concrete follow-up; or promote a
+  genuinely durable project rule into `AGENTS.md`. Merely reading the agenda
+  silently is insufficient. A requested change is written to its canonical
+  owner; a no-further-change decision remains part of the existing explicit
+  human `accept` decision, not a new debt-approval state.
 - Project-specific decisions that stay valid across plans settle into AGENTS.md,
   not carried by a closed task file; assent rules common across projects update
   the instructions template.

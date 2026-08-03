@@ -386,35 +386,36 @@ class VendorAdapterIndependence(unittest.TestCase):
 
 
 class AutoFixStateSchema(unittest.TestCase):
-    """The version-2 state validator and dataclass expose one exact schema."""
+    """The version-5 state validator and dataclass expose one exact schema."""
 
     def test_version_and_exact_field_set_stay_in_parity(self) -> None:
         from dataclasses import fields
         from assent import auto_fix
 
-        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 2)
+        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 5)
         self.assertEqual(
             {field.name for field in fields(auto_fix.AutoFixState)},
             auto_fix._STATE_KEYS)
         self.assertIn("phase", auto_fix._STATE_KEYS)
+        for field in (
+                "review_context", "review_stage", "failure_trigger",
+                "reviewer_recommendations", "approved_scope_additions",
+                "scope_amendments", "worker_dispositions", "repair_briefs",
+                "repair_round_assignments",
+                "plan_digest_transitions", "review_transitions"):
+            self.assertIn(field, auto_fix._STATE_KEYS)
         self.assertEqual(auto_fix.AUTO_FIX_PHASES, frozenset({
             "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
         }))
 
-    def test_packaged_contract_describes_the_runtime_version_two_phase_field(self) -> None:
-        contract = (ROOT / "assent" / "templates" / "format.md").read_text(
-            encoding="utf-8")
-        for phrase in (
-                "Version 2 has exactly these scalar fields",
-                "version = 2",
-                "phase = \"COMPLETE\"",
-                "NEEDS_REPAIR",
-                "REPAIRING",
-                "AWAITING_REVIEW",
-                "`COMPLETE` is valid only for a `PASS`",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, contract)
+    def test_review_enums_are_bounded_and_exclude_verification_receipts(self) -> None:
+        from assent import auto_fix
+
+        self.assertEqual(auto_fix.REVIEW_CONTEXTS,
+                         {"completed_folder", "blocked_adjudication"})
+        self.assertEqual(auto_fix.REVIEW_STAGES, {"initial", "recheck"})
+        self.assertNotIn("complete_verification", auto_fix.REVIEW_FINDING_KINDS)
+        self.assertNotIn("receipt_absence", auto_fix.REVIEW_FINDING_KINDS)
 
 
 if __name__ == "__main__":
