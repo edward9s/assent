@@ -56,10 +56,13 @@ _FIXER_PROFILE_KEYS = {"adapter", "model", "effort"}
 
 
 def review_record_schema() -> dict:
-    """Return the provider-neutral JSON Schema for one terminal review record.
+    """Return Codex's deliberately limited structured-review transport schema.
 
-    This schema is an adapter capability boundary.  The scheduler still parses and validates
-    the returned record after transport, including task ownership and declared scope.
+    This is a transport aid for the Codex adapter, not Assent's portable review contract.
+    Other adapters keep their provider-neutral raw-output fallback unless they independently
+    implement and test a native structured-output dialect.  Every adapter's response still
+    passes the strict parser and scheduler validator after transport, including task ownership
+    and declared scope.
     """
     text_schema = {
         "type": "string",
@@ -90,29 +93,14 @@ def review_record_schema() -> dict:
         "items": finding_schema,
     }
     return {
-        "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
         "additionalProperties": False,
         "required": ["type", "verdict", "findings"],
         "properties": {
-            "type": {"enum": [REVIEW_RECORD_TYPE]},
-            "verdict": {"enum": ["PASS", "FAIL"]},
+            "type": {"type": "string", "enum": [REVIEW_RECORD_TYPE]},
+            "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
             "findings": findings_schema,
         },
-        "oneOf": [
-            {
-                "properties": {
-                    "verdict": {"enum": ["PASS"]},
-                    "findings": {"maxItems": 0},
-                },
-            },
-            {
-                "properties": {
-                    "verdict": {"enum": ["FAIL"]},
-                    "findings": {"minItems": 1},
-                },
-            },
-        ],
     }
 
 
