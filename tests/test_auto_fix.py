@@ -13,7 +13,8 @@ from assent.auto_fix import (
     auto_fix_state_path, consume_fixer_profile, current_review_record,
     finding_fingerprint, next_unused_fixer_profile, normalize_finding_path,
     parse_review_output, persisted_finding, read_auto_fix_state,
-    review_record_json, scheduler_finding_path, snapshot_project_surface,
+    review_record_json, review_record_schema, scheduler_finding_path,
+    snapshot_project_surface,
     state_for_review, validate_review_findings, with_repair_phase,
     write_auto_fix_state,
 )
@@ -91,6 +92,18 @@ class TestReviewRecord(unittest.TestCase):
         for record in cases:
             with self.subTest(record=record), self.assertRaises(AssentError):
                 review_record_json(record)
+
+    def test_provider_schema_is_closed_and_binds_verdict_to_findings(self):
+        schema = review_record_schema()
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(schema["required"], ["type", "verdict", "findings"])
+        self.assertFalse(schema["properties"]["findings"]["items"]
+                         ["additionalProperties"])
+        branches = schema["oneOf"]
+        self.assertEqual(branches[0]["properties"]["verdict"]["enum"], ["PASS"])
+        self.assertEqual(branches[0]["properties"]["findings"]["maxItems"], 0)
+        self.assertEqual(branches[1]["properties"]["verdict"]["enum"], ["FAIL"])
+        self.assertEqual(branches[1]["properties"]["findings"]["minItems"], 1)
 
     def test_path_normalization_is_project_relative(self):
         self.assertEqual(normalize_finding_path("a\\b.py"), "a/b.py")
