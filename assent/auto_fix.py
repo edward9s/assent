@@ -1875,8 +1875,12 @@ def state_for_review(
                         "Legacy reviewer output first exposed this blocker after repair.")))
         record = ReviewRecord(record.verdict, tuple(upgraded))
     if enforce_transitions:
+        # ``previous`` also carries the folder's cumulative history forward.
+        # An initial review continues that history but claims no transition
+        # lineage, so it validates against no prior findings.
         record = validate_review_transitions(
-            record, review_stage=review_stage, previous=previous)
+            record, review_stage=review_stage,
+            previous=None if review_stage == "initial" else previous)
     prior_findings = previous.findings if previous is not None else ()
     prior_observed = previous.observed_states if previous is not None else ()
     prior_profiles = previous.consumed_fixer_profiles if previous is not None else ()

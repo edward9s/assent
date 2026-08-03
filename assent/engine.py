@@ -241,6 +241,15 @@ do not replace any structural, scope, focused, or independent-review gate.
 """
 
 _AUTO_FIX_EVIDENCE_LIMIT = 64_000
+# The prior-review section is lineage bookkeeping rendered from the durable
+# state a new verdict then replaces, so a recheck's own prompt can never be
+# rebuilt byte for byte once its result is written.  Hashing that section into
+# the reuse identity would therefore make every recheck PASS unusable on the
+# next unchanged invocation; the identity hashes this placeholder instead and
+# still covers the template, both policies, the stage and context, the diffs,
+# the focused evidence, and every task contract and journal.
+_AUTO_FIX_PRIOR_EVIDENCE_IDENTITY = (
+    "(review lineage; excluded from the reusable review identity)")
 
 _QUOTA_BUFFER = timedelta(minutes=2)  # reset time + buffer, to avoid being blocked again right at the edge
 _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
@@ -1241,7 +1250,7 @@ def _auto_fix_review_identity(
             task.id: task.path.read_text(encoding="utf-8")
             for task in plan.tasks
         }
-    prompt = _AUTO_FIX_REVIEW_PROMPT.format(
+    reviewed_material = dict(
         folder=cfg.tasks_name,
         base_ref=base_ref,
         source_tree=source_tree,
@@ -1258,12 +1267,16 @@ def _auto_fix_review_identity(
         blocker_evidence=_auto_fix_blocker_text(blockers),
         focused_evidence=focused_evidence,
         dependency_state=_auto_fix_dependency_state(plan),
-        prior_evidence=_auto_fix_prior_evidence(cfg, previous),
         management_evidence=_auto_fix_management_evidence(
             plan, contracts_by_id),
     )
+    prompt = _AUTO_FIX_REVIEW_PROMPT.format(
+        prior_evidence=_auto_fix_prior_evidence(cfg, previous),
+        **reviewed_material)
+    identity = _AUTO_FIX_REVIEW_PROMPT.format(
+        prior_evidence=_AUTO_FIX_PRIOR_EVIDENCE_IDENTITY, **reviewed_material)
     plan_digest = _contracts_digest(plan, contracts_by_id)
-    prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    prompt_digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return source_tree, plan_digest, prompt, prompt_digest
 
 
@@ -1547,10 +1560,57 @@ def _run_auto_fix_review_once(
             1, human_reason="focused verification changed the source worktree")
 
     existing = _auto_fix_existing_state(cfg)
+
+    def finish(outcome: _AutoFixReviewOutcome) -> _AutoFixReviewOutcome:
+        """Restore worker task-contract tampering after its review evidence is captured."""
+        if review_context != "blocked_adjudication":
+            return outcome
+        try:
+            _restore_trusted_contracts_after_adjudication(
+                plan, contracts_by_id, now)
+        except AssentError as e:
+            print("Auto-fix adjudication evidence was preserved, but trusted "
+                  f"contract restoration failed: {e}")
+            return _AutoFixReviewOutcome(1, outcome.state, str(e))
+        return outcome
+
+    if existing is not None and existing.verdict == "PASS":
+        # A settled PASS keeps the lineage it was decided under.  Deriving a
+        # fresh stage and context here would rebuild a recheck PASS as an
+        # initial completed-folder review, fail its own freshness check, and
+        # start a reviewer session whose state replaces the cumulative ledger,
+        # consumed profiles, review transitions and technical-debt agenda.  So
+        # reuse compares the durable lineage against the current material only.
+        reuse_tree, reuse_plan_digest, _reuse_prompt, reuse_digest = (
+            _auto_fix_review_identity(
+                cfg, plan, "\n".join(focused_lines),
+                contracts_by_id=contracts_by_id,
+                review_context=existing.review_context,
+                review_stage=existing.review_stage,
+                blockers=blockers))
+        if auto_fix.auto_fix_state_is_fresh(
+                existing,
+                source_tree=reuse_tree,
+                task_plan_sha256=reuse_plan_digest,
+                review_prompt_sha256=reuse_digest,
+                reviewer_adapter=review.adapter,
+                reviewer_model=review.requested_model,
+                reviewer_effort=review.requested_effort,
+                review_context=existing.review_context,
+                failure_trigger=existing.failure_trigger):
+            print("Auto-fix folder review: reusing exact fresh PASS; no reviewer session started.")
+            return finish(_AutoFixReviewOutcome(0, existing))
+
     review_stage = ("recheck"
                     if existing is not None and existing.verdict == "FAIL"
                     else "initial")
     review_previous = existing if review_stage == "recheck" else None
+    # The finding ledger, consumed profiles, review transitions and
+    # technical-debt agenda belong to the folder rather than to one review
+    # stage.  A later initial review continues them, so no finding or plan
+    # change restarts the finite fixer sequence; only a recheck may cite prior
+    # findings when validating transition identity.
+    ledger_previous = existing
     if review_stage == "recheck":
         review_context = existing.review_context
     failure_trigger = None
@@ -1574,19 +1634,6 @@ def _run_auto_fix_review_once(
         review_context=review_context, review_stage=review_stage,
         blockers=blockers, previous=review_previous)
 
-    def finish(outcome: _AutoFixReviewOutcome) -> _AutoFixReviewOutcome:
-        """Restore worker task-contract tampering after its review evidence is captured."""
-        if review_context != "blocked_adjudication":
-            return outcome
-        try:
-            _restore_trusted_contracts_after_adjudication(
-                plan, contracts_by_id, now)
-        except AssentError as e:
-            print("Auto-fix adjudication evidence was preserved, but trusted "
-                  f"contract restoration failed: {e}")
-            return _AutoFixReviewOutcome(1, outcome.state, str(e))
-        return outcome
-
     freshness = dict(
         source_tree=source_tree,
         task_plan_sha256=plan_digest,
@@ -1597,11 +1644,6 @@ def _run_auto_fix_review_once(
         review_context=review_context,
         failure_trigger=failure_trigger,
     )
-    if existing is not None and auto_fix.auto_fix_state_is_fresh(
-            existing, **freshness):
-        print("Auto-fix folder review: reusing exact fresh PASS; no reviewer session started.")
-        return finish(_AutoFixReviewOutcome(0, existing))
-
     try:
         reviewer = injected_adapter or get_adapter(review.adapter, cfg)
     except AssentError as e:
@@ -1717,7 +1759,7 @@ def _run_auto_fix_review_once(
             # authorize a write-capable task session.
             try:
                 state = auto_fix.state_for_review(
-                    record, previous=review_previous, review_stage=review_stage,
+                    record, previous=ledger_previous, review_stage=review_stage,
                     enforce_transitions=False, **freshness)
                 auto_fix.write_auto_fix_state(
                     auto_fix.auto_fix_state_path(cfg), state)
@@ -1729,7 +1771,7 @@ def _run_auto_fix_review_once(
             return finish(_AutoFixReviewOutcome(1, state, str(e)))
 
         state = auto_fix.state_for_review(
-            resolved_record, previous=review_previous, review_stage=review_stage,
+            resolved_record, previous=ledger_previous, review_stage=review_stage,
             **freshness)
         state = _auto_fix_attach_repair_briefs(
             cfg, plan, state,
