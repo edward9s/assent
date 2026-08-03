@@ -290,9 +290,19 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(task_path.read_bytes(), task_before)
         self.assertEqual(state_path.read_bytes(), state_before)
 
+        real_write_state = auto_fix.write_auto_fix_state
+        state_writes = 0
+
+        def fail_after_transaction_record(path, value):
+            nonlocal state_writes
+            state_writes += 1
+            if state_writes == 2:
+                raise AssentError("injected state boundary")
+            return real_write_state(path, value)
+
         with mock.patch(
                 "assent.engine.auto_fix.write_auto_fix_state",
-                side_effect=AssentError("injected state boundary")):
+                side_effect=fail_after_transaction_record):
             with self.assertRaisesRegex(AssentError, "injected state boundary"):
                 engine._apply_reviewed_scope_amendments(
                     cfg, state, plan, contracts, now)
@@ -332,6 +342,73 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             item for item in read_entries(journal_path_for(task_path))
             if item.get("event") == "auto_fix_scope_amendment"]
         self.assertEqual(len(entries), 1)
+
+    def test_scope_amendment_resumes_after_one_of_two_journals(self):
+        first_path = self.write_task(
+            1, scope=("src/base.py",), status="BLOCKED")
+        second_path = self.write_task(
+            2, scope=("tests/base.py",), status="BLOCKED")
+        (self.root / "src").mkdir()
+        (self.root / "tests").mkdir()
+        (self.root / "src" / "base.py").write_text("base = 1\n", encoding="utf-8")
+        (self.root / "tests" / "base.py").write_text("base = 1\n", encoding="utf-8")
+        (self.root / "src" / "needed.py").write_text("value = 1\n", encoding="utf-8")
+        (self.root / "tests" / "needed.py").write_text("value = 1\n", encoding="utf-8")
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        plan = Plan.parse(cfg.tasks_dir)
+        contracts = engine._task_contract_snapshots(plan)
+        plan_digest = engine._contracts_digest(plan, contracts)
+        findings = (
+            auto_fix.ReviewFinding(
+                "t001", "src/needed.py", "First exact scope omission",
+                "Durable evidence names src/needed.py.", kind="scope_amendment",
+                scope_addition=auto_fix.ScopeAddition(
+                    "src/needed.py", "existing_file")),
+            auto_fix.ReviewFinding(
+                "t002", "tests/needed.py", "Second exact scope omission",
+                "Durable evidence names tests/needed.py.", kind="scope_amendment",
+                scope_addition=auto_fix.ScopeAddition(
+                    "tests/needed.py", "existing_file")),
+        )
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", findings), source_tree="1" * 40,
+            task_plan_sha256=plan_digest, review_prompt_sha256="2" * 64,
+            reviewer_adapter="claude", reviewer_model="prime",
+            reviewer_effort="heavy", review_context="blocked_adjudication",
+            failure_trigger="worker_blocked")
+        state_path = auto_fix.auto_fix_state_path(cfg)
+        auto_fix.write_auto_fix_state(state_path, state)
+        now = lambda: datetime(2026, 8, 3, tzinfo=timezone.utc)
+        real_append = engine.append_entry
+        appends = 0
+
+        def fail_after_first_journal(*args, **kwargs):
+            nonlocal appends
+            appends += 1
+            if appends == 2:
+                raise AssentError("injected second journal boundary")
+            return real_append(*args, **kwargs)
+
+        with mock.patch(
+                "assent.engine.append_entry", side_effect=fail_after_first_journal):
+            with self.assertRaisesRegex(AssentError, "second journal boundary"):
+                engine._apply_reviewed_scope_amendments(
+                    cfg, state, plan, contracts, now)
+
+        recovered = auto_fix.read_auto_fix_state(state_path)
+        self.assertEqual(len(recovered.scope_amendments), 2)
+        self.assertEqual(recovered.task_plan_sha256,
+                         recovered.plan_digest_transitions[-1].after_sha256)
+        engine._apply_reviewed_scope_amendments(
+            cfg, recovered, Plan.parse(cfg.tasks_dir),
+            engine._task_contract_snapshots(Plan.parse(cfg.tasks_dir)), now)
+        self.assertIn("src/needed.py", parse_task_file(first_path).scope)
+        self.assertIn("tests/needed.py", parse_task_file(second_path).scope)
+        amendment_entries = [
+            item for path in (first_path, second_path)
+            for item in read_entries(journal_path_for(path))
+            if item.get("event") == "auto_fix_scope_amendment"]
+        self.assertEqual(len(amendment_entries), 2)
 
     def test_directory_scoped_focused_failure_persists_and_starts_fixer(self):
         verify = ('python -c "import pathlib,sys;sys.exit('

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from assent.plan import Plan
 
 AUTO_FIX_STATE_NAME = "_auto_fix.toml"
-AUTO_FIX_STATE_VERSION = 3
+AUTO_FIX_STATE_VERSION = 4
 REVIEW_RECORD_TYPE = "assent.auto_fix_review"
 REVIEW_VERDICTS = frozenset({"PASS", "FAIL"})
 REVIEW_FINDING_KINDS = frozenset({
@@ -69,7 +69,7 @@ _STATE_KEYS = {
     "review_context", "review_stage", "failure_trigger",
     "current_finding_fingerprints", "findings", "observed_states",
     "reviewer_recommendations", "approved_scope_additions",
-    "worker_dispositions", "repair_briefs", "plan_digest_transitions",
+    "scope_amendments", "worker_dispositions", "repair_briefs", "plan_digest_transitions",
     "review_transitions", "consumed_fixer_profiles",
 }
 _PERSISTED_FINDING_KEYS = {
@@ -81,6 +81,11 @@ _FIXER_PROFILE_KEYS = {"adapter", "model", "effort"}
 _RECOMMENDATION_KEYS = {"fingerprint", "recommendation"}
 _APPROVED_SCOPE_ADDITION_KEYS = {
     "fingerprint", "task_id", "path", "path_state",
+}
+_SCOPE_AMENDMENT_KEYS = {
+    "finding_fingerprints", "task_id", "paths", "path_states",
+    "task_before_sha256", "task_after_sha256", "plan_before_sha256",
+    "plan_after_sha256",
 }
 _WORKER_DISPOSITION_KEYS = {
     "task_id", "fingerprint", "disposition", "detail",
@@ -191,6 +196,26 @@ class ApprovedScopeAddition:
 
 
 @dataclass(frozen=True)
+class ScopeAmendment:
+    """One precomputed, crash-resumable scheduler scope transaction."""
+
+    finding_fingerprints: tuple[str, ...]
+    task_id: str
+    paths: tuple[str, ...]
+    path_states: tuple[str, ...]
+    task_before_sha256: str
+    task_after_sha256: str
+    plan_before_sha256: str
+    plan_after_sha256: str
+
+    def __post_init__(self) -> None:
+        for name in ("finding_fingerprints", "paths", "path_states"):
+            value = getattr(self, name)
+            if isinstance(value, list):
+                object.__setattr__(self, name, tuple(value))
+
+
+@dataclass(frozen=True)
 class WorkerDisposition:
     task_id: str
     fingerprint: str
@@ -246,6 +271,7 @@ class AutoFixState:
     failure_trigger: str | None = None
     reviewer_recommendations: tuple[ReviewerRecommendation, ...] = ()
     approved_scope_additions: tuple[ApprovedScopeAddition, ...] = ()
+    scope_amendments: tuple[ScopeAmendment, ...] = ()
     worker_dispositions: tuple[WorkerDisposition, ...] = ()
     repair_briefs: tuple[RepairBrief, ...] = ()
     plan_digest_transitions: tuple[PlanDigestTransition, ...] = ()
@@ -255,7 +281,7 @@ class AutoFixState:
         for name in ("current_finding_fingerprints", "findings",
                      "observed_states", "consumed_fixer_profiles",
                      "reviewer_recommendations", "approved_scope_additions",
-                     "worker_dispositions", "repair_briefs",
+                     "scope_amendments", "worker_dispositions", "repair_briefs",
                      "plan_digest_transitions", "review_transitions"):
             value = getattr(self, name)
             if isinstance(value, list):
@@ -853,7 +879,10 @@ def validate_scope_additions(
             raise AssentError(
                 f"Auto-fix scope path targets a protected control surface: "
                 f"{normalized}")
-        if len(parts) == 1 and parts[0].casefold() == "agents.md":
+        if (len(parts) == 1
+                and parts[0].casefold() in {
+                    "agents.md", ".gitignore", ".gitattributes", ".gitmodules",
+                }):
             raise AssentError(
                 f"Auto-fix scope path targets a protected control surface: "
                 f"{normalized}")
@@ -1059,6 +1088,14 @@ def with_plan_digest_transition(
     return _validate_state(replace(
         state, task_plan_sha256=after_sha256,
         plan_digest_transitions=state.plan_digest_transitions + (transition,)))
+
+
+def with_scope_amendments(
+        state: AutoFixState,
+        amendments: tuple[ScopeAmendment, ...]) -> AutoFixState:
+    """Persist precomputed scheduler amendments before any task file changes."""
+    state = _validate_state(state)
+    return _validate_state(replace(state, scope_amendments=amendments))
 
 
 def next_unused_fixer_profile(
@@ -1286,6 +1323,46 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
             raise AssentError("Auto-fix state has a duplicate approved scope addition")
         approved_seen.add(identity)
 
+    approved_by_fingerprint = {
+        item.fingerprint: item for item in state.approved_scope_additions}
+    amended_fingerprints: set[str] = set()
+    for index, item in enumerate(state.scope_amendments):
+        label = f"Auto-fix state scope_amendments[{index}]"
+        if not isinstance(item, ScopeAmendment):
+            raise AssentError(f"{label} is invalid")
+        if not isinstance(item.task_id, str) or not _TASK_ID_RE.fullmatch(item.task_id):
+            raise AssentError(f"{label} task_id must be a tNNN task id")
+        if (not item.finding_fingerprints
+                or len(item.finding_fingerprints) != len(item.paths)
+                or len(item.paths) != len(item.path_states)):
+            raise AssentError(f"{label} scope delta is incomplete")
+        if len(set(item.finding_fingerprints)) != len(item.finding_fingerprints):
+            raise AssentError(f"{label} has duplicate finding fingerprints")
+        if len(set(item.paths)) != len(item.paths):
+            raise AssentError(f"{label} has duplicate paths")
+        for fingerprint, path, path_state in zip(
+                item.finding_fingerprints, item.paths, item.path_states):
+            _require_digest(fingerprint, f"{label} finding fingerprint")
+            if fingerprint in amended_fingerprints:
+                raise AssentError(
+                    "Auto-fix state assigns one scope finding to multiple amendments")
+            amended_fingerprints.add(fingerprint)
+            approved = approved_by_fingerprint.get(fingerprint)
+            if (approved is None or approved.task_id != item.task_id
+                    or approved.path != path or approved.path_state != path_state):
+                raise AssentError(f"{label} does not match its approved scope decision")
+            if normalize_finding_path(path) != path:
+                raise AssentError(f"{label} path must already be normalized")
+            if path_state not in SCOPE_PATH_STATES:
+                raise AssentError(f"{label} path_state is invalid")
+        for name in ("task_before_sha256", "task_after_sha256",
+                     "plan_before_sha256", "plan_after_sha256"):
+            _require_digest(getattr(item, name), f"{label} {name}")
+        if item.task_before_sha256 == item.task_after_sha256:
+            raise AssentError(f"{label} must record an actual task change")
+        if item.plan_before_sha256 == item.plan_after_sha256:
+            raise AssentError(f"{label} must record an actual plan change")
+
     disposition_seen: set[tuple[str, str]] = set()
     for index, item in enumerate(state.worker_dispositions):
         if not isinstance(item, WorkerDisposition):
@@ -1427,7 +1504,7 @@ def _state_text(state: AutoFixState) -> str:
     if not state.consumed_fixer_profiles:
         text += "consumed_fixer_profiles = []\n"
     for name in ("reviewer_recommendations", "approved_scope_additions",
-                 "worker_dispositions", "repair_briefs",
+                 "scope_amendments", "worker_dispositions", "repair_briefs",
                  "plan_digest_transitions", "review_transitions"):
         if not getattr(state, name):
             text += f"{name} = []\n"
@@ -1473,6 +1550,19 @@ def _state_text(state: AutoFixState) -> str:
             f"task_id = {toml_string(item.task_id)}\n"
             f"path = {toml_string(item.path)}\n"
             f"path_state = {toml_string(item.path_state)}\n"
+        )
+    for item in state.scope_amendments:
+        text += (
+            "\n[[scope_amendments]]\n"
+            "finding_fingerprints = "
+            f"{_toml_array(item.finding_fingerprints)}\n"
+            f"task_id = {toml_string(item.task_id)}\n"
+            f"paths = {_toml_array(item.paths)}\n"
+            f"path_states = {_toml_array(item.path_states)}\n"
+            f"task_before_sha256 = {toml_string(item.task_before_sha256)}\n"
+            f"task_after_sha256 = {toml_string(item.task_after_sha256)}\n"
+            f"plan_before_sha256 = {toml_string(item.plan_before_sha256)}\n"
+            f"plan_after_sha256 = {toml_string(item.plan_after_sha256)}\n"
         )
     for item in state.worker_dispositions:
         text += (
@@ -1600,6 +1690,8 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
     scope_additions = records(
         "approved_scope_additions", _APPROVED_SCOPE_ADDITION_KEYS,
         ApprovedScopeAddition)
+    scope_amendments = records(
+        "scope_amendments", _SCOPE_AMENDMENT_KEYS, ScopeAmendment)
     dispositions = records(
         "worker_dispositions", _WORKER_DISPOSITION_KEYS, WorkerDisposition)
     briefs = records("repair_briefs", _REPAIR_BRIEF_KEYS, RepairBrief)
@@ -1615,6 +1707,7 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
     del scalar["consumed_fixer_profiles"]
     del scalar["reviewer_recommendations"]
     del scalar["approved_scope_additions"]
+    del scalar["scope_amendments"]
     del scalar["worker_dispositions"]
     del scalar["repair_briefs"]
     del scalar["plan_digest_transitions"]
@@ -1627,6 +1720,7 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
             consumed_fixer_profiles=tuple(profiles),
             reviewer_recommendations=tuple(recommendations),
             approved_scope_additions=tuple(scope_additions),
+            scope_amendments=tuple(scope_amendments),
             worker_dispositions=tuple(dispositions), repair_briefs=tuple(briefs),
             plan_digest_transitions=tuple(plan_transitions),
             review_transitions=tuple(review_transitions), **scalar)
@@ -1668,6 +1762,7 @@ def state_for_review(
         repair_briefs: tuple[RepairBrief, ...] | None = None,
         plan_digest_transitions: tuple[PlanDigestTransition, ...] | None = None,
         approved_scope_additions: tuple[ApprovedScopeAddition, ...] | None = None,
+        scope_amendments: tuple[ScopeAmendment, ...] | None = None,
         enforce_transitions: bool = True) -> AutoFixState:
     """Build the next durable state while retaining prior finding evidence."""
     record = _validate_review_record(record)
@@ -1677,7 +1772,7 @@ def state_for_review(
     if (review_stage == "recheck" and previous is not None and not explicit_stage
             and all(item.transition == "initial" for item in record.findings)):
         # Compatibility for callers predating transition-aware reviewer prompts.
-        # Explicit version-3 rechecks never receive this scheduler-owned upgrade.
+        # Explicit version-4 rechecks never receive this scheduler-owned upgrade.
         prior_current = set(previous.current_finding_fingerprints)
         upgraded = []
         for item in record.findings:
@@ -1700,6 +1795,7 @@ def state_for_review(
     prior_observed = previous.observed_states if previous is not None else ()
     prior_profiles = previous.consumed_fixer_profiles if previous is not None else ()
     prior_scope = previous.approved_scope_additions if previous is not None else ()
+    prior_amendments = previous.scope_amendments if previous is not None else ()
     prior_review_transitions = previous.review_transitions if previous is not None else ()
 
     ledger = {finding.fingerprint: finding for finding in prior_findings}
@@ -1730,6 +1826,8 @@ def state_for_review(
                     finding.scope_addition_path_state or ""))
                 known_additions.add(identity)
         approved_scope_additions = tuple(additions)
+    if scope_amendments is None:
+        scope_amendments = prior_amendments
     transitions = prior_review_transitions + tuple(
         ReviewTransition(
             finding_fingerprint(item), item.transition, item.prior_fingerprint,
@@ -1761,6 +1859,7 @@ def state_for_review(
         failure_trigger=failure_trigger,
         reviewer_recommendations=recommendations,
         approved_scope_additions=approved_scope_additions,
+        scope_amendments=scope_amendments,
         worker_dispositions=(
             worker_dispositions if worker_dispositions is not None
             else previous.worker_dispositions if previous is not None else ()),

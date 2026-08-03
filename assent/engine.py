@@ -51,7 +51,7 @@ from assent.inspection import try_write_report
 from assent.plan import (Plan, Task, append_entry, parse_task_file,
                          read_entries, same_except_status, set_status,
                          add_scope_entries, scope_text_without_entries,
-                         task_text_sha256)
+                         scope_text_with_entries, task_text_sha256)
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               StackState, auto_fix_fixer_capability_errors,
                               auto_fix_review_capability_errors, capability_errors,
@@ -1875,26 +1875,36 @@ def _scope_amendment_payload(
     return fingerprints, delta
 
 
+def _scope_amendment_additions(
+        amendment: auto_fix.ScopeAmendment,
+        ) -> list[auto_fix.ApprovedScopeAddition]:
+    return [
+        auto_fix.ApprovedScopeAddition(fingerprint, amendment.task_id, path, state)
+        for fingerprint, path, state in zip(
+            amendment.finding_fingerprints, amendment.paths,
+            amendment.path_states)
+    ]
+
+
 def _scope_amendment_was_journaled(
-        task: Task, addition: auto_fix.ApprovedScopeAddition) -> bool:
-    """Recognize a scheduler decision already completed in an earlier round."""
+        task: Task, amendment: auto_fix.ScopeAmendment) -> bool:
+    """Recognize the exact durable scheduler transaction in the journal."""
     try:
         entries = read_entries(task.journal_path)
     except (AssentError, OSError, ValueError):
         return False
-    needle = json.dumps(
-        {"path": addition.path, "path_state": addition.path_state},
-        sort_keys=True, separators=(",", ":"))
-    for entry in entries:
-        if (entry.get("by") != "scheduler"
-                or entry.get("event") != _SCOPE_AMENDMENT_EVENT
-                or entry.get("summary") != _SCOPE_AMENDMENT_SUMMARY):
-            continue
-        detail = str(entry.get("detail") or "")
-        if (addition.fingerprint in detail and needle in detail
-                and addition.path in task.scope):
-            return True
-    return False
+    detail = _scope_amendment_detail(
+        _scope_amendment_additions(amendment),
+        task_before=amendment.task_before_sha256,
+        task_after=amendment.task_after_sha256,
+        plan_before=amendment.plan_before_sha256,
+        plan_after=amendment.plan_after_sha256)
+    return any(
+        entry.get("by") == "scheduler"
+        and entry.get("event") == _SCOPE_AMENDMENT_EVENT
+        and entry.get("summary") == _SCOPE_AMENDMENT_SUMMARY
+        and entry.get("detail") in {detail, detail + "\n"}
+        for entry in entries)
 
 
 def _scope_amendment_detail(
@@ -1939,115 +1949,190 @@ def _apply_reviewed_scope_amendments(
 
     disk_plan = Plan.parse(cfg.tasks_dir)
     disk_tasks = {task.id: task for task in disk_plan.tasks}
-    pending: list[auto_fix.ApprovedScopeAddition] = []
     for addition in state.approved_scope_additions:
-        task = disk_tasks.get(addition.task_id)
-        if task is None:
+        if addition.task_id not in disk_tasks:
             raise AssentError(
                 f"Auto-fix scope amendment task disappeared: {addition.task_id}")
-        if not _scope_amendment_was_journaled(task, addition):
-            pending.append(addition)
-    if not pending:
-        current = _task_contract_snapshots(disk_plan)
-        return state, disk_plan, current
-
-    grouped: dict[str, list[auto_fix.ApprovedScopeAddition]] = {}
-    for addition in pending:
-        grouped.setdefault(addition.task_id, []).append(addition)
 
     current_contracts = _task_contract_snapshots(disk_plan)
-    pre_contracts = dict(current_contracts)
-    applied_in_file: set[str] = set()
-    for task_id, additions in grouped.items():
-        task = disk_tasks[task_id]
-        paths = [item.path for item in additions]
-        present = [path in task.scope for path in paths]
-        if any(present) and not all(present):
+    recorded = {
+        fingerprint
+        for amendment in state.scope_amendments
+        for fingerprint in amendment.finding_fingerprints}
+    unrecorded = [
+        item for item in state.approved_scope_additions
+        if item.fingerprint not in recorded]
+    if unrecorded:
+        grouped: dict[str, list[auto_fix.ApprovedScopeAddition]] = {}
+        for addition in unrecorded:
+            grouped.setdefault(addition.task_id, []).append(addition)
+        auto_fix.validate_scope_additions(cfg.root, disk_plan, unrecorded)
+        affected = [disk_tasks[task_id] for task_id in grouped]
+        _ensure_scope_amendment_writable(
+            auto_fix.auto_fix_state_path(cfg), affected)
+
+        before_digest = _contracts_digest(disk_plan, current_contracts)
+        if before_digest != state.task_plan_sha256:
             raise AssentError(
-                f"Auto-fix scope amendment is partially present in {task_id}")
-        if all(present):
-            pre_contracts[task_id] = scope_text_without_entries(
-                current_contracts[task_id], paths)
-            applied_in_file.add(task_id)
-
-    pre_tasks = []
-    for task in disk_plan.tasks:
-        removed = {item.path for item in grouped.get(task.id, ())}
-        pre_tasks.append(replace(
-            task, scope=[path for path in task.scope if path not in removed]))
-    pre_plan = Plan(pre_tasks, disk_plan.dir)
-    auto_fix.validate_scope_additions(cfg.root, pre_plan, pending)
-
-    current_digest = _contracts_digest(disk_plan, current_contracts)
-    before_digest = _contracts_digest(pre_plan, pre_contracts)
-    transition_applied = any(
-        item.before_sha256 == before_digest
-        and item.after_sha256 == current_digest
-        for item in state.plan_digest_transitions)
-    if applied_in_file:
-        if applied_in_file != set(grouped):
-            if before_digest != state.task_plan_sha256:
-                raise AssentError(
-                    "Partially applied scope amendment does not match its durable "
-                    "pre-amendment plan digest")
-        elif not (before_digest == state.task_plan_sha256
-                  or (state.task_plan_sha256 == current_digest
-                      and transition_applied)):
-            raise AssentError(
-                "Applied scope amendment does not match its durable plan transition")
-    elif current_digest != state.task_plan_sha256:
-        raise AssentError(
-            "Task plan drifted before the reviewed scope amendment")
-
-    affected = [disk_tasks[task_id] for task_id in grouped]
-    _ensure_scope_amendment_writable(
-        auto_fix.auto_fix_state_path(cfg), affected)
-
-    task_digests: dict[str, tuple[str, str]] = {}
-    for task_id, additions in grouped.items():
-        paths = [item.path for item in additions]
-        before_text = pre_contracts[task_id]
-        if task_id in applied_in_file:
-            after_text = current_contracts[task_id]
-            task_digests[task_id] = (
-                task_text_sha256(before_text), task_text_sha256(after_text))
-            continue
-        before_sha, after_sha = add_scope_entries(
-            disk_tasks[task_id].path, paths,
-            expected_sha256=task_text_sha256(before_text))
-        task_digests[task_id] = (before_sha, after_sha)
-
-    amended_plan = Plan.parse(cfg.tasks_dir)
-    amended_contracts = _task_contract_snapshots(amended_plan)
-    after_digest = _contracts_digest(amended_plan, amended_contracts)
-    if state.task_plan_sha256 == before_digest:
-        state = auto_fix.with_plan_digest_transition(
-            state, before_digest, after_digest)
+                "Task plan drifted before the reviewed scope amendment")
+        after_contracts = dict(current_contracts)
+        after_tasks: list[Task] = []
+        for task in disk_plan.tasks:
+            additions = grouped.get(task.id, ())
+            if not additions:
+                after_tasks.append(task)
+                continue
+            paths = [item.path for item in additions]
+            after_contracts[task.id] = scope_text_with_entries(
+                current_contracts[task.id], paths)
+            after_tasks.append(replace(task, scope=task.scope + paths))
+        after_plan = Plan(after_tasks, disk_plan.dir)
+        after_digest = _contracts_digest(after_plan, after_contracts)
+        amendments = list(state.scope_amendments)
+        for task_id, additions in grouped.items():
+            amendments.append(auto_fix.ScopeAmendment(
+                finding_fingerprints=tuple(
+                    item.fingerprint for item in additions),
+                task_id=task_id,
+                paths=tuple(item.path for item in additions),
+                path_states=tuple(item.path_state for item in additions),
+                task_before_sha256=task_text_sha256(
+                    current_contracts[task_id]),
+                task_after_sha256=task_text_sha256(after_contracts[task_id]),
+                plan_before_sha256=before_digest,
+                plan_after_sha256=after_digest))
+        state = auto_fix.with_scope_amendments(state, tuple(amendments))
+        # This is the durable transaction boundary.  It records the exact
+        # decision, delta, and before/after identities before any task changes.
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
-    elif state.task_plan_sha256 != after_digest:
-        raise AssentError(
-            "Scope amendment result does not match its durable plan digest")
 
-    for task_id, additions in grouped.items():
-        task = amended_plan.get(task_id)
-        assert task is not None
-        detail = _scope_amendment_detail(
-            additions, task_before=task_digests[task_id][0],
-            task_after=task_digests[task_id][1],
-            plan_before=before_digest, plan_after=after_digest)
-        entries = read_entries(task.journal_path)
-        if any(entry.get("by") == "scheduler"
-               and entry.get("event") == _SCOPE_AMENDMENT_EVENT
-               and entry.get("summary") == _SCOPE_AMENDMENT_SUMMARY
-               and entry.get("detail") == detail for entry in entries):
-            continue
-        append_entry(
-            task.journal_path, by="scheduler",
-            event=_SCOPE_AMENDMENT_EVENT,
-            summary=_SCOPE_AMENDMENT_SUMMARY, detail=detail,
-            time_str=now().isoformat(timespec="seconds"))
+    incomplete = [
+        amendment for amendment in state.scope_amendments
+        if not _scope_amendment_was_journaled(
+            disk_tasks[amendment.task_id], amendment)]
+    if not incomplete:
+        return state, disk_plan, current_contracts
 
-    return state, amended_plan, amended_contracts
+    pairs = list(dict.fromkeys(
+        (item.plan_before_sha256, item.plan_after_sha256)
+        for item in incomplete))
+    for plan_before, plan_after in pairs:
+        transaction = [
+            item for item in state.scope_amendments
+            if (item.plan_before_sha256, item.plan_after_sha256)
+            == (plan_before, plan_after)]
+        transaction_tasks = {item.task_id for item in transaction}
+        if len(transaction_tasks) != len(transaction):
+            raise AssentError(
+                "Auto-fix scope transaction contains duplicate task records")
+        affected = [disk_tasks[task_id] for task_id in transaction_tasks]
+        _ensure_scope_amendment_writable(
+            auto_fix.auto_fix_state_path(cfg), affected)
+
+        live_plan = Plan.parse(cfg.tasks_dir)
+        live_contracts = _task_contract_snapshots(live_plan)
+        pre_contracts = dict(live_contracts)
+        post_contracts = dict(live_contracts)
+        pre_tasks: list[Task] = []
+        post_tasks: list[Task] = []
+        by_task = {item.task_id: item for item in transaction}
+        applied: set[str] = set()
+        all_additions: list[auto_fix.ApprovedScopeAddition] = []
+        for task in live_plan.tasks:
+            amendment = by_task.get(task.id)
+            if amendment is None:
+                pre_tasks.append(task)
+                post_tasks.append(task)
+                continue
+            all_additions.extend(_scope_amendment_additions(amendment))
+            text = live_contracts[task.id]
+            digest = task_text_sha256(text)
+            paths = list(amendment.paths)
+            if digest == amendment.task_before_sha256:
+                if any(path in task.scope for path in paths):
+                    raise AssentError(
+                        f"Unapplied scope amendment is partially present in {task.id}")
+                after_text = scope_text_with_entries(text, paths)
+                if task_text_sha256(after_text) != amendment.task_after_sha256:
+                    raise AssentError(
+                        f"Precomputed scope amendment no longer matches {task.id}")
+                post_contracts[task.id] = after_text
+                pre_tasks.append(task)
+                post_tasks.append(replace(task, scope=task.scope + paths))
+            elif digest == amendment.task_after_sha256:
+                if task.scope[-len(paths):] != paths:
+                    raise AssentError(
+                        f"Applied scope amendment is not the exact suffix of {task.id}")
+                before_text = scope_text_without_entries(text, paths)
+                if task_text_sha256(before_text) != amendment.task_before_sha256:
+                    raise AssentError(
+                        f"Applied scope amendment no longer matches {task.id}")
+                pre_contracts[task.id] = before_text
+                pre_tasks.append(replace(task, scope=task.scope[:-len(paths)]))
+                post_tasks.append(task)
+                applied.add(task.id)
+            else:
+                raise AssentError(
+                    f"Task contract drifted across the scope amendment: {task.id}")
+
+        pre_plan = Plan(pre_tasks, live_plan.dir)
+        post_plan = Plan(post_tasks, live_plan.dir)
+        auto_fix.validate_scope_additions(cfg.root, pre_plan, all_additions)
+        if _contracts_digest(pre_plan, pre_contracts) != plan_before:
+            raise AssentError(
+                "Scope amendment pre-plan does not match its durable digest")
+        if _contracts_digest(post_plan, post_contracts) != plan_after:
+            raise AssentError(
+                "Scope amendment post-plan does not match its durable digest")
+        if state.task_plan_sha256 not in {plan_before, plan_after}:
+            raise AssentError(
+                "Auto-fix state is outside the durable scope plan transition")
+
+        for amendment in transaction:
+            if amendment.task_id in applied:
+                continue
+            add_scope_entries(
+                disk_tasks[amendment.task_id].path, list(amendment.paths),
+                expected_sha256=amendment.task_before_sha256)
+
+        amended_plan = Plan.parse(cfg.tasks_dir)
+        amended_contracts = _task_contract_snapshots(amended_plan)
+        if _contracts_digest(amended_plan, amended_contracts) != plan_after:
+            raise AssentError(
+                "Scope amendment result does not match its durable plan digest")
+        if state.task_plan_sha256 == plan_before:
+            state = auto_fix.with_plan_digest_transition(
+                state, plan_before, plan_after)
+            auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
+        elif not any(
+                item.before_sha256 == plan_before
+                and item.after_sha256 == plan_after
+                for item in state.plan_digest_transitions):
+            raise AssentError(
+                "Applied scope amendment is missing its durable plan transition")
+
+        for amendment in transaction:
+            task = amended_plan.get(amendment.task_id)
+            assert task is not None
+            if _scope_amendment_was_journaled(task, amendment):
+                continue
+            detail = _scope_amendment_detail(
+                _scope_amendment_additions(amendment),
+                task_before=amendment.task_before_sha256,
+                task_after=amendment.task_after_sha256,
+                plan_before=amendment.plan_before_sha256,
+                plan_after=amendment.plan_after_sha256)
+            append_entry(
+                task.journal_path, by="scheduler",
+                event=_SCOPE_AMENDMENT_EVENT,
+                summary=_SCOPE_AMENDMENT_SUMMARY, detail=detail,
+                time_str=now().isoformat(timespec="seconds"))
+
+        disk_plan = Plan.parse(cfg.tasks_dir)
+        disk_tasks = {task.id: task for task in disk_plan.tasks}
+
+    final_plan = Plan.parse(cfg.tasks_dir)
+    return state, final_plan, _task_contract_snapshots(final_plan)
 
 
 def _auto_fix_cascade_tasks(plan: Plan, implicated: list[str]) -> list[Task]:

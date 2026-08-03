@@ -260,6 +260,7 @@ class TestScopeAdditionValidation(unittest.TestCase):
             self.addition("src/directory"),
             self.addition(".assent/receipt.toml", "new_file"),
             self.addition("AGENTS.md", "new_file"),
+            self.addition(".gitignore", "new_file"),
             self.addition("src/*.py", "new_file"),
             self.addition("src/base.py"),
             self.addition("docs/new.py", "new_file"),
@@ -318,7 +319,7 @@ class TestAutoFixState(unittest.TestCase):
                 "The focused regression now passes."),),
             repair_briefs=(RepairBrief(
                 "t001", (finding.fingerprint,),
-                "Validate and round-trip the complete version-3 schema."),),
+                "Validate and round-trip the complete version-4 schema."),),
             review_transitions=(ReviewTransition(
                 finding.fingerprint, "initial", None, None),),
         )

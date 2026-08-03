@@ -386,13 +386,13 @@ class VendorAdapterIndependence(unittest.TestCase):
 
 
 class AutoFixStateSchema(unittest.TestCase):
-    """The version-3 state validator and dataclass expose one exact schema."""
+    """The version-4 state validator and dataclass expose one exact schema."""
 
     def test_version_and_exact_field_set_stay_in_parity(self) -> None:
         from dataclasses import fields
         from assent import auto_fix
 
-        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 3)
+        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 4)
         self.assertEqual(
             {field.name for field in fields(auto_fix.AutoFixState)},
             auto_fix._STATE_KEYS)
@@ -400,7 +400,7 @@ class AutoFixStateSchema(unittest.TestCase):
         for field in (
                 "review_context", "review_stage", "failure_trigger",
                 "reviewer_recommendations", "approved_scope_additions",
-                "worker_dispositions", "repair_briefs",
+                "scope_amendments", "worker_dispositions", "repair_briefs",
                 "plan_digest_transitions", "review_transitions"):
             self.assertIn(field, auto_fix._STATE_KEYS)
         self.assertEqual(auto_fix.AUTO_FIX_PHASES, frozenset({

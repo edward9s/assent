@@ -373,6 +373,16 @@ def scope_text_without_entries(text: str, entries: list[str]) -> str:
     return _scope_line_edit(text, entries, remove=True)
 
 
+def scope_text_with_entries(text: str, entries: list[str]) -> str:
+    """Precompute the exact scheduler amendment without writing a task file."""
+    if not isinstance(entries, list) or not entries or not all(
+            isinstance(item, str) and item for item in entries):
+        raise AssentError("Scope amendment entries must be a non-empty string list")
+    if len(entries) != len(set(entries)):
+        raise AssentError("Scope amendment entries contain a duplicate")
+    return _scope_line_edit(text, entries, remove=False)
+
+
 def add_scope_entries(path: Path, entries: list[str], *,
                       expected_sha256: str | None = None) -> tuple[str, str]:
     """Atomically append exact paths without changing any unrelated task bytes.
@@ -381,11 +391,6 @@ def add_scope_entries(path: Path, entries: list[str], *,
     enforces compare-and-swap bytes, addition-only semantics, and a valid task
     contract before replacing the file.
     """
-    if not isinstance(entries, list) or not entries or not all(
-            isinstance(item, str) and item for item in entries):
-        raise AssentError("Scope amendment entries must be a non-empty string list")
-    if len(entries) != len(set(entries)):
-        raise AssentError("Scope amendment entries contain a duplicate")
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
@@ -398,7 +403,7 @@ def add_scope_entries(path: Path, entries: list[str], *,
     if any(item in original.scope for item in entries):
         raise AssentError("Scope amendment would duplicate an existing entry")
 
-    amended = _scope_line_edit(text, entries, remove=False)
+    amended = scope_text_with_entries(text, entries)
     try:
         old_data = tomllib.loads(text)
         new_data = tomllib.loads(amended)

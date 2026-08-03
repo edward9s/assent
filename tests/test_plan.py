@@ -9,7 +9,8 @@ from pathlib import Path
 from assent import AssentError
 from assent.plan import (Plan, add_scope_entries, append_entry,
                          journal_path_for, parse_task_file, read_entries,
-                         same_except_status, scope_text_without_entries,
+                         same_except_status, scope_text_with_entries,
+                         scope_text_without_entries,
                          set_status, task_text_sha256)
 
 _OK = 'python -c "raise SystemExit(0)"'
@@ -347,6 +348,8 @@ class TestAddScopeEntries(PlanTestCase):
         path = self.write("t001_x.e.toml", task_text(
             scope=("src/base.py",), notes="scope = [\"not-real.py\"]"))
         before = path.read_text(encoding="utf-8")
+        predicted = scope_text_with_entries(
+            before, ["src/existing.py", "tests/new_case.py"])
         before_sha, after_sha = add_scope_entries(
             path, ["src/existing.py", "tests/new_case.py"],
             expected_sha256=task_text_sha256(before))
@@ -354,6 +357,7 @@ class TestAddScopeEntries(PlanTestCase):
 
         self.assertEqual(before_sha, task_text_sha256(before))
         self.assertEqual(after_sha, task_text_sha256(after))
+        self.assertEqual(after, predicted)
         self.assertEqual(parse_task_file(path).scope, [
             "src/base.py", "src/existing.py", "tests/new_case.py"])
         self.assertEqual(scope_text_without_entries(
