@@ -1672,7 +1672,7 @@ def _run_auto_fix_review_once(
               f"{review.model}->{session.requested_model} | "
               f"{review.effort}->{session.requested_effort}")
         try:
-            result = reviewer.run_task(
+            result = reviewer.run_structured_task(
                 prompt, session.requested_model, session.requested_effort, cfg.root)
         except KeyboardInterrupt:
             changed = _auto_fix_surface_change(
@@ -1688,7 +1688,7 @@ def _run_auto_fix_review_once(
                 print("Auto-fix reviewer interrupted; no verdict was recorded.")
             return finish(_AutoFixReviewOutcome(
                 130, human_reason="reviewer interrupted"))
-        except OSError as e:
+        except (AssentError, OSError) as e:
             changed = _auto_fix_surface_change(
                 baseline, cfg, baseline_head, baseline_status,
                 baseline_primary_head, baseline_primary_status)
@@ -1731,7 +1731,12 @@ def _run_auto_fix_review_once(
             return finish(_AutoFixReviewOutcome(1, human_reason=reason))
 
         try:
-            record = auto_fix.parse_review_output(result.output)
+            if result.structured_output_error is not None:
+                raise AssentError(result.structured_output_error)
+            review_output = (result.structured_output
+                             if result.structured_output is not None
+                             else result.output)
+            record = auto_fix.parse_review_output(review_output)
             if (review_context == "blocked_adjudication"
                     and record.verdict == "PASS" and blocked):
                 raise AssentError(

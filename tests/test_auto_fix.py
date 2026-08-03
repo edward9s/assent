@@ -19,7 +19,8 @@ from assent.auto_fix import (
     finding_fingerprint, next_unused_fixer_profile, normalize_finding_path,
     parse_repair_dispositions, parse_review_output, persisted_finding,
     read_auto_fix_state,
-    review_record_json, scheduler_finding_path, snapshot_project_surface,
+    review_record_json, review_record_schema, scheduler_finding_path,
+    snapshot_project_surface,
     state_for_review, validate_review_findings, validate_review_transitions,
     validate_scope_additions,
     with_repair_phase,
@@ -87,11 +88,19 @@ class TestReviewRecord(unittest.TestCase):
             with self.subTest(output=output[:40]), self.assertRaises(AssentError):
                 parse_review_output(output)
 
-    def test_record_schema_and_verdict_consistency_fail_closed(self):
+    def test_scheduler_rejects_pass_with_any_finding(self):
+        with self.assertRaisesRegex(
+                AssentError, "PASS auto-fix review must have no blocking findings"):
+            review_record_json(ReviewRecord("PASS", (self.finding,)))
+
+    def test_scheduler_rejects_fail_without_findings(self):
+        with self.assertRaisesRegex(
+                AssentError, "FAIL auto-fix review must have a blocking finding"):
+            review_record_json(ReviewRecord("FAIL", ()))
+
+    def test_record_validation_fail_closed(self):
         cases = (
             ReviewRecord("MAYBE", ()),
-            ReviewRecord("PASS", (self.finding,)),
-            ReviewRecord("FAIL", ()),
             ReviewRecord("FAIL", (self.finding, self.finding)),
             ReviewRecord("FAIL", (replace(self.finding, task_id="task-1"),)),
             ReviewRecord("FAIL", (replace(self.finding, path="../outside"),)),
@@ -181,6 +190,48 @@ class TestReviewRecord(unittest.TestCase):
                 ReviewRecord("FAIL", (new_finding,)), review_stage="recheck",
                 previous=first,
                 repair_changed_paths=("tests/test_auto_fix.py",))
+
+    def test_codex_provider_schema_is_closed_and_uses_supported_keywords(self):
+        schema = review_record_schema()
+        supported_keywords = {
+            "type", "enum", "additionalProperties", "required", "properties",
+            "items", "maxItems", "minLength", "maxLength", "pattern",
+        }
+        unsupported_composition = {
+            "oneOf", "anyOf", "allOf", "not", "if", "then", "else",
+            "dependentRequired", "dependentSchemas",
+        }
+
+        def visit_schema(node):
+            if isinstance(node, dict):
+                self.assertTrue(set(node) <= supported_keywords)
+                self.assertFalse(set(node) & unsupported_composition)
+                properties = node.get("properties", {})
+                for child in properties.values():
+                    visit_schema(child)
+                for key, child in node.items():
+                    if key != "properties":
+                        visit_schema(child)
+            elif isinstance(node, list):
+                for child in node:
+                    visit_schema(child)
+
+        visit_schema(schema)
+        self.assertEqual(schema["type"], "object")
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(schema["required"], ["type", "verdict", "findings"])
+        self.assertEqual(set(schema["properties"]), {"type", "verdict", "findings"})
+        self.assertNotIn("anyOf", schema)
+        self.assertEqual(schema["properties"]["type"]["enum"],
+                         ["assent.auto_fix_review"])
+        self.assertEqual(schema["properties"]["verdict"]["enum"],
+                         ["PASS", "FAIL"])
+        self.assertFalse(schema["properties"]["findings"]["items"]
+                         ["additionalProperties"])
+        self.assertEqual(schema["properties"]["findings"]["maxItems"], 100)
+        self.assertEqual(
+            schema["properties"]["findings"]["items"]["properties"]["task_id"]
+            ["type"], ["string", "null"])
 
     def test_path_normalization_is_project_relative(self):
         self.assertEqual(normalize_finding_path("a\\b.py"), "a/b.py")

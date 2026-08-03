@@ -7,7 +7,7 @@ recognized here so every adapter applies the same exact-match rule.
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
@@ -52,6 +52,15 @@ class TaskResult:
     # and a classification never turns a non-zero exit into a success.
     failure_kind: str | None = None
     checkpoint_resume: bool = False  # True = exact terminal control record requested continuation
+    # A structured invocation keeps the provider's complete stream in ``output`` and may
+    # expose a separately captured final assistant response here.  ``None`` means that no
+    # native structured boundary was supplied; the provider-neutral adapter default fills it
+    # from ``output`` so existing adapters retain their strict terminal-record behavior.
+    structured_output: str | bytes | None = None
+    # A native structured boundary can fail after the subprocess exits (for example, the
+    # last-message file is missing or is not UTF-8).  Callers must not fall back to ``output``
+    # when this is set.
+    structured_output_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +124,21 @@ class Adapter:                     # Base class for each vendor's adapter
                  cwd: Path) -> TaskResult:
         """Run the task using the concrete CLI model and effort already resolved by the engine."""
         raise NotImplementedError
+
+    def run_structured_task(self, prompt: str, requested_model: str,
+                            requested_effort: str | None,
+                            cwd: Path) -> TaskResult:
+        """Run a structured invocation through the provider-neutral fallback boundary.
+
+        Adapters with a native final-response transport override this method.  The default
+        deliberately invokes the ordinary worker path unchanged, then makes its complete raw
+        output the structured response consumed by the existing strict parser.
+        """
+        result = self.run_task(prompt, requested_model, requested_effort, cwd)
+        if (result.structured_output is None
+                and result.structured_output_error is None):
+            return replace(result, structured_output=result.output)
+        return result
 
 
 def get_adapter(name: str, cfg: "Config") -> Adapter:

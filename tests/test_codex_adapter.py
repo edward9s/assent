@@ -23,13 +23,21 @@ def make_cfg(**overrides) -> Config:
 
 
 class TestBuildCommand(unittest.TestCase):
-    def test_json_model_effort_sandbox_and_prompt(self):
+    def test_json_model_effort_sandbox_and_stdin_marker(self):
         cmd = build_command(make_cfg(), "the prompt", "gpt-5.6-sol", "max")
         self.assertEqual(cmd[:3], ["codex", "exec", "--json"])
         self.assertEqual(cmd[cmd.index("--model") + 1], "gpt-5.6-sol")
         self.assertIn('model_reasoning_effort="max"', cmd)
         self.assertEqual(
-            cmd[-3:], ["--sandbox", "danger-full-access", "the prompt"])
+            cmd[-3:], ["--sandbox", "danger-full-access", "-"])
+        self.assertNotIn("the prompt", cmd)
+
+    def test_large_prompt_is_not_in_command_arguments(self):
+        prompt = "mixed ASCII and Unicode\n臺灣" * 100_000
+        cmd = build_command(make_cfg(), prompt, "gpt-5.6-sol", "max")
+        self.assertEqual(cmd[-1], "-")
+        self.assertNotIn(prompt, cmd)
+        self.assertLess(sum(len(part) for part in cmd), 4096)
 
     def test_effort_can_be_omitted_and_extra_args_are_verbatim(self):
         cfg = make_cfg(codex_command="codex.cmd",
@@ -37,7 +45,9 @@ class TestBuildCommand(unittest.TestCase):
         cmd = build_command(cfg, "p", "custom", None)
         self.assertEqual(cmd[0], "codex.cmd")
         self.assertNotIn("model_reasoning_effort", " ".join(cmd))
-        self.assertEqual(cmd[-3:], ["--sandbox", "danger-full-access", "p"])
+        self.assertEqual(cmd[-3:], ["--sandbox", "danger-full-access", "-"])
+        self.assertNotIn("--output-schema", cmd)
+        self.assertNotIn("--output-last-message", cmd)
 
 
 class TestFormatStreamEvent(unittest.TestCase):
@@ -154,18 +164,23 @@ class TestRunTask(unittest.TestCase):
     def test_tier_translation_and_task_result(self):
         captured = {}
 
-        def fake(command, cwd, stall_seconds, echo=None):
-            captured.update(command=command, cwd=cwd, echo=echo)
+        def fake(command, cwd, stall_seconds, echo=None, input_text=None):
+            captured.update(command=command, cwd=cwd, echo=echo,
+                            input_text=input_text)
             return 0, json.dumps({"type": "turn.completed"}), False
 
         self.patch_run(fake)
         adapter = CodexAdapter(make_cfg())
         requested_model = adapter.resolve_model("prime")
-        result = adapter.run_task("p", requested_model, "high", Path("/p"))
+        prompt = "prompt\n臺灣"
+        result = adapter.run_task(prompt, requested_model, "high", Path("/p"))
         self.assertIsInstance(result, TaskResult)
         self.assertEqual(captured["command"][captured["command"].index("--model") + 1],
                          requested_model)
+        self.assertEqual(captured["command"][-1], "-")
+        self.assertEqual(captured["input_text"], prompt)
         self.assertEqual(captured["cwd"], Path("/p"))
+        self.assertTrue(callable(captured["echo"]))
         self.assertFalse(result.quota_exhausted)
         self.assertFalse(result.stalled)
 
@@ -240,6 +255,56 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(result.checkpoint_resume)
         self.assertFalse(result.quota_exhausted)
         self.assertIsNone(result.failure_kind)
+
+    def test_structured_task_keeps_raw_stream_and_reads_native_last_message(self):
+        final = '{"type":"assent.auto_fix_review","verdict":"PASS","findings":[]}'
+        stream = (json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": final}})
+                  + "\n" + json.dumps({"type": "turn.completed"}) + "\n")
+        captured = {}
+
+        def fake(command, cwd, stall_seconds, echo=None, input_text=None):
+            captured.update(command=command, cwd=cwd, input_text=input_text)
+            schema = Path(command[command.index("--output-schema") + 1])
+            last_message = Path(
+                command[command.index("--output-last-message") + 1])
+            captured.update(schema=schema, last_message=last_message,
+                            transport=schema.parent)
+            self.assertTrue(schema.is_file())
+            schema_data = json.loads(schema.read_text(encoding="utf-8"))
+            self.assertEqual(schema_data["properties"]["type"]["enum"],
+                             ["assent.auto_fix_review"])
+            last_message.write_text(final, encoding="utf-8")
+            return 0, stream, False
+
+        self.patch_run(fake)
+        prompt = "large prompt\n臺灣" * 1000
+        result = CodexAdapter(make_cfg()).run_structured_task(
+            prompt, "gpt-5.6-sol", "max", Path.cwd())
+
+        self.assertEqual(result.output, stream)
+        self.assertEqual(result.structured_output, final)
+        self.assertIsNone(result.structured_output_error)
+        self.assertEqual(captured["input_text"], prompt)
+        self.assertIn("--json", captured["command"])
+        self.assertIn("--output-schema", captured["command"])
+        self.assertIn("--output-last-message", captured["command"])
+        self.assertNotIn(prompt, captured["command"])
+        self.assertFalse(captured["transport"].exists())
+
+    def test_structured_transport_is_removed_when_subprocess_is_interrupted(self):
+        captured = {}
+
+        def interrupted(command, cwd, stall_seconds, echo=None, input_text=None):
+            schema = Path(command[command.index("--output-schema") + 1])
+            captured["transport"] = schema.parent
+            raise KeyboardInterrupt
+
+        self.patch_run(interrupted)
+        with self.assertRaises(KeyboardInterrupt):
+            CodexAdapter(make_cfg()).run_structured_task(
+                "p", "gpt-5.6-sol", "max", Path.cwd())
+        self.assertFalse(captured["transport"].exists())
 
     def test_unknown_tier_raises(self):
         with self.assertRaises(AssentError):

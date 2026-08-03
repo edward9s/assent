@@ -117,6 +117,55 @@ class ScopeAddition:
     path_state: str
 
 
+def review_record_schema() -> dict:
+    """Return Codex's deliberately limited structured-review transport schema.
+
+    This is a transport aid for the Codex adapter, not Assent's portable review contract.
+    Other adapters keep their provider-neutral raw-output fallback unless they independently
+    implement and test a native structured-output dialect.  Every adapter's response still
+    passes the strict parser and scheduler validator after transport, including task ownership
+    and declared scope.
+    """
+    text_schema = {
+        "type": "string",
+        "minLength": 1,
+        "pattern": r"^[^\u0000-\u001f\u007f]+$",
+    }
+    finding_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["task_id", "path", "summary", "evidence"],
+        "properties": {
+            "task_id": {
+                "type": ["string", "null"],
+                "pattern": r"^t\d{3}$",
+            },
+            "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_PATH_LENGTH,
+            },
+            "summary": {**text_schema, "maxLength": MAX_SUMMARY_LENGTH},
+            "evidence": {**text_schema, "maxLength": MAX_EVIDENCE_LENGTH},
+        },
+    }
+    findings_schema = {
+        "type": "array",
+        "maxItems": MAX_FINDINGS,
+        "items": finding_schema,
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["type", "verdict", "findings"],
+        "properties": {
+            "type": {"type": "string", "enum": [REVIEW_RECORD_TYPE]},
+            "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
+            "findings": findings_schema,
+        },
+    }
+
+
 @dataclass(frozen=True)
 class ReviewFinding:
     """One blocking issue stated by a reviewer, before scheduler fingerprinting."""

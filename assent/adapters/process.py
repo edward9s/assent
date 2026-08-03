@@ -95,7 +95,8 @@ def _unregister_wake_queue(waiting: "queue.Queue") -> None:
 
 
 def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
-                   echo=None, heartbeat_path: Path | None = None) -> tuple[int, str, bool]:
+                   echo=None, heartbeat_path: Path | None = None,
+                   input_text: str | None = None) -> tuple[int, str, bool]:
     """Run the subprocess, collecting output line by line; a reader thread + queue implements
     the watchdog (the standard approach from 2.4).
 
@@ -108,15 +109,66 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
     its own log file (never read here, only stat'd) prove it is still alive.  None reproduces
     the exact single-timeout-then-kill behaviour used before this parameter existed.
     Returns (returncode, full output text, stalled). stalled=True means it was killed on timeout.
-    stderr is merged into stdout so quota/error messages are never missed.
+    input_text, when supplied, is encoded as UTF-8 and delivered through a pipe on a
+    separate writer thread.  The raw pipe is used for input so newline bytes are not
+    rewritten by the platform text layer.  stderr is merged into stdout so quota/error
+    messages are never missed.
     """
     clear_stop_wake()   # this session's waits are not stopped by an earlier run's request
-    proc = subprocess.Popen(
-        command, cwd=str(cwd),
+    popen_options = dict(
+        cwd=str(cwd),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace", bufsize=1)
+    if input_text is not None:
+        popen_options["stdin"] = subprocess.PIPE
+    proc = subprocess.Popen(command, **popen_options)
 
     q: "queue.Queue" = queue.Queue()
+
+    input_thread = None
+
+    def _close_input() -> None:
+        stream = proc.stdin
+        if stream is not None:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    def _write_input(stream, text: str) -> None:
+        try:
+            data = text.encode("utf-8")
+            # Popen's text-mode stdin is a TextIOWrapper.  Writing through its
+            # binary buffer keeps the UTF-8 bytes, including newlines, exact on
+            # Windows as well as POSIX.  The fallback keeps the helper usable with
+            # simple file-like test doubles.
+            raw = getattr(stream, "buffer", None)
+            if raw is None:
+                stream.write(text)
+                stream.flush()
+            else:
+                view = memoryview(data)
+                while view:
+                    written = raw.write(view)
+                    if written is None or written <= 0:
+                        raise OSError("stdin pipe did not accept input")
+                    view = view[written:]
+                raw.flush()
+        except (BrokenPipeError, OSError, UnicodeError, ValueError):
+            # A child is allowed to exit or close stdin before the full prompt is
+            # delivered.  Its exit status and collected output remain authoritative.
+            pass
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    if input_text is not None and proc.stdin is not None:
+        input_thread = threading.Thread(
+            target=_write_input, args=(proc.stdin, input_text),
+            name="assent-subprocess-stdin", daemon=True)
+        input_thread.start()
 
     def _reader(stream) -> None:
         try:
@@ -150,7 +202,11 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
                             last_activity = mtime
                             continue    # the log file proves the process is still alive
                     stalled = True
-                    proc.kill()
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    _close_input()
                     break
                 if item is _WAKE:
                     # A stop was requested.  The pending KeyboardInterrupt has
@@ -181,11 +237,20 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
             # Never rely solely on the console's own signal propagation to the child: kill it
             # here too, so an interrupt always leaves no orphaned process behind, and reap it
             # so it is not left as a zombie once this function returns.
-            proc.kill()
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            _close_input()
             proc.wait()
             raise
     finally:
         _unregister_wake_queue(q)
+        _close_input()
+        if input_thread is not None:
+            # Closing the parent's pipe end above releases a writer blocked behind
+            # a child that stopped consuming input.  Never let cleanup wait forever.
+            input_thread.join(timeout=1)
         if proc.stdout is not None:
             proc.stdout.close()
 
