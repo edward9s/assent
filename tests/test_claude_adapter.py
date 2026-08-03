@@ -4,6 +4,7 @@ Everything uses a fake subprocess (sys.executable -c ...) or feeds strings direc
 functions — never a real claude CLI, never the network (ground rule 4). The real CLI was
 probed once to record a fixture; see stream_json_ok.txt.
 """
+import hashlib
 import json
 import subprocess
 import sys
@@ -243,6 +244,46 @@ class TestRunSubprocess(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(stalled)
         self.assertIn("still here", out)
+
+    def test_large_utf8_input_is_delivered_exactly_while_output_streams(self):
+        payload = ("ASCII line\n臺灣 mixed\r\n" * 12_000)
+        expected = payload.encode("utf-8")
+        script = (
+            "import hashlib, sys\n"
+            "data = bytearray()\n"
+            "while True:\n"
+            "    chunk = sys.stdin.buffer.read(4096)\n"
+            "    if not chunk:\n"
+            "        break\n"
+            "    data.extend(chunk)\n"
+            "    print('chunk', flush=True)\n"
+            "print(len(data))\n"
+            "print(hashlib.sha256(data).hexdigest())\n"
+        )
+        command = _py(script)
+        rc, out, stalled = run_subprocess(
+            command, Path("."), stall_seconds=10, input_text=payload)
+        lines = out.splitlines()
+        self.assertEqual(rc, 0)
+        self.assertFalse(stalled)
+        self.assertGreaterEqual(len(expected), 100 * 1024)
+        self.assertLess(sum(len(arg) for arg in command), 4096)
+        self.assertEqual(int(lines[-2]), len(expected))
+        self.assertEqual(lines[-1], hashlib.sha256(expected).hexdigest())
+
+    def test_early_child_exit_does_not_leave_input_writer_hanging(self):
+        script = (
+            "import sys\n"
+            "sys.stdin.close()\n"
+            "print('closed', flush=True)\n"
+            "sys.exit(7)\n"
+        )
+        rc, out, stalled = run_subprocess(
+            _py(script), Path("."), stall_seconds=10,
+            input_text="prompt data\n" * 50_000)
+        self.assertEqual(rc, 7)
+        self.assertFalse(stalled)
+        self.assertIn("closed", out)
 
 
 class TestRunSubprocessStopWake(unittest.TestCase):
