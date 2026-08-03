@@ -408,7 +408,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         blocked_debt = auto_fix.ReviewFinding(
             "t001", "assent/inspection.py", "Blocked debt", "blocked evidence",
             kind="eligible_technical_debt")
-        with self.assertRaisesRegex(AssentError, "limited to initial completed-folder"):
+        with self.assertRaisesRegex(AssentError, "limited to completed-folder review"):
             auto_fix.state_for_review(
                 auto_fix.ReviewRecord("FAIL", (blocked_debt,)),
                 source_tree=source_tree,
@@ -424,7 +424,8 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             "t001", "assent/inspection.py", "New debt", "new evidence",
             kind="eligible_technical_debt", transition="newly_exposed",
             transition_evidence="t001 existing requirement exposed by repair")
-        with self.assertRaisesRegex(AssentError, "limited to initial completed-folder"):
+        with self.assertRaisesRegex(
+                AssentError, "cannot introduce eligible technical debt during recheck"):
             auto_fix.state_for_review(
                 auto_fix.ReviewRecord("FAIL", (recheck_debt,)),
                 source_tree=source_tree,
