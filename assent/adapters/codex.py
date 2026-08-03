@@ -264,7 +264,7 @@ class CodexAdapter(Adapter):
     def run_structured_task(self, prompt: str, requested_model: str,
                             requested_effort: str | None,
                             cwd: Path) -> TaskResult:
-        """Run a reviewer with Codex's native schema and last-message boundaries."""
+        """Run a Codex-only native transport; Assent still owns parsing and validation."""
         with tempfile.TemporaryDirectory(prefix="as-") as temporary:
             transport = Path(temporary)
             if not _transport_is_external(transport, cwd, self.cfg):
