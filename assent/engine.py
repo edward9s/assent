@@ -295,6 +295,7 @@ class _AutoFixBlockerEvidence:
     trigger: str
     reason: str
     focused_evidence: str
+    worker_summary: str | None = None
 
 
 @dataclass
@@ -845,9 +846,11 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             if recovery_error is not None:
                 print(f"Auto-fix recovery refused: {recovery_error}.")
                 return 1
+        review_enabled = auto_fix_enabled and cfg.auto_fix_review is not None
         while not resuming_auto_fix:
-            plan = _authoritative_status_plan(
-                trusted_plan, Plan.parse(cfg.tasks_dir))
+            current_plan = Plan.parse(cfg.tasks_dir)
+            plan = (_authoritative_status_plan(trusted_plan, current_plan)
+                    if review_enabled else current_plan)
             if task_id is not None:
                 task = plan.get(task_id)
                 if task is None:
@@ -875,9 +878,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             active.session = session
             _process_task(
                 cfg, task, rotation, sleep, now, session, resumed,
-                blocker_evidence=(blocker_evidence
-                                  if auto_fix_enabled
-                                  and cfg.auto_fix_review is not None else None))
+                blocker_evidence=(blocker_evidence if review_enabled else None))
             active.task = None
             active.session = None
 
@@ -1144,10 +1145,17 @@ def _auto_fix_blocker_text(
         blockers: tuple[_AutoFixBlockerEvidence, ...]) -> str:
     if not blockers:
         return "(none; this is a completed-folder review)"
-    return "\n".join(
-        f"- {item.task.id} [{item.trigger}]: {item.reason}\n"
-        f"  focused evidence: {item.focused_evidence}"
-        for item in blockers)
+    rendered: list[str] = []
+    for item in blockers:
+        lines = [
+            f"- {item.task.id} [{item.trigger}]: {item.reason}",
+        ]
+        if item.worker_summary is not None:
+            lines.append(
+                "  worker journal summary (verbatim): " + item.worker_summary)
+        lines.append(f"  focused evidence: {item.focused_evidence}")
+        rendered.append("\n".join(lines))
+    return "\n".join(rendered)
 
 
 def _auto_fix_prior_evidence(
@@ -1311,23 +1319,45 @@ def _blocked_evidence_from_journals(plan: Plan) -> tuple[_AutoFixBlockerEvidence
     for task in plan.tasks:
         if task.status != "BLOCKED":
             continue
-        reason = "Task is durably BLOCKED; no scheduler reason was readable."
-        focused = ("NOT RUN: no captured focused result is present; this is "
-                   "legitimate for a self-marked BLOCKED closeout.")
         try:
             entries = read_entries(task.journal_path)
         except (AssentError, OSError):
-            entries = []
+            continue
+        reason: str | None = None
+        worker_summary: str | None = None
+        focused = ("NOT RUN: no captured focused result is present for this "
+                   "durable scheduler blocker.")
         for entry in reversed(entries):
             if entry.get("event") not in ("auto_fix_blocker", "blocked"):
                 continue
-            reason = str(entry.get("summary") or reason)
+            summary = str(entry.get("summary") or "")
             detail = str(entry.get("detail") or "")
             if "Focused evidence:\n" in detail:
                 focused = detail.split("Focused evidence:\n", 1)[1]
-            elif "Verify command exit code is non-zero" in reason:
-                focused = reason
+            if entry.get("by") != "scheduler":
+                reason = "Execution AI self-marked BLOCKED"
+                worker_summary = summary or "(empty summary)"
+                focused = ("NOT RUN: self-marked BLOCKED closeout legitimately "
+                           "skips the focused gate.")
+            elif (entry.get("event") == "auto_fix_blocker"
+                  and focused.startswith("NOT RUN")
+                  and "self-marked BLOCKED" in focused):
+                reason = "Execution AI self-marked BLOCKED"
+                marker = "Worker journal summary (verbatim):\n"
+                if marker in detail:
+                    worker_summary = detail.split(marker, 1)[1].split(
+                        "\nFocused evidence:\n", 1)[0]
+                elif summary != reason:
+                    # Version-2 blocker entries used the worker summary as the
+                    # scheduler entry summary. Preserve it during recovery.
+                    worker_summary = summary or "(empty summary)"
+            else:
+                reason = summary or None
+                if reason and "Verify command exit code is non-zero" in reason:
+                    focused = reason
             break
+        if reason is None:
+            continue
         focused_lower = focused.lower()
         trigger = ("focused_gate_failure"
                    if ("focused" in focused_lower
@@ -1335,8 +1365,18 @@ def _blocked_evidence_from_journals(plan: Plan) -> tuple[_AutoFixBlockerEvidence
                    and not focused.startswith("NOT RUN")
                    else "worker_blocked")
         blockers.append(_AutoFixBlockerEvidence(
-            task, trigger, reason, focused))
+            task, trigger, reason, focused, worker_summary))
     return tuple(blockers)
+
+
+def _merge_blocker_evidence(
+        plan: Plan, current: tuple[_AutoFixBlockerEvidence, ...],
+        recovered: tuple[_AutoFixBlockerEvidence, ...],
+        ) -> tuple[_AutoFixBlockerEvidence, ...]:
+    """Return one current-or-durable blocker record per task in plan order."""
+    by_id = {item.task.id: item for item in recovered}
+    by_id.update((item.task.id, item) for item in current)
+    return tuple(by_id[task.id] for task in plan.tasks if task.id in by_id)
 
 
 def _restore_trusted_contracts_after_adjudication(
@@ -1405,11 +1445,15 @@ def _run_auto_fix_review_once(
                   f"({shown}).")
             return _AutoFixReviewOutcome(0)
         review_context = "blocked_adjudication"
-        if not blockers:
-            blockers = _blocked_evidence_from_journals(plan)
-        if not blockers:
+        blockers = _merge_blocker_evidence(
+            plan, blockers, _blocked_evidence_from_journals(plan))
+        required = {item.id for item in blocked}
+        available = {item.task.id for item in blockers}
+        missing = sorted(required - available)
+        if not blockers or missing:
+            suffix = f" ({', '.join(missing)})" if missing else ""
             print("Auto-fix blocked adjudication refused: durable BLOCKED tasks "
-                  "have no readable scheduler evidence.")
+                  f"have no readable scheduler evidence{suffix}.")
             return _AutoFixReviewOutcome(
                 1, human_reason="blocked tasks have no durable scheduler evidence")
 
@@ -1496,6 +1540,20 @@ def _run_auto_fix_review_once(
         contracts_by_id=contracts_by_id,
         review_context=review_context, review_stage=review_stage,
         blockers=blockers, previous=review_previous)
+
+    def finish(outcome: _AutoFixReviewOutcome) -> _AutoFixReviewOutcome:
+        """Restore worker task-contract tampering after its review evidence is captured."""
+        if review_context != "blocked_adjudication":
+            return outcome
+        try:
+            _restore_trusted_contracts_after_adjudication(
+                plan, contracts_by_id, now)
+        except AssentError as e:
+            print("Auto-fix adjudication evidence was preserved, but trusted "
+                  f"contract restoration failed: {e}")
+            return _AutoFixReviewOutcome(1, outcome.state, str(e))
+        return outcome
+
     freshness = dict(
         source_tree=source_tree,
         task_plan_sha256=plan_digest,
@@ -1509,20 +1567,20 @@ def _run_auto_fix_review_once(
     if existing is not None and auto_fix.auto_fix_state_is_fresh(
             existing, **freshness):
         print("Auto-fix folder review: reusing exact fresh PASS; no reviewer session started.")
-        return _AutoFixReviewOutcome(0, existing)
+        return finish(_AutoFixReviewOutcome(0, existing))
 
     try:
         reviewer = injected_adapter or get_adapter(review.adapter, cfg)
     except AssentError as e:
         print(f"Auto-fix reviewer resolution failed: {e}")
-        return _AutoFixReviewOutcome(1, human_reason=str(e))
+        return finish(_AutoFixReviewOutcome(1, human_reason=str(e)))
     session, errors = auto_fix_review_capability_errors(cfg, reviewer)
     if errors:
         print(f"{review.adapter} auto-fix review capability preflight: FAIL "
               "(refusing before the review session)")
         for message in errors:
             print(f"  - {message}")
-        return _AutoFixReviewOutcome(1, human_reason="; ".join(errors))
+        return finish(_AutoFixReviewOutcome(1, human_reason="; ".join(errors)))
     assert session is not None
 
     baseline = _auto_fix_surface_snapshot(cfg)
@@ -1549,10 +1607,12 @@ def _run_auto_fix_review_once(
                 print("Auto-fix reviewer interruption interval contains project writes; "
                       "exact edits are preserved: "
                       + ", ".join(changed[:8]))
+                return _AutoFixReviewOutcome(
+                    130, human_reason="reviewer interrupted")
             else:
                 print("Auto-fix reviewer interrupted; no verdict was recorded.")
-            return _AutoFixReviewOutcome(
-                130, human_reason="reviewer interrupted")
+            return finish(_AutoFixReviewOutcome(
+                130, human_reason="reviewer interrupted"))
         except OSError as e:
             changed = _auto_fix_surface_change(
                 baseline, cfg, baseline_head, baseline_status,
@@ -1560,7 +1620,8 @@ def _run_auto_fix_review_once(
             suffix = (f"; project writes preserved: {', '.join(changed[:8])}"
                       if changed else "")
             print(f"Auto-fix reviewer infrastructure failure: {e}{suffix}")
-            return _AutoFixReviewOutcome(1, human_reason=str(e))
+            outcome = _AutoFixReviewOutcome(1, human_reason=str(e))
+            return outcome if changed else finish(outcome)
 
         changed = _auto_fix_surface_change(
             baseline, cfg, baseline_head, baseline_status,
@@ -1585,14 +1646,14 @@ def _run_auto_fix_review_once(
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output, result.failure_kind)
             print(f"Auto-fix reviewer billing/balance failure: {reason}")
-            return _AutoFixReviewOutcome(1, human_reason=reason)
+            return finish(_AutoFixReviewOutcome(1, human_reason=reason))
         if result.exit_code != 0 or result.stalled:
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output, result.failure_kind)
             print(f"Auto-fix reviewer adapter failure: {reason}")
             if result.exit_code == 130 or result.failure_kind == "interrupt":
-                return _AutoFixReviewOutcome(130, human_reason=reason)
-            return _AutoFixReviewOutcome(1, human_reason=reason)
+                return finish(_AutoFixReviewOutcome(130, human_reason=reason))
+            return finish(_AutoFixReviewOutcome(1, human_reason=reason))
 
         try:
             record = auto_fix.parse_review_output(result.output)
@@ -1607,7 +1668,7 @@ def _run_auto_fix_review_once(
                       f"({invalid_attempts}/{cfg.retry_per_task}).")
                 continue
             print(f"Auto-fix reviewer returned invalid output after configured retries: {e}")
-            return _AutoFixReviewOutcome(1, human_reason=str(e))
+            return finish(_AutoFixReviewOutcome(1, human_reason=str(e)))
 
         try:
             resolved_record = auto_fix.validate_review_findings(record, plan)
@@ -1630,9 +1691,9 @@ def _run_auto_fix_review_once(
             except AssentError as state_error:
                 print("Auto-fix invalid reviewer evidence could not be encoded "
                       f"as repair state: {state_error}")
-                return _AutoFixReviewOutcome(1, human_reason=str(e))
+                return finish(_AutoFixReviewOutcome(1, human_reason=str(e)))
             print(f"Auto-fix findings require a human scope/plan decision: {e}")
-            return _AutoFixReviewOutcome(1, state, str(e))
+            return finish(_AutoFixReviewOutcome(1, state, str(e)))
 
         state = auto_fix.state_for_review(
             resolved_record, previous=review_previous, review_stage=review_stage,
@@ -1644,20 +1705,12 @@ def _run_auto_fix_review_once(
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
         if resolved_record.verdict == "PASS":
             print("Auto-fix folder review: PASS.")
-            return _AutoFixReviewOutcome(0, state)
-        if review_context == "blocked_adjudication":
-            try:
-                _restore_trusted_contracts_after_adjudication(
-                    plan, contracts_by_id, now)
-            except AssentError as e:
-                print(f"Auto-fix repair authorization preserved, but trusted "
-                      f"contract restoration failed: {e}")
-                return _AutoFixReviewOutcome(1, state, str(e))
+            return finish(_AutoFixReviewOutcome(0, state))
         print("Auto-fix folder review: FAIL; blocking findings were preserved for repair.")
         for finding in resolved_record.findings:
             owner = f"{finding.task_id}: " if finding.task_id else ""
             print(f"  - {owner}{finding.path}: {finding.summary}")
-        return _AutoFixReviewOutcome(1, state)
+        return finish(_AutoFixReviewOutcome(1, state))
 
 
 def _auto_fix_profile_for_task(cfg: Config, task: Task) -> auto_fix.FixerProfile:
@@ -2671,7 +2724,11 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     attempts_used = 0
     failure_reason: str | None = None
     attempted_failures: list[tuple[str, str]] = []
-    journal_start = len(read_entries(task.journal_path))
+    # Repair disposition validation needs a precise journal boundary. Ordinary
+    # sessions retain the historical behavior in which a malformed pre-existing
+    # journal does not prevent the worker prompt or task execution from running.
+    journal_start = (len(read_entries(task.journal_path))
+                     if auto_fix_fingerprints else 0)
     while True:
         adapter = rotation.adapter
         adapter_name = rotation.name
@@ -2838,13 +2895,16 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                     worker_entries[-1].get("summary")
                     if worker_entries else "Execution AI self-marked BLOCKED")
                 evidence = _AutoFixBlockerEvidence(
-                    task, "worker_blocked", worker_reason,
-                    "NOT RUN: self-marked BLOCKED closeout legitimately skips the focused gate.")
+                    task, "worker_blocked", "Execution AI self-marked BLOCKED",
+                    "NOT RUN: self-marked BLOCKED closeout legitimately skips the focused gate.",
+                    worker_reason)
                 blocker_evidence.append(evidence)
                 append_entry(
                     task.journal_path, by="scheduler", event="auto_fix_blocker",
                     summary=evidence.reason,
-                    detail=f"Focused evidence:\n{evidence.focused_evidence}",
+                    detail=("Worker journal summary (verbatim):\n"
+                            f"{worker_reason}\nFocused evidence:\n"
+                            f"{evidence.focused_evidence}"),
                     agent=session.agent,
                     requested_model=session.requested_model,
                     requested_effort=session.requested_effort,
