@@ -1085,7 +1085,6 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(state.failure_trigger, "worker_blocked")
         self.assertEqual(parse_task_file(task).status, "BLOCKED")
 
-        passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
         fingerprint = auto_fix.finding_fingerprint(finding)
 
         def repair(_prompt):
@@ -1102,12 +1101,30 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                     '"The required invariant now holds."}'))
             return ok_result()
 
-        repairer = ScriptedAdapter([repair])
-        rechecker = ScriptedAdapter([TaskResult(0, passed, False, None)])
+        still_present = auto_fix.review_record_json(auto_fix.ReviewRecord(
+            "FAIL", (auto_fix.ReviewFinding(
+                finding.task_id, finding.path, finding.summary,
+                finding.evidence, kind=finding.kind,
+                recommendation=finding.recommendation,
+                transition="still_present", prior_fingerprint=fingerprint,
+                transition_evidence="The first repair still reproduces the blocker."),)))
+        passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        repairer = ScriptedAdapter([repair, repair])
+        rechecker = ScriptedAdapter([
+            TaskResult(0, still_present, False, None),
+            TaskResult(0, passed, False, None),
+        ])
         self.assertEqual(self.run_quiet(
             cfg, adapter=repairer, auto_fix_adapter=rechecker,
             auto_fix=True), 0)
-        self.assertEqual(len(repairer.calls), 1)
+        self.assertEqual(len(repairer.calls), 2)
+        second_repair_prompt = repairer.calls[1][0]
+        self.assertIn("Cannot satisfy the required invariant.",
+                      second_repair_prompt)
+        self.assertIn("legitimately skips the focused gate",
+                      second_repair_prompt)
+        self.assertNotIn("(none; this is a completed-folder review)",
+                         second_repair_prompt)
         self.assertIn("Review context: BLOCKED_ADJUDICATION",
                       rechecker.calls[0][0])
         self.assertIn("Review stage: RECHECK", rechecker.calls[0][0])

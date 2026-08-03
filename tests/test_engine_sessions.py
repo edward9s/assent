@@ -22,7 +22,7 @@ from unittest import mock
 from assent import AssentError, auto_fix, engine, gitops
 from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
-                                     wake_stop_waiters)
+                                     run_subprocess, wake_stop_waiters)
 from assent.config import load_config
 from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
                          read_entries, set_status)
@@ -623,7 +623,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         ])
 
         def process_creation_failed(_prompt):
-            raise OSError("adapter command line is too long")
+            run_subprocess(
+                [str(self.root / "missing-auto-fix-adapter.exe")],
+                self.execution_root(), 0)
 
         worker = ScriptedAdapter([
             process_creation_failed,
@@ -669,6 +671,58 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             item.get("event") == "auto_fix_attempt" for item in entries), 1)
         self.assertEqual(sum(
             item.get("event") == "auto_fix_attempt_resume" for item in entries), 1)
+
+    def test_post_start_oserror_consumes_assignment_and_uses_next_profile(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "value is stale",
+            "The focused behavior still reads the stale value.")
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+
+        def failed_after_start(_prompt):
+            marker = self.execution_root() / "src" / "started.txt"
+            marker.write_text("child started\n", encoding="utf-8")
+            raise OSError("output collection failed after child start")
+
+        worker = ScriptedAdapter([
+            failed_after_start,
+            self.repair_done(
+                task_path, {"src/value.txt": "new\n"},
+                requested_model="prime"),
+        ])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 1)
+        attempted = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(attempted.repair_round_assignments, (
+            auto_fix.RepairRoundAssignment(
+                "t001", "claude", "lite", "normal", attempted=True),))
+        self.assertEqual(parse_task_file(task_path).status, "WIP")
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        completed = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(completed.consumed_fixer_profiles, (
+            auto_fix.FixerProfile("claude", "lite", "normal"),
+            auto_fix.FixerProfile("claude", "prime", "heavy"),
+        ))
+        entries = read_entries(journal_path_for(task_path))
+        self.assertEqual(sum(
+            item.get("event") == "auto_fix_attempt_resume" for item in entries), 0)
 
     def test_profile_exhaustion_ends_blocked_without_another_mutation_round(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))

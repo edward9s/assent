@@ -1006,6 +1006,10 @@ def validate_review_transitions(
         fingerprint = finding_fingerprint(item)
         if item.transition == "initial":
             raise AssentError("An auto-fix recheck cannot contain an initial finding")
+        if (item.kind == "eligible_technical_debt"
+                and item.transition != "still_present"):
+            raise AssentError(
+                f"{label} cannot introduce eligible technical debt during recheck")
         if item.transition == "still_present":
             if item.prior_fingerprint not in current:
                 raise AssentError(
@@ -1319,11 +1323,13 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         raise AssentError("A PASS auto-fix state must have no current findings")
     if state.verdict == "FAIL" and not current:
         raise AssentError("A FAIL auto-fix state must have current findings")
-    if any(ledger[item].kind == "eligible_technical_debt" for item in current):
-        if (state.review_context != "completed_folder"
-                or state.review_stage != "initial"):
+    debt_fingerprints = {
+        fingerprint for fingerprint in current
+        if ledger[fingerprint].kind == "eligible_technical_debt"}
+    if debt_fingerprints:
+        if state.review_context != "completed_folder":
             raise AssentError(
-                "Eligible technical debt is limited to initial completed-folder review")
+                "Eligible technical debt is limited to completed-folder review")
 
     expected_recommendations = tuple(
         ReviewerRecommendation(item, ledger[item].recommendation)
@@ -1481,6 +1487,17 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
                 raise AssentError("New review transition cannot cite a prior fingerprint")
             _require_text(item.transition_evidence,
                           "Review-transition evidence", MAX_EVIDENCE_LENGTH)
+
+    if debt_fingerprints and state.review_stage == "recheck":
+        for fingerprint in debt_fingerprints:
+            lineage = [
+                item.transition for item in state.review_transitions
+                if item.fingerprint == fingerprint]
+            if (not lineage or lineage[0] != "initial"
+                    or lineage[-1] != "still_present"):
+                raise AssentError(
+                    "Recheck may retain only initial eligible technical debt "
+                    "with a still-present transition")
 
     observed_seen: set[tuple[str, tuple[str, ...]]] = set()
     for index, observed in enumerate(state.observed_states):

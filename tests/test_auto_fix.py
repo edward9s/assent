@@ -494,6 +494,49 @@ class TestAutoFixState(unittest.TestCase):
                 reviewer_effort="high", review_context="blocked_adjudication",
                 review_stage="initial", failure_trigger="focused_gate_failure")
 
+        fingerprint = finding_fingerprint(finding)
+        retained = ReviewFinding(
+            finding.task_id, finding.path, finding.summary, finding.evidence,
+            kind=finding.kind, recommendation=finding.recommendation,
+            transition="still_present", prior_fingerprint=fingerprint,
+            transition_evidence="The same local debt remains after repair.")
+        rechecked = state_for_review(
+            ReviewRecord("FAIL", (retained,)), source_tree="4" * 40,
+            task_plan_sha256=self.plan_digest,
+            review_prompt_sha256=self.prompt_digest,
+            reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+            reviewer_effort="high", previous=state_for_review(
+                ReviewRecord("FAIL", (finding,)), source_tree=self.tree,
+                task_plan_sha256=self.plan_digest,
+                review_prompt_sha256=self.prompt_digest,
+                reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+                reviewer_effort="high", review_stage="initial"),
+            review_stage="recheck")
+        self.assertEqual(rechecked.current_finding_fingerprints, (fingerprint,))
+        resolved = state_for_review(
+            ReviewRecord("PASS", ()), source_tree="5" * 40,
+            task_plan_sha256=self.plan_digest,
+            review_prompt_sha256=self.prompt_digest,
+            reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+            reviewer_effort="high", previous=rechecked,
+            review_stage="recheck")
+        self.assertEqual(resolved.current_finding_fingerprints, ())
+
+        novel = ReviewFinding(
+            "t001", "assent/auto_fix.py", "Different debt",
+            "A recheck attempted to introduce another debt identity.",
+            kind="eligible_technical_debt",
+            transition="repair_regression",
+            transition_evidence="The repair changed assent/auto_fix.py.")
+        with self.assertRaisesRegex(AssentError, "technical debt"):
+            state_for_review(
+                ReviewRecord("FAIL", (novel,)), source_tree="6" * 40,
+                task_plan_sha256=self.plan_digest,
+                review_prompt_sha256=self.prompt_digest,
+                reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
+                reviewer_effort="high", previous=rechecked,
+                review_stage="recheck")
+
     def test_recheck_retains_ledger_scope_approvals_and_profile_history(self):
         scope_finding = ReviewFinding(
             "t001", "tests/new_case.py", "A scoped test is required",

@@ -44,6 +44,7 @@ from assent import (AssentError, auto_fix, contracts, gitops, lockfile, rework,
                     shared_paths, verification)
 from assent.adapters import Adapter, get_adapter
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
+                                     run_subprocess as _adapter_run_subprocess,
                                      stop_wake_requested)
 from assent.config import Config
 from assent.folderdeps import find_unfinished_prerequisites
@@ -299,7 +300,26 @@ class _AutoFixBlockerEvidence:
 
 
 class _AdapterProcessCreationError(OSError):
-    """The adapter raised synchronously instead of returning a child result."""
+    """The shared runner proved its subprocess constructor did not return."""
+
+
+def _adapter_process_creation_failed(error: OSError) -> bool:
+    """Return whether the shared runner proves no child handle was created.
+
+    An arbitrary adapter ``OSError`` is not a start witness: collection, wait,
+    and cleanup can also fail after a child exists.  In the shared runner, the
+    local ``proc`` is assigned by the sole ``Popen`` call.  Its exact traceback
+    frame without that local therefore identifies only the constructor-failure
+    boundary, without trusting exception wording or an adapter assertion.
+    """
+    traceback = error.__traceback__
+    target = _adapter_run_subprocess.__code__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_code is target:
+            return "proc" not in frame.f_locals
+        traceback = traceback.tb_next
+    return False
 
 
 @dataclass
@@ -1815,11 +1835,53 @@ def _auto_fix_repair_briefs(
     return tuple(briefs)
 
 
+def _auto_fix_prior_brief_evidence(
+        state: auto_fix.AutoFixState, heading: str,
+        next_heading: str) -> str | None:
+    """Recover one scheduler-rendered evidence section from durable briefs."""
+    marker = heading + ":\n"
+    ending = "\n\n" + next_heading + ":\n"
+    recovered: set[str] = set()
+    for item in state.repair_briefs:
+        start = item.brief.find(marker)
+        if start < 0:
+            continue
+        start += len(marker)
+        end = item.brief.find(ending, start)
+        if end >= 0:
+            recovered.add(item.brief[start:end])
+    if len(recovered) > 1:
+        raise AssentError(
+            f"Auto-fix durable repair briefs disagree on {heading.lower()}")
+    return next(iter(recovered), None)
+
+
+def _auto_fix_merge_brief_evidence(
+        prior: str | None, current: str, *, empty: str) -> str:
+    """Retain original evidence while adding a distinct later gate result."""
+    if prior is None:
+        return current
+    if not current or current == empty:
+        return prior
+    if current in prior:
+        return prior
+    return prior + "\n\nLater repair-round evidence:\n" + current
+
+
 def _auto_fix_attach_repair_briefs(
         cfg: Config, plan: Plan, state: auto_fix.AutoFixState, *,
         blocker_evidence: str, focused_evidence: str) -> auto_fix.AutoFixState:
     if state.verdict != "FAIL":
         return state
+    prior_blocker = _auto_fix_prior_brief_evidence(
+        state, "Original blocker evidence", "Focused command evidence")
+    prior_focused = _auto_fix_prior_brief_evidence(
+        state, "Focused command evidence", "Approved scope additions")
+    blocker_evidence = _auto_fix_merge_brief_evidence(
+        prior_blocker, blocker_evidence,
+        empty="(none; this is a completed-folder review)")
+    focused_evidence = _auto_fix_merge_brief_evidence(
+        prior_focused, focused_evidence, empty="")
     return auto_fix.with_repair_briefs(
         state, _auto_fix_repair_briefs(
             cfg, plan, state, blocker_evidence=blocker_evidence,
@@ -2499,9 +2561,12 @@ def _run_auto_fix_repairs(
                         task, active.session.identity,
                         "Auto-fix adapter infrastructure failure; progress kept",
                         now, detail=str(e))
-                failures.append((task, f"Fixer infrastructure failure: {e}"))
                 active.task = None
                 active.session = None
+                print("Auto-fix fixer infrastructure failure after the child-start "
+                      "boundary could not be excluded; progress and the consumed "
+                      f"assignment were preserved: {e}")
+                return 1
 
         if failures:
             if round_blockers:
@@ -2905,10 +2970,9 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 prompt, session.requested_model, session.requested_effort,
                 cfg.root)
         except OSError as e:
-            # Built-in adapters call their subprocess launcher synchronously and
-            # return TaskResult only after a child existed. No returned result
-            # plus OSError therefore identifies the pre-child creation boundary.
-            raise _AdapterProcessCreationError(str(e)) from e
+            if _adapter_process_creation_failed(e):
+                raise _AdapterProcessCreationError(str(e)) from e
+            raise
         if not result.quota_exhausted:
             rotation.session_opened()
         escape_reason = (
