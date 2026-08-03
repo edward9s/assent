@@ -12,6 +12,7 @@ notes, journal summaries, AGENTS.md content) used to prove that non-English data
 through verbatim."""
 import contextlib
 import io
+import json
 import subprocess
 import unittest
 from unittest import mock
@@ -1009,6 +1010,39 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 auto_fix_adapter=cached, auto_fix=True), 0)
         self.assertEqual(cached.calls, [])
         self.assertIn("reusing exact fresh PASS", out.getvalue())
+
+    def test_structured_final_response_wins_over_codex_jsonl_stream(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build_review(retry=0)
+        self.commit_all()
+        final = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        raw_stream = (json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": final}})
+                      + "\n" + json.dumps({"type": "turn.completed"}) + "\n")
+        reviewer = ScriptedAdapter([TaskResult(
+            0, raw_stream, False, None, structured_output=final)])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
+
+    def test_structured_empty_response_never_falls_back_to_raw_stream(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build_review(retry=0)
+        self.commit_all()
+        final = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        raw_stream = (json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": final}})
+                      + "\n" + json.dumps({"type": "turn.completed"}) + "\n")
+        reviewer = ScriptedAdapter([TaskResult(
+            0, raw_stream, False, None, structured_output="")])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
+            auto_fix=True), 1)
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
 
     def test_focused_failure_starts_no_reviewer(self):
         task = self.write_task(1, status="DONE", verify=_NEEDS_OK_TXT)

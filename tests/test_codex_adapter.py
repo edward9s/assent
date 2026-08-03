@@ -46,6 +46,8 @@ class TestBuildCommand(unittest.TestCase):
         self.assertEqual(cmd[0], "codex.cmd")
         self.assertNotIn("model_reasoning_effort", " ".join(cmd))
         self.assertEqual(cmd[-3:], ["--sandbox", "danger-full-access", "-"])
+        self.assertNotIn("--output-schema", cmd)
+        self.assertNotIn("--output-last-message", cmd)
 
 
 class TestFormatStreamEvent(unittest.TestCase):
@@ -253,6 +255,56 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(result.checkpoint_resume)
         self.assertFalse(result.quota_exhausted)
         self.assertIsNone(result.failure_kind)
+
+    def test_structured_task_keeps_raw_stream_and_reads_native_last_message(self):
+        final = '{"type":"assent.auto_fix_review","verdict":"PASS","findings":[]}'
+        stream = (json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": final}})
+                  + "\n" + json.dumps({"type": "turn.completed"}) + "\n")
+        captured = {}
+
+        def fake(command, cwd, stall_seconds, echo=None, input_text=None):
+            captured.update(command=command, cwd=cwd, input_text=input_text)
+            schema = Path(command[command.index("--output-schema") + 1])
+            last_message = Path(
+                command[command.index("--output-last-message") + 1])
+            captured.update(schema=schema, last_message=last_message,
+                            transport=schema.parent)
+            self.assertTrue(schema.is_file())
+            schema_data = json.loads(schema.read_text(encoding="utf-8"))
+            self.assertEqual(schema_data["properties"]["type"]["enum"],
+                             ["assent.auto_fix_review"])
+            last_message.write_text(final, encoding="utf-8")
+            return 0, stream, False
+
+        self.patch_run(fake)
+        prompt = "large prompt\n臺灣" * 1000
+        result = CodexAdapter(make_cfg()).run_structured_task(
+            prompt, "gpt-5.6-sol", "max", Path.cwd())
+
+        self.assertEqual(result.output, stream)
+        self.assertEqual(result.structured_output, final)
+        self.assertIsNone(result.structured_output_error)
+        self.assertEqual(captured["input_text"], prompt)
+        self.assertIn("--json", captured["command"])
+        self.assertIn("--output-schema", captured["command"])
+        self.assertIn("--output-last-message", captured["command"])
+        self.assertNotIn(prompt, captured["command"])
+        self.assertFalse(captured["transport"].exists())
+
+    def test_structured_transport_is_removed_when_subprocess_is_interrupted(self):
+        captured = {}
+
+        def interrupted(command, cwd, stall_seconds, echo=None, input_text=None):
+            schema = Path(command[command.index("--output-schema") + 1])
+            captured["transport"] = schema.parent
+            raise KeyboardInterrupt
+
+        self.patch_run(interrupted)
+        with self.assertRaises(KeyboardInterrupt):
+            CodexAdapter(make_cfg()).run_structured_task(
+                "p", "gpt-5.6-sol", "max", Path.cwd())
+        self.assertFalse(captured["transport"].exists())
 
     def test_unknown_tier_raises(self):
         with self.assertRaises(AssentError):

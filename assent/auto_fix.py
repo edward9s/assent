@@ -55,6 +55,67 @@ _OBSERVED_STATE_KEYS = {"source_tree", "finding_fingerprints"}
 _FIXER_PROFILE_KEYS = {"adapter", "model", "effort"}
 
 
+def review_record_schema() -> dict:
+    """Return the provider-neutral JSON Schema for one terminal review record.
+
+    This schema is an adapter capability boundary.  The scheduler still parses and validates
+    the returned record after transport, including task ownership and declared scope.
+    """
+    text_schema = {
+        "type": "string",
+        "minLength": 1,
+        "pattern": r"^[^\u0000-\u001f\u007f]+$",
+    }
+    finding_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["task_id", "path", "summary", "evidence"],
+        "properties": {
+            "task_id": {
+                "type": ["string", "null"],
+                "pattern": r"^t\d{3}$",
+            },
+            "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_PATH_LENGTH,
+            },
+            "summary": {**text_schema, "maxLength": MAX_SUMMARY_LENGTH},
+            "evidence": {**text_schema, "maxLength": MAX_EVIDENCE_LENGTH},
+        },
+    }
+    findings_schema = {
+        "type": "array",
+        "maxItems": MAX_FINDINGS,
+        "items": finding_schema,
+    }
+    return {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["type", "verdict", "findings"],
+        "properties": {
+            "type": {"enum": [REVIEW_RECORD_TYPE]},
+            "verdict": {"enum": ["PASS", "FAIL"]},
+            "findings": findings_schema,
+        },
+        "oneOf": [
+            {
+                "properties": {
+                    "verdict": {"enum": ["PASS"]},
+                    "findings": {"maxItems": 0},
+                },
+            },
+            {
+                "properties": {
+                    "verdict": {"enum": ["FAIL"]},
+                    "findings": {"minItems": 1},
+                },
+            },
+        ],
+    }
+
+
 @dataclass(frozen=True)
 class ReviewFinding:
     """One blocking issue stated by a reviewer, before scheduler fingerprinting."""
