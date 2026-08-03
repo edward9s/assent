@@ -316,6 +316,39 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("Folder auto-fix: STALE (task contracts changed)", text)
 
+    def test_report_defers_blocked_human_guidance_to_pending_auto_fix(self):
+        self.write_task(1, status="BLOCKED")
+        cfg = self.build()
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/main.py", "Worker blocker", "The worker reported a blocker.",
+            kind="blocked_recovery")
+
+        for context, trigger in (
+                ("blocked_adjudication", "worker_blocked"),
+                ("completed_folder", None)):
+            with self.subTest(context=context):
+                state = auto_fix.state_for_review(
+                    auto_fix.ReviewRecord("FAIL", (finding,)),
+                    source_tree=gitops.tree_of(cfg.root, "HEAD"),
+                    task_plan_sha256=auto_fix.sha256_files(
+                        task.path for task in plan.tasks),
+                    review_prompt_sha256="5" * 64,
+                    reviewer_adapter=cfg.auto_fix_review.adapter,
+                    reviewer_model=cfg.auto_fix_review.requested_model,
+                    reviewer_effort=cfg.auto_fix_review.requested_effort,
+                    review_context=context, failure_trigger=trigger)
+                auto_fix.write_auto_fix_state(
+                    auto_fix.auto_fix_state_path(cfg), state)
+
+                text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
+                self.assertNotIn(
+                    "edit the task file and set status back to TODO", text)
+                self.assertIn("pending autonomous", text)
+                self.assertIn("BLOCKED task(s) t001", text)
+                self.assertIn("Folder auto-fix: FAILED (fresh)", text)
+
     def test_report_renders_recovery_evidence_and_persistent_debt_agenda(self):
         task_path = self.write_task(1, status="DONE")
         cfg = self.build()

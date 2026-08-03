@@ -436,9 +436,14 @@ capabilities.
 | `SKIP` | not doing it this round |
 
 Status has no write-permission model: humans only review and issue directions;
-file changes are always made by the AI following those directions. The
-scheduler's machine write-back to a task file is limited to the single status
-line, replaced precisely, leaving every other byte untouched.
+file changes are made by the AI following those directions. During an ordinary
+task session, the executing AI may change only its own status line; the
+scheduler replaces that line precisely, leaving every other byte untouched.
+The scheduler has one additional, separately reviewed exception: after a
+validated auto-fix scope decision it may append the exact approved paths to
+the named existing task's `scope` array in one transaction. The worker and
+reviewer never edit task files, requirements, or scope, and this exception does
+not grant either AI permission to do so.
 
 ## Log file (tNNN_name.r.toml)
 
@@ -895,20 +900,10 @@ review_context = "completed_folder" # completed_folder / blocked_adjudication
 review_stage = "initial"          # initial / recheck
 failure_trigger = ""              # worker_blocked / focused_gate_failure / empty
 current_finding_fingerprints = []
-findings = []
-observed_states = []
-reviewer_recommendations = []
-approved_scope_additions = []
-scope_amendments = []
-worker_dispositions = []
-repair_briefs = []
-repair_round_assignments = []
-plan_digest_transitions = []
-review_transitions = []
-consumed_fixer_profiles = []
 
 [[findings]]
 fingerprint = "<64 lowercase hexadecimal digest>"
+kind = "correctness"            # correctness | safety | unmet_requirement | focused_test_gap | eligible_technical_debt | blocked_recovery | scope_amendment
 task_id = "t001"                 # empty string represents a null reviewer id
 path = "project/relative/path"
 summary = "concise blocker"
@@ -978,7 +973,9 @@ effort = "heavy"                 # abstract effort
 The actual file may use empty arrays instead of the example tables. The
 serializer writes a null `task_id` as `""`; readers restore it to null. The
 reviewer never supplies a fingerprint: Assent normalizes each finding and
-computes its identity from `task_id`, path, summary, and evidence. A `PASS`
+computes its identity from `kind`, `task_id`, `path`, `summary`, `evidence`,
+`recommendation`, and the optional `scope_addition` path and path state using
+canonical JSON. A `PASS`
 has no current findings; a `FAIL` has at least one. The findings ledger and
 `observed_states` retain prior evidence, while `consumed_fixer_profiles` is an
 ordered set and cannot contain duplicates.

@@ -139,8 +139,20 @@ def render_report(cfg: Config, plan: Plan,
                     lines.append(f"      last journal ({by}): {summary}")
     blocked = [t for t in plan.tasks if t.status == "BLOCKED"]
     if blocked:
-        lines += ["", "To decide: compare each BLOCKED task's r file and checkpoint commit, "
+        pending = _pending_auto_fix_for_blocked(cfg, plan, blocked)
+        if pending is None:
+            lines += ["", "To decide: compare each BLOCKED task's r file and checkpoint commit, "
                       "edit the task file and set status back to TODO to continue, or mark SKIP to abandon."]
+        else:
+            state, task_ids = pending
+            lifecycle = (
+                "blocked adjudication"
+                if state.review_context == "blocked_adjudication"
+                else "repair")
+            lines += ["", "To decide: pending autonomous " + lifecycle
+                      + " covers BLOCKED task(s) " + ", ".join(task_ids)
+                      + "; inspect the Folder auto-fix lifecycle below and defer "
+                        "human task-file disposition until it reaches a terminal outcome."]
     lines += ["", *auto_fix_report_lines(cfg, plan),
               "", *receipt_report_lines(cfg)]
     return "\n".join(lines) + "\n"
@@ -153,6 +165,67 @@ def write_report(cfg: Config, plan: Plan,
     path.write_text(render_report(cfg, plan, now), encoding="utf-8")
     _write_technical_debt_report(cfg)
     return path
+
+
+_PENDING_AUTO_FIX_PHASES = frozenset({"NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW"})
+
+
+def _auto_fix_binding_reasons(
+        cfg: Config, plan: Plan, state: auto_fix.AutoFixState
+        ) -> tuple[list[str], str | None]:
+    """Return current binding drift without starting work or changing state."""
+    reasons: list[str] = []
+    current_tree: str | None = None
+    try:
+        current_tree = gitops.tree_of(cfg.root, "HEAD")
+    except AssentError as e:
+        reasons.append(f"current source identity unavailable: {e}")
+    else:
+        if current_tree != state.source_tree:
+            reasons.append("source tree changed")
+
+    try:
+        if not _task_plan_matches_state(plan, state):
+            reasons.append("task contracts changed")
+    except AssentError as e:
+        reasons.append(f"task contracts unavailable: {e}")
+
+    review = cfg.auto_fix_review
+    if review is not None:
+        configured_reviewer = (
+            review.adapter, review.requested_model, review.requested_effort)
+        stored_reviewer = (
+            state.reviewer_adapter, state.reviewer_model, state.reviewer_effort)
+        if stored_reviewer != configured_reviewer:
+            reasons.append("reviewer configuration changed")
+    return reasons, current_tree
+
+
+def _pending_auto_fix_for_blocked(
+        cfg: Config, plan: Plan, blocked: list[Task]
+        ) -> tuple[auto_fix.AutoFixState, tuple[str, ...]] | None:
+    """Find fresh pending auto-fix evidence that owns the displayed BLOCKED tasks."""
+    path = auto_fix.auto_fix_state_path(cfg)
+    if not path.is_file():
+        return None
+    try:
+        state = auto_fix.read_auto_fix_state(path)
+    except AssentError:
+        return None
+    if state.verdict != "FAIL" or state.phase not in _PENDING_AUTO_FIX_PHASES:
+        return None
+    reasons, _current_tree = _auto_fix_binding_reasons(cfg, plan, state)
+    if reasons:
+        return None
+    blocked_ids = {task.id for task in blocked}
+    current = set(state.current_finding_fingerprints)
+    covered = {
+        finding.task_id for finding in state.findings
+        if finding.fingerprint in current and finding.task_id in blocked_ids
+    }
+    if not covered:
+        return None
+    return state, tuple(sorted(covered))
 
 
 def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
@@ -172,33 +245,7 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
     except AssentError as e:
         return [f"Folder auto-fix: STALE (malformed review state: {e})"]
 
-    reasons: list[str] = []
-    current_tree: str | None = None
-    try:
-        current_tree = gitops.tree_of(cfg.root, "HEAD")
-    except AssentError as e:
-        reasons.append(f"current source identity unavailable: {e}")
-    else:
-        if current_tree != state.source_tree:
-            reasons.append("source tree changed")
-
-    try:
-        if not _task_plan_matches_state(plan, state):
-            reasons.append("task contracts changed")
-    except AssentError as e:
-        reasons.append(f"task contracts unavailable: {e}")
-
-    # A configured reviewer identity is part of the state binding.  Keep the
-    # no-policy case readable for historical reports, but never call evidence
-    # fresh after an active policy changes underneath it.
-    review = cfg.auto_fix_review
-    if review is not None:
-        configured_reviewer = (
-            review.adapter, review.requested_model, review.requested_effort)
-        stored_reviewer = (
-            state.reviewer_adapter, state.reviewer_model, state.reviewer_effort)
-        if stored_reviewer != configured_reviewer:
-            reasons.append("reviewer configuration changed")
+    reasons, current_tree = _auto_fix_binding_reasons(cfg, plan, state)
 
     if reasons:
         status = "STALE"
@@ -340,14 +387,16 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
         lines.append("  Terminal: NONZERO / EXHAUSTED")
     elif state.verdict == "PASS":
         lines.append("  Terminal: PASS (acceptance still requires the human accept action)")
-    elif state.review_context == "blocked_adjudication":
-        lines.append("  Terminal: NONZERO / PENDING BLOCKED ADJUDICATION")
-    elif state.phase == "NEEDS_REPAIR":
-        lines.append("  Terminal: NONZERO / PENDING REPAIR")
     elif state.phase == "REPAIRING":
         lines.append("  Terminal: NONZERO / REPAIRING")
     elif state.phase == "AWAITING_REVIEW":
         lines.append("  Terminal: NONZERO / AWAITING REVIEW")
+    elif current_scope_findings:
+        lines.append("  Terminal: NONZERO / PENDING SCOPE AMENDMENT")
+    elif state.review_context == "blocked_adjudication":
+        lines.append("  Terminal: NONZERO / PENDING BLOCKED ADJUDICATION")
+    elif state.phase == "NEEDS_REPAIR":
+        lines.append("  Terminal: NONZERO / PENDING REPAIR")
     else:
         lines.append("  Terminal: NONZERO / UNRESOLVED FINDINGS")
 
