@@ -836,32 +836,40 @@ def load_config(path: str | Path, folder: str) -> Config:
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
-    if review_adapter not in _ADAPTER_NAMES:
-        raise AssentError(
-            f"[auto_fix.review] adapter = {review_adapter!r} is not a registered"
-            f" adapter ({'/'.join(sorted(_ADAPTER_NAMES))})")
-    if review_model not in _MODEL_TIERS:
-        raise AssentError(
-            f"[auto_fix.review] model = {review_model!r} is not a valid model"
-            f" tier ({'/'.join(sorted(_MODEL_TIERS))})")
-    if review_effort not in _EFFORT_LEVELS:
-        raise AssentError(
-            f"[auto_fix.review] effort = {review_effort!r} is not a valid"
-            f" effort ({'/'.join(sorted(_EFFORT_LEVELS))})")
-    adapter_settings = cfg.adapter_settings(review_adapter)
-    requested_model = adapter_settings.resolve_model(review_model)
-    requested_effort = adapter_settings.resolve_requested_effort(
-        review_model, review_effort)
-    if requested_effort is None:
-        raise AssentError(
-            "[auto_fix.review] effort did not resolve to a requested value")
-    cfg.auto_fix_review = AutoFixReviewSettings(
-        adapter=review_adapter,
-        model=review_model,
-        effort=review_effort,
-        command=adapter_settings.command,
-        extra_args=adapter_settings.extra_args,
-        requested_model=requested_model,
-        requested_effort=requested_effort,
-    )
+    if review_adapter not in _ADAPTER_NAMES and "adapter" not in review:
+        # An unspecified reviewer defaults to the primary run adapter, whose
+        # validity the single-name [adapter].name path defers to
+        # adapter_settings() at point of use (see its docstring) so run/check
+        # can report their own unknown-adapter error. The default must defer
+        # the same way instead of failing config load on an unrelated label.
+        pass
+    else:
+        if review_adapter not in _ADAPTER_NAMES:
+            raise AssentError(
+                f"[auto_fix.review] adapter = {review_adapter!r} is not a registered"
+                f" adapter ({'/'.join(sorted(_ADAPTER_NAMES))})")
+        if review_model not in _MODEL_TIERS:
+            raise AssentError(
+                f"[auto_fix.review] model = {review_model!r} is not a valid model"
+                f" tier ({'/'.join(sorted(_MODEL_TIERS))})")
+        if review_effort not in _EFFORT_LEVELS:
+            raise AssentError(
+                f"[auto_fix.review] effort = {review_effort!r} is not a valid"
+                f" effort ({'/'.join(sorted(_EFFORT_LEVELS))})")
+        adapter_settings = cfg.adapter_settings(review_adapter)
+        requested_model = adapter_settings.resolve_model(review_model)
+        requested_effort = adapter_settings.resolve_requested_effort(
+            review_model, review_effort)
+        if requested_effort is None:
+            raise AssentError(
+                "[auto_fix.review] effort did not resolve to a requested value")
+        cfg.auto_fix_review = AutoFixReviewSettings(
+            adapter=review_adapter,
+            model=review_model,
+            effort=review_effort,
+            command=adapter_settings.command,
+            extra_args=adapter_settings.extra_args,
+            requested_model=requested_model,
+            requested_effort=requested_effort,
+        )
     return cfg
