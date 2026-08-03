@@ -1555,10 +1555,19 @@ def _run_auto_fix_review_once(
         review_context = existing.review_context
     failure_trigger = None
     if review_context == "blocked_adjudication":
-        failure_trigger = (
-            "focused_gate_failure"
-            if any(item.trigger == "focused_gate_failure" for item in blockers)
-            else "worker_blocked")
+        if blockers:
+            failure_trigger = (
+                "focused_gate_failure"
+                if any(item.trigger == "focused_gate_failure" for item in blockers)
+                else "worker_blocked")
+        else:
+            # Only an inherited recheck context reaches a blocked adjudication
+            # with no current collection: the repaired folder is complete, so
+            # the awaiting-review call carries no blocker.  The event under
+            # adjudication is still the original one, and an empty collection
+            # must not reclassify a focused gate failure as a worker block.
+            assert existing is not None
+            failure_trigger = existing.failure_trigger
     source_tree, plan_digest, prompt, prompt_digest = _auto_fix_review_identity(
         cfg, plan, "\n".join(focused_lines),
         contracts_by_id=contracts_by_id,

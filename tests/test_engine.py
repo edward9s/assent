@@ -1155,6 +1155,73 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(state.failure_trigger, "focused_gate_failure")
         self.assertEqual(parse_task_file(task).status, "BLOCKED")
 
+    def test_blocked_recheck_keeps_the_original_focused_gate_trigger(self):
+        task = self.write_task(1, verify=_NEEDS_OK_TXT)
+        cfg = self.build_review(retry=0)
+        self.commit_all()
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/gate.py", "The focused gate must pass",
+            "The scheduler supplied the failing focused command.")
+        failed = auto_fix.review_record_json(
+            auto_fix.ReviewRecord("FAIL", (finding,)))
+        reviewer = ScriptedAdapter([TaskResult(0, failed, False, None)])
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=ScriptedAdapter([self.ai_done(task)]),
+            auto_fix_adapter=reviewer, auto_fix=True), 1)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.failure_trigger, "focused_gate_failure")
+
+        fingerprint = auto_fix.finding_fingerprint(finding)
+
+        def repair(_prompt):
+            ready = self.execution_root() / "src" / "ok.txt"
+            ready.parent.mkdir(parents=True, exist_ok=True)
+            ready.write_text("ready\n", encoding="utf-8")
+            set_status(task, "DONE")
+            append_entry(
+                journal_path_for(task), by="claude", event="done",
+                summary="Repaired the focused gate.",
+                detail=(
+                    'ASSENT_REPAIR_DISPOSITION {"fingerprint":"'
+                    f'{fingerprint}","disposition":"fixed","detail":'
+                    '"The focused command now passes."}'))
+            return ok_result()
+
+        # The repaired folder is complete, so the recheck collects no blocker at
+        # all; the original focused-gate classification must survive both the
+        # still-present round and the final PASS.
+        still_present = auto_fix.review_record_json(auto_fix.ReviewRecord(
+            "FAIL", (auto_fix.ReviewFinding(
+                finding.task_id, finding.path, finding.summary,
+                finding.evidence, kind=finding.kind,
+                recommendation=finding.recommendation,
+                transition="still_present", prior_fingerprint=fingerprint,
+                transition_evidence="The repaired gate still fails locally."),)))
+        passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        rechecker = ScriptedAdapter([
+            TaskResult(0, still_present, False, None),
+            TaskResult(0, passed, False, None),
+        ])
+        seen: list[str] = []
+
+        def repair_round(prompt):
+            seen.append(auto_fix.read_auto_fix_state(
+                auto_fix.auto_fix_state_path(cfg)).failure_trigger)
+            return repair(prompt)
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([repair_round, repair_round]),
+            auto_fix_adapter=rechecker, auto_fix=True), 0)
+        self.assertIn("Review stage: RECHECK", rechecker.calls[0][0])
+        self.assertEqual(seen, ["focused_gate_failure", "focused_gate_failure"])
+        completed = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(completed.review_context, "blocked_adjudication")
+        self.assertEqual(completed.failure_trigger, "focused_gate_failure")
+        report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "Original blocker: focused task gate failure durable evidence",
+            report)
+
     def test_blocked_adjudication_uses_trusted_contract_and_labels_tampering(self):
         task = self.write_task(1, scope=("src/",))
         cfg = self.build_review(retry=0)
