@@ -12,7 +12,7 @@ from assent import AssentError
 from assent.auto_fix import (
     AUTO_FIX_STATE_VERSION, REVIEW_FINDING_KINDS, ApprovedScopeAddition,
     AutoFixState, FixerProfile, ObservedState, PlanDigestTransition,
-    RepairBrief, ReviewFinding, ReviewRecord, ReviewTransition,
+    RepairBrief, RepairRoundAssignment, ReviewFinding, ReviewRecord, ReviewTransition,
     ReviewerRecommendation, ScopeAddition, WorkerDisposition,
     auto_fix_state_is_fresh,
     auto_fix_state_path, consume_fixer_profile, current_review_record,
@@ -319,7 +319,7 @@ class TestAutoFixState(unittest.TestCase):
                 "The focused regression now passes."),),
             repair_briefs=(RepairBrief(
                 "t001", (finding.fingerprint,),
-                "Validate and round-trip the complete version-4 schema."),),
+                "Validate and round-trip the complete version-5 schema."),),
             review_transitions=(ReviewTransition(
                 finding.fingerprint, "initial", None, None),),
         )
@@ -335,6 +335,21 @@ class TestAutoFixState(unittest.TestCase):
         self.assertFalse(any(
             child.name.endswith(".tmp")
             for child in self.path.parent.iterdir()))
+
+    def test_not_started_round_assignment_round_trips_with_consumed_profile(self):
+        profile = self.state.consumed_fixer_profiles[0]
+        state = replace(
+            self.state, phase="REPAIRING",
+            repair_round_assignments=(RepairRoundAssignment(
+                "t001", profile.adapter, profile.model, profile.effort,
+                attempted=False),))
+        write_auto_fix_state(self.path, state)
+        self.assertEqual(read_auto_fix_state(self.path), state)
+
+        missing_profile = replace(
+            state, consumed_fixer_profiles=())
+        with self.assertRaisesRegex(AssentError, "absent from consumed history"):
+            write_auto_fix_state(self.path, missing_profile)
 
     def test_profile_cursor_is_deduplicated_and_current_record_is_recoverable(self):
         candidates = (

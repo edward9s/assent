@@ -604,6 +604,72 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             auto_fix.FixerProfile("claude", "prime", "heavy"),
         ))
 
+    def test_process_creation_failure_reuses_same_persisted_assignment(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "value is stale",
+            "The focused behavior still reads the stale value.")
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+
+        def process_creation_failed(_prompt):
+            raise OSError("adapter command line is too long")
+
+        worker = ScriptedAdapter([
+            process_creation_failed,
+            self.repair_done(task_path, {"src/value.txt": "new\n"}),
+        ])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 1)
+
+        failed_start = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg))
+        profile = auto_fix.FixerProfile("claude", "lite", "normal")
+        self.assertEqual(failed_start.phase, "REPAIRING")
+        self.assertEqual(failed_start.consumed_fixer_profiles, (profile,))
+        self.assertEqual(failed_start.repair_round_assignments, (
+            auto_fix.RepairRoundAssignment(
+                "t001", "claude", "lite", "normal", attempted=False),
+        ))
+        self.assertEqual(parse_task_file(task_path).status, "TODO")
+        entries = read_entries(journal_path_for(task_path))
+        self.assertEqual(sum(
+            item.get("event") == "rework_requested" for item in entries), 1)
+        self.assertFalse(any(
+            item.get("event") in {"interrupt", "auto_fix_blocker"}
+            for item in entries))
+        self.assertEqual(failed_start.current_finding_fingerprints,
+                         (auto_fix.finding_fingerprint(finding),))
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        completed = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(completed.consumed_fixer_profiles, (profile,))
+        self.assertEqual(len(worker.calls), 2)
+        self.assertEqual(
+            [(model, effort) for _prompt, model, effort in worker.calls],
+            [("lite", "medium"), ("lite", "medium")])
+        entries = read_entries(journal_path_for(task_path))
+        self.assertEqual(sum(
+            item.get("event") == "rework_requested" for item in entries), 1)
+        self.assertEqual(sum(
+            item.get("event") == "auto_fix_attempt" for item in entries), 1)
+        self.assertEqual(sum(
+            item.get("event") == "auto_fix_attempt_resume" for item in entries), 1)
+
     def test_profile_exhaustion_ends_blocked_without_another_mutation_round(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"

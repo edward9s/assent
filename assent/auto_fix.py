@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from assent.plan import Plan
 
 AUTO_FIX_STATE_NAME = "_auto_fix.toml"
-AUTO_FIX_STATE_VERSION = 4
+AUTO_FIX_STATE_VERSION = 5
 REVIEW_RECORD_TYPE = "assent.auto_fix_review"
 REVIEW_VERDICTS = frozenset({"PASS", "FAIL"})
 REVIEW_FINDING_KINDS = frozenset({
@@ -69,7 +69,8 @@ _STATE_KEYS = {
     "review_context", "review_stage", "failure_trigger",
     "current_finding_fingerprints", "findings", "observed_states",
     "reviewer_recommendations", "approved_scope_additions",
-    "scope_amendments", "worker_dispositions", "repair_briefs", "plan_digest_transitions",
+    "scope_amendments", "worker_dispositions", "repair_briefs",
+    "repair_round_assignments", "plan_digest_transitions",
     "review_transitions", "consumed_fixer_profiles",
 }
 _PERSISTED_FINDING_KEYS = {
@@ -91,6 +92,9 @@ _WORKER_DISPOSITION_KEYS = {
     "task_id", "fingerprint", "disposition", "detail",
 }
 _REPAIR_BRIEF_KEYS = {"task_id", "finding_fingerprints", "brief"}
+_REPAIR_ROUND_ASSIGNMENT_KEYS = {
+    "task_id", "adapter", "model", "effort", "attempted",
+}
 _PLAN_DIGEST_TRANSITION_KEYS = {"before_sha256", "after_sha256"}
 _REVIEW_TRANSITION_KEYS = {
     "fingerprint", "transition", "prior_fingerprint", "transition_evidence",
@@ -236,6 +240,21 @@ class RepairBrief:
 
 
 @dataclass(frozen=True)
+class RepairRoundAssignment:
+    """One task/profile assignment durably selected before a repair round."""
+
+    task_id: str
+    adapter: str
+    model: str
+    effort: str
+    attempted: bool
+
+    @property
+    def profile(self) -> FixerProfile:
+        return FixerProfile(self.adapter, self.model, self.effort)
+
+
+@dataclass(frozen=True)
 class PlanDigestTransition:
     before_sha256: str
     after_sha256: str
@@ -274,6 +293,7 @@ class AutoFixState:
     scope_amendments: tuple[ScopeAmendment, ...] = ()
     worker_dispositions: tuple[WorkerDisposition, ...] = ()
     repair_briefs: tuple[RepairBrief, ...] = ()
+    repair_round_assignments: tuple[RepairRoundAssignment, ...] = ()
     plan_digest_transitions: tuple[PlanDigestTransition, ...] = ()
     review_transitions: tuple[ReviewTransition, ...] = ()
 
@@ -282,6 +302,7 @@ class AutoFixState:
                      "observed_states", "consumed_fixer_profiles",
                      "reviewer_recommendations", "approved_scope_additions",
                      "scope_amendments", "worker_dispositions", "repair_briefs",
+                     "repair_round_assignments",
                      "plan_digest_transitions", "review_transitions"):
             value = getattr(self, name)
             if isinstance(value, list):
@@ -1068,6 +1089,15 @@ def with_worker_dispositions(
     return _validate_state(replace(state, worker_dispositions=dispositions))
 
 
+def with_repair_round_assignments(
+        state: AutoFixState,
+        assignments: tuple[RepairRoundAssignment, ...]) -> AutoFixState:
+    """Persist the complete current round before or after an attempt starts."""
+    state = _validate_state(state)
+    return _validate_state(replace(
+        state, repair_round_assignments=assignments))
+
+
 def with_plan_digest_transition(
         state: AutoFixState, before_sha256: str,
         after_sha256: str) -> AutoFixState:
@@ -1249,8 +1279,9 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         raise AssentError("A FAIL auto-fix state must not be COMPLETE")
     for name in ("current_finding_fingerprints", "findings",
                  "observed_states", "reviewer_recommendations",
-                 "approved_scope_additions", "worker_dispositions",
-                 "repair_briefs", "plan_digest_transitions",
+                 "approved_scope_additions", "scope_amendments",
+                 "worker_dispositions", "repair_briefs",
+                 "repair_round_assignments", "plan_digest_transitions",
                  "review_transitions", "consumed_fixer_profiles"):
         if not isinstance(getattr(state, name), tuple):
             raise AssentError(f"Auto-fix state {name} must be an ordered list")
@@ -1401,6 +1432,22 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
             if fingerprint not in ledger:
                 raise AssentError("Repair brief cites a finding absent from the ledger")
 
+    assignment_tasks: set[str] = set()
+    for index, item in enumerate(state.repair_round_assignments):
+        label = f"Auto-fix state repair_round_assignments[{index}]"
+        if not isinstance(item, RepairRoundAssignment):
+            raise AssentError(f"{label} is invalid")
+        if not isinstance(item.task_id, str) or not _TASK_ID_RE.fullmatch(item.task_id):
+            raise AssentError(f"{label} task_id must be a tNNN task id")
+        if item.task_id in assignment_tasks:
+            raise AssentError(
+                "Auto-fix state has duplicate repair-round task assignments")
+        assignment_tasks.add(item.task_id)
+        for name in ("adapter", "model", "effort"):
+            _require_text(getattr(item, name), f"{label} {name}", 1024)
+        if type(item.attempted) is not bool:
+            raise AssentError(f"{label} attempted must be a boolean")
+
     for index, item in enumerate(state.plan_digest_transitions):
         if not isinstance(item, PlanDigestTransition):
             raise AssentError(
@@ -1472,6 +1519,11 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         if identity in profiles:
             raise AssentError("Auto-fix state has a duplicate consumed fixer profile")
         profiles.add(identity)
+    for item in state.repair_round_assignments:
+        identity = (item.adapter, item.model, item.effort)
+        if identity not in profiles:
+            raise AssentError(
+                "Repair-round assignment profile is absent from consumed history")
     return state
 
 
@@ -1505,7 +1557,8 @@ def _state_text(state: AutoFixState) -> str:
         text += "consumed_fixer_profiles = []\n"
     for name in ("reviewer_recommendations", "approved_scope_additions",
                  "scope_amendments", "worker_dispositions", "repair_briefs",
-                 "plan_digest_transitions", "review_transitions"):
+                 "repair_round_assignments", "plan_digest_transitions",
+                 "review_transitions"):
         if not getattr(state, name):
             text += f"{name} = []\n"
     for finding in state.findings:
@@ -1579,6 +1632,15 @@ def _state_text(state: AutoFixState) -> str:
             "finding_fingerprints = "
             f"{_toml_array(item.finding_fingerprints)}\n"
             f"brief = {toml_string(item.brief)}\n"
+        )
+    for item in state.repair_round_assignments:
+        text += (
+            "\n[[repair_round_assignments]]\n"
+            f"task_id = {toml_string(item.task_id)}\n"
+            f"adapter = {toml_string(item.adapter)}\n"
+            f"model = {toml_string(item.model)}\n"
+            f"effort = {toml_string(item.effort)}\n"
+            f"attempted = {'true' if item.attempted else 'false'}\n"
         )
     for item in state.plan_digest_transitions:
         text += (
@@ -1695,6 +1757,9 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
     dispositions = records(
         "worker_dispositions", _WORKER_DISPOSITION_KEYS, WorkerDisposition)
     briefs = records("repair_briefs", _REPAIR_BRIEF_KEYS, RepairBrief)
+    assignments = records(
+        "repair_round_assignments", _REPAIR_ROUND_ASSIGNMENT_KEYS,
+        RepairRoundAssignment)
     plan_transitions = records(
         "plan_digest_transitions", _PLAN_DIGEST_TRANSITION_KEYS,
         PlanDigestTransition)
@@ -1710,6 +1775,7 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
     del scalar["scope_amendments"]
     del scalar["worker_dispositions"]
     del scalar["repair_briefs"]
+    del scalar["repair_round_assignments"]
     del scalar["plan_digest_transitions"]
     del scalar["review_transitions"]
     if scalar["failure_trigger"] == "":
@@ -1722,6 +1788,7 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
             approved_scope_additions=tuple(scope_additions),
             scope_amendments=tuple(scope_amendments),
             worker_dispositions=tuple(dispositions), repair_briefs=tuple(briefs),
+            repair_round_assignments=tuple(assignments),
             plan_digest_transitions=tuple(plan_transitions),
             review_transitions=tuple(review_transitions), **scalar)
     except TypeError as e:
@@ -1760,6 +1827,7 @@ def state_for_review(
         failure_trigger: str | None = None,
         worker_dispositions: tuple[WorkerDisposition, ...] | None = None,
         repair_briefs: tuple[RepairBrief, ...] | None = None,
+        repair_round_assignments: tuple[RepairRoundAssignment, ...] | None = None,
         plan_digest_transitions: tuple[PlanDigestTransition, ...] | None = None,
         approved_scope_additions: tuple[ApprovedScopeAddition, ...] | None = None,
         scope_amendments: tuple[ScopeAmendment, ...] | None = None,
@@ -1828,6 +1896,11 @@ def state_for_review(
         approved_scope_additions = tuple(additions)
     if scope_amendments is None:
         scope_amendments = prior_amendments
+    if repair_round_assignments is None:
+        # A reviewer decision completes the preceding mutation round. Its
+        # profiles remain in the cumulative history, while only a live
+        # REPAIRING boundary retains concrete assignments.
+        repair_round_assignments = ()
     transitions = prior_review_transitions + tuple(
         ReviewTransition(
             finding_fingerprint(item), item.transition, item.prior_fingerprint,
@@ -1866,6 +1939,7 @@ def state_for_review(
         repair_briefs=(
             repair_briefs if repair_briefs is not None
             else previous.repair_briefs if previous is not None else ()),
+        repair_round_assignments=repair_round_assignments,
         plan_digest_transitions=plan_digest_transitions,
         review_transitions=transitions,
     )

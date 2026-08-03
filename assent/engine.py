@@ -298,6 +298,10 @@ class _AutoFixBlockerEvidence:
     worker_summary: str | None = None
 
 
+class _AdapterProcessCreationError(OSError):
+    """The adapter raised synchronously instead of returning a child result."""
+
+
 @dataclass
 class _AdapterRotation:
     """Run-scoped adapter cursor and quota evidence shared across tasks."""
@@ -2163,6 +2167,41 @@ def _auto_fix_profiles_are_exhausted(
         for task in tasks)
 
 
+def _auto_fix_round_assignments(
+        state: auto_fix.AutoFixState,
+        repair_tasks: list[Task],
+        ) -> list[tuple[Task, auto_fix.FixerProfile | None]] | None:
+    """Recover a wholly not-started round, or request a fresh finite round."""
+    durable = state.repair_round_assignments
+    if not durable:
+        return None
+    by_task = {item.task_id: item for item in durable}
+    current = [by_task.get(task.id) for task in repair_tasks]
+    if not any(item is not None for item in current):
+        return None
+    if any(item is not None and item.attempted for item in current):
+        return None
+    return [
+        (task, item.profile if item is not None else None)
+        for task, item in zip(repair_tasks, current)
+    ]
+
+
+def _auto_fix_mark_assignment_attempted(
+        state: auto_fix.AutoFixState, task_id: str, attempted: bool,
+        ) -> auto_fix.AutoFixState:
+    """Update one durable child-start witness without changing its profile."""
+    matches = [item for item in state.repair_round_assignments
+               if item.task_id == task_id]
+    if len(matches) != 1:
+        raise AssentError(
+            f"Auto-fix repair round has no exact assignment for {task_id}")
+    assignments = tuple(
+        replace(item, attempted=attempted) if item.task_id == task_id else item
+        for item in state.repair_round_assignments)
+    return auto_fix.with_repair_round_assignments(state, assignments)
+
+
 def _auto_fix_finish_exhausted(
         cfg: Config, tasks: list[Task], now: Callable[[], datetime]) -> int:
     """Terminate nonzero with durable BLOCKED evidence and no new repair round."""
@@ -2340,34 +2379,45 @@ def _run_auto_fix_repairs(
         # dependency cascade to escalate.  Persist the complete round before
         # its first write-capable session; an interrupted round therefore
         # remains finite on restart.
-        used_before_round = {
-            (item.adapter, item.model, item.effort)
-            for item in state.consumed_fixer_profiles}
-        escalations = _auto_fix_escalation_profiles(cfg)
-        round_assignments: list[tuple[Task, auto_fix.FixerProfile | None]] = []
-        new_profiles: list[auto_fix.FixerProfile] = []
-        new_identities: set[tuple[str, str, str]] = set()
-        for task in repair_tasks:
-            candidates = (_auto_fix_profile_for_task(cfg, task),) + escalations
-            profile = next((candidate for candidate in candidates
-                            if (candidate.adapter, candidate.model,
-                                candidate.effort) not in used_before_round), None)
-            round_assignments.append((task, profile))
-            if profile is None:
-                continue
-            identity = (profile.adapter, profile.model, profile.effort)
-            if identity not in new_identities:
-                new_profiles.append(profile)
-                new_identities.add(identity)
-        if all(profile is None for _task, profile in round_assignments):
-            print("Auto-fix profiles exhausted; unresolved state and evidence "
-                  "were preserved for human adjudication.")
-            return 1
-        if new_profiles:
-            state = auto_fix.replace_fixer_profiles(
-                state, state.consumed_fixer_profiles + tuple(new_profiles))
-        state = auto_fix.with_worker_dispositions(state, ())
-        auto_fix.write_auto_fix_state(state_path, state)
+        resuming_not_started = bool(state.repair_round_assignments)
+        round_assignments = _auto_fix_round_assignments(state, repair_tasks)
+        if round_assignments is None:
+            resuming_not_started = False
+            used_before_round = {
+                (item.adapter, item.model, item.effort)
+                for item in state.consumed_fixer_profiles}
+            escalations = _auto_fix_escalation_profiles(cfg)
+            round_assignments = []
+            new_profiles: list[auto_fix.FixerProfile] = []
+            new_identities: set[tuple[str, str, str]] = set()
+            for task in repair_tasks:
+                candidates = (_auto_fix_profile_for_task(cfg, task),) + escalations
+                profile = next((candidate for candidate in candidates
+                                if (candidate.adapter, candidate.model,
+                                    candidate.effort) not in used_before_round), None)
+                round_assignments.append((task, profile))
+                if profile is None:
+                    continue
+                identity = (profile.adapter, profile.model, profile.effort)
+                if identity not in new_identities:
+                    new_profiles.append(profile)
+                    new_identities.add(identity)
+            if all(profile is None for _task, profile in round_assignments):
+                print("Auto-fix profiles exhausted; unresolved state and evidence "
+                      "were preserved for human adjudication.")
+                return 1
+            if new_profiles:
+                state = auto_fix.replace_fixer_profiles(
+                    state, state.consumed_fixer_profiles + tuple(new_profiles))
+            durable_assignments = tuple(
+                auto_fix.RepairRoundAssignment(
+                    task.id, profile.adapter, profile.model, profile.effort,
+                    attempted=False)
+                for task, profile in round_assignments if profile is not None)
+            state = auto_fix.with_repair_round_assignments(
+                state, durable_assignments)
+            state = auto_fix.with_worker_dispositions(state, ())
+            auto_fix.write_auto_fix_state(state_path, state)
 
         failures: list[tuple[Task, str]] = []
         round_blockers: list[_AutoFixBlockerEvidence] = []
@@ -2386,17 +2436,31 @@ def _run_auto_fix_repairs(
                                      + "; ".join(errors)))
                     continue
                 assert session is not None
+                event = ("auto_fix_attempt_resume" if resuming_not_started
+                         else "auto_fix_attempt")
+                summary = (
+                    "Retrying a repair assignment whose AI child did not start: "
+                    if resuming_not_started else
+                    "Bounded automatic repair profile consumed: ")
                 append_entry(
-                    task.journal_path, by="scheduler", event="auto_fix_attempt",
-                    summary=("Bounded automatic repair profile consumed: "
-                             f"{profile.adapter}/{profile.model}/{profile.effort}"),
-                    detail=("The profile was durably consumed before this "
-                            "write-capable fixer session; all edits and later "
-                            "gate evidence are preserved."),
+                    task.journal_path, by="scheduler", event=event,
+                    summary=(summary
+                             + f"{profile.adapter}/{profile.model}/{profile.effort}"),
+                    detail=(
+                        "The exact pre-persisted assignment is being retried after "
+                        "a synchronous process-creation failure proved that no AI "
+                        "child started. No additional profile was consumed."
+                        if resuming_not_started else
+                        "The full round and its profiles were durably persisted "
+                        "before this write-capable fixer session; all edits and "
+                        "later gate evidence are preserved."),
                     agent=session.agent,
                     requested_model=session.requested_model,
                     requested_effort=session.requested_effort,
                     time_str=now().isoformat(timespec="seconds"))
+                state = _auto_fix_mark_assignment_attempted(
+                    state, task.id, True)
+                auto_fix.write_auto_fix_state(state_path, state)
                 task_rotation = _AdapterRotation(
                     (profile.adapter,), (fixer,))
                 session_state = _SessionState()
@@ -2420,6 +2484,15 @@ def _run_auto_fix_repairs(
                     auto_fix.write_auto_fix_state(state_path, state)
                 if failure is not None:
                     failures.append((task, failure))
+            except _AdapterProcessCreationError as e:
+                state = _auto_fix_mark_assignment_attempted(
+                    state, task.id, False)
+                auto_fix.write_auto_fix_state(state_path, state)
+                active.task = None
+                active.session = None
+                print("Auto-fix fixer infrastructure failure before an AI child "
+                      f"started; the same assignment remains resumable: {e}")
+                return 1
             except OSError as e:
                 if active.session is not None and active.session.identity is not None:
                     _mark_interrupted_task(
@@ -2827,8 +2900,15 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             adapter_name, task, session, model=profile_model))
         main_tree_baseline = (gitops.dirty_paths(cfg.source_root, _task_excludes(cfg, task))
                               if cfg.source_root is not None else None)
-        result = adapter.run_task(
-            prompt, session.requested_model, session.requested_effort, cfg.root)
+        try:
+            result = adapter.run_task(
+                prompt, session.requested_model, session.requested_effort,
+                cfg.root)
+        except OSError as e:
+            # Built-in adapters call their subprocess launcher synchronously and
+            # return TaskResult only after a child existed. No returned result
+            # plus OSError therefore identifies the pre-child creation boundary.
+            raise _AdapterProcessCreationError(str(e)) from e
         if not result.quota_exhausted:
             rotation.session_opened()
         escape_reason = (
