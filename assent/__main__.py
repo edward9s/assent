@@ -544,18 +544,22 @@ def _close_run(result: int, *, verify: bool, config_path: str,
     whole-project request (``--all`` or a bare ``...``), which keeps the dynamic
     batch's own discovery rather than freezing a set the scheduler may extend.
 
-    A limited ``--once`` / ``--task`` run arrives here as its one selected
-    folder like any other single-folder selection: the single-folder entry point
-    re-reads the plan and its own pre-candidate gate refuses an incomplete
-    folder, so the CLI keeps no second completion predicate.
-
-    The single folder goes through ``verify_folder_if_needed`` so a receipt the
-    run's own closeout already produced for this exact candidate is reported
-    instead of running the identical full suite a second time; with no fresh
-    matching receipt it runs the suite exactly as ``verify_folder`` would.  The
-    whole-project and multi-folder branches build a merged candidate no
+    A complete single folder goes through ``verify_folder_if_needed`` so a
+    receipt the run's own closeout already produced for this exact candidate is
+    reported instead of running the identical full suite a second time; with no
+    fresh matching receipt it runs the suite exactly as ``verify_folder`` would.
+    The whole-project and multi-folder branches build a merged candidate no
     per-folder receipt certifies, so their verification is never that duplicate
     and stays unconditional.
+
+    A limited ``--once`` / ``--task`` run arrives here as its one selected
+    folder like any other single-folder selection, and it is the one selection
+    that can still be incomplete.  ``verify_folder_if_needed`` is the scheduler's
+    closeout entry point and treats an incomplete folder as a silent no-op, so
+    an invocation-level ``--verify`` sends that case to ``verify_folder``, whose
+    own pre-candidate gate names the unfinished task ids and refuses before any
+    candidate or verifier exists.  The routing reuses the CLI's existing
+    ``infer_folder_completion`` helper and states no refusal of its own.
     """
     if result != 0 or not verify:
         return result
@@ -568,6 +572,8 @@ def _close_run(result: int, *, verify: bool, config_path: str,
     except AssentError as e:
         print(f"Config error: {e}")
         return 1
+    if not infer_folder_completion(cfg.tasks_dir).complete:
+        return verify_folder(cfg)
     return verify_folder_if_needed(cfg)
 
 
