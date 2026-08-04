@@ -970,6 +970,94 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
         return state
 
+    @contextlib.contextmanager
+    def counted_verify(self, codes=None):
+        """Script every focused command as a counted, subprocess-free result."""
+        calls: list[str] = []
+
+        def fake(_cfg, command):
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                command, (codes or {}).get(command, 0), "", "")
+
+        with mock.patch.object(engine, "_verify_subprocess", fake):
+            yield calls
+
+    def test_unchanged_authoritative_pass_reaches_the_final_gate_unrun(self):
+        task = self.write_task(1, verify=_OK)
+        cfg = self.build_review()
+        self.commit_all()
+        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+
+        def review(prompt):
+            self.assertIn(f"- PASS (reused authoritative PASS): {_OK}", prompt)
+            return TaskResult(0, terminal, False, None)
+
+        reviewer = ScriptedAdapter([review])
+        out = io.StringIO()
+        with self.counted_verify() as calls, contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter(
+                    [self.ai_done(task, {"src/one.txt": "one\n"})]),
+                auto_fix_adapter=reviewer, auto_fix=True), 0)
+
+        # One authoritative scheduler execution at task closeout; the final gate
+        # reuses it instead of launching the same command against the same tree.
+        self.assertEqual(calls, [_OK])
+        self.assertIn("reused authoritative PASS", out.getvalue())
+        self.assertEqual(len(reviewer.calls), 1)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
+
+    def test_shared_command_reuses_once_and_a_later_write_reruns_the_other(self):
+        first = self.write_task(1, verify=_OK)
+        second = self.write_task(2, slug="two", deps=("t001",), verify=_OK)
+        third = self.write_task(3, slug="three", deps=("t002",),
+                                verify=_NEEDS_OK_TXT)
+        cfg = self.build_review()
+        self.commit_all()
+        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        reviewer = ScriptedAdapter([TaskResult(0, terminal, False, None)])
+        worker = ScriptedAdapter([
+            self.ai_done(first, {"src/one.txt": "one\n"}),
+            self.ai_done(second, {"src/two.txt": "two\n"}),
+            self.ai_done(third, {"src/ok.txt": "ok\n"}),
+        ])
+
+        out = io.StringIO()
+        with self.counted_verify() as calls, contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=worker, auto_fix_adapter=reviewer,
+                auto_fix=True), 0)
+
+        # Three closeout gates, then one final-gate execution: the shared command
+        # last passed two checkpoints ago and is rerun exactly once for both of
+        # its tasks, while t003's own unchanged pass is reused.
+        self.assertEqual(calls, [_OK, _OK, _NEEDS_OK_TXT, _OK])
+        self.assertEqual(out.getvalue().count("reused authoritative PASS"), 1)
+
+    def test_gate_evidence_binds_the_command_tree_and_clean_state(self):
+        self.write_task(1, status="DONE", verify=_OK)
+        cfg = self.build_review()
+        self.commit_all()
+        ledger = engine._FocusedGateLedger()
+
+        ledger.record(cfg, _OK)
+        self.assertTrue(ledger.reusable(cfg, _OK))
+        self.assertFalse(ledger.reusable(cfg, _FAILV))
+
+        source = self.root / "src" / "late.txt"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("late\n", encoding="utf-8")
+        self.assertFalse(ledger.reusable(cfg, _OK))
+        # A pass proven while the worktree is dirty is not retained either.
+        ledger.record(cfg, _FAILV)
+        self.assertFalse(ledger.reusable(cfg, _FAILV))
+
+        self.commit_all("late")
+        self.assertFalse(ledger.reusable(cfg, _OK))
+        self.assertFalse(engine._FocusedGateLedger().reusable(cfg, _OK))
+
     def test_complete_folder_sweeps_distinct_checks_then_reuses_exact_pass(self):
         command = _OK
         self.write_task(1, status="DONE", verify=command)

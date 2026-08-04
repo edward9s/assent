@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import re
+import subprocess
 import threading
 import time
 import unittest
@@ -129,6 +130,52 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual((attempt["agent"], attempt["requested_model"],
                           attempt["requested_effort"]),
                          ("claude", "lite", "medium"))
+
+    def test_repair_round_pass_is_reused_by_its_own_recheck_gate(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "value is stale", "expected repaired value")
+        command = parse_task_file(task_path).verify
+        calls: list[str] = []
+
+        def fake_verify(_cfg, verify_command):
+            calls.append(verify_command)
+            return subprocess.CompletedProcess(verify_command, 0, "", "")
+
+        def recheck(prompt):
+            self.assertIn("Review stage: RECHECK", prompt)
+            self.assertIn(f"- PASS (reused authoritative PASS): {command}",
+                          prompt)
+            return TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)
+
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+            recheck,
+        ])
+        worker = ScriptedAdapter([
+            self.repair_done(task_path, {"src/value.txt": "new\n"})])
+
+        out = io.StringIO()
+        with mock.patch.object(engine, "_verify_subprocess", fake_verify), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=worker, auto_fix_adapter=reviewer,
+                auto_fix=True), 0)
+
+        # The initial final gate runs the command, the repair round's closeout
+        # gate runs it against the repaired tree, and that round's own recheck
+        # reuses that authoritative pass instead of a third execution.
+        self.assertEqual(calls, [command, command])
+        self.assertEqual(out.getvalue().count("reused authoritative PASS"), 1)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
 
     def test_invalid_or_status_incompatible_disposition_consumes_attempt(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
