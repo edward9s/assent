@@ -344,12 +344,15 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             "t001", "src/main.py", "Worker blocker", "The worker reported a blocker.",
             kind="blocked_recovery")
 
-        for context, trigger in (
-                ("blocked_adjudication", "worker_blocked"),
-                ("completed_folder", None)):
-            with self.subTest(context=context):
+        # FIXED is an unconfirmed self-repair awaiting its recheck, so it is
+        # pending exactly as FAIL is and must defer the same human guidance.
+        for verdict, context, trigger in (
+                ("FAIL", "blocked_adjudication", "worker_blocked"),
+                ("FAIL", "completed_folder", None),
+                ("FIXED", "blocked_adjudication", "worker_blocked")):
+            with self.subTest(verdict=verdict, context=context):
                 state = auto_fix.state_for_review(
-                    auto_fix.ReviewRecord("FAIL", (finding,)),
+                    auto_fix.ReviewRecord(verdict, (finding,)),
                     source_tree=gitops.tree_of(cfg.root, "HEAD"),
                     task_plan_sha256=auto_fix.sha256_files(
                         task.path for task in plan.tasks),
@@ -408,11 +411,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 (auto_fix.finding_fingerprint(scope_finding),), "t001",
                 ("tests/test_inspection.py",), ("existing_file",),
                 "1" * 64, "2" * 64, "3" * 64, "4" * 64),))
-        state = auto_fix.consume_fixer_profile(
-            state, auto_fix.FixerProfile("claude", "core", "heavy"))
-        state = auto_fix.with_repair_round_assignments(
-            state, (auto_fix.RepairRoundAssignment(
-                "t001", "claude", "core", "heavy", False),))
+        state = auto_fix.with_review_round_index(state, 1)
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), state)
 
@@ -427,12 +426,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertIn("Approved scope additions:", report)
         self.assertIn("Repair acknowledgements:", report)
         self.assertIn("fixed; Focused regression passes.", report)
-        self.assertIn("Consumed fixer profiles:", report)
-        self.assertIn("claude/core/heavy", report)
+        self.assertIn("Review round index: 1 (configured rounds: 1)", report)
         self.assertIn("Scope amendment transactions:", report)
         self.assertIn("tests/test_inspection.py (existing_file)", report)
-        self.assertIn("Repair-round assignments:", report)
-        self.assertIn("claude/core/heavy (not started)", report)
         self.assertIn("TECHNICAL DEBT REVIEW REQUIRED", report)
         self.assertIn("Existing debt needs a follow-up", debt)
         self.assertIn("CURRENT / unresolved in the latest review", debt)

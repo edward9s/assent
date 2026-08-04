@@ -213,7 +213,9 @@ def _pending_auto_fix_for_blocked(
         state = auto_fix.read_auto_fix_state(path)
     except AssentError:
         return None
-    if state.verdict != "FAIL" or state.phase not in _PENDING_AUTO_FIX_PHASES:
+    # Every non-PASS verdict is a pending state: FIXED is an unconfirmed
+    # self-repair awaiting its recheck, exactly as FAIL awaits its repair.
+    if state.verdict == "PASS" or state.phase not in _PENDING_AUTO_FIX_PHASES:
         return None
     reasons, _current_tree = _auto_fix_binding_reasons(cfg, plan, state)
     if reasons:
@@ -336,13 +338,11 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
                 f"    - {brief.task_id}: "
                 f"{_compact_report_text(brief.brief)}")
 
-    lines.append("  Consumed fixer profiles:")
-    if not state.consumed_fixer_profiles:
-        lines.append("    - none")
-    else:
-        lines.extend(
-            f"    - {profile.adapter}/{profile.model}/{profile.effort}"
-            for profile in state.consumed_fixer_profiles)
+    # The round index is the durable record of how far the merged reviewer-fixer
+    # loop has advanced; it replaced the per-round escalation-profile ledger.
+    lines.append(
+        f"  Review round index: {state.review_round_index}"
+        f" (configured rounds: {len(cfg.auto_fix_review or ())})")
 
     lines.append("  Scope amendment transactions:")
     if not state.scope_amendments:
@@ -359,17 +359,6 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
             lines.append(
                 f"      task plan: {amendment.plan_before_sha256}"
                 f" -> {amendment.plan_after_sha256}")
-
-    lines.append("  Repair-round assignments:")
-    if not state.repair_round_assignments:
-        lines.append("    - none active")
-    else:
-        for assignment in state.repair_round_assignments:
-            attempted = "attempted" if assignment.attempted else "not started"
-            lines.append(
-                f"    - {assignment.task_id}: "
-                f"{assignment.adapter}/{assignment.model}/{assignment.effort} "
-                f"({attempted})")
 
     if state.plan_digest_transitions:
         lines.append("  Plan digest transitions:")
