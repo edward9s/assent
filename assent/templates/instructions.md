@@ -2,10 +2,12 @@
 
 > This file lives at `~/.assent/instructions.md`, the per-user assent home
 > shared by every project on this machine, and defines only the behavior of an
-> assent session. The single contract for the plan format is `format.md` in
-> that same directory. Both are installed and refreshed by `assent init`; a
-> project's own `.assent/` never carries a copy of either one. A scheduled
-> session is handed both as absolute paths rather than deriving them.
+> assent session. The contract for the plan format is `format.md` in that
+> same directory, and its companion `workflow.md` is the CLI, report, and
+> receipt contract. All three are installed and refreshed by `assent init`; a
+> project's own `.assent/` never carries a copy of any of them. A scheduled
+> session is handed the ones it needs as absolute paths rather than deriving
+> them.
 
 ## Cross-project common rules
 
@@ -18,9 +20,10 @@
 Each normative rule has one canonical document owner:
 
 - repository-specific development constraints belong in `AGENTS.md`;
-- scheduled-session procedure belongs in `instructions.md`; and
-- persisted artifact schemas, filename rules, state meanings, and CLI/report/
-  receipt contracts belong in `format.md`.
+- scheduled-session procedure belongs in `instructions.md`;
+- persisted artifact schemas, filename rules, and state meanings belong in
+  `format.md`; and
+- CLI, report, and receipt contracts belong in `workflow.md`.
 
 Other documents may reference an owned rule, but must not duplicate it as a
 competing normative contract.
@@ -32,9 +35,13 @@ A **meeting / interactive session** reads only, to get started:
 1. The project root `AGENTS.md` (if present)
 2. This file, at `~/.assent/instructions.md`
 3. `~/.assent/format.md` (required before creating or modifying a task file)
-4. The current work folder's task files and `_report.md` (during a review
+4. `~/.assent/workflow.md` (during a review or acceptance meeting, to judge
+   whether a worktree's implementation matches its task file's spec, or
+   whenever CLI/scheduler mechanics matter directly — not required merely to
+   draft a task file)
+5. The current work folder's task files and `_report.md` (during a review
    meeting)
-5. The source and tests the task directly touches
+6. The source and tests the task directly touches
 
 An **assent-scheduled task session** reads only:
 

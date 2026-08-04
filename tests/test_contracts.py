@@ -106,10 +106,11 @@ class TestContractContent(unittest.TestCase):
     def test_checkpoint_resume_control_is_documented_consistently(self):
         install_global_contracts(self)
         record = '{"type":"assent.checkpoint_resume"}'
-        format_text = contracts.installed_contract_text("format.md")
+        format_text = (contracts.installed_contract_text("format.md") + "\n"
+                       + contracts.installed_contract_text("workflow.md"))
         english = (_PROJECT_ROOT / "docs/CONFIGURATION.md").read_text(
             encoding="utf-8")
-        for name, text in (("format.md", format_text),
+        for name, text in (("format.md+workflow.md", format_text),
                            ("docs/CONFIGURATION.md", english)):
             with self.subTest(document=name):
                 self.assertIn(record, text)
@@ -138,10 +139,11 @@ class TestContractContent(unittest.TestCase):
 
     def test_wip_progress_and_terminal_auto_boundary_are_documented(self):
         install_global_contracts(self)
-        format_text = contracts.installed_contract_text("format.md")
+        format_text = (contracts.installed_contract_text("format.md") + "\n"
+                       + contracts.installed_contract_text("workflow.md"))
         english = (_PROJECT_ROOT / "docs/WORKFLOW.md").read_text(
             encoding="utf-8")
-        for name, text in (("format.md", format_text),
+        for name, text in (("format.md+workflow.md", format_text),
                            ("docs/WORKFLOW.md", english)):
             compact = " ".join(text.split())
             for phrase in (
@@ -235,7 +237,9 @@ class TestContractContent(unittest.TestCase):
     def test_folder_verification_report_refresh_is_documented(self):
         install_global_contracts(self)
         english = {
-            "format.md": contracts.installed_contract_text("format.md"),
+            "format.md+workflow.md": (
+                contracts.installed_contract_text("format.md") + "\n"
+                + contracts.installed_contract_text("workflow.md")),
             "docs/VERIFICATION.md": (_PROJECT_ROOT / "docs/VERIFICATION.md").read_text(
                 encoding="utf-8"),
         }
@@ -243,7 +247,7 @@ class TestContractContent(unittest.TestCase):
             compact = " ".join(text.split())
             phrases = (
                 ("refreshes `_report.md` after", "best-effort")
-                if name == "format.md" else
+                if name == "format.md+workflow.md" else
                 ("refreshes that folder's `_report.md` exactly once",
                  "all verification locks are released",
                  "best-effort report refresh"))
@@ -263,7 +267,7 @@ class TestContractContent(unittest.TestCase):
 
     def test_format_states_the_provisioned_candidate_link_rule(self):
         install_global_contracts(self)
-        text = contracts.installed_contract_text("format.md")
+        text = contracts.installed_contract_text("workflow.md")
         for phrase in (
                 "reviewed-profile ignored\ndirectory links Assent provisioned",
                 "ordinary ignored leaf files that sit inside an otherwise "
@@ -299,7 +303,8 @@ class TestContractContent(unittest.TestCase):
         for phrase in (
                 "repository-specific development constraints belong in `AGENTS.md`",
                 "scheduled-session procedure belongs in `instructions.md`",
-                "persisted artifact schemas, filename rules, state meanings",
+                "persisted artifact schemas, filename rules, and state meanings",
+                "CLI, report, and receipt contracts belong in `workflow.md`",
                 "Other documents may reference an owned rule, but must not duplicate it"):
             with self.subTest(document="instructions.md", phrase=phrase):
                 self.assertIn(phrase, instructions)
@@ -318,7 +323,9 @@ class TestContractContent(unittest.TestCase):
         english = {
             "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
                 encoding="utf-8"),
-            "format.md": contracts.installed_contract_text("format.md"),
+            "format.md+workflow.md": (
+                contracts.installed_contract_text("format.md") + "\n"
+                + contracts.installed_contract_text("workflow.md")),
             "docs/CONSENSUS.md": (
                 _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
                     encoding="utf-8"),
@@ -361,7 +368,9 @@ class TestContractContent(unittest.TestCase):
         english = {
             "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
                 encoding="utf-8"),
-            "format.md": contracts.installed_contract_text("format.md"),
+            "format.md+workflow.md": (
+                contracts.installed_contract_text("format.md") + "\n"
+                + contracts.installed_contract_text("workflow.md")),
             "instructions.md": contracts.installed_contract_text(
                 "instructions.md"),
             "docs/CONSENSUS.md": (
@@ -416,7 +425,9 @@ class TestContractContent(unittest.TestCase):
         english = {
             "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
                 encoding="utf-8"),
-            "format.md": contracts.installed_contract_text("format.md"),
+            "format.md+workflow.md": (
+                contracts.installed_contract_text("format.md") + "\n"
+                + contracts.installed_contract_text("workflow.md")),
             "instructions.md": contracts.installed_contract_text(
                 "instructions.md"),
             "docs/CONSENSUS.md": (
@@ -465,7 +476,9 @@ class TestContractContent(unittest.TestCase):
         documents = {
             "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
                 encoding="utf-8"),
-            "format.md": contracts.installed_contract_text("format.md"),
+            "format.md+workflow.md": (
+                contracts.installed_contract_text("format.md") + "\n"
+                + contracts.installed_contract_text("workflow.md")),
             "docs/OPERATIONS.md": (_PROJECT_ROOT / "docs/OPERATIONS.md").read_text(
                 encoding="utf-8"),
         }
@@ -506,7 +519,9 @@ class TestContractContent(unittest.TestCase):
         english = {
             "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
                 encoding="utf-8"),
-            "format.md": contracts.installed_contract_text("format.md"),
+            "format.md+workflow.md": (
+                contracts.installed_contract_text("format.md") + "\n"
+                + contracts.installed_contract_text("workflow.md")),
             "instructions.md": contracts.installed_contract_text(
                 "instructions.md"),
             "docs/CONSENSUS.md": (
@@ -608,7 +623,8 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(english_contract=phrase):
                 self.assertIn(phrase, english_contract)
 
-        format_text = english["format.md"]
+        format_text = english["format.md"] + "\n" + contracts.installed_contract_text(
+            "workflow.md")
         for field in (
                 "source_tree", "task_plan_sha256", "review_prompt_sha256",
                 "reviewer_adapter", "reviewer_model", "reviewer_effort",
@@ -668,7 +684,7 @@ class TestContractContent(unittest.TestCase):
 
         from assent import auto_fix
 
-        format_text = contracts.installed_contract_text("format.md")
+        format_text = contracts.installed_contract_text("workflow.md")
         self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 5)
         self.assertEqual(
             {field.name for field in fields(auto_fix.AutoFixState)},
@@ -698,8 +714,9 @@ class TestContractContent(unittest.TestCase):
     def test_version_five_example_is_parseable_and_finding_identity_is_complete(self):
         """The packaged state example must be usable as TOML and describe its full identity."""
         format_text = contracts.installed_contract_text("format.md")
+        workflow_text = contracts.installed_contract_text("workflow.md")
         match = re.search(
-            r"```toml\n(version = 5\n.*?)(?:\n```)", format_text, re.DOTALL)
+            r"```toml\n(version = 5\n.*?)(?:\n```)", workflow_text, re.DOTALL)
         self.assertIsNotNone(match)
         assert match is not None
         example = tomllib.loads(match.group(1))
@@ -707,9 +724,9 @@ class TestContractContent(unittest.TestCase):
         self.assertEqual(
             set(example["findings"][0]), auto_fix._PERSISTED_FINDING_KEYS)
         self.assertIn(
-            "`kind`, `task_id`, `path`, `summary`, `evidence`,", format_text)
+            "`kind`, `task_id`, `path`, `summary`, `evidence`,", workflow_text)
         self.assertIn(
-            "`recommendation`, and the optional `scope_addition` path", format_text)
+            "`recommendation`, and the optional `scope_addition` path", workflow_text)
         self.assertIn("one additional, separately reviewed exception", format_text)
         self.assertIn("append the exact approved paths", format_text)
 
@@ -755,7 +772,7 @@ class TestContractValidation(unittest.TestCase):
         for name in contracts.CONTRACT_NAMES:
             (home / name).unlink()
         errors = contracts.contract_errors()
-        self.assertEqual(len(errors), 2)
+        self.assertEqual(len(errors), len(contracts.CONTRACT_NAMES))
         for name, error in zip(contracts.CONTRACT_NAMES, errors):
             with self.subTest(contract=name):
                 self.assertIn(str(home / name), error)

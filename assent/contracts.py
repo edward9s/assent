@@ -1,16 +1,16 @@
-"""The global AI contracts: one installed assent, one pair of contract texts.
+"""The global AI contracts: one installed assent, three contract texts.
 
-``instructions.md`` (how an assent session behaves) and ``format.md`` (the plan
-format) describe the tool, not any one project, so they are installed once into
-the user-wide ``~/.assent`` directory and every project's session reads them
-from there.  A project's own ``.assent`` keeps what genuinely belongs to it:
-task folders, journals, receipts, the verifier, and the optional settings
-override.
+``instructions.md`` (how an assent session behaves), ``format.md`` (the plan
+format), and ``workflow.md`` (the CLI, report, and receipt contract) describe
+the tool, not any one project, so they are installed once into the user-wide
+``~/.assent`` directory and every project's session reads them from there.  A
+project's own ``.assent`` keeps what genuinely belongs to it: task folders,
+journals, receipts, the verifier, and the optional settings override.
 
-Both files are copies of this installation's packaged templates, so the only
-questions worth asking are whether they are there and whether they belong to
-this version.  This module answers exactly that and never merges, patches, or
-rewrites what it finds: it reports, and ``assent init`` installs.
+All three files are copies of this installation's packaged templates, so the
+only questions worth asking are whether they are there and whether they
+belong to this version.  This module answers exactly that and never merges,
+patches, or rewrites what it finds: it reports, and ``assent init`` installs.
 """
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ from assent.user_home import user_assent_dir
 
 INSTRUCTIONS_NAME = "instructions.md"
 FORMAT_NAME = "format.md"
-CONTRACT_NAMES = (INSTRUCTIONS_NAME, FORMAT_NAME)
+WORKFLOW_NAME = "workflow.md"
+CONTRACT_NAMES = (INSTRUCTIONS_NAME, FORMAT_NAME, WORKFLOW_NAME)
 CONTRACT_REMEDY = "run `assent init` to install the current global contracts"
 
 _TEMPLATES = Path(__file__).resolve().parent / "templates"
@@ -106,7 +107,7 @@ def contract_errors() -> list[str]:
 
 
 def require_contracts() -> None:
-    """Fail closed unless both global contracts are present and current."""
+    """Fail closed unless all global contracts are present and current."""
     errors = contract_errors()
     if errors:
         raise AssentError("; ".join(errors) + f"; {CONTRACT_REMEDY}")

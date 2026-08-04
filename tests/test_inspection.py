@@ -571,7 +571,7 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
 
         text = self.check_output(cfg)
         self.assertIn(f"Global contracts: OK ({self.user_home}: "
-                      "instructions.md, format.md current)", text)
+                      "instructions.md, format.md, workflow.md current)", text)
         self.assertIn("Result: passed", text)
 
     def test_the_user_config_alone_resolves_and_reports_its_assignments(self):

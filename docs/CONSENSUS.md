@@ -4,12 +4,14 @@
 
 > Distilled from three rounds of discussion (Claude Fable × GPT-5.6), updated
 > as the architecture evolves. Goal: the most robust balance between
-> "trustworthy, reliable output" and "aggressive token savings". The single
+> "trustworthy, reliable output" and "aggressive token savings". The
 > contract for the current format is `~/.assent/format.md` (source lives at
-> `assent/templates/format.md`); this document records the design principles
-> behind the format. This document is normative design rationale for the
-> project, not the executable task-format contract itself — that contract is
-> `assent/templates/format.md` alone.
+> `assent/templates/format.md`), split from its companion CLI/report/receipt
+> contract `~/.assent/workflow.md` (source at `assent/templates/workflow.md`)
+> along exactly this document's layering principle; this document records the
+> design principles behind both. This document is normative design rationale
+> for the project, not the executable contracts themselves — those are
+> `assent/templates/format.md` and `assent/templates/workflow.md` alone.
 
 ## Core idea
 
@@ -40,7 +42,10 @@ Proof of correctness → the task file's verify command
    Rules, tasks, state, and history are never mixed into the same file. An
    execution session's required reading is only the project AGENTS.md +
    instructions.md + the one assigned task file; a meeting session adds
-   format.md, and a review meeting adds the work folder's `_report.md`.
+   format.md, and a review or acceptance meeting additionally adds
+   workflow.md and the work folder's `_report.md` — CLI/report/receipt
+   mechanics are relevant to judging an implementation against its spec, not
+   to drafting the spec itself.
 
 2. **Generated, not a snapshot**
    Early designs had a hand-written `CURRENT.md` navigation snapshot, and "a
@@ -254,8 +259,9 @@ copy activates exactly one, so an empty project cannot report `verify: OK`
 without its selected test.
 
 Repeat `assent init` never replaces an existing `.assent/verify.py` and refuses
-`--test` when that verifier exists. It refreshes `~/.assent/format.md` and
-`~/.assent/instructions.md` from the packaged contracts and merges only missing
+`--test` when that verifier exists. It refreshes `~/.assent/format.md`,
+`~/.assent/instructions.md`, and `~/.assent/workflow.md` from the packaged
+contracts and merges only missing
 active table/key paths into `~/.assent/assent.toml`, preserving existing and
 custom values. An older project copy of a contract is removed only when it
 matches the packaged text exactly; one that differs is kept and warned about,
@@ -283,9 +289,10 @@ environments; the product does not add a container or VM sandbox.
   scheduler's prompt supplies the main-tree absolute path.
 - assent session behavior and cross-project common rules live in
   `~/.assent/instructions.md`, not mixed into the project's `AGENTS.md`. That
-  file and its sibling `~/.assent/format.md` describe the tool rather than any
-  one project, so they are installed once per machine and no project receives
-  a copy; the shared `~/.assent/assent.toml` settings live beside them. Every
+  file and its siblings `~/.assent/format.md` and `~/.assent/workflow.md`
+  describe the tool rather than any one project, so they are installed once
+  per machine and no project receives a copy; the shared `~/.assent/assent.toml`
+  settings live beside them. Every
   project-specific management file is likewise kept under the project's own
   `.assent/`, leaving root clean.
 - Settings resolve through built-in defaults, then `~/.assent/assent.toml`,

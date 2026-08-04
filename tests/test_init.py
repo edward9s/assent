@@ -34,9 +34,11 @@ class TestInitContractRefresh(unittest.TestCase):
 
         expected = (_PROJECT_ROOT / "assent/templates/format.md").read_bytes()
         self.assertEqual((self.user_home / "format.md").read_bytes(), expected)
+        workflow_expected = (
+            _PROJECT_ROOT / "assent/templates/workflow.md").read_bytes()
         self.assertIn(
             "refreshes `_report.md` after",
-            expected.decode("utf-8"))
+            workflow_expected.decode("utf-8"))
         self.assertIn(
             "descriptive `name` segment has no canonical-language requirement",
             " ".join(expected.decode("utf-8").split()))

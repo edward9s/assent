@@ -29,7 +29,7 @@ the verifier. It reads a tracked `AGENTS.md` from the branch, or the supplied
 main-tree path when that file is untracked. The verifier is loaded from the
 main tree but executed with the candidate or worktree as its current directory.
 The shared contracts are always the absolute user-home paths
-`~/.assent/instructions.md` and `~/.assent/format.md`.
+`~/.assent/instructions.md`, `~/.assent/format.md`, and `~/.assent/workflow.md`.
 
 AI meetings occur in the primary worktree. Review every worktree without
 entering it using `git worktree list`, `git log <branch>`, and

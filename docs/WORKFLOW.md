@@ -303,6 +303,7 @@ English is canonical for tracked technical documentation and generated
 scheduler text. `README.zh-TW.md` and `docs/zh-TW/` are Taiwan Traditional
 Chinese reader translations; commands, paths, task IDs, JSON, configuration,
 and user data stay literal. The shared contracts live only at
-`~/.assent/instructions.md` and `~/.assent/format.md`. See
+`~/.assent/instructions.md`, `~/.assent/format.md`, and `~/.assent/workflow.md`.
+See
 [TRANSLATING](TRANSLATING.md) for translation process and
 [CONSENSUS](CONSENSUS.md) for design rationale.

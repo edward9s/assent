@@ -35,7 +35,8 @@ Assent's own shared files live once per machine:
 ~/.assent/
 ├── assent.toml       # shared settings
 ├── instructions.md   # session rules contract
-└── format.md         # task-format contract
+├── format.md         # task-format contract
+└── workflow.md       # CLI, report, and receipt contract
 
 <project>/
 ├── AGENTS.md         # project rules and the Assent bridge line
@@ -45,8 +46,8 @@ Assent's own shared files live once per machine:
     └── <work folder>/
 ```
 
-The project does not receive copies of `instructions.md` or `format.md`.
-`assent init` installs and refreshes them in the user home. The project keeps
+The project does not receive copies of `instructions.md`, `format.md`, or
+`workflow.md`. `assent init` installs and refreshes them in the user home. The project keeps
 its own `AGENTS.md`, verifier, task folders, reports, logs, receipts, archive,
 and optional project override.
 
@@ -93,9 +94,9 @@ The generated verifier activates the selected command rather than leaving an
 empty skeleton that could report success without testing the project.
 
 On repeat init, Assent preserves an existing project verifier and refuses a new
-`--test` choice, refreshes `~/.assent/instructions.md` and
-`~/.assent/format.md` from the packaged text, and adds only missing active
-settings keys. An existing `.assent/assent.toml` remains a reported override.
+`--test` choice, refreshes `~/.assent/instructions.md`,
+`~/.assent/format.md`, and `~/.assent/workflow.md` from the packaged text, and
+adds only missing active settings keys. An existing `.assent/assent.toml` remains a reported override.
 Reads, parses, and merges finish before the first write, so an invalid request
 does not leave a partial upgrade. A project copy of a shared contract is
 removed only when it exactly matches the packaged text; a differing copy is
