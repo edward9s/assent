@@ -855,9 +855,12 @@ class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
         cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
         self.commit_all()
         commands: list[list[str]] = []
+        prompts: list[str] = []
 
-        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None):
+        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None,
+                 input_text=None):
             commands.append(command)
+            prompts.append(input_text)
             (Path(cwd) / "src").mkdir(exist_ok=True)
             (Path(cwd) / "src" / "done.py").write_text("ok", encoding="utf-8")
             set_status(path, "DONE")
@@ -872,7 +875,7 @@ class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
 
         self.assertEqual(len(commands), 1)      # first attempt accepted, no retry loop
-        prompt = commands[0][commands[0].index("--print") + 1]
+        prompt = prompts[0]
         self.assertIn('by = "antigravity"', prompt)
         self.assertIn('requested_model = "gemini-3.5-flash"', prompt)
         self.assertIn('requested_effort = "medium"', prompt)
@@ -925,9 +928,12 @@ class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
         t0 = datetime(2026, 3, 1, tzinfo=timezone.utc)
         sleeps: list[float] = []
         calls: list[list[str]] = []
+        prompts: list[str] = []
 
-        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None):
+        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None,
+                 input_text=None):
             calls.append(command)
+            prompts.append(input_text)
             if len(calls) == 1:
                 return (1, "Error: Resource has been exhausted (e.g. check quota).", False)
             (Path(cwd) / "src").mkdir(exist_ok=True)
@@ -954,7 +960,7 @@ class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(command[command.index("--effort") + 1], "low")
         self.assertIn("gemini-3.1-pro", terminal)
 
-        resume_prompt = calls[1][calls[1].index("--print") + 1]
+        resume_prompt = prompts[1]
         self.assertIn("resume", resume_prompt.lower())
         self.assertIn('requested_model = "gemini-3.1-pro"', resume_prompt)
         self.assertIn('requested_effort = "low"', resume_prompt)
