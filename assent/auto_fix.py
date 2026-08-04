@@ -25,9 +25,13 @@ if TYPE_CHECKING:
     from assent.plan import Plan
 
 AUTO_FIX_STATE_NAME = "_auto_fix.toml"
-AUTO_FIX_STATE_VERSION = 5
+AUTO_FIX_STATE_VERSION = 6
 REVIEW_RECORD_TYPE = "assent.auto_fix_review"
-REVIEW_VERDICTS = frozenset({"PASS", "FAIL"})
+# FIXED is the merged reviewer-fixer verdict: the round found a genuine blocker
+# and repaired it inside the declared scope of the one task it named.  FAIL
+# remains valid for a round that reports a blocker it may not repair itself,
+# such as an exact scope omission, and for blocked adjudication.
+REVIEW_VERDICTS = frozenset({"PASS", "FIXED", "FAIL"})
 REVIEW_FINDING_KINDS = frozenset({
     "correctness", "safety", "unmet_requirement", "focused_test_gap",
     "eligible_technical_debt", "blocked_recovery", "scope_amendment",
@@ -74,19 +78,17 @@ _SCOPE_ADDITION_KEYS = {"path", "path_state"}
 _STATE_KEYS = {
     "version", "source_tree", "task_plan_sha256", "review_prompt_sha256",
     "reviewer_adapter", "reviewer_model", "reviewer_effort", "phase", "verdict",
-    "review_context", "review_stage", "failure_trigger",
+    "review_context", "review_stage", "failure_trigger", "review_round_index",
     "current_finding_fingerprints", "findings", "observed_states",
     "reviewer_recommendations", "approved_scope_additions",
     "scope_amendments", "worker_dispositions", "repair_briefs",
-    "repair_round_assignments", "plan_digest_transitions",
-    "review_transitions", "consumed_fixer_profiles",
+    "plan_digest_transitions", "review_transitions",
 }
 _PERSISTED_FINDING_KEYS = {
     "fingerprint", "kind", "task_id", "path", "summary", "evidence",
     "recommendation", "scope_addition_path", "scope_addition_path_state",
 }
 _OBSERVED_STATE_KEYS = {"source_tree", "finding_fingerprints"}
-_FIXER_PROFILE_KEYS = {"adapter", "model", "effort"}
 _RECOMMENDATION_KEYS = {"fingerprint", "recommendation"}
 _APPROVED_SCOPE_ADDITION_KEYS = {
     "fingerprint", "task_id", "path", "path_state",
@@ -100,9 +102,6 @@ _WORKER_DISPOSITION_KEYS = {
     "task_id", "fingerprint", "disposition", "detail",
 }
 _REPAIR_BRIEF_KEYS = {"task_id", "finding_fingerprints", "brief"}
-_REPAIR_ROUND_ASSIGNMENT_KEYS = {
-    "task_id", "adapter", "model", "effort", "attempted",
-}
 _PLAN_DIGEST_TRANSITION_KEYS = {"before_sha256", "after_sha256"}
 _REVIEW_TRANSITION_KEYS = {
     "fingerprint", "transition", "prior_fingerprint", "transition_evidence",
@@ -160,7 +159,7 @@ def review_record_schema() -> dict:
         "required": ["type", "verdict", "findings"],
         "properties": {
             "type": {"type": "string", "enum": [REVIEW_RECORD_TYPE]},
-            "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
+            "verdict": {"type": "string", "enum": ["PASS", "FIXED", "FAIL"]},
             "findings": findings_schema,
         },
     }
@@ -234,15 +233,6 @@ class ObservedState:
 
 
 @dataclass(frozen=True)
-class FixerProfile:
-    """One abstract adapter/model/effort repair profile already consumed."""
-
-    adapter: str
-    model: str
-    effort: str
-
-
-@dataclass(frozen=True)
 class ReviewerRecommendation:
     fingerprint: str
     recommendation: str
@@ -297,21 +287,6 @@ class RepairBrief:
 
 
 @dataclass(frozen=True)
-class RepairRoundAssignment:
-    """One task/profile assignment durably selected before a repair round."""
-
-    task_id: str
-    adapter: str
-    model: str
-    effort: str
-    attempted: bool
-
-    @property
-    def profile(self) -> FixerProfile:
-        return FixerProfile(self.adapter, self.model, self.effort)
-
-
-@dataclass(frozen=True)
 class PlanDigestTransition:
     before_sha256: str
     after_sha256: str
@@ -341,25 +316,27 @@ class AutoFixState:
     current_finding_fingerprints: tuple[str, ...]
     findings: tuple[PersistedFinding, ...]
     observed_states: tuple[ObservedState, ...]
-    consumed_fixer_profiles: tuple[FixerProfile, ...]
     review_context: str = "completed_folder"
     review_stage: str = "initial"
     failure_trigger: str | None = None
+    # The 0-based position in the configured ``[auto_fix.review]`` adapter list
+    # the folder's next review round must use.  A folder's first review is 0,
+    # and every recorded round result advances it by exactly one, so the loop
+    # terminates finitely once it reaches the end of the configured list.
+    review_round_index: int = 0
     reviewer_recommendations: tuple[ReviewerRecommendation, ...] = ()
     approved_scope_additions: tuple[ApprovedScopeAddition, ...] = ()
     scope_amendments: tuple[ScopeAmendment, ...] = ()
     worker_dispositions: tuple[WorkerDisposition, ...] = ()
     repair_briefs: tuple[RepairBrief, ...] = ()
-    repair_round_assignments: tuple[RepairRoundAssignment, ...] = ()
     plan_digest_transitions: tuple[PlanDigestTransition, ...] = ()
     review_transitions: tuple[ReviewTransition, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("current_finding_fingerprints", "findings",
-                     "observed_states", "consumed_fixer_profiles",
+                     "observed_states",
                      "reviewer_recommendations", "approved_scope_additions",
                      "scope_amendments", "worker_dispositions", "repair_briefs",
-                     "repair_round_assignments",
                      "plan_digest_transitions", "review_transitions"):
             value = getattr(self, name)
             if isinstance(value, list):
@@ -714,7 +691,7 @@ def _validate_review_record(record: ReviewRecord) -> ReviewRecord:
     if not isinstance(record, ReviewRecord):
         raise AssentError("Auto-fix review verdict must be a review record")
     if not isinstance(record.verdict, str) or record.verdict not in REVIEW_VERDICTS:
-        raise AssentError("Auto-fix review verdict must be PASS or FAIL")
+        raise AssentError("Auto-fix review verdict must be PASS, FIXED or FAIL")
     if not isinstance(record.findings, tuple):
         raise AssentError("Auto-fix review findings must be a finite list")
     if len(record.findings) > MAX_FINDINGS:
@@ -725,8 +702,9 @@ def _validate_review_record(record: ReviewRecord) -> ReviewRecord:
     )
     if record.verdict == "PASS" and findings:
         raise AssentError("A PASS auto-fix review must have no blocking findings")
-    if record.verdict == "FAIL" and not findings:
-        raise AssentError("A FAIL auto-fix review must have a blocking finding")
+    if record.verdict != "PASS" and not findings:
+        raise AssentError(
+            f"A {record.verdict} auto-fix review must have a blocking finding")
     fingerprints = [finding_fingerprint(finding) for finding in findings]
     if len(fingerprints) != len(set(fingerprints)):
         raise AssentError("Auto-fix review contains a duplicate finding")
@@ -1103,20 +1081,10 @@ def current_review_record(state: AutoFixState) -> ReviewRecord:
     return _validate_review_record(ReviewRecord(state.verdict, findings))
 
 
-def consume_fixer_profile(state: AutoFixState,
-                          profile: FixerProfile) -> AutoFixState:
-    """Persistently consume one unique repair profile before its session starts."""
+def with_review_round_index(state: AutoFixState, index: int) -> AutoFixState:
+    """Durably move the folder to the next configured review-round position."""
     state = _validate_state(state)
-    candidate = replace_fixer_profiles(
-        state, state.consumed_fixer_profiles + (profile,))
-    return _validate_state(candidate)
-
-
-def replace_fixer_profiles(
-        state: AutoFixState,
-        profiles: tuple[FixerProfile, ...]) -> AutoFixState:
-    """Return a state copy with a caller-supplied ordered profile history."""
-    return replace(state, consumed_fixer_profiles=profiles)
+    return _validate_state(replace(state, review_round_index=index))
 
 
 def with_repair_phase(state: AutoFixState, phase: str) -> AutoFixState:
@@ -1141,15 +1109,6 @@ def with_worker_dispositions(
     """Persist validated worker acknowledgement evidence for the next recheck."""
     state = _validate_state(state)
     return _validate_state(replace(state, worker_dispositions=dispositions))
-
-
-def with_repair_round_assignments(
-        state: AutoFixState,
-        assignments: tuple[RepairRoundAssignment, ...]) -> AutoFixState:
-    """Persist the complete current round before or after an attempt starts."""
-    state = _validate_state(state)
-    return _validate_state(replace(
-        state, repair_round_assignments=assignments))
 
 
 def with_plan_digest_transition(
@@ -1180,23 +1139,6 @@ def with_scope_amendments(
     """Persist precomputed scheduler amendments before any task file changes."""
     state = _validate_state(state)
     return _validate_state(replace(state, scope_amendments=amendments))
-
-
-def next_unused_fixer_profile(
-        state: AutoFixState,
-        profiles: Iterable[FixerProfile]) -> FixerProfile | None:
-    """Return the first unique profile not already consumed by this folder."""
-    state = _validate_state(state)
-    used = {(item.adapter, item.model, item.effort)
-            for item in state.consumed_fixer_profiles}
-    seen = set(used)
-    for profile in profiles:
-        identity = (profile.adapter, profile.model, profile.effort)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        return profile
-    return None
 
 
 def auto_fix_state_path(config_or_folder: Config | str | Path) -> Path:
@@ -1315,7 +1257,10 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
     if not isinstance(state.phase, str) or state.phase not in AUTO_FIX_PHASES:
         raise AssentError("Auto-fix state phase is invalid")
     if not isinstance(state.verdict, str) or state.verdict not in REVIEW_VERDICTS:
-        raise AssentError("Auto-fix state verdict must be PASS or FAIL")
+        raise AssentError("Auto-fix state verdict must be PASS, FIXED or FAIL")
+    if type(state.review_round_index) is not int or state.review_round_index < 0:
+        raise AssentError(
+            "Auto-fix state review_round_index must be a non-negative integer")
     if state.review_context not in REVIEW_CONTEXTS:
         raise AssentError("Auto-fix state review_context is invalid")
     if state.review_stage not in REVIEW_STAGES:
@@ -1329,14 +1274,14 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
             "A blocked adjudication requires a worker_blocked or focused_gate_failure trigger")
     if state.verdict == "PASS" and state.phase != "COMPLETE":
         raise AssentError("A PASS auto-fix state must be COMPLETE")
-    if state.verdict == "FAIL" and state.phase == "COMPLETE":
-        raise AssentError("A FAIL auto-fix state must not be COMPLETE")
+    if state.verdict != "PASS" and state.phase == "COMPLETE":
+        raise AssentError(
+            f"A {state.verdict} auto-fix state must not be COMPLETE")
     for name in ("current_finding_fingerprints", "findings",
                  "observed_states", "reviewer_recommendations",
                  "approved_scope_additions", "scope_amendments",
                  "worker_dispositions", "repair_briefs",
-                 "repair_round_assignments", "plan_digest_transitions",
-                 "review_transitions", "consumed_fixer_profiles"):
+                 "plan_digest_transitions", "review_transitions"):
         if not isinstance(getattr(state, name), tuple):
             raise AssentError(f"Auto-fix state {name} must be an ordered list")
 
@@ -1371,8 +1316,9 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
                 "Auto-fix state current finding is absent from the finding ledger")
     if state.verdict == "PASS" and current:
         raise AssentError("A PASS auto-fix state must have no current findings")
-    if state.verdict == "FAIL" and not current:
-        raise AssentError("A FAIL auto-fix state must have current findings")
+    if state.verdict != "PASS" and not current:
+        raise AssentError(
+            f"A {state.verdict} auto-fix state must have current findings")
     debt_fingerprints = {
         fingerprint for fingerprint in current
         if ledger[fingerprint].kind == "eligible_technical_debt"}
@@ -1488,22 +1434,6 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
             if fingerprint not in ledger:
                 raise AssentError("Repair brief cites a finding absent from the ledger")
 
-    assignment_tasks: set[str] = set()
-    for index, item in enumerate(state.repair_round_assignments):
-        label = f"Auto-fix state repair_round_assignments[{index}]"
-        if not isinstance(item, RepairRoundAssignment):
-            raise AssentError(f"{label} is invalid")
-        if not isinstance(item.task_id, str) or not _TASK_ID_RE.fullmatch(item.task_id):
-            raise AssentError(f"{label} task_id must be a tNNN task id")
-        if item.task_id in assignment_tasks:
-            raise AssentError(
-                "Auto-fix state has duplicate repair-round task assignments")
-        assignment_tasks.add(item.task_id)
-        for name in ("adapter", "model", "effort"):
-            _require_text(getattr(item, name), f"{label} {name}", 1024)
-        if type(item.attempted) is not bool:
-            raise AssentError(f"{label} attempted must be a boolean")
-
     for index, item in enumerate(state.plan_digest_transitions):
         if not isinstance(item, PlanDigestTransition):
             raise AssentError(
@@ -1569,28 +1499,6 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         if identity in observed_seen:
             raise AssentError("Auto-fix state has a duplicate observed state")
         observed_seen.add(identity)
-
-    profiles: set[tuple[str, str, str]] = set()
-    for index, profile in enumerate(state.consumed_fixer_profiles):
-        if not isinstance(profile, FixerProfile):
-            raise AssentError(
-                f"Auto-fix state consumed_fixer_profiles[{index}] is invalid")
-        identity = tuple(
-            _require_text(value,
-                          f"Auto-fix state consumed_fixer_profiles[{index}] {name}",
-                          1024)
-            for name, value in (("adapter", profile.adapter),
-                                ("model", profile.model),
-                                ("effort", profile.effort))
-        )
-        if identity in profiles:
-            raise AssentError("Auto-fix state has a duplicate consumed fixer profile")
-        profiles.add(identity)
-    for item in state.repair_round_assignments:
-        identity = (item.adapter, item.model, item.effort)
-        if identity not in profiles:
-            raise AssentError(
-                "Repair-round assignment profile is absent from consumed history")
     return state
 
 
@@ -1613,6 +1521,7 @@ def _state_text(state: AutoFixState) -> str:
         f"review_context = {toml_string(state.review_context)}\n"
         f"review_stage = {toml_string(state.review_stage)}\n"
         f"failure_trigger = {toml_string(state.failure_trigger or '')}\n"
+        f"review_round_index = {state.review_round_index}\n"
         "current_finding_fingerprints = "
         f"{_toml_array(state.current_finding_fingerprints)}\n"
     )
@@ -1620,12 +1529,9 @@ def _state_text(state: AutoFixState) -> str:
         text += "findings = []\n"
     if not state.observed_states:
         text += "observed_states = []\n"
-    if not state.consumed_fixer_profiles:
-        text += "consumed_fixer_profiles = []\n"
     for name in ("reviewer_recommendations", "approved_scope_additions",
                  "scope_amendments", "worker_dispositions", "repair_briefs",
-                 "repair_round_assignments", "plan_digest_transitions",
-                 "review_transitions"):
+                 "plan_digest_transitions", "review_transitions"):
         if not getattr(state, name):
             text += f"{name} = []\n"
     for finding in state.findings:
@@ -1649,13 +1555,6 @@ def _state_text(state: AutoFixState) -> str:
             f"source_tree = {toml_string(observed.source_tree)}\n"
             "finding_fingerprints = "
             f"{_toml_array(observed.finding_fingerprints)}\n"
-        )
-    for profile in state.consumed_fixer_profiles:
-        text += (
-            "\n[[consumed_fixer_profiles]]\n"
-            f"adapter = {toml_string(profile.adapter)}\n"
-            f"model = {toml_string(profile.model)}\n"
-            f"effort = {toml_string(profile.effort)}\n"
         )
     for item in state.reviewer_recommendations:
         text += (
@@ -1699,15 +1598,6 @@ def _state_text(state: AutoFixState) -> str:
             "finding_fingerprints = "
             f"{_toml_array(item.finding_fingerprints)}\n"
             f"brief = {toml_string(item.brief)}\n"
-        )
-    for item in state.repair_round_assignments:
-        text += (
-            "\n[[repair_round_assignments]]\n"
-            f"task_id = {toml_string(item.task_id)}\n"
-            f"adapter = {toml_string(item.adapter)}\n"
-            f"model = {toml_string(item.model)}\n"
-            f"effort = {toml_string(item.effort)}\n"
-            f"attempted = {'true' if item.attempted else 'false'}\n"
         )
     for item in state.plan_digest_transitions:
         text += (
