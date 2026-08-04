@@ -1834,24 +1834,27 @@ def _run_auto_fix_review_once(
                 return finish(_AutoFixReviewOutcome(130, human_reason=reason))
             return finish(_AutoFixReviewOutcome(1, human_reason=reason))
 
+        review_output = (result.structured_output
+                         if result.structured_output is not None
+                         else result.output)
         try:
             if result.structured_output_error is not None:
                 raise AssentError(result.structured_output_error)
-            review_output = (result.structured_output
-                             if result.structured_output is not None
-                             else result.output)
             record = auto_fix.parse_review_output(review_output)
             if (review_context == "blocked_adjudication"
                     and record.verdict == "PASS" and blocked):
                 raise AssentError(
                     "A blocked adjudication cannot PASS while a task remains BLOCKED")
         except AssentError as e:
+            diagnostic = _bounded_adapter_diagnostic(review_output)
             if invalid_attempts < cfg.retry_per_task:
                 invalid_attempts += 1
                 print(f"Auto-fix reviewer returned invalid output ({e}); retrying "
-                      f"({invalid_attempts}/{cfg.retry_per_task}).")
+                      f"({invalid_attempts}/{cfg.retry_per_task}). "
+                      f"bounded diagnostic: {diagnostic}")
                 continue
-            print(f"Auto-fix reviewer returned invalid output after configured retries: {e}")
+            print(f"Auto-fix reviewer returned invalid output after configured retries: {e}; "
+                  f"bounded diagnostic: {diagnostic}")
             return finish(_AutoFixReviewOutcome(1, human_reason=str(e)))
 
         try:
