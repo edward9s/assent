@@ -111,18 +111,14 @@ _CLOSEOUT_RETRY_SUFFIX = (
     "file to DONE, and append one [[entry]] journal record to the journal file. "
     "Do not modify any code or tests.")
 
-_AUTO_FIX_REVIEW_PROMPT = """You are the read-only Assent folder reviewer.
+_AUTO_FIX_REVIEW_PROMPT = """You are the Assent folder reviewer.
 
 Review context: {review_context}
 Review stage: {review_stage}
 
-This is a blocking decision gate, never an implementation session. Do not
-edit, create, delete, rename, format, or otherwise write any project or
-management-plane file. Do not run tests, formatters, generators, or any other
-command that may write. Perform read-only inspection and rely on the exact
-scheduler-supplied focused evidence below. This cooperative write check does
-not make the worktree a security sandbox and cannot intercept effects outside
-the project.
+{write_policy}
+
+{round_policy}
 
 Complete verification has deliberately not run yet. The absence of a full
 suite result, integration candidate, verification receipt, or any other
@@ -152,8 +148,8 @@ expansion cannot block PASS.
 Finish with exactly one JSON object on the last non-empty output line and no
 later text. PASS example:
 {{"type": "assent.auto_fix_review", "verdict": "PASS", "findings": []}}
-Every FAIL finding must supply all schema fields: kind, task_id, path,
-summary, evidence, recommendation, scope_addition, transition,
+Every finding of a non-PASS verdict must supply all schema fields: kind,
+task_id, path, summary, evidence, recommendation, scope_addition, transition,
 prior_fingerprint, and transition_evidence. Use null where an optional field is
 absent.
 
@@ -188,6 +184,38 @@ Prior review and repair evidence:
 Task contracts and journals:
 {management_evidence}
 """
+
+_AUTO_FIX_READ_ONLY_POLICY = """This is a blocking decision gate, never an
+implementation session. Do not edit, create, delete, rename, format, or
+otherwise write any project or management-plane file. Do not run tests,
+formatters, generators, or any other command that may write. Perform read-only
+inspection and rely on the exact scheduler-supplied focused evidence below.
+This cooperative write check does not make the worktree a security sandbox and
+cannot intercept effects outside the project."""
+
+_AUTO_FIX_MERGED_WRITE_POLICY = """This is a merged reviewer-fixer round: when
+you find a genuine blocking problem you may repair it directly instead of only
+reporting it. You may write only inside the declared scope of the one existing
+task your finding names. Every other write is refused by the same structural
+safety gate an ordinary worker session faces -- a management-plane file, a task
+file, another task's scope, a commit, or any write in the primary worktree
+makes your verdict unusable while preserving your exact edits. Assent alone
+owns task status, task contracts, and Git state: never create a task, change a
+task's requirements or scope, revert or delete sources, or accept the folder.
+
+Report a repair with verdict "FIXED", carrying the same finding fields a
+reported blocker uses: what was wrong in summary and evidence, and what you
+changed in recommendation. Return "PASS" only when nothing blocking remains
+and you wrote nothing at all."""
+
+_AUTO_FIX_ROUND_POLICY = """This is review round {position} of {total}.
+Review rounds remaining after this one: {remaining}."""
+
+_AUTO_FIX_FINAL_ROUND_POLICY = """This is the FINAL review round.
+No further review will occur after this one. Anything you leave merely
+reported will never be repaired, rechecked, or confirmed by another round.
+Decide now -- either PASS, or fix the blocker inside the naming task's declared
+scope and return FIXED. Do not leave a concern unresolved."""
 
 _AUTO_FIX_COMPLETED_POLICY = """This COMPLETED_FOLDER review examines the
 bounded cumulative implementation. Only COMPLETED_FOLDER + INITIAL may report
@@ -290,12 +318,29 @@ class _ActiveTask:
 
 
 @dataclass(frozen=True)
+class _FixerProfile:
+    """One reopened task's repair identity for a single round.
+
+    The merged reviewer-fixer loop terminates by walking the configured review
+    round sequence, so this identity is derived per round and never persisted.
+    """
+
+    adapter: str
+    model: str
+    effort: str
+
+
+@dataclass(frozen=True)
 class _AutoFixReviewOutcome:
     """One final-focused/reviewer cycle and its durable repair evidence."""
 
     code: int
     state: auto_fix.AutoFixState | None = None
     human_reason: str | None = None
+    # The configured review-round sequence was walked to its end without an
+    # independent PASS.  The finite loop stops here; how that terminal state is
+    # reported to a human is the following task's decision.
+    rounds_exhausted: bool = False
 
 
 @dataclass(frozen=True)
@@ -935,7 +980,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         resuming_auto_fix = bool(
             auto_fix_enabled
             and existing_auto_fix is not None
-            and existing_auto_fix.verdict == "FAIL")
+            and existing_auto_fix.verdict != "PASS")
         if resuming_auto_fix:
             assert existing_auto_fix is not None
             recovery_error = _auto_fix_recovery_config_error(
@@ -1000,6 +1045,10 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 trusted_contracts=trusted_contracts,
                 gate_passes=gate_passes)
             if review_outcome.code != 0:
+                if review_outcome.rounds_exhausted:
+                    assert review_outcome.state is not None
+                    return _auto_fix_finish_rounds_exhausted(
+                        review_outcome.state)
                 if (auto_fix_enabled and review_outcome.state is not None
                         and review_outcome.human_reason is None
                         and not (once or task_id is not None)):
@@ -1299,12 +1348,23 @@ def _auto_fix_prior_evidence(
     return "\n".join(lines)
 
 
+def _auto_fix_round_policy(round_index: int, total: int) -> str:
+    """State this round's position, how many follow, and the final-round rule."""
+    text = _AUTO_FIX_ROUND_POLICY.format(
+        position=round_index + 1, total=total,
+        remaining=max(total - round_index - 1, 0))
+    if round_index + 1 >= total:
+        text += "\n\n" + _AUTO_FIX_FINAL_ROUND_POLICY
+    return text
+
+
 def _auto_fix_review_identity(
         cfg: Config, plan: Plan, focused_evidence: str, *,
         focused_identity: str | None = None,
         contracts_by_id: dict[str, str] | None = None,
         review_context: str = "completed_folder",
         review_stage: str = "initial",
+        round_index: int = 0,
         blockers: tuple[_AutoFixBlockerEvidence, ...] = (),
         previous: auto_fix.AutoFixState | None = None,
         ) -> tuple[str, str, str, str]:
@@ -1323,6 +1383,12 @@ def _auto_fix_review_identity(
         source_tree=source_tree,
         review_context=review_context.upper(),
         review_stage=review_stage.upper(),
+        write_policy=(
+            _AUTO_FIX_READ_ONLY_POLICY
+            if review_context == "blocked_adjudication"
+            else _AUTO_FIX_MERGED_WRITE_POLICY),
+        round_policy=_auto_fix_round_policy(
+            round_index, len(cfg.auto_fix_review or ()) or 1),
         context_policy=(
             _AUTO_FIX_BLOCKED_POLICY
             if review_context == "blocked_adjudication"
@@ -1363,20 +1429,27 @@ def _auto_fix_existing_state(cfg: Config) -> auto_fix.AutoFixState | None:
 
 def _auto_fix_recovery_config_error(
         cfg: Config, state: auto_fix.AutoFixState) -> str | None:
-    """Refuse stale FAIL recovery unless its reviewer is still configured."""
-    review = cfg.auto_fix_review
-    if review is None:
+    """Refuse stale unfinished recovery unless its reviewer is still configured."""
+    rounds = cfg.auto_fix_review
+    if not rounds:
         return ("the pending FAIL state requires a configured [auto_fix.review] "
                 "before repair or closeout can resume")
     stored = (state.reviewer_adapter, state.reviewer_model,
               state.reviewer_effort)
-    configured = (review.adapter, review.requested_model,
-                  review.requested_effort)
-    if stored != configured:
+    configured = [(item.adapter, item.requested_model, item.requested_effort)
+                  for item in rounds]
+    # The round that produced this state must still be a configured round; a
+    # rewritten reviewer list is policy drift, not a resumable position.
+    if stored not in configured:
+        shown = ", ".join(f"{item[0]}/{item[1]}/{item[2]}"
+                          for item in configured)
         return ("the pending FAIL state reviewer identity no longer matches "
                 "the configured [auto_fix.review] identity "
-                f"({stored[0]}/{stored[1]}/{stored[2]} -> "
-                f"{configured[0]}/{configured[1]}/{configured[2]})")
+                f"({stored[0]}/{stored[1]}/{stored[2]} -> {shown})")
+    if state.review_round_index > len(rounds):
+        return ("the pending FAIL state round index is outside the configured "
+                f"[auto_fix.review] sequence ({state.review_round_index} > "
+                f"{len(rounds)})")
     return None
 
 
@@ -1531,10 +1604,21 @@ def _run_auto_fix_review_once(
         trusted_contracts: dict[str, str] | None = None,
         gate_passes: _FocusedGateLedger | None = None,
         ) -> _AutoFixReviewOutcome:
-    """Run one completed-folder review or quiescent blocked adjudication."""
-    review = cfg.auto_fix_review
-    if review is None:
+    """Run one merged reviewer-fixer round or quiescent blocked adjudication."""
+    rounds = cfg.auto_fix_review
+    if not rounds:
         return _AutoFixReviewOutcome(0)
+    # The folder walks the configured reviewer list position by position, and
+    # the durable index is what survives a restart mid-sequence.
+    existing = _auto_fix_existing_state(cfg)
+    round_index = existing.review_round_index if existing is not None else 0
+    if round_index >= len(rounds):
+        print(f"Auto-fix folder review: all {len(rounds)} configured review "
+              "rounds have been used; no further round starts.")
+        return _AutoFixReviewOutcome(
+            1, existing, human_reason="configured review rounds are exhausted",
+            rounds_exhausted=True)
+    review = rounds[round_index]
 
     plan = (_authoritative_status_plan(trusted_plan)
             if trusted_plan is not None else Plan.parse(cfg.tasks_dir))
@@ -1631,10 +1715,12 @@ def _run_auto_fix_review_once(
                 _auto_fix_review_identity(
                     cfg, plan, "\n".join(focused_lines),
                     focused_identity="\n".join(identity_lines),
-                    contracts_by_id=contracts_by_id))
-            previous = _auto_fix_existing_state(cfg)
+                    contracts_by_id=contracts_by_id,
+                    round_index=round_index))
+            # The scheduler authored this failure; no reviewer round ran, so
+            # the folder's round position stays exactly where it was.
             state = auto_fix.state_for_review(
-                record, previous=previous,
+                record, previous=existing,
                 source_tree=source_tree,
                 task_plan_sha256=plan_digest,
                 review_prompt_sha256=prompt_digest,
@@ -1661,8 +1747,6 @@ def _run_auto_fix_review_once(
         return _AutoFixReviewOutcome(
             1, human_reason="focused verification changed the source worktree")
 
-    existing = _auto_fix_existing_state(cfg)
-
     def finish(outcome: _AutoFixReviewOutcome) -> _AutoFixReviewOutcome:
         """Restore worker task-contract tampering after its review evidence is captured."""
         if review_context != "blocked_adjudication":
@@ -1681,8 +1765,8 @@ def _run_auto_fix_review_once(
         # fresh stage and context here would rebuild a recheck PASS as an
         # initial completed-folder review, fail its own freshness check, and
         # start a reviewer session whose state replaces the cumulative ledger,
-        # consumed profiles, review transitions and technical-debt agenda.  So
-        # reuse compares the durable lineage against the current material only.
+        # review transitions and technical-debt agenda.  So reuse compares the
+        # durable lineage against the current material only.
         reuse_tree, reuse_plan_digest, _reuse_prompt, reuse_digest = (
             _auto_fix_review_identity(
                 cfg, plan, "\n".join(focused_lines),
@@ -1690,6 +1774,7 @@ def _run_auto_fix_review_once(
                 contracts_by_id=contracts_by_id,
                 review_context=existing.review_context,
                 review_stage=existing.review_stage,
+                round_index=round_index,
                 blockers=blockers))
         if auto_fix.auto_fix_state_is_fresh(
                 existing,
@@ -1705,14 +1790,14 @@ def _run_auto_fix_review_once(
             return finish(_AutoFixReviewOutcome(0, existing))
 
     review_stage = ("recheck"
-                    if existing is not None and existing.verdict == "FAIL"
+                    if existing is not None and existing.verdict != "PASS"
                     else "initial")
     review_previous = existing if review_stage == "recheck" else None
-    # The finding ledger, consumed profiles, review transitions and
-    # technical-debt agenda belong to the folder rather than to one review
-    # stage.  A later initial review continues them, so no finding or plan
-    # change restarts the finite fixer sequence; only a recheck may cite prior
-    # findings when validating transition identity.
+    # The finding ledger, review transitions and technical-debt agenda belong
+    # to the folder rather than to one review stage.  A later initial review
+    # continues them, so no finding or plan change restarts the finite round
+    # sequence; only a recheck may cite prior findings when validating
+    # transition identity.
     ledger_previous = existing
     if review_stage == "recheck":
         review_context = existing.review_context
@@ -1736,6 +1821,7 @@ def _run_auto_fix_review_once(
         focused_identity="\n".join(identity_lines),
         contracts_by_id=contracts_by_id,
         review_context=review_context, review_stage=review_stage,
+        round_index=round_index,
         blockers=blockers, previous=review_previous)
 
     freshness = dict(
@@ -1753,14 +1839,19 @@ def _run_auto_fix_review_once(
     except AssentError as e:
         print(f"Auto-fix reviewer resolution failed: {e}")
         return finish(_AutoFixReviewOutcome(1, human_reason=str(e)))
-    session, errors = auto_fix_review_capability_errors(cfg, reviewer)
+    _first_round_session, errors = auto_fix_review_capability_errors(cfg, reviewer)
     if errors:
         print(f"{review.adapter} auto-fix review capability preflight: FAIL "
               "(refusing before the review session)")
         for message in errors:
             print(f"  - {message}")
         return finish(_AutoFixReviewOutcome(1, human_reason="; ".join(errors)))
-    assert session is not None
+    assert _first_round_session is not None
+    # The preflight covers every configured round's adapter; this round runs
+    # under its own position's already-resolved identity, not the first one's.
+    session = SessionIdentity(
+        agent=review.adapter, requested_model=review.requested_model,
+        effort=review.effort, requested_effort=review.requested_effort)
 
     baseline = _auto_fix_surface_snapshot(cfg)
     baseline_head = gitops.commit_of(cfg.root, "HEAD")
@@ -1805,10 +1896,19 @@ def _run_auto_fix_review_once(
         changed = _auto_fix_surface_change(
             baseline, cfg, baseline_head, baseline_status,
             baseline_primary_head, baseline_primary_status)
-        if changed:
-            shown = ", ".join(changed[:8]) + (" ..." if len(changed) > 8 else "")
+        # A merged reviewer-fixer round may repair source files, so the general
+        # before/after comparison still runs for every round but the refusal is
+        # decided against the verdict below.  Writes no round may ever make --
+        # the management plane, the primary worktree, Git state itself, and
+        # anything at all during a read-only blocked adjudication -- still
+        # refuse here, before the verdict is even parsed.
+        forbidden = _auto_fix_forbidden_writes(changed)
+        if changed and (review_context == "blocked_adjudication" or forbidden):
+            reported = forbidden or list(changed)
+            shown = ", ".join(reported[:8]) + (
+                " ..." if len(reported) > 8 else "")
             print("Protected project writes were detected during the reviewer interval; "
-                  "PASS/FAIL was ignored and the exact edits are preserved "
+                  "the verdict was ignored and the exact edits are preserved "
                   f"({shown}).")
             return _AutoFixReviewOutcome(
                 1, human_reason="reviewer project writes detected")
@@ -1882,8 +1982,35 @@ def _run_auto_fix_review_once(
             print(f"Auto-fix findings require a human scope/plan decision: {e}")
             return finish(_AutoFixReviewOutcome(1, state, str(e)))
 
+        if changed:
+            outside = _auto_fix_out_of_scope_writes(cfg, plan, resolved_record)
+            if outside:
+                shown = ", ".join(outside[:8]) + (
+                    " ..." if len(outside) > 8 else "")
+                print("The review round wrote outside the declared scope of the "
+                      "task its finding names; the verdict was ignored and the "
+                      f"exact edits are preserved ({shown}).")
+                return _AutoFixReviewOutcome(
+                    1, human_reason="review round wrote outside the named task scope")
+            # Git state belongs to the scheduler alone, so the round's approved
+            # in-scope repair is checkpointed here.  The next round then reviews
+            # a clean worktree and can name the exact repaired paths.
+            owner = next(
+                (plan.get(item.task_id) for item in resolved_record.findings
+                 if item.task_id is not None), None)
+            if owner is not None:
+                gitops.commit_if_dirty(
+                    cfg.root,
+                    _checkpoint_subject(
+                        cfg, "auto", owner,
+                        f"review round {round_index + 1} repaired its own finding"),
+                    cfg.git_excludes)
+
         state = auto_fix.state_for_review(
             resolved_record, previous=ledger_previous, review_stage=review_stage,
+            review_round_index=(
+                round_index if resolved_record.verdict == "PASS"
+                else round_index + 1),
             **freshness)
         state = _auto_fix_attach_repair_briefs(
             cfg, plan, state,
@@ -1893,27 +2020,57 @@ def _run_auto_fix_review_once(
         if resolved_record.verdict == "PASS":
             print("Auto-fix folder review: PASS.")
             return finish(_AutoFixReviewOutcome(0, state))
-        print("Auto-fix folder review: FAIL; blocking findings were preserved for repair.")
+        if resolved_record.verdict == "FIXED":
+            print("Auto-fix folder review: FIXED; the round repaired what it found "
+                  "and the next round confirms the result.")
+        else:
+            print("Auto-fix folder review: FAIL; blocking findings were preserved for repair.")
         for finding in resolved_record.findings:
             owner = f"{finding.task_id}: " if finding.task_id else ""
             print(f"  - {owner}{finding.path}: {finding.summary}")
         return finish(_AutoFixReviewOutcome(1, state))
 
 
-def _auto_fix_profile_for_task(cfg: Config, task: Task) -> auto_fix.FixerProfile:
+def _auto_fix_forbidden_writes(changed: tuple[str, ...]) -> list[str]:
+    """The review-interval writes no round may make, whatever its verdict.
+
+    A merged reviewer-fixer round repairs ordinary source files; the management
+    plane, the primary worktree, and Git state itself stay off limits exactly as
+    they are for a worker session.  A dirty source worktree is the expected
+    witness of an in-scope repair and is judged by scope, not here.
+    """
+    return [item for item in changed
+            if not item.startswith("source:") or item == "source:.git/HEAD"]
+
+
+def _auto_fix_out_of_scope_writes(
+        cfg: Config, plan: Plan,
+        record: auto_fix.ReviewRecord) -> list[str]:
+    """Uncommitted round writes outside the declared scope of the named tasks.
+
+    Repair is authorized exactly as far as the one existing task a finding
+    names, so this is the same ``gitops.changes_outside_scope`` floor
+    ``_inspect_task_safety`` applies to an ordinary worker session.  A round
+    that asserts nothing is wrong names no task, and an empty scope already
+    fails closed, so such a round is authorized to write nothing at all.
+    """
+    scope: list[str] = []
+    for finding in record.findings:
+        task = plan.get(finding.task_id) if finding.task_id else None
+        if task is not None:
+            scope.extend(task.scope)
+    return gitops.changes_outside_scope(
+        cfg.root, list(dict.fromkeys(scope)), excludes=cfg.git_excludes)
+
+
+def _auto_fix_profile_for_task(cfg: Config, task: Task) -> _FixerProfile:
     """The primary worker's ordinary identity for one reopened task."""
     settings = cfg.adapter_settings(cfg.adapter_names[0])
     effort = settings.resolve_effort(task.effort, task.model)
     if effort is None:
         raise AssentError(
             f"Auto-fix task profile has no concrete effort: {task.id}")
-    return auto_fix.FixerProfile(cfg.adapter_names[0], task.model, effort)
-
-
-def _auto_fix_escalation_profiles(cfg: Config) -> tuple[auto_fix.FixerProfile, ...]:
-    """Primary worker first, then each other worker adapter, all at prime/heavy."""
-    return tuple(auto_fix.FixerProfile(name, "prime", "heavy")
-                 for name in cfg.adapter_names)
+    return _FixerProfile(cfg.adapter_names[0], task.model, effort)
 
 
 def _auto_fix_adapter(
@@ -1973,9 +2130,6 @@ def _auto_fix_repair_briefs(
     additions = "\n".join(
         f"- {item.fingerprint} {item.task_id}: {item.path} ({item.path_state})"
         for item in state.approved_scope_additions) or "- none"
-    profiles = "\n".join(
-        f"- {item.adapter}/{item.model}/{item.effort}"
-        for item in state.consumed_fixer_profiles) or "- none"
     fingerprints = state.current_finding_fingerprints
     briefs = []
     implicated = list(dict.fromkeys(
@@ -1991,8 +2145,7 @@ def _auto_fix_repair_briefs(
             f"{focused_evidence or '(none)'}\n\n"
             f"Approved scope additions:\n{additions}\n\n"
             "Relevant cumulative diff:\n"
-            f"{_auto_fix_task_diff(cfg, task)}\n\n"
-            f"Prior fixer identities:\n{profiles}"
+            f"{_auto_fix_task_diff(cfg, task)}"
         )
         briefs.append(auto_fix.RepairBrief(task.id, fingerprints, brief))
     return tuple(briefs)
@@ -2379,78 +2532,18 @@ def _auto_fix_cascade_tasks(plan: Plan, implicated: list[str]) -> list[Task]:
             if task.id in selected and task.status != "SKIP"]
 
 
-def _auto_fix_profiles_are_exhausted(
-        cfg: Config, state: auto_fix.AutoFixState,
-        tasks: list[Task]) -> bool:
-    used = {(item.adapter, item.model, item.effort)
-            for item in state.consumed_fixer_profiles}
-    escalations = _auto_fix_escalation_profiles(cfg)
-    return bool(tasks) and all(not any(
-        (candidate.adapter, candidate.model, candidate.effort) not in used
-        for candidate in ((_auto_fix_profile_for_task(cfg, task),)
-                          + escalations))
-        for task in tasks)
+def _auto_fix_finish_rounds_exhausted(state: auto_fix.AutoFixState) -> int:
+    """The finite review-round sequence ran out; stop without another round.
 
-
-def _auto_fix_round_assignments(
-        state: auto_fix.AutoFixState,
-        repair_tasks: list[Task],
-        ) -> list[tuple[Task, auto_fix.FixerProfile | None]] | None:
-    """Recover a wholly not-started round, or request a fresh finite round."""
-    durable = state.repair_round_assignments
-    if not durable:
-        return None
-    by_task = {item.task_id: item for item in durable}
-    current = [by_task.get(task.id) for task in repair_tasks]
-    if not any(item is not None for item in current):
-        return None
-    if any(item is not None and item.attempted for item in current):
-        return None
-    return [
-        (task, item.profile if item is not None else None)
-        for task, item in zip(repair_tasks, current)
-    ]
-
-
-def _auto_fix_mark_assignment_attempted(
-        state: auto_fix.AutoFixState, task_id: str, attempted: bool,
-        ) -> auto_fix.AutoFixState:
-    """Update one durable child-start witness without changing its profile."""
-    matches = [item for item in state.repair_round_assignments
-               if item.task_id == task_id]
-    if len(matches) != 1:
-        raise AssentError(
-            f"Auto-fix repair round has no exact assignment for {task_id}")
-    assignments = tuple(
-        replace(item, attempted=attempted) if item.task_id == task_id else item
-        for item in state.repair_round_assignments)
-    return auto_fix.with_repair_round_assignments(state, assignments)
-
-
-def _auto_fix_finish_exhausted(
-        cfg: Config, tasks: list[Task], now: Callable[[], datetime]) -> int:
-    """Terminate nonzero with durable BLOCKED evidence and no new repair round."""
-    for task in tasks:
-        fresh = parse_task_file(task.path)
-        if fresh.status != "BLOCKED":
-            set_status(task.path, "BLOCKED")
-        if not any(entry.get("event") == "auto_fix_exhausted"
-                   for entry in read_entries(task.journal_path)):
-            append_entry(
-                task.journal_path, by="scheduler", event="auto_fix_exhausted",
-                summary="Automatic repair profiles exhausted; task remains BLOCKED",
-                detail=("The folder-global finite fixer sequence has no unused "
-                        "profile. Source edits, scope amendments, findings, repair "
-                        "briefs, and journals were preserved; no further mutation "
-                        "round or interactive adjudication was started."),
-                time_str=now().isoformat(timespec="seconds"))
-    gitops.commit_if_dirty(
-        cfg.root,
-        _checkpoint_subject(
-            cfg, "auto", tasks[0], "BLOCKED (auto-fix profiles exhausted)"),
-        cfg.git_excludes)
-    print("Auto-fix profiles exhausted; unresolved tasks remain BLOCKED and "
-          "all evidence was preserved without another mutation round.")
+    Nothing is reverted, reopened, or re-marked: the durable finding ledger,
+    every edit a round made, and each task's own status stay exactly as the
+    last round left them.  Turning this boundary into its own human-facing
+    report state is the following task's job; this is the single hand-off point
+    it replaces.
+    """
+    print(f"Auto-fix review rounds exhausted after {state.review_round_index} "
+          "round(s); every finding, edit, and journal was preserved without "
+          "another round.")
     return 1
 
 
@@ -2502,7 +2595,7 @@ def _run_auto_fix_repairs(
         now: Callable[[], datetime],
         trusted_plan: Plan | None = None,
         trusted_contracts: dict[str, str] | None = None) -> int:
-    """Consume the finite worker capability sequence until review passes or hands off."""
+    """Walk the finite review-round sequence until a round passes or it runs out."""
     state_path = auto_fix.auto_fix_state_path(cfg)
     recovery_error = _auto_fix_recovery_config_error(cfg, state)
     if recovery_error is not None:
@@ -2574,6 +2667,8 @@ def _run_auto_fix_repairs(
                 gate_passes=round_passes)
             if outcome.code == 0:
                 return 0
+            if outcome.rounds_exhausted:
+                return _auto_fix_finish_rounds_exhausted(state)
             if outcome.state is None or outcome.human_reason is not None:
                 return outcome.code
             state = outcome.state
@@ -2587,12 +2682,6 @@ def _run_auto_fix_repairs(
             continue
 
         if state.phase == "NEEDS_REPAIR":
-            prospective = _auto_fix_cascade_tasks(plan, implicated)
-            if _auto_fix_profiles_are_exhausted(cfg, state, prospective):
-                owners = [task for task in prospective
-                          if task.id in set(implicated)]
-                return _auto_fix_finish_exhausted(
-                    cfg, owners or prospective, now)
             reason = "Automatic repair of durable folder-review findings"
             if rework.rework_tasks_locked(cfg, implicated, reason) != 0:
                 return 1
@@ -2609,62 +2698,20 @@ def _run_auto_fix_repairs(
                   "the current statuses for human adjudication.")
             return 1
 
-        # Select the capability level once for the whole repair round.  Every
-        # reopened task compares against the same pre-round history, so one
-        # task consuming a shared normal identity cannot force its siblings or
-        # dependency cascade to escalate.  Persist the complete round before
-        # its first write-capable session; an interrupted round therefore
-        # remains finite on restart.
-        resuming_not_started = bool(state.repair_round_assignments)
-        round_assignments = _auto_fix_round_assignments(state, repair_tasks)
-        if round_assignments is None:
-            resuming_not_started = False
-            used_before_round = {
-                (item.adapter, item.model, item.effort)
-                for item in state.consumed_fixer_profiles}
-            escalations = _auto_fix_escalation_profiles(cfg)
-            round_assignments = []
-            new_profiles: list[auto_fix.FixerProfile] = []
-            new_identities: set[tuple[str, str, str]] = set()
-            for task in repair_tasks:
-                candidates = (_auto_fix_profile_for_task(cfg, task),) + escalations
-                profile = next((candidate for candidate in candidates
-                                if (candidate.adapter, candidate.model,
-                                    candidate.effort) not in used_before_round), None)
-                round_assignments.append((task, profile))
-                if profile is None:
-                    continue
-                identity = (profile.adapter, profile.model, profile.effort)
-                if identity not in new_identities:
-                    new_profiles.append(profile)
-                    new_identities.add(identity)
-            if all(profile is None for _task, profile in round_assignments):
-                print("Auto-fix profiles exhausted; unresolved state and evidence "
-                      "were preserved for human adjudication.")
-                return 1
-            if new_profiles:
-                state = auto_fix.replace_fixer_profiles(
-                    state, state.consumed_fixer_profiles + tuple(new_profiles))
-            durable_assignments = tuple(
-                auto_fix.RepairRoundAssignment(
-                    task.id, profile.adapter, profile.model, profile.effort,
-                    attempted=False)
-                for task, profile in round_assignments if profile is not None)
-            state = auto_fix.with_repair_round_assignments(
-                state, durable_assignments)
-            state = auto_fix.with_worker_dispositions(state, ())
-            auto_fix.write_auto_fix_state(state_path, state)
+        # The configured review-round sequence, not a worker-identity ladder,
+        # is what makes this loop finite, so every reopened task is repaired
+        # under its own ordinary profile and nothing is consumed: an
+        # interrupted round resumes on exactly the same identity.
+        state = auto_fix.with_worker_dispositions(state, ())
+        auto_fix.write_auto_fix_state(state_path, state)
 
         failures: list[tuple[Task, str]] = []
         round_blockers: list[_AutoFixBlockerEvidence] = []
         round_passes = _FocusedGateLedger()
         round_dispositions: list[auto_fix.WorkerDisposition] = []
-        for task, profile in round_assignments:
-            if profile is None:
-                failures.append((task, "No unused fixer profile remains"))
-                continue
-
+        for task in repair_tasks:
             try:
+                profile = _auto_fix_profile_for_task(cfg, task)
                 fixer = _auto_fix_adapter(rotation, profile.adapter)
                 session, errors = auto_fix_fixer_capability_errors(
                     cfg, fixer, profile.adapter, profile.model, profile.effort)
@@ -2673,31 +2720,17 @@ def _run_auto_fix_repairs(
                                      + "; ".join(errors)))
                     continue
                 assert session is not None
-                event = ("auto_fix_attempt_resume" if resuming_not_started
-                         else "auto_fix_attempt")
-                summary = (
-                    "Retrying a repair assignment whose AI child did not start: "
-                    if resuming_not_started else
-                    "Bounded automatic repair profile consumed: ")
                 append_entry(
-                    task.journal_path, by="scheduler", event=event,
-                    summary=(summary
+                    task.journal_path, by="scheduler", event="auto_fix_attempt",
+                    summary=("Bounded automatic repair session: "
                              + f"{profile.adapter}/{profile.model}/{profile.effort}"),
-                    detail=(
-                        "The exact pre-persisted assignment is being retried after "
-                        "a synchronous process-creation failure proved that no AI "
-                        "child started. No additional profile was consumed."
-                        if resuming_not_started else
-                        "The full round and its profiles were durably persisted "
-                        "before this write-capable fixer session; all edits and "
-                        "later gate evidence are preserved."),
+                    detail=("The durable finding ledger and repair brief were "
+                            "persisted before this write-capable fixer session; "
+                            "all edits and later gate evidence are preserved."),
                     agent=session.agent,
                     requested_model=session.requested_model,
                     requested_effort=session.requested_effort,
                     time_str=now().isoformat(timespec="seconds"))
-                state = _auto_fix_mark_assignment_attempted(
-                    state, task.id, True)
-                auto_fix.write_auto_fix_state(state_path, state)
                 task_rotation = _AdapterRotation(
                     (profile.adapter,), (fixer,))
                 session_state = _SessionState()
@@ -2723,13 +2756,10 @@ def _run_auto_fix_repairs(
                 if failure is not None:
                     failures.append((task, failure))
             except _AdapterProcessCreationError as e:
-                state = _auto_fix_mark_assignment_attempted(
-                    state, task.id, False)
-                auto_fix.write_auto_fix_state(state_path, state)
                 active.task = None
                 active.session = None
                 print("Auto-fix fixer infrastructure failure before an AI child "
-                      f"started; the same assignment remains resumable: {e}")
+                      f"started; the same repair remains resumable: {e}")
                 return 1
             except OSError as e:
                 if active.session is not None and active.session.identity is not None:
@@ -2740,8 +2770,8 @@ def _run_auto_fix_repairs(
                 active.task = None
                 active.session = None
                 print("Auto-fix fixer infrastructure failure after the child-start "
-                      "boundary could not be excluded; progress and the consumed "
-                      f"assignment were preserved: {e}")
+                      "boundary could not be excluded; progress and the durable "
+                      f"repair state were preserved: {e}")
                 return 1
 
         if failures:
@@ -2750,6 +2780,8 @@ def _run_auto_fix_repairs(
                     cfg, once=False, task_id=None,
                     injected_adapter=injected_reviewer, sleep=sleep, now=now,
                     blockers=tuple(round_blockers))
+                if outcome.rounds_exhausted:
+                    return _auto_fix_finish_rounds_exhausted(state)
                 if outcome.state is None or outcome.human_reason is not None:
                     return outcome.code
                 state = outcome.state

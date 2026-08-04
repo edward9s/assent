@@ -33,6 +33,23 @@ from tests.test_contracts import GlobalContractsMixin
 
 
 class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
+    @staticmethod
+    def review_rounds(count, *names):
+        """A [auto_fix.review] adapter list of exactly `count` review rounds.
+
+        The merged reviewer-fixer loop is finite because it walks this list
+        position by position, so a case needing N reviewer sessions must
+        configure N rounds.
+        """
+        adapters = list(names) or ["claude"] * count
+        rendered = ", ".join(json.dumps(name) for name in adapters)
+        return f"\n[auto_fix.review]\nadapter = [{rendered}]\n"
+
+    @staticmethod
+    def review_session_agents(output):
+        """The adapter each review round actually ran under, in order."""
+        return re.findall(r"(?m)^Auto-fix review session: (\S+) \|", output)
+
     def repair_done(self, task_path, files=None, *, requested_model="lite"):
         def step(prompt):
             for rel, content in (files or {}).items():
@@ -71,13 +88,13 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 transition_evidence="The repair diff still reproduces the issue."),
         )))
 
-    def test_review_failure_reopens_repairs_and_reviews_with_one_normal_profile(self):
+    def test_review_failure_reopens_repairs_and_reviews_with_the_task_profile(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(2))
 
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "value is stale", "expected repaired value")
@@ -113,8 +130,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(parse_task_file(task_path).status, "DONE")
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
-        self.assertEqual(state.consumed_fixer_profiles,
-                         (auto_fix.FixerProfile("claude", "lite", "normal"),))
+        # The recheck ran as the second configured round and, having passed,
+        # leaves the position on the round that decided it.
+        self.assertEqual(state.review_round_index, 1)
         self.assertEqual(len(worker.calls), 1)
         self.assertEqual(len(reviewer.calls), 2)
         repair_prompt = worker.calls[0][0]
@@ -124,7 +142,6 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertIn(finding.evidence, repair_prompt)
         self.assertIn(finding.recommendation, repair_prompt)
         self.assertIn("Focused command evidence", repair_prompt)
-        self.assertIn("Prior fixer identities", repair_prompt)
         attempt = next(entry for entry in read_entries(journal_path_for(task_path))
                        if entry["event"] == "auto_fix_attempt")
         self.assertEqual((attempt["agent"], attempt["requested_model"],
@@ -137,7 +154,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(2))
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "value is stale", "expected repaired value")
         command = parse_task_file(task_path).verify
@@ -177,13 +194,13 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
 
-    def test_invalid_or_status_incompatible_disposition_consumes_attempt(self):
+    def test_invalid_or_status_incompatible_disposition_reopens_the_task(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(3))
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "value is stale", "review reproduced it")
         reviewer = ScriptedAdapter([
@@ -210,19 +227,19 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
         worker = ScriptedAdapter([
             incompatible,
-            self.repair_done(
-                task_path, {"src/value.txt": "fixed\n"},
-                requested_model="prime"),
+            self.repair_done(task_path, {"src/value.txt": "fixed\n"}),
         ])
         self.assertEqual(self.run_quiet(
             cfg, adapter=worker, auto_fix_adapter=reviewer,
             auto_fix=True), 0)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.consumed_fixer_profiles, (
-            auto_fix.FixerProfile("claude", "lite", "normal"),
-            auto_fix.FixerProfile("claude", "prime", "heavy"),
-        ))
-        self.assertEqual(len(worker.calls), 2)
+        self.assertEqual(state.verdict, "PASS")
+        self.assertEqual(state.review_round_index, 2)
+        # Every repair keeps the reopened task's own ordinary profile; only the
+        # review round position advances.
+        self.assertEqual(
+            [(model, effort) for _prompt, model, effort in worker.calls],
+            [("lite", "medium"), ("lite", "medium")])
         entries = read_entries(journal_path_for(task_path))
         self.assertTrue(any(
             "Repair disposition gate failed" in str(item.get("summary", ""))
@@ -236,7 +253,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         (source / "base.py").write_text("base = 1\n", encoding="utf-8")
         (source / "needed.py").write_text("value = 1\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(2))
 
         finding = auto_fix.ReviewFinding(
             "t001", "src/needed.py", "Required source file was omitted from scope",
@@ -302,7 +319,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         (source / "base.py").write_text("old\n", encoding="utf-8")
         (source / "needed.py").write_text("value = 1\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(3))
 
         stale = auto_fix.ReviewFinding(
             "t001", "src/base.py", "base value is stale",
@@ -334,8 +351,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             self.assertIn("src/needed.py (existing_file)", prompt)
             self.assertIn("src/needed.py", parse_task_file(task_path).scope)
             return self.repair_done(
-                task_path, {"src/needed.py": "value = 2\n"},
-                requested_model="prime")(prompt)
+                task_path, {"src/needed.py": "value = 2\n"})(prompt)
 
         worker = ScriptedAdapter([
             self.repair_done(task_path, {"src/base.py": "new\n"}),
@@ -549,13 +565,13 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(len(worker.calls), 1)
         self.assertEqual(len(reviewer.calls), 1)
 
-    def test_same_finding_advances_from_normal_identity_to_prime_heavy(self):
+    def test_a_repeated_finding_keeps_the_task_profile_and_advances_the_round(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(3))
 
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "still stale", "review reproduced the issue")
@@ -569,20 +585,19 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         ])
         worker = ScriptedAdapter([
             self.repair_done(task_path, {"src/value.txt": "partial\n"}),
-            self.repair_done(task_path, {"src/value.txt": "fixed\n"},
-                         requested_model="prime"),
+            self.repair_done(task_path, {"src/value.txt": "fixed\n"}),
         ])
 
         self.assertEqual(self.run_quiet(
             cfg, adapter=worker, auto_fix_adapter=reviewer,
             auto_fix=True), 0)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.consumed_fixer_profiles, (
-            auto_fix.FixerProfile("claude", "lite", "normal"),
-            auto_fix.FixerProfile("claude", "prime", "heavy"),
-        ))
+        self.assertEqual(state.verdict, "PASS")
+        # No worker-identity ladder remains: the same finding twice is repaired
+        # twice under t001's ordinary profile, and only the round index moves.
         self.assertEqual([(model, effort) for _prompt, model, effort in worker.calls],
-                         [("lite", "medium"), ("prime", "high")])
+                         [("lite", "medium"), ("lite", "medium")])
+        self.assertEqual(state.review_round_index, 2)
 
     def test_multi_task_finding_round_gives_every_task_the_normal_profile(self):
         first = self.write_task(
@@ -594,7 +609,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         (source / "one.txt").write_text("old one\n", encoding="utf-8")
         (source / "two.txt").write_text("old two\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(2))
         failed = auto_fix.review_record_json(auto_fix.ReviewRecord("FAIL", (
             auto_fix.ReviewFinding(
                 "t001", "src/one.txt", "first blocker", "first evidence"),
@@ -618,8 +633,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             [(model, effort) for _prompt, model, effort in worker.calls],
             [("lite", "medium"), ("lite", "medium")])
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.consumed_fixer_profiles, (
-            auto_fix.FixerProfile("claude", "lite", "normal"),))
+        self.assertEqual(state.verdict, "PASS")
+        self.assertEqual(state.review_round_index, 1)
 
     def test_dependency_cascade_shares_the_same_normal_repair_round(self):
         first = self.write_task(
@@ -632,7 +647,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         (source / "dependent.txt").write_text(
             "old dependent\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(2))
         failed = auto_fix.review_record_json(auto_fix.ReviewRecord("FAIL", (
             auto_fix.ReviewFinding(
                 "t001", "src/base.txt", "base blocker", "base evidence"),
@@ -655,10 +670,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             [("lite", "medium"), ("lite", "medium")])
         self.assertEqual(parse_task_file(second).status, "DONE")
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.consumed_fixer_profiles, (
-            auto_fix.FixerProfile("claude", "lite", "normal"),))
+        self.assertEqual(state.verdict, "PASS")
+        self.assertEqual(state.review_round_index, 1)
 
-    def test_interrupted_multi_task_round_restarts_at_the_next_profile(self):
+    def test_interrupted_multi_task_round_resumes_on_the_same_profile(self):
         first = self.write_task(
             1, status="DONE", scope=("src/one.txt",))
         second = self.write_task(
@@ -668,7 +683,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         (source / "one.txt").write_text("old one\n", encoding="utf-8")
         (source / "two.txt").write_text("old two\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(2))
         failed = auto_fix.review_record_json(auto_fix.ReviewRecord("FAIL", (
             auto_fix.ReviewFinding(
                 "t001", "src/one.txt", "first blocker", "first evidence"),
@@ -691,35 +706,33 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             auto_fix_adapter=reviewer, auto_fix=True), 130)
         interrupted = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(interrupted.consumed_fixer_profiles, (
-            auto_fix.FixerProfile("claude", "lite", "normal"),))
+        self.assertEqual(interrupted.phase, "REPAIRING")
+        self.assertEqual(interrupted.review_round_index, 1)
 
         resumed = ScriptedAdapter([
-            self.repair_done(first, {"src/one.txt": "new one\n"},
-                         requested_model="prime"),
-            self.repair_done(second, {"src/two.txt": "new two\n"},
-                         requested_model="prime"),
+            self.repair_done(first, {"src/one.txt": "new one\n"}),
+            self.repair_done(second, {"src/two.txt": "new two\n"}),
         ])
         self.assertEqual(self.run_quiet(
             cfg, adapter=resumed, auto_fix_adapter=reviewer,
             auto_fix=True), 0)
+        # Nothing was consumed by the interrupted round, so the resumed one
+        # repairs under exactly the same ordinary identity.
         self.assertEqual(
             [(model, effort) for _prompt, model, effort in resumed.calls],
-            [("prime", "high"), ("prime", "high")])
+            [("lite", "medium"), ("lite", "medium")])
         completed = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(completed.consumed_fixer_profiles, (
-            auto_fix.FixerProfile("claude", "lite", "normal"),
-            auto_fix.FixerProfile("claude", "prime", "heavy"),
-        ))
+        self.assertEqual(completed.verdict, "PASS")
+        self.assertEqual(completed.review_round_index, 1)
 
-    def test_process_creation_failure_reuses_same_persisted_assignment(self):
+    def test_process_creation_failure_leaves_the_same_repair_resumable(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(2))
 
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "value is stale",
@@ -746,13 +759,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
         failed_start = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
-        profile = auto_fix.FixerProfile("claude", "lite", "normal")
         self.assertEqual(failed_start.phase, "REPAIRING")
-        self.assertEqual(failed_start.consumed_fixer_profiles, (profile,))
-        self.assertEqual(failed_start.repair_round_assignments, (
-            auto_fix.RepairRoundAssignment(
-                "t001", "claude", "lite", "normal", attempted=False),
-        ))
+        self.assertEqual(failed_start.review_round_index, 1)
         self.assertEqual(parse_task_file(task_path).status, "TODO")
         entries = read_entries(journal_path_for(task_path))
         self.assertEqual(sum(
@@ -768,7 +776,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             auto_fix=True), 0)
         completed = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(completed.consumed_fixer_profiles, (profile,))
+        self.assertEqual(completed.verdict, "PASS")
         self.assertEqual(len(worker.calls), 2)
         self.assertEqual(
             [(model, effort) for _prompt, model, effort in worker.calls],
@@ -777,17 +785,15 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(sum(
             item.get("event") == "rework_requested" for item in entries), 1)
         self.assertEqual(sum(
-            item.get("event") == "auto_fix_attempt" for item in entries), 1)
-        self.assertEqual(sum(
-            item.get("event") == "auto_fix_attempt_resume" for item in entries), 1)
+            item.get("event") == "auto_fix_attempt" for item in entries), 2)
 
-    def test_post_start_oserror_consumes_assignment_and_uses_next_profile(self):
+    def test_post_start_oserror_keeps_progress_and_reuses_the_profile(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(2))
 
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "value is stale",
@@ -806,18 +812,14 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
         worker = ScriptedAdapter([
             failed_after_start,
-            self.repair_done(
-                task_path, {"src/value.txt": "new\n"},
-                requested_model="prime"),
+            self.repair_done(task_path, {"src/value.txt": "new\n"}),
         ])
         self.assertEqual(self.run_quiet(
             cfg, adapter=worker, auto_fix_adapter=reviewer,
             auto_fix=True), 1)
         attempted = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(attempted.repair_round_assignments, (
-            auto_fix.RepairRoundAssignment(
-                "t001", "claude", "lite", "normal", attempted=True),))
+        self.assertEqual(attempted.phase, "REPAIRING")
         self.assertEqual(parse_task_file(task_path).status, "WIP")
 
         self.assertEqual(self.run_quiet(
@@ -825,21 +827,18 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             auto_fix=True), 0)
         completed = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(completed.consumed_fixer_profiles, (
-            auto_fix.FixerProfile("claude", "lite", "normal"),
-            auto_fix.FixerProfile("claude", "prime", "heavy"),
-        ))
-        entries = read_entries(journal_path_for(task_path))
-        self.assertEqual(sum(
-            item.get("event") == "auto_fix_attempt_resume" for item in entries), 0)
+        self.assertEqual(completed.verdict, "PASS")
+        self.assertEqual(
+            [(model, effort) for _prompt, model, effort in worker.calls],
+            [("lite", "medium"), ("lite", "medium")])
 
-    def test_profile_exhaustion_ends_blocked_without_another_mutation_round(self):
+    def test_round_list_exhaustion_stops_without_another_round(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(2))
 
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "persistent blocker", "still reproducible")
@@ -848,27 +847,147 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         reviewer = ScriptedAdapter([
             TaskResult(0, failed, False, None),
             TaskResult(0, self.recheck_record(finding), False, None),
-            TaskResult(0, self.recheck_record(finding), False, None),
         ])
         worker = ScriptedAdapter([
             self.repair_done(task_path, {"src/value.txt": "attempt one\n"}),
-            self.repair_done(task_path, {"src/value.txt": "attempt two\n"},
-                         requested_model="prime"),
+            self.repair_done(task_path, {"src/value.txt": "attempt two\n"}),
         ])
 
-        self.assertEqual(self.run_quiet(
-            cfg, adapter=worker, auto_fix_adapter=reviewer,
-            auto_fix=True), 1)
-        self.assertEqual(parse_task_file(task_path).status, "BLOCKED")
-        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(len(state.consumed_fixer_profiles), 2)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=worker, auto_fix_adapter=reviewer,
+                auto_fix=True), 1)
+        # Both configured rounds ran, so no third reviewer session starts; the
+        # task keeps whatever status its own closeout gave it.
+        self.assertEqual(len(reviewer.calls), 2)
         self.assertEqual(len(worker.calls), 2)
-        self.assertEqual(len(reviewer.calls), 3)
+        self.assertEqual(parse_task_file(task_path).status, "DONE")
+        self.assertIn("Auto-fix review rounds exhausted after 2 round(s)",
+                      out.getvalue())
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.review_round_index, 2)
+        self.assertEqual(state.current_finding_fingerprints,
+                         (auto_fix.finding_fingerprint(finding),))
         entries = read_entries(journal_path_for(task_path))
-        self.assertEqual(sum(
-            item.get("event") == "rework_requested" for item in entries), 2)
-        self.assertEqual(sum(
-            item.get("event") == "auto_fix_exhausted" for item in entries), 1)
+        self.assertFalse(any(
+            item.get("event") == "auto_fix_exhausted" for item in entries))
+
+    def test_fixed_rounds_walk_the_configured_adapter_list_positionally(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config=self.review_rounds(
+            3, "claude", "codex", "claude"))
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "value is stale",
+            "The focused behavior still reads the stale value.",
+            recommendation="Write the repaired value.")
+        fingerprint = auto_fix.finding_fingerprint(finding)
+        repaired = auto_fix.ReviewFinding(
+            finding.task_id, finding.path, finding.summary, finding.evidence,
+            kind=finding.kind, recommendation=finding.recommendation,
+            transition="still_present", prior_fingerprint=fingerprint,
+            transition_evidence="The same blocker was repaired again in place.")
+
+        def fix(text, expected_round, expected_remaining):
+            def step(prompt):
+                self.assertIn(
+                    f"This is review round {expected_round} of 3.", prompt)
+                self.assertIn(
+                    "Review rounds remaining after this one: "
+                    f"{expected_remaining}.", prompt)
+                self.assertIn("you may repair it directly", prompt)
+                (self.execution_root() / "src" / "value.txt").write_text(
+                    text, encoding="utf-8")
+                return TaskResult(0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord(
+                        "FIXED",
+                        (finding if expected_round == 1 else repaired,))),
+                    False, None)
+            return step
+
+        def final(prompt):
+            self.assertIn("This is review round 3 of 3.", prompt)
+            self.assertIn("Review rounds remaining after this one: 0.", prompt)
+            self.assertIn("This is the FINAL review round.", prompt)
+            self.assertIn("No further review will occur after this one.", prompt)
+            return TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)
+
+        reviewer = ScriptedAdapter([
+            fix("first repair\n", 1, 2),
+            fix("second repair\n", 2, 1),
+            final,
+        ])
+        worker = ScriptedAdapter([])
+
+        out = io.StringIO()
+        with mock.patch("assent.preflight.get_adapter", return_value=reviewer), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=worker, auto_fix_adapter=reviewer,
+                auto_fix=True), 0)
+
+        # Position, not identity history, selects each round: the repeated
+        # third "claude" entry is used again rather than treated as consumed.
+        self.assertEqual(self.review_session_agents(out.getvalue()),
+                         ["claude", "codex", "claude"])
+        self.assertEqual(len(worker.calls), 0)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
+        self.assertEqual(state.reviewer_adapter, "claude")
+        self.assertEqual(state.review_round_index, 2)
+        self.assertEqual(parse_task_file(task_path).status, "DONE")
+        self.assertEqual(
+            (self.execution_root() / "src" / "value.txt").read_text(
+                encoding="utf-8"),
+            "second repair\n")
+        self.assertTrue(any(
+            "review round 1 repaired its own finding" in subject
+            for subject in self.subjects()))
+
+    def test_a_fixed_round_writing_outside_the_named_task_scope_is_refused(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        (self.root / "other").mkdir()
+        (self.root / "other" / "keep.txt").write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config=self.review_rounds(2))
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "value is stale",
+            "The focused behavior still reads the stale value.")
+
+        def repair_outside_scope(_prompt):
+            (self.execution_root() / "other" / "keep.txt").write_text(
+                "reviewer overreach\n", encoding="utf-8")
+            return TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FIXED", (finding,))), False, None)
+
+        reviewer = ScriptedAdapter([repair_outside_scope])
+        worker = ScriptedAdapter([])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=worker, auto_fix_adapter=reviewer,
+                auto_fix=True), 1)
+        self.assertIn("wrote outside the declared scope", out.getvalue())
+        self.assertIn("other/keep.txt", out.getvalue())
+        # The verdict is not honored and no durable state records it, while the
+        # exact edit is preserved for a human.
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
+        self.assertEqual(
+            (self.execution_root() / "other" / "keep.txt").read_text(
+                encoding="utf-8"),
+            "reviewer overreach\n")
+        self.assertEqual(len(reviewer.calls), 1)
 
 
 class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):

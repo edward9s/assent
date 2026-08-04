@@ -50,6 +50,14 @@ REPAIR_DISPOSITION_PREFIX = "ASSENT_REPAIR_DISPOSITION "
 AUTO_FIX_PHASES = frozenset({
     "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
 })
+# A merged reviewer-fixer round that repaired what it found leaves the folder
+# waiting for the next round's independent confirmation; only a reported-but-
+# unrepaired blocker still hands the work to a separate repair session.
+_PHASE_FOR_VERDICT = {
+    "PASS": "COMPLETE",
+    "FIXED": "AWAITING_REVIEW",
+    "FAIL": "NEEDS_REPAIR",
+}
 # Basenames no reviewed scope amendment may authorize, at any directory depth:
 # the instruction and Git-control files that govern how a session behaves, and
 # Assent's own derived management artifacts.
@@ -321,8 +329,10 @@ class AutoFixState:
     failure_trigger: str | None = None
     # The 0-based position in the configured ``[auto_fix.review]`` adapter list
     # the folder's next review round must use.  A folder's first review is 0,
-    # and every recorded round result advances it by exactly one, so the loop
-    # terminates finitely once it reaches the end of the configured list.
+    # and a round that leaves anything for another round to confirm advances it
+    # by exactly one, so the loop terminates finitely once it reaches the end of
+    # the configured list.  A settled PASS needs no further round and leaves the
+    # position on the round that decided it.
     review_round_index: int = 0
     reviewer_recommendations: tuple[ReviewerRecommendation, ...] = ()
     approved_scope_additions: tuple[ApprovedScopeAddition, ...] = ()
@@ -1643,6 +1653,14 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
         raise AssentError(f"Unable to read auto-fix state {path}: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise AssentError(f"Auto-fix state is not valid TOML ({path}): {e}") from e
+    version = data.get("version")
+    if type(version) is not int or version != AUTO_FIX_STATE_VERSION:
+        # Derived folder memory is deletable, never migrated: a record written
+        # under an earlier schema refuses instead of being silently upgraded.
+        raise AssentError(
+            f"Auto-fix state version must be {AUTO_FIX_STATE_VERSION} "
+            f"(found {version!r} in {path}); delete the derived state to "
+            "review the folder again")
     _require_exact_keys(data, _STATE_KEYS, "Auto-fix state")
 
     findings: list[PersistedFinding] = []
@@ -1674,19 +1692,6 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
             raise AssentError(
                 f"Auto-fix state observed_states[{index}] has an invalid structure: {e}") from e
 
-    profiles: list[FixerProfile] = []
-    for index, item in enumerate(_table_list(
-            data, "consumed_fixer_profiles",
-            "Auto-fix state consumed_fixer_profiles")):
-        _require_exact_keys(item, _FIXER_PROFILE_KEYS,
-                            f"Auto-fix state consumed_fixer_profiles[{index}]")
-        try:
-            profiles.append(FixerProfile(**item))
-        except TypeError as e:
-            raise AssentError(
-                "Auto-fix state consumed_fixer_profiles"
-                f"[{index}] has an invalid structure: {e}") from e
-
     def records(key: str, keys: set[str], record_type: type) -> list:
         result = []
         for index, item in enumerate(_table_list(data, key, f"Auto-fix state {key}")):
@@ -1714,9 +1719,6 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
     dispositions = records(
         "worker_dispositions", _WORKER_DISPOSITION_KEYS, WorkerDisposition)
     briefs = records("repair_briefs", _REPAIR_BRIEF_KEYS, RepairBrief)
-    assignments = records(
-        "repair_round_assignments", _REPAIR_ROUND_ASSIGNMENT_KEYS,
-        RepairRoundAssignment)
     plan_transitions = records(
         "plan_digest_transitions", _PLAN_DIGEST_TRANSITION_KEYS,
         PlanDigestTransition)
@@ -1726,13 +1728,11 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
     scalar = dict(data)
     del scalar["findings"]
     del scalar["observed_states"]
-    del scalar["consumed_fixer_profiles"]
     del scalar["reviewer_recommendations"]
     del scalar["approved_scope_additions"]
     del scalar["scope_amendments"]
     del scalar["worker_dispositions"]
     del scalar["repair_briefs"]
-    del scalar["repair_round_assignments"]
     del scalar["plan_digest_transitions"]
     del scalar["review_transitions"]
     if scalar["failure_trigger"] == "":
@@ -1740,12 +1740,10 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
     try:
         state = AutoFixState(
             findings=tuple(findings), observed_states=tuple(observed),
-            consumed_fixer_profiles=tuple(profiles),
             reviewer_recommendations=tuple(recommendations),
             approved_scope_additions=tuple(scope_additions),
             scope_amendments=tuple(scope_amendments),
             worker_dispositions=tuple(dispositions), repair_briefs=tuple(briefs),
-            repair_round_assignments=tuple(assignments),
             plan_digest_transitions=tuple(plan_transitions),
             review_transitions=tuple(review_transitions), **scalar)
     except TypeError as e:
@@ -1784,7 +1782,7 @@ def state_for_review(
         failure_trigger: str | None = None,
         worker_dispositions: tuple[WorkerDisposition, ...] | None = None,
         repair_briefs: tuple[RepairBrief, ...] | None = None,
-        repair_round_assignments: tuple[RepairRoundAssignment, ...] | None = None,
+        review_round_index: int | None = None,
         plan_digest_transitions: tuple[PlanDigestTransition, ...] | None = None,
         approved_scope_additions: tuple[ApprovedScopeAddition, ...] | None = None,
         scope_amendments: tuple[ScopeAmendment, ...] | None = None,
@@ -1822,7 +1820,6 @@ def state_for_review(
             previous=None if review_stage == "initial" else previous)
     prior_findings = previous.findings if previous is not None else ()
     prior_observed = previous.observed_states if previous is not None else ()
-    prior_profiles = previous.consumed_fixer_profiles if previous is not None else ()
     prior_scope = previous.approved_scope_additions if previous is not None else ()
     prior_amendments = previous.scope_amendments if previous is not None else ()
     prior_review_transitions = previous.review_transitions if previous is not None else ()
@@ -1857,11 +1854,12 @@ def state_for_review(
         approved_scope_additions = tuple(additions)
     if scope_amendments is None:
         scope_amendments = prior_amendments
-    if repair_round_assignments is None:
-        # A reviewer decision completes the preceding mutation round. Its
-        # profiles remain in the cumulative history, while only a live
-        # REPAIRING boundary retains concrete assignments.
-        repair_round_assignments = ()
+    if review_round_index is None:
+        # A caller that records something other than a completed review round
+        # -- a scheduler-authored gate failure, for instance -- leaves the
+        # folder's round position exactly where the last round left it.
+        review_round_index = (
+            previous.review_round_index if previous is not None else 0)
     transitions = prior_review_transitions + tuple(
         ReviewTransition(
             finding_fingerprint(item), item.transition, item.prior_fingerprint,
@@ -1882,12 +1880,12 @@ def state_for_review(
         reviewer_adapter=reviewer_adapter,
         reviewer_model=reviewer_model,
         reviewer_effort=reviewer_effort,
-        phase="COMPLETE" if record.verdict == "PASS" else "NEEDS_REPAIR",
+        phase=_PHASE_FOR_VERDICT[record.verdict],
         verdict=record.verdict,
         current_finding_fingerprints=current_tuple,
         findings=tuple(ledger.values()),
         observed_states=observations,
-        consumed_fixer_profiles=prior_profiles,
+        review_round_index=review_round_index,
         review_context=review_context,
         review_stage=review_stage,
         failure_trigger=failure_trigger,
@@ -1900,7 +1898,6 @@ def state_for_review(
         repair_briefs=(
             repair_briefs if repair_briefs is not None
             else previous.repair_briefs if previous is not None else ()),
-        repair_round_assignments=repair_round_assignments,
         plan_digest_transitions=plan_digest_transitions,
         review_transitions=transitions,
     )

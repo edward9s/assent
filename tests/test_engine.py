@@ -1022,19 +1022,24 @@ class TestReworkPromptSuffix(GlobalContractsMixin, EngineTestCase):
 
 
 class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
-    def build_review(self, retry=1):
+    def build_review(self, retry=1, rounds=1):
+        # The merged reviewer-fixer loop walks this list position by position,
+        # so a case needing more than one reviewer session configures more than
+        # one round.
+        adapters = ", ".join(['"codex"'] * rounds)
         return self.build(
             retry=retry,
             extra_config=(
                 '[auto_fix.review]\n'
-                'adapter = "codex"\n'
+                f'adapter = [{adapters}]\n'
                 'model = "core"\n'
                 'effort = "heavy"\n'))
 
     def write_pending_fail(self, cfg):
         task = parse_task_file(self.plan_dir / "t001_task.e.toml")
-        review = cfg.auto_fix_review
-        self.assertIsNotNone(review)
+        rounds = cfg.auto_fix_review
+        self.assertTrue(rounds)
+        review = rounds[0]
         state = auto_fix.state_for_review(
             auto_fix.ReviewRecord("FAIL", (auto_fix.ReviewFinding(
                 task.id, "src/missing.py", "pending blocker",
@@ -1358,7 +1363,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
     def test_limited_self_blocked_attempt_is_adjudicated_without_a_fixer(self):
         task = self.write_task(1)
-        cfg = self.build_review(retry=0)
+        cfg = self.build_review(retry=0, rounds=3)
         self.commit_all()
         finding = auto_fix.ReviewFinding(
             "t001", "src/blocker.py", "Worker blocker needs repair",
@@ -1465,7 +1470,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
     def test_blocked_recheck_keeps_the_original_focused_gate_trigger(self):
         task = self.write_task(1, verify=_NEEDS_OK_TXT)
-        cfg = self.build_review(retry=0)
+        cfg = self.build_review(retry=0, rounds=3)
         self.commit_all()
         finding = auto_fix.ReviewFinding(
             "t001", "src/gate.py", "The focused gate must pass",
