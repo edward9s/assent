@@ -61,6 +61,13 @@ _configure_utf8_stdio()
 # The verification target is always the cwd the scheduler sets; under isolated execution the script body still lives in the main tree.
 ROOT = Path.cwd().resolve()
 
+# Wall-clock origin for the whole verifier, reported on both the OK and FAIL exit.
+_VERIFIER_STARTED = time.monotonic()
+
+# (unittest phase seconds, module count, resolved worker count), or None when
+# the unittest phase never ran.
+_UNITTEST_TOTALS: tuple[float, int, int] | None = None
+
 # Keep diff --check's conflict-marker detection without enforcing formatting.
 DIFF_CHECK_CONFIG = (
     "core.whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,"
@@ -68,7 +75,17 @@ DIFF_CHECK_CONFIG = (
 )
 
 
+def _print_verifier_totals() -> None:
+    """Report the timing totals once, immediately before the OK/FAIL marker."""
+    if _UNITTEST_TOTALS is not None:
+        phase_elapsed, module_count, jobs = _UNITTEST_TOTALS
+        print(f"unittest phase: {phase_elapsed:.2f}s "
+              f"across {module_count} module(s) on {jobs} worker(s)")
+    print(f"verifier total: {time.monotonic() - _VERIFIER_STARTED:.2f}s")
+
+
 def fail(message: str) -> None:
+    _print_verifier_totals()
     print(f"verify: FAIL - {message}")
     sys.exit(1)
 
@@ -137,6 +154,24 @@ def _resolve_jobs(module_count: int) -> int:
     return value
 
 
+def _print_slowest_modules(results: dict[str, tuple]) -> None:
+    """Rank the slowest ten modules, or every module when fewer than ten ran.
+
+    Ranking uses the same two-decimal duration the line below prints, so two
+    modules a reader sees as equally slow are always ordered by module name
+    rather than by a difference no printed digit shows.
+    """
+    ranked = sorted(results.items(),
+                    key=lambda item: (-round(item[1][1], 2), item[0]))
+    if len(ranked) >= 10:
+        ranked = ranked[:10]
+    print("Slowest test modules:")
+    for rank, (name, result) in enumerate(ranked, start=1):
+        returncode, elapsed = result[0], result[1]
+        status = "PASS" if returncode == 0 else "FAIL"
+        print(f"  {rank}. {name} {elapsed:.2f}s {status}")
+
+
 def run_unittest_parallel(start_dir: str = "tests", jobs: int | None = None) -> None:
     """Run each start_dir/test_*.py module in its own subprocess, concurrently.
 
@@ -172,18 +207,25 @@ def run_unittest_parallel(start_dir: str = "tests", jobs: int | None = None) -> 
             returncode = 1
         return returncode, elapsed, stdout, stderr
 
+    # Live lines follow completion order, so a long verification never looks
+    # silent; the deterministic ranking below is what tests and readers compare.
     results = {}
+    phase_started = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {executor.submit(run_module, name): name for name in modules}
         for future in concurrent.futures.as_completed(futures):
-            results[futures[future]] = future.result()
+            name = futures[future]
+            results[name] = future.result()
+            returncode, elapsed = results[name][0], results[name][1]
+            status = "pass" if returncode == 0 else "fail"
+            print(f"{name}: {status} ({elapsed:.2f}s)", flush=True)
+
+    global _UNITTEST_TOTALS
+    _UNITTEST_TOTALS = (time.monotonic() - phase_started, len(modules), jobs)
+
+    _print_slowest_modules(results)
 
     failed = [name for name in modules if results[name][0] != 0]
-    for name in modules:
-        returncode, elapsed, _stdout, _stderr = results[name]
-        status = "pass" if returncode == 0 else "fail"
-        print(f"{name}: {status} ({elapsed:.2f}s)")
-
     if failed:
         for name in failed:
             _returncode, _elapsed, stdout, stderr = results[name]
@@ -218,4 +260,5 @@ check_committed_delta()
 # run("pytest")
 # run_unittest_parallel()
 
+_print_verifier_totals()
 print("verify: OK")

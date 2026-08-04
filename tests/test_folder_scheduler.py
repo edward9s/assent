@@ -133,6 +133,9 @@ class TestRunAll(FolderSchedulerTestCase):
         # told to watch it.
         self.assertEqual(options["stdin"], subprocess.PIPE)
         self.assertEqual(options["env"]["ASSENT_STDIN_STOP"], "1")
+        # The child owns one folder, so it labels its own duration instead of
+        # printing a second copy of this parent's end-to-end total.
+        self.assertEqual(options["env"]["ASSENT_FOLDER_RUN"], "1")
         self.assertEqual(options["stdout"], subprocess.PIPE)
         self.assertEqual(options["stderr"], subprocess.STDOUT)
         self.assertIs(options["text"], True)

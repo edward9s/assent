@@ -309,6 +309,68 @@ class _AutoFixBlockerEvidence:
     worker_summary: str | None = None
 
 
+@dataclass(frozen=True)
+class _FocusedGateIdentity:
+    """The exact state one scheduler-owned focused PASS was proven against."""
+
+    command: str
+    source_tree: str
+    shared_inputs: str
+
+
+class _FocusedGateLedger:
+    """Scheduler focused PASSes reusable inside one invocation and repair round.
+
+    The scheduler stays the only authority: an entry is written after its own
+    focused command exited 0 and the task reached its terminal checkpoint, and
+    it is bound to that command, the resulting checkpoint tree, the current
+    shared-input digest, and a clean worktree.  A later task or repair that
+    writes source moves the tree and therefore invalidates every earlier entry
+    mechanically, without consulting a status, timestamp, or AI claim.
+
+    Evidence lives in memory only -- deliberately no receipt, state file, task
+    field, or cross-restart cache -- so a restart re-runs the command instead of
+    reconstructing a PASS it cannot prove.
+    """
+
+    def __init__(self) -> None:
+        self._passes: set[_FocusedGateIdentity] = set()
+
+    def record(self, cfg: Config, command: str) -> None:
+        """Retain one just-passed focused command bound to the current state."""
+        identity = self._identity(cfg, command)
+        if identity is not None:
+            self._passes.add(identity)
+
+    def reusable(self, cfg: Config, command: str) -> bool:
+        """Return whether an earlier PASS still matches the current state exactly."""
+        identity = self._identity(cfg, command)
+        return identity is not None and identity in self._passes
+
+    @staticmethod
+    def _identity(cfg: Config, command: str) -> _FocusedGateIdentity | None:
+        """Bind a command to the current checkpoint tree and shared inputs.
+
+        Any state that cannot be proven right now -- a dirty worktree, an
+        unreadable checkpoint, an unsettled or disagreeing shared-path contract
+        -- yields no identity at all, so nothing is retained and nothing is
+        reused: the caller simply runs the command.
+        """
+        try:
+            if not gitops.working_tree_status(
+                    cfg.root, cfg.git_excludes).is_clean:
+                return None
+            source_tree = gitops.tree_of(cfg.root, "HEAD")
+            contract = _shared_paths_contract(cfg)
+            if not contract.settled:
+                return None
+            shared_inputs = shared_paths.shared_inputs_digest(
+                gitops.main_worktree(cfg.root), [(cfg.tasks_name, contract)])
+        except (AssentError, OSError):
+            return None
+        return _FocusedGateIdentity(command, source_tree, shared_inputs)
+
+
 class _AdapterProcessCreationError(OSError):
     """The shared runner proved its subprocess constructor did not return."""
 
@@ -862,6 +924,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
 
     active = _ActiveTask()
     blocker_evidence: list[_AutoFixBlockerEvidence] = []
+    gate_passes = _FocusedGateLedger()
     try:
         # Read the durable state even for an ordinary run.  A pending FAIL is
         # not an additional task status and ordinary execution may still make
@@ -912,7 +975,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             active.session = session
             _process_task(
                 cfg, task, rotation, sleep, now, session, resumed,
-                blocker_evidence=(blocker_evidence if review_enabled else None))
+                blocker_evidence=(blocker_evidence if review_enabled else None),
+                gate_passes=gate_passes if review_enabled else None)
             active.task = None
             active.session = None
 
@@ -933,7 +997,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 injected_adapter=auto_fix_adapter, sleep=sleep, now=now,
                 blockers=tuple(blocker_evidence),
                 trusted_plan=trusted_plan,
-                trusted_contracts=trusted_contracts)
+                trusted_contracts=trusted_contracts,
+                gate_passes=gate_passes)
             if review_outcome.code != 0:
                 if (auto_fix_enabled and review_outcome.state is not None
                         and review_outcome.human_reason is None
@@ -1236,6 +1301,7 @@ def _auto_fix_prior_evidence(
 
 def _auto_fix_review_identity(
         cfg: Config, plan: Plan, focused_evidence: str, *,
+        focused_identity: str | None = None,
         contracts_by_id: dict[str, str] | None = None,
         review_context: str = "completed_folder",
         review_stage: str = "initial",
@@ -1274,8 +1340,15 @@ def _auto_fix_review_identity(
     prompt = _AUTO_FIX_REVIEW_PROMPT.format(
         prior_evidence=_auto_fix_prior_evidence(cfg, previous),
         **reviewed_material)
+    identity_material = dict(reviewed_material)
+    if focused_identity is not None:
+        # A reused authoritative PASS is annotated for the reviewer and the
+        # terminal log, but must not move the review identity: one command, one
+        # source tree and one shared-input state digest the same whether the
+        # scheduler ran the command once or twice.
+        identity_material["focused_evidence"] = focused_identity
     identity = _AUTO_FIX_REVIEW_PROMPT.format(
-        prior_evidence=_AUTO_FIX_PRIOR_EVIDENCE_IDENTITY, **reviewed_material)
+        prior_evidence=_AUTO_FIX_PRIOR_EVIDENCE_IDENTITY, **identity_material)
     plan_digest = _contracts_digest(plan, contracts_by_id)
     prompt_digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return source_tree, plan_digest, prompt, prompt_digest
@@ -1456,6 +1529,7 @@ def _run_auto_fix_review_once(
         blockers: tuple[_AutoFixBlockerEvidence, ...] = (),
         trusted_plan: Plan | None = None,
         trusted_contracts: dict[str, str] | None = None,
+        gate_passes: _FocusedGateLedger | None = None,
         ) -> _AutoFixReviewOutcome:
     """Run one completed-folder review or quiescent blocked adjudication."""
     review = cfg.auto_fix_review
@@ -1501,6 +1575,9 @@ def _run_auto_fix_review_once(
         return _AutoFixReviewOutcome(0)
 
     focused_lines: list[str] = []
+    # The identity lines carry the same evidence without the reuse annotation,
+    # so reuse never changes the reviewer's freshness or convergence boundary.
+    identity_lines: list[str] = []
     seen: set[str] = set()
     if review_context == "completed_folder":
         print("Auto-fix folder review: running final distinct focused checks.")
@@ -1509,10 +1586,18 @@ def _run_auto_fix_review_once(
               "no focused command is run by the reviewer gate.")
         focused_lines.extend(
             f"- {item.task.id}: {item.focused_evidence}" for item in blockers)
+        identity_lines.extend(focused_lines)
     for task in done if review_context == "completed_folder" else ():
         if task.verify in seen:
             continue
         seen.add(task.verify)
+        if gate_passes is not None and gate_passes.reusable(cfg, task.verify):
+            print(f"  verify: {task.verify}")
+            print("  reused authoritative PASS (scheduler gate, exit 0)")
+            focused_lines.append(
+                f"- PASS (reused authoritative PASS): {task.verify}")
+            identity_lines.append(f"- PASS: {task.verify}")
+            continue
         verify_result = _verify_subprocess(cfg, task.verify)
         _show_verify_result(task.verify, verify_result)
         if verify_result.returncode != 0:
@@ -1520,6 +1605,7 @@ def _run_auto_fix_review_once(
                 verify_result.stderr or verify_result.stdout or "")
             focused_lines.append(
                 f"- FAIL ({verify_result.returncode}): {task.verify}; {diagnostic}")
+            identity_lines.append(focused_lines[-1])
             owners = [item for item in done if item.verify == task.verify]
             record = auto_fix.ReviewRecord("FAIL", tuple(
                 auto_fix.ReviewFinding(
@@ -1531,6 +1617,7 @@ def _run_auto_fix_review_once(
             source_tree, plan_digest, _prompt, prompt_digest = (
                 _auto_fix_review_identity(
                     cfg, plan, "\n".join(focused_lines),
+                    focused_identity="\n".join(identity_lines),
                     contracts_by_id=contracts_by_id))
             previous = _auto_fix_existing_state(cfg)
             state = auto_fix.state_for_review(
@@ -1554,6 +1641,7 @@ def _run_auto_fix_review_once(
                       if dirty else None)
             return _AutoFixReviewOutcome(1, state, reason)
         focused_lines.append(f"- PASS: {task.verify}")
+        identity_lines.append(focused_lines[-1])
     if not gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
         print("Auto-fix folder review: focused verification changed the source worktree; "
               "reviewer was not started and the exact changes are preserved.")
@@ -1585,6 +1673,7 @@ def _run_auto_fix_review_once(
         reuse_tree, reuse_plan_digest, _reuse_prompt, reuse_digest = (
             _auto_fix_review_identity(
                 cfg, plan, "\n".join(focused_lines),
+                focused_identity="\n".join(identity_lines),
                 contracts_by_id=contracts_by_id,
                 review_context=existing.review_context,
                 review_stage=existing.review_stage,
@@ -1631,6 +1720,7 @@ def _run_auto_fix_review_once(
             failure_trigger = existing.failure_trigger
     source_tree, plan_digest, prompt, prompt_digest = _auto_fix_review_identity(
         cfg, plan, "\n".join(focused_lines),
+        focused_identity="\n".join(identity_lines),
         contracts_by_id=contracts_by_id,
         review_context=review_context, review_stage=review_stage,
         blockers=blockers, previous=review_previous)
@@ -2411,6 +2501,10 @@ def _run_auto_fix_repairs(
                 "Recovered focused or blocker evidence is embedded in each "
                 "current finding."))
         auto_fix.write_auto_fix_state(state_path, state)
+    # Reusable focused evidence belongs to one repair round: it is replaced when
+    # the next round starts and is empty on a restart, so a RECHECK only ever
+    # reuses a PASS its own round proved against the current state.
+    round_passes = _FocusedGateLedger()
     while True:
         # Every reviewer decision that enters NEEDS_REPAIR is amended here,
         # not only the first one: a recheck may be what first exposes the
@@ -2460,7 +2554,8 @@ def _run_auto_fix_repairs(
                 cfg, once=False, task_id=None,
                 injected_adapter=injected_reviewer, sleep=sleep, now=now,
                 trusted_plan=trusted_plan,
-                trusted_contracts=trusted_contracts)
+                trusted_contracts=trusted_contracts,
+                gate_passes=round_passes)
             if outcome.code == 0:
                 return 0
             if outcome.state is None or outcome.human_reason is not None:
@@ -2546,6 +2641,7 @@ def _run_auto_fix_repairs(
 
         failures: list[tuple[Task, str]] = []
         round_blockers: list[_AutoFixBlockerEvidence] = []
+        round_passes = _FocusedGateLedger()
         round_dispositions: list[auto_fix.WorkerDisposition] = []
         for task, profile in round_assignments:
             if profile is None:
@@ -2600,7 +2696,8 @@ def _run_auto_fix_repairs(
                     retry_limit=0, billing_is_failure=True,
                     blocker_evidence=round_blockers,
                     auto_fix_fingerprints=state.current_finding_fingerprints,
-                    repair_dispositions=round_dispositions)
+                    repair_dispositions=round_dispositions,
+                    gate_passes=round_passes)
                 active.task = None
                 active.session = None
                 if round_dispositions:
@@ -2991,6 +3088,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   blocker_evidence: list[_AutoFixBlockerEvidence] | None = None,
                   auto_fix_fingerprints: tuple[str, ...] = (),
                   repair_dispositions: list[auto_fix.WorkerDisposition] | None = None,
+                  gate_passes: _FocusedGateLedger | None = None,
                   ) -> str | None:
     """Run a single task's full lifecycle; internally handles quota/control resumption and
     retries, and by the end the task is DONE/BLOCKED.
@@ -3170,6 +3268,11 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 print("  (no new changes in the working tree; progress is already in a prior wip checkpoint)")
             elif resumed:
                 print("  terminal auto checkpoint created; resumed progress was preserved")
+            if gate_passes is not None:
+                # Only this path reaches here with the scheduler's own focused
+                # command having exited 0; the closeout-only probe and every
+                # failed gate leave through the failure path below.
+                gate_passes.record(cfg, task.verify)
             try_write_report(cfg)
             return None
         if outcome == "self_blocked":

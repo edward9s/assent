@@ -8,6 +8,7 @@ passes through the CLI verbatim rather than being translated as output."""
 import contextlib
 import io
 import importlib.metadata
+import itertools
 import os
 import re
 import shutil
@@ -43,6 +44,9 @@ class MainTestCase(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
         os.environ.pop("ASSENT_STDIN_STOP", None)
+        # The same spawned session also exports ASSENT_FOLDER_RUN, which would
+        # otherwise relabel every timing line here as a scheduler child's.
+        os.environ.pop("ASSENT_FOLDER_RUN", None)
         self.root = Path(tempfile.mkdtemp())
         self._old_cwd = os.getcwd()
         os.chdir(self.root)
@@ -1169,6 +1173,194 @@ class TestRunVerifyChaining(MainTestCase):
                     main(argv)
                 self.assertEqual(ctx.exception.code, 2)
                 self.assertIn("--once", " ".join(errors.getvalue().split()))
+
+
+class TestCommandElapsed(MainTestCase):
+    """`run` and `verify` report their end-to-end wall-clock duration.
+
+    The clock is injected, so every assertion is on the reported arithmetic
+    rather than on how long the test machine happened to take.
+    """
+
+    # Two readings per invocation, 2.5 seconds apart, whatever the machine does.
+    def injected_clock(self):
+        return patch("assent.__main__._monotonic",
+                     side_effect=itertools.count(0.0, 2.5))
+
+    def total_lines(self, output: str) -> list[str]:
+        return [line for line in output.splitlines()
+                if line.startswith("Command `assent ")]
+
+    def test_every_run_path_reports_one_total_with_the_unchanged_exit_code(self):
+        config = self.write_config()
+        for folder in ("alpha", "beta"):
+            self.write_task(folder)
+        cases = {
+            "direct": ["run", "alpha"],
+            "selected": ["run", "alpha", "beta"],
+            "remainder": ["run", "alpha", "..."],
+            "automatic": ["run"],
+        }
+        for name, argv in cases.items():
+            for result in (0, 1):
+                with self.subTest(case=name, result=result):
+                    self.write_task("alpha")
+                    # The automatic selection needs exactly one ongoing folder.
+                    self.write_task(
+                        "beta", "DONE" if name == "automatic" else "TODO")
+                    with self.injected_clock(), patch(
+                            "assent.__main__.engine.run", return_value=result):
+                        code, out = self.run_main(
+                            argv + ["--config", str(config)])
+                    self.assertEqual(code, result)
+                    self.assertEqual(
+                        self.total_lines(out),
+                        [f"Command `assent run` finished: elapsed 2.5s, "
+                         f"exit code {result}"])
+
+        with self.injected_clock(), patch("assent.__main__.run_all",
+                                          return_value=0):
+            code, out = self.run_main(["run", "--all", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.total_lines(out),
+            ["Command `assent run` finished: elapsed 2.5s, exit code 0"])
+
+    def test_a_scheduler_child_labels_its_folder_total_apart(self):
+        config = self.write_config()
+        self.write_task("work")
+        os.environ["ASSENT_FOLDER_RUN"] = "1"
+        with self.injected_clock(), patch("assent.__main__.engine.run",
+                                          return_value=0):
+            code, out = self.run_main(["run", "work", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.total_lines(out), [])
+        self.assertIn(
+            "Scheduled folder run finished: elapsed 2.5s, exit code 0", out)
+
+    def test_verification_paths_keep_the_verifier_only_elapsed_line(self):
+        config = self.write_config()
+        for folder in ("earlier", "later"):
+            self.write_task(folder, "DONE")
+
+        def verifier(*args, **kwargs):
+            # What the full verifier itself reports, from inside the command.
+            print("Full verification finished: elapsed 1.0s, exit code 0")
+            return 0
+
+        cases = {
+            "folder": (["verify", "earlier"], "assent.__main__.verify_folder"),
+            "selected": (["verify", "earlier", "later"],
+                         "assent.__main__.verify_selected_batch"),
+            "batch": (["verify", "--batch"], "assent.__main__.verify_batch"),
+            "focused": (["verify", "earlier", "--focus"],
+                        "assent.__main__.engine.verify_focused"),
+        }
+        for name, (argv, target) in cases.items():
+            with self.subTest(case=name):
+                with self.injected_clock(), patch(target, side_effect=verifier):
+                    code, out = self.run_main(argv + ["--config", str(config)])
+                self.assertEqual(code, 0)
+                self.assertEqual(
+                    self.total_lines(out),
+                    ["Command `assent verify` finished: elapsed 2.5s, "
+                     "exit code 0"])
+                self.assertIn(
+                    "Full verification finished: elapsed 1.0s, exit code 0",
+                    out)
+
+        # `run --verify` is one invocation covering both stages, so it reports
+        # one run-shaped total, not a second verify one.
+        self.write_task("earlier", "DONE")
+        with self.injected_clock(), \
+                patch("assent.__main__.engine.run", return_value=0), \
+                patch("assent.__main__.verify_folder", side_effect=verifier):
+            code, out = self.run_main(
+                ["run", "earlier", "--verify", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.total_lines(out),
+            ["Command `assent run` finished: elapsed 2.5s, exit code 0"])
+        self.assertIn("Full verification finished: elapsed 1.0s, exit code 0",
+                      out)
+
+    def test_refusal_and_interrupt_keep_their_result_and_report_elapsed(self):
+        config = self.write_config()
+        self.write_task("reviewed", "DONE")
+
+        # A configuration refusal never reaches an engine or a verifier.
+        with self.injected_clock():
+            code, out = self.run_main(["verify", "reviewed", "--config",
+                                       str(self.root / "absent.toml")])
+        self.assertEqual(code, 1)
+        self.assertIn("Config error:", out)
+        self.assertEqual(
+            self.total_lines(out),
+            ["Command `assent verify` finished: elapsed 2.5s, exit code 1"])
+
+        # A handled Ctrl+C keeps its own diagnostic and its 130.
+        with self.injected_clock(), patch("assent.__main__.verify_folder",
+                                          side_effect=KeyboardInterrupt):
+            code, out = self.run_main(
+                ["verify", "reviewed", "--config", str(config)])
+        self.assertEqual(code, 130)
+        self.assertIn("temporary resources were cleaned up", out)
+        self.assertEqual(
+            self.total_lines(out),
+            ["Command `assent verify` finished: elapsed 2.5s, exit code 130"])
+
+        # An interrupt that leaves the command is timed and then re-raised, so
+        # the caller's own interrupt handling is unchanged.
+        self.write_task("work")
+        out = io.StringIO()
+        with self.injected_clock(), patch("assent.__main__.engine.run",
+                                          side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt), \
+                    contextlib.redirect_stdout(out):
+                main(["run", "work", "--config", str(config)])
+        self.assertEqual(
+            self.total_lines(out.getvalue()),
+            ["Command `assent run` interrupted: elapsed 2.5s, exit code 130"])
+
+    def test_the_total_is_retained_by_the_ordinary_terminal_log(self):
+        config = self.write_config()
+        self.write_task("reviewed", "DONE")
+        with self.injected_clock(), patch("assent.__main__.verify_folder",
+                                          return_value=0):
+            code, _ = self.run_main(
+                ["verify", "reviewed", "--config", str(config)])
+        self.assertEqual(code, 0)
+        log = (self.root / ".assent" / "reviewed" / "_assent.log").read_text(
+            encoding="utf-8")
+        self.assertIn(
+            "Command `assent verify` finished: elapsed 2.5s, exit code 0", log)
+
+    def test_the_other_commands_report_no_elapsed_time(self):
+        config = self.write_config()
+        self.write_task("done", "DONE")
+        cases = {
+            "status": (["status"], None),
+            "check": (["check"], None),
+            "report": (["report"], None),
+            "accept": (["accept", "done"], "assent.__main__.accept_folder"),
+            "clean": (["clean", "done"], "assent.__main__.clean_folders"),
+            "archive": (["archive", "done"], "assent.__main__.archive_folder"),
+            "reconcile": (["reconcile", "done"],
+                          "assent.__main__.reconcile_start"),
+            "reject": (["reject", "done"], "assent.__main__.reject_folder"),
+            "rework": (["rework", "done", "t001"],
+                       "assent.__main__.rework_task"),
+            "doctor": (["doctor"], "assent.__main__.run_doctor"),
+        }
+        for name, (argv, target) in cases.items():
+            with self.subTest(command=name):
+                patched = (patch(target, return_value=0) if target
+                           else contextlib.nullcontext())
+                with self.injected_clock(), patched:
+                    _code, out = self.run_main(
+                        argv + ([] if name == "doctor"
+                                else ["--config", str(config)]))
+                self.assertNotIn("elapsed", out)
 
 
 class TestHelpPalette(MainTestCase):
