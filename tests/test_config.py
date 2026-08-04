@@ -196,8 +196,9 @@ class TestLoadConfig(ConfigTestCase):
                           ".assent/manifest.toml", ".assent/manifest.lock"))
 
     def test_auto_fix_review_policy_resolves_without_an_override_table(self):
-        builtin = load_config(self.write(_MINIMAL), "plan01").auto_fix_review
-        self.assertIsNotNone(builtin)
+        rounds = load_config(self.write(_MINIMAL), "plan01").auto_fix_review
+        self.assertEqual(len(rounds), 1)
+        builtin = rounds[0]
         self.assertEqual(
             (builtin.adapter, builtin.model, builtin.effort,
              builtin.requested_model, builtin.requested_effort),
@@ -205,8 +206,8 @@ class TestLoadConfig(ConfigTestCase):
         cfg = load_config(self.write(
             '[adapter]\nname = ["codex", "claude"]\n'
             ), "plan01")
-        review = cfg.auto_fix_review
-        self.assertIsNotNone(review)
+        self.assertEqual(len(cfg.auto_fix_review), 1)
+        review = cfg.auto_fix_review[0]
         self.assertEqual(review.adapter, "codex")
         self.assertEqual(review.model, "prime")
         self.assertEqual(review.effort, "heavy")
@@ -222,7 +223,7 @@ class TestLoadConfig(ConfigTestCase):
             '[adapter.codex.efforts.core]\nslight = "review-effort"\n'
             '[auto_fix.review]\nadapter = "codex"\nmodel = "core"\n'
             'effort = "slight"\n'), "plan01")
-        review = cfg.auto_fix_review
+        review = cfg.auto_fix_review[0]
         self.assertEqual(review.adapter, "codex")
         self.assertNotIn(review.adapter, cfg.adapter_names)
         self.assertEqual(review.command, "codex-review.cmd")
@@ -238,6 +239,11 @@ class TestLoadConfig(ConfigTestCase):
             ('[auto_fix.review]\nadapter = 1\n', "wrong type"),
             ('[auto_fix.review]\nadapter = "  "\n', "is blank"),
             ('[auto_fix.review]\nadapter = "elsewhere"\n', "registered adapter"),
+            ('[auto_fix.review]\nadapter = []\n', "non-empty list"),
+            ('[auto_fix.review]\nadapter = ["claude", 1]\n', "wrong type"),
+            ('[auto_fix.review]\nadapter = ["claude", "  "]\n', "is blank"),
+            ('[auto_fix.review]\nadapter = ["claude", "elsewhere"]\n',
+             "registered adapter"),
             ('[auto_fix.review]\nmodel = "max"\n', "valid model tier"),
             ('[auto_fix.review]\neffort = "medium"\n', "valid effort"),
         )
@@ -245,13 +251,34 @@ class TestLoadConfig(ConfigTestCase):
             with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):
                 load_config(self.write(text), "plan01")
 
+    def test_auto_fix_review_adapter_list_resolves_ordered_rounds(self):
+        """A bare string is exactly a one-round list, and a list keeps order and repeats."""
+        single = load_config(self.write(
+            '[auto_fix.review]\nadapter = "codex"\n'), "plan01").auto_fix_review
+        listed = load_config(self.write(
+            '[auto_fix.review]\nadapter = ["codex"]\n'), "plan01").auto_fix_review
+        self.assertEqual(single, listed)
+        self.assertEqual(len(single), 1)
+
+        rounds = load_config(self.write(
+            '[auto_fix.review]\nadapter = ["claude", "codex", "claude"]\n'
+            'model = "core"\neffort = "slight"\n'), "plan01").auto_fix_review
+        self.assertEqual([item.adapter for item in rounds],
+                         ["claude", "codex", "claude"])
+        # model and effort stay single fields that apply to every round.
+        self.assertEqual({(item.model, item.effort) for item in rounds},
+                         {("core", "slight")})
+        self.assertEqual([item.requested_model for item in rounds],
+                         ["opus", "gpt-5.6-terra", "opus"])
+        self.assertEqual(rounds[0], rounds[2])
+
     def test_auto_fix_review_uses_normal_layer_precedence(self):
         self.write_user(
             '[auto_fix.review]\nadapter = "codex"\nmodel = "core"\n'
             'effort = "slight"\n')
         cfg = load_config(self.write(
             '[auto_fix.review]\nmodel = "lite"\n'), "plan01")
-        review = cfg.auto_fix_review
+        review = cfg.auto_fix_review[0]
         self.assertEqual(
             (review.adapter, review.model, review.effort),
             ("codex", "lite", "slight"))

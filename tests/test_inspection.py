@@ -89,6 +89,24 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             "reviewer effort = slight -> low (setting source: project "
             "(explicit settings layer)", text)
 
+    def test_check_lists_every_configured_reviewer_round_in_order(self):
+        self.write_task(1, model="core")
+        cfg = self.build(extra_config=(
+            "[auto_fix.review]\n"
+            'adapter = ["claude", "codex", "claude"]\n'
+            'model = "core"\n'
+            'effort = "slight"\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 0)
+        text = out.getvalue()
+        self.assertIn("Auto-fix reviewer rounds (configured order):", text)
+        self.assertIn("round 1: claude / core->opus / slight->low", text)
+        self.assertIn("round 2: codex / core->gpt-5.6-terra / slight->low", text)
+        self.assertIn("round 3: claude / core->opus / slight->low", text)
+
     def test_check_fails_on_dependency_cycle(self):
         self.write_task(1, deps=("t002",))
         self.write_task(2, deps=("t001",))
@@ -227,7 +245,8 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             auto_fix.ReviewFinding(
                 "t001", "src/main.py", "Blocking implementation issue",
                 "The implementation does not satisfy the task contract."),)
-        review = cfg.auto_fix_review
+        rounds = cfg.auto_fix_review
+        review = rounds[0] if rounds else None
         reviewer_adapter = review.adapter if review is not None else "codex"
         reviewer_model = (review.requested_model
                           if review is not None else "gpt-5.6-sol")
@@ -335,9 +354,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                     task_plan_sha256=auto_fix.sha256_files(
                         task.path for task in plan.tasks),
                     review_prompt_sha256="5" * 64,
-                    reviewer_adapter=cfg.auto_fix_review.adapter,
-                    reviewer_model=cfg.auto_fix_review.requested_model,
-                    reviewer_effort=cfg.auto_fix_review.requested_effort,
+                    reviewer_adapter=cfg.auto_fix_review[0].adapter,
+                    reviewer_model=cfg.auto_fix_review[0].requested_model,
+                    reviewer_effort=cfg.auto_fix_review[0].requested_effort,
                     review_context=context, failure_trigger=trigger)
                 auto_fix.write_auto_fix_state(
                     auto_fix.auto_fix_state_path(cfg), state)
@@ -372,9 +391,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             source_tree=source_tree,
             task_plan_sha256=task_digest,
             review_prompt_sha256="4" * 64,
-            reviewer_adapter=cfg.auto_fix_review.adapter,
-            reviewer_model=cfg.auto_fix_review.requested_model,
-            reviewer_effort=cfg.auto_fix_review.requested_effort)
+            reviewer_adapter=cfg.auto_fix_review[0].adapter,
+            reviewer_model=cfg.auto_fix_review[0].requested_model,
+            reviewer_effort=cfg.auto_fix_review[0].requested_effort)
         fingerprint = state.current_finding_fingerprints[0]
         state = auto_fix.with_worker_dispositions(
             state, (auto_fix.WorkerDisposition(
@@ -424,9 +443,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             source_tree=source_tree,
             task_plan_sha256=task_digest,
             review_prompt_sha256="4" * 64,
-            reviewer_adapter=cfg.auto_fix_review.adapter,
-            reviewer_model=cfg.auto_fix_review.requested_model,
-            reviewer_effort=cfg.auto_fix_review.requested_effort,
+            reviewer_adapter=cfg.auto_fix_review[0].adapter,
+            reviewer_model=cfg.auto_fix_review[0].requested_model,
+            reviewer_effort=cfg.auto_fix_review[0].requested_effort,
             previous=state, review_stage="recheck")
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), passed)
@@ -447,9 +466,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 source_tree=source_tree,
                 task_plan_sha256=task_digest,
                 review_prompt_sha256="4" * 64,
-                reviewer_adapter=cfg.auto_fix_review.adapter,
-                reviewer_model=cfg.auto_fix_review.requested_model,
-                reviewer_effort=cfg.auto_fix_review.requested_effort,
+                reviewer_adapter=cfg.auto_fix_review[0].adapter,
+                reviewer_model=cfg.auto_fix_review[0].requested_model,
+                reviewer_effort=cfg.auto_fix_review[0].requested_effort,
                 review_context="blocked_adjudication",
                 failure_trigger="worker_blocked")
 
@@ -464,9 +483,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 source_tree=source_tree,
                 task_plan_sha256=task_digest,
                 review_prompt_sha256="4" * 64,
-                reviewer_adapter=cfg.auto_fix_review.adapter,
-                reviewer_model=cfg.auto_fix_review.requested_model,
-                reviewer_effort=cfg.auto_fix_review.requested_effort,
+                reviewer_adapter=cfg.auto_fix_review[0].adapter,
+                reviewer_model=cfg.auto_fix_review[0].requested_model,
+                reviewer_effort=cfg.auto_fix_review[0].requested_effort,
                 previous=passed, review_stage="recheck")
 
     def test_report_isolates_namespaced_checkpoints(self):

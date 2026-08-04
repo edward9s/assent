@@ -190,8 +190,9 @@ def _auto_fix_binding_reasons(
     except AssentError as e:
         reasons.append(f"task contracts unavailable: {e}")
 
-    review = cfg.auto_fix_review
-    if review is not None:
+    rounds = cfg.auto_fix_review
+    if rounds:
+        review = rounds[0]
         configured_reviewer = (
             review.adapter, review.requested_model, review.requested_effort)
         stored_reviewer = (
@@ -808,9 +809,10 @@ def _review_effort_source_key(cfg: Config, review) -> str:
 
 def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
     """Show the fully resolved reviewer identity and each contributing layer."""
-    review = cfg.auto_fix_review
-    if review is None:
+    rounds = cfg.auto_fix_review
+    if not rounds:
         return ["Auto-fix reviewer: unavailable (no resolved reviewer policy)"]
+    review = rounds[0]
 
     if "auto_fix.review.adapter" in cfg.provenance:
         adapter_source = _setting_source_label(
@@ -822,6 +824,12 @@ def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
     model_mapping_key = (
         f"adapter.{review.adapter}.models.{review.model}")
     effort_mapping_key = _review_effort_source_key(cfg, review)
+    # Every configured round is shown, in order and with repeats, so a human sees
+    # the whole sequence before any round loop consumes it.
+    round_lines = [
+        f"  round {index}: {item.adapter} / {item.model}->{item.requested_model}"
+        f" / {item.effort}->{item.requested_effort}"
+        for index, item in enumerate(rounds, start=1)]
     return [
         "Auto-fix reviewer (resolved): "
         f"{review.adapter} / {review.model}->{review.requested_model} / "
@@ -834,6 +842,8 @@ def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
         f"  reviewer effort = {review.effort} -> {review.requested_effort} "
         f"(setting source: {_setting_source_label(cfg, 'auto_fix.review.effort')}; "
         f"effort mapping source: {_setting_source_label(cfg, effort_mapping_key)})",
+        "Auto-fix reviewer rounds (configured order):",
+        *round_lines,
     ]
 
 

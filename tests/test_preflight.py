@@ -228,5 +228,69 @@ class TestAntigravityCapabilityPreflight(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
 
 
+class TestAutoFixReviewRoundPreflight(GlobalContractsMixin, EngineTestCase):
+    """A reviewer list is proven whole before a run, not one round at a time.
+
+    Antigravity is the adapter with a real capability catalog, so it plays the listed
+    round whose mapping the vendor would refuse.
+    """
+
+    BAD_PRIME_HEAVY = '[adapter.antigravity.efforts.prime]\nheavy = "medium"\n'
+
+    def setUp(self):
+        super().setUp()
+        from assent.adapters import antigravity
+        catalog = antigravity.parse_models_catalog(
+            (Path(__file__).resolve().parent / "fixtures"
+             / "agy_models_1.1.5.txt").read_text(encoding="utf-8"))
+        catalog_patch = mock.patch.object(
+            antigravity, "load_catalog", return_value=catalog)
+        catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
+        session_patch = mock.patch.object(
+            antigravity, "run_subprocess",
+            side_effect=AssertionError("no AGY session may be started"))
+        self.session = session_patch.start()
+        self.addCleanup(session_patch.stop)
+
+    def review_errors(self, extra_config, adapter_name):
+        from assent.adapters import get_adapter
+        (self.root / ".assent" / "assent.toml").write_text(
+            extra_config, encoding="utf-8")
+        cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
+        return preflight.auto_fix_review_capability_errors(
+            cfg, get_adapter(adapter_name, cfg))
+
+    def test_a_later_listed_round_fails_the_preflight_before_the_run(self):
+        session, errors = self.review_errors(
+            '[adapter]\nname = "claude"\n'
+            '[auto_fix.review]\nadapter = ["claude", "antigravity"]\n'
+            + self.BAD_PRIME_HEAVY, "claude")
+        self.assertEqual(session.agent, "claude")   # round 1 still drives the call
+        self.assertTrue(errors)
+        # Each diagnostic names the round's adapter, which is not the one the
+        # caller resolved and would otherwise print.
+        self.assertTrue(all(message.startswith("antigravity: ")
+                            for message in errors), errors)
+        self.session.assert_not_called()
+
+    def test_one_round_keeps_todays_unprefixed_diagnostics(self):
+        session, errors = self.review_errors(
+            '[adapter]\nname = "antigravity"\n' + self.BAD_PRIME_HEAVY,
+            "antigravity")
+        self.assertEqual(session.agent, "antigravity")
+        self.assertTrue(errors)
+        self.assertFalse(any(message.startswith("antigravity: ")
+                             for message in errors), errors)
+
+    def test_a_repeated_adapter_is_proven_once(self):
+        session, errors = self.review_errors(
+            '[adapter]\nname = "claude"\n'
+            '[auto_fix.review]\nadapter = ["antigravity", "claude", "antigravity"]\n'
+            + self.BAD_PRIME_HEAVY, "antigravity")
+        self.assertEqual(session.agent, "antigravity")
+        self.assertEqual(len(errors), len(set(errors)))
+
+
 if __name__ == "__main__":
     unittest.main()
