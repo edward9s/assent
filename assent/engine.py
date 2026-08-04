@@ -149,9 +149,10 @@ runnable focused regression test. Speculation, uncertainty without evidence,
 idealized design, style, preference, optional improvement, and unrelated scope
 expansion cannot block PASS.
 
-Finish with exactly one provider-neutral `assent.auto_fix_review` JSON object
-on the last non-empty output line and no later text. PASS has an empty findings
-array. Every FAIL finding must supply all schema fields: kind, task_id, path,
+Finish with exactly one JSON object on the last non-empty output line and no
+later text. PASS example:
+{{"type": "assent.auto_fix_review", "verdict": "PASS", "findings": []}}
+Every FAIL finding must supply all schema fields: kind, task_id, path,
 summary, evidence, recommendation, scope_addition, transition,
 prior_fingerprint, and transition_evidence. Use null where an optional field is
 absent.
