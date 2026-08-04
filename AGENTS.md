@@ -293,4 +293,35 @@ while operating an assent-managed session live in
   protocol, media-capability inference, or a second review state; `verify`
   keeps the machine-checkable requirements and perceptual judgment stays part
   of the explicit `accept`.
+## Functional categories
+
+Planning meetings talk about assent in three functional categories: unattended
+running, in-flight review, and the git-based workflow. Only the third is also a
+physical file boundary. The first two are one recursively-coupled state machine
+on purpose -- the review-and-repair loop calls back into the same task-processing
+and run-locking functions it is itself called from, including a direct recursive
+call into the top-level run-lock function for a `RECHECK` review -- so they are
+distinguished by function name inside `engine.py` and `auto_fix.py` rather than
+by file. No split of those two files is pending or expected. The lists below are
+orientation only; the behavioral contracts stay where they already are.
+
+Git-based workflow: `gitops.py`, `accept.py`, `archive.py`, `reconcile.py`,
+`reject.py`, `rework.py`, `clean.py`, `init.py`, `plan.py`, `batch_accept.py`,
+`batch_receipt.py`, `folder_verification.py`,
+`folder_verification_closeout.py`, `batch_verification.py`, `verification.py`,
+`verification_common.py`, `shared_paths.py`.
+
+Unattended running: `folder_scheduler.py`, plus the scheduling, session, and
+resume surface inside `engine.py` -- `_run_locked`, `_process_task`,
+`_evaluate`, adapter rotation, and quota/resume handling.
+
+In-flight review: `auto_fix.py`, plus the review-and-repair surface inside
+`engine.py` -- `_run_auto_fix_review_once`, `_run_auto_fix_repairs`,
+`_FocusedGateLedger`, `_AutoFixBlockerEvidence`.
+
+Shared foundation used by more than one category: `config.py`, `contracts.py`,
+`lockfile.py`, `pathops.py`, `user_home.py`, `preflight.py`, `folderdeps.py`,
+`folder_source.py`, `inspection.py`, `doctor.py`, `terminal_log.py`,
+`adapters/`, `__main__.py`, `main.py`.
+
 - When using assent, first read `~/.assent/instructions.md`, the global working instructions shared by every project; a scheduled worktree session uses the absolute path the scheduler provides. <!-- assent-instructions -->

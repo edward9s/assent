@@ -82,6 +82,84 @@ class TestFocusedVerification(GlobalContractsMixin, EngineTestCase):
         self.assertNotIn("verify: " + later, output.getvalue())
         self.assertFalse((worktree / "later.txt").exists())
 
+    @contextlib.contextmanager
+    def counted_verify(self, codes=None):
+        """Script every focused command as a counted, subprocess-free result."""
+        calls: list[str] = []
+
+        def fake(_cfg, command):
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                command, (codes or {}).get(command, 0), "", "")
+
+        with mock.patch.object(engine, "_verify_subprocess", fake):
+            yield calls
+
+    def test_focus_runs_overlapping_unittest_modules_once_per_pass(self):
+        first = "python -m unittest tests.alpha tests.shared"
+        second = "python -m unittest tests.shared tests.beta"
+        self.write_task(1, slug="first", status="DONE", verify=first)
+        self.write_task(2, slug="second", status="DONE", verify=second)
+        self.write_task(3, slug="other", status="DONE", verify=_OK)
+        cfg = self.build()
+        self.prepare_source()
+
+        output = io.StringIO()
+        with self.counted_verify() as calls, contextlib.redirect_stdout(output):
+            result = engine.verify_focused(cfg)
+
+        self.assertEqual(result, 0, output.getvalue())
+        # tests.shared is imported once for the merged group; the command that
+        # is not the exact unittest shape still runs byte-for-byte on its own.
+        self.assertEqual(
+            calls,
+            ["python -m unittest tests.alpha tests.shared tests.beta", _OK])
+        text = output.getvalue()
+        for command in (first, second, _OK):
+            self.assertEqual(text.count(f"  verify: {command}"), 1)
+        self.assertEqual(text.count("verify passed (exit 0)"), 3)
+
+    def test_focus_leaves_unmergeable_command_shapes_untouched(self):
+        commands = ("python -m unittest tests.alpha", "pytest -q",
+                    "python3 -m unittest tests.beta",
+                    "python -m unittest -v tests.gamma",
+                    "python -m unittest  tests.delta")
+        for index, command in enumerate(commands, 1):
+            self.write_task(index, slug=f"task{index}", status="DONE",
+                            verify=command)
+        cfg = self.build()
+        self.prepare_source()
+
+        output = io.StringIO()
+        with self.counted_verify() as calls, contextlib.redirect_stdout(output):
+            result = engine.verify_focused(cfg)
+
+        self.assertEqual(result, 0, output.getvalue())
+        # Only one command has the exact shape, so nothing is merged and every
+        # invocation is identical to the unmerged behavior.
+        self.assertEqual(calls, list(commands))
+
+    def test_focus_falls_back_to_single_commands_when_the_merge_fails(self):
+        first = "python -m unittest tests.alpha tests.shared"
+        second = "python -m unittest tests.broken"
+        merged = "python -m unittest tests.alpha tests.shared tests.broken"
+        self.write_task(1, slug="first", status="DONE", verify=first)
+        self.write_task(2, slug="second", status="DONE", verify=second)
+        cfg = self.build()
+        self.prepare_source()
+
+        output = io.StringIO()
+        codes = {merged: 1, second: 1}
+        with self.counted_verify(codes) as calls, \
+                contextlib.redirect_stdout(output):
+            result = engine.verify_focused(cfg)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [merged, first, second])
+        text = output.getvalue()
+        self.assertIn(f"  verify: {second}\n  verify failed (exit 1)", text)
+        self.assertIn(f"  verify: {first}\n  verify passed (exit 0)", text)
+
     def test_focus_refuses_busy_folder_and_no_eligible_command(self):
         path = self.write_task(1, status="SKIP")
         self.write_task(2, slug="waiting", status="TODO")
@@ -1036,6 +1114,41 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(calls, [_OK, _OK, _NEEDS_OK_TXT, _OK])
         self.assertEqual(out.getvalue().count("reused authoritative PASS"), 1)
 
+    def test_reused_authoritative_pass_never_enters_the_merged_union(self):
+        first = self.write_task(
+            1, verify="python -m unittest tests.alpha tests.shared")
+        second = self.write_task(
+            2, slug="two", deps=("t001",),
+            verify="python -m unittest tests.shared tests.beta")
+        third = self.write_task(3, slug="three", deps=("t002",),
+                                verify="python -m unittest tests.gamma")
+        cfg = self.build_review()
+        self.commit_all()
+        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+        reviewer = ScriptedAdapter([TaskResult(0, terminal, False, None)])
+        worker = ScriptedAdapter([
+            self.ai_done(first, {"src/one.txt": "one\n"}),
+            self.ai_done(second, {"src/two.txt": "two\n"}),
+            self.ai_done(third, {"src/three.txt": "three\n"}),
+        ])
+
+        out = io.StringIO()
+        with self.counted_verify() as calls, contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=worker, auto_fix_adapter=reviewer,
+                auto_fix=True), 0)
+
+        # Three closeout gates, then one merged final run: t003's command is
+        # still proven against this exact tree, so it is reused rather than
+        # merged, and tests.gamma is never re-executed.
+        self.assertEqual(calls, [
+            "python -m unittest tests.alpha tests.shared",
+            "python -m unittest tests.shared tests.beta",
+            "python -m unittest tests.gamma",
+            "python -m unittest tests.alpha tests.shared tests.beta",
+        ])
+        self.assertEqual(out.getvalue().count("reused authoritative PASS"), 1)
+
     def test_gate_evidence_binds_the_command_tree_and_clean_state(self):
         self.write_task(1, status="DONE", verify=_OK)
         cfg = self.build_review()
@@ -1101,6 +1214,79 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 auto_fix_adapter=cached, auto_fix=True), 0)
         self.assertEqual(cached.calls, [])
         self.assertIn("reusing exact fresh PASS", out.getvalue())
+
+    def test_unittest_shape_is_recognized_exactly_and_nothing_else(self):
+        self.assertEqual(
+            engine._unittest_modules("python -m unittest tests.a tests.b_2"),
+            ("tests.a", "tests.b_2"))
+        for command in ("python -m unittest",
+                        "python -m unittest  tests.a",
+                        "python -m unittest tests.a ",
+                        "python3 -m unittest tests.a",
+                        "python -m unittest -v tests.a",
+                        "python -m unittest tests/a.py",
+                        "python -m unittest tests.2bad",
+                        "python -m pytest tests.a",
+                        "pytest -q", _OK):
+            self.assertIsNone(engine._unittest_modules(command), command)
+
+    def test_final_sweep_runs_overlapping_unittest_modules_once(self):
+        first = "python -m unittest tests.alpha tests.shared"
+        second = "python -m unittest tests.shared tests.beta"
+        merged = "python -m unittest tests.alpha tests.shared tests.beta"
+        self.write_task(1, status="DONE", verify=first)
+        self.write_task(2, slug="two", status="DONE", verify=second)
+        self.write_task(3, slug="three", status="DONE", verify=_OK)
+        cfg = self.build_review()
+        self.commit_all()
+        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
+
+        def review(prompt):
+            for command in (first, second, _OK):
+                self.assertIn(f"- PASS: {command}", prompt)
+            return TaskResult(0, terminal, False, None)
+
+        reviewer = ScriptedAdapter([review])
+        out = io.StringIO()
+        with self.counted_verify() as calls, contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter([]),
+                auto_fix_adapter=reviewer, auto_fix=True), 0)
+
+        # One merged unittest run proves both overlapping commands; the
+        # non-unittest command still runs exactly as it did before.
+        self.assertEqual(calls, [merged, _OK])
+        text = out.getvalue()
+        for command in (first, second, _OK):
+            self.assertEqual(text.count(f"  verify: {command}"), 1)
+
+    def test_failed_merge_falls_back_and_names_the_owning_command(self):
+        first = "python -m unittest tests.alpha"
+        second = "python -m unittest tests.broken"
+        merged = "python -m unittest tests.alpha tests.broken"
+        self.write_task(1, status="DONE", verify=first)
+        self.write_task(2, slug="two", status="DONE", verify=second)
+        cfg = self.build_review()
+        self.commit_all()
+
+        reviewer = ScriptedAdapter([])
+        out = io.StringIO()
+        codes = {merged: 1, second: 1}
+        with self.counted_verify(codes) as calls, contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
+                auto_fix=True, once=True), 1)
+
+        self.assertEqual(calls, [merged, first, second])
+        self.assertEqual(reviewer.calls, [])
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "FAIL")
+        # Only the command that actually names the failing module is blamed.
+        evidence = "\n".join(finding.evidence for finding in state.findings)
+        self.assertIn(second, evidence)
+        self.assertNotIn(first, evidence)
+        self.assertEqual([finding.task_id for finding in state.findings],
+                         ["t002"])
 
     def test_structured_final_response_wins_over_codex_jsonl_stream(self):
         self.write_task(1, status="DONE")

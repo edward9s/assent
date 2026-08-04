@@ -137,6 +137,12 @@ files (logs; read only when debugging or explicitly referenced), and the
   tool-call preambles and restated plans, and quote a command or test
   failure as its shortest decisive line rather than a full transcript,
   unless the task or a human explicitly asks for more.
+- While any command runs — the focused verify command, the full suite, a
+  build, or any other long-running command — wait for it to finish and report
+  its outcome once. Do not start it in the background or asynchronously and
+  then poll it with repeated status checks, and emit no interim "still
+  running" / "checking again" heartbeat narration between starting a command
+  and reporting its result.
 - Prefer the smallest change that satisfies the task: reuse a helper,
   type, or pattern already in the touched files before adding a new one,
   and do not add abstractions, config, or scaffolding the task does not
@@ -342,7 +348,9 @@ decision, not a second debt-approval state.
    a deferred closeout will never happen. Verification runs only the
    scheduler-provided focused verify command, in the foreground and
    synchronously; it does not run the full suite — full verification belongs
-   to the scheduler's folder-closeout stage.
+   to the scheduler's folder-closeout stage. The general no-polling,
+   no-heartbeat-narration rule in "Working rules" applies to that run as it
+   does to every other command.
 2. Self-check against the task file's acceptance item by item, and run the
    verification command the scheduler provides to confirm exit code 0.
 3. Change the status of **your own task file** to DONE or BLOCKED — only this

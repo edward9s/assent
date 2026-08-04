@@ -38,6 +38,7 @@ from assent.reject import reject_folder
 from assent.rework import rework_task
 from assent.terminal_log import terminal_logging
 from assent.verification import (verify_batch, verify_folder,
+                                  verify_folder_if_needed,
                                   verify_selected_batch)
 
 _DEFAULT_CONFIG = ".assent/assent.toml"
@@ -535,18 +536,30 @@ def _close_run(result: int, *, verify: bool, config_path: str,
     """Chain `run --verify`'s complete verification onto a successful run.
 
     A nonzero run is returned untouched and starts no verification: there is no
-    finished plan to certify.  ``--verify`` is an invocation-level request, so it
-    always performs the verification, unlike the closeout stage that consults the
-    configured receipt-refresh policy.
+    finished plan to certify.  ``--verify`` is an invocation-level request that
+    does not consult the configured receipt-refresh policy: it verifies whatever
+    the selection covers regardless of whether closeout already would have.
 
     ``selection`` is the exact folder set the run covered, and ``None`` is a
     whole-project request (``--all`` or a bare ``...``), which keeps the dynamic
     batch's own discovery rather than freezing a set the scheduler may extend.
 
+    A complete single folder goes through ``verify_folder_if_needed`` so a
+    receipt the run's own closeout already produced for this exact candidate is
+    reported instead of running the identical full suite a second time; with no
+    fresh matching receipt it runs the suite exactly as ``verify_folder`` would.
+    The whole-project and multi-folder branches build a merged candidate no
+    per-folder receipt certifies, so their verification is never that duplicate
+    and stays unconditional.
+
     A limited ``--once`` / ``--task`` run arrives here as its one selected
-    folder like any other single-folder selection: ``verify_folder`` re-reads the
-    plan and its own pre-candidate gate refuses an incomplete folder, so the CLI
-    keeps no second completion predicate.
+    folder like any other single-folder selection, and it is the one selection
+    that can still be incomplete.  ``verify_folder_if_needed`` is the scheduler's
+    closeout entry point and treats an incomplete folder as a silent no-op, so
+    an invocation-level ``--verify`` sends that case to ``verify_folder``, whose
+    own pre-candidate gate names the unfinished task ids and refuses before any
+    candidate or verifier exists.  The routing reuses the CLI's existing
+    ``infer_folder_completion`` helper and states no refusal of its own.
     """
     if result != 0 or not verify:
         return result
@@ -559,7 +572,9 @@ def _close_run(result: int, *, verify: bool, config_path: str,
     except AssentError as e:
         print(f"Config error: {e}")
         return 1
-    return verify_folder(cfg)
+    if not infer_folder_completion(cfg.tasks_dir).complete:
+        return verify_folder(cfg)
+    return verify_folder_if_needed(cfg)
 
 
 def _dispatch(argv: list[str]) -> int:

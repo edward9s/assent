@@ -27,6 +27,7 @@ from assent.config import load_config
 from assent.init import init as run_init
 from assent.plan import Plan
 from tests.test_contracts import install_global_contracts
+from tests.test_shared_paths import settle_shared_paths
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _HAN_CHAR_RE = re.compile(r"[一-鿿]")
@@ -851,8 +852,14 @@ class TestRunVerifyChaining(MainTestCase):
     """`run --verify` chains the complete verification that matches the run.
 
     Each case patches the verification entry point the CLI is expected to
-    choose and makes the other two fail loudly, so the tests prove the
+    choose and makes the other ones fail loudly, so the tests prove the
     selection-to-verification mapping rather than re-testing verification.
+
+    A single folder has two of those entry points: a complete folder goes to
+    the conditional ``verify_folder_if_needed``, which reports a receipt the
+    run's own closeout already produced instead of repeating the identical full
+    suite, while an incomplete one goes to ``verify_folder`` for its refusing
+    pre-candidate gate.
     """
 
     def setUp(self):
@@ -862,8 +869,9 @@ class TestRunVerifyChaining(MainTestCase):
 
     @contextlib.contextmanager
     def only(self, name, result=0):
-        """Allow exactly one of the three verification entry points."""
-        entries = {"verify_folder", "verify_selected_batch", "verify_batch"}
+        """Allow exactly one of the four verification entry points."""
+        entries = {"verify_folder", "verify_folder_if_needed",
+                   "verify_selected_batch", "verify_batch"}
         with contextlib.ExitStack() as stack:
             for other in entries - {name}:
                 stack.enter_context(patch(
@@ -873,6 +881,8 @@ class TestRunVerifyChaining(MainTestCase):
                 f"assent.__main__.{name}", return_value=result))
 
     def test_automatically_selected_folder_verifies_that_one_folder(self):
+        # The patched run leaves the automatically selected folder ongoing, so
+        # this is the incomplete single folder that keeps the refusing gate.
         self.write_task("active", "TODO")
         with patch("assent.__main__.engine.run", return_value=0), \
                 self.only("verify_folder") as folder:
@@ -886,7 +896,7 @@ class TestRunVerifyChaining(MainTestCase):
     def test_one_explicit_folder_verifies_that_folder(self):
         self.write_task("alpha", "DONE")
         with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
-                self.only("verify_folder") as folder:
+                self.only("verify_folder_if_needed") as folder:
             code, _ = self.run_main(
                 ["run", "alpha", "--verify", "--auto-fix", "--config",
                  str(self.config)])
@@ -992,6 +1002,8 @@ class TestRunVerifyChaining(MainTestCase):
                 with patch("assent.__main__.engine.run", return_value=3), \
                         patch("assent.__main__.verify_folder",
                               side_effect=AssertionError("verified a failed run")), \
+                        patch("assent.__main__.verify_folder_if_needed",
+                              side_effect=AssertionError("verified a failed run")), \
                         patch("assent.__main__.verify_batch",
                               side_effect=AssertionError("verified a failed run")), \
                         patch("assent.__main__.verify_selected_batch",
@@ -1011,7 +1023,7 @@ class TestRunVerifyChaining(MainTestCase):
     def test_verification_failure_becomes_the_exit_code_of_a_successful_run(self):
         self.write_task("alpha", "DONE")
         with patch("assent.__main__.engine.run", return_value=0), \
-                self.only("verify_folder", result=1):
+                self.only("verify_folder_if_needed", result=1):
             code, _ = self.run_main(
                 ["run", "alpha", "--verify", "--auto-fix", "--config",
                  str(self.config)])
@@ -1040,7 +1052,7 @@ class TestRunVerifyChaining(MainTestCase):
                         f"report result {result}\n", encoding="utf-8")
 
                 with patch("assent.__main__.engine.run", return_value=0), \
-                        patch("assent.__main__.verify_folder",
+                        patch("assent.__main__.verify_folder_if_needed",
                               side_effect=verify), \
                         patch("assent.__main__.inspection.try_write_report",
                               side_effect=refresh) as report:
@@ -1059,6 +1071,8 @@ class TestRunVerifyChaining(MainTestCase):
         self.write_task("alpha")
         with patch("assent.__main__.engine.run", return_value=0), \
                 patch("assent.__main__.verify_folder",
+                      side_effect=AssertionError("verified without --verify")), \
+                patch("assent.__main__.verify_folder_if_needed",
                       side_effect=AssertionError("verified without --verify")):
             code, _ = self.run_main(
                 ["run", "alpha", "--config", str(self.config)])
@@ -1080,20 +1094,25 @@ class TestRunVerifyChaining(MainTestCase):
         return path
 
     def test_once_and_task_verify_the_single_selected_folder(self):
-        """A limited run selects one folder, so it earns a folder receipt."""
+        """A limited run selects one folder, so it earns a folder receipt.
+
+        The completed folder takes the conditional entry point and the ongoing
+        one the gate-bearing entry point; both verify the selected folder.
+        """
         self.write_task("alpha", "DONE")
         self.write_task("active", "TODO")
         cases = ((["run", "alpha", "--once", "--verify", "--auto-fix"],
-                   "alpha"),
+                   "alpha", "verify_folder_if_needed"),
                  (["run", "alpha", "--task", "t001", "--verify",
-                   "--auto-fix"], "alpha"),
-                 (["run", "--once", "--verify", "--auto-fix"], "active"),
+                   "--auto-fix"], "alpha", "verify_folder_if_needed"),
+                 (["run", "--once", "--verify", "--auto-fix"], "active",
+                  "verify_folder"),
                  (["run", "--task", "t001", "--verify", "--auto-fix"],
-                  "active"))
-        for argv, expected in cases:
+                  "active", "verify_folder"))
+        for argv, expected, entry in cases:
             with self.subTest(argv=argv):
                 with patch("assent.__main__.engine.run", return_value=0), \
-                        self.only("verify_folder") as folder:
+                        self.only(entry) as folder:
                     code, _ = self.run_main(
                         [*argv, "--config", str(self.config)])
                 self.assertEqual(code, 0)
@@ -1114,7 +1133,7 @@ class TestRunVerifyChaining(MainTestCase):
 
         observed = []
         with patch("assent.__main__.engine.run", side_effect=finish_the_folder), \
-                self.only("verify_folder") as folder:
+                self.only("verify_folder_if_needed") as folder:
             folder.side_effect = lambda cfg: observed.append(
                 [task.status for task in Plan.parse(cfg.tasks_dir).tasks]) or 0
             code, _ = self.run_main(
@@ -1173,6 +1192,104 @@ class TestRunVerifyChaining(MainTestCase):
                     main(argv)
                 self.assertEqual(ctx.exception.code, 2)
                 self.assertIn("--once", " ".join(errors.getvalue().split()))
+
+
+class TestRunVerifyFullSuiteCount(MainTestCase):
+    """`run FOLDER --verify` starts the real full verifier once, not twice.
+
+    Nothing about verification is patched here: a real repository, a real
+    complete folder, and a stand-in full verifier that counts its own
+    subprocess starts, so the assertions are on how many times the complete
+    suite actually ran for one invocation.
+    """
+
+    FOLDER = "finished"
+
+    def setUp(self):
+        super().setUp()
+        self.counter = Path(tempfile.mkdtemp()) / "verifier runs.txt"
+        self.addCleanup(shutil.rmtree, self.counter.parent, ignore_errors=True)
+        self.assent_dir = self.root / ".assent"
+        self.tasks_dir = self.assent_dir / self.FOLDER
+        self.tasks_dir.mkdir(parents=True)
+        self.config = self.assent_dir / "assent.toml"
+        # `.assent` stays out of Git, and the verifier only counts, so the
+        # candidate's result never depends on this machine's real test suite.
+        (self.assent_dir / "verify.py").write_text(
+            "from pathlib import Path\n"
+            f"counter = Path({str(self.counter)!r})\n"
+            "previous = int(counter.read_text() or '0') if counter.exists() else 0\n"
+            "counter.write_text(str(previous + 1), encoding='utf-8')\n",
+            encoding="utf-8")
+        (self.tasks_dir / "t001_done.e.toml").write_text(
+            'title = "Finished"\n'
+            'deps = []\nmodel = "lite"\nstatus = "DONE"\n'
+            'scope = ["result.txt"]\nverify = "python .assent/verify.py"\n'
+            'goal = "done"\nacceptance = "verified"\n',
+            encoding="utf-8")
+        self.git("init")
+        self.git("config", "user.name", "Assent Test")
+        self.git("config", "user.email", "assent@example.invalid")
+        self.git("checkout", "-b", "trunk")
+        (self.root / ".gitignore").write_text(".assent/\n", encoding="utf-8")
+        (self.root / "result.txt").write_text("initial\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-m", "initial")
+        # The finished folder's own source branch, one commit ahead of the
+        # target, is what an executed task would have left behind; the
+        # candidate needs it to be a real merge rather than a fast-forward.
+        self.worktree = self.root.parent / f"{self.root.name}.worktrees"
+        self.addCleanup(self.remove_worktrees)
+        self.addCleanup(shutil.rmtree, self.worktree, ignore_errors=True)
+        self.worktree = self.worktree / self.FOLDER
+        self.git("branch", f"{self.FOLDER}/run", "trunk")
+        self.git("worktree", "add", str(self.worktree), f"{self.FOLDER}/run")
+        (self.worktree / "result.txt").write_text(
+            "task result\n", encoding="utf-8")
+        subprocess.run(["git", "commit", "-am", "task result"],
+                       cwd=self.worktree, check=True, capture_output=True)
+        settle_shared_paths(self.root, self.worktree)
+
+    def git(self, *args) -> None:
+        subprocess.run(["git", *args], cwd=self.root, check=True,
+                       capture_output=True)
+
+    def remove_worktrees(self) -> None:
+        listing = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"], cwd=self.root,
+            capture_output=True, encoding="utf-8", errors="replace")
+        for line in listing.stdout.splitlines():
+            if line.startswith("worktree "):
+                path = Path(line.removeprefix("worktree "))
+                if path.resolve() != self.root.resolve():
+                    subprocess.run(
+                        ["git", "worktree", "remove", "--force", str(path)],
+                        cwd=self.root, capture_output=True)
+
+    def verifier_runs(self) -> int:
+        return (int(self.counter.read_text(encoding="utf-8") or "0")
+                if self.counter.exists() else 0)
+
+    def run_verify(self, receipt_refresh: str) -> tuple[int, str]:
+        self.config.write_text(
+            f'[verification]\nreceipt_refresh = "{receipt_refresh}"\n',
+            encoding="utf-8")
+        return self.run_main(
+            ["run", self.FOLDER, "--verify", "--config", str(self.config)])
+
+    def test_auto_closeout_receipt_replaces_the_second_full_run(self):
+        code, out = self.run_verify("auto")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.verifier_runs(), 1)
+        self.assertIn("full suite skipped", out)
+        self.assertTrue((self.tasks_dir / "_verification.toml").exists())
+
+    def test_manual_closeout_still_produces_one_fresh_receipt(self):
+        code, out = self.run_verify("manual")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.verifier_runs(), 1)
+        self.assertIn(f"verify {self.FOLDER}: passed", out)
+        self.assertTrue((self.tasks_dir / "_verification.toml").exists())
 
 
 class TestCommandElapsed(MainTestCase):
@@ -1274,7 +1391,8 @@ class TestCommandElapsed(MainTestCase):
         self.write_task("earlier", "DONE")
         with self.injected_clock(), \
                 patch("assent.__main__.engine.run", return_value=0), \
-                patch("assent.__main__.verify_folder", side_effect=verifier):
+                patch("assent.__main__.verify_folder_if_needed",
+                      side_effect=verifier):
             code, out = self.run_main(
                 ["run", "earlier", "--verify", "--config", str(config)])
         self.assertEqual(code, 0)
