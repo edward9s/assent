@@ -76,6 +76,9 @@ def _start_folder(config_path: str, folder: str, *, auto_fix: bool = False) -> s
     command.extend(("--config", str(Path(config_path).resolve())))
     child_env = dict(os.environ)
     child_env["ASSENT_STDIN_STOP"] = "1"
+    # Marks the child as one folder's run rather than the human's invocation, so
+    # its timing line is labeled apart from this parent's end-to-end total.
+    child_env["ASSENT_FOLDER_RUN"] = "1"
     kwargs = {
         "env": child_env,
         "cwd": str(_package_search_root()),

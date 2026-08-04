@@ -11,6 +11,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -50,6 +51,18 @@ _CONFIG_HELP = (
 # that child into the stdin stop channel; a hand-typed `assent run` never sees
 # it, so an interactive stdin (possibly a tty) is left completely alone.
 _STDIN_STOP_ENV = "ASSENT_STDIN_STOP"
+# Also set by the parent scheduler on a spawned `assent run <folder>` child.  The
+# end-to-end total belongs to the user's own invocation, so a child reports its
+# folder duration under its own label instead of a second, identical-looking
+# command total.
+_FOLDER_CHILD_ENV = "ASSENT_FOLDER_RUN"
+# The two long-running commands whose wall-clock duration is worth reporting:
+# they open AI sessions, build integration candidates, and run whole suites.
+# Every other subcommand returns promptly and its output stays untouched.
+_TIMED_COMMANDS = ("run", "verify")
+# Named so tests can inject a deterministic clock; production always reads the
+# monotonic clock, which no wall-clock or timezone change can move backwards.
+_monotonic = time.monotonic
 # The literal ASCII token `...` is remainder syntax, never a folder name:
 # `A B ...` means "A, then B, then every other discovered work folder".  Folder
 # validation already rejects any name containing `..`, so the token cannot
@@ -958,6 +971,50 @@ def _start_stdin_stop_watcher() -> threading.Thread | None:
     return thread
 
 
+def _command_elapsed_line(command: str, elapsed: float, code: int, *,
+                          interrupted: bool = False) -> str:
+    """Word one end-to-end timing line for a finished or interrupted command.
+
+    The label states the boundary explicitly, because `verify` also prints the
+    verifier's own ``Full verification finished: elapsed ...`` line: that one is
+    the expensive suite alone, this one additionally covers validation,
+    candidate construction and cleanup.  A scheduler-spawned `run` child owns
+    one folder rather than the human's invocation, so it is labeled apart from
+    the parent's single end-to-end total.
+    """
+    verb = "interrupted" if interrupted else "finished"
+    if command == "run" and os.environ.get(_FOLDER_CHILD_ENV):
+        subject = "Scheduled folder run"
+    else:
+        subject = f"Command `assent {command}`"
+    return f"{subject} {verb}: elapsed {elapsed:.1f}s, exit code {code}"
+
+
+def _dispatch_timed(actual_argv: list[str]) -> int:
+    """Dispatch one invocation, reporting its end-to-end elapsed time.
+
+    The timer covers everything the command does before it returns, and the
+    reporting deliberately changes nothing else: the original diagnostics are
+    already printed, the original exit code is returned unchanged, and an
+    interrupt is re-raised after being timed.  A usage error or ``--help``
+    leaves through ``SystemExit`` without a timing line, since neither is a run
+    whose duration means anything.
+    """
+    command = actual_argv[0] if actual_argv else ""
+    if command not in _TIMED_COMMANDS:
+        return _dispatch(actual_argv)
+    started = _monotonic()
+    try:
+        code = _dispatch(actual_argv)
+    except KeyboardInterrupt:
+        print(_command_elapsed_line(command, _monotonic() - started, 130,
+                                    interrupted=True), flush=True)
+        raise
+    print(_command_elapsed_line(command, _monotonic() - started, code),
+          flush=True)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
     _install_break_handler()
@@ -975,7 +1032,7 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     with terminal_logging(actual_argv):
-        return _dispatch(actual_argv)
+        return _dispatch_timed(actual_argv)
 
 
 if __name__ == "__main__":
