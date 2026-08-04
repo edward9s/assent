@@ -1587,31 +1587,44 @@ def _run_auto_fix_review_once(
         focused_lines.extend(
             f"- {item.task.id}: {item.focused_evidence}" for item in blockers)
         identity_lines.extend(focused_lines)
+    distinct: list[str] = []
     for task in done if review_context == "completed_folder" else ():
         if task.verify in seen:
             continue
         seen.add(task.verify)
-        if gate_passes is not None and gate_passes.reusable(cfg, task.verify):
-            print(f"  verify: {task.verify}")
+        distinct.append(task.verify)
+    # Reuse is decided first and still wins, so a command the scheduler already
+    # proved against this tree never enters the merged union.  Only the
+    # commands this sweep would really execute are merged, on one fixed tree.
+    reused = {command: gate_passes is not None
+              and gate_passes.reusable(cfg, command)
+              for command in distinct}
+    merged = _merged_unittest_passes(
+        cfg, [command for command in distinct if not reused[command]])
+    for command in distinct:
+        if reused[command]:
+            print(f"  verify: {command}")
             print("  reused authoritative PASS (scheduler gate, exit 0)")
             focused_lines.append(
-                f"- PASS (reused authoritative PASS): {task.verify}")
-            identity_lines.append(f"- PASS: {task.verify}")
+                f"- PASS (reused authoritative PASS): {command}")
+            identity_lines.append(f"- PASS: {command}")
             continue
-        verify_result = _verify_subprocess(cfg, task.verify)
-        _show_verify_result(task.verify, verify_result)
+        verify_result = merged.get(command)
+        if verify_result is None:
+            verify_result = _verify_subprocess(cfg, command)
+        _show_verify_result(command, verify_result)
         if verify_result.returncode != 0:
             diagnostic = _bounded_adapter_diagnostic(
                 verify_result.stderr or verify_result.stdout or "")
             focused_lines.append(
-                f"- FAIL ({verify_result.returncode}): {task.verify}; {diagnostic}")
+                f"- FAIL ({verify_result.returncode}): {command}; {diagnostic}")
             identity_lines.append(focused_lines[-1])
-            owners = [item for item in done if item.verify == task.verify]
+            owners = [item for item in done if item.verify == command]
             record = auto_fix.ReviewRecord("FAIL", tuple(
                 auto_fix.ReviewFinding(
                     item.id, auto_fix.scheduler_finding_path(item.scope[0]),
                     "Final focused verification failed",
-                    f"exit {verify_result.returncode}: {task.verify}; {diagnostic}")
+                    f"exit {verify_result.returncode}: {command}; {diagnostic}")
                 for item in owners))
             record = auto_fix.validate_review_findings(record, plan)
             source_tree, plan_digest, _prompt, prompt_digest = (
@@ -1640,7 +1653,7 @@ def _run_auto_fix_review_once(
             reason = ("focused verification changed the source worktree"
                       if dirty else None)
             return _AutoFixReviewOutcome(1, state, reason)
-        focused_lines.append(f"- PASS: {task.verify}")
+        focused_lines.append(f"- PASS: {command}")
         identity_lines.append(focused_lines[-1])
     if not gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
         print("Auto-fix folder review: focused verification changed the source worktree; "
@@ -3473,6 +3486,56 @@ def _show_verify_result(
         print("  verify passed (exit 0)")
 
 
+_UNITTEST_MODULE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
+def _unittest_modules(command: str) -> tuple[str, ...] | None:
+    """Return the modules of an exact ``python -m unittest <modules>`` command.
+
+    The shape is recognized conservatively and nothing else qualifies: a
+    different interpreter or runner, extra flags, unusual spacing, or a path
+    argument all return ``None``, so such a command keeps running exactly on
+    its own as before.
+    """
+    tokens = command.split(" ")
+    if tokens[:3] != ["python", "-m", "unittest"] or len(tokens) < 4:
+        return None
+    modules = tokens[3:]
+    if not all(_UNITTEST_MODULE.match(module) for module in modules):
+        return None
+    return tuple(modules)
+
+
+def _merged_unittest_passes(
+        cfg: Config,
+        commands: list[str]) -> dict[str, subprocess.CompletedProcess]:
+    """Prove overlapping unittest commands with one run over their module union.
+
+    Within one fixed tree state, distinct declared commands that name a shared
+    module re-import and re-execute that module once per command.  Running the
+    ordered union once instead proves every command in the group when it exits
+    0.  A nonzero merged run proves nothing and returns nothing, so the caller
+    falls back to its ordinary per-command execution and keeps today's failure
+    attribution and diagnostics.
+    """
+    modules_by_command = {command: _unittest_modules(command)
+                          for command in commands}
+    matched = [command for command in commands
+               if modules_by_command[command] is not None]
+    if len(matched) < 2:
+        return {}
+    union: list[str] = []
+    for command in matched:
+        for module in modules_by_command[command] or ():
+            if module not in union:
+                union.append(module)
+    result = _verify_subprocess(cfg, "python -m unittest " + " ".join(union))
+    if result.returncode != 0:
+        return {}
+    return {command: result for command in matched}
+
+
 def _verify_focused_locked(cfg: Config) -> int:
     """Run the distinct DONE-task checks from one folder's source worktree.
 
@@ -3504,7 +3567,14 @@ def _verify_focused_locked(cfg: Config) -> int:
     print(f"verify {folder} --focus: source worktree {source.worktree}")
     print("verify --focus: focused task verification cannot authorize `accept`; "
           "complete integration verification has not run")
+    # One fixed tree, so overlapping unittest commands are proven together; a
+    # failed or ineligible merge leaves every command to run one at a time.
+    merged = _merged_unittest_passes(source_cfg, commands)
     for command in commands:
+        proven = merged.get(command)
+        if proven is not None:
+            _show_verify_result(command, proven)
+            continue
         if _run_verify(source_cfg, command) != 0:
             print(f"verify {folder} --focus: failed; this focused result cannot "
                   "authorize `accept`")
