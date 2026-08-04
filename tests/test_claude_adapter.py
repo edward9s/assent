@@ -514,6 +514,39 @@ class TestRunTask(unittest.TestCase):
         self.assertFalse(result.quota_exhausted)
         self.assertIsNone(result.failure_kind)
 
+    def test_structured_task_extracts_result_event_text_not_raw_stream(self):
+        final = '{"type":"assent.auto_fix_review","verdict":"PASS","findings":[]}'
+        stream = (
+            json.dumps({"type": "system", "subtype": "init"}) + "\n"
+            + json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": final}]}}) + "\n"
+            + json.dumps({"type": "result", "subtype": "success",
+                         "result": final}) + "\n")
+        self.patch_run(lambda *args, **kwargs: (0, stream, False))
+        result = ClaudeAdapter(make_cfg()).run_structured_task(
+            "p", "opus", "medium", Path("."))
+        self.assertEqual(result.output, stream)
+        self.assertEqual(result.structured_output, final)
+        self.assertIsNone(result.structured_output_error)
+
+    def test_structured_task_errors_when_no_result_event_is_present(self):
+        stream = json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "no terminal result event here"}]}}) + "\n"
+        self.patch_run(lambda *args, **kwargs: (0, stream, False))
+        result = ClaudeAdapter(make_cfg()).run_structured_task(
+            "p", "opus", "medium", Path("."))
+        self.assertIsNone(result.structured_output)
+        self.assertIsNotNone(result.structured_output_error)
+
+    def test_structured_task_errors_when_result_field_is_blank(self):
+        stream = json.dumps({"type": "result", "subtype": "success",
+                             "result": "   "}) + "\n"
+        self.patch_run(lambda *args, **kwargs: (0, stream, False))
+        result = ClaudeAdapter(make_cfg()).run_structured_task(
+            "p", "opus", "medium", Path("."))
+        self.assertIsNone(result.structured_output)
+        self.assertIsNotNone(result.structured_output_error)
+
 
 class TestGetAdapter(unittest.TestCase):
     def test_claude_returns_adapter(self):

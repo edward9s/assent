@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -256,6 +257,36 @@ def parse_output_for_billing(output: str) -> bool:
     return any(_BILLING_TEXT_RE.search(text) for text in human_texts)
 
 
+def _extract_result_text(output: str) -> tuple[str | None, str | None]:
+    """Pull the model's final response text out of a stream-json transcript.
+
+    stream-json has no native last-message transport like Codex's --output-last-message: the
+    final text lives inside the terminal ``result`` event's ``result`` field, one JSON value
+    nested in a line among system/assistant/rate_limit_event events -- never a standalone
+    top-level line by itself. The provider-neutral fallback in Adapter.run_structured_task
+    assumes ``output`` is already plain response text, which holds for adapters that print it
+    directly but not for this one, so it must be overridden here.
+    """
+    result_text: str | None = None
+    for raw in output.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        try:
+            evt = json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(evt, dict) and evt.get("type") == "result":
+            r = evt.get("result")
+            if isinstance(r, str):
+                result_text = r
+    if result_text is None:
+        return None, "Claude structured output is missing: no result event with a result field was found"
+    if not result_text.strip():
+        return None, "Claude structured output is empty"
+    return result_text, None
+
+
 class ClaudeAdapter(Adapter):
     """claude CLI adapter; config is injected by get_adapter."""
 
@@ -295,6 +326,20 @@ class ClaudeAdapter(Adapter):
                           quota_exhausted=exhausted, reset_at=reset_at,
                           stalled=False, checkpoint_resume=checkpoint_resume,
                           failure_kind=failure_kind)
+
+    def run_structured_task(self, prompt: str, requested_model: str,
+                            requested_effort: str | None,
+                            cwd: Path) -> TaskResult:
+        """Extract the terminal ``result`` event's text instead of the raw stream-json.
+
+        The base fallback would otherwise hand the whole event transcript to the strict
+        review parser, which never contains a standalone terminal-record line and always
+        fails closed.
+        """
+        result = self.run_task(prompt, requested_model, requested_effort, cwd)
+        structured_output, structured_output_error = _extract_result_text(result.output)
+        return replace(result, structured_output=structured_output,
+                       structured_output_error=structured_output_error)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:
