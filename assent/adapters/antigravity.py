@@ -250,7 +250,12 @@ def log_file(cfg: "Config") -> Path:
 
 def build_command(cfg: "Config", prompt: str, requested_model: str,
                   requested_effort: str | None) -> list[str]:
-    """Build the headless ``agy`` command; model and effort are already resolved by the engine.
+    """Build the headless ``agy`` command whose prompt is supplied through stdin.
+
+    Model and effort are already resolved by the engine.  The prompt is delivered via
+    stdin (run_subprocess's input_text) instead of ``--print prompt`` to avoid exceeding
+    Windows' CreateProcessW command-line length limit ([WinError 206]).  Without
+    ``--print``, ``agy`` auto-detects a piped stdin and runs in non-interactive mode.
 
     The argument array is handed to the process untouched -- no shell is involved -- and any
     reserved-flag conflict is refused here as the hard floor, in addition to the preflight.
@@ -260,7 +265,7 @@ def build_command(cfg: "Config", prompt: str, requested_model: str,
     if conflicts:
         raise AssentError("; ".join(conflicts))
 
-    cmd = [settings.command, "--print", prompt, "--model", requested_model]
+    cmd = [settings.command, "--model", requested_model]
     if requested_effort:
         cmd += ["--effort", requested_effort]
     cmd += ["--mode", "accept-edits",
@@ -419,7 +424,7 @@ class AntigravityAdapter(Adapter):
         try:
             returncode, output, stalled = run_subprocess(
                 command, cwd, stall_seconds, echo=self._echo_line,
-                heartbeat_path=log_path)
+                heartbeat_path=log_path, input_text=prompt)
         finally:
             # Success, failure, stall-kill and interrupt all take this path: the per-run log
             # may hold internal detail that must not linger on disk, and it is never read here.

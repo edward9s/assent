@@ -70,9 +70,13 @@ _BILLING_API_STATUSES = {400, 402}
 
 def build_command(cfg: "Config", prompt: str, requested_model: str,
                   requested_effort: str | None) -> list[str]:
-    """Build the claude CLI command; both model and effort have already been resolved to
-    concrete values by the engine."""
-    cmd = [cfg.claude_command, "-p", prompt, "--model", requested_model]
+    """Build the claude CLI command whose prompt is supplied through stdin.
+
+    Both model and effort have already been resolved to concrete values by the engine.
+    The prompt is delivered via stdin (run_subprocess's input_text) to avoid exceeding
+    Windows' CreateProcessW command-line length limit ([WinError 206]).
+    """
+    cmd = [cfg.claude_command, "-p", "--model", requested_model]
     if requested_effort:
         cmd += ["--effort", requested_effort]
     # Fixed flags required for parsing (--verbose is a hard requirement found by probing);
@@ -268,7 +272,8 @@ class ClaudeAdapter(Adapter):
             self.cfg, prompt, requested_model, requested_effort)
         stall_seconds = self.cfg.stall_minutes * 60 if self.cfg.stall_minutes else 0
         returncode, output, stalled = run_subprocess(
-            cmd, cwd, stall_seconds, echo=self._echo_line)
+            cmd, cwd, stall_seconds, echo=self._echo_line,
+            input_text=prompt)
         if stalled:  # A stall is a task failure, never mistaken for quota exhaustion (2.5)
             return TaskResult(exit_code=returncode, output=output,
                               quota_exhausted=False, reset_at=None,

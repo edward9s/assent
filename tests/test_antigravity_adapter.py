@@ -167,8 +167,10 @@ class TestBuildCommand(unittest.TestCase):
     def test_headless_flags_workspace_and_permissions(self):
         cfg = make_cfg()
         cmd = build_command(cfg, "the prompt", "gemini-3.1-pro", "high")
-        self.assertEqual(cmd[:5],
-                         ["agy", "--print", "the prompt", "--model", "gemini-3.1-pro"])
+        self.assertEqual(cmd[0], "agy")
+        self.assertNotIn("--print", cmd)
+        self.assertNotIn("the prompt", cmd)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "gemini-3.1-pro")
         self.assertEqual(cmd[cmd.index("--effort") + 1], "high")
         self.assertEqual(cmd[cmd.index("--mode") + 1], "accept-edits")
         self.assertEqual(cmd[cmd.index("--print-timeout") + 1], "120m")
@@ -182,7 +184,6 @@ class TestBuildCommand(unittest.TestCase):
         self.assertEqual(len(added), 2)      # task folder plus system temp
         # every element is a separate argument: nothing is ever handed to a shell
         self.assertTrue(all(isinstance(part, str) for part in cmd))
-        self.assertEqual(sum(1 for part in cmd if part == "the prompt"), 1)
 
     def test_nine_cell_grid_has_exact_model_and_effort_flags(self):
         cfg = make_cfg()
@@ -453,9 +454,10 @@ class TestRunTask(unittest.TestCase):
     def test_command_uses_resolved_values_and_reports_success(self):
         captured = {}
 
-        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None):
+        def fake(command, cwd, stall_seconds, echo=None, heartbeat_path=None,
+                 input_text=None):
             captured.update(command=command, cwd=cwd, stall_seconds=stall_seconds,
-                            heartbeat_path=heartbeat_path)
+                            heartbeat_path=heartbeat_path, input_text=input_text)
             return 0, "finished\n", False
 
         self.patch_run(fake)
@@ -468,6 +470,7 @@ class TestRunTask(unittest.TestCase):
         self.assertEqual(captured["cwd"], Path("/work"))
         self.assertEqual(captured["stall_seconds"], 30 * 60)
         self.assertEqual(captured["heartbeat_path"], log_file(make_cfg()))
+        self.assertEqual(captured["input_text"], "p")
         self.assertEqual(result.exit_code, 0)
         self.assertIsNone(result.failure_kind)
         self.assertFalse(result.quota_exhausted)

@@ -43,11 +43,12 @@ class TestBuildCommand(unittest.TestCase):
         i = cmd.index("--output-format")
         self.assertEqual(cmd[i + 1], "stream-json")
 
-    def test_model_effort_and_prompt_placement(self):
+    def test_model_effort_and_prompt_via_stdin(self):
         cmd = build_command(make_cfg(claude_command="claude.cmd"),
                             "the prompt", "opus", "max")
         self.assertEqual(cmd[0], "claude.cmd")
-        self.assertEqual(cmd[cmd.index("-p") + 1], "the prompt")
+        self.assertIn("-p", cmd)
+        self.assertNotIn("the prompt", cmd)
         self.assertEqual(cmd[cmd.index("--model") + 1], "opus")
         self.assertEqual(cmd[cmd.index("--effort") + 1], "max")
 
@@ -395,9 +396,10 @@ class TestRunTask(unittest.TestCase):
     def test_translates_tier_to_alias_and_returns_result(self):
         captured = {}
 
-        def fake(cmd, cwd, stall_seconds, echo=None):
+        def fake(cmd, cwd, stall_seconds, echo=None, input_text=None):
             captured["cmd"] = cmd
             captured["cwd"] = cwd
+            captured["input_text"] = input_text
             return 0, '{"type":"result","result":"OK"}\n', False
 
         self.patch_run(fake)
@@ -415,6 +417,7 @@ class TestRunTask(unittest.TestCase):
             requested_model)
         self.assertEqual(captured["cmd"][captured["cmd"].index("--effort") + 1], "high")
         self.assertEqual(captured["cwd"], Path("/proj"))
+        self.assertEqual(captured["input_text"], "prompt")
 
     def test_unknown_tier_raises(self):
         adapter = ClaudeAdapter(make_cfg(claude_models={"core": "opus"}))
@@ -425,7 +428,7 @@ class TestRunTask(unittest.TestCase):
         ts = 1784041800
         quota_line = json.dumps({"type": "rate_limit_event", "rate_limit_info": {
             "status": "rejected", "resetsAt": ts}}) + "\n"
-        self.patch_run(lambda c, w, s, echo=None: (1, quota_line, False))
+        self.patch_run(lambda c, w, s, echo=None, input_text=None: (1, quota_line, False))
         adapter = ClaudeAdapter(make_cfg())
         result = adapter.run_task(
             "p", adapter.resolve_model("lite"), None, Path("."))
@@ -438,7 +441,7 @@ class TestRunTask(unittest.TestCase):
                 line = json.dumps({"type": "assistant", "message": {
                     "content": [{"type": "text",
                                  "text": f"The answer discusses {phrase}."}]}})
-                self.patch_run(lambda c, w, s, echo=None: (0, line + "\n", False))
+                self.patch_run(lambda c, w, s, echo=None, input_text=None: (0, line + "\n", False))
                 result = ClaudeAdapter(make_cfg()).run_task(
                     "p", "fable", None, Path("."))
                 self.assertEqual(result.exit_code, 0)
@@ -448,7 +451,7 @@ class TestRunTask(unittest.TestCase):
     def test_billing_output_sets_failure_kind_not_quota(self):
         output = (FIXTURES / "stream_json_billing.txt").read_text(encoding="utf-8")
         # the real CLI exits non-zero on this api_error
-        self.patch_run(lambda c, w, s, echo=None: (1, output, False))
+        self.patch_run(lambda c, w, s, echo=None, input_text=None: (1, output, False))
         adapter = ClaudeAdapter(make_cfg())
         result = adapter.run_task(
             "p", adapter.resolve_model("lite"), None, Path("."))
@@ -461,7 +464,7 @@ class TestRunTask(unittest.TestCase):
         # credit balance must never be classified as a billing failure
         line = json.dumps({"type": "result",
                            "result": "I checked the credit balance module, all good"})
-        self.patch_run(lambda c, w, s, echo=None: (0, line + "\n", False))
+        self.patch_run(lambda c, w, s, echo=None, input_text=None: (0, line + "\n", False))
         adapter = ClaudeAdapter(make_cfg())
         result = adapter.run_task(
             "p", adapter.resolve_model("lite"), None, Path("."))
@@ -471,7 +474,7 @@ class TestRunTask(unittest.TestCase):
     def test_stall_is_failure_not_quota(self):
         # Even if a stall's output contains quota-looking text, it's always a task failure,
         # never mistaken for quota exhaustion (2.5)
-        self.patch_run(lambda c, w, s, echo=None: (1, "rate limit exceeded\n", True))
+        self.patch_run(lambda c, w, s, echo=None, input_text=None: (1, "rate limit exceeded\n", True))
         adapter = ClaudeAdapter(make_cfg())
         result = adapter.run_task(
             "p", adapter.resolve_model("lite"), None, Path("."))
