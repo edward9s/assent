@@ -1074,7 +1074,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 if review_outcome.rounds_exhausted:
                     assert review_outcome.state is not None
                     return _auto_fix_finish_rounds_exhausted(
-                        cfg, review_outcome.state, now)
+                        cfg, review_outcome.state, now,
+                        gate_passes=gate_passes)
                 if (auto_fix_enabled and review_outcome.state is not None
                         and review_outcome.human_reason is None
                         and not (once or task_id is not None)):
@@ -2572,7 +2573,8 @@ def _auto_fix_cascade_tasks(plan: Plan, implicated: list[str]) -> list[Task]:
 
 def _auto_fix_finish_rounds_exhausted(
         cfg: Config, state: auto_fix.AutoFixState,
-        now: Callable[[], datetime]) -> int:
+        now: Callable[[], datetime], *,
+        gate_passes: _FocusedGateLedger | None = None) -> int:
     """The finite review-round sequence ran out; stop without another round.
 
     Nothing is reverted, reopened, or re-marked: the durable finding ledger,
@@ -2581,8 +2583,11 @@ def _auto_fix_finish_rounds_exhausted(
     it found (verdict ``FIXED``) is not a failure -- the code passed every
     focused gate its own tasks declare and only independent review confirmation
     is missing -- so it settles as the distinct, human-gated SELF-FIXED,
-    UNREVIEWED outcome and the run succeeds.  A blocker no round repaired still
-    ends nonzero.
+    UNREVIEWED outcome and the run succeeds.  That claim is what the settling
+    gate below proves: the last round wrote its repair after those gates last
+    ran, so they run once more on the repaired source before anything settles,
+    and a repair that breaks one ends the run nonzero instead of handing a
+    human an unproven outcome.  A blocker no round repaired still ends nonzero.
     """
     if state.verdict != "FIXED":
         print(f"Auto-fix review rounds exhausted after {state.review_round_index} "
@@ -2590,23 +2595,145 @@ def _auto_fix_finish_rounds_exhausted(
               "another round.")
         return 1
     already_settled = state.self_fixed_unreviewed is not None
-    settled = auto_fix.with_self_fixed_unreviewed(
-        state, source_tree=_auto_fix_current_tree(cfg))
-    outcome = settled.self_fixed_unreviewed
-    assert outcome is not None
+    gate_passed, evidence, gate_tasks = (
+        (True, "", ()) if already_settled
+        else _auto_fix_settling_gates(cfg, state, gate_passes, now))
+    if not already_settled:
+        state = _auto_fix_with_settling_gate_evidence(
+            state, gate_tasks, evidence)
     try:
         # The durable outcome and the report a human reads must both be on disk
         # before this folder hands control back, so the report refresh follows
         # the same unconditional discipline folder verification's own closeout
-        # uses -- a later failure can never leave either unwritten.
+        # uses -- a later failure can never leave either unwritten.  A failed
+        # settling gate takes the same discipline: its evidence is durable, and
+        # only the settled outcome itself is withheld.
+        if not gate_passed:
+            auto_fix.write_auto_fix_state(
+                auto_fix.auto_fix_state_path(cfg), state)
+            print(f"Auto-fix review rounds exhausted after "
+                  f"{state.review_round_index} round(s); the final round's "
+                  "repair failed the focused gate of the task it repaired, so "
+                  "the folder did not settle. Every finding, edit, and journal "
+                  "was preserved without another round.")
+            return 1
+        settled = auto_fix.with_self_fixed_unreviewed(
+            state, source_tree=_auto_fix_current_tree(cfg))
+        outcome = settled.self_fixed_unreviewed
+        assert outcome is not None
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), settled)
         _print_self_fixed_unreviewed(outcome)
         if not already_settled:
-            _auto_fix_journal_self_fixed(cfg, settled, now)
+            _auto_fix_journal_self_fixed(
+                cfg, settled, now, gate_evidence=evidence)
     finally:
         try_write_report(cfg)
     return 0
+
+
+# The one heading the settling gate writes into a durable brief, so re-proving
+# a folder replaces its own section instead of stacking another copy.
+_AUTO_FIX_SETTLING_GATE_HEADING = "Settling focused gate evidence"
+
+
+def _auto_fix_settling_gates(
+        cfg: Config, state: auto_fix.AutoFixState,
+        gate_passes: _FocusedGateLedger | None,
+        now: Callable[[], datetime]) -> tuple[bool, str, tuple[str, ...]]:
+    """Prove the last round's repair against the implicated tasks' own gates.
+
+    SELF-FIXED, UNREVIEWED tells a human that every task passed the focused
+    gate it declares itself, and that only independent review confirmation is
+    missing.  The final round writes its repair after those gates last ran, so
+    the statement is true of the repair only once they run again on it.  This
+    reuses the ordinary focused-gate execution and the invocation's own
+    ``_FocusedGateLedger``, so a command already proven against exactly this
+    source is not run a second time.
+    """
+    ledger = {item.fingerprint: item for item in state.findings}
+    implicated = tuple(dict.fromkeys(
+        ledger[fingerprint].task_id
+        for fingerprint in state.current_finding_fingerprints
+        if ledger[fingerprint].task_id is not None))
+    lines = [f"{_AUTO_FIX_SETTLING_GATE_HEADING} "
+             f"({now().isoformat(timespec='seconds')}):"]
+
+    def refused(line: str) -> tuple[bool, str, tuple[str, ...]]:
+        lines.append(line)
+        return False, "\n".join(lines), implicated
+
+    if not implicated:
+        return refused("- FAIL: no existing task owns the settling findings, "
+                       "so no focused gate can prove the repair")
+    plan = Plan.parse(cfg.tasks_dir)
+    owners: dict[str, list[str]] = {}
+    for task_id in implicated:
+        task = plan.get(task_id)
+        if task is None:
+            return refused(f"- FAIL {task_id}: the repaired task is no longer "
+                           "in the plan")
+        owners.setdefault(task.verify, []).append(task.id)
+
+    print("Auto-fix folder review: proving the final round's repair against "
+          "the focused gates of the tasks it repaired.")
+    reused = {command: gate_passes is not None
+              and gate_passes.reusable(cfg, command)
+              for command in owners}
+    merged = _merged_unittest_passes(
+        cfg, [command for command in owners if not reused[command]])
+    for command, tasks in owners.items():
+        label = ", ".join(tasks)
+        if reused[command]:
+            print(f"  verify: {command}")
+            print("  reused authoritative PASS (scheduler gate, exit 0)")
+            lines.append(
+                f"- PASS (reused authoritative PASS) {label}: {command}")
+            continue
+        result = merged.get(command)
+        if result is None:
+            result = _verify_subprocess(cfg, command)
+        _show_verify_result(command, result)
+        if result.returncode != 0:
+            diagnostic = _bounded_adapter_diagnostic(
+                result.stderr or result.stdout or "")
+            return refused(f"- FAIL ({result.returncode}) {label}: {command}; "
+                           f"{diagnostic}")
+        lines.append(f"- PASS {label}: {command}")
+    return True, "\n".join(lines), implicated
+
+
+def _auto_fix_with_settling_gate_evidence(
+        state: auto_fix.AutoFixState, task_ids: tuple[str, ...],
+        evidence: str) -> auto_fix.AutoFixState:
+    """Persist the settling gate result where the folder report already reads.
+
+    The durable repair brief is the folder's one free-text per-task evidence
+    record, and the report renders its opening, so the gate result leads it: a
+    human reading `_report.md` sees which command proved the final repair, and
+    when, without opening the derived state file.
+    """
+    briefs: list[auto_fix.RepairBrief] = []
+    carried: set[str] = set()
+    for item in state.repair_briefs:
+        brief = _auto_fix_without_gate_evidence(item.brief)
+        if item.task_id in task_ids:
+            carried.add(item.task_id)
+            brief = f"{evidence}\n\n{brief}" if brief else evidence
+        briefs.append(auto_fix.RepairBrief(
+            item.task_id, item.finding_fingerprints, brief))
+    briefs.extend(
+        auto_fix.RepairBrief(
+            task_id, state.current_finding_fingerprints, evidence)
+        for task_id in task_ids if task_id not in carried)
+    return auto_fix.with_repair_briefs(state, tuple(briefs))
+
+
+def _auto_fix_without_gate_evidence(brief: str) -> str:
+    """Drop an earlier settling-gate section so re-proving replaces it."""
+    if not brief.startswith(_AUTO_FIX_SETTLING_GATE_HEADING):
+        return brief
+    return brief.partition("\n\n")[2]
 
 
 def _auto_fix_current_tree(cfg: Config) -> str | None:
@@ -2629,7 +2756,7 @@ def _print_self_fixed_unreviewed(outcome: auto_fix.SelfFixedOutcome) -> None:
 
 def _auto_fix_journal_self_fixed(
         cfg: Config, state: auto_fix.AutoFixState,
-        now: Callable[[], datetime]) -> None:
+        now: Callable[[], datetime], *, gate_evidence: str = "") -> None:
     """Record the settled outcome once on every implicated task's r file."""
     outcome = state.self_fixed_unreviewed
     assert outcome is not None
@@ -2659,7 +2786,8 @@ def _auto_fix_journal_self_fixed(
                     "was reopened, reverted, or marked BLOCKED. Only "
                     "independent review confirmation is missing; acceptance "
                     "remains the explicit human action.\n"
-                    "Unconfirmed findings:\n" + "\n".join(findings)),
+                    "Unconfirmed findings:\n" + "\n".join(findings)
+                    + (f"\n{gate_evidence}" if gate_evidence else "")),
             time_str=now().isoformat(timespec="seconds"))
 
 
@@ -2785,7 +2913,8 @@ def _run_auto_fix_repairs(
                 return 0
             if outcome.rounds_exhausted:
                 return _auto_fix_finish_rounds_exhausted(
-                    cfg, outcome.state or state, now)
+                    cfg, outcome.state or state, now,
+                    gate_passes=round_passes)
             if outcome.state is None or outcome.human_reason is not None:
                 return outcome.code
             state = outcome.state
@@ -2899,7 +3028,8 @@ def _run_auto_fix_repairs(
                     blockers=tuple(round_blockers))
                 if outcome.rounds_exhausted:
                     return _auto_fix_finish_rounds_exhausted(
-                        cfg, outcome.state or state, now)
+                        cfg, outcome.state or state, now,
+                        gate_passes=round_passes)
                 if outcome.state is None or outcome.human_reason is not None:
                     return outcome.code
                 state = outcome.state
