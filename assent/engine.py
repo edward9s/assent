@@ -2915,17 +2915,56 @@ def _recover_or_ensure_clean(cfg: Config, now: Callable[[], datetime]) -> None:
 
     A hard power loss or a forced kill never reaches the Ctrl+C / quota / infrastructure
     interrupt handlers, so it leaves the worktree dirty with the task status and the wip
-    checkpoint unwritten.  On the next run, if every uncommitted change is provably inside the
-    scope of the task ``next_task()`` would resume -- or, failing that, of a single DONE task
-    the scheduler never checkpointed -- that progress is gathered into a ``wip`` checkpoint and
-    the run continues -- no AI session, zero tokens.  Every other dirty state (a change outside
-    that scope, ambiguous ownership, or no provable owner at all) keeps today's fail-closed
-    behaviour: ``ensure_clean`` raises and the caller refuses to run rather than guessing
-    attribution.
+    checkpoint unwritten.  A merged reviewer-fixer round interrupted between its first write
+    and its verdict leaves the same kind of dirt behind a folder whose tasks are all already
+    checkpointed.  On the next run, if every uncommitted change is provably inside the scope of
+    the task ``next_task()`` would resume -- or, failing that, of a single DONE task the
+    scheduler never checkpointed, or of the single task a durable in-flight review round
+    implicates -- that progress is gathered into a ``wip`` checkpoint and the run continues --
+    no AI session, zero tokens.  Every other dirty state (a change outside that scope,
+    ambiguous ownership, or no provable owner at all) keeps today's fail-closed behaviour:
+    ``ensure_clean`` raises and the caller refuses to run rather than guessing attribution.
     """
     if _try_recover_attributable_worktree(cfg, now):
         return
     gitops.ensure_clean(cfg.root, cfg.git_excludes)
+
+
+@dataclass(frozen=True)
+class _DirtOrigin:
+    """What left a provably attributable dirty worktree behind, in the recovery's own wording.
+
+    The checkpoint that gathers the dirt is the same one either way; the origin decides what
+    the checkpoint subject, the terminal line and the journal entry say about where the dirt
+    came from, so a human reading either afterwards can tell an unclean process exit from an
+    interrupted review round without digging, and whether the owning task is reopened.
+    """
+
+    description: str
+    checkpoint_reason: str
+    journal_detail: str
+    # Whether recovery may itself put the owning task back to WIP.  A crash before the
+    # scheduler accepted anything leaves an untrusted status the next run must resume, but a
+    # task a review round was repairing already passed its own focused gate and reached its
+    # terminal checkpoint: only the durable repair loop's own rework may reopen that one, so
+    # recovery gathers the edits and leaves every status exactly as its gate proved it.
+    reopens_task: bool
+
+
+_UNCLEAN_EXIT_DIRT = _DirtOrigin(
+    "an unclean process exit",
+    "recovered dirty worktree from an unclean exit, scope-verified",
+    "run startup detected a dirty worktree from an unclean process "
+    "exit and scope-verified it against the resumable candidate",
+    reopens_task=True)
+
+_INTERRUPTED_REVIEW_DIRT = _DirtOrigin(
+    "an interrupted review round",
+    "recovered dirty worktree from an interrupted review round, scope-verified",
+    "run startup detected a dirty worktree left by a merged reviewer-fixer round "
+    "that was interrupted after it wrote and before its verdict was recorded, and "
+    "scope-verified it against the task the durable current findings implicate",
+    reopens_task=False)
 
 
 def _try_recover_attributable_worktree(cfg: Config,
@@ -2933,14 +2972,15 @@ def _try_recover_attributable_worktree(cfg: Config,
     """Return True only when the worktree was dirty and every change was provably attributable
     to one task, having just committed that progress into a wip checkpoint.
 
-    Two owners can be proven, in this order: the task ``next_task()`` would resume, and -- only
-    when that candidate does not own the dirt -- a single DONE task the scheduler never got to
-    checkpoint (see ``_uncheckpointed_done_dirt_owner``).  A clean worktree, an unparsable plan,
-    or dirt no single task provably owns all return False, leaving the caller's fail-closed
-    ``ensure_clean`` to decide.  Attribution reuses the same scope machinery that contains a
-    running task's output (``changes_outside_scope`` with an empty ``since_ref`` -> only the
-    current uncommitted changes), so the recovery can never claim work a task's scope would not
-    have permitted.
+    Three owners can be proven, in this order: the task ``next_task()`` would resume; failing
+    that, a single DONE task the scheduler never got to checkpoint (see
+    ``_uncheckpointed_done_dirt_owner``); and failing that, the task a durable in-flight review
+    round implicates (see ``_interrupted_review_round_dirt_owner``).  A clean worktree, an
+    unparsable plan, or dirt no single task provably owns all return False, leaving the caller's
+    fail-closed ``ensure_clean`` to decide.  Attribution reuses the same scope machinery that
+    contains a running task's output (``changes_outside_scope`` with an empty ``since_ref`` ->
+    only the current uncommitted changes), so the recovery can never claim work a task's scope
+    would not have permitted.
     """
     if gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
         return False
@@ -2948,16 +2988,18 @@ def _try_recover_attributable_worktree(cfg: Config,
         plan = Plan.parse(cfg.tasks_dir)
     except AssentError:
         return False
+    origin = _UNCLEAN_EXIT_DIRT
     owner = _resumable_dirt_owner(cfg, plan) or _uncheckpointed_done_dirt_owner(cfg, plan)
+    if owner is None:
+        owner = _interrupted_review_round_dirt_owner(cfg, plan)
+        origin = _INTERRUPTED_REVIEW_DIRT
     if owner is None:
         return False
 
-    _mark_recovered_task(owner, now)
-    subject = _checkpoint_subject(
-        cfg, "wip", owner,
-        "recovered dirty worktree from an unclean exit, scope-verified")
+    _mark_recovered_task(owner, now, origin)
+    subject = _checkpoint_subject(cfg, "wip", owner, origin.checkpoint_reason)
     gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes)
-    print(f"Recovered a dirty worktree from an unclean process exit; scope-verified "
+    print(f"Recovered a dirty worktree from {origin.description}; scope-verified "
           f"against {owner.id}, progress kept in a wip checkpoint.")
     return True
 
@@ -3003,31 +3045,68 @@ def _uncheckpointed_done_dirt_owner(cfg: Config, plan: Plan) -> Task | None:
     return owners[0] if len(owners) == 1 else None
 
 
-def _mark_recovered_task(task: Task, now: Callable[[], datetime]) -> None:
-    """Persist a crash-recovered candidate as WIP and journal the scope-verified recovery.
+def _interrupted_review_round_dirt_owner(cfg: Config, plan: Plan) -> Task | None:
+    """The task an in-flight review round implicates, when its scope contains every uncommitted
+    change; None when that ownership is not provable.
+
+    A merged reviewer-fixer round may repair source itself, so interrupting one after its first
+    write and before its verdict leaves dirt neither owner above can claim: the round writes no
+    durable verdict (its position must not advance), and the task it was repairing already
+    completed its ordinary closeout, so it has its terminal ``auto(...)`` checkpoint.  The
+    folder's durable ``_auto_fix.toml`` supplies the missing evidence -- a ``REPAIRING`` or
+    ``AWAITING_REVIEW`` phase is a round that was in flight, and its current findings name the
+    tasks that round was allowed to write in.  Everything else fails closed: no durable state,
+    a settled or not-in-flight phase, an unreadable record, dirt outside the implicated scope,
+    and two implicated tasks that could each own it all return None.
+    """
+    try:
+        state = _auto_fix_existing_state(cfg)
+    except AssentError:
+        return None
+    if (state is None or state.phase not in ("REPAIRING", "AWAITING_REVIEW")
+            or state.self_fixed_unreviewed is not None):
+        return None
+    ledger = {finding.fingerprint: finding for finding in state.findings}
+    implicated = {
+        ledger[fingerprint].task_id
+        for fingerprint in state.current_finding_fingerprints
+        if fingerprint in ledger and ledger[fingerprint].task_id is not None}
+    owners = [
+        task for task in plan.tasks
+        if task.id in implicated
+        and not gitops.changes_outside_scope(
+            cfg.root, task.scope, excludes=_task_excludes(cfg, task))
+    ]
+    return owners[0] if len(owners) == 1 else None
+
+
+def _mark_recovered_task(task: Task, now: Callable[[], datetime],
+                         origin: _DirtOrigin) -> None:
+    """Persist a recovered candidate as WIP and journal the scope-verified recovery in the
+    wording of the ``origin`` that proved it.
 
     Unlike ``_mark_interrupted_task`` there is no AI session at this point, so no
-    ``agent`` / ``requested_model`` / ``requested_effort`` identity exists -- a hard crash
-    leaves those genuinely unknown, and no fake session identity is fabricated to fill them
+    ``agent`` / ``requested_model`` / ``requested_effort`` identity exists -- a hard crash and
+    an interrupted review round alike leave those genuinely unknown, and no fake session
+    identity is fabricated to fill them
     (``append_entry`` accepts a ``scheduler`` entry with those fields omitted).  BLOCKED is
     preserved as a legal terminal state (though ``next_task()`` never yields a BLOCKED
     candidate); a secondary write error is only warned about so it never masks the recovery.
     """
-    summary = ("Recovered a dirty worktree from an unclean process exit; "
+    summary = (f"Recovered a dirty worktree from {origin.description}; "
                f"scope-verified against {task.id}, progress kept")
-    try:
-        fresh = parse_task_file(task.path)
-        if fresh.status != "BLOCKED":
-            set_status(task.path, "WIP")
-    except Exception as e:  # recovery must not mask itself with a secondary status-write error
-        print(f"Writing back the recovered task status failed: {e} (working tree left as is, nothing discarded)")
+    if origin.reopens_task:
+        try:
+            fresh = parse_task_file(task.path)
+            if fresh.status != "BLOCKED":
+                set_status(task.path, "WIP")
+        except Exception as e:  # recovery must not mask itself with a secondary status-write error
+            print(f"Writing back the recovered task status failed: {e} (working tree left as is, nothing discarded)")
 
     try:
         append_entry(
             task.journal_path, by="scheduler", event="interrupt",
-            summary=summary,
-            detail=("run startup detected a dirty worktree from an unclean process "
-                    "exit and scope-verified it against the resumable candidate"),
+            summary=summary, detail=origin.journal_detail,
             time_str=now().isoformat(timespec="seconds"))
     except Exception as e:  # status and journal are attempted independently; one failing does not block the other
         print(f"Writing the recovery journal failed: {e} (working tree left as is, nothing discarded)")

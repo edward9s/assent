@@ -17,7 +17,7 @@ from unittest import mock
 
 from assent import auto_fix, engine, gitops
 from assent.adapters import TaskResult
-from assent.plan import (append_entry, journal_path_for, parse_task_file,
+from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
                          read_entries, set_status)
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
 from tests.test_contracts import GlobalContractsMixin
@@ -224,8 +224,11 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
 
 
 class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
-    """Startup recovery of a worktree left dirty by an unclean process exit (hard power loss /
-    kill) that never reached the Ctrl+C / quota / infrastructure interrupt handlers."""
+    """Startup recovery of a worktree left dirty by work the scheduler never recorded: an
+    unclean process exit (hard power loss / kill) that never reached the Ctrl+C / quota /
+    infrastructure interrupt handlers, and -- from the merged reviewer-fixer round, which may
+    write source itself -- a round interrupted after it wrote and before its verdict was
+    recorded."""
 
     def _reused_worktree(self):
         """A worktree that a prior run created and left behind, on the folder's work branch."""
@@ -423,6 +426,152 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
                                 "-r", "HEAD").strip(), "")
         report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
         self.assertIn(f"t001  DONE     Resume stored work  [{auto_hash[:7]}]", report)
+
+    # An interrupted merged reviewer-fixer round: the round wrote source, was
+    # interrupted before its verdict, and deliberately left the durable state
+    # untouched so its position does not advance.  The task it was repairing is
+    # DONE with its terminal auto() checkpoint, so neither owner above can claim
+    # the remaining dirt -- only the folder's durable in-flight state can.
+
+    def _reviewed_folder(self, extra_tasks=(), *, scope=("src/",)):
+        """A folder whose tasks all finished their ordinary closeout: DONE, each with its own
+        terminal auto() checkpoint, which is exactly what the two existing owners cannot
+        claim dirt against."""
+        path = self.write_task(1, status="DONE", scope=scope)
+        for num, slug in extra_tasks:
+            self.write_task(num, slug=slug, status="DONE", scope=scope)
+        cfg = self.build(extra_config=TWO_REVIEW_ROUNDS)
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "value.txt").write_text("closed out\n", encoding="utf-8")
+        self._commit_in_worktree(worktree, "auto(plan01/t001): 任務")
+        for num, _slug in extra_tasks:
+            (worktree / "src" / f"value{num}.txt").write_text(
+                "closed out\n", encoding="utf-8")
+            self._commit_in_worktree(worktree, f"auto(plan01/t{num:03d}): 任務")
+        return cfg, path, worktree
+
+    def _write_review_state(self, cfg, *, phase="AWAITING_REVIEW",
+                            task_ids=("t001",)):
+        """The durable record a review round in flight left behind, exactly as the loop writes
+        it: the round that decided FAIL, its findings, and the phase it was interrupted in."""
+        plan = Plan.parse(cfg.tasks_dir)
+        review = cfg.auto_fix_review[0]
+        findings = tuple(
+            auto_fix.ReviewFinding(task_id, "src/value.txt", "stale value",
+                                   "review evidence")
+            for task_id in task_ids)
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", findings),
+            source_tree=gitops.tree_of(self.execution_root(), "HEAD"),
+            task_plan_sha256=auto_fix.sha256_files(
+                task.path for task in plan.tasks),
+            review_prompt_sha256="3" * 64,
+            reviewer_adapter=review.adapter,
+            reviewer_model=review.requested_model,
+            reviewer_effort=review.requested_effort,
+            review_round_index=1)
+        if state.phase != phase:
+            state = auto_fix.with_repair_phase(state, phase)
+        auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
+
+    def test_in_flight_review_round_dirt_recovers_and_the_run_continues(self):
+        cfg, path, worktree = self._reviewed_folder()
+        self._write_review_state(cfg)
+        (worktree / "src" / "value.txt").write_text(
+            "interrupted reviewer repair\n", encoding="utf-8")
+
+        def pass_after_recovery(prompt):
+            # Proven from inside the first AI session of the run: the dirt was
+            # already gathered into its wip checkpoint before any session began.
+            self.assertTrue(any(s.startswith("wip(plan01/t001): recovered dirty worktree")
+                                for s in self.subjects()))
+            return TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)
+
+        worker = ScriptedAdapter([])
+        reviewer = ScriptedAdapter([pass_after_recovery])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer, auto_fix=True), 0)
+
+        self.assertIn(
+            "wip(plan01/t001): recovered dirty worktree from an interrupted "
+            "review round, scope-verified", self.subjects())
+        # Recovery opens no session of its own and reopens nothing: the run
+        # continues into the round the interrupt left pending, and the fixer
+        # side is never dispatched.
+        self.assertEqual(worker.calls, [])
+        self.assertEqual(len(reviewer.calls), 1)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        entries = read_entries(journal_path_for(path))
+        self.assertFalse(any(e["event"] == "auto_fix_attempt" for e in entries))
+        # The interrupted round's edits survived, never discarded.
+        self.assertEqual(
+            (worktree / "src" / "value.txt").read_text(encoding="utf-8"),
+            "interrupted reviewer repair\n")
+        # A scheduler recovery entry naming the round as the origin, with no
+        # fabricated AI session identity.
+        recovery = next(
+            e for e in entries
+            if e["by"] == "scheduler" and "Recovered a dirty worktree" in e["summary"])
+        self.assertIn("an interrupted review round", recovery["summary"])
+        self.assertIn("reviewer-fixer round", recovery["detail"])
+        self.assertNotIn("agent", recovery)
+        self.assertNotIn("requested_model", recovery)
+
+    def _assert_refused(self, cfg, worktree):
+        """The dirt reaches ensure_clean: no session, no checkpoint, nothing committed."""
+        worker = ScriptedAdapter([])
+        reviewer = ScriptedAdapter([])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=worker, auto_fix_adapter=reviewer, auto_fix=True), 1)
+        self.assertIn("Working tree is not clean", out.getvalue())
+        self.assertEqual(worker.calls, [])
+        self.assertEqual(reviewer.calls, [])
+        self.assertFalse(any(s.startswith("wip(plan01/") for s in self.subjects()))
+        self.assertFalse(gitops.working_tree_status(
+            worktree, cfg.git_excludes).is_clean)
+
+    def test_same_dirt_without_durable_state_stays_fail_closed(self):
+        cfg, path, worktree = self._reviewed_folder()
+        (worktree / "src" / "value.txt").write_text(
+            "interrupted reviewer repair\n", encoding="utf-8")
+
+        self._assert_refused(cfg, worktree)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertFalse(journal_path_for(path).exists())
+
+    def test_dirt_outside_the_implicated_task_scope_stays_fail_closed(self):
+        cfg, path, worktree = self._reviewed_folder()
+        self._write_review_state(cfg)
+        (worktree / "src" / "value.txt").write_text(
+            "interrupted reviewer repair\n", encoding="utf-8")
+        (worktree / "outside.txt").write_text("stray", encoding="utf-8")
+
+        self._assert_refused(cfg, worktree)
+        self.assertEqual(
+            (worktree / "outside.txt").read_text(encoding="utf-8"), "stray")
+
+    def test_phase_that_is_not_in_flight_does_not_activate_the_new_owner(self):
+        # NEEDS_REPAIR is the verdict written before any repair session runs, so
+        # no round was writing and the dirt has no proven origin.
+        cfg, path, worktree = self._reviewed_folder()
+        self._write_review_state(cfg, phase="NEEDS_REPAIR")
+        (worktree / "src" / "value.txt").write_text(
+            "unexplained\n", encoding="utf-8")
+
+        self._assert_refused(cfg, worktree)
+
+    def test_two_implicated_tasks_that_could_own_the_dirt_stay_fail_closed(self):
+        cfg, path, worktree = self._reviewed_folder(extra_tasks=((2, "also"),))
+        self._write_review_state(cfg, task_ids=("t001", "t002"))
+        (worktree / "src" / "value.txt").write_text(
+            "ambiguous\n", encoding="utf-8")
+
+        self._assert_refused(cfg, worktree)
 
     def test_resumed_task_that_fails_a_gate_gets_no_empty_terminal_auto(self):
         path = self.write_task(
