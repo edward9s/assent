@@ -121,10 +121,23 @@ but cannot add one. Unknown, ambiguous, or out-of-scope findings stop for a
 scheduler-owned decision. A reviewer may approve one exact scope addition, but
 only the scheduler edits the task contract; worker and reviewer task-file edits
 remain forbidden. No automatic task creation, source reversion, source
-deletion, or acceptance occurs. Exhaustion, interruption, quota, and failed
-repair gates preserve state and edits for a later opted-in recovery or human
-review; no runtime human gate is inserted into the loop. Recovery refuses
-repair and closeout if the current reviewer identity drifted.
+deletion, or acceptance occurs. Round exhaustion, interruption, quota, and
+failed repair gates preserve state and edits for a later opted-in recovery or
+human review; no runtime human gate is inserted into the loop. Recovery refuses
+repair and closeout when the identity that decided a pending state is no longer
+one of the configured rounds.
+
+Each round advances the durable `review_round_index` by exactly one, and
+reaching the end of the configured list ends automation finitely. Running out
+on an unrepaired blocker preserves every finding, edit, and journal and exits
+nonzero. Running out on a `FIXED` round instead settles the folder as
+SELF-FIXED, UNREVIEWED and exits zero: nothing is reverted, reopened, or
+re-marked, so a repaired task keeps the `DONE` its own focused gate proved
+rather than being turned `BLOCKED`. That outcome is terminal rather than a
+resumable phase -- a later `run --auto-fix` reports it again and starts no
+further round, and only a human `rework` reopens the folder. The one thing
+missing is independent review confirmation, which only the human `accept`
+decision supplies.
 
 Re-review follows soft convergence: prior current findings are considered first,
 a still-present blocker keeps its fingerprint, and a new blocker needs evidence
@@ -151,12 +164,14 @@ focused/full verification evidence.
 
 The report's `Folder auto-fix` section is zero-token derived evidence: `NOT RUN`
 means no state file, `PASSED (fresh)` and `FAILED (fresh)` show the current
-review verdict, and `STALE` means malformed state or a changed source/task
-binding. It also shows phase, context, stage, original blocker, findings and
-recommendations, scope decisions and exact scope-amendment transactions,
-repair acknowledgements and briefs, repair-round assignments, profiles, and
-terminal exhaustion evidence. Scheduler-owned status-only transitions during
-rework, interruption, repair closeout, or exhaustion do not by themselves make
+review verdict, `SELF-FIXED, UNREVIEWED (fresh)` names the self-fixed round
+position, the rounds used, and that round's adapter/model/effort, and `STALE`
+means malformed state or a changed source/task binding. It also shows phase,
+context, stage, original blocker, findings and recommendations, scope decisions
+and exact scope-amendment transactions, repair acknowledgements and briefs, and
+the review round index against the number of configured rounds.
+Scheduler-owned status-only transitions during
+rework, interruption, repair closeout, or round exhaustion do not by themselves make
 this evidence stale; structural task-contract edits do. When eligible debt has ever entered through
 `COMPLETED_FOLDER + INITIAL`, `_report.md` points to the mechanically generated
 `_technical_debt.md` agenda. Neither that state nor a review `PASS` is
@@ -174,6 +189,15 @@ The review decision can be:
   batch;
 - reopen one task with `assent rework <FOLDER> <TASK>`; or
 - reject the whole folder with `assent reject <FOLDER>`.
+
+A single-folder accept whose derived auto-fix state is SELF-FIXED, UNREVIEWED
+adds one interactive confirmation as the last gate before the merge. Every
+receipt-based check has already passed; the only missing thing is the
+independent confirmation the finite round list never produced. Assent names the
+self-fixed round, its adapter/model/effort, and the `_report.md` holding the
+repaired findings, then asks `Publish it anyway? [y/N]`. Only an exact `y`/`Y`
+publishes; anything else, including EOF from a non-interactive stdin, declines
+and changes no Git state.
 
 Remote synchronization, such as `git push`, is a separate human Git decision.
 Cleanup with `assent clean` happens only after the source is no longer needed

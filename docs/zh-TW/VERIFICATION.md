@@ -21,8 +21,12 @@
 ### Folder auto-fix review gate
 
 `[auto_fix.review]` 是可選的 reviewer override；若沒有 table，會用第一個 effective worker
-adapter 的 `prime`/`heavy` 自動解析。Invocation 明示 `run --auto-fix` 時，completed folder
-才會在最後 focused gate 後做 folder-level 唯讀 review。Scheduler 先再跑每個 distinct `DONE`
+adapter 的 `prime`/`heavy` 自動解析。它的 `adapter` 可以是單一名稱，也可以是有序的名稱
+list，每個項目就是一個 review round；重複的名稱是有意義的，代表再跑一個相同 identity 的
+round。單一的 `model` 與 `effort` 套用到每個項目，因此 list 會依序解析成每 round 一組
+adapter/model/effort identity，設定的項目數就是這個 loop 的有限上限。
+Invocation 明示 `run --auto-fix` 時，completed folder
+才會在最後 focused gate 後做 folder-level review。Scheduler 先再跑每個 distinct `DONE`
 task 的 `verify` 一次；任何 failure 都只寫 focused finding evidence，不啟動 completed-folder
 reviewer。`--once` 或 `--task` 若留下 incomplete folder，會延後這個 loop 且不消耗 token；有
 durable worker `BLOCKED` 或 focused-gate 證據的 quiescent blocked dependency 走另一個
@@ -32,9 +36,23 @@ blocked-adjudication entry point；只有 `SKIP` 的 folder 不需要 implementa
 `run --auto-fix` 是該次 invocation 修正 FAIL review 的授權，與 run selection 正交，可和
 明示 folder、`...`、`--all`、`--once`、`--task`、`--verify` 合用。它不跑 full candidate、
 不 publish ref。沒有 flag 時 FAIL 是人類裁決 evidence；有 flag 時每個 finding 都必須對應
-一個既有 task 與 declared scope，才會記錄 code-preserving reason-bearing rework，並為每個
-repair round 選定有限 fixer-profile assignment，在該 round 第一個 write-capable session
-前持久化。多 task finding 與 dependency cascade 不會逐 task 提前 escalation。
+一個既有 task 與 declared scope，才會記錄 code-preserving reason-bearing rework。每個被
+reopen 的 task 都以它自己原本的 task profile 修復：沒有 escalation ladder，也不會消耗任何
+profile，所以中斷的 round 會以完全相同的 identity 恢復，多 task finding 與 dependency
+cascade 也不會逐 task 提前 escalation。
+
+completed-folder round 是 reviewer 與 fixer 合併的 session，不是嚴格唯讀的 gate：發現真正
+的 blocking problem 時，它可以直接修，但只能寫入 finding 指名的那一個既有 task 的 declared
+scope，並以 verdict `FIXED` 回報。其他任何寫入 —— management-plane 檔案、task 檔案、別的
+task 的 scope、commit，或任何寫入 primary worktree —— 都會被普通 worker session 面對的同一
+道結構性安全 gate 擋下，使該 verdict 不可用，同時保留原編輯。只有在沒有任何 blocking 問題
+殘留、且該 round 完全沒有寫入時才回 `PASS`；`FAIL` 仍代表該 round 自己不能修的 blocker
+（例如精確的 scope omission），以及維持唯讀的 blocked adjudication。
+
+Loop 依設定的 round list 終止：每個 round 讓 durable round index 剛好前進一，走到 list
+結尾就有限地結束自動化。在未修好的 blocker 上用完 round，會保留每一項 finding、編輯與
+journal，不再開新 round，並以非零 exit code 結束；在 `FIXED` round 上用完，則結算為下述
+獨立的 SELF-FIXED, UNREVIEWED 結果，exit code 為零。
 
 Review 依循 changed 與 directly interacting code；既有 technical debt 只有在
 `COMPLETED_FOLDER + INITIAL` 引入、修正局部於既有 scope 且 focused gate 能可靠測試時才
@@ -42,9 +60,18 @@ Review 依循 changed 與 directly interacting code；既有 technical debt 只�
 但不能新增。未知、含糊或越界 finding 交 scheduler 作決定。reviewer 可核准一個精確 scope
 addition，但只有 scheduler 修改 task file；worker 與 reviewer 都禁止 task-file edits。
 不會自動建立 task、改 task requirement、還原 source、刪 source、accept，也不把
-`_auto_fix.toml` 當 task status。Reviewer 不得寫 project 或 management file；Assent 以
-before/after surface snapshot 偵測並拒絕寫入、保留原編輯。這是在 `danger-full-access` 預設
+`_auto_fix.toml` 當 task status。任何 round 都不得寫 management-plane 檔案；Assent 以
+before/after surface snapshot 偵測並拒絕這類寫入、保留原編輯，唯讀的 blocked adjudication
+則完全不得寫入。這是在 `danger-full-access` 預設
 下的 cooperative rule，不是 security sandbox，loop 內沒有 runtime human adjudication gate。
+
+Round list 在 `FIXED` round 上結束的 folder 屬於 SELF-FIXED, UNREVIEWED：durable state 記下
+結算結果 —— round 位置、用掉的 round 總數、該 round 的 adapter/model/effort，以及沒有人確認
+過的 finding fingerprint —— run 以零 exit code 結束。不還原、不 reopen、不重新標記：每個 task
+保留它自己 focused gate 證明的 status，被修好的 task 維持 `DONE` 而不會被改成 `BLOCKED`。
+Scheduler 為每個 implicated task 寫一筆 journal entry 並刷新 report。這個結果是終局，不是
+可續跑的 phase，之後的 `run --auto-fix` 只會再次回報它、不再開新 round，只有人類 `rework`
+能重新開啟該 folder。唯一缺的是獨立的 review 確認，而那只有人類的 `accept` 決定能提供。
 
 Review context 是 `COMPLETED_FOLDER` 或 `BLOCKED_ADJUDICATION`，stage 是 `INITIAL` 或
 `RECHECK`。Recheck 先處理 prior current findings；仍存在 blocker 保留 fingerprint，新
@@ -85,17 +112,20 @@ fresh reuse、malformed refusal、incomplete no-op 與 interrupt，但不改變�
 
 Folder report 也會以零 token 顯示 derived `_auto_fix.toml`：沒有檔案是
 `Folder auto-fix: NOT RUN (no review state)`；malformed 或 source/task binding 改變是
-`STALE`；新鮮 review PASS 是 `PASSED (fresh)`；新鮮 FAIL 是 `FAILED (fresh)` 並列出
-phase、context、stage、original blocker、current findings/recommendations、scope decision、
-acknowledgement、profiles、terminal reason、exact scope-amendment transaction 與
-repair-round assignment。Version 5 的 state 必須有 `phase`、
+`STALE`；新鮮 review PASS 是 `PASSED (fresh)`；新鮮的非 `PASS` verdict 是 `FAILED (fresh)`
+並列出 phase、context、stage、original blocker、current findings/recommendations、scope
+decision、acknowledgement、terminal reason、exact scope-amendment transaction，以及 review
+round index 對設定 round 數的比例。已結算的 self-fixed folder 會顯示獨立的
+`SELF-FIXED, UNREVIEWED (fresh)`，指出 self-fixed round 的位置、用掉的 round 數與該 round
+的 adapter/model/effort。Version 6 的 state 必須有 `phase`、
 `review_context`、`review_stage`、`failure_trigger`，綁定 source tree、task-plan digest、
 review-prompt digest 與 resolved reviewer adapter/model/effort，保留 finding ledger、
 recommendations、scope additions、exact scope-amendment transactions、repair briefs、
-repair-round assignments、dispositions、transitions、observed states 與 consumed fixer
-profiles；`NEEDS_REPAIR`、`REPAIRING`、`AWAITING_REVIEW`、`COMPLETE` 明確
+dispositions、transitions、observed states、`review_round_index`，以及至多一筆
+`self_fixed_unreviewed` 結果；`NEEDS_REPAIR`、`REPAIRING`、`AWAITING_REVIEW`、`COMPLETE` 明確
 表示 restart boundary。它可刪除重建，不是 receipt、task status 或 acceptance gate。Pending
-FAIL 若沒有目前 reviewer policy 或 identity 漂移，repair 與 closeout 會拒絕。
+的非 `PASS` state 若沒有目前 reviewer policy，或決定它的 identity 已不在設定的 round 之中，
+repair 與 closeout 會拒絕。
 
 若 eligible debt 曾由 `COMPLETED_FOLDER + INITIAL` 引入，report generation 會建立同層
 `_technical_debt.md`，並在 `_report.md` 標示 `TECHNICAL DEBT REVIEW REQUIRED`；它保留
@@ -104,7 +134,7 @@ current/resolved outcome、scope decision。blocked adjudication 與 recheck 不
 Acceptance 前 meeting 必須主動告訴人類、列舉每項，逐項取得完成 repair 足夠、follow-up
 task/rework，或 durable `AGENTS.md` rule 的 disposition；這不是第二個 approval state。
 
-Scheduler 在 automatic rework、中斷、repair closeout 或有限 profile 用盡時造成的
+Scheduler 在 automatic rework、中斷、repair closeout 或有限 round 用盡時造成的
 status-only transition 是正常 lifecycle evidence，不會單獨讓 auto-fix report stale。
 真正改動 task requirement、scope、verification 或其他 contract structure 才會讓 binding
 stale；兩者都只是 zero-token report evidence。
@@ -257,6 +287,15 @@ idempotent no-op，否則需要 fresh `PASSED` folder evidence，且 source tip�
 verifier digest 與 shared-input digest 都必須精確重現。`assent accept A B` 同樣需要恰好
 dependency-ordered selected set 的 fresh `PASSED` batch receipt。兩者都不開始完整 verifier、
 不擴大選取、不連線 remote、不自動解衝突。
+
+若單一 folder 的 derived auto-fix state 是 SELF-FIXED, UNREVIEWED，accept 會在 merge 前多加
+一道互動式確認。所有 receipt-based check 都已通過，所以這不是拒絕：缺的只是有限 round list
+沒能產生的獨立確認，而那只有人類能提供。Assent 會指出 self-fixed round、它的
+adapter/model/effort，以及記載被修復 finding 的 `_report.md`，然後詢問
+`Publish it anyway? [y/N]`。只有精確的 `y`/`Y` 會 publish；其他任何輸入，包含已關閉或
+非互動 stdin 的 EOF，都視為拒絕，不 merge、不改任何 Git state。state 檔是可刪除的 derived
+memory、不是 acceptance evidence，因此 malformed record 無法在 receipt evidence 完整的
+folder 上憑空製造這道 gate。
 
 `assent accept --all` 有兩種模式：
 
