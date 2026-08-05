@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import AssentError, gitops, shared_paths, verification
+from assent import AssentError, auto_fix, gitops, shared_paths, verification
 from assent import accept as accept_mod
 from assent.accept import accept_folder
 from assent.config import load_config
@@ -100,10 +100,11 @@ class AcceptRepositoryCase(unittest.TestCase):
     def _config(self, folder: str | None = None):
         return load_config(self.config_path, folder or self.folder)
 
-    def _accept(self, folder: str | None = None) -> tuple[int, str]:
+    def _accept(self, folder: str | None = None,
+                confirm=None) -> tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = accept_folder(self._config(folder))
+            code = accept_folder(self._config(folder), confirm)
         return code, output.getvalue()
 
     def _head(self, ref: str = "HEAD") -> str:
@@ -636,6 +637,119 @@ class TestDependencyGate(AcceptRepositoryCase):
 
         self.assertEqual(code, 0, output)
         self.assertEqual(gitops.tree_of(self.root, "HEAD"), receipt.integration_tree)
+
+
+class TestSelfFixedConfirmation(AcceptRepositoryCase):
+    """The one interactive gate: receipt evidence is complete, review is not."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.task_path = self._write_task()
+        self.worktree, self.branch, self.source_tip = self._make_source()
+        self.receipt = self._write_receipt()
+
+    def _write_auto_fix_state(self, verdict: str, *, self_fixed: bool) -> None:
+        cfg = self._config()
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord(verdict, () if verdict == "PASS" else (
+                auto_fix.ReviewFinding(
+                    "t001", "assent/accept.py", "Blocking implementation issue",
+                    "The round repaired the task's own declared scope."),)),
+            source_tree=gitops.tree_of(self.root, "HEAD"),
+            task_plan_sha256=auto_fix.sha256_files([self.task_path]),
+            review_prompt_sha256="7" * 64,
+            reviewer_adapter="claude", reviewer_model="prime",
+            reviewer_effort="heavy", review_round_index=2)
+        if self_fixed:
+            state = auto_fix.with_self_fixed_unreviewed(state)
+        auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
+
+    def _must_not_ask(self, prompt: str) -> str:
+        raise AssertionError(f"accept asked for confirmation: {prompt}")
+
+    def test_ordinary_and_passed_folders_are_never_asked_to_confirm(self) -> None:
+        before = self._head()
+
+        code, output = self._accept(confirm=self._must_not_ask)
+
+        self.assertEqual(code, 0, output)
+        self.assertNotEqual(self._head(), before)
+        self.assertNotIn("SELF-FIXED", output)
+
+        _git(self.root, "reset", "--hard", before)
+        self._write_auto_fix_state("PASS", self_fixed=False)
+
+        code, output = self._accept(confirm=self._must_not_ask)
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(
+            gitops.tree_of(self.root, "HEAD"), self.receipt.integration_tree)
+        self.assertNotIn("SELF-FIXED", output)
+
+    def test_confirmed_self_fixed_folder_publishes_an_ordinary_accept(self) -> None:
+        before = self._head()
+        self._write_auto_fix_state("FIXED", self_fixed=True)
+        asked: list[str] = []
+
+        code, output = self._accept(confirm=lambda prompt: asked.append(prompt) or "y")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(asked), 1)
+        self.assertIn("[y/N]", asked[0])
+        self.assertIn("SELF-FIXED, UNREVIEWED", output)
+        self.assertIn("self-fixed round: 2 of 2 (claude/prime/heavy)", output)
+        after = self._head()
+        # Publication is byte-for-byte the ordinary accept: the same two-parent
+        # receipt-backed merge, and no marker of the confirmation path.
+        self.assertEqual(
+            gitops.commit_parents(self.root, after), (before, self.source_tip))
+        self.assertEqual(
+            gitops.tree_of(self.root, after), self.receipt.integration_tree)
+        message = gitops.commit_message(self.root, after)
+        self.assertEqual(message.strip(), accept_mod.accept_merge_message(
+            "trunk", self.folder, self.branch, self.source_tip,
+            self.receipt.integration_tree,
+            self.receipt.verify_script_sha256).strip())
+        for marker in ("SELF-FIXED", "UNREVIEWED", "confirm"):
+            self.assertNotIn(marker, message)
+
+    def test_every_other_answer_declines_without_touching_git(self) -> None:
+        before = self._head()
+        self._write_auto_fix_state("FIXED", self_fixed=True)
+
+        def raise_eof(prompt: str) -> str:
+            raise EOFError()
+
+        for answer in ("", "n", "N", "no", "yes please", " ", "Y E S"):
+            with self.subTest(answer=answer):
+                output = self._assert_refused_unchanged(
+                    before, self._accept(confirm=lambda prompt: answer))
+                self.assertIn("SELF-FIXED, UNREVIEWED", output)
+                self.assertIn("was not confirmed", output)
+                self.assertIn(f"assent accept {self.folder}", output)
+                # Distinct from the ordinary stale-receipt refusal.
+                self.assertNotIn("refresh the verification receipt", output)
+
+        output = self._assert_refused_unchanged(
+            before, self._accept(confirm=raise_eof))
+        self.assertIn("was not confirmed", output)
+        self.assertEqual(
+            gitops.branch_tip(self.root, self.branch), self.source_tip)
+
+        # Only the answer changed: the same folder still publishes.
+        code, output = self._accept(confirm=lambda prompt: "Y")
+        self.assertEqual(code, 0, output)
+        self.assertNotEqual(self._head(), before)
+
+    def test_unreadable_state_is_not_a_second_refusal_path(self) -> None:
+        before = self._head()
+        auto_fix.auto_fix_state_path(self._config()).write_text(
+            "not valid toml = [\n", encoding="utf-8")
+
+        code, output = self._accept(confirm=self._must_not_ask)
+
+        self.assertEqual(code, 0, output)
+        self.assertNotEqual(self._head(), before)
 
 
 class TestAcceptTransactionalFailures(AcceptRepositoryCase):

@@ -14,9 +14,9 @@ changed without loading the other.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
-from assent import AssentError, gitops, verification
+from assent import AssentError, auto_fix, gitops, verification
 from assent.config import Config
 from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
 from assent.folderdeps import (infer_folder_completion, live_upstreams,
@@ -79,14 +79,54 @@ def cleanup_warning(path: Path, branch: str, error: AssentError) -> None:
     print(f"  temporary path: {path}")
 
 
-def accept_folder(cfg: Config) -> int:
+def _confirm_self_fixed(folder: str, outcome: auto_fix.SelfFixedOutcome,
+                        confirm: Callable[[str], str] | None) -> bool:
+    """Ask before publishing a folder no configured review round ever confirmed.
+
+    The receipt-based evidence is complete, so this is not a refusal: the one
+    thing missing is the independent confirmation the round list ran out of, and
+    only a human can supply it.  Anything other than exactly "y"/"Y", including
+    EOF (no TTY or closed stdin), declines.
+    """
+    print(f"accept {folder}: the folder auto-fix state is SELF-FIXED, UNREVIEWED.")
+    print(f"  self-fixed round: {outcome.round_index + 1} of "
+          f"{outcome.rounds_used} "
+          f"({outcome.adapter}/{outcome.model}/{outcome.effort}); "
+          "no later configured round confirmed the repair")
+    print("  Every task passed its own focused gate and the PASSED receipt "
+          f"matches, but no independent review confirmed the last repair. See "
+          f".assent/{folder}/_report.md for the findings it repaired.")
+    ask = confirm if confirm is not None else input
+    try:
+        answer = ask("Publish it anyway? [y/N]: ")
+    except EOFError:
+        answer = ""
+    return answer.strip().lower() == "y"
+
+
+def _self_fixed_outcome(cfg: Config) -> auto_fix.SelfFixedOutcome | None:
+    """Read the settled self-fixed outcome from deletable folder runtime memory."""
+    path = auto_fix.auto_fix_state_path(cfg)
+    if not path.is_file():
+        return None
+    try:
+        state = auto_fix.read_auto_fix_state(path)
+    except AssentError:
+        # The state file is derived, deletable memory, never acceptance
+        # evidence: a malformed record cannot manufacture a second gate on a
+        # folder whose receipt evidence is complete.
+        return None
+    return state.self_fixed_unreviewed
+
+
+def accept_folder(cfg: Config, confirm: Callable[[str], str] | None = None) -> int:
     """Accept exactly ``cfg.tasks_name``; return zero only on proven success."""
     folder = cfg.tasks_name
     try:
         # This order is part of the concurrency contract and must remain fixed.
         with hold_integration_lock(cfg.assent_dir):
             with hold_lock(cfg.tasks_dir, folder):
-                return _accept_locked(cfg)
+                return _accept_locked(cfg, confirm)
     except LockBusy as e:
         print(f"accept {folder}: refused ({e})")
         return 1
@@ -95,7 +135,8 @@ def accept_folder(cfg: Config) -> int:
         return 1
 
 
-def _accept_locked(cfg: Config) -> int:
+def _accept_locked(cfg: Config,
+                   confirm: Callable[[str], str] | None = None) -> int:
     """Rebuild and publish an exact receipt-backed integration candidate."""
     folder = cfg.tasks_name
 
@@ -201,6 +242,18 @@ def _accept_locked(cfg: Config) -> int:
     if receipt.shared_inputs_sha256 != current_shared:
         print(_refresh_message(
             folder, "the reviewed shared inputs changed since verification"))
+        return 1
+
+    # The last gate before the merge, and the only one a human can answer: every
+    # receipt-based check above already passed, so a decline here is a human
+    # withholding the confirmation the finite review loop never produced.
+    self_fixed = _self_fixed_outcome(cfg)
+    if self_fixed is not None and not _confirm_self_fixed(
+            folder, self_fixed, confirm):
+        print(f"accept {folder}: refused, publishing a SELF-FIXED, UNREVIEWED "
+              "folder was not confirmed; nothing was merged and no Git state "
+              f"changed. Review it, then run `assent accept {folder}` again and "
+              "answer y to publish it")
         return 1
 
     message = accept_merge_message(
