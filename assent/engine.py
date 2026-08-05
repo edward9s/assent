@@ -994,11 +994,24 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             existing_auto_fix is not None
             and existing_auto_fix.self_fixed_unreviewed is not None
             and all(task.status in ("DONE", "SKIP") for task in plan.tasks))
-        if settled_self_fixed and auto_fix_enabled:
+        # A settled REVIEW UNRESOLVED folder ends the loop the same way, but it
+        # may legitimately hold a BLOCKED task, so "no task is runnable" is what
+        # distinguishes it from a folder a human reopened with rework.
+        settled_unresolved = bool(
+            existing_auto_fix is not None
+            and existing_auto_fix.unresolved_review is not None)
+        quiescent_unresolved = settled_unresolved and not any(
+            task.status in ("TODO", "WIP") for task in plan.tasks)
+        if auto_fix_enabled and (settled_self_fixed or quiescent_unresolved):
             assert existing_auto_fix is not None
-            outcome = existing_auto_fix.self_fixed_unreviewed
-            assert outcome is not None
-            _print_self_fixed_unreviewed(outcome)
+            if settled_self_fixed:
+                outcome = existing_auto_fix.self_fixed_unreviewed
+                assert outcome is not None
+                _print_self_fixed_unreviewed(outcome)
+            else:
+                unresolved = existing_auto_fix.unresolved_review
+                assert unresolved is not None
+                _print_unresolved_review(unresolved)
             _print_summary(plan)
             try_write_report(cfg)
             return 0
@@ -1006,7 +1019,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             auto_fix_enabled
             and existing_auto_fix is not None
             and existing_auto_fix.verdict != "PASS"
-            and not settled_self_fixed)
+            and not settled_self_fixed
+            and not settled_unresolved)
         if resuming_auto_fix:
             assert existing_auto_fix is not None
             recovery_error = _auto_fix_recovery_config_error(
@@ -1176,10 +1190,12 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     # Every non-PASS verdict is an unconfirmed pending state, matching the
     # resume guard above: a durable FIXED is a self-repair no round has yet
     # confirmed, so it must refuse closeout exactly as a FAIL does.  The one
-    # settled exception is the terminal SELF-FIXED, UNREVIEWED outcome, whose
-    # remaining decision is the human accept rather than another round.
+    # settled exceptions are the two terminal outcomes -- SELF-FIXED, UNREVIEWED
+    # and REVIEW UNRESOLVED -- whose remaining decision is the human accept
+    # rather than another round.
     if (pending is not None and pending.verdict != "PASS"
-            and pending.self_fixed_unreviewed is None):
+            and pending.self_fixed_unreviewed is None
+            and pending.unresolved_review is None):
         print("Auto-fix closeout refused: the folder has a pending "
               f"{pending.verdict} state; "
               "rerun with --auto-fix and its current [auto_fix.review] policy.")
@@ -2587,13 +2603,13 @@ def _auto_fix_finish_rounds_exhausted(
     gate below proves: the last round wrote its repair after those gates last
     ran, so they run once more on the repaired source before anything settles,
     and a repair that breaks one ends the run nonzero instead of handing a
-    human an unproven outcome.  A blocker no round repaired still ends nonzero.
+    human an unproven outcome.  A blocker no round repaired is likewise not an
+    infrastructure failure but a question the scheduler cannot decide, so it
+    settles as the distinct, human-gated REVIEW UNRESOLVED outcome and the run
+    also succeeds; only a broken gate keeps a nonzero exit here.
     """
     if state.verdict != "FIXED":
-        print(f"Auto-fix review rounds exhausted after {state.review_round_index} "
-              "round(s); every finding, edit, and journal was preserved without "
-              "another round.")
-        return 1
+        return _auto_fix_settle_unresolved_review(cfg, state, now)
     already_settled = state.self_fixed_unreviewed is not None
     gate_passed, evidence, gate_tasks = (
         (True, "", ()) if already_settled
@@ -2631,6 +2647,88 @@ def _auto_fix_finish_rounds_exhausted(
     finally:
         try_write_report(cfg)
     return 0
+
+
+def _auto_fix_settle_unresolved_review(
+        cfg: Config, state: auto_fix.AutoFixState,
+        now: Callable[[], datetime]) -> int:
+    """Hand an unresolved finding to the human meeting instead of failing the run.
+
+    The configured rounds ran out with a blocker none of them repaired.  That is
+    a question the scheduler cannot settle, not an infrastructure failure, a
+    refused precondition, or a broken gate, so it must not exit nonzero: a
+    nonzero folder stops the launch loop and silently cancels every unrelated
+    folder still queued behind it in the same invocation.  The outcome instead
+    becomes a durable terminal record plus a distinctly named report state, and
+    the explicit ``accept`` gate stays the human decision point.  Every task
+    keeps the status its own closeout gave it; nothing is reverted, reopened, or
+    marked BLOCKED.
+    """
+    already_settled = state.unresolved_review is not None
+    try:
+        # The durable outcome and the report a human reads must both be on disk
+        # before this folder hands control back, under the same unconditional
+        # discipline the self-fixed settlement above uses.
+        settled = auto_fix.with_unresolved_review(
+            state, source_tree=_auto_fix_current_tree(cfg))
+        outcome = settled.unresolved_review
+        assert outcome is not None
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg), settled)
+        _print_unresolved_review(outcome)
+        if not already_settled:
+            _auto_fix_journal_unresolved_review(cfg, settled, now)
+    finally:
+        try_write_report(cfg)
+    return 0
+
+
+def _print_unresolved_review(
+        outcome: auto_fix.UnresolvedReviewOutcome) -> None:
+    print(f"Auto-fix folder review: REVIEW UNRESOLVED, HUMAN DECISION after "
+          f"{outcome.rounds_used} configured round(s); review round "
+          f"{outcome.round_index + 1} "
+          f"({outcome.adapter}/{outcome.model}/{outcome.effort}) left "
+          f"{len(outcome.finding_fingerprints)} finding(s) no round resolved. "
+          "Every task keeps the status its own closeout gave it, and the "
+          "findings, edits and journals are preserved for the human acceptance "
+          "decision.")
+
+
+def _auto_fix_journal_unresolved_review(
+        cfg: Config, state: auto_fix.AutoFixState,
+        now: Callable[[], datetime]) -> None:
+    """Record the settled outcome once on every implicated task's r file."""
+    outcome = state.unresolved_review
+    assert outcome is not None
+    ledger = {item.fingerprint: item for item in state.findings}
+    by_task: dict[str, list[str]] = {}
+    for fingerprint in outcome.finding_fingerprints:
+        finding = ledger[fingerprint]
+        if finding.task_id is None:
+            continue
+        by_task.setdefault(finding.task_id, []).append(
+            f"- {fingerprint} {finding.path}: {finding.summary}")
+    plan = Plan.parse(cfg.tasks_dir)
+    identity = f"{outcome.adapter}/{outcome.model}/{outcome.effort}"
+    for task_id, findings in by_task.items():
+        task = plan.get(task_id)
+        if task is None:
+            continue
+        append_entry(
+            task.journal_path, by="scheduler",
+            event="auto_fix_unresolved_review",
+            summary=(f"Review round {outcome.round_index + 1} of "
+                     f"{outcome.rounds_used} ({identity}) ended the configured "
+                     "round list with this task's finding still unresolved"),
+            detail=("The bounded review-and-repair loop is finitely over, so "
+                    "the folder is REVIEW UNRESOLVED, HUMAN DECISION: the run "
+                    "succeeds so unrelated queued folders still start, the task "
+                    "keeps the status its own closeout gave it, and nothing was "
+                    "reopened, reverted, or marked BLOCKED. The unresolved "
+                    "findings are evidence for the human acceptance meeting.\n"
+                    "Unresolved findings:\n" + "\n".join(findings)),
+            time_str=now().isoformat(timespec="seconds"))
 
 
 # The one heading the settling gate writes into a durable brief, so re-proving
@@ -3195,7 +3293,8 @@ def _interrupted_review_round_dirt_owner(cfg: Config, plan: Plan) -> Task | None
     except AssentError:
         return None
     if (state is None or state.phase not in ("REPAIRING", "AWAITING_REVIEW")
-            or state.self_fixed_unreviewed is not None):
+            or state.self_fixed_unreviewed is not None
+            or state.unresolved_review is not None):
         return None
     ledger = {finding.fingerprint: finding for finding in state.findings}
     implicated = {
