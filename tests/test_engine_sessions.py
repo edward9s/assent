@@ -873,13 +873,46 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertFalse(any(
             item.get("event") == "auto_fix_exhausted" for item in entries))
 
-    def self_fixed_folder(self, rounds):
+    def gate_log(self):
+        """An absolute log a real focused gate appends to, outside every worktree."""
+        log = self.root.parent / f"{self.root.name}.gatelog"
+        self.addCleanup(log.unlink, True)
+        return log
+
+    @staticmethod
+    def recording_gate(log, *, fails_on=None):
+        """A real verify command that records the source value it was run against.
+
+        Nothing here is mocked, so each recorded line is proof the scheduler
+        really executed the task's own gate, and the value it read is proof of
+        which tree that execution proved.
+        """
+        check = (f"sys.exit(3 if value.strip() == {fails_on!r} else 0)"
+                 if fails_on is not None else "sys.exit(0)")
+        return ('python -c "import pathlib,sys;'
+                "value=pathlib.Path('src/value.txt').read_text(encoding='utf-8');"
+                f"log=pathlib.Path(r'{log}');"
+                "prev=log.read_text(encoding='utf-8') if log.exists() else '';"
+                "log.write_text(prev+value,encoding='utf-8');"
+                f'{check}"')
+
+    @staticmethod
+    def gate_runs(log):
+        """The source value every recorded gate execution saw, in order."""
+        if not log.exists():
+            return []
+        return log.read_text(encoding="utf-8").splitlines()
+
+    def self_fixed_folder(self, rounds, *, verify=None, repairs=None):
         """A folder whose every configured round repairs and none confirms.
 
         The last round leaves a FIXED verdict with no round left to review it,
-        which is the exact SELF-FIXED, UNREVIEWED hand-off point.
+        which is the exact SELF-FIXED, UNREVIEWED hand-off point.  `verify`
+        declares the task's own focused gate and `repairs` what each round
+        writes, which is what the settling gate is judged on.
         """
-        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        gate = {"verify": verify} if verify is not None else {}
+        task_path = self.write_task(1, status="DONE", scope=("src/",), **gate)
         source = self.root / "src" / "value.txt"
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
@@ -899,8 +932,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
         def fix(position):
             def step(_prompt):
+                text = (repairs[position - 1] if repairs is not None
+                        else f"repair {position}")
                 (self.execution_root() / "src" / "value.txt").write_text(
-                    f"repair {position}\n", encoding="utf-8")
+                    f"{text}\n", encoding="utf-8")
                 return TaskResult(0, auto_fix.review_record_json(
                     auto_fix.ReviewRecord(
                         "FIXED", (finding if position == 1 else repaired,))),
@@ -1011,6 +1046,126 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertFalse(any(
             item.get("event") == "auto_fix_self_fixed_unreviewed"
             for item in read_entries(journal_path_for(task_path))))
+
+    def test_the_settling_gate_proves_the_final_rounds_repair(self):
+        log = self.gate_log()
+        cfg, task_path, reviewer, _finding = self.self_fixed_folder(
+            2, verify=self.recording_gate(log))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
+                auto_fix=True), 0)
+
+        # Each round gates the folder before its own review, so those two runs
+        # see the source as it was before that round repaired it.  The third
+        # run is the settling gate, and it is the only one that ever reads the
+        # final round's repair.
+        self.assertEqual(self.gate_runs(log), ["old", "repair 1", "repair 2"])
+        self.assertEqual(parse_task_file(task_path).status, "DONE")
+        self.assertIn("SELF-FIXED, UNREVIEWED", out.getvalue())
+
+        command = parse_task_file(task_path).verify
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertIsNotNone(state.self_fixed_unreviewed)
+        brief = next(item for item in state.repair_briefs
+                     if item.task_id == "t001")
+        self.assertIn(f"- PASS t001: {command}", brief.brief)
+
+        report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        self.assertIn("Folder auto-fix: SELF-FIXED, UNREVIEWED (fresh)", report)
+        self.assertIn("Settling focused gate evidence", report)
+        settled = next(item for item in read_entries(journal_path_for(task_path))
+                       if item.get("event") == "auto_fix_self_fixed_unreviewed")
+        self.assertIn(f"- PASS t001: {command}", settled["detail"])
+
+    def test_a_final_repair_failing_its_focused_gate_does_not_settle(self):
+        log = self.gate_log()
+        cfg, task_path, reviewer, _finding = self.self_fixed_folder(
+            2, verify=self.recording_gate(log, fails_on="broken"),
+            repairs=("repair 1", "broken"))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
+                auto_fix=True), 1)
+
+        self.assertEqual(self.gate_runs(log), ["old", "repair 1", "broken"])
+        self.assertIn("was not proven by the focused gate", out.getvalue())
+        # A repair the task's own gate rejects is not an acceptable outcome, so
+        # the folder does not settle -- and nothing is reverted or re-marked to
+        # achieve that: the status, the edit and the evidence all stay put.
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertIsNone(state.self_fixed_unreviewed)
+        self.assertEqual(parse_task_file(task_path).status, "DONE")
+        self.assertEqual(
+            (self.execution_root() / "src" / "value.txt").read_text(
+                encoding="utf-8"),
+            "broken\n")
+        self.assertFalse(any(
+            item.get("event") == "auto_fix_self_fixed_unreviewed"
+            for item in read_entries(journal_path_for(task_path))))
+
+        command = parse_task_file(task_path).verify
+        brief = next(item for item in state.repair_briefs
+                     if item.task_id == "t001")
+        self.assertIn(f"- FAIL (3) t001: {command}", brief.brief)
+        report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
+        self.assertIn("Settling focused gate evidence", report)
+        self.assertNotIn("SELF-FIXED, UNREVIEWED", report)
+
+    def test_the_settling_gate_reuses_a_pass_proven_against_this_source(self):
+        log = self.gate_log()
+        task_path = self.write_task(1, status="DONE", scope=("src/",),
+                                    verify=self.recording_gate(log))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(extra_config=self.review_rounds(2))
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "value is stale",
+            "The focused behavior still reads the stale value.",
+            recommendation="Write the repaired value.")
+        # The final round reports FIXED for a repair that is already on disk
+        # from the repair round, so it writes nothing itself and the tree that
+        # settles is exactly the tree the repair round's own gate proved.
+        confirmed = auto_fix.ReviewFinding(
+            finding.task_id, finding.path, finding.summary, finding.evidence,
+            kind=finding.kind, recommendation=finding.recommendation,
+            transition="still_present",
+            prior_fingerprint=auto_fix.finding_fingerprint(finding),
+            transition_evidence="The repair round's edit is the repair.")
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FIXED", (confirmed,))), False, None),
+        ])
+        worker = ScriptedAdapter([
+            self.repair_done(task_path, {"src/value.txt": "worker repair\n"})])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=worker, auto_fix_adapter=reviewer,
+                auto_fix=True), 0)
+
+        # The initial folder gate and the repair's own closeout gate are the
+        # only executions: the second round's review gate and the settling gate
+        # both reuse that authoritative PASS instead of a third and fourth run.
+        self.assertEqual(self.gate_runs(log), ["old", "worker repair"])
+        self.assertEqual(out.getvalue().count("reused authoritative PASS"), 2)
+        command = parse_task_file(task_path).verify
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertIsNotNone(state.self_fixed_unreviewed)
+        brief = next(item for item in state.repair_briefs
+                     if item.task_id == "t001")
+        self.assertIn(
+            f"- PASS (reused authoritative PASS) t001: {command}", brief.brief)
 
     def test_fixed_rounds_walk_the_configured_adapter_list_positionally(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))

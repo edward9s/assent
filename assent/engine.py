@@ -2613,9 +2613,10 @@ def _auto_fix_finish_rounds_exhausted(
                 auto_fix.auto_fix_state_path(cfg), state)
             print(f"Auto-fix review rounds exhausted after "
                   f"{state.review_round_index} round(s); the final round's "
-                  "repair failed the focused gate of the task it repaired, so "
-                  "the folder did not settle. Every finding, edit, and journal "
-                  "was preserved without another round.")
+                  "repair was not proven by the focused gate of the task it "
+                  "repaired, so the folder did not settle. Every finding, "
+                  "edit, and journal entry was preserved without another "
+                  "round.")
             return 1
         settled = auto_fix.with_self_fixed_unreviewed(
             state, source_tree=_auto_fix_current_tree(cfg))
