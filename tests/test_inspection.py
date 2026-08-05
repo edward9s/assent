@@ -89,6 +89,24 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             "reviewer effort = slight -> low (setting source: project "
             "(explicit settings layer)", text)
 
+    def test_check_lists_every_configured_reviewer_round_in_order(self):
+        self.write_task(1, model="core")
+        cfg = self.build(extra_config=(
+            "[auto_fix.review]\n"
+            'adapter = ["claude", "codex", "claude"]\n'
+            'model = "core"\n'
+            'effort = "slight"\n'))
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 0)
+        text = out.getvalue()
+        self.assertIn("Auto-fix reviewer rounds (configured order):", text)
+        self.assertIn("round 1: claude / core->opus / slight->low", text)
+        self.assertIn("round 2: codex / core->gpt-5.6-terra / slight->low", text)
+        self.assertIn("round 3: claude / core->opus / slight->low", text)
+
     def test_check_fails_on_dependency_cycle(self):
         self.write_task(1, deps=("t002",))
         self.write_task(2, deps=("t001",))
@@ -227,7 +245,8 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             auto_fix.ReviewFinding(
                 "t001", "src/main.py", "Blocking implementation issue",
                 "The implementation does not satisfy the task contract."),)
-        review = cfg.auto_fix_review
+        rounds = cfg.auto_fix_review
+        review = rounds[0] if rounds else None
         reviewer_adapter = review.adapter if review is not None else "codex"
         reviewer_model = (review.requested_model
                           if review is not None else "gpt-5.6-sol")
@@ -278,6 +297,46 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("Folder auto-fix: STALE (source tree changed)", text)
 
+    def test_report_names_the_self_fixed_unreviewed_outcome_distinctly(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build(extra_config=(
+            '[auto_fix.review]\n'
+            'adapter = ["claude", "codex"]\n'
+            'model = "prime"\n'
+            'effort = "heavy"\n'))
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        review = cfg.auto_fix_review[1]
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FIXED", (auto_fix.ReviewFinding(
+                "t001", "src/main.py", "Blocking implementation issue",
+                "The round repaired the task's own declared scope."),)),
+            source_tree=gitops.tree_of(cfg.root, "HEAD"),
+            task_plan_sha256=auto_fix.sha256_files(
+                task.path for task in plan.tasks),
+            review_prompt_sha256="6" * 64,
+            reviewer_adapter=review.adapter,
+            reviewer_model=review.requested_model,
+            reviewer_effort=review.requested_effort,
+            review_round_index=2)
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg),
+            auto_fix.with_self_fixed_unreviewed(state))
+
+        text = inspection.render_report(cfg, plan)
+        identity = (f"{review.adapter}/{review.requested_model}/"
+                    f"{review.requested_effort}")
+        # A state decided by a later configured round is not drift, and the
+        # outcome is named apart from every other rendered state.
+        self.assertIn("Folder auto-fix: SELF-FIXED, UNREVIEWED (fresh)", text)
+        self.assertIn(f"Self-fixed round: 2 of 2 ({identity})", text)
+        self.assertIn(f"Terminal: SELF-FIXED, UNREVIEWED (round 2 of 2, "
+                      f"{identity}", text)
+        for other in ("Folder auto-fix: NOT RUN", "Folder auto-fix: STALE",
+                      "Folder auto-fix: PASSED (fresh)",
+                      "Folder auto-fix: FAILED (fresh)"):
+            self.assertNotIn(other, text)
+
     def test_report_marks_reviewer_configuration_drift_stale(self):
         self.write_task(1, status="DONE")
         cfg = self.build(extra_config=(
@@ -325,19 +384,22 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             "t001", "src/main.py", "Worker blocker", "The worker reported a blocker.",
             kind="blocked_recovery")
 
-        for context, trigger in (
-                ("blocked_adjudication", "worker_blocked"),
-                ("completed_folder", None)):
-            with self.subTest(context=context):
+        # FIXED is an unconfirmed self-repair awaiting its recheck, so it is
+        # pending exactly as FAIL is and must defer the same human guidance.
+        for verdict, context, trigger in (
+                ("FAIL", "blocked_adjudication", "worker_blocked"),
+                ("FAIL", "completed_folder", None),
+                ("FIXED", "blocked_adjudication", "worker_blocked")):
+            with self.subTest(verdict=verdict, context=context):
                 state = auto_fix.state_for_review(
-                    auto_fix.ReviewRecord("FAIL", (finding,)),
+                    auto_fix.ReviewRecord(verdict, (finding,)),
                     source_tree=gitops.tree_of(cfg.root, "HEAD"),
                     task_plan_sha256=auto_fix.sha256_files(
                         task.path for task in plan.tasks),
                     review_prompt_sha256="5" * 64,
-                    reviewer_adapter=cfg.auto_fix_review.adapter,
-                    reviewer_model=cfg.auto_fix_review.requested_model,
-                    reviewer_effort=cfg.auto_fix_review.requested_effort,
+                    reviewer_adapter=cfg.auto_fix_review[0].adapter,
+                    reviewer_model=cfg.auto_fix_review[0].requested_model,
+                    reviewer_effort=cfg.auto_fix_review[0].requested_effort,
                     review_context=context, failure_trigger=trigger)
                 auto_fix.write_auto_fix_state(
                     auto_fix.auto_fix_state_path(cfg), state)
@@ -372,9 +434,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             source_tree=source_tree,
             task_plan_sha256=task_digest,
             review_prompt_sha256="4" * 64,
-            reviewer_adapter=cfg.auto_fix_review.adapter,
-            reviewer_model=cfg.auto_fix_review.requested_model,
-            reviewer_effort=cfg.auto_fix_review.requested_effort)
+            reviewer_adapter=cfg.auto_fix_review[0].adapter,
+            reviewer_model=cfg.auto_fix_review[0].requested_model,
+            reviewer_effort=cfg.auto_fix_review[0].requested_effort)
         fingerprint = state.current_finding_fingerprints[0]
         state = auto_fix.with_worker_dispositions(
             state, (auto_fix.WorkerDisposition(
@@ -389,11 +451,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 (auto_fix.finding_fingerprint(scope_finding),), "t001",
                 ("tests/test_inspection.py",), ("existing_file",),
                 "1" * 64, "2" * 64, "3" * 64, "4" * 64),))
-        state = auto_fix.consume_fixer_profile(
-            state, auto_fix.FixerProfile("claude", "core", "heavy"))
-        state = auto_fix.with_repair_round_assignments(
-            state, (auto_fix.RepairRoundAssignment(
-                "t001", "claude", "core", "heavy", False),))
+        state = auto_fix.with_review_round_index(state, 1)
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), state)
 
@@ -408,12 +466,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertIn("Approved scope additions:", report)
         self.assertIn("Repair acknowledgements:", report)
         self.assertIn("fixed; Focused regression passes.", report)
-        self.assertIn("Consumed fixer profiles:", report)
-        self.assertIn("claude/core/heavy", report)
+        self.assertIn("Review round index: 1 (configured rounds: 1)", report)
         self.assertIn("Scope amendment transactions:", report)
         self.assertIn("tests/test_inspection.py (existing_file)", report)
-        self.assertIn("Repair-round assignments:", report)
-        self.assertIn("claude/core/heavy (not started)", report)
         self.assertIn("TECHNICAL DEBT REVIEW REQUIRED", report)
         self.assertIn("Existing debt needs a follow-up", debt)
         self.assertIn("CURRENT / unresolved in the latest review", debt)
@@ -424,9 +479,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             source_tree=source_tree,
             task_plan_sha256=task_digest,
             review_prompt_sha256="4" * 64,
-            reviewer_adapter=cfg.auto_fix_review.adapter,
-            reviewer_model=cfg.auto_fix_review.requested_model,
-            reviewer_effort=cfg.auto_fix_review.requested_effort,
+            reviewer_adapter=cfg.auto_fix_review[0].adapter,
+            reviewer_model=cfg.auto_fix_review[0].requested_model,
+            reviewer_effort=cfg.auto_fix_review[0].requested_effort,
             previous=state, review_stage="recheck")
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), passed)
@@ -447,9 +502,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 source_tree=source_tree,
                 task_plan_sha256=task_digest,
                 review_prompt_sha256="4" * 64,
-                reviewer_adapter=cfg.auto_fix_review.adapter,
-                reviewer_model=cfg.auto_fix_review.requested_model,
-                reviewer_effort=cfg.auto_fix_review.requested_effort,
+                reviewer_adapter=cfg.auto_fix_review[0].adapter,
+                reviewer_model=cfg.auto_fix_review[0].requested_model,
+                reviewer_effort=cfg.auto_fix_review[0].requested_effort,
                 review_context="blocked_adjudication",
                 failure_trigger="worker_blocked")
 
@@ -464,9 +519,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 source_tree=source_tree,
                 task_plan_sha256=task_digest,
                 review_prompt_sha256="4" * 64,
-                reviewer_adapter=cfg.auto_fix_review.adapter,
-                reviewer_model=cfg.auto_fix_review.requested_model,
-                reviewer_effort=cfg.auto_fix_review.requested_effort,
+                reviewer_adapter=cfg.auto_fix_review[0].adapter,
+                reviewer_model=cfg.auto_fix_review[0].requested_model,
+                reviewer_effort=cfg.auto_fix_review[0].requested_effort,
                 previous=passed, review_stage="recheck")
 
     def test_report_isolates_namespaced_checkpoints(self):

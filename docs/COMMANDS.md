@@ -114,8 +114,11 @@ The optional `[auto_fix.review]` table overrides the reviewer. With no table,
 the first effective worker adapter at `prime`/`heavy` is resolved automatically;
 `assent init` and `~/.assent/assent.toml` need no change. The entire loop is
 invocation-level opt-in: only a run that states `--auto-fix` performs the final
-distinct focused sweep and folder-closeout review. The reviewer is read-only,
-and a `FAIL` may enter automatic repair only in that same invocation. An
+distinct focused sweep and folder-closeout review. `adapter` accepts one name or
+an ordered list of them, and that list length bounds the loop. A completed-folder
+round may repair a blocker inside the named task's own declared scope and report
+it as `FIXED`; blocked adjudication stays read-only. A `FAIL` may enter
+automatic repair only in that same invocation. An
 ordinary run without `--auto-fix` starts neither the sweep/review nor repair; an
 incomplete `--once`/`--task` run defers the completed-folder loop, while a
 quiescent blocked dependency with durable worker `BLOCKED` or focused-gate
@@ -123,10 +126,14 @@ evidence uses the blocked-adjudication entry point. A focused failure starts no
 completed-folder reviewer.
 
 Automatic repair reopens only existing tasks whose declared scopes own the
-findings, records a reason-bearing code-preserving rework, and selects a finite
-fixer-profile sequence per repair round. The round's assignments are persisted
-before its first write-capable session, so multi-task findings and dependency
-cascades do not escalate one task at a time. Eligible pre-existing technical
+findings and records a reason-bearing code-preserving rework. Each round
+advances the durable review round index by exactly one, and each reopened task
+is repaired under its own ordinary task profile: there is no escalation ladder
+and nothing is consumed, so an interrupted round resumes on the same identity
+and multi-task findings and dependency cascades do not escalate one task at a
+time. A round list that ends on an unconfirmed repair settles as
+`SELF-FIXED, UNREVIEWED`, which keeps every task's own status, exits zero, and
+makes `accept` ask for one explicit confirmation. Eligible pre-existing technical
 debt may be introduced only by `COMPLETED_FOLDER + INITIAL`, when local to an
 existing scope and reliably testable in directly interacting code; blocked
 adjudication and `RECHECK` may resolve it but cannot add another. Review does

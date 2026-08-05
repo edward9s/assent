@@ -93,25 +93,30 @@ snapshot，不是 `--all` 的別名。和 `--all` 合用、重複、或不在最
 adapter 的 `prime`/`heavy` 自動解析 reviewer，不需重跑 `assent init` 或編輯
 `~/.assent/assent.toml`。整個 loop 是 invocation-level opt-in，只有明示 `--auto-fix` 的
 run 才會在所有 task-focused gate 與最後 distinct focused sweep 通過後做 completed-folder
-唯讀 review；有 durable worker `BLOCKED` 或 focused-gate 證據的 quiescent blocked dependency
-則走 blocked-adjudication entry point；同一次 invocation 的 FAIL 才能進入 automatic repair。
+review。`adapter` 接受單一名稱或有序 list，list 長度即 loop 的上界；completed-folder round
+可以在 finding 指名 task 自己的 declared scope 內修好 blocker 並回報 `FIXED`。有 durable
+worker `BLOCKED` 或 focused-gate 證據的 quiescent blocked dependency
+則走唯讀的 blocked-adjudication entry point；同一次 invocation 的 FAIL 才能進入 automatic repair。
 沒有 `--auto-fix` 的普通 run 不會做 final sweep、review 或 repair；`--once`/`--task` 受限執行
 不完整會延後 completed-folder loop，focused failure 不會開 completed-folder reviewer。
 
 自動修正只重開 finding 所有權明確且位於 declared scope 的既有 task，記錄帶理由且
-保留程式碼的 rework；每個 repair round 依 round 開始前未消耗的有限 fixer profile 選定
-assignments，並在第一個 write-capable session 前持久化。因此多 task finding 與 dependency
-cascade 不會逐 task escalation。既有 technical debt 只有 `COMPLETED_FOLDER + INITIAL`
+保留程式碼的 rework；每個 round 讓 durable review round index 剛好前進一格，每個 reopen
+的 task 都以它自己原本的 task profile 修復：沒有 escalation ladder，也不消耗任何東西，
+所以中斷的 round 會以相同 identity 恢復，多 task finding 與 dependency
+cascade 不會逐 task escalation。round list 若結束在未被確認的修復，folder 會沉澱為
+`SELF-FIXED, UNREVIEWED`：保留每個 task 自己的狀態、exit code 為 0，並讓 `accept` 要求
+一次明確確認。既有 technical debt 只有 `COMPLETED_FOLDER + INITIAL`
 引入、局部且 focused test 可可靠驗證時才合格；blocked adjudication 與 `RECHECK` 可以保留
 或解決，但不能新增。review 不做全 repository debt audit。reviewer 可核准一個精確 scope
 addition，但只有 scheduler 修改 task file；worker 與 reviewer 都禁止 task-file edits。
 不會自動建立 task、還原 source、刪 source、做完整 candidate acceptance 或 publish Git。
 recheck 會保留仍存在 finding 的 fingerprint，新的 finding 只接受有證據的 repair regression
 或 newly exposed existing requirement；原集合清空後必須 PASS，optional improvement 與
-speculation 不會讓 loop 繼續。profile 用盡、中斷或 gate 失敗會保留 evidence，loop 內沒有
+speculation 不會讓 loop 繼續。round 用盡、中斷或 gate 失敗會保留 evidence，loop 內沒有
 runtime human adjudication gate。`_auto_fix.toml` 與 report 都是 derived evidence；`accept`
-仍是人類明示動作。Pending `FAIL` 的 recovery 若 resolved reviewer identity 漂移，repair
-與 closeout 會拒絕。完整 verification 仍依成功 run 的 receipt policy 或明示 `--verify`，缺
+仍是人類明示動作。Pending state 的 recovery 若決定它的 reviewer identity 已不在 configured
+rounds 之中，repair 與 closeout 會拒絕。完整 verification 仍依成功 run 的 receipt policy 或明示 `--verify`，缺
 receipt 或未跑 full suite 絕不是 reviewer failure。
 
 Review 或 acceptance meeting 先讀 `_report.md`。若有 `TECHNICAL DEBT REVIEW REQUIRED`，

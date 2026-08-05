@@ -11,19 +11,19 @@ from types import SimpleNamespace
 from assent import AssentError
 from assent.auto_fix import (
     AUTO_FIX_STATE_VERSION, REVIEW_FINDING_KINDS, ApprovedScopeAddition,
-    AutoFixState, FixerProfile, ObservedState, PlanDigestTransition,
-    RepairBrief, RepairRoundAssignment, ReviewFinding, ReviewRecord, ReviewTransition,
+    AutoFixState, ObservedState, PlanDigestTransition,
+    RepairBrief, ReviewFinding, ReviewRecord, ReviewTransition,
     ReviewerRecommendation, ScopeAddition, WorkerDisposition,
     auto_fix_state_is_fresh,
-    auto_fix_state_path, consume_fixer_profile, current_review_record,
-    finding_fingerprint, next_unused_fixer_profile, normalize_finding_path,
+    auto_fix_state_path, current_review_record,
+    finding_fingerprint, normalize_finding_path,
     parse_repair_dispositions, parse_review_output, persisted_finding,
     read_auto_fix_state,
     review_record_json, review_record_schema, scheduler_finding_path,
     snapshot_project_surface,
     state_for_review, validate_review_findings, validate_review_transitions,
     validate_scope_additions,
-    with_repair_phase,
+    with_repair_phase, with_review_round_index,
     write_auto_fix_state,
 )
 
@@ -37,11 +37,15 @@ class TestReviewRecord(unittest.TestCase):
             recommendation="Reject unknown review configuration keys.",
         )
 
-    def test_pass_and_fail_round_trip_deterministically(self):
+    def test_pass_fixed_and_fail_round_trip_deterministically(self):
         records = (
             ReviewRecord("PASS", ()),
+            ReviewRecord("FIXED", (self.finding,)),
             ReviewRecord("FAIL", (self.finding,)),
         )
+        self.assertEqual(
+            review_record_schema()["properties"]["verdict"]["enum"],
+            ["PASS", "FIXED", "FAIL"])
         for record in records:
             with self.subTest(verdict=record.verdict):
                 text = review_record_json(record)
@@ -93,10 +97,31 @@ class TestReviewRecord(unittest.TestCase):
                 AssentError, "PASS auto-fix review must have no blocking findings"):
             review_record_json(ReviewRecord("PASS", (self.finding,)))
 
-    def test_scheduler_rejects_fail_without_findings(self):
-        with self.assertRaisesRegex(
-                AssentError, "FAIL auto-fix review must have a blocking finding"):
-            review_record_json(ReviewRecord("FAIL", ()))
+    def test_scheduler_rejects_fail_or_fixed_without_findings(self):
+        for verdict in ("FAIL", "FIXED"):
+            with self.subTest(verdict=verdict), self.assertRaisesRegex(
+                    AssentError,
+                    f"{verdict} auto-fix review must have a blocking finding"):
+                review_record_json(ReviewRecord(verdict, ()))
+
+    def test_a_fixed_verdict_awaits_the_next_round_confirmation(self):
+        state = state_for_review(
+            ReviewRecord("FIXED", (self.finding,)), source_tree="1" * 40,
+            task_plan_sha256="2" * 64, review_prompt_sha256="3" * 64,
+            reviewer_adapter="claude", reviewer_model="review-model",
+            reviewer_effort="high", review_stage="initial",
+            review_round_index=1)
+        self.assertEqual(state.verdict, "FIXED")
+        self.assertEqual(state.phase, "AWAITING_REVIEW")
+        self.assertEqual(state.review_round_index, 1)
+        self.assertEqual(state.current_finding_fingerprints,
+                         (finding_fingerprint(self.finding),))
+        # A repaired round is never a settled folder: only an independent PASS
+        # may be reused without another review.
+        self.assertFalse(auto_fix_state_is_fresh(
+            state, source_tree="1" * 40, task_plan_sha256="2" * 64,
+            review_prompt_sha256="3" * 64, reviewer_adapter="claude",
+            reviewer_model="review-model", reviewer_effort="high"))
 
     def test_record_validation_fail_closed(self):
         cases = (
@@ -225,7 +250,7 @@ class TestReviewRecord(unittest.TestCase):
         self.assertEqual(schema["properties"]["type"]["enum"],
                          ["assent.auto_fix_review"])
         self.assertEqual(schema["properties"]["verdict"]["enum"],
-                         ["PASS", "FAIL"])
+                         ["PASS", "FIXED", "FAIL"])
         self.assertFalse(schema["properties"]["findings"]["items"]
                          ["additionalProperties"])
         self.assertEqual(schema["properties"]["findings"]["maxItems"], 100)
@@ -375,8 +400,7 @@ class TestAutoFixState(unittest.TestCase):
             findings=(finding,),
             observed_states=(ObservedState(
                 self.tree, (finding.fingerprint,)),),
-            consumed_fixer_profiles=(FixerProfile(
-                "codex", "core", "normal"),),
+            review_round_index=1,
             reviewer_recommendations=(ReviewerRecommendation(
                 finding.fingerprint, finding.recommendation),),
             worker_dispositions=(WorkerDisposition(
@@ -384,54 +408,53 @@ class TestAutoFixState(unittest.TestCase):
                 "The focused regression now passes."),),
             repair_briefs=(RepairBrief(
                 "t001", (finding.fingerprint,),
-                "Validate and round-trip the complete version-5 schema."),),
+                "Validate and round-trip the complete versioned schema."),),
             review_transitions=(ReviewTransition(
                 finding.fingerprint, "initial", None, None),),
         )
 
-    def test_state_round_trip_preserves_ledger_history_and_profiles(self):
+    def test_state_round_trip_preserves_ledger_history_and_round_index(self):
         write_auto_fix_state(self.path, self.state)
         loaded = read_auto_fix_state(self.path)
         self.assertEqual(loaded, self.state)
         self.assertEqual(loaded.finding_ledger, self.state.findings)
         self.assertEqual(loaded.observed_states, self.state.observed_states)
-        self.assertEqual(loaded.consumed_fixer_profiles,
-                         self.state.consumed_fixer_profiles)
+        self.assertEqual(loaded.review_round_index, 1)
         self.assertFalse(any(
             child.name.endswith(".tmp")
             for child in self.path.parent.iterdir()))
 
-    def test_not_started_round_assignment_round_trips_with_consumed_profile(self):
-        profile = self.state.consumed_fixer_profiles[0]
-        state = replace(
-            self.state, phase="REPAIRING",
-            repair_round_assignments=(RepairRoundAssignment(
-                "t001", profile.adapter, profile.model, profile.effort,
-                attempted=False),))
-        write_auto_fix_state(self.path, state)
-        self.assertEqual(read_auto_fix_state(self.path), state)
+    def test_removed_escalation_profile_fields_are_no_longer_persisted(self):
+        write_auto_fix_state(self.path, self.state)
+        text = self.path.read_text(encoding="utf-8")
+        self.assertNotIn("consumed_fixer_profiles", text)
+        self.assertNotIn("repair_round_assignments", text)
+        self.assertIn("review_round_index = 1\n", text)
+        for field in ("consumed_fixer_profiles", "repair_round_assignments"):
+            with self.subTest(field=field):
+                self.path.write_text(f"{text}\n{field} = []\n", encoding="utf-8")
+                with self.assertRaises(AssentError):
+                    read_auto_fix_state(self.path)
 
-        missing_profile = replace(
-            state, consumed_fixer_profiles=())
-        with self.assertRaisesRegex(AssentError, "absent from consumed history"):
-            write_auto_fix_state(self.path, missing_profile)
+    def test_a_state_written_under_the_previous_version_refuses(self):
+        write_auto_fix_state(self.path, self.state)
+        text = self.path.read_text(encoding="utf-8")
+        self.path.write_text(
+            text.replace(f"version = {AUTO_FIX_STATE_VERSION}",
+                         f"version = {AUTO_FIX_STATE_VERSION - 1}", 1),
+            encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "version must be"):
+            read_auto_fix_state(self.path)
 
-    def test_profile_cursor_is_deduplicated_and_current_record_is_recoverable(self):
-        candidates = (
-            self.state.consumed_fixer_profiles[0],
-            FixerProfile("claude", "prime", "heavy"),
-            FixerProfile("claude", "prime", "heavy"),
-        )
-        selected = next_unused_fixer_profile(self.state, candidates)
-        self.assertEqual(selected, FixerProfile("claude", "prime", "heavy"))
-        consumed = consume_fixer_profile(self.state, selected)
-        self.assertIsNone(next_unused_fixer_profile(consumed, candidates))
-        self.assertEqual(current_review_record(consumed).findings[0],
+    def test_round_index_advances_and_the_current_record_is_recoverable(self):
+        advanced = with_review_round_index(self.state, 2)
+        self.assertEqual(advanced.review_round_index, 2)
+        self.assertEqual(current_review_record(advanced).findings[0],
                          self.state.findings[0].finding)
-        with self.assertRaisesRegex(AssentError, "duplicate consumed"):
-            consume_fixer_profile(consumed, selected)
+        with self.assertRaisesRegex(AssentError, "review_round_index"):
+            with_review_round_index(self.state, -1)
         self.assertEqual(
-            with_repair_phase(consumed, "AWAITING_REVIEW").phase,
+            with_repair_phase(advanced, "AWAITING_REVIEW").phase,
             "AWAITING_REVIEW")
 
     def test_atomic_replacement_writes_one_complete_new_state(self):
@@ -533,8 +556,7 @@ class TestAutoFixState(unittest.TestCase):
             failure_trigger="worker_blocked")
         self.assertEqual(updated.plan_digest_transitions, (
             PlanDigestTransition(self.plan_digest, "5" * 64),))
-        self.assertEqual(updated.consumed_fixer_profiles,
-                         state.consumed_fixer_profiles)
+        self.assertEqual(updated.review_round_index, state.review_round_index)
         write_auto_fix_state(self.path, updated)
         self.assertEqual(read_auto_fix_state(self.path), updated)
 
@@ -602,7 +624,7 @@ class TestAutoFixState(unittest.TestCase):
                 reviewer_effort="high", previous=rechecked,
                 review_stage="recheck")
 
-    def test_recheck_retains_ledger_scope_approvals_and_profile_history(self):
+    def test_recheck_retains_ledger_scope_approvals_and_round_position(self):
         scope_finding = ReviewFinding(
             "t001", "tests/new_case.py", "A scoped test is required",
             "The task cannot add the required regression.",
@@ -613,9 +635,8 @@ class TestAutoFixState(unittest.TestCase):
             task_plan_sha256=self.plan_digest,
             review_prompt_sha256=self.prompt_digest,
             reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
-            reviewer_effort="high", review_stage="initial")
-        first = consume_fixer_profile(
-            first, FixerProfile("codex", "prime", "heavy"))
+            reviewer_effort="high", review_stage="initial",
+            review_round_index=1)
         changed = ReviewFinding(
             "t001", "assent/auto_fix.py", "Repair introduced a regression",
             "The changed parser now accepts an unknown finding key.",
@@ -631,8 +652,7 @@ class TestAutoFixState(unittest.TestCase):
         self.assertEqual(len(second.findings), 2)
         self.assertEqual(second.approved_scope_additions,
                          first.approved_scope_additions)
-        self.assertEqual(second.consumed_fixer_profiles,
-                         first.consumed_fixer_profiles)
+        self.assertEqual(second.review_round_index, first.review_round_index)
 
     def test_surface_snapshot_reports_exact_changed_paths(self):
         source = self.root / "source"

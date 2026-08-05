@@ -177,7 +177,11 @@ def _auto_fix_binding_reasons(
     reasons: list[str] = []
     current_tree: str | None = None
     try:
-        current_tree = gitops.tree_of(cfg.root, "HEAD")
+        # The review states the folder's own source, which lives on its
+        # isolated branch, so the comparison reads that worktree whenever one
+        # exists -- reading the main tree from a report invocation would call
+        # every live folder's evidence stale.
+        current_tree = gitops.tree_of(_query_git_root(cfg), "HEAD")
     except AssentError as e:
         reasons.append(f"current source identity unavailable: {e}")
     else:
@@ -190,13 +194,16 @@ def _auto_fix_binding_reasons(
     except AssentError as e:
         reasons.append(f"task contracts unavailable: {e}")
 
-    review = cfg.auto_fix_review
-    if review is not None:
-        configured_reviewer = (
-            review.adapter, review.requested_model, review.requested_effort)
+    rounds = cfg.auto_fix_review
+    if rounds:
+        # Any configured round may have produced this state, so drift is
+        # "the round that decided it is no longer configured at all".
+        configured_reviewers = [
+            (review.adapter, review.requested_model, review.requested_effort)
+            for review in rounds]
         stored_reviewer = (
             state.reviewer_adapter, state.reviewer_model, state.reviewer_effort)
-        if stored_reviewer != configured_reviewer:
+        if stored_reviewer not in configured_reviewers:
             reasons.append("reviewer configuration changed")
     return reasons, current_tree
 
@@ -212,7 +219,9 @@ def _pending_auto_fix_for_blocked(
         state = auto_fix.read_auto_fix_state(path)
     except AssentError:
         return None
-    if state.verdict != "FAIL" or state.phase not in _PENDING_AUTO_FIX_PHASES:
+    # Every non-PASS verdict is a pending state: FIXED is an unconfirmed
+    # self-repair awaiting its recheck, exactly as FAIL awaits its repair.
+    if state.verdict == "PASS" or state.phase not in _PENDING_AUTO_FIX_PHASES:
         return None
     reasons, _current_tree = _auto_fix_binding_reasons(cfg, plan, state)
     if reasons:
@@ -247,9 +256,16 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
 
     reasons, current_tree = _auto_fix_binding_reasons(cfg, plan, state)
 
+    self_fixed = state.self_fixed_unreviewed
     if reasons:
         status = "STALE"
         freshness = "; ".join(reasons)
+    elif self_fixed is not None:
+        # Distinct from all four other states: the code passed every focused
+        # gate its own tasks declare, and only independent review confirmation
+        # is missing.
+        status = "SELF-FIXED, UNREVIEWED"
+        freshness = "fresh"
     elif state.verdict == "PASS":
         status = "PASSED"
         freshness = "fresh"
@@ -266,6 +282,12 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
              f"  Original blocker: {_auto_fix_blocker_label(state)}"]
     if current_tree is not None and current_tree != state.source_tree:
         lines.append(f"  Current source tree: {current_tree}")
+    if self_fixed is not None:
+        lines.append(
+            f"  Self-fixed round: {self_fixed.round_index + 1} of "
+            f"{self_fixed.rounds_used} "
+            f"({self_fixed.adapter}/{self_fixed.model}/{self_fixed.effort}); "
+            "no later configured round confirmed the repair")
 
     if state.repair_briefs:
         for brief in state.repair_briefs:
@@ -335,13 +357,11 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
                 f"    - {brief.task_id}: "
                 f"{_compact_report_text(brief.brief)}")
 
-    lines.append("  Consumed fixer profiles:")
-    if not state.consumed_fixer_profiles:
-        lines.append("    - none")
-    else:
-        lines.extend(
-            f"    - {profile.adapter}/{profile.model}/{profile.effort}"
-            for profile in state.consumed_fixer_profiles)
+    # The round index is the durable record of how far the merged reviewer-fixer
+    # loop has advanced; it replaced the per-round escalation-profile ledger.
+    lines.append(
+        f"  Review round index: {state.review_round_index}"
+        f" (configured rounds: {len(cfg.auto_fix_review or ())})")
 
     lines.append("  Scope amendment transactions:")
     if not state.scope_amendments:
@@ -359,17 +379,6 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
                 f"      task plan: {amendment.plan_before_sha256}"
                 f" -> {amendment.plan_after_sha256}")
 
-    lines.append("  Repair-round assignments:")
-    if not state.repair_round_assignments:
-        lines.append("    - none active")
-    else:
-        for assignment in state.repair_round_assignments:
-            attempted = "attempted" if assignment.attempted else "not started"
-            lines.append(
-                f"    - {assignment.task_id}: "
-                f"{assignment.adapter}/{assignment.model}/{assignment.effort} "
-                f"({attempted})")
-
     if state.plan_digest_transitions:
         lines.append("  Plan digest transitions:")
         lines.extend(
@@ -382,7 +391,14 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
             for item in state.review_transitions)
 
     exhaustion = _auto_fix_exhaustion(plan)
-    if exhaustion is not None:
+    if self_fixed is not None:
+        lines.append(
+            "  Terminal: SELF-FIXED, UNREVIEWED (round "
+            f"{self_fixed.round_index + 1} of {self_fixed.rounds_used}, "
+            f"{self_fixed.adapter}/{self_fixed.model}/{self_fixed.effort}; "
+            "every task passed its own focused gate, and acceptance remains "
+            "the human accept action)")
+    elif exhaustion is not None:
         lines.append(f"  Exhaustion reason: {_compact_report_text(exhaustion)}")
         lines.append("  Terminal: NONZERO / EXHAUSTED")
     elif state.verdict == "PASS":
@@ -808,9 +824,10 @@ def _review_effort_source_key(cfg: Config, review) -> str:
 
 def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
     """Show the fully resolved reviewer identity and each contributing layer."""
-    review = cfg.auto_fix_review
-    if review is None:
+    rounds = cfg.auto_fix_review
+    if not rounds:
         return ["Auto-fix reviewer: unavailable (no resolved reviewer policy)"]
+    review = rounds[0]
 
     if "auto_fix.review.adapter" in cfg.provenance:
         adapter_source = _setting_source_label(
@@ -822,6 +839,12 @@ def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
     model_mapping_key = (
         f"adapter.{review.adapter}.models.{review.model}")
     effort_mapping_key = _review_effort_source_key(cfg, review)
+    # Every configured round is shown, in order and with repeats, so a human sees
+    # the whole sequence before any round loop consumes it.
+    round_lines = [
+        f"  round {index}: {item.adapter} / {item.model}->{item.requested_model}"
+        f" / {item.effort}->{item.requested_effort}"
+        for index, item in enumerate(rounds, start=1)]
     return [
         "Auto-fix reviewer (resolved): "
         f"{review.adapter} / {review.model}->{review.requested_model} / "
@@ -834,6 +857,8 @@ def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
         f"  reviewer effort = {review.effort} -> {review.requested_effort} "
         f"(setting source: {_setting_source_label(cfg, 'auto_fix.review.effort')}; "
         f"effort mapping source: {_setting_source_label(cfg, effort_mapping_key)})",
+        "Auto-fix reviewer rounds (configured order):",
+        *round_lines,
     ]
 
 

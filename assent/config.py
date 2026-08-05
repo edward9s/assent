@@ -228,7 +228,8 @@ class Config:
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
     prompt_template: str | None = None
     receipt_refresh: str = "manual"  # "manual" = explicit verify only, "auto" = also at run closeout
-    auto_fix_review: AutoFixReviewSettings | None = None
+    # The reviewer rounds in configured order; today only the first is used.
+    auto_fix_review: tuple[AutoFixReviewSettings, ...] | None = None
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
     # Where the effective settings came from: the layers that were present, lowest priority
     # first, and each stated leaf setting's dotted key mapped to the layer that stated it.
@@ -455,6 +456,34 @@ class _BlankGuard:
         for key, value in mapping.items():
             self.text(value, f"{prefix}.{key}")
         return mapping
+
+
+def _parse_review_adapters(section: dict, guard: "_BlankGuard",
+                           default: str) -> tuple[str, ...]:
+    """Parse the reviewer adapter as one name or an ordered list of review rounds.
+
+    Unlike the worker rotation, a repeated name is meaningful here: it states another
+    review round with the same identity, so the entries are kept exactly as written.
+    """
+    if "adapter" not in section:
+        return (default,)
+    raw = section["adapter"]
+    if isinstance(raw, str):
+        return (guard.text(raw, "auto_fix.review.adapter"),)
+    if not isinstance(raw, list):
+        raise AssentError(
+            "Config [auto_fix.review].adapter has the wrong type: expected a"
+            " string or a list of strings")
+    if not raw:
+        raise AssentError(
+            "Config [auto_fix.review].adapter must be a non-empty list of adapter names")
+    for index, name in enumerate(raw):
+        if not isinstance(name, str):
+            raise AssentError(
+                f"Config [auto_fix.review].adapter[{index}] has the wrong type:"
+                " expected str")
+        guard.text(name, "auto_fix.review.adapter")
+    return tuple(raw)
 
 
 def _parse_adapter_names(section: dict, guard: "_BlankGuard") -> tuple[str, ...]:
@@ -743,10 +772,7 @@ def load_config(path: str | Path, folder: str) -> Config:
     _known_keys(review, "auto_fix.review", {"adapter", "model", "effort"})
     guard = _BlankGuard(provenance, sources)
     adapter_names = _parse_adapter_names(adapter, guard)
-    review_adapter = guard.text(
-        _typed(review, "[auto_fix.review]", "adapter", str,
-               adapter_names[0]),
-        "auto_fix.review.adapter")
+    review_adapters = _parse_review_adapters(review, guard, adapter_names[0])
     review_model = guard.text(
         _typed(review, "[auto_fix.review]", "model", str, "prime"),
         "auto_fix.review.model")
@@ -836,7 +862,9 @@ def load_config(path: str | Path, folder: str) -> Config:
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
-    if review_adapter not in _ADAPTER_NAMES and "adapter" not in review:
+    unknown_review_adapters = [name for name in review_adapters
+                               if name not in _ADAPTER_NAMES]
+    if unknown_review_adapters and "adapter" not in review:
         # An unspecified reviewer defaults to the primary run adapter, whose
         # validity the single-name [adapter].name path defers to
         # adapter_settings() at point of use (see its docstring) so run/check
@@ -844,10 +872,10 @@ def load_config(path: str | Path, folder: str) -> Config:
         # the same way instead of failing config load on an unrelated label.
         pass
     else:
-        if review_adapter not in _ADAPTER_NAMES:
+        if unknown_review_adapters:
             raise AssentError(
-                f"[auto_fix.review] adapter = {review_adapter!r} is not a registered"
-                f" adapter ({'/'.join(sorted(_ADAPTER_NAMES))})")
+                f"[auto_fix.review] adapter = {unknown_review_adapters[0]!r} is not a"
+                f" registered adapter ({'/'.join(sorted(_ADAPTER_NAMES))})")
         if review_model not in _MODEL_TIERS:
             raise AssentError(
                 f"[auto_fix.review] model = {review_model!r} is not a valid model"
@@ -856,20 +884,25 @@ def load_config(path: str | Path, folder: str) -> Config:
             raise AssentError(
                 f"[auto_fix.review] effort = {review_effort!r} is not a valid"
                 f" effort ({'/'.join(sorted(_EFFORT_LEVELS))})")
-        adapter_settings = cfg.adapter_settings(review_adapter)
-        requested_model = adapter_settings.resolve_model(review_model)
-        requested_effort = adapter_settings.resolve_requested_effort(
-            review_model, review_effort)
-        if requested_effort is None:
-            raise AssentError(
-                "[auto_fix.review] effort did not resolve to a requested value")
-        cfg.auto_fix_review = AutoFixReviewSettings(
-            adapter=review_adapter,
-            model=review_model,
-            effort=review_effort,
-            command=adapter_settings.command,
-            extra_args=adapter_settings.extra_args,
-            requested_model=requested_model,
-            requested_effort=requested_effort,
-        )
+        # One resolved identity per configured round, in order and with repeats
+        # kept: model and effort are single fields that apply to every entry.
+        rounds = []
+        for name in review_adapters:
+            adapter_settings = cfg.adapter_settings(name)
+            requested_model = adapter_settings.resolve_model(review_model)
+            requested_effort = adapter_settings.resolve_requested_effort(
+                review_model, review_effort)
+            if requested_effort is None:
+                raise AssentError(
+                    "[auto_fix.review] effort did not resolve to a requested value")
+            rounds.append(AutoFixReviewSettings(
+                adapter=name,
+                model=review_model,
+                effort=review_effort,
+                command=adapter_settings.command,
+                extra_args=adapter_settings.extra_args,
+                requested_model=requested_model,
+                requested_effort=requested_effort,
+            ))
+        cfg.auto_fix_review = tuple(rounds)
     return cfg

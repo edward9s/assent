@@ -130,12 +130,8 @@ def capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
     return adapter.preflight(requests)
 
 
-def resolve_auto_fix_review_session(cfg: Config,
-                                    adapter: Adapter) -> SessionIdentity:
-    """Resolve the configured folder reviewer through normal adapter mappings."""
-    review = cfg.auto_fix_review
-    if review is None:
-        raise AssentError("Auto-fix folder review is not configured")
+def _review_round_session(review) -> SessionIdentity:
+    """Restate one already-resolved reviewer round as a session identity."""
     return SessionIdentity(
         agent=review.adapter,
         requested_model=review.requested_model,
@@ -144,24 +140,48 @@ def resolve_auto_fix_review_session(cfg: Config,
     )
 
 
+def resolve_auto_fix_review_session(cfg: Config,
+                                    adapter: Adapter) -> SessionIdentity:
+    """Resolve the folder reviewer the next review call uses (the first round)."""
+    rounds = cfg.auto_fix_review
+    if not rounds:
+        raise AssentError("Auto-fix folder review is not configured")
+    return _review_round_session(rounds[0])
+
+
 def auto_fix_review_capability_errors(
         cfg: Config, adapter: Adapter) -> tuple[SessionIdentity | None, list[str]]:
-    """Resolve and preflight the one optional read-only folder-review invocation."""
-    review = cfg.auto_fix_review
-    if review is None:
+    """Preflight every distinct configured reviewer adapter, not only the first round's.
+
+    A later round naming an adapter this machine cannot invoke is then caught before the
+    run starts, instead of only when that round is finally reached.
+    """
+    rounds = cfg.auto_fix_review
+    if not rounds:
         return None, []
+    by_adapter: dict[str, object] = {}
+    for review in rounds:
+        by_adapter.setdefault(review.adapter, review)
+    errors: list[str] = []
     try:
         session = resolve_auto_fix_review_session(cfg, adapter)
-        request = InvocationRequest(
-            task_id=f"{cfg.tasks_name}/folder-review",
-            model=review.model,
-            effort=review.effort,
-            requested_model=session.requested_model,
-            requested_effort=session.requested_effort,
-        )
+        for name, review in by_adapter.items():
+            round_adapter = (adapter if name == rounds[0].adapter
+                             else get_adapter(name, cfg))
+            identity = _review_round_session(review)
+            request = InvocationRequest(
+                task_id=f"{cfg.tasks_name}/folder-review",
+                model=review.model,
+                effort=review.effort,
+                requested_model=identity.requested_model,
+                requested_effort=identity.requested_effort,
+            )
+            for message in round_adapter.preflight([request]):
+                errors.append(message if len(by_adapter) == 1
+                              else f"{name}: {message}")
     except AssentError as e:
         return None, [str(e)]
-    return session, adapter.preflight([request])
+    return session, errors
 
 
 def resolve_auto_fix_fixer_session(

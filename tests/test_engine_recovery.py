@@ -22,6 +22,11 @@ from assent.plan import (append_entry, journal_path_for, parse_task_file,
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
 from tests.test_contracts import GlobalContractsMixin
 
+# The merged reviewer-fixer loop is finite because it walks the configured
+# [auto_fix.review] list position by position, so a case that needs a first
+# round and a later confirming round must configure exactly two rounds.
+TWO_REVIEW_ROUNDS = '\n[auto_fix.review]\nadapter = ["claude", "claude"]\n'
+
 
 class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
     def repair_done(self, task_path, files=None, *, requested_model="lite"):
@@ -47,13 +52,13 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
             return ok_result()
         return step
 
-    def test_interrupt_preserves_edits_and_restart_uses_next_profile(self):
+    def test_interrupt_preserves_edits_and_restart_reuses_the_same_profile(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=TWO_REVIEW_ROUNDS)
 
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "stale value", "review evidence")
@@ -81,16 +86,22 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
         self.assertIn(durable_brief, first_worker.calls[0][0])
 
         second_worker = ScriptedAdapter([
-            self.repair_done(task_path, {"src/value.txt": "fixed\n"},
-                         requested_model="prime")])
+            self.repair_done(task_path, {"src/value.txt": "fixed\n"})])
         self.assertEqual(self.run_quiet(
             cfg, adapter=second_worker, auto_fix_adapter=reviewer,
             auto_fix=True), 0)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.consumed_fixer_profiles, (
-            auto_fix.FixerProfile("claude", "lite", "normal"),
-            auto_fix.FixerProfile("claude", "prime", "heavy"),
-        ))
+        # An interrupted repair resumes on exactly the identity it started on:
+        # nothing is consumed, because only the review-round position advances.
+        attempts = [
+            entry for entry in read_entries(journal_path_for(task_path))
+            if entry["event"] == "auto_fix_attempt"]
+        self.assertEqual(
+            [(item["agent"], item["requested_model"], item["requested_effort"])
+             for item in attempts],
+            [("claude", "lite", "medium"), ("claude", "lite", "medium")])
+        # Round 0 failed and advanced the position; round 1 passed there.
+        self.assertEqual(state.review_round_index, 1)
         self.assertEqual((self.execution_root() / "src" / "value.txt").read_text(
             encoding="utf-8"), "fixed\n")
         self.assertIn(durable_brief, second_worker.calls[0][0])
@@ -105,7 +116,7 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=TWO_REVIEW_ROUNDS)
 
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "stale value", "review evidence")
@@ -133,7 +144,9 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
         crashed = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(crashed.phase, "REPAIRING")
         self.assertEqual(parse_task_file(task_path).status, "DONE")
-        self.assertEqual(len(crashed.consumed_fixer_profiles), 1)
+        # The failed round already moved the durable position forward, so the
+        # restart resumes at that round instead of replaying the sequence.
+        self.assertEqual(crashed.review_round_index, 1)
         checkpoint_subjects = self.subjects()
 
         restart_worker = ScriptedAdapter([])
@@ -147,8 +160,8 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
 
         recovered = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(recovered.phase, "COMPLETE")
-        self.assertEqual(recovered.consumed_fixer_profiles,
-                         crashed.consumed_fixer_profiles)
+        self.assertEqual(recovered.review_round_index,
+                         crashed.review_round_index)
         self.assertEqual(restart_worker.calls, [])
         self.assertEqual(len(restart_reviewer.calls), 1)
         self.assertIn("- PASS:", restart_reviewer.calls[0][0])
@@ -164,7 +177,7 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=TWO_REVIEW_ROUNDS)
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "stale value", "review evidence")
         reviewer = ScriptedAdapter([
