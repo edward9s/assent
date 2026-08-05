@@ -94,12 +94,32 @@ scheduler 作決定。不會自動建立 task、還原 source、刪 source，絕
 已不在設定的 round 之中，repair 與 closeout 會 fail closed。
 
 每個 round 讓 durable `review_round_index` 剛好前進一，走到設定 list 結尾就有限地結束自動化。
-在未修好的 blocker 上用完 round，會保留每一項 finding、編輯與 journal，並以非零 exit code
-結束；在 `FIXED` round 上用完，則結算為 SELF-FIXED, UNREVIEWED 且 exit code 為零：不還原、
-不 reopen、不重新標記，被修好的 task 保留它自己 focused gate 證明的 `DONE`，不會被改成
-`BLOCKED`。這個結果是終局而非可續跑的 phase —— 之後的 `run --auto-fix` 只會再次回報它、不再
-開新 round，只有人類 `rework` 能重新開啟該 folder。唯一缺的是獨立的 review 確認，而那只有
-人類的 `accept` 決定能提供。
+在 `FIXED` round 上用完不會馬上結算：scheduler 會先在修復後的 source 上重跑 implicated
+task 自己的 focused gate 一次——沿用同一份會跳過本次 invocation 已證明過 command 的
+de-duplicating ledger——所以最終「每個 task 都通過自己 focused gate」這個結算聲明，證明的
+是這次修復本身，不只是修復之前的狀態。通過後才結算為 SELF-FIXED, UNREVIEWED 且 exit code
+為零：不還原、不 reopen、不重新標記，被修好的 task 保留它自己 focused gate 證明的 `DONE`，
+不會被改成 `BLOCKED`。這個結果是終局而非可續跑的 phase —— 之後的 `run --auto-fix` 只會再次
+回報它、不再開新 round，只有人類 `rework` 能重新開啟該 folder。唯一缺的是獨立的 review
+確認，而那只有人類的 `accept` 決定能提供。
+
+若這道 settling gate 失敗，則是另一個獨立結果，與 SELF-FIXED, UNREVIEWED 及一般 `BLOCKED`
+task 都不同：folder 不會結算、沒有 task 被標成 `BLOCKED`，修復、finding 與每一筆編輯都
+保留 —— 而 run 以非零 exit code 結束。
+
+在未修好的 blocker 上用完 round，不再以非零 exit code 結束：而是結算為同樣獨立的
+REVIEW UNRESOLVED, HUMAN DECISION 結果，保留每一項 finding、編輯與 journal，每個 task
+保留它自己 closeout 給的 status，exit code 為零。這是刻意設計：因為 folder scheduler 的
+`--all` launch loop 只在沒有 folder 失敗時才持續啟動下一個，這裡的非零 exit 過去會靜默取消
+同一次 invocation 中排在後面的所有無關 folder。未解決的 review finding 是 scheduler
+無法決定的問題，不是 infrastructure failure，因此改由人類 acceptance meeting 決定，而不是
+讓 run failure 取消其他佇列中的工作。
+
+一個已經寫入修復的 round 若在其 verdict 記錄前被中斷，保留該編輯且不前進 round index。
+下一次 run 的 startup recovery 會利用 durable state 的 current finding 所指名的 task 來
+歸屬這份 dirt，證明方式與其他 recovery owner 相同的 scope-containment 判斷，並收進 `wip`
+checkpoint，不開任何 AI session；若無法以此方式證明 ownership，recovery 仍會 fail-closed
+拒絕，不會用猜的。
 
 Worker 必須在 repair task journal detail 以每個 current fingerprint 一行回覆下列 exact
 provider-neutral acknowledgement；`still_blocked` 只能搭配 `BLOCKED` task，scheduler 會驗證
@@ -127,9 +147,14 @@ journal、checkpoint commit 與 diff、實作，以及 focused/full verification
 
 Report 的 `Folder auto-fix` 是零 token 的 derived evidence：沒有 state file 是
 `NOT RUN`，新鮮的 review pass/fail 分別是 `PASSED (fresh)` 與 `FAILED (fresh)`，
-`SELF-FIXED, UNREVIEWED (fresh)` 會指出 self-fixed round 的位置、用掉的 round 數與該 round
-的 adapter/model/effort，
-malformed state 或 source/task binding 改變則是 `STALE`。它也會列出 phase、context、stage、
+`SELF-FIXED, UNREVIEWED (fresh)` 會指出 self-fixed round 的位置、用掉的 round 數、該 round
+的 adapter/model/effort，以及證明這次修復的 settling-gate evidence，
+`REVIEW UNRESOLVED, HUMAN DECISION (fresh)` 會指出 round 位置、用掉的 round 數、該 round 的
+adapter/model/effort，以及沒有任何 round 解決的 finding —— 這與 `SELF-FIXED, UNREVIEWED`
+及一般 `BLOCKED` task 都是不同的獨立結果 —— 而
+malformed state 或 source/task binding 改變則是 `STALE`。settling gate 失敗的 `FIXED` round
+不會進入這兩種結算 state，仍停在 `FAILED (fresh)` 並附上失敗 gate 的 command 與 evidence，
+產生它的 run 以非零 exit code 結束。它也會列出 phase、context、stage、
 original blocker、current findings/recommendations、scope decision 與 exact scope-amendment
 transaction、repair acknowledgement 與 brief，以及 review round index 對設定 round 數的
 比例。Scheduler 在 rework、中斷、repair closeout 或 round 用盡時的 status-only
@@ -154,6 +179,12 @@ accept 會重播新鮮且相符的 receipt，不會自行啟動完整 verifier�
 確認。Assent 會指出 self-fixed round、它的 adapter/model/effort，以及記載被修復 finding 的
 `_report.md`，然後詢問 `Publish it anyway? [y/N]`。只有精確的 `y`/`Y` 會 publish；其他任何
 輸入，包含非互動 stdin 的 EOF，都視為拒絕，不改任何 Git state。
+
+若單一 folder 的 derived auto-fix state 是 REVIEW UNRESOLVED, HUMAN DECISION，accept 會以
+同樣方式 gate，同樣在所有 receipt-based check 都已通過之後：Assent 會指出產生這些未解決
+finding 的 round 位置與 identity，以及每個 finding 的 task、path 與 summary，然後詢問
+`Publish it anyway? [y/N]`。拒絕規則相同，且不留下任何 Git side effect。同時帶有
+self-fixed gate 條件與此結果的 folder，只會被問一次，並同時指出兩個原因。
 
 `git push` 等遠端同步是另外的人類 Git 決定。只有 source 不再需要且 Assent
 能證明安全時才用 `assent clean`；詳見[作業](OPERATIONS.md)。

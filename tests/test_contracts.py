@@ -677,6 +677,68 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(chinese_contract=phrase):
                 self.assertIn("".join(phrase.split()), chinese_contract)
 
+    def test_round_interruption_and_gated_settle_are_documented(self):
+        """Interrupted-round recovery, the gated settle, the failing-gate
+        disposition, and the unresolved-review outcome must all be
+        discoverable in the installed contract and both reader-doc surfaces.
+        """
+        install_global_contracts(self)
+        root = _PROJECT_ROOT
+        english = {
+            "instructions.md": contracts.installed_contract_text("instructions.md"),
+            "workflow.md": contracts.installed_contract_text("workflow.md"),
+            "WORKFLOW.md": (root / "docs/WORKFLOW.md").read_text(encoding="utf-8"),
+            "COMMANDS.md": (root / "docs/COMMANDS.md").read_text(encoding="utf-8"),
+            "VERIFICATION.md": (root / "docs/VERIFICATION.md").read_text(
+                encoding="utf-8"),
+        }
+        required = (
+            "REVIEW UNRESOLVED, HUMAN DECISION",
+            "settling gate",
+            "REPAIRING",
+            "AWAITING_REVIEW",
+            "wip",
+            "fail-closed",
+            "de-duplicating ledger",
+        )
+        english_contract = " ".join(" ".join(text.split())
+                                    for text in english.values())
+        for phrase in required:
+            with self.subTest(english_contract=phrase):
+                self.assertIn(phrase, english_contract)
+        # The failing-gate disposition must read as its own outcome, distinct
+        # from SELF-FIXED, UNREVIEWED and from an ordinary BLOCKED task.
+        self.assertIn("distinct", english_contract)
+        self.assertIn("does not settle", english_contract)
+        # The stale claim that exhaustion with open findings ends the run
+        # nonzero must no longer appear anywhere in these surfaces.
+        self.assertNotIn(
+            "an unrepaired blocker preserves every finding, edit, and journal "
+            "without another round and exits nonzero", english_contract)
+        self.assertNotIn(
+            "on an unrepaired blocker preserves every finding, edit, and "
+            "journal and exits nonzero", english_contract)
+
+        chinese = {
+            "WORKFLOW.zh-TW.md": (root / "docs/zh-TW/WORKFLOW.md").read_text(
+                encoding="utf-8"),
+            "COMMANDS.zh-TW.md": (root / "docs/zh-TW/COMMANDS.md").read_text(
+                encoding="utf-8"),
+            "VERIFICATION.zh-TW.md": (
+                root / "docs/zh-TW/VERIFICATION.md").read_text(encoding="utf-8"),
+        }
+        translated_required = (
+            "REVIEW UNRESOLVED, HUMAN DECISION",
+            "settling gate",
+            "de-duplicating ledger",
+            "fail-closed",
+        )
+        chinese_contract = "".join("".join(text.split())
+                                   for text in chinese.values())
+        for phrase in translated_required:
+            with self.subTest(chinese_contract=phrase):
+                self.assertIn("".join(phrase.split()), chinese_contract)
+
     def test_auto_fix_state_schema_matches_the_version_six_contract(self):
         """The executable state shape and packaged contract must advance together."""
         install_global_contracts(self)

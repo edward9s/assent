@@ -104,9 +104,24 @@ worker `BLOCKED` 或 focused-gate 證據的 quiescent blocked dependency
 保留程式碼的 rework；每個 round 讓 durable review round index 剛好前進一格，每個 reopen
 的 task 都以它自己原本的 task profile 修復：沒有 escalation ladder，也不消耗任何東西，
 所以中斷的 round 會以相同 identity 恢復，多 task finding 與 dependency
-cascade 不會逐 task escalation。round list 若結束在未被確認的修復，folder 會沉澱為
-`SELF-FIXED, UNREVIEWED`：保留每個 task 自己的狀態、exit code 為 0，並讓 `accept` 要求
-一次明確確認。既有 technical debt 只有 `COMPLETED_FOLDER + INITIAL`
+cascade 不會逐 task escalation。一個已經寫入修復的 round 若在其 verdict 記錄前被中斷，
+保留該編輯；下一次 run 的 startup recovery 在 durable state 的 current finding 能證明
+ownership 時，會把這份 dirt 歸屬給 implicated task，收進 `wip` checkpoint，否則 fail-closed
+拒絕。
+
+round list 若結束在 `FIXED` round，會先在修復後的 source 上重跑 implicated task 自己的
+focused gate 一次 —— 沿用同一份會跳過本次 invocation 已證明過 command 的 de-duplicating
+ledger —— 通過後才沉澱為 `SELF-FIXED, UNREVIEWED`：保留每個 task 自己的狀態、exit code
+為 0，並讓 `accept` 要求一次明確確認。若這道 settling gate 失敗，則是另一個獨立結果，
+與 `SELF-FIXED, UNREVIEWED` 及一般 `BLOCKED` task 都不同：folder 不會沉澱、沒有 task 被標成
+`BLOCKED`、每一項編輯與 finding 都保留，run 以非零 exit code 結束。round list 若結束在
+未修好的 blocker，則沉澱為同樣獨立的 `REVIEW UNRESOLVED, HUMAN DECISION` 結果：每個 task
+保留它自己 closeout 給的狀態、沒有 task 被標成 `BLOCKED`，exit code 為 0 —— 這是刻意取代
+先前的非零 exit，讓同一次 `--all` invocation 中排在後面的 folder 仍能繼續啟動；未解決的
+review finding 是留給人類 acceptance meeting 決定的問題，不是 infrastructure failure。在
+`accept` 時，這個結果會要求同樣一次明確的 `[y/N]` 確認，指出未解決 finding 的 task、path
+與 summary；同時帶有兩種結果的 folder 只會被問一次，並同時指出兩個原因。既有 technical
+debt 只有 `COMPLETED_FOLDER + INITIAL`
 引入、局部且 focused test 可可靠驗證時才合格；blocked adjudication 與 `RECHECK` 可以保留
 或解決，但不能新增。review 不做全 repository debt audit。reviewer 可核准一個精確 scope
 addition，但只有 scheduler 修改 task file；worker 與 reviewer 都禁止 task-file edits。
