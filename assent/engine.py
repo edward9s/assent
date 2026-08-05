@@ -977,10 +977,28 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         # unresolved review evidence just because the invocation omitted the
         # repair authorization.
         existing_auto_fix = _auto_fix_existing_state(cfg)
+        # A settled SELF-FIXED, UNREVIEWED folder is terminal, not a resumable
+        # phase: a later run must not reopen, re-review, or re-run anything for
+        # it just because that durable record exists.  A human who reopens a
+        # task with rework leaves the folder incomplete, and ordinary execution
+        # continues below as usual.
+        settled_self_fixed = bool(
+            existing_auto_fix is not None
+            and existing_auto_fix.self_fixed_unreviewed is not None
+            and all(task.status in ("DONE", "SKIP") for task in plan.tasks))
+        if settled_self_fixed and auto_fix_enabled:
+            assert existing_auto_fix is not None
+            outcome = existing_auto_fix.self_fixed_unreviewed
+            assert outcome is not None
+            _print_self_fixed_unreviewed(outcome)
+            _print_summary(plan)
+            try_write_report(cfg)
+            return 0
         resuming_auto_fix = bool(
             auto_fix_enabled
             and existing_auto_fix is not None
-            and existing_auto_fix.verdict != "PASS")
+            and existing_auto_fix.verdict != "PASS"
+            and not settled_self_fixed)
         if resuming_auto_fix:
             assert existing_auto_fix is not None
             recovery_error = _auto_fix_recovery_config_error(
@@ -1048,7 +1066,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 if review_outcome.rounds_exhausted:
                     assert review_outcome.state is not None
                     return _auto_fix_finish_rounds_exhausted(
-                        review_outcome.state)
+                        cfg, review_outcome.state, now)
                 if (auto_fix_enabled and review_outcome.state is not None
                         and review_outcome.human_reason is None
                         and not (once or task_id is not None)):
@@ -2532,19 +2550,97 @@ def _auto_fix_cascade_tasks(plan: Plan, implicated: list[str]) -> list[Task]:
             if task.id in selected and task.status != "SKIP"]
 
 
-def _auto_fix_finish_rounds_exhausted(state: auto_fix.AutoFixState) -> int:
+def _auto_fix_finish_rounds_exhausted(
+        cfg: Config, state: auto_fix.AutoFixState,
+        now: Callable[[], datetime]) -> int:
     """The finite review-round sequence ran out; stop without another round.
 
     Nothing is reverted, reopened, or re-marked: the durable finding ledger,
     every edit a round made, and each task's own status stay exactly as the
-    last round left them.  Turning this boundary into its own human-facing
-    report state is the following task's job; this is the single hand-off point
-    it replaces.
+    last round left them.  A sequence that ended on a round which repaired what
+    it found (verdict ``FIXED``) is not a failure -- the code passed every
+    focused gate its own tasks declare and only independent review confirmation
+    is missing -- so it settles as the distinct, human-gated SELF-FIXED,
+    UNREVIEWED outcome and the run succeeds.  A blocker no round repaired still
+    ends nonzero.
     """
-    print(f"Auto-fix review rounds exhausted after {state.review_round_index} "
-          "round(s); every finding, edit, and journal was preserved without "
-          "another round.")
-    return 1
+    if state.verdict != "FIXED":
+        print(f"Auto-fix review rounds exhausted after {state.review_round_index} "
+              "round(s); every finding, edit, and journal was preserved without "
+              "another round.")
+        return 1
+    already_settled = state.self_fixed_unreviewed is not None
+    settled = auto_fix.with_self_fixed_unreviewed(
+        state, source_tree=_auto_fix_current_tree(cfg))
+    outcome = settled.self_fixed_unreviewed
+    assert outcome is not None
+    try:
+        # The durable outcome and the report a human reads must both be on disk
+        # before this folder hands control back, so the report refresh follows
+        # the same unconditional discipline folder verification's own closeout
+        # uses -- a later failure can never leave either unwritten.
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg), settled)
+        _print_self_fixed_unreviewed(outcome)
+        if not already_settled:
+            _auto_fix_journal_self_fixed(cfg, settled, now)
+    finally:
+        try_write_report(cfg)
+    return 0
+
+
+def _auto_fix_current_tree(cfg: Config) -> str | None:
+    """The tree the last round's repair was checkpointed into, when readable."""
+    try:
+        return gitops.tree_of(cfg.root, "HEAD")
+    except AssentError:
+        return None
+
+
+def _print_self_fixed_unreviewed(outcome: auto_fix.SelfFixedOutcome) -> None:
+    print(f"Auto-fix folder review: SELF-FIXED, UNREVIEWED after "
+          f"{outcome.rounds_used} configured round(s); review round "
+          f"{outcome.round_index + 1} "
+          f"({outcome.adapter}/{outcome.model}/{outcome.effort}) repaired its "
+          "own finding and no further round confirmed it. Every task keeps the "
+          "status its own focused gate proved; only independent review "
+          "confirmation is missing.")
+
+
+def _auto_fix_journal_self_fixed(
+        cfg: Config, state: auto_fix.AutoFixState,
+        now: Callable[[], datetime]) -> None:
+    """Record the settled outcome once on every implicated task's r file."""
+    outcome = state.self_fixed_unreviewed
+    assert outcome is not None
+    ledger = {item.fingerprint: item for item in state.findings}
+    by_task: dict[str, list[str]] = {}
+    for fingerprint in outcome.finding_fingerprints:
+        finding = ledger[fingerprint]
+        if finding.task_id is None:
+            continue
+        by_task.setdefault(finding.task_id, []).append(
+            f"- {fingerprint} {finding.path}: {finding.summary}")
+    plan = Plan.parse(cfg.tasks_dir)
+    identity = f"{outcome.adapter}/{outcome.model}/{outcome.effort}"
+    for task_id, findings in by_task.items():
+        task = plan.get(task_id)
+        if task is None:
+            continue
+        append_entry(
+            task.journal_path, by="scheduler",
+            event="auto_fix_self_fixed_unreviewed",
+            summary=(f"Review round {outcome.round_index + 1} of "
+                     f"{outcome.rounds_used} ({identity}) repaired this task's "
+                     "own finding and no further configured round confirmed it"),
+            detail=("The configured [auto_fix.review] round list ended on that "
+                    "repair, so the folder is SELF-FIXED, UNREVIEWED: the task "
+                    "keeps the status its own focused gate proved and nothing "
+                    "was reopened, reverted, or marked BLOCKED. Only "
+                    "independent review confirmation is missing; acceptance "
+                    "remains the explicit human action.\n"
+                    "Unconfirmed findings:\n" + "\n".join(findings)),
+            time_str=now().isoformat(timespec="seconds"))
 
 
 def _auto_fix_recover_dispositions(
@@ -2668,7 +2764,8 @@ def _run_auto_fix_repairs(
             if outcome.code == 0:
                 return 0
             if outcome.rounds_exhausted:
-                return _auto_fix_finish_rounds_exhausted(state)
+                return _auto_fix_finish_rounds_exhausted(
+                    cfg, outcome.state or state, now)
             if outcome.state is None or outcome.human_reason is not None:
                 return outcome.code
             state = outcome.state
@@ -2781,7 +2878,8 @@ def _run_auto_fix_repairs(
                     injected_adapter=injected_reviewer, sleep=sleep, now=now,
                     blockers=tuple(round_blockers))
                 if outcome.rounds_exhausted:
-                    return _auto_fix_finish_rounds_exhausted(state)
+                    return _auto_fix_finish_rounds_exhausted(
+                        cfg, outcome.state or state, now)
                 if outcome.state is None or outcome.human_reason is not None:
                     return outcome.code
                 state = outcome.state

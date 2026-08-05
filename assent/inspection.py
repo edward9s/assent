@@ -177,7 +177,11 @@ def _auto_fix_binding_reasons(
     reasons: list[str] = []
     current_tree: str | None = None
     try:
-        current_tree = gitops.tree_of(cfg.root, "HEAD")
+        # The review states the folder's own source, which lives on its
+        # isolated branch, so the comparison reads that worktree whenever one
+        # exists -- reading the main tree from a report invocation would call
+        # every live folder's evidence stale.
+        current_tree = gitops.tree_of(_query_git_root(cfg), "HEAD")
     except AssentError as e:
         reasons.append(f"current source identity unavailable: {e}")
     else:
@@ -192,12 +196,14 @@ def _auto_fix_binding_reasons(
 
     rounds = cfg.auto_fix_review
     if rounds:
-        review = rounds[0]
-        configured_reviewer = (
-            review.adapter, review.requested_model, review.requested_effort)
+        # Any configured round may have produced this state, so drift is
+        # "the round that decided it is no longer configured at all".
+        configured_reviewers = [
+            (review.adapter, review.requested_model, review.requested_effort)
+            for review in rounds]
         stored_reviewer = (
             state.reviewer_adapter, state.reviewer_model, state.reviewer_effort)
-        if stored_reviewer != configured_reviewer:
+        if stored_reviewer not in configured_reviewers:
             reasons.append("reviewer configuration changed")
     return reasons, current_tree
 
@@ -250,9 +256,16 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
 
     reasons, current_tree = _auto_fix_binding_reasons(cfg, plan, state)
 
+    self_fixed = state.self_fixed_unreviewed
     if reasons:
         status = "STALE"
         freshness = "; ".join(reasons)
+    elif self_fixed is not None:
+        # Distinct from all four other states: the code passed every focused
+        # gate its own tasks declare, and only independent review confirmation
+        # is missing.
+        status = "SELF-FIXED, UNREVIEWED"
+        freshness = "fresh"
     elif state.verdict == "PASS":
         status = "PASSED"
         freshness = "fresh"
@@ -269,6 +282,12 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
              f"  Original blocker: {_auto_fix_blocker_label(state)}"]
     if current_tree is not None and current_tree != state.source_tree:
         lines.append(f"  Current source tree: {current_tree}")
+    if self_fixed is not None:
+        lines.append(
+            f"  Self-fixed round: {self_fixed.round_index + 1} of "
+            f"{self_fixed.rounds_used} "
+            f"({self_fixed.adapter}/{self_fixed.model}/{self_fixed.effort}); "
+            "no later configured round confirmed the repair")
 
     if state.repair_briefs:
         for brief in state.repair_briefs:
@@ -372,7 +391,14 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
             for item in state.review_transitions)
 
     exhaustion = _auto_fix_exhaustion(plan)
-    if exhaustion is not None:
+    if self_fixed is not None:
+        lines.append(
+            "  Terminal: SELF-FIXED, UNREVIEWED (round "
+            f"{self_fixed.round_index + 1} of {self_fixed.rounds_used}, "
+            f"{self_fixed.adapter}/{self_fixed.model}/{self_fixed.effort}; "
+            "every task passed its own focused gate, and acceptance remains "
+            "the human accept action)")
+    elif exhaustion is not None:
         lines.append(f"  Exhaustion reason: {_compact_report_text(exhaustion)}")
         lines.append("  Terminal: NONZERO / EXHAUSTED")
     elif state.verdict == "PASS":

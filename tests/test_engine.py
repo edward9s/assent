@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 
 from assent import auto_fix, engine, gitops, inspection
+from assent.__main__ import _dispatch
 from assent.adapters import TaskResult
 from assent.config import load_config
 from assent.lockfile import hold_lock
@@ -2025,6 +2026,88 @@ class TestGlobalContractGate(GlobalContractsMixin, EngineTestCase):
         (self.user_home / "instructions.md").unlink()
         text = self.refuse()
         self.assertNotIn(str(self.project_instructions), text)
+
+
+class TestSelfFixedUnreviewedSelection(GlobalContractsMixin, EngineTestCase):
+    """An exhausted round list ends one folder, never the whole selection.
+
+    The whole invocation runs through the real ``assent run --auto-fix`` CLI
+    path: only the adapter processes are scripted.
+    """
+
+    def test_self_fixed_folder_exits_zero_and_the_next_folder_still_runs(self):
+        self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        second_dir = self.root / ".assent" / "plan02"
+        second_dir.mkdir()
+        second_task = second_dir / "t001_task.e.toml"
+        second_task.write_text(task_text(scope=("other/",)),
+                               encoding="utf-8", newline="\n")
+        config_path = self.root / ".assent" / "assent.toml"
+        self.build(extra_config=(
+            '[auto_fix.review]\nadapter = ["claude", "claude"]\n'))
+        self.commit_all()
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "value is stale",
+            "The focused behavior still reads the stale value.")
+        repaired = auto_fix.ReviewFinding(
+            finding.task_id, finding.path, finding.summary, finding.evidence,
+            transition="still_present",
+            prior_fingerprint=auto_fix.finding_fingerprint(finding),
+            transition_evidence="The same blocker was repaired again in place.")
+
+        def fix(position):
+            def step(_prompt):
+                (gitops.worktree_path(self.root, "plan01") / "src"
+                 / "value.txt").write_text(f"repair {position}\n",
+                                           encoding="utf-8")
+                return TaskResult(0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord(
+                        "FIXED", (finding if position == 1 else repaired,))),
+                    False, None)
+            return step
+
+        def second_done(_prompt):
+            worktree = gitops.worktree_path(self.root, "plan02")
+            (worktree / "other").mkdir(parents=True, exist_ok=True)
+            (worktree / "other" / "value.txt").write_text(
+                "done\n", encoding="utf-8")
+            set_status(second_task, "DONE")
+            append_entry(journal_path_for(second_task), by="claude",
+                         requested_model="lite", event="done", summary="完成")
+            return ok_result()
+
+        adapters = {
+            "plan01": ScriptedAdapter([fix(1), fix(2)]),
+            "plan02": ScriptedAdapter([
+                second_done,
+                TaskResult(0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("PASS", ())), False, None)]),
+        }
+        out = io.StringIO()
+        with mock.patch.object(
+                engine, "get_adapter",
+                side_effect=lambda _name, cfg: adapters[cfg.tasks_name]), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(_dispatch([
+                "run", "plan01", "plan02", "--auto-fix",
+                "--config", str(config_path)]), 0)
+
+        # plan01 settles as SELF-FIXED, UNREVIEWED with a zero exit code, so
+        # the independent plan02 still runs to completion in the same call.
+        text = out.getvalue()
+        self.assertIn("SELF-FIXED, UNREVIEWED", text)
+        first = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(load_config(config_path, "plan01")))
+        self.assertIsNotNone(first.self_fixed_unreviewed)
+        self.assertEqual(parse_task_file(second_task).status, "DONE")
+        second = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(load_config(config_path, "plan02")))
+        self.assertEqual(second.verdict, "PASS")
+        self.assertEqual(len(adapters["plan02"].calls), 2)
 
 
 if __name__ == "__main__":
