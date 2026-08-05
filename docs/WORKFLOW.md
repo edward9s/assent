@@ -73,9 +73,12 @@ receipt, and report rules are in [Verification](VERIFICATION.md).
 If the invocation states `--auto-fix`, the completed folder enters a bounded
 folder-level review-and-repair loop. An optional `[auto_fix.review]` table
 overrides the reviewer; when absent, the first effective worker adapter at
-`prime`/`heavy` is resolved automatically. The final gate order is ordinary
+`prime`/`heavy` is resolved automatically. Its `adapter` may be a single name or
+an ordered list, where each entry -- repeats included -- is one review round
+sharing the table's single `model` and `effort`; the length of that list is the
+finite bound on the loop. The final gate order is ordinary
 task-focused verification, one final run of each distinct `DONE`-task `verify`
-command, then the read-only reviewer; an incomplete `--once`/`--task` run
+command, then the reviewer round; an incomplete `--once`/`--task` run
 defers this completed-folder loop and spends no review token. A quiescent
 blocked dependency with durable worker `BLOCKED` or focused-gate evidence uses
 the separate blocked-adjudication entry point. A focused failure prevents the
@@ -91,14 +94,25 @@ With `--verify`, complete verification still happens only after the run and
 bounded loop succeed; auto-fix itself never verifies a full candidate or
 accepts.
 
-A failed review is written to the folder's derived `_auto_fix.toml` state and
+A completed-folder round is a merged reviewer-fixer session rather than a
+strictly read-only gate: it may repair a genuine blocker directly, writing only
+inside the declared scope of the one existing task its finding names, and
+reports that with the verdict `FIXED`. Any other write -- a management-plane or
+task file, another task's scope, a commit, or a write in the primary worktree --
+makes the verdict unusable while preserving the exact edits. `PASS` means
+nothing blocking remains and the round wrote nothing; `FAIL` remains for a
+blocker the round may not repair itself, such as an exact scope omission, and
+for blocked adjudication, which stays read-only.
+
+A `FAIL` review is written to the folder's derived `_auto_fix.toml` state and
 report. With `--auto-fix`, only findings resolved to existing tasks and their
 declared scopes may trigger automatic, code-preserving rework. The scheduler
 records the reason `Automatic repair of durable folder-review findings` and
-`authorization: run --auto-fix`, then selects and persists the finite
-fixer-profile assignments for the whole repair round before its first
-write-capable session. Multi-task findings and dependency cascades therefore do
-not consume the normal profile once per task. A pre-existing technical-debt
+`authorization: run --auto-fix`. Each reopened task is repaired under its own
+ordinary task profile: there is no escalation ladder and no consumed-profile
+ledger, so an interrupted round resumes on exactly the same identity and
+multi-task findings and dependency cascades never escalate one task at a time.
+A pre-existing technical-debt
 finding is eligible only when it is introduced by `COMPLETED_FOLDER + INITIAL`,
 encountered in changed or directly interacting code, local to an existing task
 scope, and reliably testable; the review is not a repository-wide debt audit.
