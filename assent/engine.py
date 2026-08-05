@@ -211,6 +211,14 @@ and you wrote nothing at all."""
 _AUTO_FIX_ROUND_POLICY = """This is review round {position} of {total}.
 Review rounds remaining after this one: {remaining}."""
 
+# Blocked adjudication is a separate read-only entry point, not one of the
+# merged reviewer-fixer rounds, so it must never receive the round sequence's
+# final-round instruction to repair the blocker itself -- that would contradict
+# the read-only write policy in the very same prompt.
+_AUTO_FIX_BLOCKED_ROUND_POLICY = """This adjudication is a single read-only
+decision gate, not one of the merged reviewer-fixer rounds. Report what you
+find; repairing it yourself is not available in this context."""
+
 _AUTO_FIX_FINAL_ROUND_POLICY = """This is the FINAL review round.
 No further review will occur after this one. Anything you leave merely
 reported will never be repaired, rechecked, or confirmed by another round.
@@ -1164,8 +1172,15 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         try_write_report(cfg)
         return 0
     pending = _auto_fix_existing_state(cfg)
-    if pending is not None and pending.verdict == "FAIL":
-        print("Auto-fix closeout refused: the folder has a pending FAIL state; "
+    # Every non-PASS verdict is an unconfirmed pending state, matching the
+    # resume guard above: a durable FIXED is a self-repair no round has yet
+    # confirmed, so it must refuse closeout exactly as a FAIL does.  The one
+    # settled exception is the terminal SELF-FIXED, UNREVIEWED outcome, whose
+    # remaining decision is the human accept rather than another round.
+    if (pending is not None and pending.verdict != "PASS"
+            and pending.self_fixed_unreviewed is None):
+        print("Auto-fix closeout refused: the folder has a pending "
+              f"{pending.verdict} state; "
               "rerun with --auto-fix and its current [auto_fix.review] policy.")
         _print_summary(final_plan)
         try_write_report(cfg)
@@ -1405,8 +1420,11 @@ def _auto_fix_review_identity(
             _AUTO_FIX_READ_ONLY_POLICY
             if review_context == "blocked_adjudication"
             else _AUTO_FIX_MERGED_WRITE_POLICY),
-        round_policy=_auto_fix_round_policy(
-            round_index, len(cfg.auto_fix_review or ()) or 1),
+        round_policy=(
+            _AUTO_FIX_BLOCKED_ROUND_POLICY
+            if review_context == "blocked_adjudication"
+            else _auto_fix_round_policy(
+                round_index, len(cfg.auto_fix_review or ()) or 1)),
         context_policy=(
             _AUTO_FIX_BLOCKED_POLICY
             if review_context == "blocked_adjudication"
@@ -2014,8 +2032,10 @@ def _run_auto_fix_review_once(
             # in-scope repair is checkpointed here.  The next round then reviews
             # a clean worktree and can name the exact repaired paths.
             owner = next(
-                (plan.get(item.task_id) for item in resolved_record.findings
-                 if item.task_id is not None), None)
+                (task for task in (
+                    plan.get(item.task_id) for item in resolved_record.findings
+                    if item.task_id is not None)
+                 if task is not None), None)
             if owner is not None:
                 gitops.commit_if_dirty(
                     cfg.root,
@@ -2044,8 +2064,8 @@ def _run_auto_fix_review_once(
         else:
             print("Auto-fix folder review: FAIL; blocking findings were preserved for repair.")
         for finding in resolved_record.findings:
-            owner = f"{finding.task_id}: " if finding.task_id else ""
-            print(f"  - {owner}{finding.path}: {finding.summary}")
+            label = f"{finding.task_id}: " if finding.task_id else ""
+            print(f"  - {label}{finding.path}: {finding.summary}")
         return finish(_AutoFixReviewOutcome(1, state))
 
 

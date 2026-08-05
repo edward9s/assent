@@ -629,7 +629,7 @@ class TestContractContent(unittest.TestCase):
                 "source_tree", "task_plan_sha256", "review_prompt_sha256",
                 "reviewer_adapter", "reviewer_model", "reviewer_effort",
                 "current_finding_fingerprints", "observed_states",
-                "consumed_fixer_profiles"):
+                "review_round_index"):
             with self.subTest(state_field=field):
                 self.assertIn(field, format_text)
         for phrase in (
@@ -677,7 +677,7 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(chinese_contract=phrase):
                 self.assertIn("".join(phrase.split()), chinese_contract)
 
-    def test_auto_fix_state_schema_matches_the_version_five_contract(self):
+    def test_auto_fix_state_schema_matches_the_version_six_contract(self):
         """The executable state shape and packaged contract must advance together."""
         install_global_contracts(self)
         from dataclasses import fields
@@ -685,13 +685,13 @@ class TestContractContent(unittest.TestCase):
         from assent import auto_fix
 
         format_text = contracts.installed_contract_text("workflow.md")
-        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 5)
+        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 6)
         self.assertEqual(
             {field.name for field in fields(auto_fix.AutoFixState)},
             auto_fix._STATE_KEYS)
         for phrase in (
-                "Version 5 has exactly these scalar fields",
-                "version = 5",
+                "Version 6 has exactly these scalar fields",
+                "version = 6",
                 "phase = \"COMPLETE\"",
                 "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
                 "A restart resumes `REPAIRING` or `AWAITING_REVIEW`",
@@ -705,18 +705,18 @@ class TestContractContent(unittest.TestCase):
                 "review_context", "review_stage", "failure_trigger",
                 "reviewer_recommendations", "approved_scope_additions",
                 "scope_amendments", "worker_dispositions", "repair_briefs",
-                "repair_round_assignments",
+                "review_round_index", "self_fixed_unreviewed",
                 "plan_digest_transitions", "review_transitions"):
             with self.subTest(state_field=field):
                 self.assertIn(field, format_text)
         self.assertIn("ASSENT_REPAIR_DISPOSITION", format_text)
 
-    def test_version_five_example_is_parseable_and_finding_identity_is_complete(self):
+    def test_version_six_example_is_parseable_and_finding_identity_is_complete(self):
         """The packaged state example must be usable as TOML and describe its full identity."""
         format_text = contracts.installed_contract_text("format.md")
         workflow_text = contracts.installed_contract_text("workflow.md")
         match = re.search(
-            r"```toml\n(version = 5\n.*?)(?:\n```)", workflow_text, re.DOTALL)
+            r"```toml\n(version = 6\n.*?)(?:\n```)", workflow_text, re.DOTALL)
         self.assertIsNotNone(match)
         assert match is not None
         example = tomllib.loads(match.group(1))

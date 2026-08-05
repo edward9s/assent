@@ -1036,13 +1036,13 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 'model = "core"\n'
                 'effort = "heavy"\n'))
 
-    def write_pending_fail(self, cfg):
+    def write_pending_fail(self, cfg, verdict="FAIL"):
         task = parse_task_file(self.plan_dir / "t001_task.e.toml")
         rounds = cfg.auto_fix_review
         self.assertTrue(rounds)
         review = rounds[0]
         state = auto_fix.state_for_review(
-            auto_fix.ReviewRecord("FAIL", (auto_fix.ReviewFinding(
+            auto_fix.ReviewRecord(verdict, (auto_fix.ReviewFinding(
                 task.id, "src/missing.py", "pending blocker",
                 "restart evidence"),)),
             source_tree=gitops.tree_of(cfg.root, "HEAD"),
@@ -1394,6 +1394,14 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
             prompt)
         self.assertIn("legitimately skips the focused gate", prompt)
         self.assertIn("integration candidate", prompt)
+        # A read-only adjudication must never also be told to repair the
+        # blocker itself: the merged write policy and the round sequence's
+        # final-round instruction would contradict its own write policy.
+        self.assertIn("never an\nimplementation session", prompt)
+        self.assertIn("single read-only\ndecision gate", prompt)
+        self.assertNotIn("you may repair it directly", prompt)
+        self.assertNotIn("This is the FINAL review round.", prompt)
+        self.assertNotIn("This is review round", prompt)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.phase, "NEEDS_REPAIR")
         self.assertEqual(state.failure_trigger, "worker_blocked")
@@ -1855,6 +1863,29 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
         self.assertEqual(worker.calls, [])
         self.assertIn("pending FAIL state", out.getvalue())
+        self.assertEqual(
+            auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(ordinary)),
+            before)
+
+    def test_pending_fixed_cannot_close_an_ordinary_run_either(self):
+        """An unconfirmed self-repair is pending review exactly as a FAIL is."""
+        self.write_task(1, status="DONE")
+        cfg = self.build_review()
+        self.commit_all()
+        before = self.write_pending_fail(cfg, verdict="FIXED")
+        # A durable FIXED is always an unreviewed pending state: the phase map
+        # sends it to AWAITING_REVIEW and no non-PASS state may be COMPLETE.
+        self.assertEqual(before.phase, "AWAITING_REVIEW")
+        self.assertIsNone(before.self_fixed_unreviewed)
+        ordinary = self.build()
+        worker = ScriptedAdapter([])
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(ordinary, adapter=worker), 1)
+
+        self.assertEqual(worker.calls, [])
+        self.assertIn("pending FIXED state", out.getvalue())
         self.assertEqual(
             auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(ordinary)),
             before)

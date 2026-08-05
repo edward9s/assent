@@ -625,8 +625,8 @@ completed and the next configured round must run; and `COMPLETE` is valid only
 for a `PASS` with no current findings. `review_context` distinguishes a completed-folder review
 from blocked adjudication, and `review_stage` distinguishes the first review
 from a recheck. A restart resumes `REPAIRING` or `AWAITING_REVIEW` from the
-stored evidence, while a missing or drifted reviewer configuration refuses
-repair and closeout rather than treating the state as a cache miss.
+stored evidence, while a missing or drifted reviewer configuration
+refuses repair and closeout rather than treating the state as a cache miss.
 
 An exact fresh `PASS` requires all of `source_tree`, `task_plan_sha256`,
 `review_prompt_sha256`, `reviewer_adapter`, `reviewer_model`, and

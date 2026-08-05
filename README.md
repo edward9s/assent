@@ -93,9 +93,9 @@ Configure `[auto_fix.review]` when a project wants to override a final,
 folder-level AI review-and-repair loop. With no table, `assent run --auto-fix`
 resolves the first effective worker adapter at `prime`/`heavy`; no `assent init`
 rerun or `~/.assent/assent.toml` edit is needed. Only an explicit
-`assent run --auto-fix` starts the read-only completed-folder review after all
+`assent run --auto-fix` starts the completed-folder review after all
 task-focused checks and the final distinct focused sweep, or enters the
-quiescent blocked-adjudication path with durable blocker evidence, and
+quiescent read-only blocked-adjudication path with durable blocker evidence, and
 authorizes bounded repair for that invocation. An ordinary `assent run` without
 the flag starts neither review nor repair. The flag is compatible with the
 normal run selectors, including explicit folders, `...`, `--all`, `--once`,
@@ -108,25 +108,36 @@ interacting code. Debt may be introduced only by `COMPLETED_FOLDER + INITIAL`,
 when repair stays inside an existing task's scope and its focused tests can
 verify the result; blocked adjudication and `RECHECK` may retain or resolve it
 but cannot add another. This is not an unbounded repository-wide debt audit. A
-failed review automatically reopens only implicated existing tasks, records a
-reason-bearing rework, and tries a finite sequence of fixer profiles. Each
-repair round selects its assignments from the profiles unused before that round
-and persists them before the first write-capable session, so a multi-task
-finding or dependency cascade does not escalate sibling tasks one at a time. A
+failed review automatically reopens only implicated existing tasks and records a
+reason-bearing rework. A completed-folder round is a merged reviewer-fixer
+session: it may repair a genuine blocker directly, writing only inside the
+declared scope of the one existing task its finding names, and reports that as
+`FIXED`; `PASS` means nothing blocking remains and the round wrote nothing at
+all. `[auto_fix.review].adapter` accepts one adapter or an ordered list of
+them, and that list length is the finite round bound: each round advances a
+durable round index by exactly one. Each reopened task is repaired under its
+own ordinary task profile, with no escalation ladder and nothing consumed, so
+an interrupted round resumes on exactly the same identity and a multi-task
+finding or dependency cascade never escalates sibling tasks one at a time. A
 reviewer may approve one exact scope addition, but only the scheduler edits the
 task file; worker and reviewer task-file edits remain forbidden. It keeps code
 by default and never creates tasks, reverts source, deletes source, or accepts
 a folder. Re-review keeps still-present fingerprints, admits new findings only
 for evidenced repair regression or newly exposed existing requirements, and
 must PASS once the prior set clears. Optional improvements and speculation do
-not keep the loop open. Profile exhaustion preserves the findings and edits for
+not keep the loop open. A round list that ends on a repair nothing confirmed
+settles as `SELF-FIXED, UNREVIEWED`: every task keeps the status its own
+focused gate proved, the run still succeeds, and `assent accept` asks for one
+explicit human confirmation before publishing. A list that ends on an
+unrepaired blocker preserves the findings and edits for
 later human review; no runtime human adjudication step is inserted. A later
-opted-in recovery requires the same current reviewer identity. `_auto_fix.toml`
+opted-in recovery requires that the identity which decided the pending state is
+still one of the configured rounds. `_auto_fix.toml`
 is derived runtime memory, not a task status or acceptance evidence; complete
 verification remains a separate successful-run/receipt-policy or explicit
 `--verify` stage, and its absence is never a reviewer failure. Report generation
-also shows exact scope-amendment transactions and repair-round
-assignments. Scheduler-owned status-only transitions during rework, interruption,
+also shows exact scope-amendment transactions and the durable review round
+index. Scheduler-owned status-only transitions during rework, interruption,
 repair closeout, or exhaustion do not by themselves make that evidence stale;
 structural task-contract edits do. See the [Workflow](docs/WORKFLOW.md) and
 [Verification](docs/VERIFICATION.md) guides.

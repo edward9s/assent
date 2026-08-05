@@ -979,6 +979,15 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             item for item in read_entries(journal_path_for(task_path))
             if item.get("event") == "auto_fix_self_fixed_unreviewed"]), 1)
 
+        # A settled outcome is the one non-PASS state that still closes out an
+        # ordinary run: it is terminal, so unlike an unconfirmed FIXED it must
+        # not refuse closeout.
+        ordinary = io.StringIO()
+        with contextlib.redirect_stdout(ordinary):
+            self.assertEqual(engine.run(cfg, adapter=ScriptedAdapter([])), 0)
+        self.assertNotIn("closeout refused", ordinary.getvalue())
+        self.assertEqual(auto_fix.read_auto_fix_state(state_path), settled)
+
     def test_self_fixed_state_and_report_survive_a_later_closeout_failure(self):
         cfg, task_path, reviewer, _finding = self.self_fixed_folder(2)
 

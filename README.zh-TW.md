@@ -88,9 +88,9 @@ npm test、Flutter test 或 custom argv。重跑 init 會保留現有 verifier�
 table 時，明示的 `assent run --auto-fix` 會用第一個 effective worker adapter 的
 `prime`/`heavy` 解析 reviewer，不需要重跑 `assent init` 或編輯
 `~/.assent/assent.toml`。整個 loop 都是 invocation-level opt-in，只有明示的
-`assent run --auto-fix` 才會在最後 focused checks 後啟動唯讀 completed-folder review，
-或在有 durable blocker 證據的 quiescent blocked dependency 進入 blocked-adjudication
-入口，並授權該次 invocation 的有界 repair。沒有 flag 的普通 `assent run` 不會啟動
+`assent run --auto-fix` 才會在最後 focused checks 後啟動 completed-folder review，
+或在有 durable blocker 證據的 quiescent blocked dependency 進入唯讀的
+blocked-adjudication 入口，並授權該次 invocation 的有界 repair。沒有 flag 的普通 `assent run` 不會啟動
 review，也不會 repair。這個 flag 與選取正交，可和明示 folder、`...`、`--all`、
 `--once`、`--task`、`--verify` 合用；受限 run 若留下 incomplete folder，就延後
 completed-folder loop。
@@ -101,19 +101,28 @@ test 能可靠驗證時才合格，不做全 repository debt audit。blocked adj
 `RECHECK` 可以保留或解決該 ledger entry，但不能新增 debt。FAIL 只會自動重開 finding
 所有權明確的既有 task，記錄帶理由且保留程式碼的 rework。reviewer 可以核准一個精確的
 scope addition，但只有 scheduler 能修改 task file；worker 與 reviewer 都禁止編輯 task
-file。每個 repair round 都依該 round 開始前尚未消耗的有限 fixer profile 選定 assignments，
-並在第一個 write-capable session 前持久化；多 task finding 或 dependency cascade 不會
-逐 task 讓 sibling 提前 escalation。recheck 會保留仍存在 finding 的 fingerprint，只有
+file。completed-folder round 是合併的 reviewer-fixer session：發現真正的 blocker 時，
+它可以直接在 finding 指名的那一個既有 task 的 declared scope 內修好，並以 `FIXED` 回報；
+`PASS` 代表沒有 blocker 且該 round 完全沒有寫入任何檔案。
+`[auto_fix.review].adapter` 接受單一 adapter 或有序 list，list 長度就是
+round 的有限上界：每個 round 讓 durable round index 剛好前進一格。每個 reopen 的 task 都以它自己原本
+的 task profile 修復，沒有 escalation ladder 也不消耗任何東西，所以中斷的 round 會以完全
+相同的 identity 恢復，多 task finding 或 dependency cascade 也不會逐 task 讓 sibling
+提前 escalation。recheck 會保留仍存在 finding 的 fingerprint，只有
 有證據的 repair regression 或 newly exposed existing requirement 才能有新 finding；先前
 集合清空後必須 PASS，optional improvement 與 speculation 不會讓 loop 繼續。它不會自動建立 task、
-還原 source、刪 source、publish Git 或接受 folder。profile 用盡、中斷或 gate
-失敗會保留 state 與編輯，交人類事後檢視；loop 內沒有 runtime human adjudication gate。
-之後明示的 `run --auto-fix` recovery 必須仍有相同的目前 reviewer identity；移除或改變
+還原 source、刪 source、publish Git 或接受 folder。round list 若結束在一個沒有任何 round
+確認過的修復上，folder 會沉澱為 `SELF-FIXED, UNREVIEWED`：每個 task 保留它自己 focused
+gate 證明的狀態，run 仍然成功，而 `assent accept` 會在 publish 前要求一次明確的人類確認。
+若 round list 結束在未修復的 blocker，state 與編輯會被保留交人類事後檢視；loop 內沒有
+runtime human adjudication gate。
+之後明示的 `run --auto-fix` recovery，必須讓決定該 pending state 的 identity 仍是目前
+configured rounds 之一；移除或改變
 policy 會拒絕 repair 與 closeout。`_auto_fix.toml` 與 report 是 derived evidence，不是
 task status 或 acceptance evidence。完整 verification 仍依成功 run 的 receipt policy 或
 明示 `--verify` 另行執行；缺 receipt 或尚未跑 full suite 絕不是 reviewer failure。
-Report 也會顯示 exact scope-amendment transaction 與 repair-round assignment。Scheduler 在
-rework、中斷、repair closeout 或 profile 用盡時的 status-only transition 不會單獨讓 evidence
+Report 也會顯示 exact scope-amendment transaction 與 durable review round index。Scheduler 在
+rework、中斷、repair closeout 或 round 用盡時的 status-only transition 不會單獨讓 evidence
 stale；真正的 task-contract structural edit 才會。
 
 ## 規劃會議 prompt
