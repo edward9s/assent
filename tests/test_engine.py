@@ -22,7 +22,8 @@ from assent.__main__ import _dispatch
 from assent.adapters import TaskResult
 from assent.config import load_config
 from assent.lockfile import hold_lock
-from assent.plan import append_entry, journal_path_for, parse_task_file, set_status
+from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
+                         set_status)
 from tests.engine_support import (_FAILV, _NEEDS_OK_TXT, _OK, EngineTestCase,
                                   ScriptedAdapter, ok_result, task_text)
 from tests.link_support import make_directory_link, safe_rmtree
@@ -1041,10 +1042,13 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         rounds = cfg.auto_fix_review
         self.assertTrue(rounds)
         review = rounds[0]
+        # A PASS carries no findings; every other verdict must carry at least
+        # one, so the fixture follows the verdict rather than the caller.
+        findings = () if verdict == "PASS" else (auto_fix.ReviewFinding(
+            task.id, "src/missing.py", "pending blocker",
+            "restart evidence"),)
         state = auto_fix.state_for_review(
-            auto_fix.ReviewRecord(verdict, (auto_fix.ReviewFinding(
-                task.id, "src/missing.py", "pending blocker",
-                "restart evidence"),)),
+            auto_fix.ReviewRecord(verdict, findings),
             source_tree=gitops.tree_of(cfg.root, "HEAD"),
             task_plan_sha256=auto_fix.sha256_files((task.path,)),
             review_prompt_sha256="a" * 64,
@@ -1889,6 +1893,103 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(
             auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(ordinary)),
             before)
+
+    def test_every_review_verdict_states_its_ordinary_closeout(self):
+        """A new review verdict must not inherit an unstated closeout answer.
+
+        While only PASS and FAIL existed, each gate could name FAIL directly
+        and still be exhaustive.  Adding FIXED silently made those gates
+        under-specified: the resume guard was generalized to non-PASS and the
+        closeout guard was not, so a durable FIXED reported success.  This
+        walks REVIEW_VERDICTS itself rather than a hand-written list, so the
+        next verdict cannot be added without deciding this question here.
+        """
+        closeout_exit_code = {"PASS": 0, "FIXED": 1, "FAIL": 1}
+        self.assertEqual(
+            set(closeout_exit_code), set(auto_fix.REVIEW_VERDICTS),
+            "a review verdict was added or removed without stating what an"
+            " ordinary run's closeout does with a folder durably holding it")
+
+        self.write_task(1, status="DONE")
+        cfg = self.build_review()
+        self.commit_all()
+        ordinary = self.build()
+        for verdict, code in closeout_exit_code.items():
+            with self.subTest(verdict=verdict):
+                stored = self.write_pending_fail(cfg, verdict=verdict)
+                worker = ScriptedAdapter([])
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(engine.run(ordinary, adapter=worker), code)
+                # Refusal and exit code are one decision, not two: a gate that
+                # returns nonzero must say why, and a gate that closes out must
+                # not print a refusal it did not act on.
+                self.assertEqual("closeout refused" in out.getvalue(), code != 0)
+                self.assertEqual(worker.calls, [])
+                self.assertEqual(
+                    auto_fix.read_auto_fix_state(
+                        auto_fix.auto_fix_state_path(ordinary)),
+                    stored)
+
+    def test_every_review_prompt_combination_keeps_its_write_policy_coherent(self):
+        """No context/stage/round cell may tell a reviewer two opposite things.
+
+        The prompt is a product of review context, review stage and round
+        position, but its parts were switched independently: the write policy
+        branched on context while the round policy did not, so a read-only
+        blocked adjudication was also handed the round sequence's final-round
+        instruction to repair the blocker and return FIXED -- in the same
+        prompt that forbids every write, and on the default single-adapter
+        config. Point assertions cannot catch that; only the product can.
+        """
+        contexts = sorted(auto_fix.REVIEW_CONTEXTS)
+        stages = sorted(auto_fix.REVIEW_STAGES)
+        self.assertEqual(contexts, ["blocked_adjudication", "completed_folder"])
+        self.assertEqual(stages, ["initial", "recheck"])
+
+        self.write_task(1, status="DONE")
+        total = 3
+        cfg = self.build_review(rounds=total)
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        # Text that only a round permitted to write may ever be given.
+        repair_instructions = (
+            "you may repair it directly",
+            "This is the FINAL review round.",
+            "and return FIXED",
+        )
+
+        for context in contexts:
+            for stage in stages:
+                for index in range(total):
+                    with self.subTest(context=context, stage=stage,
+                                      round_index=index):
+                        _tree, _digest, prompt, _prompt_digest = (
+                            engine._auto_fix_review_identity(
+                                cfg, plan, "focused evidence",
+                                review_context=context, review_stage=stage,
+                                round_index=index))
+                        if context == "blocked_adjudication":
+                            self.assertIn("never an\nimplementation session",
+                                          prompt)
+                            for phrase in repair_instructions:
+                                self.assertNotIn(phrase, prompt)
+                            # It is outside the sequence, so it must not claim
+                            # a position in it either.
+                            self.assertNotIn("This is review round", prompt)
+                            continue
+                        self.assertIn("you may repair it directly", prompt)
+                        self.assertIn(
+                            f"This is review round {index + 1} of {total}.",
+                            prompt)
+                        self.assertIn(
+                            "Review rounds remaining after this one: "
+                            f"{total - index - 1}.", prompt)
+                        # Only the last position may claim finality, and it
+                        # always must.
+                        self.assertEqual(
+                            "This is the FINAL review round." in prompt,
+                            index == total - 1)
 
     def test_invalid_response_retries_then_persists_valid_fail(self):
         self.write_task(1, status="DONE")
