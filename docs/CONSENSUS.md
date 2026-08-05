@@ -36,7 +36,7 @@ Proof of correctness → the task file's verify command
                     (defaults to .assent/verify.py)
 ```
 
-## Four core principles
+## Five core principles
 
 1. **Layering**
    Rules, tasks, state, and history are never mixed into the same file. An
@@ -73,6 +73,22 @@ Proof of correctness → the task file's verify command
    passes. A summary
    states only verifiable facts; pending must not be dressed up as
    completed.
+
+5. **Unattended completion, human adjudication**
+   The scheduler decides everything it can decide without a human, and routes
+   what it cannot decide to the human acceptance meeting as report evidence.
+   The two are separated by whether a decision needs a human, never by whether
+   the code is finished. The operational consequence is the process exit code:
+   `run --all` stops launching further folders once any folder exits nonzero
+   (the launch loop in `folder_scheduler.py` is guarded on that failure flag),
+   so a nonzero exit silently cancels unrelated queued work. A question the
+   scheduler cannot settle — an unconfirmed self-repair, an unresolved review
+   finding — therefore ends its folder with exit 0, a distinct `_report.md`
+   state, and an explicit gate at `accept`: the folder arrives at the meeting
+   carrying an open question instead of taking the queue down with it. Nonzero
+   is reserved for genuine failure — infrastructure, a refused precondition, a
+   broken gate — where continuing would be unsafe rather than merely
+   undecided.
 
 ## Verification, receipts, and human acceptance
 

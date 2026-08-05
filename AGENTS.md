@@ -14,6 +14,15 @@ while operating an assent-managed session live in
 
 ## Permanent constraints
 
+- Unattended completion, human adjudication: the scheduler decides everything
+  it can decide without a human, and routes what it cannot decide to the human
+  acceptance meeting as `_report.md` evidence. A question the scheduler cannot
+  settle is not a run failure. Design such an outcome as exit 0 plus a
+  distinctly named report state plus an explicit gate at `accept` — never as a
+  nonzero exit, because `run --all` stops launching further folders once any
+  folder exits nonzero, so nonzero silently cancels unrelated queued work.
+  Reserve nonzero for genuine failure: infrastructure, a refused precondition,
+  or a broken gate, where continuing would be unsafe rather than undecided.
 - Standard library only; introduce no third-party dependencies.
 - Windows compatibility comes first: use pathlib for paths, force utf-8 output,
   lock with msvcrt (fcntl on POSIX).
