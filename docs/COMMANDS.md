@@ -202,9 +202,9 @@ is not a second approval state.
 | `assent reconcile <FOLDER>` | Prepares one finished folder's source-versus-target conflict for human edits in a managed worktree. It changes neither target nor task status and writes no receipt. | Zero |
 | `assent reconcile --continue <FOLDER>` | Validates staged conflict resolution, commits the merge, advances the source branch, and removes only proven managed resources. It does not run verification. | Zero |
 | `assent reconcile --abort <FOLDER>` | Removes only the proven managed reconcile worktree and temporary branch, refusing while edits remain. | Zero |
-| `assent clean [FOLDER ...]` | Removes only fully merged, clean worktrees and same-folder-prefix branches that Assent can prove safe. With no folder it considers all; several are upstream-first. | Zero |
+| `assent clean [FOLDER ...]` | Removes only fully merged, clean worktrees and same-folder-prefix branches that Assent can prove safe. With no folder it considers all; several are upstream-first. A bare `assent clean --all` also sweeps orphaned Assent-owned temporary branches once per invocation; a single named `assent clean FOLDER` deliberately does not sweep. | Zero |
 | `assent archive <FOLDER ...>` | Runs the clean contract, compresses eligible plans into `.assent/_archive/`, and updates the roster. Named ineligible folders make the request fail after attempts. | Zero |
-| `assent archive --all` | Archives independently eligible folders and skips ineligible ones without failing the whole dynamic request. | Zero |
+| `assent archive --all` | Archives independently eligible folders and skips ineligible ones without failing the whole dynamic request; it inherits the same once-per-invocation orphaned temporary-branch sweep as `clean --all`. | Zero |
 | `assent archive --restore FOLDER` | Restores exactly one archive; it takes neither `--all` nor `...`. | Zero |
 | `assent reject <FOLDER>` | Human-adjudicated destructive rejection: records tips, archives uncommitted changes as WIP, removes the managed worktree, deletes same-prefix branches, and resets `DONE`/`WIP`/`BLOCKED` to `TODO`. | Zero |
 | `assent rework <FOLDER> <TASK>` | Non-destructively reopens one task and keeps code by default. `--cascade` is required to reopen started downstream tasks; `--reason` records the decision; `--revert-code` adds only a provable reverse commit. | Zero |
@@ -216,6 +216,19 @@ is not a second approval state.
 Each subcommand's `-h`/`--help` is the authoritative syntax for that command.
 Assent does not silently connect to a remote, pull, rebase, force-push, delete
 source, or resolve conflicts during acceptance.
+
+## Orphaned temporary branch sweep
+
+`assent-integration/<folder>/<suffix>` and `assent-reconcile/<folder>` are
+Assent-owned temporary branches that a human must not use directly; each is
+removed by its own transaction and is orphaned only when that transaction
+died before completing. The repository-wide integration lock being held while
+the branch still exists is what proves it is an orphan, not its content or
+whether its tree is published or superseded (that distinction is reporting
+only). `assent clean --all` sweeps every such orphan once per invocation, and
+`assent archive --all` inherits that same sweep rather than reimplementing
+it; a single named `assent clean FOLDER` deliberately does not sweep. See
+[OPERATIONS](OPERATIONS.md) for `assent doctor`'s `[y/N]` recovery offer.
 
 ## Acceptance modes in brief
 

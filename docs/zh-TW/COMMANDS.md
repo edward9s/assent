@@ -161,9 +161,9 @@ disposition；默讀檔案不算完成，也不是新增的 approval state。
 | `assent reconcile <FOLDER>` | 為一個 source-versus-target conflict 準備人類編輯的 managed worktree；不改 target/status、不寫 receipt。 | 零 |
 | `assent reconcile --continue <FOLDER>` | 驗證 staged resolution、commit merge、前進 source branch、移除已證明的 managed resource；不驗證。 | 零 |
 | `assent reconcile --abort <FOLDER>` | 只移除已證明的 managed reconcile worktree 與 branch；有未提交編輯會拒絕。 | 零 |
-| `assent clean [FOLDER ...]` | 只移除 fully merged 且 clean 的 worktree/branch；不碰 `.assent/`。無 folder 時處理所有，選取多個時 upstream-first。 | 零 |
+| `assent clean [FOLDER ...]` | 只移除 fully merged 且 clean 的 worktree/branch；不碰 `.assent/`。無 folder 時處理所有，選取多個時 upstream-first。裸的 `assent clean --all` 還會每次呼叫掃一次 orphaned Assent-owned 暫存 branch；明示單一 `assent clean FOLDER` 刻意不掃。 | 零 |
 | `assent archive <FOLDER ...>` | 先走 clean，再把合格計畫壓入 archive；明示但不合格者令 request 失敗。 | 零 |
-| `assent archive --all` | 封存獨立合格的 folder；dynamic 模式略過不合格者而不使整體失敗。 | 零 |
+| `assent archive --all` | 封存獨立合格的 folder；dynamic 模式略過不合格者而不使整體失敗；它繼承 `clean --all` 同一次每次呼叫的暫存 branch 清理。 | 零 |
 | `assent archive --restore FOLDER` | 只還原一個 archive，不接受 `--all` 或 `...`。 | 零 |
 | `assent reject <FOLDER>` | 人類駁回：保存 tips/WIP、link-safe 移除 worktree、刪 branch、將 `DONE`/`WIP`/`BLOCKED` 重設 `TODO`。 | 零 |
 | `assent rework <FOLDER> <TASK>` | 非破壞性重開 task，預設保留程式碼；`--cascade`、`--reason`、`--revert-code` 都是明示選項。 | 零 |
@@ -174,6 +174,17 @@ disposition；默讀檔案不算完成，也不是新增的 approval state。
 
 每個 subcommand 的 `-h`/`--help` 才是實際 syntax。Assent 不會在 acceptance 中
 連線 remote、pull、rebase、force-push、刪 source 或自動解衝突。
+
+## 孤兒暫存 branch 清理
+
+`assent-integration/<folder>/<suffix>` 與 `assent-reconcile/<folder>` 是
+Assent 自有的暫存 branch，人類不可直接使用：兩者各自由建立它的 transaction
+在完成後移除，唯有該 transaction 在完成前就中斷，殘留的 branch 才算 orphan。
+repository-wide integration lock 在該 branch 仍存在時被持有，才是它是 orphan
+的完整證明，而不是它的內容，也不是它的 tree 是 published 還是 superseded
+——那只是回報資訊。`assent clean --all` 每次呼叫掃一次所有這類 orphan，
+`assent archive --all` 繼承同一次掃描而非重新實作；明示單一 `assent clean
+FOLDER` 刻意不掃。`assent doctor` 的 `[y/N]` 復原提案見[作業](OPERATIONS.md)。
 
 ## Acceptance 模式
 

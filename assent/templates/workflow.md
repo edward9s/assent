@@ -425,6 +425,45 @@ separately chosen synchronization, `assent clean <FOLDER>` may remove the
 source only when its independent merged-and-clean proof succeeds; cleanup
 never deletes source before that proof.
 
+## Temporary integration and reconcile branches
+
+`assent-integration/<folder>/<suffix>` (including the folder-independent
+`assent-integration/batch/<suffix>` a batch verification candidate uses) and
+`assent-reconcile/<folder>` are the two Assent-owned temporary branch
+namespaces. Both name branches a human must not check out, build on, or
+delete by hand: each is removed by the transaction that created it -- a
+verification candidate's cleanup, or `reconcile --continue`/`--abort` --
+once that transaction completes. A branch in either namespace survives only
+when its owning transaction died before finishing, which makes it orphaned.
+
+A surviving branch is proven orphaned by the repository-wide integration lock
+being held while nobody is otherwise integrating, never by inspecting the
+branch itself: `assent clean --all` and `assent doctor` both re-read the
+branch list inside one hold of that lock, so what they act on is exactly what
+the lock proves has no live owner. `gitops.temporary_branches` additionally
+reports each surviving branch as `published` (its tree is already reachable
+from the target, so ancestry alone would find no leftover) or `superseded`
+(its tree is not); that distinction is reporting information only and is
+never the deletion criterion; a content- or reachability-based gate would
+collect none of the branches this sweep exists to remove, because the
+integration lock is the only thing that tells the difference between "still
+mid-transaction" and "orphaned."
+
+`assent clean --all` runs this sweep exactly once per invocation, after its
+per-folder cleanup, because the two namespaces are folder-independent and no
+per-folder path can otherwise ever see them; a single named `assent clean
+FOLDER` deliberately does not sweep, so that naming a subset of folders never
+deletes repository-global refs as a side effect. `assent archive --all`
+inherits the identical sweep by delegating to the same implementation after
+its own per-folder loop, rather than reimplementing it, and for the same
+reason: every per-folder archive step already holds the integration lock the
+sweep must take for itself. `assent doctor` reports any orphaned temporary
+branch it finds and offers one confirmed `[y/N]` removal, re-checking the
+branch list inside the same lock immediately before deleting so an answer of
+"y" can never remove a branch that stopped being an orphan between the report
+and the confirmation; doctor's offer is the recovery path, while `clean --all`
+and `archive --all` are the routine, unattended one.
+
 ## Opt-in folder review and bounded repair
 
 The optional `[auto_fix.review]` table overrides the folder reviewer identity;

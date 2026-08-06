@@ -340,6 +340,64 @@ class DocumentationTests(unittest.TestCase):
         self.assertNotIn("Never accept or rework automatically", readmes["README.md"])
         self.assertNotIn("絕不要自動 accept 或 rework", readmes["README.zh-TW.md"])
 
+    def test_orphaned_temporary_branch_sweep_stays_in_parity(self):
+        """The English and zh-TW COMMANDS/OPERATIONS pages must match on the sweep."""
+        english = {
+            "docs/COMMANDS.md": _read(Path("docs/COMMANDS.md")),
+            "docs/OPERATIONS.md": _read(Path("docs/OPERATIONS.md")),
+        }
+        required_english = {
+            "docs/COMMANDS.md": (
+                "## Orphaned temporary branch sweep",
+                "assent-integration/<folder>/<suffix>",
+                "assent-reconcile/<folder>",
+                "reporting only",
+                "once per invocation",
+                "deliberately does not sweep",
+            ),
+            "docs/OPERATIONS.md": (
+                "## `doctor`",
+                "assent-integration/<folder>/<suffix>",
+                "assent-reconcile/<folder>",
+                "reporting information only",
+                "once per invocation",
+                "deliberately does not sweep",
+                "`[y/N]`",
+            ),
+        }
+        for name, text in english.items():
+            compact = " ".join(text.split())
+            for phrase in required_english[name]:
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+
+        chinese = {
+            "docs/zh-TW/COMMANDS.md": _read(Path("docs/zh-TW/COMMANDS.md")),
+            "docs/zh-TW/OPERATIONS.md": _read(Path("docs/zh-TW/OPERATIONS.md")),
+        }
+        required_chinese = {
+            "docs/zh-TW/COMMANDS.md": (
+                "## 孤兒暫存 branch 清理",
+                "assent-integration/<folder>/<suffix>",
+                "assent-reconcile/<folder>",
+                "只是回報資訊",
+                "刻意不掃",
+            ),
+            "docs/zh-TW/OPERATIONS.md": (
+                "## `doctor`",
+                "assent-integration/<folder>/<suffix>",
+                "assent-reconcile/<folder>",
+                "那只是回報資訊",
+                "刻意不掃",
+                "`[y/N]`",
+            ),
+        }
+        for name, text in chinese.items():
+            compact = " ".join(text.split())
+            for phrase in required_chinese[name]:
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, compact)
+
 
 if __name__ == "__main__":
     unittest.main()
