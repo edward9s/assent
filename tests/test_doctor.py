@@ -8,6 +8,7 @@ import contextlib
 import io
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,11 +33,21 @@ def _fake_get_adapter(results):
     return _get
 
 
+def _declines(prompt: str) -> str:
+    """A confirm function that answers "no" without touching stdin.
+
+    These exit-code tests run in whatever repository the suite was started
+    from, which may legitimately hold orphaned temporary branches; without an
+    injected answer doctor would put a real question to the terminal.
+    """
+    return "n"
+
+
 class DoctorExitCodeTests(unittest.TestCase):
     def _run(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = doctor()
+            code = doctor(confirm=_declines)
         return code, out.getvalue()
 
     @patch("assent.doctor.get_adapter")
@@ -160,3 +171,173 @@ class DoctorCommandTests(unittest.TestCase):
         self.assertIn("codex:", output)
         self.assertIn("antigravity:", output)
         self.assertIn("temp directory:", output)
+
+
+def _fails_if_called(prompt: str) -> str:
+    raise AssertionError(f"doctor asked a question it should not ask: {prompt}")
+
+
+def _raises_eof(prompt: str) -> str:
+    """Stand in for a closed stdin, the way reject's own tests already do."""
+    raise EOFError
+
+
+class DoctorOrphanBranchTests(unittest.TestCase):
+    """Real repositories, real refs: the offer is proven by what Git holds
+    afterwards, not by a mocked removal."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        self._git("init")
+        self._git("config", "user.name", "Test")
+        self._git("config", "user.email", "test@example.com")
+        (self.root / "README.md").write_text("init\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "init")
+        self.target = self._git("branch", "--show-current").strip()
+        self.worktrees: list[Path] = []
+        # An ordinary folder branch, to prove the offer touches nothing else.
+        self._git("branch", "demo/w1")
+
+        old_cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, old_cwd)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self) -> None:
+        for path in self.worktrees:
+            subprocess.run(["git", "worktree", "remove", "--force", str(path)],
+                           cwd=self.root, capture_output=True, encoding="utf-8")
+        subprocess.run(["git", "worktree", "prune"], cwd=self.root,
+                       capture_output=True, encoding="utf-8")
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(["git", *args], cwd=self.root, capture_output=True,
+                              encoding="utf-8", check=True).stdout
+
+    def _published_orphan(self, branch: str) -> str:
+        """A temporary branch whose tree a reachable commit already carries."""
+        self._git("branch", branch, self.target)
+        return branch
+
+    def _superseded_orphan(self, branch: str) -> str:
+        """A temporary branch carrying a tree no reachable commit has."""
+        self._git("checkout", "-b", branch)
+        (self.root / f"{branch.replace('/', '-')}.txt").write_text(
+            "work\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", f"work on {branch}")
+        self._git("checkout", self.target)
+        return branch
+
+    def _branches(self) -> set[str]:
+        return {line[2:].strip()
+                for line in self._git("branch", "--list").splitlines()
+                if line.strip()}
+
+    def _run(self, confirm):
+        out = io.StringIO()
+        with patch("assent.doctor.get_adapter",
+                   side_effect=_fake_get_adapter(
+                       {"claude": True, "codex": True, "antigravity": True})):
+            with contextlib.redirect_stdout(out):
+                code = doctor(confirm=confirm)
+        return code, out.getvalue()
+
+    def test_no_orphans_passes_and_asks_nothing(self):
+        code, out = self._run(_fails_if_called)
+        self.assertEqual(code, 0)
+        self.assertIn("[OK] orphaned temporary branches: none", out)
+
+    def test_orphans_warn_and_are_listed_in_order_with_classification(self):
+        self._superseded_orphan("assent-reconcile/demo")
+        self._published_orphan("assent-integration/batch/abc")
+        code, out = self._run(_declines)
+
+        self.assertEqual(code, 0)
+        self.assertIn("[!] orphaned temporary branches: 2 found", out)
+        listed = [line for line in out.splitlines()
+                  if line.startswith("  assent-")]
+        self.assertEqual(listed, [
+            "  assent-integration/batch/abc: published",
+            "  assent-reconcile/demo: superseded",
+        ])
+
+    def test_confirming_removes_exactly_the_offered_branches(self):
+        self._published_orphan("assent-integration/batch/abc")
+        self._superseded_orphan("assent-reconcile/demo")
+        code, out = self._run(lambda prompt: "y")
+
+        self.assertEqual(code, 0)
+        remaining = self._branches()
+        self.assertNotIn("assent-integration/batch/abc", remaining)
+        self.assertNotIn("assent-reconcile/demo", remaining)
+        self.assertIn("demo/w1", remaining)
+        self.assertIn(self.target, remaining)
+        self.assertIn("branch assent-reconcile/demo: removed", out)
+
+    def test_every_declining_answer_removes_nothing(self):
+        for answer in ("", "n", "N", "yes", "  ", _raises_eof):
+            with self.subTest(answer=answer):
+                self._published_orphan("assent-integration/batch/abc")
+                self._superseded_orphan("assent-reconcile/demo")
+                confirm = (answer if callable(answer)
+                           else (lambda prompt, a=answer: a))
+                code, out = self._run(confirm)
+
+                self.assertEqual(code, 0)
+                self.assertIn("declined: nothing was removed", out)
+                remaining = self._branches()
+                self.assertIn("assent-integration/batch/abc", remaining)
+                self.assertIn("assent-reconcile/demo", remaining)
+                self._git("branch", "-D", "assent-integration/batch/abc")
+                self._git("branch", "-D", "assent-reconcile/demo")
+
+    def test_checked_out_orphan_is_reported_and_never_offered(self):
+        self._superseded_orphan("assent-reconcile/demo")
+        path = self.root.parent / f"{self.root.name}.checkout"
+        self._git("worktree", "add", str(path), "assent-reconcile/demo")
+        self.worktrees.append(path)
+
+        code, out = self._run(_fails_if_called)
+
+        self.assertEqual(code, 0)
+        self.assertIn("[!] orphaned temporary branches: 1 found", out)
+        self.assertIn("assent-reconcile/demo: superseded, checked out in", out)
+        self.assertIn("every listed branch is checked out in a worktree", out)
+        self.assertIn("assent-reconcile/demo", self._branches())
+
+    def test_checked_out_orphan_is_excluded_from_a_confirmed_removal(self):
+        self._published_orphan("assent-integration/batch/abc")
+        self._superseded_orphan("assent-reconcile/demo")
+        path = self.root.parent / f"{self.root.name}.checkout"
+        self._git("worktree", "add", str(path), "assent-reconcile/demo")
+        self.worktrees.append(path)
+
+        code, _ = self._run(lambda prompt: "y")
+
+        self.assertEqual(code, 0)
+        remaining = self._branches()
+        self.assertNotIn("assent-integration/batch/abc", remaining)
+        self.assertIn("assent-reconcile/demo", remaining)
+
+    def test_confirmed_removal_performs_no_folder_operation(self):
+        folder = self.root / ".assent" / "demo"
+        folder.mkdir(parents=True)
+        (folder / "t001_x.e.toml").write_text("status = \"DONE\"\n",
+                                              encoding="utf-8")
+        (folder / "_report.md").write_text("# report\n", encoding="utf-8")
+        (folder / "_verification.toml").write_text("result = \"PASSED\"\n",
+                                                   encoding="utf-8")
+        before = {path.relative_to(self.root).as_posix():
+                  path.read_bytes() for path in sorted(folder.iterdir())}
+        self._published_orphan("assent-integration/batch/abc")
+
+        code, _ = self._run(lambda prompt: "y")
+
+        self.assertEqual(code, 0)
+        after = {path.relative_to(self.root).as_posix():
+                 path.read_bytes() for path in sorted(folder.iterdir())}
+        self.assertEqual(after, before)
+        self.assertNotIn("assent-integration/batch/abc", self._branches())

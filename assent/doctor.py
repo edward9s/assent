@@ -11,10 +11,13 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
+from assent import AssentError, gitops
 from assent.adapters import get_adapter
 from assent.config import Config
+from assent.lockfile import LockBusy, hold_integration_lock
 
 _MIN_PYTHON = (3, 11)
 _ADAPTER_NAMES = ("claude", "codex", "antigravity")
@@ -126,7 +129,93 @@ def _check_temp_dir() -> bool:
     return True
 
 
-def doctor() -> int:
+_ORPHAN_CHECK = "orphaned temporary branches"
+
+
+def _remove_offered_branches(cfg: Config, offered: frozenset[str]) -> None:
+    """Delete the offered branches inside one hold of the integration lock.
+
+    The lock is the whole proof that these refs are orphans, so the inventory is
+    read again inside it rather than trusting the one shown to the human before
+    the question: between the two moments an integration may have finished and
+    legitimately created or checked out a branch.  Only a branch that was
+    offered and is still unclaimed is deleted, so answering "y" can never remove
+    something the human was not shown.
+    """
+    try:
+        with hold_integration_lock(cfg.assent_dir):
+            removable = [record for record in gitops.temporary_branches(cfg.root)
+                         if record.branch in offered and not record.is_checked_out]
+            removals = gitops.remove_temporary_branches(cfg.root, removable)
+    except LockBusy:
+        print("  removed nothing: repository integration is in progress")
+        return
+    except AssentError as e:
+        print(f"  removal failed ({e})")
+        return
+
+    for removal in removals:
+        if removal.outcome == gitops.DELETED:
+            print(f"  branch {removal.branch}: removed")
+        elif removal.outcome == gitops.REFUSED:
+            print(f"  branch {removal.branch}: retained (checked out in "
+                  f"{removal.checked_out_in})")
+        else:
+            print(f"  branch {removal.branch}: retained ({removal.error})")
+    for branch in sorted(offered - {removal.branch for removal in removals}):
+        print(f"  branch {branch}: retained (no longer an orphan)")
+
+
+def _check_orphaned_branches(cfg: Config,
+                             confirm: Callable[[str], str] | None) -> None:
+    """Report leftover Assent temporary branches and offer to remove them.
+
+    Their existence is untidy, not broken: this check is never a failure and
+    never contributes to doctor's exit code, whether orphans are found, the
+    human declines, or a removal is refused.  It is also the recovery path, not
+    the routine one -- ``clean --all`` sweeps the same refs without asking,
+    because that matches clean's prove-or-retain contract -- so this is the only
+    place the question is put to a human.
+
+    doctor stays diagnostic apart from that one confirmed branch deletion: it
+    runs no folder operation and touches no work folder, task file or receipt.
+    """
+    try:
+        records = gitops.temporary_branches(cfg.root)
+    except AssentError as e:
+        _print_check(WARN, _ORPHAN_CHECK, f"not checked ({e})")
+        return
+    if not records:
+        _print_check(PASS, _ORPHAN_CHECK, "none")
+        return
+
+    _print_check(WARN, _ORPHAN_CHECK, f"{len(records)} found")
+    for record in records:
+        detail = record.classification
+        if record.is_checked_out:
+            detail += f", checked out in {record.checked_out_in}"
+        print(f"  {record.branch}: {detail}")
+
+    offered = frozenset(record.branch for record in records
+                        if not record.is_checked_out)
+    if not offered:
+        print("  every listed branch is checked out in a worktree; "
+              "nothing to offer")
+        return
+
+    ask = confirm if confirm is not None else input
+    try:
+        answer = ask(f"Remove {len(offered)} orphaned temporary branch(es)? "
+                     "[y/N]: ")
+    except EOFError:
+        answer = ""
+    if answer.strip().lower() != "y":
+        print("  declined: nothing was removed")
+        return
+    _remove_offered_branches(cfg, offered)
+
+
+def doctor(confirm: Callable[[str], str] | None = None) -> int:
     python_ok = _check_python()
     git_ok = _check_git()
 
@@ -135,5 +224,6 @@ def doctor() -> int:
     any_adapter_ok = any(adapter_results)
 
     temp_ok = _check_temp_dir()
+    _check_orphaned_branches(cfg, confirm)
 
     return 0 if (python_ok and git_ok and any_adapter_ok and temp_ok) else 1
