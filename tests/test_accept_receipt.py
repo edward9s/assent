@@ -81,7 +81,7 @@ class AcceptReceiptCase(unittest.TestCase):
             'model = "core"\n'
             'status = "DONE"\n'
             'scope = ["src/"]\n'
-            'verify = "python .assent/verify.py"\n'
+            'verify = "python --version"\n'
             'goal = "Finish."\n'
             'acceptance = "Pass."\n',
             encoding="utf-8")

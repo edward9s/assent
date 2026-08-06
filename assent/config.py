@@ -188,7 +188,7 @@ class Config:
     assent_dir: Path               # .assent directory (= where the config file lives)
     tasks_dir: Path                # Task folder (.assent/<tasks>)
     tasks_name: str                # Task folder name (= git branch prefix stem)
-    stall_minutes: int = 30        # 0 = watchdog disabled
+    stall_minutes: int = 0         # 0 = watchdog disabled
     retry_per_task: int = 1
     quota_poll_minutes: int = 30
     rotation_poll_minutes: int = 1
@@ -792,7 +792,7 @@ def load_config(path: str | Path, folder: str) -> Config:
         assent_dir=assent_dir,
         tasks_dir=assent_dir / tasks_name,
         tasks_name=tasks_name,
-        stall_minutes=_typed(watchdog, "[watchdog]", "stall_minutes", int, 30),
+        stall_minutes=_typed(watchdog, "[watchdog]", "stall_minutes", int, 0),
         retry_per_task=_typed(run, "[run]", "retry_per_task", int, 1),
         quota_poll_minutes=_typed(run, "[run]", "quota_poll_minutes", int, 30),
         rotation_poll_minutes=_typed(run, "[run]", "rotation_poll_minutes", int, 1),

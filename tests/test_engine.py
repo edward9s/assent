@@ -538,17 +538,20 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
                  if "Session:" in line]
         self.assertEqual(lines, ["  Session: claude | lite->sonnet | heavy->max"])
 
-    def test_worktree_default_verify_uses_main_script_and_worktree_cwd(self):
+    def test_worktree_verify_runs_with_the_worktree_as_cwd(self):
+        # The main-tree expansion of `.assent/verify.py` was retired with the plan
+        # parser's refusal of it as a task gate; a narrow gate resolves its own
+        # relative paths, and what still has to hold is the cwd.
         cfg = self.build()
         worktree = self.root / "isolated"
         worktree.mkdir()
-        (cfg.assent_dir / "verify.py").write_text(
+        (worktree / "probe.py").write_text(
             "from pathlib import Path\n"
             "Path('verified.txt').write_text('ok', encoding='utf-8')\n",
             encoding="utf-8")
 
-        self.assertEqual(engine._run_verify(
-            cfg.for_worktree(worktree), "python .assent/verify.py"), 0)
+        self.assertEqual(
+            engine._run_verify(cfg.for_worktree(worktree), "python probe.py"), 0)
         self.assertEqual((worktree / "verified.txt").read_text(encoding="utf-8"),
                          "ok")
         self.assertFalse((self.root / "verified.txt").exists())

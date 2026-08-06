@@ -41,6 +41,12 @@ _STATUS_LINE_RE = re.compile(
 _SCOPE_LINE_RE = re.compile(
     r'^(?P<prefix>\s*scope\s*=\s*)\[(?P<body>.*)\]'
     r'(?P<suffix>\s*(?:#.*)?)$')
+# The project's own full verifier, in the spellings a verify command can reach it
+# by.  A task's verify is the session's focused gate; the full verifier runs outside
+# every AI session -- a human starts it, or the scheduler runs it once at the end of
+# a whole run.  Naming it here would make every task re-run the whole suite, and on
+# a slow project it outlives what a session can wait for at all.
+_FULL_VERIFIER_RE = re.compile(r'\.assent[\\/]verify\.py\b')
 
 
 @dataclass
@@ -174,6 +180,15 @@ def parse_task_file(path: Path) -> Task:
             " (undeclared = every change counts as out of scope), list the allowed"
             " paths explicitly")
 
+    verify = _require_str(data, path, "verify").strip()
+    if _FULL_VERIFIER_RE.search(verify):
+        raise AssentError(
+            f"Task file {path.name} names the full verifier in verify: {verify!r}."
+            " A task's verify is the session's focused gate; the full verifier runs"
+            " outside every AI session, on a human's command or once at the end of a"
+            " whole run. Name the narrow command that proves this task's own"
+            " acceptance instead")
+
     return Task(
         id=task_id,
         title=_require_str(data, path, "title").strip(),
@@ -182,7 +197,7 @@ def parse_task_file(path: Path) -> Task:
         effort=effort_raw or None,
         status=status,
         scope=scope,
-        verify=_require_str(data, path, "verify").strip(),
+        verify=verify,
         goal=_require_str(data, path, "goal"),
         behavior=_optional_str(data, path, "behavior"),
         acceptance=_require_str(data, path, "acceptance"),

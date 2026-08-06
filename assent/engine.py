@@ -32,7 +32,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 from collections import Counter
@@ -237,7 +236,18 @@ blockers, their trusted requirements, and directly necessary interacting code.
 Unfinished tasks, TODO work, and the incomplete folder state are expected and
 cannot be findings. Technical debt is not eligible in this context. A
 self-marked BLOCKED task legitimately has no focused result because ordinary
-closeout skips that gate; that absence is not a finding."""
+closeout skips that gate; that absence is not a finding.
+
+One incomplete state is the exception, because it is the only one a repair can
+end: a task whose scheduler evidence records its focused verify command as
+PASS and whose sole remaining blocker is the unwritten status. Report it with
+kind = "blocked_recovery", summary and evidence quoting that recorded PASS and
+the status the task still carries, and a recommendation to re-run that focused
+command and write the status, so the repair session can finish the closeout.
+Such a blocker owns no file, but every finding must name a path inside the
+named task's declared scope: name any one of that task's scope entries. You may
+not reach this verdict from the code looking finished -- only the scheduler's
+own recorded focused PASS establishes it."""
 
 _AUTO_FIX_INITIAL_POLICY = """This INITIAL review has no prior reviewer finding
 to resolve. Findings must use transition = \"initial\" and must not cite a prior
@@ -296,7 +306,6 @@ _QUOTA_TICK = 1.0                     # countdown refresh interval (seconds)
 # delivered when bytecode next runs, so the wait had to finish first. Splitting
 # it bounds that delivery delay without changing the total wait.
 _COUNTDOWN_SEGMENT = 60.0
-_DEFAULT_VERIFY_COMMAND = "python .assent/verify.py"
 _ADAPTER_DIAGNOSTIC_LIMIT = 240
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)([\"']?(?:api[_ -]?key|access[_ -]?token|token|password|secret|"
@@ -533,8 +542,7 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
             .replace("{instructions_path}", str(contracts.instructions_path()))
             .replace("{task_path}", cfg.rel(task.path))
             .replace("{journal_path}", cfg.rel(task.journal_path))
-            .replace("{verify_command}",
-                     _verify_command_for_prompt(cfg, task.verify))
+            .replace("{verify_command}", task.verify)
             .replace("{task_id}", task.id)
             .replace("{task_title}", task.title)
             .replace("{agent}", session.agent)
@@ -687,15 +695,6 @@ def _task_excludes(cfg: Config, task: Task) -> list[str]:
     update and journal are part of the job) plus the global runtime artifacts."""
     return [cfg.git_rel(task.path), cfg.git_rel(task.journal_path),
             *cfg.git_excludes]
-
-
-def _verify_command_for_prompt(cfg: Config, command: str) -> str:
-    """When running isolated, expand the default verify script to the main tree's absolute path."""
-    if cfg.source_root is None or command.strip() != _DEFAULT_VERIFY_COMMAND:
-        return command
-    parts = [sys.executable, str((cfg.assent_dir / "verify.py").resolve())]
-    return (subprocess.list2cmdline(parts) if sys.platform == "win32"
-            else shlex.join(parts))
 
 
 def _agents_md_path_for_prompt(cfg: Config) -> str:
@@ -3602,15 +3601,10 @@ def _evaluate(cfg: Config, task: Task,
 def _verify_subprocess(cfg: Config, command: str) -> subprocess.CompletedProcess:
     """Run verify in the target working tree and return the completed process (no output).
 
-    For isolated runs the default script is loaded from the main tree by absolute path; other
-    commands keep their original shell semantics; the cwd for both is the current target
-    working tree.
+    A task gate is always a narrow command -- the plan parser refuses one naming
+    `.assent/verify.py` -- so the command keeps its original shell semantics and needs
+    no main-tree expansion; the cwd is the current target working tree.
     """
-    if cfg.source_root is not None and command.strip() == _DEFAULT_VERIFY_COMMAND:
-        return subprocess.run(
-            [sys.executable, str((cfg.assent_dir / "verify.py").resolve())],
-            cwd=str(cfg.root), capture_output=True, encoding="utf-8",
-            errors="replace")
     return subprocess.run(
         command, shell=True, cwd=str(cfg.root),
         capture_output=True, encoding="utf-8", errors="replace")

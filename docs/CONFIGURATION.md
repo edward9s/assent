@@ -257,7 +257,7 @@ from the worker rotation:
 name = ["claude", "codex"]
 
 [auto_fix.review]
-adapter = "antigravity"       # registered reviewer; outside the worker rotation
+adapter = ["antigravity"]     # one entry per review round; outside the worker rotation
 model = "prime"               # abstract tier
 effort = "heavy"              # abstract effort
 ```

@@ -8,7 +8,7 @@
 # All relative paths are based on the project root (= the parent of .assent).
 
 [watchdog]
-stall_minutes = 30                # minutes of no session output before it is judged stalled; 0 = off
+stall_minutes = 0                 # minutes of no session output before it is judged stalled; 0 = off
 
 [run]
 retry_per_task = 1                # number of retries after a verification failure
@@ -32,15 +32,16 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 # only an explicit `run --auto-fix` invocation starts the review and authorizes
 # repair; an ordinary run without the flag does neither. It never accepts.
 # [auto_fix.review]
-# adapter = "antigravity"        # one adapter, or an ordered list of review rounds
+# adapter = ["antigravity"]      # ordered list of review rounds, one entry per round
 # model = "prime"                # abstract tier only: prime | core | lite
 # effort = "heavy"               # abstract value only: heavy | normal | slight
 # An explicit adapter reuses its own [adapter.<name>] model/effort mappings,
 # so it can select a different vendor from the worker rotation without changing
-# the worker rotation used by ordinary task sessions. adapter also accepts an
-# ordered list, which states one review round per entry, repeats included; the
-# number of entries is the finite bound on the review loop. A completed-folder
-# round is a merged reviewer-fixer session: it may repair a blocker directly,
+# the worker rotation used by ordinary task sessions. The list states one review
+# round per entry, repeats included; the number of entries is the finite bound on
+# the review loop, so a folder that ends its last round on an unrepaired blocker
+# hands back to a human. A completed-folder round is a merged reviewer-fixer
+# session: it may repair a blocker directly,
 # but only inside the declared scope of the one existing task its finding
 # names, and reports that with the verdict FIXED. Blocked adjudication stays
 # read-only. A later recovery requires the identity that decided a pending

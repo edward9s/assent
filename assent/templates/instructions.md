@@ -115,14 +115,15 @@ files (logs; read only when debugging or explicitly referenced), and the
   or ignored directories the task does not require — and never modify anything
   inside the linked target. An ordinary ignored file generated beside its
   tracked source, such as a `*.g.dart`, needs no action.
-- During interactive work, run the smallest relevant checks. Do not launch the
-  full project suite merely because files changed. Launch it only when the human
-  explicitly asks, when a scheduler-provided focused verify command itself
-  requires it, or when no narrower check can responsibly validate the requested
-  change and no later standard verification stage will do so; state that
-  necessity before starting it. In a human-driven `reconcile` -> `verify` flow,
-  resolve the requested conflict and leave `assent verify` for the human to
-  start after `assent reconcile --continue`.
+- Never launch the full project suite or `.assent/verify.py`, in any session and
+  for any reason: not because files changed, not to be thorough, and not because
+  a human asked for it during interactive work — say it is theirs to start and
+  name the command instead of running it. Complete verification belongs outside
+  every AI session: a human runs it, or the scheduler runs it once at the end of
+  a whole run (`assent run --verify`) or on an explicit `assent verify`. Run the
+  smallest check that decides the question in front of you. In a human-driven
+  `reconcile` -> `verify` flow, resolve the requested conflict and leave
+  `assent verify` for the human to start after `assent reconcile --continue`.
 - Code, git, and test results are the final source of truth.
 - Never kill / Stop-Process any process the session did not itself start — your
   parent process chain leads straight to the scheduler, and killing the wrong
@@ -137,12 +138,13 @@ files (logs; read only when debugging or explicitly referenced), and the
   tool-call preambles and restated plans, and quote a command or test
   failure as its shortest decisive line rather than a full transcript,
   unless the task or a human explicitly asks for more.
-- While any command runs — the focused verify command, the full suite, a
-  build, or any other long-running command — wait for it to finish and report
-  its outcome once. Do not start it in the background or asynchronously and
-  then poll it with repeated status checks, and emit no interim "still
-  running" / "checking again" heartbeat narration between starting a command
-  and reporting its result.
+- While any command runs — the focused verify command, a build, or any other
+  long-running command you are allowed to start — stay in the session until it
+  finishes and report its outcome once. A command that outlives the foreground
+  tool limit may be started in the background and polled until it returns; the
+  turn must not end while it is still running. Keep every interim line to one
+  short status of the form `<command>: running, <elapsed>` — no restated plan,
+  no narrated transcript, no reasoning about what the result might be.
 - Prefer the smallest change that satisfies the task: reuse a helper,
   type, or pattern already in the touched files before adding a new one,
   and do not add abstractions, config, or scaffolding the task does not
@@ -364,11 +366,11 @@ decision, not a second debt-approval state.
    finishes, and do not use a scheduled wakeup or background notification to
    wait on tests — a headless session terminates the moment the turn ends, so
    a deferred closeout will never happen. Verification runs only the
-   scheduler-provided focused verify command, in the foreground and
-   synchronously; it does not run the full suite — full verification belongs
-   to the scheduler's folder-closeout stage. The general no-polling,
-   no-heartbeat-narration rule in "Working rules" applies to that run as it
-   does to every other command.
+   scheduler-provided focused verify command, run to completion inside this
+   turn; it never runs the full suite, which happens outside every AI session.
+   When that command outlives the foreground tool limit, the background-and-poll
+   rule in "Working rules" applies: poll it to completion in this turn, then
+   close out. Polling is not deferral.
 2. Self-check against the task file's acceptance item by item, and run the
    verification command the scheduler provides to confirm exit code 0.
 3. Change the status of **your own task file** to DONE or BLOCKED — only this

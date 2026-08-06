@@ -31,7 +31,7 @@ describes that project. `assent init` writes both halves.
 project/
 ├── AGENTS.md                    # project rules (root; versioning is the project's call; keep one assent bridge line)
 └── .assent/
-    ├── verify.py                # this project's verification script (default choice for a task file's verify field)
+    ├── verify.py                # this project's full verification script (run outside every AI session; a task file's verify never names it)
     ├── assent.toml              # optional: a deliberate or legacy project-only settings override
     └── bootstrap01/             # work folder (named after the nature of the work, decided by the meeting, = git branch prefix)
         ├── assent.lock          # this folder's run lock; the file persists as diagnostics
@@ -103,13 +103,13 @@ the single bridge line in the first and never overwrites an existing second one.
 
 The entire `.assent/` is the scheduler's management plane, excluded by
 `.gitignore` by default and always kept in the main worktree; a worktree does
-not contain `.assent/`. The scheduler's prompt expands t/r files and the default
-verification script into main-tree absolute paths, and the global contracts into
-their user-home absolute paths. The body of
-`.assent/verify.py` is loaded from the main tree, but the execution cwd is the
-worktree, so the verification target is still the isolated worktree. Any
-`.assent/` file that has entered Git fails closed, to prevent a worktree from
-producing a second source of truth.
+not contain `.assent/`. The scheduler's prompt expands t/r files into main-tree
+absolute paths and the global contracts into their user-home absolute paths. A
+task's verify command needs no such expansion: it is always a narrow command the
+worktree can run on its own, because the plan parser refuses a task naming
+`.assent/verify.py`. That script is run only outside every AI session, against
+the integration candidate. Any `.assent/` file that has entered Git fails closed,
+to prevent a worktree from producing a second source of truth.
 
 `.assent/` has the main-tree disk as its only copy; backups are the project's
 own responsibility. Git is always enabled and always isolated into a worktree,
@@ -219,7 +219,8 @@ model = "prime"                  # prime | core | lite (never write a vendor mod
 effort = "heavy"                 # heavy | normal | slight; usually omitted, written only to deliberately deviate from the default
 status = "TODO"                  # TODO | WIP | DONE | BLOCKED | SKIP
 scope = ["assent/", "tests/"]    # allowed path prefixes for changes; fail-closed, must not be empty
-verify = "python .assent/verify.py"   # verification command, exit 0 = pass
+verify = "python -m unittest tests.test_thing"  # this task's focused gate, exit 0 = pass;
+                                 # never the full verifier -- that runs outside every AI session
 
 goal = """
 What to achieve, in one or two sentences.

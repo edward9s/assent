@@ -579,9 +579,12 @@ class TestWorktreeScenarios(E2ETestCase):
             self.root, "plan01").exists())
         self.assertIn("resources were retained for recovery", out.getvalue())
 
-    def test_default_verify_script_runs_inside_worktree(self):
+    def test_task_gate_runs_inside_worktree(self):
+        # The full verifier used to be spelled here and expanded to a main-tree
+        # absolute path; a task's gate is now always a narrow command, so what
+        # this proves is only that the gate runs and the task closes out.
         self.configure_git_run()
-        task = self.add_task(1, verify="python .assent/verify.py")
+        task = self.add_task(1, verify="python --version")
         self.start()
         adapter = ScriptedAdapter([])
         adapter.steps.append(self.isolated_done_step(
@@ -589,8 +592,6 @@ class TestWorktreeScenarios(E2ETestCase):
 
         self.assertEqual(self.run_engine(adapter, once=True), 0)
         self.assertEqual(parse_task_file(task).status, "DONE")
-        self.assertIn(str((self.root / ".assent" / "verify.py").resolve()),
-                      adapter.calls[0])
 
     def test_tracked_task_folder_is_rejected_before_worktree_creation(self):
         self.configure_git_run()
@@ -606,7 +607,7 @@ class TestWorktreeScenarios(E2ETestCase):
 
     def test_ignored_agents_md_is_passed_as_main_absolute_path(self):
         self.configure_git_run()
-        task = self.add_task(1, verify="python .assent/verify.py")
+        task = self.add_task(1, verify="python --version")
         (self.root / ".gitignore").write_text(
             ".assent/\nAGENTS.md\n", encoding="utf-8")
         self.start()

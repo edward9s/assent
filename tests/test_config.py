@@ -56,7 +56,7 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.tasks_name, "plan01")
         self.assertEqual(cfg.tasks_dir, self.assent_dir.resolve() / "plan01")
         self.assertEqual(cfg.branch_prefix, "plan01/")
-        self.assertEqual(cfg.stall_minutes, 30)
+        self.assertEqual(cfg.stall_minutes, 0)   # watchdog off unless configured
         self.assertEqual(cfg.retry_per_task, 1)
         self.assertEqual(cfg.quota_poll_minutes, 30)
         self.assertEqual(cfg.rotation_poll_minutes, 1)

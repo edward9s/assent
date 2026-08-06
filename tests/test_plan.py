@@ -150,6 +150,28 @@ class TestParseTaskFile(PlanTestCase):
         with self.assertRaisesRegex(AssentError, "fail-closed"):
             parse_task_file(path)
 
+    def test_full_verifier_as_a_task_gate_rejected(self):
+        # The full verifier is folder closeout's own stage: naming it here makes
+        # every task re-run the whole suite, and on a slow project it outlives
+        # what a session can wait for at all.
+        for command in ("python .assent/verify.py",
+                        "python .assent\\verify.py",
+                        "py -3 .assent/verify.py --quiet",
+                        "python C:/proj/.assent/verify.py"):
+            with self.subTest(command=command):
+                path = self.write("t001_x.e.toml", task_text(verify=command))
+                with self.assertRaisesRegex(AssentError, "full verifier"):
+                    parse_task_file(path)
+
+    def test_a_narrow_gate_naming_its_own_verify_module_is_accepted(self):
+        # Only the project's own .assent/verify.py is refused; a test module that
+        # merely happens to be about verification is an ordinary focused gate.
+        path = self.write(
+            "t001_x.e.toml",
+            task_text(verify="python -m unittest tests.test_verify_py"))
+        self.assertEqual(parse_task_file(path).verify,
+                         "python -m unittest tests.test_verify_py")
+
     def test_bad_dep_id_rejected(self):
         path = self.write("t002_x.e.toml", task_text(deps=("W1",)))
         with self.assertRaisesRegex(AssentError, "tNNN"):

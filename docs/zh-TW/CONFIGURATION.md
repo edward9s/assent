@@ -223,7 +223,7 @@ effective worker adapter 的 `prime`/`heavy` 自動解析；不需重跑 `assent
 name = ["claude", "codex"]
 
 [auto_fix.review]
-adapter = "antigravity"       # 已註冊、但不在 worker rotation
+adapter = ["antigravity"]     # 每個 entry 一輪 review；不在 worker rotation
 model = "prime"               # 抽象 tier
 effort = "heavy"              # 抽象 effort
 ```

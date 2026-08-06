@@ -90,7 +90,7 @@ class AcceptAllRepositoryCase(unittest.TestCase):
             'model = "core"\n'
             f'status = "{status}"\n'
             'scope = ["assent/"]\n'
-            'verify = "python .assent/verify.py"\n'
+            'verify = "python --version"\n'
             'goal = "Complete the task."\n'
             'acceptance = "Verification passes."\n',
             encoding="utf-8")

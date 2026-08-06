@@ -83,7 +83,7 @@ class ReconcileRepositoryCase(unittest.TestCase):
             'model = "prime"\n'
             f'status = "{status}"\n'
             'scope = ["shared.txt"]\n'
-            'verify = "python .assent/verify.py"\n'
+            'verify = "python --version"\n'
             'goal = "Complete the task."\n'
             'acceptance = "Verification passes."\n',
             encoding="utf-8")

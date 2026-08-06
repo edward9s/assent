@@ -73,7 +73,7 @@ class VerificationRepositoryCase(unittest.TestCase):
         (self.tasks_dir / "t001_complete.e.toml").write_text(
             'title = "Complete"\n'
             'deps = []\nmodel = "core"\nstatus = "DONE"\n'
-            'scope = ["result.txt"]\nverify = "python .assent/verify.py"\n'
+            'scope = ["result.txt"]\nverify = "python --version"\n'
             'goal = "done"\nacceptance = "verified"\n',
             encoding="utf-8")
         (self.root / "README.md").write_text("initial\n", encoding="utf-8")
@@ -428,7 +428,7 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
         (upstream / "t001_base.e.toml").write_text(
             'title = "Base"\n'
             'deps = []\nmodel = "core"\nstatus = "DONE"\n'
-            'scope = ["result.txt"]\nverify = "python .assent/verify.py"\n'
+            'scope = ["result.txt"]\nverify = "python --version"\n'
             'goal = "done"\nacceptance = "verified"\n',
             encoding="utf-8")
         (self.tasks_dir / "_folder.toml").write_text(
@@ -467,7 +467,7 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
                 f'title = "{folder}"\n'
                 'deps = []\nmodel = "core"\nstatus = "DONE"\n'
                 f'scope = ["{folder.lower()}.txt"]\n'
-                'verify = "python .assent/verify.py"\n'
+                'verify = "python --version"\n'
                 'goal = "done"\nacceptance = "verified"\n',
                 encoding="utf-8")
         (self.tasks_dir / "_folder.toml").write_text(
@@ -505,7 +505,7 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
                 f'title = "{folder}"\n'
                 'deps = []\nmodel = "core"\nstatus = "DONE"\n'
                 f'scope = ["{folder.lower()}.txt"]\n'
-                'verify = "python .assent/verify.py"\n'
+                'verify = "python --version"\n'
                 'goal = "done"\nacceptance = "verified"\n',
                 encoding="utf-8")
         (self.tasks_dir / "_folder.toml").write_text(

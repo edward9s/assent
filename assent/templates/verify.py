@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Shared verification script: a task is not complete unless the verify command exits 0.
 
-A task file's verify field points to this script by default (python .assent/verify.py);
-individual tasks may swap in a faster or stricter command.
+This script runs outside every AI session: a human starts it, or the scheduler runs
+it once at the end of a whole run (assent run --verify) or on an explicit
+assent verify. A task file's verify field must never name it -- a task's gate is
+the narrow command proving its own acceptance, and the plan parser refuses a task
+that points here.
 assent init activates exactly one of the commented project-test examples below;
 the packaged template intentionally leaves every project test disabled.
 """

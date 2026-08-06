@@ -1224,7 +1224,7 @@ class TestRunVerifyFullSuiteCount(MainTestCase):
         (self.tasks_dir / "t001_done.e.toml").write_text(
             'title = "Finished"\n'
             'deps = []\nmodel = "lite"\nstatus = "DONE"\n'
-            'scope = ["result.txt"]\nverify = "python .assent/verify.py"\n'
+            'scope = ["result.txt"]\nverify = "python --version"\n'
             'goal = "done"\nacceptance = "verified"\n',
             encoding="utf-8")
         self.git("init")
