@@ -461,7 +461,7 @@ class TestRunTask(unittest.TestCase):
             return 0, "finished\n", False
 
         self.patch_run(fake)
-        adapter = make_adapter()
+        adapter = make_adapter(stall_minutes=30)
         result = adapter.run_task("p", adapter.resolve_model("core"), "medium",
                                   Path("/work"))
         self.assertIsInstance(result, TaskResult)
@@ -469,7 +469,7 @@ class TestRunTask(unittest.TestCase):
                          "gemini-3.6-flash")
         self.assertEqual(captured["cwd"], Path("/work"))
         self.assertEqual(captured["stall_seconds"], 30 * 60)
-        self.assertEqual(captured["heartbeat_path"], log_file(make_cfg()))
+        self.assertEqual(captured["heartbeat_path"], log_file(make_cfg(stall_minutes=30)))
         self.assertEqual(captured["input_text"], "p")
         self.assertEqual(result.exit_code, 0)
         self.assertIsNone(result.failure_kind)

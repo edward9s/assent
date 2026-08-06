@@ -18,7 +18,7 @@ from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
 from tests.link_support import make_directory_link
 
-_DEFAULT_VERIFY = "python .assent/verify.py"
+_DEFAULT_VERIFY = "python -c pass"
 
 
 def _git(root: Path, *args: str) -> str:

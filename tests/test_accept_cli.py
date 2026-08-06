@@ -22,7 +22,7 @@ from assent.lockfile import hold_integration_lock, hold_lock
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_VERIFY = "python .assent/verify.py"
+_VERIFY = "python -c pass"
 
 
 class AcceptCliCase(unittest.TestCase):
