@@ -37,6 +37,7 @@ from pathlib import Path
 
 from assent import AssentError, gitops
 from assent.clean import (clean_locked, has_cleanup_target,
+                          sweep_orphaned_temporary_branches,
                           validate_live_folder_selection)
 from assent.config import (Config, list_task_folders, load_config,
                            validate_config, validate_tasks_name)
@@ -424,6 +425,7 @@ def archive_all(config_path: str, assent_dir: Path) -> int:
     archived: list[str] = []
     skipped: list[str] = []
     errored: list[str] = []
+    sweep_cfg: Config | None = None
     for index, folder in enumerate(folders):
         if index:
             print()
@@ -433,6 +435,8 @@ def archive_all(config_path: str, assent_dir: Path) -> int:
             print(f"{folder}: archive error (config error: {e})")
             errored.append(folder)
             continue
+        if sweep_cfg is None:
+            sweep_cfg = cfg
         result = _archive_one(cfg)
         if result.status == "archived":
             archived.append(folder)
@@ -440,10 +444,22 @@ def archive_all(config_path: str, assent_dir: Path) -> int:
             skipped.append(folder)
         else:
             errored.append(folder)
+
+    # ``archive --all`` is a whole-project invocation, so it owns the
+    # repository-global temporary namespace exactly as ``clean --all`` does.  It
+    # delegates to clean's single implementation rather than growing a copy, and
+    # calls it here -- after the per-folder loop -- because every ``_archive_one``
+    # holds the integration lock the sweep must take for itself, and because a
+    # folder that is skipped or errors must not skip the sweep.  A config that
+    # only names the archived folder still carries the repository root and
+    # ``.assent`` directory the sweep needs, and both outlive the archived folder.
+    swept = 0
+    if sweep_cfg is not None:
+        swept = sweep_orphaned_temporary_branches(sweep_cfg)
     print()
     print(f"archive --all summary: {len(archived)} archived, "
           f"{len(skipped)} skipped, {len(errored)} error(s).")
-    return 1 if errored else 0
+    return 1 if errored or swept else 0
 
 
 def restore_folder(cfg: Config) -> int:
