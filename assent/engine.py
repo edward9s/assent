@@ -2625,6 +2625,16 @@ def _auto_fix_finish_rounds_exhausted(
         # settling gate takes the same discipline: its evidence is durable, and
         # only the settled outcome itself is withheld.
         if not gate_passed:
+            # The preserved state is rebound to the tree the gate was just
+            # proven against, exactly as both settle branches below rebind
+            # theirs: the final round's repair was checkpointed after the last
+            # review bound this record, so writing it unchanged would make the
+            # report call the freshest evidence the folder has STALE (source
+            # tree changed) instead of the pending FAILED (fresh) verdict plus
+            # the failing gate's command and evidence.
+            current_tree = _auto_fix_current_tree(cfg)
+            if current_tree is not None:
+                state = replace(state, source_tree=current_tree)
             auto_fix.write_auto_fix_state(
                 auto_fix.auto_fix_state_path(cfg), state)
             print(f"Auto-fix review rounds exhausted after "

@@ -1320,6 +1320,14 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
         self.assertIn("Settling focused gate evidence", report)
         self.assertNotIn("SELF-FIXED, UNREVIEWED", report)
+        # The gate was just run against this very source, so the state it
+        # preserved is the freshest evidence the folder has: the report shows
+        # the pending non-PASS verdict with that failing command attached, and
+        # must never call it stale and invite deleting the derived state.
+        self.assertIn("Folder auto-fix: FAILED (fresh)", report)
+        self.assertNotIn("Folder auto-fix: STALE", report)
+        self.assertNotIn("source tree changed", report)
+        self.assertIn("- FAIL (3) t001:", report)
 
     def test_the_settling_gate_reuses_a_pass_proven_against_this_source(self):
         log = self.gate_log()
