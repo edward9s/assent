@@ -310,6 +310,54 @@ def clean_locked(cfg: Config, path: Path) -> int:
         return 1
 
 
+def sweep_orphaned_temporary_branches(cfg: Config) -> int:
+    """Delete every leftover Assent temporary branch once; return 1 on a refusal or failure.
+
+    The two temporary namespaces are folder-independent: an
+    ``assent-integration/batch/<suffix>`` ref names no work folder at all, and a
+    folder's ``cfg.branch_prefix`` is its own ``<folder>/``, so no per-folder
+    cleanup path can ever see these refs.  The sweep therefore belongs to the
+    whole-project invocation and runs once for it -- never inside
+    ``clean_folder``/``clean_locked``, because a human naming a subset of
+    folders must not have repository-global refs deleted as a side effect, and
+    because those two already run inside the integration lock this sweep has to
+    take for itself.
+
+    The repository-wide integration lock is the entire proof that what is listed
+    is an orphan, so enumeration and removal happen inside one hold: a temporary
+    branch that still exists while nobody can be integrating belongs to a
+    transaction that did not complete.  Finding nothing prints nothing, so the
+    ordinary quiet case stays quiet.
+    """
+    try:
+        with hold_integration_lock(cfg.assent_dir):
+            records = gitops.temporary_branches(cfg.root)
+            if not records:
+                return 0
+            removals = gitops.remove_temporary_branches(cfg.root, records)
+    except LockBusy:
+        print("orphaned temporary branches: skipped (repository integration is "
+              "in progress)")
+        return 0
+    except AssentError as e:
+        print(f"orphaned temporary branches: failed ({e})")
+        return 1
+
+    failed = False
+    print("orphaned temporary branches:")
+    for removal in removals:
+        if removal.outcome == gitops.DELETED:
+            print(f"  branch {removal.branch}: cleaned ({removal.classification})")
+        elif removal.outcome == gitops.REFUSED:
+            failed = True
+            print(f"  branch {removal.branch}: refused (checked out in "
+                  f"{removal.checked_out_in}, retained)")
+        else:
+            failed = True
+            print(f"  branch {removal.branch}: failed ({removal.error})")
+    return 1 if failed else 0
+
+
 def clean_folders(configs: list[Config]) -> int:
     """Clean folders upstream-first; one item's result does not block unrelated items."""
     if not configs:
@@ -339,10 +387,28 @@ def clean_folders(configs: list[Config]) -> int:
     for folder in sorted(by_name):
         add_with_prerequisites(folder)
 
+    # Every clean invocation arrives here, including ``clean FOLDER`` for one
+    # named folder, so whether this invocation owns the repository-global
+    # temporary namespace is decided from the selection itself, before anything
+    # is cleaned: it owns it when the selection covers every live folder (bare
+    # ``clean``, a ``...`` expansion, or an explicit selection that happens to
+    # be the whole project), and it does not when a human named a subset.
+    try:
+        whole_project = set(list_task_folders(configs[0].assent_dir)) <= set(by_name)
+    except (AssentError, OSError) as e:
+        print("orphaned temporary branches: skipped (live-folder discovery "
+              f"failed: {e})")
+        whole_project = False
+
     failed = False
     for index, cfg in enumerate(ordered):
         if index:
             print()
         if clean_folder(cfg) != 0:
             failed = True
+    # The sweep runs after every selected folder, so a folder that is retained
+    # or fails does not skip it and it cannot interfere with the per-folder
+    # dependency proofs that run first.
+    if whole_project and sweep_orphaned_temporary_branches(configs[0]) != 0:
+        failed = True
     return 1 if failed else 0

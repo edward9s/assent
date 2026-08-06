@@ -163,6 +163,19 @@ Cleanup is a separate guarded operation: `assent clean` must retain an
 upstream source while any dependent folder remains unaccepted, and skips when
 its merged-and-clean proof is insufficient.
 
+`assent-integration/<folder>/<suffix>` and `assent-reconcile/<folder>` are
+Assent-owned temporary branches; a human must never check one out or build on
+it. Each is removed by the transaction that created it once that transaction
+completes, so a surviving branch is orphaned only when its owning transaction
+died before finishing. The repository-wide integration lock being held while
+the branch still exists is the entire proof that it is an orphan -- never the
+branch's content, and never whether its tree is published or superseded, which
+is reporting information only. `assent clean --all` sweeps every such orphan
+once per invocation, `assent archive --all` inherits that same sweep, and a
+single named `assent clean FOLDER` deliberately does not sweep it. `assent
+doctor` reports any it finds and offers a confirmed `[y/N]` removal as the
+recovery path.
+
 Folder `after` controls scheduler readiness only; it never supplies a worktree
 base. A declared `base` is the only lineage declaration, and stacking occurs
 only through it, so at most one unaccepted upstream can be in a downstream

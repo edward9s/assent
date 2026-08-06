@@ -513,6 +513,31 @@ class TestContractContent(unittest.TestCase):
                               phrase=phrase):
                 self.assertIn(phrase, compact)
 
+    def test_orphaned_temporary_branch_sweep_contract_is_documented(self):
+        """instructions.md and workflow.md both state the lock-based orphan proof."""
+        instructions = contracts.installed_contract_text("instructions.md")
+        workflow = contracts.installed_contract_text("workflow.md")
+
+        for phrase in (
+                "assent-integration/<folder>/<suffix>",
+                "assent-reconcile/<folder>",
+                "orphaned only when",
+        ):
+            with self.subTest(document="instructions.md", phrase=phrase):
+                self.assertIn(phrase, instructions)
+
+        for phrase in (
+                "assent-integration/<folder>/<suffix>",
+                "assent-reconcile/<folder>",
+                "proven orphaned by the repository-wide integration lock",
+                "published",
+                "superseded",
+                "reporting information only",
+                "never the deletion criterion",
+        ):
+            with self.subTest(document="workflow.md", phrase=phrase):
+                self.assertIn(phrase, workflow)
+
     def test_limited_run_verification_is_conditional_in_every_document(self):
         """`--verify` with `--once`/`--task` is gated, never blanket-refused."""
         install_global_contracts(self)

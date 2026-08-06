@@ -182,6 +182,18 @@ clean, clean upstream and then dependent with Assent.
 upstream-first pass; bare `assent clean` keeps its all-folder discovery. The
 literal remainder selection is defined in [Commands](COMMANDS.md).
 
+`assent-integration/<folder>/<suffix>` and `assent-reconcile/<folder>` are the
+two Assent-owned temporary branch namespaces; a human must not check one out
+or build on it. Each is removed by the transaction that created it once that
+transaction completes, so one that survives is orphaned only because its
+transaction died first. `assent clean --all` sweeps every such orphan once per
+invocation, after its per-folder cleanup, because the repository-wide
+integration lock being held while the branch still exists is the entire proof
+that it is an orphan -- never the branch's content, and never whether its tree
+is published or superseded, which is reporting information only. A single
+named `assent clean FOLDER` deliberately does not sweep, so naming a subset of
+folders never deletes repository-global refs as a side effect.
+
 ## `archive`
 
 Archive is a retirement action, not ordinary cleanup. It contains the clean
@@ -196,6 +208,29 @@ dynamic request.
 neither `--all` nor `...`. Archive recovery may intentionally begin without a
 live directory; the normal explicit-selection audit does not turn that
 recognized restore state into a false missing-folder error.
+
+`archive --all` inherits `clean --all`'s once-per-invocation orphaned
+temporary-branch sweep by delegating to the same implementation after its own
+per-folder loop, rather than reimplementing it: every per-folder archive step
+already holds the integration lock the sweep must take for itself.
+
+## `doctor`
+
+`assent doctor` diagnoses Python, Git, adapter CLIs, and temporary-directory
+writability without needing an existing project, and additionally reports any
+orphaned Assent-owned temporary branch it finds using the same lock-based
+proof as `clean --all`. Finding orphans, a human declining to remove them, or
+a refused removal never fails `doctor` or contributes to its exit code -- the
+check is untidiness, not breakage.
+
+Unlike the unattended sweep, `doctor` offers a confirmed `[y/N]` removal: it
+lists what it found, asks whether to remove the offered branches, and
+re-reads the branch list inside the same integration-lock hold immediately
+before deleting, so a branch that stopped being an orphan between the report
+and the confirmation is retained rather than removed. `doctor`'s offer is the
+recovery path; `clean --all` and `archive --all` remain the routine,
+unattended one, and `doctor` itself runs no folder operation and touches no
+work folder, task file, or receipt.
 
 ## `reject`
 

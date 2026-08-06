@@ -14,7 +14,7 @@ There is no state file and no "current folder" pointer.  Everything a later run
 needs is a deterministic managed fact or a Git fact:
 
 - worktree ``<project>.reconcile/<folder>``, a sibling of the main worktree,
-- temporary branch ``assent-reconcile/<folder>``,
+- temporary branch ``<RECONCILE_BRANCH_PREFIX><folder>``,
 - ``HEAD``, ``MERGE_HEAD``, branch ownership and the merge parents, which
   together say exactly how far an interrupted run got.
 
@@ -37,7 +37,9 @@ from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 
-RECONCILE_BRANCH_PREFIX = "assent-reconcile/"
+# gitops owns both temporary branch namespaces; this is the same object, kept
+# under reconcile's own public name for the callers that read it here.
+RECONCILE_BRANCH_PREFIX = gitops.RECONCILE_BRANCH_PREFIX
 RECONCILE_TRAILER_FOLDER = "Assent-Reconcile-Folder"
 
 

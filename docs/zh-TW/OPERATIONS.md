@@ -140,6 +140,15 @@ dependent 已接受、可證明整合且 clean 後，才先 clean upstream，再
 `assent clean A B` 與 `assent clean A ...` 會在一次 upstream-first pass 中處理選取；裸的
 `assent clean` 仍 discovery 全部。`...` 規則見[指令](COMMANDS.md)。
 
+`assent-integration/<folder>/<suffix>` 與 `assent-reconcile/<folder>` 是兩個 Assent 自有的
+暫存 branch namespace，人類不可 checkout 或在其上建置。兩者各自由建立它的 transaction
+在完成後移除，殘留下來的只因為那個 transaction 在完成前就中斷，才算 orphan。
+`assent clean --all` 在每次 per-folder cleanup 之後、每次呼叫掃一次所有這類 orphan，因為
+repository-wide integration lock 在該 branch 仍存在時被持有，才是它是 orphan 的完整
+證明——不是 branch 的內容，也不是它的 tree 是 published 還是 superseded，那只是回報資訊。
+明示單一 `assent clean FOLDER` 刻意不掃，讓指名部分 folder 時不會意外刪掉
+repository-global 的 ref。
+
 ## `archive`
 
 Archive 是 retirement，不是普通 cleanup。它先遵守 clean contract，再把合格 work folder
@@ -150,6 +159,23 @@ folder 時採 single-folder contract：逐一嘗試，不合格者令 command no
 `archive --restore FOLDER` 只還原一個 archive，不接受 `--all` 或 `...`。Archive recovery
 可能暫時沒有 live directory；已辨識的 restore 狀態不會被一般 explicit-selection audit
 錯報成遺失 folder。
+
+`archive --all` 繼承 `clean --all` 每次呼叫一次的暫存 branch 清理，做法是委派同一個
+實作在自己的 per-folder loop 之後執行，而非重新實作：每個 per-folder archive 步驟本身
+已持有清理所需的 integration lock。
+
+## `doctor`
+
+`assent doctor` 診斷 Python、Git、adapter CLI 與 temporary directory 是否可寫，不需要
+現有 project，另外也會用和 `clean --all` 相同的 lock-based 證明，回報找到的 orphaned
+Assent-owned 暫存 branch。找到 orphan、人類拒絕移除、或移除被拒絕，都不會讓 `doctor`
+失敗或影響它的 exit code——這只是不整潔，不是壞掉。
+
+跟不問人的自動 sweep 不同，`doctor` 會提出確認式的 `[y/N]` 移除：先列出找到的項目，
+詢問是否移除，並在真正刪除前於同一次 integration lock 內重新讀取 branch 清單，讓
+「回報之後、確認之前」剛好不再是 orphan 的 branch 被保留而不是被刪。`doctor` 的提案是
+復原路徑；`clean --all` 與 `archive --all` 仍是例行、不問人的路徑，且 `doctor` 本身不跑
+任何 folder 操作，也不碰任何 work folder、task file 或 receipt。
 
 ## `reject`
 

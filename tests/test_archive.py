@@ -505,6 +505,87 @@ class TestArchive(unittest.TestCase):
             self.assertEqual(sorted(entry),
                              ["archived_at", "folder", "main_tip"])
 
+    def _orphaned_temporary_branches(self) -> tuple[str, str]:
+        """One published and one superseded orphan in Assent's temporary namespaces."""
+        target = _git(self.root, "branch", "--show-current")
+        published = "assent-integration/batch/aaaa"
+        _git(self.root, "branch", published, "HEAD")
+        superseded = "assent-reconcile/plan01"
+        _git(self.root, "checkout", "-b", superseded)
+        (self.root / "abandoned.txt").write_text("abandoned\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "abandoned reconcile work")
+        _git(self.root, "checkout", target)
+        return published, superseded
+
+    def _temporary_branches(self) -> list[str]:
+        return sorted(branch
+                      for prefix in gitops.TEMPORARY_BRANCH_PREFIXES
+                      for branch in gitops.branches_with_prefix(self.root, prefix))
+
+    def test_archive_all_sweeps_orphaned_temporary_branches(self) -> None:
+        """``archive --all`` owns the global namespace exactly as ``clean --all``
+        does, and inherits the sweep instead of reimplementing it."""
+        published, superseded = self._orphaned_temporary_branches()
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = archive_all(str(self.config_path), self.assent_dir)
+        text = output.getvalue()
+
+        self.assertEqual(code, 0, text)
+        self.assertEqual(self._temporary_branches(), [])
+        self.assertIn(f"  branch {published}: cleaned (published)", text)
+        self.assertIn(f"  branch {superseded}: cleaned (superseded)", text)
+        # The sweep runs once, after the per-folder loop and outside every
+        # per-folder integration-lock hold.
+        self.assertEqual(text.count("orphaned temporary branches:"), 1)
+        self.assertLess(text.index(f"{self.folder}: archived"),
+                        text.index("orphaned temporary branches:"))
+        self.assertIn("1 archived, 0 skipped, 0 error(s)", text)
+
+    def test_archive_all_delegates_the_sweep_to_clean(self) -> None:
+        """The one call site delegates; archive keeps no sweep of its own."""
+        self._orphaned_temporary_branches()
+
+        output = io.StringIO()
+        with patch("assent.archive.sweep_orphaned_temporary_branches",
+                   return_value=0) as sweep, contextlib.redirect_stdout(output):
+            code = archive_all(str(self.config_path), self.assent_dir)
+
+        self.assertEqual(code, 0, output.getvalue())
+        sweep.assert_called_once()
+        # Patching out the single delegating call leaves no second implementation
+        # inside archive.py that could still remove the refs.
+        self.assertEqual(len(self._temporary_branches()), 2)
+
+    def test_archive_all_without_orphans_prints_nothing_new(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = archive_all(str(self.config_path), self.assent_dir)
+        text = output.getvalue()
+
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("orphaned temporary branches", text)
+
+    def test_archive_all_reports_a_refused_orphan_as_a_failure(self) -> None:
+        published, superseded = self._orphaned_temporary_branches()
+        checkout = self.root.parent / f"{self.root.name}.checkout"
+        self.addCleanup(safe_rmtree, checkout)
+        _git(self.root, "worktree", "add", str(checkout), published)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = archive_all(str(self.config_path), self.assent_dir)
+        text = output.getvalue()
+
+        self.assertEqual(code, 1, text)
+        self.assertEqual(self._temporary_branches(), [published])
+        self.assertIn(f"  branch {published}: refused (checked out in", text)
+        self.assertIn(f"  branch {superseded}: cleaned (superseded)", text)
+        # The refusal is the sweep's, not the folder's: the folder still archived.
+        self.assertIn("1 archived, 0 skipped, 0 error(s)", text)
+
     # ---- explicit multi-folder selection ---------------------------------
 
     def test_selected_archive_reports_an_ineligible_folder_as_a_failure(self) -> None:

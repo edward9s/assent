@@ -5,11 +5,12 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from assent import AssentError, pathops
+from assent import AssentError, gitops, lockfile, pathops, reconcile
 from assent.gitops import (
     branches_with_prefix, changes_outside_scope, commit_all, commit_empty,
     commit_if_dirty,
@@ -597,6 +598,194 @@ class TestRestore(GitTestCase):
             ["git", "status", "--porcelain"], cwd=self.root,
             capture_output=True, encoding="utf-8", check=True).stdout
         self.assertEqual(status.strip(), "")
+
+
+class TemporaryBranchTestCase(GitTestCase):
+    """A repo whose temporary branches, worktrees and refs are easy to build and read."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.target = subprocess.run(
+            ["git", "branch", "--show-current"], cwd=self.root,
+            capture_output=True, encoding="utf-8", check=True).stdout.strip()
+        self.worktrees: list[Path] = []
+
+    def tearDown(self) -> None:
+        for path in self.worktrees:
+            cleanup_worktree(self.root, path)
+        _run(self.root, "worktree", "prune")
+        super().tearDown()
+
+    def _commit_file(self, name: str, content: str,
+                     message: str | None = None) -> None:
+        (self.root / name).write_text(content, encoding="utf-8")
+        _run(self.root, "add", "-A")
+        _run(self.root, "commit", "-m", message or f"write {name}")
+
+    def _branch_with_commit(self, branch: str, name: str, content: str) -> None:
+        _run(self.root, "checkout", "-b", branch)
+        self._commit_file(name, content)
+        _run(self.root, "checkout", self.target)
+
+    def _add_worktree(self, branch: str) -> Path:
+        path = self.root.parent / f"{self.root.name}.checkout"
+        _run(self.root, "worktree", "add", str(path), branch)
+        self.worktrees.append(path)
+        return path
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(["git", *args], cwd=self.root, capture_output=True,
+                              encoding="utf-8", check=True).stdout
+
+class TestTemporaryBranches(TemporaryBranchTestCase):
+    """Read-only inventory of the two branch namespaces Assent owns."""
+
+    def test_prefixes_have_exactly_one_definition(self):
+        self.assertEqual(gitops.INTEGRATION_BRANCH_PREFIX, "assent-integration/")
+        self.assertEqual(gitops.RECONCILE_BRANCH_PREFIX, "assent-reconcile/")
+        self.assertIs(reconcile.RECONCILE_BRANCH_PREFIX,
+                      gitops.RECONCILE_BRANCH_PREFIX)
+
+    def test_repository_without_temporary_branches_is_empty(self):
+        _run(self.root, "branch", "feature01")
+        self.assertEqual(gitops.temporary_branches(self.root), ())
+
+    def test_same_tree_off_the_target_is_published(self):
+        # Exactly the accept shape: the target publishes a *different* commit
+        # carrying the same tree, so ancestry would find nothing.
+        self._branch_with_commit("assent-integration/folder01/aaaa",
+                                 "shared.txt", "published\n")
+        # accept(folder01): a distinct commit publishing the identical tree.
+        self._commit_file("shared.txt", "published\n", "accept(folder01)")
+        record, = gitops.temporary_branches(self.root)
+        self.assertEqual(record.branch, "assent-integration/folder01/aaaa")
+        self.assertEqual(record.classification, "published")
+        self.assertTrue(record.is_published)
+        self.assertNotEqual(record.tip, self._git("rev-parse", "HEAD").strip())
+        self.assertEqual(record.tree, self._git("rev-parse", "HEAD^{tree}").strip())
+
+    def test_tree_no_reachable_commit_carries_is_superseded(self):
+        self._branch_with_commit("assent-reconcile/folder02", "only.txt", "gone\n")
+        record, = gitops.temporary_branches(self.root)
+        self.assertEqual(record.branch, "assent-reconcile/folder02")
+        self.assertEqual(record.classification, "superseded")
+        self.assertFalse(record.is_published)
+
+    def test_records_are_ordered_by_branch_name(self):
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        self._branch_with_commit("assent-integration/folder03/bbbb", "c.txt", "c\n")
+        self._branch_with_commit("assent-integration/folder01/aaaa", "a.txt", "a\n")
+        self.assertEqual(
+            [record.branch for record in gitops.temporary_branches(self.root)],
+            ["assent-integration/folder01/aaaa",
+             "assent-integration/folder03/bbbb",
+             "assent-reconcile/folder02"])
+
+    def test_checked_out_branch_is_reported_with_its_worktree(self):
+        self._branch_with_commit("assent-integration/folder01/aaaa", "a.txt", "a\n")
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        path = self._add_worktree("assent-integration/folder01/aaaa")
+        checked, free = gitops.temporary_branches(self.root)
+        self.assertTrue(checked.is_checked_out)
+        self.assertEqual(checked.checked_out_in.resolve(), path.resolve())
+        self.assertIsNone(free.checked_out_in)
+        self.assertFalse(free.is_checked_out)
+
+    def test_call_mutates_nothing(self):
+        self._branch_with_commit("assent-integration/folder01/aaaa", "a.txt", "a\n")
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        self._add_worktree("assent-reconcile/folder02")
+        before_branches = self._git("branch", "--format=%(refname) %(objectname)")
+        before_worktrees = self._git("worktree", "list", "--porcelain")
+        gitops.temporary_branches(self.root)
+        self.assertEqual(self._git("branch", "--format=%(refname) %(objectname)"),
+                         before_branches)
+        self.assertEqual(self._git("worktree", "list", "--porcelain"),
+                         before_worktrees)
+
+    def test_explicit_target_classifies_against_that_ref(self):
+        self._branch_with_commit("assent-integration/folder01/aaaa",
+                                 "shared.txt", "published\n")
+        # accept(folder01): a distinct commit publishing the identical tree.
+        self._commit_file("shared.txt", "published\n", "accept(folder01)")
+        self.assertEqual(
+            gitops.temporary_branches(self.root, "HEAD~1")[0].classification,
+            "superseded")
+
+
+class TestRemoveTemporaryBranches(TemporaryBranchTestCase):
+    """Deleting the orphans the inventory found, under a lock the caller holds."""
+
+    def _refs(self) -> list[str]:
+        return sorted(self._git("show-ref").splitlines())
+
+    def test_deletes_every_temporary_branch_and_leaves_other_refs_alone(self):
+        self._branch_with_commit("assent-integration/folder01/aaaa", "a.txt", "a\n")
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        _run(self.root, "branch", "folder01/run", "HEAD")
+        _run(self.root, "tag", "release01")
+        temporary = gitops.temporary_branches(self.root)
+        survivors = [ref for ref in self._refs()
+                     if not any(f" refs/heads/{record.branch}" in ref
+                                for record in temporary)]
+        removals = gitops.remove_temporary_branches(self.root, temporary)
+        self.assertEqual([(removal.branch, removal.outcome) for removal in removals],
+                         [("assent-integration/folder01/aaaa", "deleted"),
+                          ("assent-reconcile/folder02", "deleted")])
+        self.assertEqual([removal.classification for removal in removals],
+                         ["superseded", "superseded"])
+        self.assertEqual(gitops.temporary_branches(self.root), ())
+        self.assertEqual(self._refs(), survivors)
+
+    def test_checked_out_branch_is_refused_and_the_rest_still_go(self):
+        self._branch_with_commit("assent-integration/folder01/aaaa", "a.txt", "a\n")
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        path = self._add_worktree("assent-integration/folder01/aaaa")
+        refused, deleted = gitops.remove_temporary_branches(
+            self.root, gitops.temporary_branches(self.root))
+        self.assertEqual(refused.outcome, "refused")
+        self.assertEqual(refused.checked_out_in.resolve(), path.resolve())
+        self.assertIsNone(refused.error)
+        self.assertEqual(deleted.outcome, "deleted")
+        self.assertEqual([record.branch for record in gitops.temporary_branches(self.root)],
+                         ["assent-integration/folder01/aaaa"])
+
+    def test_git_refusal_is_reported_and_the_other_branch_is_still_attempted(self):
+        # Real Git refusal, no mock: the branch is genuinely checked out, but the
+        # record claims otherwise, so only Git itself can stop the deletion.
+        self._branch_with_commit("assent-integration/folder01/aaaa", "a.txt", "a\n")
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        self._add_worktree("assent-integration/folder01/aaaa")
+        checked, free = gitops.temporary_branches(self.root)
+        failed, deleted = gitops.remove_temporary_branches(
+            self.root, (replace(checked, checked_out_in=None), free))
+        self.assertEqual(failed.outcome, "failed")
+        self.assertIn("assent-integration/folder01/aaaa", failed.error)
+        self.assertIsNone(failed.checked_out_in)
+        self.assertEqual(deleted.outcome, "deleted")
+        self.assertEqual([record.branch for record in gitops.temporary_branches(self.root)],
+                         ["assent-integration/folder01/aaaa"])
+
+    def test_branch_outside_the_owned_prefixes_raises_instead_of_deleting(self):
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        _run(self.root, "branch", "folder01/run", "HEAD")
+        record, = gitops.temporary_branches(self.root)
+        with self.assertRaises(AssentError) as raised:
+            gitops.remove_temporary_branches(
+                self.root, (replace(record, branch="folder01/run"),))
+        self.assertIn("folder01/run", str(raised.exception))
+        self.assertIn(" refs/heads/folder01/run", "\n".join(self._refs()))
+
+    def test_does_not_acquire_the_integration_lock(self):
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        with lockfile.hold_integration_lock(self.root / ".assent"):
+            removal, = gitops.remove_temporary_branches(
+                self.root, gitops.temporary_branches(self.root))
+        self.assertEqual(removal.outcome, "deleted")
+        self.assertEqual(gitops.temporary_branches(self.root), ())
+
+    def test_removing_nothing_is_a_success(self):
+        self.assertEqual(gitops.remove_temporary_branches(self.root, ()), ())
 
 
 class TestGitMissing(unittest.TestCase):
