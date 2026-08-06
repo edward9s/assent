@@ -20,6 +20,14 @@ from typing import Iterator, Sequence
 
 from assent import AssentError, pathops
 
+# The two temporary branch namespaces Assent owns.  Every branch name under
+# either prefix is created and removed by Assent alone, so these constants are
+# the single definition of both namespaces; no other module declares the
+# literal.
+INTEGRATION_BRANCH_PREFIX = "assent-integration/"
+RECONCILE_BRANCH_PREFIX = "assent-reconcile/"
+TEMPORARY_BRANCH_PREFIXES = (INTEGRATION_BRANCH_PREFIX, RECONCILE_BRANCH_PREFIX)
+
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess:
     # core.quotepath=false: by default Git octal-escapes non-ASCII filenames (Chinese, etc.)
@@ -1118,7 +1126,7 @@ def temporary_integration_worktree(
     primary = main_worktree(root)
     snapshot = _commit_snapshot(primary, target_snapshot)
     suffix = uuid.uuid4().hex
-    branch = f"assent-integration/{folder}/{suffix}"
+    branch = f"{INTEGRATION_BRANCH_PREFIX}{folder}/{suffix}"
     path = _temporary_container(primary) / f"target-{suffix}"
     path.parent.mkdir(parents=True, exist_ok=True)
     primary_error: BaseException | None = None
@@ -1135,3 +1143,86 @@ def temporary_integration_worktree(
             if primary_error is None:
                 raise
             primary_error.add_note(str(cleanup_error))
+
+
+# --- Temporary branch inventory ---
+
+PUBLISHED = "published"
+SUPERSEDED = "superseded"
+
+
+@dataclass(frozen=True)
+class TemporaryBranchRecord:
+    """One existing branch in an Assent temporary namespace, as read from Git.
+
+    ``classification`` is reporting information only: ``published`` means the
+    branch tip's tree is byte-identical to the tree of some commit reachable
+    from the integration target -- accept publishes a different commit with the
+    same tree, so ancestry would find no leftover at all -- and ``superseded``
+    means no reachable commit carries that tree.  Nothing may be deleted on the
+    strength of either value; deletion is proven by holding the integration
+    lock.
+    """
+
+    branch: str
+    tip: str
+    tree: str
+    classification: str
+    checked_out_in: Path | None
+
+    @property
+    def is_published(self) -> bool:
+        return self.classification == PUBLISHED
+
+    @property
+    def is_checked_out(self) -> bool:
+        return self.checked_out_in is not None
+
+
+def _branch_checkouts(root: Path) -> dict[str, Path]:
+    """Map every branch a registered worktree has checked out to that worktree."""
+    checkouts: dict[str, Path] = {}
+    path: Path | None = None
+    for line in _git(root, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            path = Path(line[len("worktree "):])
+        elif line.startswith("branch refs/heads/") and path is not None:
+            checkouts[line[len("branch refs/heads/"):]] = path
+    return checkouts
+
+
+def _reachable_trees(root: Path, target: str) -> set[str]:
+    """Collect the tree id of every commit reachable from ``target``."""
+    return {tree for line in _git(root, "log", "--format=%T", target).splitlines()
+            if (tree := line.strip())}
+
+
+def temporary_branches(root: Path,
+                       target: str | None = None) -> tuple[TemporaryBranchRecord, ...]:
+    """Read every existing branch in Assent's temporary namespaces, in name order.
+
+    Purely observational: it lists, classifies and reports, and never creates,
+    checks out, moves or deletes anything.  ``target`` defaults to the primary
+    worktree's current branch, the integration target; a repository with no
+    temporary branch is answered with an empty result before the target is
+    consulted at all.
+    """
+    primary = main_worktree(root)
+    branches = sorted({branch for prefix in TEMPORARY_BRANCH_PREFIXES
+                       for branch in branches_with_prefix(primary, prefix)})
+    if not branches:
+        return ()
+    published = _reachable_trees(
+        primary, target if target is not None else require_current_branch(primary))
+    checkouts = _branch_checkouts(primary)
+    records = []
+    for branch in branches:
+        tip = commit_of(primary, f"refs/heads/{branch}")
+        tree = tree_of(primary, tip)
+        records.append(TemporaryBranchRecord(
+            branch=branch,
+            tip=tip,
+            tree=tree,
+            classification=PUBLISHED if tree in published else SUPERSEDED,
+            checked_out_in=checkouts.get(branch)))
+    return tuple(records)
