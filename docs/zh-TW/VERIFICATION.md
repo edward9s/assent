@@ -50,9 +50,16 @@ task 的 scope、commit，或任何寫入 primary worktree —— 都會被普�
 （例如精確的 scope omission），以及維持唯讀的 blocked adjudication。
 
 Loop 依設定的 round list 終止：每個 round 讓 durable round index 剛好前進一，走到 list
-結尾就有限地結束自動化。在未修好的 blocker 上用完 round，會保留每一項 finding、編輯與
-journal，不再開新 round，並以非零 exit code 結束；在 `FIXED` round 上用完，則結算為下述
-獨立的 SELF-FIXED, UNREVIEWED 結果，exit code 為零。
+結尾就有限地結束自動化。在 `FIXED` round 上用完，不會馬上結算：scheduler 會先在修復後的
+source 上重跑 implicated task 自己的 focused gate 一次——沿用同一份會跳過本次 invocation
+已證明過 command 的 de-duplicating ledger——只有在通過後才結算為下述獨立的
+SELF-FIXED, UNREVIEWED 結果，exit code 為零。若這道 gate 失敗，則是另一個獨立結果，
+與 SELF-FIXED, UNREVIEWED 及一般 `BLOCKED` task 都不同：不寫結算 record、run 以非零
+exit code 結束、沒有 task 被標成 `BLOCKED`，修復、finding 與每一筆編輯都保留。在未修好的
+blocker 上用完 round，則會保留每一項 finding、編輯與 journal，不再開新 round，並結算為
+下述同樣獨立的 REVIEW UNRESOLVED, HUMAN DECISION 結果，exit code 為零而非非零——這是
+刻意設計，讓同一次 `--all` invocation 中排在後面的 folder 仍能繼續啟動，因為未解決的
+review finding 是留給人類 acceptance meeting 決定的問題，不是 infrastructure failure。
 
 Review 依循 changed 與 directly interacting code；既有 technical debt 只有在
 `COMPLETED_FOLDER + INITIAL` 引入、修正局部於既有 scope 且 focused gate 能可靠測試時才
@@ -65,13 +72,41 @@ before/after surface snapshot 偵測並拒絕這類寫入、保留原編輯，�
 則完全不得寫入。這是在 `danger-full-access` 預設
 下的 cooperative rule，不是 security sandbox，loop 內沒有 runtime human adjudication gate。
 
-Round list 在 `FIXED` round 上結束的 folder 屬於 SELF-FIXED, UNREVIEWED：durable state 記下
-結算結果 —— round 位置、用掉的 round 總數、該 round 的 adapter/model/effort，以及沒有人確認
-過的 finding fingerprint —— run 以零 exit code 結束。不還原、不 reopen、不重新標記：每個 task
-保留它自己 focused gate 證明的 status，被修好的 task 維持 `DONE` 而不會被改成 `BLOCKED`。
-Scheduler 為每個 implicated task 寫一筆 journal entry 並刷新 report。這個結果是終局，不是
-可續跑的 phase，之後的 `run --auto-fix` 只會再次回報它、不再開新 round，只有人類 `rework`
-能重新開啟該 folder。唯一缺的是獨立的 review 確認，而那只有人類的 `accept` 決定能提供。
+Round list 在 `FIXED` round 上結束的 folder，只有在 implicated task 自己的 focused gate 於
+修復後的 source 上重新證明通過，才會屬於 SELF-FIXED, UNREVIEWED：durable state 記下
+結算結果 —— round 位置、用掉的 round 總數、該 round 的 adapter/model/effort、證明這次修復的
+settling-gate evidence，以及沒有人確認過的 finding fingerprint —— run 以零 exit code 結束。
+不還原、不 reopen、不重新標記：每個 task 保留它自己 focused gate 證明的 status，被修好的
+task 維持 `DONE` 而不會被改成 `BLOCKED`。Scheduler 為每個 implicated task 寫一筆 journal
+entry 並刷新 report。這個結果是終局，不是可續跑的 phase，之後的 `run --auto-fix` 只會再次
+回報它、不再開新 round，只有人類 `rework` 能重新開啟該 folder。唯一缺的是獨立的 review
+確認，而那只有人類的 `accept` 決定能提供。
+
+若這道 settling gate 失敗，folder 不會結算：這是另一個獨立結果，與 SELF-FIXED, UNREVIEWED
+及一般 `BLOCKED` task 都不同。不會寫入 `self_fixed_unreviewed` record、run 以非零 exit code
+結束、沒有 task 被標成 `BLOCKED`，修復、finding 與每一筆編輯都原封不動地保留在 disk 上，
+就跟該 round 留下的狀態一樣。
+
+Round list 若改為在未修好的 blocker 上用完，則會結算為同樣獨立的
+REVIEW UNRESOLVED, HUMAN DECISION 結果：durable state 記下 round 位置、用掉的 round 總數、
+該 round 的 adapter/model/effort，以及沒有任何 round 解決的 finding，run 以零 exit code
+結束，而非非零。每個 task 都保留它自己 closeout 給的 status；不還原、不 reopen、不標記
+`BLOCKED`。這是刻意取代先前的非零 exit：因為 folder scheduler 的 `--all` launch loop 只在
+沒有 folder 失敗時才持續啟動下一個，這裡的非零 exit 過去會靜默取消同一次 invocation 中排在
+後面的所有無關 folder。未解決的 review finding 是 scheduler 無法決定的問題，不是
+infrastructure failure，因此改由人類 acceptance meeting 決定。`assent accept <FOLDER>` 對
+它的 gate 方式與 SELF-FIXED, UNREVIEWED 相同：在所有 receipt-based check 都已通過後，會
+指出產生這些未解決 finding 的 round 位置與 identity，以及每個 finding 的 task、path 與
+summary，再詢問一次明確的 `[y/N]` 確認才 publish；同時帶有兩種結果的 folder 只會被問一次，
+並同時指出兩個原因。
+
+一個已經寫入修復的 round 若在其 verdict 記錄前被中斷 —— 即在 `REPAIRING` 或
+`AWAITING_REVIEW` 期間發生的 unclean exit —— 會保留該編輯，且不會前進 round index。下一次
+run 的 startup recovery 會利用 durable state 的 current finding 所指名的 task 來歸屬這份
+dirt，證明方式與其他 recovery owner 相同的 scope-containment 判斷，並將其收進 `wip`
+checkpoint，不開任何 AI session。若無法以此方式證明 ownership —— dirt 超出該 task 宣告的
+scope、有一個以上可能的 owner、state 檔無法讀取，或根本沒有記錄中的 in-flight round ——
+recovery 仍會 fail-closed 拒絕，不會用猜的。
 
 Review context 是 `COMPLETED_FOLDER` 或 `BLOCKED_ADJUDICATION`，stage 是 `INITIAL` 或
 `RECHECK`。Recheck 先處理 prior current findings；仍存在 blocker 保留 fingerprint，新
@@ -116,14 +151,20 @@ Folder report 也會以零 token 顯示 derived `_auto_fix.toml`：沒有檔案�
 並列出 phase、context、stage、original blocker、current findings/recommendations、scope
 decision、acknowledgement、terminal reason、exact scope-amendment transaction，以及 review
 round index 對設定 round 數的比例。已結算的 self-fixed folder 會顯示獨立的
-`SELF-FIXED, UNREVIEWED (fresh)`，指出 self-fixed round 的位置、用掉的 round 數與該 round
-的 adapter/model/effort。Version 6 的 state 必須有 `phase`、
+`SELF-FIXED, UNREVIEWED (fresh)`，指出 self-fixed round 的位置、用掉的 round 數、該 round
+的 adapter/model/effort，以及證明這次修復的 settling-gate evidence。已結算的
+unresolved-review folder 會顯示同樣獨立的 `REVIEW UNRESOLVED, HUMAN DECISION (fresh)`，
+指出 round 位置、用掉的 round 數、該 round 的 adapter/model/effort，以及沒有任何 round
+解決的 finding。settling gate 失敗的 `FIXED` round 不會顯示這兩種結算 state 的任何一種：
+它仍停在 `FAILED (fresh)`，附上失敗 gate 的 command 與 evidence，產生它的 run 以非零 exit
+code 結束。Version 6 的 state 必須有 `phase`、
 `review_context`、`review_stage`、`failure_trigger`，綁定 source tree、task-plan digest、
 review-prompt digest 與 resolved reviewer adapter/model/effort，保留 finding ledger、
 recommendations、scope additions、exact scope-amendment transactions、repair briefs、
 dispositions、transitions、observed states、`review_round_index`，以及至多一筆
-`self_fixed_unreviewed` 結果；`NEEDS_REPAIR`、`REPAIRING`、`AWAITING_REVIEW`、`COMPLETE` 明確
-表示 restart boundary。它可刪除重建，不是 receipt、task status 或 acceptance gate。Pending
+`self_fixed_unreviewed` 結果與一筆 `unresolved_review` 結果；`NEEDS_REPAIR`、`REPAIRING`、
+`AWAITING_REVIEW`、`COMPLETE` 明確表示 restart boundary。它可刪除重建，不是 receipt、
+task status 或 acceptance gate。Pending
 的非 `PASS` state 若沒有目前 reviewer policy，或決定它的 identity 已不在設定的 round 之中，
 repair 與 closeout 會拒絕。
 
@@ -296,6 +337,12 @@ adapter/model/effort，以及記載被修復 finding 的 `_report.md`，然後�
 非互動 stdin 的 EOF，都視為拒絕，不 merge、不改任何 Git state。state 檔是可刪除的 derived
 memory、不是 acceptance evidence，因此 malformed record 無法在 receipt evidence 完整的
 folder 上憑空製造這道 gate。
+
+若單一 folder 的 derived auto-fix state 是 REVIEW UNRESOLVED, HUMAN DECISION，accept 會以
+同樣方式 gate，同樣在所有 receipt-based check 都已通過之後：Assent 會指出產生這些未解決
+finding 的 round 位置與 identity，以及每個 finding 的 task、path 與 summary —— 不只是數量
+—— 然後詢問 `Publish it anyway? [y/N]`。拒絕規則相同，且不留下任何 Git side effect。同時
+帶有 self-fixed gate 條件與此結果的 folder，只會被問一次，並同時指出兩個原因。
 
 `assent accept --all` 有兩種模式：
 

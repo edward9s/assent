@@ -131,9 +131,30 @@ advances the durable review round index by exactly one, and each reopened task
 is repaired under its own ordinary task profile: there is no escalation ladder
 and nothing is consumed, so an interrupted round resumes on the same identity
 and multi-task findings and dependency cascades do not escalate one task at a
-time. A round list that ends on an unconfirmed repair settles as
-`SELF-FIXED, UNREVIEWED`, which keeps every task's own status, exits zero, and
-makes `accept` ask for one explicit confirmation. Eligible pre-existing technical
+time. An unclean exit that interrupts a round after it already wrote a repair,
+but before its verdict advances the round index, preserves the edit; the next
+run's startup recovery attributes that dirt to the implicated task when the
+durable state's current findings prove ownership, gathering it into a `wip`
+checkpoint, or refuses fail-closed when it cannot.
+
+A round list that ends on a `FIXED` round first re-runs the implicated task's
+own focused gate against the repaired source -- reusing the same
+de-duplicating ledger that skips a command already proven earlier in the
+invocation -- and only then settles as `SELF-FIXED, UNREVIEWED`, which keeps
+every task's own status, exits zero, and makes `accept` ask for one explicit
+confirmation. When that settling gate fails instead, this is its own distinct
+outcome, separate from `SELF-FIXED, UNREVIEWED` and from an ordinary `BLOCKED`
+task: the folder does not settle, no task is marked `BLOCKED`, every edit and
+finding is preserved, and the run ends nonzero. A round list that ends on an
+unrepaired blocker settles as the equally distinct `REVIEW UNRESOLVED, HUMAN
+DECISION` outcome instead: every task keeps the status its own closeout gave
+it, nothing is marked `BLOCKED`, and the run exits zero -- deliberately,
+replacing a prior nonzero exit, so that the rest of an `--all` invocation's
+queued folders still start behind it; an unresolved review finding is a
+question for the human acceptance meeting, not an infrastructure failure. At
+`accept`, this outcome asks the same one explicit `[y/N]` confirmation,
+naming the unresolved findings' task, path, and summary, and a folder
+carrying both outcomes is asked once, naming both reasons. Eligible pre-existing technical
 debt may be introduced only by `COMPLETED_FOLDER + INITIAL`, when local to an
 existing scope and reliably testable in directly interacting code; blocked
 adjudication and `RECHECK` may resolve it but cannot add another. Review does

@@ -129,15 +129,41 @@ one of the configured rounds.
 
 Each round advances the durable `review_round_index` by exactly one, and
 reaching the end of the configured list ends automation finitely. Running out
-on an unrepaired blocker preserves every finding, edit, and journal and exits
-nonzero. Running out on a `FIXED` round instead settles the folder as
-SELF-FIXED, UNREVIEWED and exits zero: nothing is reverted, reopened, or
-re-marked, so a repaired task keeps the `DONE` its own focused gate proved
-rather than being turned `BLOCKED`. That outcome is terminal rather than a
-resumable phase -- a later `run --auto-fix` reports it again and starts no
-further round, and only a human `rework` reopens the folder. The one thing
-missing is independent review confirmation, which only the human `accept`
-decision supplies.
+on a `FIXED` round does not settle immediately: the scheduler first re-runs
+the implicated task's own focused gate against the repaired source, reusing
+the same de-duplicating ledger that skips a command already proven earlier in
+the invocation, so the settled claim -- that every task passed its own
+focused gate -- is proven of the final repair and not only of the state that
+preceded it. When that gate passes, the folder settles as SELF-FIXED,
+UNREVIEWED and exits zero: nothing is reverted, reopened, or re-marked, so a
+repaired task keeps the `DONE` its own focused gate proved rather than being
+turned `BLOCKED`. That outcome is terminal rather than a resumable phase -- a
+later `run --auto-fix` reports it again and starts no further round, and only
+a human `rework` reopens the folder. The one thing missing is independent
+review confirmation, which only the human `accept` decision supplies.
+
+When that settling gate fails instead, this is its own distinct outcome,
+separate from both SELF-FIXED, UNREVIEWED and an ordinary `BLOCKED` task: the
+folder does not settle, no task is marked `BLOCKED`, and the repair, findings,
+and every edit are preserved -- and the run ends nonzero.
+
+Running out on an unrepaired blocker no longer exits nonzero: it settles as
+the equally distinct REVIEW UNRESOLVED, HUMAN DECISION outcome, preserving
+every finding, edit, and journal, leaving every task at the status its own
+closeout gave it, and exiting zero. This is deliberate: because the folder
+scheduler's `--all` launch loop only keeps starting folders while none has
+failed, a nonzero exit here used to silently cancel every unrelated folder
+still queued behind it in the same invocation. An unresolved review finding is
+a question the scheduler cannot decide, not an infrastructure failure, so it
+is routed to the human acceptance meeting instead of stopping the queue.
+
+An unclean exit that interrupts a round after it has already written a repair,
+but before its verdict advances the round index, preserves the edit and
+leaves the round index unmoved. The next run's startup recovery attributes
+that dirt to the task the durable state's current findings implicate, using
+the same scope-containment proof its other recovery owners use, and gathers
+it into a `wip` checkpoint with no AI session opened; when ownership cannot be
+proven this way, recovery still refuses fail-closed rather than guessing.
 
 Re-review follows soft convergence: prior current findings are considered first,
 a still-present blocker keeps its fingerprint, and a new blocker needs evidence
@@ -165,8 +191,15 @@ focused/full verification evidence.
 The report's `Folder auto-fix` section is zero-token derived evidence: `NOT RUN`
 means no state file, `PASSED (fresh)` and `FAILED (fresh)` show the current
 review verdict, `SELF-FIXED, UNREVIEWED (fresh)` names the self-fixed round
-position, the rounds used, and that round's adapter/model/effort, and `STALE`
-means malformed state or a changed source/task binding. It also shows phase,
+position, the rounds used, that round's adapter/model/effort, and the
+settling-gate evidence that proved the final repair, `REVIEW UNRESOLVED, HUMAN
+DECISION (fresh)` names the round position, the rounds used, that round's
+adapter/model/effort, and the findings no round resolved -- a distinct outcome
+from both `SELF-FIXED, UNREVIEWED` and an ordinary `BLOCKED` task -- and
+`STALE` means malformed state or a changed source/task binding. A `FIXED`
+round whose settling gate failed settles as neither of those states and stays
+`FAILED (fresh)` with the failing gate's command and evidence, and the run
+that produced it exits nonzero. It also shows phase,
 context, stage, original blocker, findings and recommendations, scope decisions
 and exact scope-amendment transactions, repair acknowledgements and briefs, and
 the review round index against the number of configured rounds.
@@ -198,6 +231,14 @@ self-fixed round, its adapter/model/effort, and the `_report.md` holding the
 repaired findings, then asks `Publish it anyway? [y/N]`. Only an exact `y`/`Y`
 publishes; anything else, including EOF from a non-interactive stdin, declines
 and changes no Git state.
+
+A single-folder accept whose derived auto-fix state is REVIEW UNRESOLVED,
+HUMAN DECISION gates the same way, after the same receipt-based checks already
+pass: Assent names the round position and identity that produced the
+unresolved findings and, for each one, its task, path, and summary, then asks
+`Publish it anyway? [y/N]`. The same decline rule applies, with no Git side
+effect. A folder carrying both the self-fixed gate condition and this one is
+asked exactly once, naming both reasons.
 
 Remote synchronization, such as `git push`, is a separate human Git decision.
 Cleanup with `assent clean` happens only after the source is no longer needed

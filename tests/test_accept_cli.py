@@ -412,6 +412,54 @@ class TestAcceptCliFailures(AcceptCliCase):
         self.assertNotIn(
             "SELF-FIXED", self._git("log", "-1", "--format=%B", "trunk"))
 
+    def test_unresolved_review_folder_needs_a_real_typed_confirmation(self) -> None:
+        source, branch, tip = self._make_source()
+        before = self._head()
+        verified = self._cli("verify", self.folder)
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+        cfg = load_config(self.config, self.folder)
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (auto_fix.ReviewFinding(
+                "t001", "src/main.py", "The entry point still crashes on start",
+                "No configured round repaired it."),)),
+            source_tree=gitops.tree_of(self.root, "HEAD"),
+            task_plan_sha256=auto_fix.sha256_files(
+                [self.tasks_dir / "t001_任務.e.toml"]),
+            review_prompt_sha256="5" * 64,
+            reviewer_adapter="codex", reviewer_model="prime",
+            reviewer_effort="heavy", review_round_index=1)
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg),
+            auto_fix.with_unresolved_review(state))
+
+        # Piping no input at all: it must decline immediately rather than hang
+        # or default to publishing.
+        closed = self._cli("accept", self.folder)
+        self.assertEqual(closed.returncode, 1, closed.stdout + closed.stderr)
+        self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", closed.stdout)
+        self.assertIn("unresolved review round: 1 of 1 (codex/prime/heavy)",
+                      closed.stdout)
+        # The findings themselves, not a count, are what a human overrules.
+        self.assertIn(
+            "- t001 src/main.py: The entry point still crashes on start",
+            closed.stdout)
+        self.assertIn("was not confirmed", closed.stdout)
+        self._assert_failed_preserves(before, source, branch, tip)
+
+        declined = self._cli("accept", self.folder, stdin="n\n")
+        self.assertEqual(declined.returncode, 1, declined.stdout + declined.stderr)
+        self.assertIn("was not confirmed", declined.stdout)
+        self._assert_failed_preserves(before, source, branch, tip)
+
+        confirmed = self._cli("accept", self.folder, stdin="y\n")
+        self.assertEqual(confirmed.returncode, 0,
+                         confirmed.stdout + confirmed.stderr)
+        after = self._head()
+        parents = self._git("rev-list", "--parents", "-n", "1", after).split()
+        self.assertEqual(parents[1:], [before, tip])
+        self.assertNotIn(
+            "UNRESOLVED", self._git("log", "-1", "--format=%B", "trunk"))
+
     def test_last_gate_branch_head_and_cleanliness_changes_refuse(self) -> None:
         source, branch, tip = self._make_source()
         before = self._head()

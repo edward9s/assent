@@ -257,6 +257,7 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
     reasons, current_tree = _auto_fix_binding_reasons(cfg, plan, state)
 
     self_fixed = state.self_fixed_unreviewed
+    unresolved = state.unresolved_review
     if reasons:
         status = "STALE"
         freshness = "; ".join(reasons)
@@ -265,6 +266,12 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
         # gate its own tasks declare, and only independent review confirmation
         # is missing.
         status = "SELF-FIXED, UNREVIEWED"
+        freshness = "fresh"
+    elif unresolved is not None:
+        # The other terminal outcome, and distinct from the self-fixed one: the
+        # finite round list ended with a blocker no round resolved, so what a
+        # human must decide is the finding itself, not a missing confirmation.
+        status = "REVIEW UNRESOLVED, HUMAN DECISION"
         freshness = "fresh"
     elif state.verdict == "PASS":
         status = "PASSED"
@@ -288,6 +295,13 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
             f"{self_fixed.rounds_used} "
             f"({self_fixed.adapter}/{self_fixed.model}/{self_fixed.effort}); "
             "no later configured round confirmed the repair")
+    if unresolved is not None:
+        lines.append(
+            f"  Unresolved review round: {unresolved.round_index + 1} of "
+            f"{unresolved.rounds_used} "
+            f"({unresolved.adapter}/{unresolved.model}/{unresolved.effort}); "
+            f"{len(unresolved.finding_fingerprints)} finding(s) no configured "
+            "round resolved")
 
     if state.repair_briefs:
         for brief in state.repair_briefs:
@@ -398,6 +412,13 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
             f"{self_fixed.adapter}/{self_fixed.model}/{self_fixed.effort}; "
             "every task passed its own focused gate, and acceptance remains "
             "the human accept action)")
+    elif unresolved is not None:
+        lines.append(
+            "  Terminal: REVIEW UNRESOLVED, HUMAN DECISION (round "
+            f"{unresolved.round_index + 1} of {unresolved.rounds_used}, "
+            f"{unresolved.adapter}/{unresolved.model}/{unresolved.effort}; "
+            "the run succeeded, every task keeps the status its own closeout "
+            "gave it, and the findings above are the human accept decision)")
     elif exhaustion is not None:
         lines.append(f"  Exhaustion reason: {_compact_report_text(exhaustion)}")
         lines.append("  Terminal: NONZERO / EXHAUSTED")

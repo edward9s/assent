@@ -992,11 +992,24 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             existing_auto_fix is not None
             and existing_auto_fix.self_fixed_unreviewed is not None
             and all(task.status in ("DONE", "SKIP") for task in plan.tasks))
-        if settled_self_fixed and auto_fix_enabled:
+        # A settled REVIEW UNRESOLVED folder ends the loop the same way, but it
+        # may legitimately hold a BLOCKED task, so "no task is runnable" is what
+        # distinguishes it from a folder a human reopened with rework.
+        settled_unresolved = bool(
+            existing_auto_fix is not None
+            and existing_auto_fix.unresolved_review is not None)
+        quiescent_unresolved = settled_unresolved and not any(
+            task.status in ("TODO", "WIP") for task in plan.tasks)
+        if auto_fix_enabled and (settled_self_fixed or quiescent_unresolved):
             assert existing_auto_fix is not None
-            outcome = existing_auto_fix.self_fixed_unreviewed
-            assert outcome is not None
-            _print_self_fixed_unreviewed(outcome)
+            if settled_self_fixed:
+                outcome = existing_auto_fix.self_fixed_unreviewed
+                assert outcome is not None
+                _print_self_fixed_unreviewed(outcome)
+            else:
+                unresolved = existing_auto_fix.unresolved_review
+                assert unresolved is not None
+                _print_unresolved_review(unresolved)
             _print_summary(plan)
             try_write_report(cfg)
             return 0
@@ -1004,7 +1017,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             auto_fix_enabled
             and existing_auto_fix is not None
             and existing_auto_fix.verdict != "PASS"
-            and not settled_self_fixed)
+            and not settled_self_fixed
+            and not settled_unresolved)
         if resuming_auto_fix:
             assert existing_auto_fix is not None
             recovery_error = _auto_fix_recovery_config_error(
@@ -1072,7 +1086,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 if review_outcome.rounds_exhausted:
                     assert review_outcome.state is not None
                     return _auto_fix_finish_rounds_exhausted(
-                        cfg, review_outcome.state, now)
+                        cfg, review_outcome.state, now,
+                        gate_passes=gate_passes)
                 if (auto_fix_enabled and review_outcome.state is not None
                         and review_outcome.human_reason is None
                         and not (once or task_id is not None)):
@@ -1173,10 +1188,12 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     # Every non-PASS verdict is an unconfirmed pending state, matching the
     # resume guard above: a durable FIXED is a self-repair no round has yet
     # confirmed, so it must refuse closeout exactly as a FAIL does.  The one
-    # settled exception is the terminal SELF-FIXED, UNREVIEWED outcome, whose
-    # remaining decision is the human accept rather than another round.
+    # settled exceptions are the two terminal outcomes -- SELF-FIXED, UNREVIEWED
+    # and REVIEW UNRESOLVED -- whose remaining decision is the human accept
+    # rather than another round.
     if (pending is not None and pending.verdict != "PASS"
-            and pending.self_fixed_unreviewed is None):
+            and pending.self_fixed_unreviewed is None
+            and pending.unresolved_review is None):
         print("Auto-fix closeout refused: the folder has a pending "
               f"{pending.verdict} state; "
               "rerun with --auto-fix and its current [auto_fix.review] policy.")
@@ -2570,7 +2587,8 @@ def _auto_fix_cascade_tasks(plan: Plan, implicated: list[str]) -> list[Task]:
 
 def _auto_fix_finish_rounds_exhausted(
         cfg: Config, state: auto_fix.AutoFixState,
-        now: Callable[[], datetime]) -> int:
+        now: Callable[[], datetime], *,
+        gate_passes: _FocusedGateLedger | None = None) -> int:
     """The finite review-round sequence ran out; stop without another round.
 
     Nothing is reverted, reopened, or re-marked: the durable finding ledger,
@@ -2579,32 +2597,250 @@ def _auto_fix_finish_rounds_exhausted(
     it found (verdict ``FIXED``) is not a failure -- the code passed every
     focused gate its own tasks declare and only independent review confirmation
     is missing -- so it settles as the distinct, human-gated SELF-FIXED,
-    UNREVIEWED outcome and the run succeeds.  A blocker no round repaired still
-    ends nonzero.
+    UNREVIEWED outcome and the run succeeds.  That claim is what the settling
+    gate below proves: the last round wrote its repair after those gates last
+    ran, so they run once more on the repaired source before anything settles,
+    and a repair that breaks one ends the run nonzero instead of handing a
+    human an unproven outcome.  A blocker no round repaired is likewise not an
+    infrastructure failure but a question the scheduler cannot decide, so it
+    settles as the distinct, human-gated REVIEW UNRESOLVED outcome and the run
+    also succeeds; only a broken gate keeps a nonzero exit here.
     """
     if state.verdict != "FIXED":
-        print(f"Auto-fix review rounds exhausted after {state.review_round_index} "
-              "round(s); every finding, edit, and journal was preserved without "
-              "another round.")
-        return 1
+        return _auto_fix_settle_unresolved_review(cfg, state, now)
     already_settled = state.self_fixed_unreviewed is not None
-    settled = auto_fix.with_self_fixed_unreviewed(
-        state, source_tree=_auto_fix_current_tree(cfg))
-    outcome = settled.self_fixed_unreviewed
-    assert outcome is not None
+    gate_passed, evidence, gate_tasks = (
+        (True, "", ()) if already_settled
+        else _auto_fix_settling_gates(cfg, state, gate_passes, now))
+    if not already_settled:
+        state = _auto_fix_with_settling_gate_evidence(
+            state, gate_tasks, evidence)
     try:
         # The durable outcome and the report a human reads must both be on disk
         # before this folder hands control back, so the report refresh follows
         # the same unconditional discipline folder verification's own closeout
-        # uses -- a later failure can never leave either unwritten.
+        # uses -- a later failure can never leave either unwritten.  A failed
+        # settling gate takes the same discipline: its evidence is durable, and
+        # only the settled outcome itself is withheld.
+        if not gate_passed:
+            # The preserved state is rebound to the tree the gate was just
+            # proven against, exactly as both settle branches below rebind
+            # theirs: the final round's repair was checkpointed after the last
+            # review bound this record, so writing it unchanged would make the
+            # report call the freshest evidence the folder has STALE (source
+            # tree changed) instead of the pending FAILED (fresh) verdict plus
+            # the failing gate's command and evidence.
+            current_tree = _auto_fix_current_tree(cfg)
+            if current_tree is not None:
+                state = replace(state, source_tree=current_tree)
+            auto_fix.write_auto_fix_state(
+                auto_fix.auto_fix_state_path(cfg), state)
+            print(f"Auto-fix review rounds exhausted after "
+                  f"{state.review_round_index} round(s); the final round's "
+                  "repair was not proven by the focused gate of the task it "
+                  "repaired, so the folder did not settle. Every finding, "
+                  "edit, and journal entry was preserved without another "
+                  "round.")
+            return 1
+        settled = auto_fix.with_self_fixed_unreviewed(
+            state, source_tree=_auto_fix_current_tree(cfg))
+        outcome = settled.self_fixed_unreviewed
+        assert outcome is not None
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), settled)
         _print_self_fixed_unreviewed(outcome)
         if not already_settled:
-            _auto_fix_journal_self_fixed(cfg, settled, now)
+            _auto_fix_journal_self_fixed(
+                cfg, settled, now, gate_evidence=evidence)
     finally:
         try_write_report(cfg)
     return 0
+
+
+def _auto_fix_settle_unresolved_review(
+        cfg: Config, state: auto_fix.AutoFixState,
+        now: Callable[[], datetime]) -> int:
+    """Hand an unresolved finding to the human meeting instead of failing the run.
+
+    The configured rounds ran out with a blocker none of them repaired.  That is
+    a question the scheduler cannot settle, not an infrastructure failure, a
+    refused precondition, or a broken gate, so it must not exit nonzero: a
+    nonzero folder stops the launch loop and silently cancels every unrelated
+    folder still queued behind it in the same invocation.  The outcome instead
+    becomes a durable terminal record plus a distinctly named report state, and
+    the explicit ``accept`` gate stays the human decision point.  Every task
+    keeps the status its own closeout gave it; nothing is reverted, reopened, or
+    marked BLOCKED.
+    """
+    already_settled = state.unresolved_review is not None
+    try:
+        # The durable outcome and the report a human reads must both be on disk
+        # before this folder hands control back, under the same unconditional
+        # discipline the self-fixed settlement above uses.
+        settled = auto_fix.with_unresolved_review(
+            state, source_tree=_auto_fix_current_tree(cfg))
+        outcome = settled.unresolved_review
+        assert outcome is not None
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg), settled)
+        _print_unresolved_review(outcome)
+        if not already_settled:
+            _auto_fix_journal_unresolved_review(cfg, settled, now)
+    finally:
+        try_write_report(cfg)
+    return 0
+
+
+def _print_unresolved_review(
+        outcome: auto_fix.UnresolvedReviewOutcome) -> None:
+    print(f"Auto-fix folder review: REVIEW UNRESOLVED, HUMAN DECISION after "
+          f"{outcome.rounds_used} configured round(s); review round "
+          f"{outcome.round_index + 1} "
+          f"({outcome.adapter}/{outcome.model}/{outcome.effort}) left "
+          f"{len(outcome.finding_fingerprints)} finding(s) no round resolved. "
+          "Every task keeps the status its own closeout gave it, and the "
+          "findings, edits and journals are preserved for the human acceptance "
+          "decision.")
+
+
+def _auto_fix_journal_unresolved_review(
+        cfg: Config, state: auto_fix.AutoFixState,
+        now: Callable[[], datetime]) -> None:
+    """Record the settled outcome once on every implicated task's r file."""
+    outcome = state.unresolved_review
+    assert outcome is not None
+    ledger = {item.fingerprint: item for item in state.findings}
+    by_task: dict[str, list[str]] = {}
+    for fingerprint in outcome.finding_fingerprints:
+        finding = ledger[fingerprint]
+        if finding.task_id is None:
+            continue
+        by_task.setdefault(finding.task_id, []).append(
+            f"- {fingerprint} {finding.path}: {finding.summary}")
+    plan = Plan.parse(cfg.tasks_dir)
+    identity = f"{outcome.adapter}/{outcome.model}/{outcome.effort}"
+    for task_id, findings in by_task.items():
+        task = plan.get(task_id)
+        if task is None:
+            continue
+        append_entry(
+            task.journal_path, by="scheduler",
+            event="auto_fix_unresolved_review",
+            summary=(f"Review round {outcome.round_index + 1} of "
+                     f"{outcome.rounds_used} ({identity}) ended the configured "
+                     "round list with this task's finding still unresolved"),
+            detail=("The bounded review-and-repair loop is finitely over, so "
+                    "the folder is REVIEW UNRESOLVED, HUMAN DECISION: the run "
+                    "succeeds so unrelated queued folders still start, the task "
+                    "keeps the status its own closeout gave it, and nothing was "
+                    "reopened, reverted, or marked BLOCKED. The unresolved "
+                    "findings are evidence for the human acceptance meeting.\n"
+                    "Unresolved findings:\n" + "\n".join(findings)),
+            time_str=now().isoformat(timespec="seconds"))
+
+
+# The one heading the settling gate writes into a durable brief, so re-proving
+# a folder replaces its own section instead of stacking another copy.
+_AUTO_FIX_SETTLING_GATE_HEADING = "Settling focused gate evidence"
+
+
+def _auto_fix_settling_gates(
+        cfg: Config, state: auto_fix.AutoFixState,
+        gate_passes: _FocusedGateLedger | None,
+        now: Callable[[], datetime]) -> tuple[bool, str, tuple[str, ...]]:
+    """Prove the last round's repair against the implicated tasks' own gates.
+
+    SELF-FIXED, UNREVIEWED tells a human that every task passed the focused
+    gate it declares itself, and that only independent review confirmation is
+    missing.  The final round writes its repair after those gates last ran, so
+    the statement is true of the repair only once they run again on it.  This
+    reuses the ordinary focused-gate execution and the invocation's own
+    ``_FocusedGateLedger``, so a command already proven against exactly this
+    source is not run a second time.
+    """
+    ledger = {item.fingerprint: item for item in state.findings}
+    implicated = tuple(dict.fromkeys(
+        ledger[fingerprint].task_id
+        for fingerprint in state.current_finding_fingerprints
+        if ledger[fingerprint].task_id is not None))
+    lines = [f"{_AUTO_FIX_SETTLING_GATE_HEADING} "
+             f"({now().isoformat(timespec='seconds')}):"]
+
+    def refused(line: str) -> tuple[bool, str, tuple[str, ...]]:
+        lines.append(line)
+        return False, "\n".join(lines), implicated
+
+    if not implicated:
+        return refused("- FAIL: no existing task owns the settling findings, "
+                       "so no focused gate can prove the repair")
+    plan = Plan.parse(cfg.tasks_dir)
+    owners: dict[str, list[str]] = {}
+    for task_id in implicated:
+        task = plan.get(task_id)
+        if task is None:
+            return refused(f"- FAIL {task_id}: the repaired task is no longer "
+                           "in the plan")
+        owners.setdefault(task.verify, []).append(task.id)
+
+    print("Auto-fix folder review: proving the final round's repair against "
+          "the focused gates of the tasks it repaired.")
+    reused = {command: gate_passes is not None
+              and gate_passes.reusable(cfg, command)
+              for command in owners}
+    merged = _merged_unittest_passes(
+        cfg, [command for command in owners if not reused[command]])
+    for command, tasks in owners.items():
+        label = ", ".join(tasks)
+        if reused[command]:
+            print(f"  verify: {command}")
+            print("  reused authoritative PASS (scheduler gate, exit 0)")
+            lines.append(
+                f"- PASS (reused authoritative PASS) {label}: {command}")
+            continue
+        result = merged.get(command)
+        if result is None:
+            result = _verify_subprocess(cfg, command)
+        _show_verify_result(command, result)
+        if result.returncode != 0:
+            diagnostic = _bounded_adapter_diagnostic(
+                result.stderr or result.stdout or "")
+            return refused(f"- FAIL ({result.returncode}) {label}: {command}; "
+                           f"{diagnostic}")
+        lines.append(f"- PASS {label}: {command}")
+    return True, "\n".join(lines), implicated
+
+
+def _auto_fix_with_settling_gate_evidence(
+        state: auto_fix.AutoFixState, task_ids: tuple[str, ...],
+        evidence: str) -> auto_fix.AutoFixState:
+    """Persist the settling gate result where the folder report already reads.
+
+    The durable repair brief is the folder's one free-text per-task evidence
+    record, and the report renders its opening, so the gate result leads it: a
+    human reading `_report.md` sees which command proved the final repair, and
+    when, without opening the derived state file.
+    """
+    briefs: list[auto_fix.RepairBrief] = []
+    carried: set[str] = set()
+    for item in state.repair_briefs:
+        brief = _auto_fix_without_gate_evidence(item.brief)
+        if item.task_id in task_ids:
+            carried.add(item.task_id)
+            brief = f"{evidence}\n\n{brief}" if brief else evidence
+        briefs.append(auto_fix.RepairBrief(
+            item.task_id, item.finding_fingerprints, brief))
+    briefs.extend(
+        auto_fix.RepairBrief(
+            task_id, state.current_finding_fingerprints, evidence)
+        for task_id in task_ids if task_id not in carried)
+    return auto_fix.with_repair_briefs(state, tuple(briefs))
+
+
+def _auto_fix_without_gate_evidence(brief: str) -> str:
+    """Drop an earlier settling-gate section so re-proving replaces it."""
+    if not brief.startswith(_AUTO_FIX_SETTLING_GATE_HEADING):
+        return brief
+    return brief.partition("\n\n")[2]
 
 
 def _auto_fix_current_tree(cfg: Config) -> str | None:
@@ -2627,7 +2863,7 @@ def _print_self_fixed_unreviewed(outcome: auto_fix.SelfFixedOutcome) -> None:
 
 def _auto_fix_journal_self_fixed(
         cfg: Config, state: auto_fix.AutoFixState,
-        now: Callable[[], datetime]) -> None:
+        now: Callable[[], datetime], *, gate_evidence: str = "") -> None:
     """Record the settled outcome once on every implicated task's r file."""
     outcome = state.self_fixed_unreviewed
     assert outcome is not None
@@ -2657,7 +2893,8 @@ def _auto_fix_journal_self_fixed(
                     "was reopened, reverted, or marked BLOCKED. Only "
                     "independent review confirmation is missing; acceptance "
                     "remains the explicit human action.\n"
-                    "Unconfirmed findings:\n" + "\n".join(findings)),
+                    "Unconfirmed findings:\n" + "\n".join(findings)
+                    + (f"\n{gate_evidence}" if gate_evidence else "")),
             time_str=now().isoformat(timespec="seconds"))
 
 
@@ -2783,7 +3020,8 @@ def _run_auto_fix_repairs(
                 return 0
             if outcome.rounds_exhausted:
                 return _auto_fix_finish_rounds_exhausted(
-                    cfg, outcome.state or state, now)
+                    cfg, outcome.state or state, now,
+                    gate_passes=round_passes)
             if outcome.state is None or outcome.human_reason is not None:
                 return outcome.code
             state = outcome.state
@@ -2897,7 +3135,8 @@ def _run_auto_fix_repairs(
                     blockers=tuple(round_blockers))
                 if outcome.rounds_exhausted:
                     return _auto_fix_finish_rounds_exhausted(
-                        cfg, outcome.state or state, now)
+                        cfg, outcome.state or state, now,
+                        gate_passes=round_passes)
                 if outcome.state is None or outcome.human_reason is not None:
                     return outcome.code
                 state = outcome.state
@@ -2913,17 +3152,56 @@ def _recover_or_ensure_clean(cfg: Config, now: Callable[[], datetime]) -> None:
 
     A hard power loss or a forced kill never reaches the Ctrl+C / quota / infrastructure
     interrupt handlers, so it leaves the worktree dirty with the task status and the wip
-    checkpoint unwritten.  On the next run, if every uncommitted change is provably inside the
-    scope of the task ``next_task()`` would resume -- or, failing that, of a single DONE task
-    the scheduler never checkpointed -- that progress is gathered into a ``wip`` checkpoint and
-    the run continues -- no AI session, zero tokens.  Every other dirty state (a change outside
-    that scope, ambiguous ownership, or no provable owner at all) keeps today's fail-closed
-    behaviour: ``ensure_clean`` raises and the caller refuses to run rather than guessing
-    attribution.
+    checkpoint unwritten.  A merged reviewer-fixer round interrupted between its first write
+    and its verdict leaves the same kind of dirt behind a folder whose tasks are all already
+    checkpointed.  On the next run, if every uncommitted change is provably inside the scope of
+    the task ``next_task()`` would resume -- or, failing that, of a single DONE task the
+    scheduler never checkpointed, or of the single task a durable in-flight review round
+    implicates -- that progress is gathered into a ``wip`` checkpoint and the run continues --
+    no AI session, zero tokens.  Every other dirty state (a change outside that scope,
+    ambiguous ownership, or no provable owner at all) keeps today's fail-closed behaviour:
+    ``ensure_clean`` raises and the caller refuses to run rather than guessing attribution.
     """
     if _try_recover_attributable_worktree(cfg, now):
         return
     gitops.ensure_clean(cfg.root, cfg.git_excludes)
+
+
+@dataclass(frozen=True)
+class _DirtOrigin:
+    """What left a provably attributable dirty worktree behind, in the recovery's own wording.
+
+    The checkpoint that gathers the dirt is the same one either way; the origin decides what
+    the checkpoint subject, the terminal line and the journal entry say about where the dirt
+    came from, so a human reading either afterwards can tell an unclean process exit from an
+    interrupted review round without digging, and whether the owning task is reopened.
+    """
+
+    description: str
+    checkpoint_reason: str
+    journal_detail: str
+    # Whether recovery may itself put the owning task back to WIP.  A crash before the
+    # scheduler accepted anything leaves an untrusted status the next run must resume, but a
+    # task a review round was repairing already passed its own focused gate and reached its
+    # terminal checkpoint: only the durable repair loop's own rework may reopen that one, so
+    # recovery gathers the edits and leaves every status exactly as its gate proved it.
+    reopens_task: bool
+
+
+_UNCLEAN_EXIT_DIRT = _DirtOrigin(
+    "an unclean process exit",
+    "recovered dirty worktree from an unclean exit, scope-verified",
+    "run startup detected a dirty worktree from an unclean process "
+    "exit and scope-verified it against the resumable candidate",
+    reopens_task=True)
+
+_INTERRUPTED_REVIEW_DIRT = _DirtOrigin(
+    "an interrupted review round",
+    "recovered dirty worktree from an interrupted review round, scope-verified",
+    "run startup detected a dirty worktree left by a merged reviewer-fixer round "
+    "that was interrupted after it wrote and before its verdict was recorded, and "
+    "scope-verified it against the task the durable current findings implicate",
+    reopens_task=False)
 
 
 def _try_recover_attributable_worktree(cfg: Config,
@@ -2931,14 +3209,15 @@ def _try_recover_attributable_worktree(cfg: Config,
     """Return True only when the worktree was dirty and every change was provably attributable
     to one task, having just committed that progress into a wip checkpoint.
 
-    Two owners can be proven, in this order: the task ``next_task()`` would resume, and -- only
-    when that candidate does not own the dirt -- a single DONE task the scheduler never got to
-    checkpoint (see ``_uncheckpointed_done_dirt_owner``).  A clean worktree, an unparsable plan,
-    or dirt no single task provably owns all return False, leaving the caller's fail-closed
-    ``ensure_clean`` to decide.  Attribution reuses the same scope machinery that contains a
-    running task's output (``changes_outside_scope`` with an empty ``since_ref`` -> only the
-    current uncommitted changes), so the recovery can never claim work a task's scope would not
-    have permitted.
+    Three owners can be proven, in this order: the task ``next_task()`` would resume; failing
+    that, a single DONE task the scheduler never got to checkpoint (see
+    ``_uncheckpointed_done_dirt_owner``); and failing that, the task a durable in-flight review
+    round implicates (see ``_interrupted_review_round_dirt_owner``).  A clean worktree, an
+    unparsable plan, or dirt no single task provably owns all return False, leaving the caller's
+    fail-closed ``ensure_clean`` to decide.  Attribution reuses the same scope machinery that
+    contains a running task's output (``changes_outside_scope`` with an empty ``since_ref`` ->
+    only the current uncommitted changes), so the recovery can never claim work a task's scope
+    would not have permitted.
     """
     if gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
         return False
@@ -2946,16 +3225,18 @@ def _try_recover_attributable_worktree(cfg: Config,
         plan = Plan.parse(cfg.tasks_dir)
     except AssentError:
         return False
+    origin = _UNCLEAN_EXIT_DIRT
     owner = _resumable_dirt_owner(cfg, plan) or _uncheckpointed_done_dirt_owner(cfg, plan)
+    if owner is None:
+        owner = _interrupted_review_round_dirt_owner(cfg, plan)
+        origin = _INTERRUPTED_REVIEW_DIRT
     if owner is None:
         return False
 
-    _mark_recovered_task(owner, now)
-    subject = _checkpoint_subject(
-        cfg, "wip", owner,
-        "recovered dirty worktree from an unclean exit, scope-verified")
+    _mark_recovered_task(owner, now, origin)
+    subject = _checkpoint_subject(cfg, "wip", owner, origin.checkpoint_reason)
     gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes)
-    print(f"Recovered a dirty worktree from an unclean process exit; scope-verified "
+    print(f"Recovered a dirty worktree from {origin.description}; scope-verified "
           f"against {owner.id}, progress kept in a wip checkpoint.")
     return True
 
@@ -3001,31 +3282,69 @@ def _uncheckpointed_done_dirt_owner(cfg: Config, plan: Plan) -> Task | None:
     return owners[0] if len(owners) == 1 else None
 
 
-def _mark_recovered_task(task: Task, now: Callable[[], datetime]) -> None:
-    """Persist a crash-recovered candidate as WIP and journal the scope-verified recovery.
+def _interrupted_review_round_dirt_owner(cfg: Config, plan: Plan) -> Task | None:
+    """The task an in-flight review round implicates, when its scope contains every uncommitted
+    change; None when that ownership is not provable.
+
+    A merged reviewer-fixer round may repair source itself, so interrupting one after its first
+    write and before its verdict leaves dirt neither owner above can claim: the round writes no
+    durable verdict (its position must not advance), and the task it was repairing already
+    completed its ordinary closeout, so it has its terminal ``auto(...)`` checkpoint.  The
+    folder's durable ``_auto_fix.toml`` supplies the missing evidence -- a ``REPAIRING`` or
+    ``AWAITING_REVIEW`` phase is a round that was in flight, and its current findings name the
+    tasks that round was allowed to write in.  Everything else fails closed: no durable state,
+    a settled or not-in-flight phase, an unreadable record, dirt outside the implicated scope,
+    and two implicated tasks that could each own it all return None.
+    """
+    try:
+        state = _auto_fix_existing_state(cfg)
+    except AssentError:
+        return None
+    if (state is None or state.phase not in ("REPAIRING", "AWAITING_REVIEW")
+            or state.self_fixed_unreviewed is not None
+            or state.unresolved_review is not None):
+        return None
+    ledger = {finding.fingerprint: finding for finding in state.findings}
+    implicated = {
+        ledger[fingerprint].task_id
+        for fingerprint in state.current_finding_fingerprints
+        if fingerprint in ledger and ledger[fingerprint].task_id is not None}
+    owners = [
+        task for task in plan.tasks
+        if task.id in implicated
+        and not gitops.changes_outside_scope(
+            cfg.root, task.scope, excludes=_task_excludes(cfg, task))
+    ]
+    return owners[0] if len(owners) == 1 else None
+
+
+def _mark_recovered_task(task: Task, now: Callable[[], datetime],
+                         origin: _DirtOrigin) -> None:
+    """Persist a recovered candidate as WIP and journal the scope-verified recovery in the
+    wording of the ``origin`` that proved it.
 
     Unlike ``_mark_interrupted_task`` there is no AI session at this point, so no
-    ``agent`` / ``requested_model`` / ``requested_effort`` identity exists -- a hard crash
-    leaves those genuinely unknown, and no fake session identity is fabricated to fill them
+    ``agent`` / ``requested_model`` / ``requested_effort`` identity exists -- a hard crash and
+    an interrupted review round alike leave those genuinely unknown, and no fake session
+    identity is fabricated to fill them
     (``append_entry`` accepts a ``scheduler`` entry with those fields omitted).  BLOCKED is
     preserved as a legal terminal state (though ``next_task()`` never yields a BLOCKED
     candidate); a secondary write error is only warned about so it never masks the recovery.
     """
-    summary = ("Recovered a dirty worktree from an unclean process exit; "
+    summary = (f"Recovered a dirty worktree from {origin.description}; "
                f"scope-verified against {task.id}, progress kept")
-    try:
-        fresh = parse_task_file(task.path)
-        if fresh.status != "BLOCKED":
-            set_status(task.path, "WIP")
-    except Exception as e:  # recovery must not mask itself with a secondary status-write error
-        print(f"Writing back the recovered task status failed: {e} (working tree left as is, nothing discarded)")
+    if origin.reopens_task:
+        try:
+            fresh = parse_task_file(task.path)
+            if fresh.status != "BLOCKED":
+                set_status(task.path, "WIP")
+        except Exception as e:  # recovery must not mask itself with a secondary status-write error
+            print(f"Writing back the recovered task status failed: {e} (working tree left as is, nothing discarded)")
 
     try:
         append_entry(
             task.journal_path, by="scheduler", event="interrupt",
-            summary=summary,
-            detail=("run startup detected a dirty worktree from an unclean process "
-                    "exit and scope-verified it against the resumable candidate"),
+            summary=summary, detail=origin.journal_detail,
             time_str=now().isoformat(timespec="seconds"))
     except Exception as e:  # status and journal are attempted independently; one failing does not block the other
         print(f"Writing the recovery journal failed: {e} (working tree left as is, nothing discarded)")

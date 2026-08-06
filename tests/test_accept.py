@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -750,6 +751,182 @@ class TestSelfFixedConfirmation(AcceptRepositoryCase):
 
         self.assertEqual(code, 0, output)
         self.assertNotEqual(self._head(), before)
+
+
+class TestUnresolvedReviewConfirmation(AcceptRepositoryCase):
+    """The same one gate for the other outcome the finite loop cannot settle."""
+
+    findings = (
+        auto_fix.ReviewFinding(
+            "t001", "assent/accept.py", "The receipt check can be bypassed",
+            "The round could not repair it inside the declared scope."),
+        auto_fix.ReviewFinding(
+            "t001", "tests/test_accept.py", "The new gate has no focused test",
+            "No test exercises the declined answer."),
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.task_path = self._write_task()
+        self.worktree, self.branch, self.source_tip = self._make_source()
+        self.receipt = self._write_receipt()
+
+    def _state(self) -> auto_fix.AutoFixState:
+        return auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", self.findings),
+            source_tree=gitops.tree_of(self.root, "HEAD"),
+            task_plan_sha256=auto_fix.sha256_files([self.task_path]),
+            review_prompt_sha256="7" * 64,
+            reviewer_adapter="codex", reviewer_model="prime",
+            reviewer_effort="heavy", review_round_index=3)
+
+    def _write_state(self, state: auto_fix.AutoFixState) -> None:
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(self._config()), state)
+
+    def _write_unresolved(self) -> auto_fix.AutoFixState:
+        state = auto_fix.with_unresolved_review(self._state())
+        self._write_state(state)
+        return state
+
+    def _must_not_ask(self, prompt: str) -> str:
+        raise AssertionError(f"accept asked for confirmation: {prompt}")
+
+    def test_an_unsettled_failing_review_is_not_a_gate(self) -> None:
+        # Only the settled terminal record gates; a FAIL the loop may still
+        # repair is not a decision a human is asked to overrule here.
+        before = self._head()
+        self._write_state(self._state())
+
+        code, output = self._accept(confirm=self._must_not_ask)
+
+        self.assertEqual(code, 0, output)
+        self.assertNotEqual(self._head(), before)
+        self.assertNotIn("REVIEW UNRESOLVED", output)
+
+    def test_confirmed_unresolved_folder_publishes_an_ordinary_accept(self) -> None:
+        before = self._head()
+        self._write_unresolved()
+        asked: list[str] = []
+
+        code, output = self._accept(
+            confirm=lambda prompt: asked.append(prompt) or "y")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(asked), 1)
+        self.assertIn("[y/N]", asked[0])
+        self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", output)
+        self.assertIn("unresolved review round: 3 of 3 (codex/prime/heavy)",
+                      output)
+        after = self._head()
+        # Publication is byte-for-byte the ordinary accept: the same two-parent
+        # receipt-backed merge, and no marker of the confirmation path.
+        self.assertEqual(
+            gitops.commit_parents(self.root, after), (before, self.source_tip))
+        self.assertEqual(
+            gitops.tree_of(self.root, after), self.receipt.integration_tree)
+        message = gitops.commit_message(self.root, after)
+        self.assertEqual(message.strip(), accept_mod.accept_merge_message(
+            "trunk", self.folder, self.branch, self.source_tip,
+            self.receipt.integration_tree,
+            self.receipt.verify_script_sha256).strip())
+        for marker in ("UNRESOLVED", "HUMAN DECISION", "confirm"):
+            self.assertNotIn(marker, message)
+
+    def test_the_prompt_names_every_finding_rather_than_a_count(self) -> None:
+        # A human cannot consent to a decision they cannot see, so the findings
+        # themselves must be on screen, not just how many there are.
+        self._write_unresolved()
+
+        code, output = self._accept(confirm=lambda prompt: "y")
+
+        self.assertEqual(code, 0, output)
+        for finding in self.findings:
+            self.assertIn(
+                f"- {finding.task_id} {finding.path}: {finding.summary}",
+                output)
+
+    def test_every_other_answer_declines_without_touching_git(self) -> None:
+        before = self._head()
+        self._write_unresolved()
+
+        def raise_eof(prompt: str) -> str:
+            raise EOFError()
+
+        for answer in ("", "n", "N", "no", "yes please", " ", "Y E S"):
+            with self.subTest(answer=answer):
+                output = self._assert_refused_unchanged(
+                    before, self._accept(confirm=lambda prompt: answer))
+                self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", output)
+                self.assertIn("was not confirmed", output)
+                self.assertIn(f"assent accept {self.folder}", output)
+                # Distinct from the ordinary stale-receipt refusal and from the
+                # self-fixed decline alike.
+                self.assertNotIn("refresh the verification receipt", output)
+                self.assertNotIn("SELF-FIXED", output)
+
+        output = self._assert_refused_unchanged(
+            before, self._accept(confirm=raise_eof))
+        self.assertIn("was not confirmed", output)
+        self.assertEqual(
+            gitops.branch_tip(self.root, self.branch), self.source_tip)
+
+        # Only the answer changed: the same folder still publishes.
+        code, output = self._accept(confirm=lambda prompt: "Y")
+        self.assertEqual(code, 0, output)
+        self.assertNotEqual(self._head(), before)
+
+    def test_both_settled_outcomes_ask_once_and_name_both_reasons(self) -> None:
+        # A state carrying both outcomes cannot be written or read back -- one
+        # folder settles exactly once -- so the state is injected directly to
+        # prove the gate asks one question per accept rather than one per
+        # reason.  Two prompts for one decision train a human to answer without
+        # reading.
+        state = self._write_unresolved()
+        unresolved = state.unresolved_review
+        assert unresolved is not None
+        both = replace(state, self_fixed_unreviewed=auto_fix.SelfFixedOutcome(
+            round_index=unresolved.round_index,
+            rounds_used=unresolved.rounds_used,
+            adapter=unresolved.adapter, model=unresolved.model,
+            effort=unresolved.effort,
+            finding_fingerprints=unresolved.finding_fingerprints[:1]))
+        asked: list[str] = []
+
+        with patch.object(auto_fix, "read_auto_fix_state", return_value=both):
+            code, output = self._accept(
+                confirm=lambda prompt: asked.append(prompt) or "y")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(asked), 1)
+        self.assertIn(
+            "SELF-FIXED, UNREVIEWED and REVIEW UNRESOLVED, HUMAN DECISION",
+            output)
+        self.assertIn("self-fixed round: 3 of 3 (codex/prime/heavy)", output)
+        self.assertIn("unresolved review round: 3 of 3 (codex/prime/heavy)",
+                      output)
+
+    def test_a_declined_double_outcome_names_both_reasons(self) -> None:
+        before = self._head()
+        state = self._write_unresolved()
+        unresolved = state.unresolved_review
+        assert unresolved is not None
+        both = replace(state, self_fixed_unreviewed=auto_fix.SelfFixedOutcome(
+            round_index=unresolved.round_index,
+            rounds_used=unresolved.rounds_used,
+            adapter=unresolved.adapter, model=unresolved.model,
+            effort=unresolved.effort,
+            finding_fingerprints=unresolved.finding_fingerprints[:1]))
+        asked: list[str] = []
+
+        with patch.object(auto_fix, "read_auto_fix_state", return_value=both):
+            output = self._assert_refused_unchanged(before, self._accept(
+                confirm=lambda prompt: asked.append(prompt) or "n"))
+
+        self.assertEqual(len(asked), 1)
+        self.assertIn(
+            "publishing a SELF-FIXED, UNREVIEWED and REVIEW UNRESOLVED, "
+            "HUMAN DECISION folder was not confirmed", output)
 
 
 class TestAcceptTransactionalFailures(AcceptRepositoryCase):

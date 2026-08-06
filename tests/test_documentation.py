@@ -249,6 +249,48 @@ class DocumentationTests(unittest.TestCase):
                 self.assertIn(phrase, chinese)
         self.assertNotIn("每個 write-capable session 前", chinese)
 
+    def test_review_unresolved_outcome_and_settling_gate_stay_in_parity(self):
+        """The gated settle, its failing-gate outcome, and REVIEW UNRESOLVED,
+        HUMAN DECISION must reach every reader doc surface in both languages,
+        distinct from SELF-FIXED, UNREVIEWED and from BLOCKED.
+        """
+        english_paths = [
+            Path("docs/WORKFLOW.md"), Path("docs/COMMANDS.md"),
+            Path("docs/VERIFICATION.md"),
+        ]
+        english = "\n".join(_read(path) for path in english_paths)
+        for phrase in (
+                "REVIEW UNRESOLVED, HUMAN DECISION",
+                "settling gate",
+                "distinct outcome",
+                "exits zero",
+                "queued behind it"):
+            with self.subTest(language="English", phrase=phrase):
+                self.assertIn(phrase, english)
+        for path in english_paths:
+            text = _read(path)
+            with self.subTest(document=str(path)):
+                self.assertNotIn(
+                    "an unrepaired blocker preserves every finding, edit, "
+                    "and journal without another round and exits\nnonzero",
+                    text)
+                self.assertNotIn(
+                    "unrepaired blocker preserves every finding, edit, and "
+                    "journal and exits\nnonzero", text)
+
+        chinese_paths = [
+            Path("docs/zh-TW/WORKFLOW.md"), Path("docs/zh-TW/COMMANDS.md"),
+            Path("docs/zh-TW/VERIFICATION.md"),
+        ]
+        chinese = "\n".join(_read(path) for path in chinese_paths)
+        for phrase in (
+                "REVIEW UNRESOLVED, HUMAN DECISION",
+                "settling gate",
+                "獨立結果",
+                "exit code 為零"):
+            with self.subTest(language="Traditional Chinese", phrase=phrase):
+                self.assertIn(phrase, chinese)
+
     def test_readme_auto_fix_contracts_stay_in_parity(self):
         """The two onboarding pages must expose the same opt-in boundaries."""
         readmes = {

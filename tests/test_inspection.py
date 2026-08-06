@@ -337,6 +337,52 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                       "Folder auto-fix: FAILED (fresh)"):
             self.assertNotIn(other, text)
 
+    def test_report_names_the_unresolved_review_outcome_distinctly(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build(extra_config=(
+            '[auto_fix.review]\n'
+            'adapter = ["claude", "codex"]\n'
+            'model = "prime"\n'
+            'effort = "heavy"\n'))
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        review = cfg.auto_fix_review[1]
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/main.py", "Blocking implementation issue",
+            "No configured round repaired the declared behavior.")
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (finding,)),
+            source_tree=gitops.tree_of(cfg.root, "HEAD"),
+            task_plan_sha256=auto_fix.sha256_files(
+                task.path for task in plan.tasks),
+            review_prompt_sha256="7" * 64,
+            reviewer_adapter=review.adapter,
+            reviewer_model=review.requested_model,
+            reviewer_effort=review.requested_effort,
+            review_round_index=2)
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg),
+            auto_fix.with_unresolved_review(state))
+
+        text = inspection.render_report(cfg, plan)
+        identity = (f"{review.adapter}/{review.requested_model}/"
+                    f"{review.requested_effort}")
+        # The state a human must decide is named apart from every other
+        # rendered state, and it lists the findings that decision is about.
+        self.assertIn(
+            "Folder auto-fix: REVIEW UNRESOLVED, HUMAN DECISION (fresh)", text)
+        self.assertIn(f"Unresolved review round: 2 of 2 ({identity})", text)
+        self.assertIn("Terminal: REVIEW UNRESOLVED, HUMAN DECISION "
+                      f"(round 2 of 2, {identity}", text)
+        self.assertIn(auto_fix.finding_fingerprint(finding), text)
+        self.assertIn(finding.summary, text)
+        for other in ("Folder auto-fix: NOT RUN", "Folder auto-fix: STALE",
+                      "Folder auto-fix: PASSED (fresh)",
+                      "Folder auto-fix: FAILED (fresh)",
+                      "SELF-FIXED, UNREVIEWED",
+                      "Terminal: NONZERO"):
+            self.assertNotIn(other, text)
+
     def test_report_marks_reviewer_configuration_drift_stale(self):
         self.write_task(1, status="DONE")
         cfg = self.build(extra_config=(

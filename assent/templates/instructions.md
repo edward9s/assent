@@ -301,6 +301,17 @@ exposed existing requirement. When the prior set is cleared it must return
 `PASS`; optional improvements, speculative concerns, and repeated debt
 discovery do not keep the loop open.
 
+A round that writes a repair and is then interrupted before its verdict is
+recorded -- an unclean exit during `REPAIRING` or `AWAITING_REVIEW` -- keeps
+the edit and does not advance `review_round_index`. The next run's startup
+recovery gate attributes that dirt to the task the durable `_auto_fix.toml`'s
+current findings implicate, proven by the same scope-containment machinery its
+other recovery owners use, and gathers it into a `wip` checkpoint with no AI
+session opened. Ownership that cannot be proven this way -- dirt outside that
+task's declared scope, more than one plausible owner, an unreadable state file,
+or no in-flight round recorded at all -- still refuses fail-closed at
+`ensure_clean` rather than guessing.
+
 Each round advances the durable `review_round_index` by exactly one, and
 reaching the end of the configured list ends the loop; that list length, not a
 worker-identity escalation ladder, is what makes the loop finite. Each reopened
@@ -308,12 +319,33 @@ task is repaired under its own ordinary task profile and nothing is consumed,
 so an interrupted round resumes on exactly the same identity and multi-task
 findings and dependency cascades never escalate one task at a time. Repair runs
 the ordinary focused gate before reviewing again. When the list ends on a round
-that repaired what it found, the folder settles as `SELF-FIXED, UNREVIEWED`:
-every task keeps the status its own focused gate proved, nothing is marked
-`BLOCKED`, the run succeeds, and `accept` asks for one explicit human
-confirmation before publishing. When the list ends on an unrepaired blocker,
-the unresolved finding ledger and all edits remain for later human review; no
-automatic code reversion or task creation follows.
+that repaired what it found, the scheduler re-runs the implicated task's own
+focused gate against the repaired source -- reusing the same de-duplicating
+ledger that skips a command already proven earlier in this invocation -- before
+anything settles, so the claim `accept` and the report make, that every task
+passed its own focused gate, is proven of the final repair itself and not only
+of the state that preceded it. When that gate passes, the folder settles as
+`SELF-FIXED, UNREVIEWED`: every task keeps the status its own focused gate
+proved, nothing is marked `BLOCKED`, the run succeeds, and `accept` asks for
+one explicit human confirmation before publishing. When that gate instead
+fails, this is a distinct disposition from both `SELF-FIXED, UNREVIEWED` and an
+ordinary `BLOCKED` task: the folder does not settle, no
+`self_fixed_unreviewed` record is written, the run ends nonzero, no task is
+marked `BLOCKED`, and every edit and finding stays exactly as the round left
+it. When the list ends on an unrepaired blocker instead, the folder settles as
+the equally distinct `REVIEW UNRESOLVED, HUMAN DECISION` outcome: every task
+keeps the status its own closeout gave it, nothing is marked `BLOCKED`, the
+unresolved finding ledger and all edits remain for later human review, and the
+run succeeds -- exiting zero rather than failing, precisely so that the rest of
+an `--all` invocation's queued folders still start behind it. An unresolved
+review finding is a question the scheduler cannot decide, not an
+infrastructure failure, so it belongs at the human acceptance meeting rather
+than in a run failure that cancels unrelated queued work. `assent accept
+<FOLDER>` gates on that outcome exactly as it gates on `SELF-FIXED,
+UNREVIEWED`: after every receipt-based check already passes, it names the
+unresolved findings' task, path, and summary and asks one explicit `[y/N]`
+confirmation naming what is being overruled before publishing; a folder
+carrying both outcomes is asked once, naming both reasons.
 
 The repair brief requires one acknowledgement line for every current finding
 in the task's closeout journal detail, using exactly this provider-neutral
@@ -334,8 +366,8 @@ all edits and state. A later `run --auto-fix` reads the existing pending state,
 resumes WIP work, and continues from the durable round index, but only while
 the current `[auto_fix.review]` exists and the identity that decided that state
 is still one of its configured rounds. Removing or changing that policy refuses
-repair and closeout; a settled `SELF-FIXED, UNREVIEWED` folder is terminal and
-resumes nothing. Running
+repair and closeout; a settled `SELF-FIXED, UNREVIEWED` or `REVIEW UNRESOLVED,
+HUMAN DECISION` folder is terminal and resumes nothing. Running
 without the flag continues ordinary task execution only; it neither starts this
 review nor authorizes repair. A human may inspect the report and use explicit
 `rework`, `reject`, `verify`, or `accept` actions; a review `PASS`, an auto-fix

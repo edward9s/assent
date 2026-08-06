@@ -91,6 +91,7 @@ _STATE_KEYS = {
     "reviewer_recommendations", "approved_scope_additions",
     "scope_amendments", "worker_dispositions", "repair_briefs",
     "plan_digest_transitions", "review_transitions", "self_fixed_unreviewed",
+    "unresolved_review",
 }
 _PERSISTED_FINDING_KEYS = {
     "fingerprint", "kind", "task_id", "path", "summary", "evidence",
@@ -114,7 +115,10 @@ _PLAN_DIGEST_TRANSITION_KEYS = {"before_sha256", "after_sha256"}
 _REVIEW_TRANSITION_KEYS = {
     "fingerprint", "transition", "prior_fingerprint", "transition_evidence",
 }
-_SELF_FIXED_OUTCOME_KEYS = {
+# Both terminal outcomes state the same facts -- where the configured round
+# list ended, which identity decided it, and which findings a human inherits --
+# so they share one record shape.
+_SETTLED_OUTCOME_KEYS = {
     "round_index", "rounds_used", "adapter", "model", "effort",
     "finding_fingerprints",
 }
@@ -338,6 +342,31 @@ class SelfFixedOutcome:
 
 
 @dataclass(frozen=True)
+class UnresolvedReviewOutcome:
+    """The settled terminal record of findings no configured round resolved.
+
+    The round list ended on a blocker the loop could not repair, which is a
+    question the scheduler cannot decide rather than an infrastructure failure:
+    every task keeps the status its own closeout gave it, the findings and edits
+    stay on disk, and the remaining decision is the human ``accept`` one.  Like
+    ``SelfFixedOutcome`` this is a settled outcome rather than a phase, so its
+    presence makes the folder terminal instead of resumable.
+    """
+
+    round_index: int
+    rounds_used: int
+    adapter: str
+    model: str
+    effort: str
+    finding_fingerprints: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if isinstance(self.finding_fingerprints, list):
+            object.__setattr__(self, "finding_fingerprints",
+                               tuple(self.finding_fingerprints))
+
+
+@dataclass(frozen=True)
 class AutoFixState:
     """Deletable runtime memory for one folder's bounded review/repair loop."""
 
@@ -374,6 +403,10 @@ class AutoFixState:
     # repair.  Its presence is what makes the folder terminal, so a restart
     # reports the settled outcome instead of resuming the loop.
     self_fixed_unreviewed: SelfFixedOutcome | None = None
+    # The other terminal outcome, and mutually exclusive with it: the round list
+    # ended with findings no round resolved, so the same restart property holds
+    # and the unresolved findings are handed to the human acceptance meeting.
+    unresolved_review: UnresolvedReviewOutcome | None = None
 
     def __post_init__(self) -> None:
         for name in ("current_finding_fingerprints", "findings",
@@ -1161,6 +1194,39 @@ def with_self_fixed_unreviewed(
     return _validate_state(replace(state, self_fixed_unreviewed=outcome))
 
 
+def with_unresolved_review(
+        state: AutoFixState, *, source_tree: str | None = None) -> AutoFixState:
+    """Settle a folder whose round list ended on findings nothing resolved.
+
+    Only a FAIL verdict settles this way: the last round left a blocker no
+    round repaired.  Nothing is reverted, reopened, or re-marked -- the record
+    only states that the finite loop is over and that the unresolved findings
+    are now the human ``accept`` decision.  ``source_tree`` rebinds the record
+    to the tree a human is about to read, exactly as the self-fixed outcome
+    does, so an earlier round's checkpointed repair does not make the settled
+    evidence read as stale.
+    """
+    state = _validate_state(state)
+    if state.unresolved_review is not None:
+        return state
+    if state.verdict != "FAIL":
+        raise AssentError(
+            "Only a FAIL auto-fix state can settle as an unresolved review")
+    if state.review_round_index < 1:
+        raise AssentError(
+            "An unresolved-review outcome requires at least one used round")
+    outcome = UnresolvedReviewOutcome(
+        round_index=state.review_round_index - 1,
+        rounds_used=state.review_round_index,
+        adapter=state.reviewer_adapter,
+        model=state.reviewer_model,
+        effort=state.reviewer_effort,
+        finding_fingerprints=state.current_finding_fingerprints)
+    if source_tree is not None:
+        state = replace(state, source_tree=source_tree)
+    return _validate_state(replace(state, unresolved_review=outcome))
+
+
 def with_repair_phase(state: AutoFixState, phase: str) -> AutoFixState:
     """Durably distinguish an active repair from its pending re-review."""
     state = _validate_state(state)
@@ -1317,6 +1383,32 @@ def _require_tree(value: object, label: str) -> str:
     return value
 
 
+def _validate_settled_outcome(
+        settled: object, record_type: type, label: str,
+        required_verdict: str, verdict: str) -> None:
+    """Validate whichever terminal outcome a settled folder recorded."""
+    if settled is None:
+        return
+    if not isinstance(settled, record_type):
+        raise AssentError(f"Auto-fix state {label} outcome is invalid")
+    if verdict != required_verdict:
+        raise AssentError(
+            f"A {label} auto-fix state must carry the {required_verdict} verdict")
+    if (type(settled.round_index) is not int
+            or type(settled.rounds_used) is not int
+            or settled.round_index < 0
+            or settled.rounds_used != settled.round_index + 1):
+        raise AssentError(
+            f"A {label} outcome must name the last used round position")
+    for name in ("adapter", "model", "effort"):
+        _require_text(getattr(settled, name), f"{label} outcome {name}", 1024)
+    if not isinstance(settled.finding_fingerprints, tuple):
+        raise AssentError(
+            f"A {label} outcome's finding_fingerprints must be an ordered list")
+    if not settled.finding_fingerprints:
+        raise AssentError(f"A {label} outcome must cite its open findings")
+
+
 def _validate_state(state: AutoFixState) -> AutoFixState:
     if not isinstance(state, AutoFixState):
         raise AssentError("Auto-fix state must be an AutoFixState record")
@@ -1346,29 +1438,16 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
     elif state.failure_trigger not in FAILURE_TRIGGERS:
         raise AssentError(
             "A blocked adjudication requires a worker_blocked or focused_gate_failure trigger")
-    settled = state.self_fixed_unreviewed
-    if settled is not None:
-        if not isinstance(settled, SelfFixedOutcome):
-            raise AssentError(
-                "Auto-fix state self_fixed_unreviewed is invalid")
-        if state.verdict != "FIXED":
-            raise AssentError(
-                "A self-fixed, unreviewed auto-fix state must carry the FIXED verdict")
-        if (type(settled.round_index) is not int
-                or type(settled.rounds_used) is not int
-                or settled.round_index < 0
-                or settled.rounds_used != settled.round_index + 1):
-            raise AssentError(
-                "A self-fixed, unreviewed outcome must name the last used round position")
-        for name in ("adapter", "model", "effort"):
-            _require_text(getattr(settled, name),
-                          f"Self-fixed outcome {name}", 1024)
-        if not isinstance(settled.finding_fingerprints, tuple):
-            raise AssentError(
-                "Self-fixed outcome finding_fingerprints must be an ordered list")
-        if not settled.finding_fingerprints:
-            raise AssentError(
-                "A self-fixed, unreviewed outcome must cite its unconfirmed findings")
+    if (state.self_fixed_unreviewed is not None
+            and state.unresolved_review is not None):
+        raise AssentError(
+            "An auto-fix state settles as exactly one terminal outcome")
+    _validate_settled_outcome(
+        state.self_fixed_unreviewed, SelfFixedOutcome,
+        "self-fixed, unreviewed", "FIXED", state.verdict)
+    _validate_settled_outcome(
+        state.unresolved_review, UnresolvedReviewOutcome,
+        "unresolved-review", "FAIL", state.verdict)
     if state.verdict == "PASS" and state.phase != "COMPLETE":
         raise AssentError("A PASS auto-fix state must be COMPLETE")
     if state.verdict != "PASS" and state.phase == "COMPLETE":
@@ -1416,12 +1495,14 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
     if state.verdict != "PASS" and not current:
         raise AssentError(
             f"A {state.verdict} auto-fix state must have current findings")
-    if settled is not None:
+    for settled in (state.self_fixed_unreviewed, state.unresolved_review):
+        if settled is None:
+            continue
         for fingerprint in settled.finding_fingerprints:
-            _require_digest(fingerprint, "Self-fixed outcome finding fingerprint")
+            _require_digest(fingerprint, "Settled outcome finding fingerprint")
             if fingerprint not in ledger:
                 raise AssentError(
-                    "Self-fixed outcome cites a finding absent from the ledger")
+                    "A settled outcome cites a finding absent from the ledger")
     debt_fingerprints = {
         fingerprint for fingerprint in current
         if ledger[fingerprint].kind == "eligible_technical_debt"}
@@ -1637,14 +1718,20 @@ def _state_text(state: AutoFixState) -> str:
                  "plan_digest_transitions", "review_transitions"):
         if not getattr(state, name):
             text += f"{name} = []\n"
-    # A folder is settled at most once, so the terminal outcome is written as an
-    # empty or single-entry array of tables rather than a second scalar block.
+    # A folder is settled at most once, so each terminal outcome is written as
+    # an empty or single-entry array of tables rather than a second scalar
+    # block.  Both absent keys are written before either table opens, so a
+    # settled outcome never swallows the other one's key.
     if state.self_fixed_unreviewed is None:
         text += "self_fixed_unreviewed = []\n"
-    else:
-        settled = state.self_fixed_unreviewed
+    if state.unresolved_review is None:
+        text += "unresolved_review = []\n"
+    for name in ("self_fixed_unreviewed", "unresolved_review"):
+        settled = getattr(state, name)
+        if settled is None:
+            continue
         text += (
-            "\n[[self_fixed_unreviewed]]\n"
+            f"\n[[{name}]]\n"
             f"round_index = {settled.round_index}\n"
             f"rounds_used = {settled.rounds_used}\n"
             f"adapter = {toml_string(settled.adapter)}\n"
@@ -1834,10 +1921,12 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
     review_transitions = records(
         "review_transitions", _REVIEW_TRANSITION_KEYS, ReviewTransition)
     settled_records = records(
-        "self_fixed_unreviewed", _SELF_FIXED_OUTCOME_KEYS, SelfFixedOutcome)
-    if len(settled_records) > 1:
+        "self_fixed_unreviewed", _SETTLED_OUTCOME_KEYS, SelfFixedOutcome)
+    unresolved_records = records(
+        "unresolved_review", _SETTLED_OUTCOME_KEYS, UnresolvedReviewOutcome)
+    if len(settled_records) > 1 or len(unresolved_records) > 1:
         raise AssentError(
-            "Auto-fix state records more than one self-fixed, unreviewed outcome")
+            "Auto-fix state records more than one terminal outcome")
 
     scalar = dict(data)
     del scalar["findings"]
@@ -1850,6 +1939,7 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
     del scalar["plan_digest_transitions"]
     del scalar["review_transitions"]
     del scalar["self_fixed_unreviewed"]
+    del scalar["unresolved_review"]
     if scalar["failure_trigger"] == "":
         scalar["failure_trigger"] = None
     try:
@@ -1863,6 +1953,8 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
             review_transitions=tuple(review_transitions),
             self_fixed_unreviewed=(
                 settled_records[0] if settled_records else None),
+            unresolved_review=(
+                unresolved_records[0] if unresolved_records else None),
             **scalar)
     except TypeError as e:
         raise AssentError(f"Auto-fix state has an invalid structure: {e}") from e
