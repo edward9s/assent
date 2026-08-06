@@ -592,5 +592,162 @@ class TestClean(unittest.TestCase):
                         output.getvalue().index("dependent: cleaned"))
 
 
+class TestOrphanSweep(unittest.TestCase):
+    """The once-per-invocation sweep of Assent's temporary branch namespaces."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(safe_rmtree, self.root)
+        _git(self.root, "init")
+        _git(self.root, "config", "user.name", "Test")
+        _git(self.root, "config", "user.email", "test@example.com")
+        (self.root / ".gitignore").write_text(".assent/\n", encoding="utf-8")
+        (self.root / "README.md").write_text("init\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", "init")
+        self.target = _git(self.root, "branch", "--show-current")
+
+        self.folder = "plan01"
+        self.config_path = self.root / ".assent" / "assent.toml"
+        self.config_path.parent.mkdir(parents=True)
+        self.config_path.write_text("", encoding="utf-8")
+        self.cfg = self._folder(self.folder)
+        self.container = self.root.parent / f"{self.root.name}.worktrees"
+        self.addCleanup(self._cleanup_worktrees)
+
+    def _cleanup_worktrees(self) -> None:
+        safe_rmtree(self.container)
+        safe_rmtree(self.root.parent / f"{self.root.name}.checkout")
+        subprocess.run(["git", "worktree", "prune"], cwd=self.root,
+                       capture_output=True)
+
+    def _folder(self, name: str):
+        folder = self.root / ".assent" / name
+        folder.mkdir(parents=True)
+        (folder / "t001_task.e.toml").write_text(_task_text(), encoding="utf-8")
+        (folder / "assent.lock").write_text(
+            f'folder = "{name}"\n', encoding="utf-8")
+        return load_config(self.config_path, name)
+
+    def _published_orphan(self, branch: str) -> str:
+        """A temporary branch whose tree is already reachable from the target."""
+        _git(self.root, "branch", branch, "HEAD")
+        return branch
+
+    def _superseded_orphan(self, branch: str) -> str:
+        """A temporary branch carrying a tree no reachable commit has."""
+        _git(self.root, "checkout", "-b", branch)
+        (self.root / f"{branch.replace('/', '_')}.txt").write_text(
+            "abandoned\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-m", f"abandoned work on {branch}")
+        _git(self.root, "checkout", self.target)
+        return branch
+
+    def _both_orphans(self) -> tuple[str, str]:
+        return (self._published_orphan("assent-integration/batch/aaaa"),
+                self._superseded_orphan("assent-reconcile/plan01"))
+
+    def _clean(self, configs) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = clean_folders(configs)
+        return code, output.getvalue()
+
+    def _branches(self) -> list[str]:
+        return sorted(branch
+                      for prefix in gitops.TEMPORARY_BRANCH_PREFIXES
+                      for branch in gitops.branches_with_prefix(self.root, prefix))
+
+    def test_whole_project_clean_deletes_and_classifies_every_orphan(self) -> None:
+        published, superseded = self._both_orphans()
+
+        code, output = self._clean([self.cfg])
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self._branches(), [])
+        self.assertIn(f"  branch {published}: cleaned (published)", output)
+        self.assertIn(f"  branch {superseded}: cleaned (superseded)", output)
+
+    def test_single_named_folder_leaves_the_global_namespace_alone(self) -> None:
+        published, superseded = self._both_orphans()
+        self._folder("plan02")
+
+        code, output = self._clean([self.cfg])
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self._branches(), [published, superseded])
+        self.assertNotIn("orphaned temporary branches", output)
+        self.assertNotIn(published, output)
+
+    def test_multi_folder_selection_sweeps_exactly_once(self) -> None:
+        self._both_orphans()
+        second = self._folder("plan02")
+
+        with patch.object(clean_mod.gitops, "remove_temporary_branches",
+                          wraps=gitops.remove_temporary_branches) as sweep:
+            code, output = self._clean([self.cfg, second])
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(sweep.call_count, 1)
+        self.assertEqual(self._branches(), [])
+
+    def test_retained_folder_does_not_skip_the_sweep(self) -> None:
+        published, superseded = self._both_orphans()
+        worktree = gitops.ensure_worktree(self.root, self.folder)
+        gitops.ensure_branch(worktree, f"{self.folder}/")
+        (worktree / "untracked.txt").write_text("keep me\n", encoding="utf-8")
+
+        code, output = self._clean([self.cfg])
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("worktree not clean, retained", output)
+        self.assertTrue(worktree.exists())
+        self.assertEqual(self._branches(), [])
+        self.assertIn(f"  branch {published}: cleaned (published)", output)
+        self.assertIn(f"  branch {superseded}: cleaned (superseded)", output)
+
+    def test_checked_out_orphan_refuses_nonzero_and_others_still_go(self) -> None:
+        published, superseded = self._both_orphans()
+        checkout = self.root.parent / f"{self.root.name}.checkout"
+        _git(self.root, "worktree", "add", str(checkout), published)
+
+        code, output = self._clean([self.cfg])
+
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self._branches(), [published])
+        self.assertIn(f"  branch {published}: refused (checked out in", output)
+        self.assertIn(f"  branch {superseded}: cleaned (superseded)", output)
+
+    def test_git_failure_in_the_sweep_makes_the_invocation_nonzero(self) -> None:
+        self._both_orphans()
+
+        with patch.object(clean_mod.gitops, "remove_temporary_branches",
+                          side_effect=AssentError("simulated ref lock")):
+            code, output = self._clean([self.cfg])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("orphaned temporary branches: failed (simulated ref lock)",
+                      output)
+        self.assertEqual(len(self._branches()), 2)
+
+    def test_repository_without_orphans_prints_nothing_new(self) -> None:
+        code, output = self._clean([self.cfg])
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(
+            output, f"{self.folder}: skipped (no worktree or branch to clean up)\n")
+
+    def test_busy_integration_lock_leaves_the_sweep_for_a_later_run(self) -> None:
+        published, superseded = self._both_orphans()
+
+        with hold_integration_lock(self.root / ".assent"):
+            code, output = self._clean([self.cfg])
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self._branches(), [published, superseded])
+        self.assertIn("orphaned temporary branches: skipped", output)
+
+
 if __name__ == "__main__":
     unittest.main()

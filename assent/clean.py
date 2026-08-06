@@ -319,7 +319,9 @@ def sweep_orphaned_temporary_branches(cfg: Config) -> int:
     cleanup path can ever see these refs.  The sweep therefore belongs to the
     whole-project invocation and runs once for it -- never inside
     ``clean_folder``/``clean_locked``, because a human naming a subset of
-    folders must not have repository-global refs deleted as a side effect.
+    folders must not have repository-global refs deleted as a side effect, and
+    because those two already run inside the integration lock this sweep has to
+    take for itself.
 
     The repository-wide integration lock is the entire proof that what is listed
     is an orphan, so enumeration and removal happen inside one hold: a temporary
@@ -342,10 +344,10 @@ def sweep_orphaned_temporary_branches(cfg: Config) -> int:
         return 1
 
     failed = False
+    print("orphaned temporary branches:")
     for removal in removals:
         if removal.outcome == gitops.DELETED:
-            print(f"  branch {removal.branch}: cleaned (orphaned temporary "
-                  f"branch, {removal.classification})")
+            print(f"  branch {removal.branch}: cleaned ({removal.classification})")
         elif removal.outcome == gitops.REFUSED:
             failed = True
             print(f"  branch {removal.branch}: refused (checked out in "
@@ -385,11 +387,12 @@ def clean_folders(configs: list[Config]) -> int:
     for folder in sorted(by_name):
         add_with_prerequisites(folder)
 
-    # Whether this invocation owns the repository-global namespace is decided
-    # before anything is cleaned: it does when the selection covers every live
-    # folder (bare ``clean``, a ``...`` expansion, or an explicit selection that
-    # happens to be the whole project), and it does not when a human named a
-    # subset.
+    # Every clean invocation arrives here, including ``clean FOLDER`` for one
+    # named folder, so whether this invocation owns the repository-global
+    # temporary namespace is decided from the selection itself, before anything
+    # is cleaned: it owns it when the selection covers every live folder (bare
+    # ``clean``, a ``...`` expansion, or an explicit selection that happens to
+    # be the whole project), and it does not when a human named a subset.
     try:
         whole_project = set(list_task_folders(configs[0].assent_dir)) <= set(by_name)
     except (AssentError, OSError) as e:
