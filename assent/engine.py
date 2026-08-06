@@ -1381,9 +1381,17 @@ def _auto_fix_prior_evidence(
         for item in state.approved_scope_additions)
     if not state.approved_scope_additions:
         lines.append("- none")
-    lines.append("Durable repair briefs:")
+    # The full brief text (findings, evidence, and a task-scoped diff) is
+    # preserved verbatim in the durable state for the worker that receives it,
+    # but every part of it duplicates what this prior-evidence text already
+    # shows the reviewer above (findings) and below (the diffs) -- repeating
+    # it per task made recheck prompts grow with the cascade width for no new
+    # signal. Only the task -> fingerprint routing is genuinely new here.
+    lines.append("Durable repair briefs (task -> addressed fingerprints; "
+                  "full brief text omitted, it repeats the findings and "
+                  "diffs already shown above/below):")
     lines.extend(
-        f"--- {item.task_id} ---\n{item.brief}"
+        f"- {item.task_id}: {', '.join(item.finding_fingerprints)}"
         for item in state.repair_briefs)
     if not state.repair_briefs:
         lines.append("- none")
