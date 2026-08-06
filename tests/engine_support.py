@@ -108,16 +108,12 @@ class EngineTestCase(unittest.TestCase):
             ["git", *args], cwd=self.execution_root(), capture_output=True,
             encoding="utf-8", check=True).stdout
 
-    def build(self, retry=1, adapter_name="claude", prompt_template=None,
-              extra_config=""):
-        prompt = (f'[prompt]\ntemplate = {json.dumps(prompt_template)}\n'
-                  if prompt_template is not None else "")
+    def build(self, retry=1, adapter_name="claude", extra_config=""):
         (self.root / ".assent" / "assent.toml").write_text(
             f"[run]\nretry_per_task = {retry}\n"
             f'[adapter]\nname = "{adapter_name}"\n'
             '[adapter.claude]\ncommand = "python"\n'
-            + extra_config
-            + prompt,
+            + extra_config,
             encoding="utf-8")
         return load_config(self.root / ".assent" / "assent.toml", "plan01")
 

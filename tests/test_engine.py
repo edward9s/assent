@@ -511,19 +511,6 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
         self.assertIn('requested_model = "gpt-cli"', prompt)
         self.assertEqual(requested_model, "gpt-cli")
 
-    def test_custom_prompt_can_use_agent_and_requested_model(self):
-        p1 = self.write_task(1)
-        cfg = self.build(
-            prompt_template=("{agent}|{requested_model}|{effort}|"
-                             "{requested_effort}|{task_id}"))
-        self.commit_all()
-        adapter = ScriptedAdapter(
-            [self.ai_done(p1, requested_model="cli-model")],
-            resolved_model="cli-model")
-        self.run_quiet(cfg, once=True, adapter=adapter)
-        self.assertEqual(adapter.calls[0][0],
-                         "claude|cli-model|normal|medium|t001")
-
     def test_session_line_states_the_four_facts_compactly(self):
         p1 = self.write_task(1, model="lite", effort="heavy")
         cfg = self.build(extra_config=

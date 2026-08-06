@@ -68,7 +68,6 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.claude_tier_efforts, {})
         self.assertEqual(cfg.codex_efforts, {})
         self.assertEqual(cfg.codex_tier_efforts, {})
-        self.assertIsNone(cfg.prompt_template)
         self.assertEqual(cfg.receipt_refresh, "manual")
 
     def test_scalar_and_singleton_adapter_name_are_equivalent(self):
@@ -394,11 +393,6 @@ class TestLoadConfig(ConfigTestCase):
                     AssentError, message):
                 load_config(self.write(text), "plan01")
 
-    def test_prompt_template_loaded(self):
-        cfg = load_config(self.write(
-            '[prompt]\ntemplate = "hi {task_id}"\n'), "plan01")
-        self.assertEqual(cfg.prompt_template, "hi {task_id}")
-
     def test_receipt_refresh_domain_default_and_fail_closed(self):
         # An absent section, an absent key, and each stated mode; anything else is
         # refused at load time rather than silently treated as one of the two.
@@ -615,7 +609,7 @@ class TestBlankOverrideSemantics(ConfigTestCase):
             '[watchdog]\nstall_minutes = 7\n')
         # [adapter.codex] is stated but empty, [watchdog] is omitted entirely:
         # neither contributes a leaf override.
-        project = self.write('[adapter.codex]\n[prompt]\n')
+        project = self.write('[adapter.codex]\n')
         cfg = load_config(project, "plan01")
         self.assertEqual(cfg.adapter_name, "codex")
         self.assertEqual(cfg.codex_command, "codex.cmd")
@@ -649,14 +643,13 @@ class TestBlankOverrideSemantics(ConfigTestCase):
 
     def test_blank_operational_strings_fail_at_load_naming_key_and_source(self):
         # Every setting whose contract is "useful text": adapter selection, adapter
-        # commands, model mappings, prompt templates, and effort translations.  Each is
-        # refused while loading the config, not later when an adapter is launched.
+        # commands, model mappings, and effort translations.  Each is refused while
+        # loading the config, not later when an adapter is launched.
         cases = (
             ('[adapter]\nname = ""\n', "adapter.name"),
             ('[adapter]\nname = ["claude", "  "]\n', "adapter.name"),
             ('[adapter.claude]\ncommand = "   "\n', "adapter.claude.command"),
             ('[adapter.codex.models]\ncore = ""\n', "adapter.codex.models.core"),
-            ('[prompt]\ntemplate = "\\t"\n', "prompt.template"),
             ('[adapter.claude.efforts]\nnormal = ""\n',
              "adapter.claude.efforts.normal"),
             ('[adapter.antigravity.efforts.lite]\nheavy = " "\n',
@@ -710,7 +703,7 @@ class TestBlankOverrideSemantics(ConfigTestCase):
         cfg = load_config(self.write(
             "[adapter]\n[adapter.claude]\n[adapter.claude.models]\n"
             "[adapter.claude.efforts]\n[adapter.claude.efforts.lite]\n"
-            "[run]\n[watchdog]\n[prompt]\n[verification]\n"), "plan01")
+            "[run]\n[watchdog]\n[verification]\n"), "plan01")
         # the user's stated models table still replaces the built-in one whole,
         # exactly as it does without the project file
         self.assertEqual(cfg.claude_models,

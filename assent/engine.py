@@ -58,9 +58,9 @@ from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               has_git_marker, resolve_session, resolve_stack_state,
                               worktree_configuration_errors)
 
-# Default prompt template (overridable via [prompt] template; variables are substituted
-# literally, tolerating other braces inside the template).
-_DEFAULT_PROMPT_TEMPLATE = (
+# The worker session's opening prompt (variables are substituted literally,
+# tolerating other braces inside the template).
+_PROMPT_TEMPLATE = (
     "You are the assent execution AI. First read the project rules {agents_md_path},\n"
     "then read the assent working instructions {instructions_path} and the task file {task_path}.\n"
     "Run only task {task_id}; do not touch other task files.\n"
@@ -536,8 +536,7 @@ def _shared_paths_contract(cfg: Config) -> "shared_paths.Contract":
 
 def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
                   session: SessionIdentity, resumed: bool = False) -> str:
-    template = cfg.prompt_template or _DEFAULT_PROMPT_TEMPLATE
-    text = (template
+    text = (_PROMPT_TEMPLATE
             .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
             .replace("{instructions_path}", str(contracts.instructions_path()))
             .replace("{task_path}", cfg.rel(task.path))

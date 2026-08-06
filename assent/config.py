@@ -28,7 +28,7 @@ from assent.shared_paths import MANIFEST_LOCK_NAME, MANIFEST_NAME
 from assent.user_home import user_config_path
 
 _TOP_LEVEL_KEYS = {
-    "watchdog", "run", "adapter", "prompt", "verification", "auto_fix",
+    "watchdog", "run", "adapter", "verification", "auto_fix",
 }
 
 # The ordered settings layers, lowest priority first.  The built-in layer contributes no
@@ -226,7 +226,6 @@ class Config:
     # Print mode has its own upstream wait limit, far shorter than a task session; the
     # adapter always states one instead of inheriting the CLI default.
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
-    prompt_template: str | None = None
     receipt_refresh: str = "manual"  # "manual" = explicit verify only, "auto" = also at run closeout
     # The reviewer rounds in configured order; today only the first is used.
     auto_fix_review: tuple[AutoFixReviewSettings, ...] | None = None
@@ -764,7 +763,6 @@ def load_config(path: str | Path, folder: str) -> Config:
     codex = _section(adapter, "codex") if "codex" in adapter else {}
     antigravity = (_section(adapter, "antigravity")
                    if "antigravity" in adapter else {})
-    prompt = _section(data, "prompt")
     verification_section = _section(data, "verification")
     auto_fix = _section(data, "auto_fix")
     _known_keys(auto_fix, "auto_fix", {"review"})
@@ -839,8 +837,6 @@ def load_config(path: str | Path, folder: str) -> Config:
         antigravity_print_timeout_minutes=_typed(
             antigravity, "[adapter.antigravity]", "print_timeout_minutes", int,
             _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES),
-        prompt_template=guard.text(
-            _typed(prompt, "[prompt]", "template", str, None), "prompt.template"),
         receipt_refresh=_typed(verification_section, "[verification]",
                                "receipt_refresh", str, "manual"),
         sources=sources,
