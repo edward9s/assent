@@ -5,11 +5,12 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from assent import AssentError, gitops, pathops, reconcile
+from assent import AssentError, gitops, lockfile, pathops, reconcile
 from assent.gitops import (
     branches_with_prefix, changes_outside_scope, commit_all, commit_empty,
     commit_if_dirty,
@@ -599,8 +600,8 @@ class TestRestore(GitTestCase):
         self.assertEqual(status.strip(), "")
 
 
-class TestTemporaryBranches(GitTestCase):
-    """Read-only inventory of the two branch namespaces Assent owns."""
+class TemporaryBranchTestCase(GitTestCase):
+    """A repo whose temporary branches, worktrees and refs are easy to build and read."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -635,6 +636,9 @@ class TestTemporaryBranches(GitTestCase):
     def _git(self, *args: str) -> str:
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True,
                               encoding="utf-8", check=True).stdout
+
+class TestTemporaryBranches(TemporaryBranchTestCase):
+    """Read-only inventory of the two branch namespaces Assent owns."""
 
     def test_prefixes_have_exactly_one_definition(self):
         self.assertEqual(gitops.INTEGRATION_BRANCH_PREFIX, "assent-integration/")
@@ -707,6 +711,81 @@ class TestTemporaryBranches(GitTestCase):
         self.assertEqual(
             gitops.temporary_branches(self.root, "HEAD~1")[0].classification,
             "superseded")
+
+
+class TestRemoveTemporaryBranches(TemporaryBranchTestCase):
+    """Deleting the orphans the inventory found, under a lock the caller holds."""
+
+    def _refs(self) -> list[str]:
+        return sorted(self._git("show-ref").splitlines())
+
+    def test_deletes_every_temporary_branch_and_leaves_other_refs_alone(self):
+        self._branch_with_commit("assent-integration/folder01/aaaa", "a.txt", "a\n")
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        _run(self.root, "branch", "folder01/run", "HEAD")
+        _run(self.root, "tag", "release01")
+        temporary = gitops.temporary_branches(self.root)
+        survivors = [ref for ref in self._refs()
+                     if not any(f" refs/heads/{record.branch}" in ref
+                                for record in temporary)]
+        removals = gitops.remove_temporary_branches(self.root, temporary)
+        self.assertEqual([(removal.branch, removal.outcome) for removal in removals],
+                         [("assent-integration/folder01/aaaa", "deleted"),
+                          ("assent-reconcile/folder02", "deleted")])
+        self.assertEqual([removal.classification for removal in removals],
+                         ["superseded", "superseded"])
+        self.assertEqual(gitops.temporary_branches(self.root), ())
+        self.assertEqual(self._refs(), survivors)
+
+    def test_checked_out_branch_is_refused_and_the_rest_still_go(self):
+        self._branch_with_commit("assent-integration/folder01/aaaa", "a.txt", "a\n")
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        path = self._add_worktree("assent-integration/folder01/aaaa")
+        refused, deleted = gitops.remove_temporary_branches(
+            self.root, gitops.temporary_branches(self.root))
+        self.assertEqual(refused.outcome, "refused")
+        self.assertEqual(refused.checked_out_in.resolve(), path.resolve())
+        self.assertIsNone(refused.error)
+        self.assertEqual(deleted.outcome, "deleted")
+        self.assertEqual([record.branch for record in gitops.temporary_branches(self.root)],
+                         ["assent-integration/folder01/aaaa"])
+
+    def test_git_refusal_is_reported_and_the_other_branch_is_still_attempted(self):
+        # Real Git refusal, no mock: the branch is genuinely checked out, but the
+        # record claims otherwise, so only Git itself can stop the deletion.
+        self._branch_with_commit("assent-integration/folder01/aaaa", "a.txt", "a\n")
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        self._add_worktree("assent-integration/folder01/aaaa")
+        checked, free = gitops.temporary_branches(self.root)
+        failed, deleted = gitops.remove_temporary_branches(
+            self.root, (replace(checked, checked_out_in=None), free))
+        self.assertEqual(failed.outcome, "failed")
+        self.assertIn("assent-integration/folder01/aaaa", failed.error)
+        self.assertIsNone(failed.checked_out_in)
+        self.assertEqual(deleted.outcome, "deleted")
+        self.assertEqual([record.branch for record in gitops.temporary_branches(self.root)],
+                         ["assent-integration/folder01/aaaa"])
+
+    def test_branch_outside_the_owned_prefixes_raises_instead_of_deleting(self):
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        _run(self.root, "branch", "folder01/run", "HEAD")
+        record, = gitops.temporary_branches(self.root)
+        with self.assertRaises(AssentError) as raised:
+            gitops.remove_temporary_branches(
+                self.root, (replace(record, branch="folder01/run"),))
+        self.assertIn("folder01/run", str(raised.exception))
+        self.assertIn(" refs/heads/folder01/run", "\n".join(self._refs()))
+
+    def test_does_not_acquire_the_integration_lock(self):
+        self._branch_with_commit("assent-reconcile/folder02", "b.txt", "b\n")
+        with lockfile.hold_integration_lock(self.root / ".assent"):
+            removal, = gitops.remove_temporary_branches(
+                self.root, gitops.temporary_branches(self.root))
+        self.assertEqual(removal.outcome, "deleted")
+        self.assertEqual(gitops.temporary_branches(self.root), ())
+
+    def test_removing_nothing_is_a_success(self):
+        self.assertEqual(gitops.remove_temporary_branches(self.root, ()), ())
 
 
 class TestGitMissing(unittest.TestCase):

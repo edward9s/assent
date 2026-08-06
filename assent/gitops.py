@@ -1226,3 +1226,77 @@ def temporary_branches(root: Path,
             classification=PUBLISHED if tree in published else SUPERSEDED,
             checked_out_in=checkouts.get(branch)))
     return tuple(records)
+
+
+# --- Temporary branch removal ---
+
+DELETED = "deleted"
+REFUSED = "refused"
+FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class TemporaryBranchRemoval:
+    """What one sweep did to one temporary branch, ready to render as it stands.
+
+    ``outcome`` is ``deleted``, ``refused`` (a registered worktree has the
+    branch checked out, so ``checked_out_in`` names that worktree) or ``failed``
+    (Git declined, and ``error`` carries its message).  ``classification`` is
+    carried over from the inventory record unchanged, so a caller never has to
+    read the branch again to report what it removed.
+    """
+
+    branch: str
+    classification: str
+    outcome: str
+    checked_out_in: Path | None = None
+    error: str | None = None
+
+
+def remove_temporary_branches(
+        root: Path,
+        records: Sequence[TemporaryBranchRecord]) -> tuple[TemporaryBranchRemoval, ...]:
+    """Delete orphaned temporary branches; the caller must already hold the lock.
+
+    The caller is **required** to hold ``hold_integration_lock`` for this
+    repository across the whole sweep, and this function deliberately never
+    acquires it: its callers hold that lock across a wider transaction, so a
+    nested acquisition would deadlock or quietly weaken the invariant that makes
+    the sweep safe.  That lock is what proves the branches are orphans -- it is
+    repository-wide, so any temporary branch that still exists while it is held
+    belongs to a transaction that did not complete.  Neither the inventory's
+    ``classification`` nor any property of the branch content takes part in that
+    proof.
+
+    Deleting a branch is the only mutation performed: no worktree is removed or
+    pruned, and no integration target or folder branch is touched.  A branch
+    outside the two owned prefixes is a programming error and raises before
+    anything at all is deleted.  Every branch is attempted, and one that cannot
+    be deleted is reported rather than raised, so a single undeletable ref
+    cannot hide the rest.  Sweeping nothing is a success.
+    """
+    for record in records:
+        if not record.branch.startswith(TEMPORARY_BRANCH_PREFIXES):
+            raise AssentError(
+                f"refusing to delete branch outside Assent's temporary "
+                f"namespaces: {record.branch}")
+    primary = main_worktree(root)
+    removals: list[TemporaryBranchRemoval] = []
+    for record in records:
+        if record.checked_out_in is not None:
+            removals.append(TemporaryBranchRemoval(
+                branch=record.branch, classification=record.classification,
+                outcome=REFUSED, checked_out_in=record.checked_out_in))
+            continue
+        deleted = _run_git(primary, "branch", "-D", record.branch)
+        if deleted.returncode == 0:
+            removals.append(TemporaryBranchRemoval(
+                branch=record.branch, classification=record.classification,
+                outcome=DELETED))
+        else:
+            removals.append(TemporaryBranchRemoval(
+                branch=record.branch, classification=record.classification,
+                outcome=FAILED,
+                error=(deleted.stderr.strip() or deleted.stdout.strip()
+                       or "unknown error")))
+    return tuple(removals)
