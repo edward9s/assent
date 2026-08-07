@@ -248,42 +248,42 @@ check_committed_delta()
 # --- Project test choice (assent init activates exactly one line; the
 # numbering matches the assent init menu) ---
 
-# 1. Custom command (anything not covered below):
+# 0. Custom command (anything not covered below):
 #    assent init --test custom:"<your test command>"
 
-# 2. Python (unittest):
+# 1. Python (unittest):
 # run_unittest_parallel()
 
-# 3. Python (pytest):
+# 2. Python (pytest):
 # run("ruff", "check", ".")
 # run("ruff", "format", "--check", ".")
 # run("pytest")
 
-# 4. Node / TypeScript:
+# 3. Node / TypeScript:
 # run("npx", "prettier", "--check", ".")
 # run("npx", "eslint", ".")
 # run("npm", "test")
 
-# 5. Flutter / Dart:
+# 4. Flutter / Dart:
 # run("dart", "format", "--output=none", "--set-exit-if-changed", ".")
 # run("flutter", "analyze")
 # run("flutter", "test")
 
-# 6. C# / .NET:
+# 5. C# / .NET:
 # run("dotnet", "test")
 
-# 7. Java (Maven):
+# 6. Java (Maven):
 # run("mvn", "test")
 
-# 8. Java (Gradle):
+# 7. Java (Gradle):
 # run("gradle", "test")
 
-# 9. C / C++ (CMake + CTest; "build" is only the common default -- point
+# 8. C / C++ (CMake + CTest; "build" is only the common default -- point
 #    --test-dir at whatever binary directory your project actually
 #    configures, e.g. cmake-build-debug or out/build/<preset>):
 # run("ctest", "--test-dir", "build", "--output-on-failure")
 
-# 10. C / C++ (Make):
+# 9. C / C++ (Make):
 # run("make", "test")
 
 _print_verifier_totals()

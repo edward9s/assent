@@ -1955,11 +1955,11 @@ class TestInit(MainTestCase):
                         self.assertIn(f"\n# {other}\n", verifier)
 
     def test_cli_without_test_shows_menu_and_uses_the_selected_choice(self):
-        with patch("builtins.input", return_value="3"):
+        with patch("builtins.input", return_value="2"):
             code, output = self.run_main(["init"])
         self.assertEqual(code, 0)
-        self.assertIn("1. Custom command", output)
-        self.assertIn("2. Parallel unittest", output)
+        self.assertIn("0. Custom command", output)
+        self.assertIn("1. Parallel unittest", output)
         verifier = (self.root / ".assent" / "verify.py").read_text(
             encoding="utf-8")
         self.assertIn('\nrun("pytest")\n', verifier)
