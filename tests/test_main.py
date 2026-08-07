@@ -1918,6 +1918,13 @@ class TestInit(MainTestCase):
         self.assertIn("\n# run(\"pytest\")\n", verifier)
         self.assertIn("\n# run(\"npm\", \"test\")\n", verifier)
         self.assertIn("\n# run(\"flutter\", \"test\")\n", verifier)
+        self.assertIn("\n# run(\"dotnet\", \"test\")\n", verifier)
+        self.assertIn("\n# run(\"mvn\", \"test\")\n", verifier)
+        self.assertIn("\n# run(\"gradle\", \"test\")\n", verifier)
+        self.assertIn(
+            "\n# run(\"ctest\", \"--test-dir\", \"build\", "
+            "\"--output-on-failure\")\n", verifier)
+        self.assertIn("\n# run(\"make\", \"test\")\n", verifier)
         self.assertIn("Created:", out)
 
     def test_builtin_test_choices_activate_only_the_selected_command(self):
@@ -1926,6 +1933,12 @@ class TestInit(MainTestCase):
             "pytest": 'run("pytest")',
             "npm": 'run("npm", "test")',
             "flutter": 'run("flutter", "test")',
+            "dotnet": 'run("dotnet", "test")',
+            "maven": 'run("mvn", "test")',
+            "gradle": 'run("gradle", "test")',
+            "cmake-ctest":
+                'run("ctest", "--test-dir", "build", "--output-on-failure")',
+            "make": 'run("make", "test")',
         }
         for choice, active in choices.items():
             with self.subTest(choice=choice):
@@ -1942,11 +1955,11 @@ class TestInit(MainTestCase):
                         self.assertIn(f"\n# {other}\n", verifier)
 
     def test_cli_without_test_shows_menu_and_uses_the_selected_choice(self):
-        with patch("builtins.input", return_value="2"):
+        with patch("builtins.input", return_value="3"):
             code, output = self.run_main(["init"])
         self.assertEqual(code, 0)
-        self.assertIn("1. Parallel unittest", output)
-        self.assertIn("5. Custom command", output)
+        self.assertIn("1. Custom command", output)
+        self.assertIn("2. Parallel unittest", output)
         verifier = (self.root / ".assent" / "verify.py").read_text(
             encoding="utf-8")
         self.assertIn('\nrun("pytest")\n', verifier)

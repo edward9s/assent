@@ -245,23 +245,46 @@ def run_unittest_parallel(start_dir: str = "tests", jobs: int | None = None) -> 
 run("git", "-c", DIFF_CHECK_CONFIG, "diff", "--check")
 check_committed_delta()
 
-# --- Project test choice (assent init activates exactly one line) ---
+# --- Project test choice (assent init activates exactly one line; the
+# numbering matches the assent init menu) ---
 
-# Flutter / Dart:
-# run("dart", "format", "--output=none", "--set-exit-if-changed", ".")
-# run("flutter", "analyze")
-# run("flutter", "test")
+# 1. Custom command (anything not covered below):
+#    assent init --test custom:"<your test command>"
 
-# Node / TypeScript:
+# 2. Python (unittest):
+# run_unittest_parallel()
+
+# 3. Python (pytest):
+# run("ruff", "check", ".")
+# run("ruff", "format", "--check", ".")
+# run("pytest")
+
+# 4. Node / TypeScript:
 # run("npx", "prettier", "--check", ".")
 # run("npx", "eslint", ".")
 # run("npm", "test")
 
-# Python:
-# run("ruff", "check", ".")
-# run("ruff", "format", "--check", ".")
-# run("pytest")
-# run_unittest_parallel()
+# 5. Flutter / Dart:
+# run("dart", "format", "--output=none", "--set-exit-if-changed", ".")
+# run("flutter", "analyze")
+# run("flutter", "test")
+
+# 6. C# / .NET:
+# run("dotnet", "test")
+
+# 7. Java (Maven):
+# run("mvn", "test")
+
+# 8. Java (Gradle):
+# run("gradle", "test")
+
+# 9. C / C++ (CMake + CTest; "build" is only the common default -- point
+#    --test-dir at whatever binary directory your project actually
+#    configures, e.g. cmake-build-debug or out/build/<preset>):
+# run("ctest", "--test-dir", "build", "--output-on-failure")
+
+# 10. C / C++ (Make):
+# run("make", "test")
 
 _print_verifier_totals()
 print("verify: OK")

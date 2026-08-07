@@ -73,8 +73,9 @@ assent archive --all
 ```
 
 `assent init` asks for the real project verifier on a fresh project. It can
-activate parallel unittest, pytest, npm test, Flutter test, or a custom argv
-command. A repeat init preserves an existing verifier, refreshes the three
+activate parallel unittest, pytest, npm test, Flutter test, dotnet test,
+Maven test, Gradle test, CMake/CTest, Make test, or a custom argv command.
+A repeat init preserves an existing verifier, refreshes the three
 user-home contracts, and adds only missing settings keys. The user-home
 contracts are `~/.assent/instructions.md`, `~/.assent/format.md`, and
 `~/.assent/workflow.md`; a project does not receive copies. See

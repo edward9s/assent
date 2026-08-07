@@ -71,7 +71,8 @@ assent archive --all
 ```
 
 新專案的 `assent init` 會詢問真正的 verifier，可選平行 unittest、pytest、
-npm test、Flutter test 或 custom argv。重跑 init 會保留現有 verifier、刷新兩份
+npm test、Flutter test、dotnet test、Maven test、Gradle test、CMake/CTest、
+Make test 或 custom argv。重跑 init 會保留現有 verifier、刷新兩份
 使用者家目錄契約，只補入遺漏設定。使用者家目錄契約是
 `~/.assent/instructions.md` 與 `~/.assent/format.md`；專案不會收到副本。
 詳見[設定指南](docs/zh-TW/CONFIGURATION.md)。

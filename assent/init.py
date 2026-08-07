@@ -49,30 +49,61 @@ _BUILTIN_TESTS = {
     "pytest": _TestSelection("pytest", 'run("pytest")'),
     "npm": _TestSelection("npm test", 'run("npm", "test")'),
     "flutter": _TestSelection("Flutter test", 'run("flutter", "test")'),
+    "dotnet": _TestSelection("dotnet test", 'run("dotnet", "test")'),
+    "maven": _TestSelection("Maven test", 'run("mvn", "test")'),
+    "gradle": _TestSelection("Gradle test", 'run("gradle", "test")'),
+    "cmake-ctest": _TestSelection(
+        "CMake/CTest",
+        'run("ctest", "--test-dir", "build", "--output-on-failure")'),
+    "make": _TestSelection("Make test", 'run("make", "test")'),
 }
 _BUILTIN_ALIASES = {
-    "1": "unittest",
+    "2": "unittest",
     "parallel-unittest": "unittest",
     "parallel unittest": "unittest",
     "unittest-parallel": "unittest",
     "parallel_unittest": "unittest",
     "python-unittest": "unittest",
     "python unittest": "unittest",
-    "2": "pytest",
-    "3": "npm",
+    "3": "pytest",
+    "4": "npm",
     "npm-test": "npm",
     "npm test": "npm",
-    "4": "flutter",
+    "5": "flutter",
     "flutter-test": "flutter",
     "flutter test": "flutter",
+    "6": "dotnet",
+    "dotnet-test": "dotnet",
+    "dotnet test": "dotnet",
+    "7": "maven",
+    "mvn": "maven",
+    "mvn-test": "maven",
+    "mvn test": "maven",
+    "8": "gradle",
+    "gradle-test": "gradle",
+    "gradle test": "gradle",
+    "9": "cmake-ctest",
+    "cmake": "cmake-ctest",
+    "ctest": "cmake-ctest",
+    "cmake-test": "cmake-ctest",
+    "cmake ctest": "cmake-ctest",
+    "10": "make",
+    "make-test": "make",
+    "make test": "make",
 }
-_CUSTOM_ALIASES = {"5", "custom", "custom-command", "custom command"}
+_CUSTOM_ALIASES = {"1", "custom", "custom-command", "custom command"}
 _MENU = (
-    ("1", "Parallel unittest (run_unittest_parallel())"),
-    ("2", "pytest (run(\"pytest\"))"),
-    ("3", "npm test (run(\"npm\", \"test\"))"),
-    ("4", "Flutter test (run(\"flutter\", \"test\"))"),
-    ("5", "Custom command (argv passed to run(...))"),
+    ("1", "Custom command (argv passed to run(...))"),
+    ("2", "Parallel unittest (run_unittest_parallel())"),
+    ("3", "pytest (run(\"pytest\"))"),
+    ("4", "npm test (run(\"npm\", \"test\"))"),
+    ("5", "Flutter test (run(\"flutter\", \"test\"))"),
+    ("6", "dotnet test (run(\"dotnet\", \"test\"))"),
+    ("7", "Maven test (run(\"mvn\", \"test\"))"),
+    ("8", "Gradle test (run(\"gradle\", \"test\"))"),
+    ("9", "CMake/CTest (run(\"ctest\", \"--test-dir\", \"build\", "
+          "\"--output-on-failure\"))"),
+    ("10", "Make test (run(\"make\", \"test\"))"),
 )
 
 
@@ -128,8 +159,9 @@ def _custom_selection(command: str | Sequence[str]) -> _TestSelection:
 def _selection_from_values(values: Sequence[str]) -> _TestSelection:
     if not values:
         raise AssentError(
-            "invalid test selection; choose 1-5, unittest, pytest, npm, "
-            "flutter, or custom:<command>")
+            "invalid test selection; choose 1-10, unittest, pytest, npm, "
+            "flutter, dotnet, maven, gradle, cmake-ctest, make, or "
+            "custom:<command>")
     if not all(isinstance(value, str) for value in values):
         raise AssentError("test selection values must be strings")
 
@@ -167,8 +199,9 @@ def _selection_from_values(values: Sequence[str]) -> _TestSelection:
     if any(char.isspace() for char in first.strip()):
         return _custom_selection(first)
     raise AssentError(
-        f"invalid test selection {first!r}; choose 1-5, unittest, pytest, "
-        "npm, flutter, or custom:<command>")
+        f"invalid test selection {first!r}; choose 1-10, unittest, pytest, "
+        "npm, flutter, dotnet, maven, gradle, cmake-ctest, make, or "
+        "custom:<command>")
 
 
 def _interactive_selection() -> _TestSelection:
@@ -176,7 +209,7 @@ def _interactive_selection() -> _TestSelection:
     for number, description in _MENU:
         print(f"  {number}. {description}")
     try:
-        choice = input("Test choice [1-5]: ").strip()
+        choice = input("Test choice [1-10]: ").strip()
     except (EOFError, KeyboardInterrupt) as e:
         raise AssentError("test selection cancelled or reached EOF") from e
 
@@ -204,6 +237,11 @@ def _render_verifier(template: str, selection: _TestSelection) -> str:
         '# run("pytest")',
         '# run("npm", "test")',
         '# run("flutter", "test")',
+        '# run("dotnet", "test")',
+        '# run("mvn", "test")',
+        '# run("gradle", "test")',
+        '# run("ctest", "--test-dir", "build", "--output-on-failure")',
+        '# run("make", "test")',
     )
     active_markers = [marker for marker in markers if marker in template]
     if len(active_markers) != len(markers):
@@ -214,6 +252,11 @@ def _render_verifier(template: str, selection: _TestSelection) -> str:
         "pytest": '# run("pytest")',
         "npm test": '# run("npm", "test")',
         "Flutter test": '# run("flutter", "test")',
+        "dotnet test": '# run("dotnet", "test")',
+        "Maven test": '# run("mvn", "test")',
+        "Gradle test": '# run("gradle", "test")',
+        "CMake/CTest": '# run("ctest", "--test-dir", "build", "--output-on-failure")',
+        "Make test": '# run("make", "test")',
     }.get(selection.label)
     if marker is None:
         # A custom command has no fixed marker; it replaces the Python unittest

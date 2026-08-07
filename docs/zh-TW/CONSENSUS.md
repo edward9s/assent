@@ -201,7 +201,8 @@ verification receipt 從不會發布任何東西。
 committed delta 是否殘留衝突標記; root commit 沒有父提交時安全略過第二項。只有
 空白差異時不阻擋驗證,包括換行格式、行尾空格或 tab,以及檔尾空白行;需要格式政策的
 專案應加入明確的 formatter 檢查。新的 `assent init` 必須明示選擇平行 unittest、
-pytest、npm test、Flutter test 或 custom argv 命令。打包 template 的每個專案測試
+pytest、npm test、Flutter test、dotnet test、Maven test、Gradle test、
+CMake/CTest、Make test 或 custom argv 命令。打包 template 的每個專案測試
 範例都維持註解,產生的副本只啟用一個選項,因此空專案在選定測試不存在時不能回報
 `verify: OK`。
 

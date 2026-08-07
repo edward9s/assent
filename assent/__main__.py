@@ -322,9 +322,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Target project root directory (default: current directory)")
     init_p.add_argument(
         "--test", nargs="+", metavar="CHOICE",
-        help=("Select the project test non-interactively: 1/unittest, 2/pytest, "
-              "3/npm, 4/flutter, or 5/custom followed by an argv command; "
-              "custom:<command> also accepts one quoted command. Omit it on "
+        help=("Select the project test non-interactively: 1/custom followed "
+              "by an argv command (custom:<command> also accepts one quoted "
+              "command), 2/unittest, 3/pytest, 4/npm, 5/flutter, 6/dotnet, "
+              "7/maven, 8/gradle, 9/cmake-ctest, or 10/make. Omit it on "
               "fresh init for the numbered menu; repeat init does not prompt"))
 
     # The only sanctioned writer of the local shared-path manifest.  It needs no

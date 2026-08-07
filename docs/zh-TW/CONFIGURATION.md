@@ -67,7 +67,8 @@ override 並從 `.assent` parent 定位 project，不是 current-folder pointer�
 在 Git project root 執行 fresh init，會安裝 user-home 契約與設定、建立
 `.assent/verify.py`、保留 `.assent/` ignored，並刷新 `AGENTS.md` bridge line。它會
 要求選一個真正的 project verifier：parallel unittest、pytest、npm test、Flutter
-test 或 custom argv：
+test、dotnet test、Maven test、Gradle test、CMake/CTest、Make test 或 custom
+argv：
 
 ```text
 assent init --test unittest

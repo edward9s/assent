@@ -269,7 +269,8 @@ that second check for a root commit. Whitespace-only differences, including line
 endings, trailing spaces or tabs, and blank lines at EOF, do not block
 verification; a project that requires formatting policy adds an explicit
 formatter check. Fresh `assent init` requires an explicit choice of parallel
-unittest, pytest, npm test, Flutter test, or a custom argv command. Every
+unittest, pytest, npm test, Flutter test, dotnet test, Maven test, Gradle
+test, CMake/CTest, Make test, or a custom argv command. Every
 project-test example remains commented in the packaged template; the generated
 copy activates exactly one, so an empty project cannot report `verify: OK`
 without its selected test.

@@ -82,8 +82,9 @@ Invalid TOML and invalid values fail before managed files are written.
 From a Git project root, a fresh initialization installs the user-home
 contracts and settings, creates `.assent/verify.py`, keeps `.assent/` ignored,
 and refreshes the `AGENTS.md` bridge line. It asks for exactly one real project
-verification choice: parallel unittest, pytest, npm test, Flutter test, or a
-custom argv command. Scripts can supply it directly, for example:
+verification choice: parallel unittest, pytest, npm test, Flutter test, dotnet
+test, Maven test, Gradle test, CMake/CTest, Make test, or a custom argv
+command. Scripts can supply it directly, for example:
 
 ```text
 assent init --test unittest
