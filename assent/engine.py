@@ -41,17 +41,19 @@ from typing import Callable, TextIO
 
 from assent import (AssentError, auto_fix, contracts, gitops, lockfile, rework,
                     shared_paths, verification)
-from assent.adapters import Adapter, get_adapter
+from assent.adapters import Adapter, InvocationRequest, get_adapter
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess as _adapter_run_subprocess,
                                      stop_wake_requested)
-from assent.config import Config
+from assent.config import Config, WorkflowPlanStep, WorkflowTaskStep
 from assent.folderdeps import find_unfinished_prerequisites
 from assent.inspection import try_write_report
 from assent.plan import (Plan, Task, append_entry, parse_task_file,
-                         read_entries, same_except_status, set_status,
+                         read_entries, read_workflow_state, same_except_status,
+                         set_status, WorkflowState,
                          add_scope_entries, scope_text_without_entries,
-                         scope_text_with_entries, task_text_sha256)
+                         scope_text_with_entries, task_text_sha256,
+                         workflow_state_path, write_workflow_state)
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               StackState, auto_fix_fixer_capability_errors,
                               auto_fix_review_capability_errors, capability_errors,
@@ -91,6 +93,43 @@ _RESUME_SUFFIX = ("\nThe previous adapter session was interrupted (quota exhaust
                   "interrupt); the partial work already done is kept in the working tree "
                   "(possibly including a wip checkpoint). Review the current state first, "
                   "resume and finish the remaining part, and do not redo what is already done.")
+_TASK_WORKFLOW_SUFFIX = """
+
+Task workflow step {position} of {total}; scheduled role: {role}
+
+Role abilities:
+{role_policy}
+
+{closeout_policy}
+"""
+_PLAN_WORKER_PROMPT = """You are the Assent plan execution worker.
+
+First read the project rules {agents_md_path} and the Assent working instructions
+{instructions_path}. This folder uses `[workflow].task = []`, so the whole plan,
+not any individual task, is the accountability unit. Do not edit any task file or
+journal; the scheduler owns their closeout.
+
+Plan workflow step {position} of {total}; scheduled role: {role}
+
+Role abilities:
+{role_policy}
+
+You may write only within this union of every task's declared scope:
+{scope}
+
+The scheduler will run these focused commands, deduplicated in plan order:
+{verify_commands}
+
+Task contracts:
+{contracts}
+
+Folder dependency state:
+{dependency_state}
+{completed_context}
+Do not run the full project verifier and do not commit. Complete the scheduled
+role and return normally; the scheduler decides the gate, journals, statuses,
+retry, and checkpoint.
+"""
 _REWORK_SUFFIX = ("\nThe previous implementation of this task was rejected by a human "
                   "reviewer, and its status was reset to TODO.{reject_reason_clause}\n"
                   "The previous implementation and its tests may still be present in the "
@@ -538,8 +577,118 @@ def _shared_paths_contract(cfg: Config) -> "shared_paths.Contract":
     return contract
 
 
+def _role_policy(step: WorkflowTaskStep | object) -> str:
+    resolved = step.resolved_role
+    return "\n\n".join(ability.prompt for ability in resolved.abilities)
+
+
+def _workflow_task_session(
+        cfg: Config, adapter: Adapter, task: Task, step: WorkflowTaskStep,
+        adapter_name: str) -> SessionIdentity:
+    """Resolve one configured task role, falling back to the task's profile."""
+    model = step.resolved_role.model or task.model
+    stated_effort = (step.resolved_role.effort
+                     if step.resolved_role.effort is not None else task.effort)
+    settings = cfg.adapter_settings(adapter_name)
+    effort = settings.resolve_effort(stated_effort, model)
+    return SessionIdentity(
+        agent=adapter_name,
+        requested_model=adapter.resolve_model(model),
+        effort=effort,
+        requested_effort=settings.resolve_requested_effort(model, effort),
+    )
+
+
+def _workflow_task_capability_errors(
+        cfg: Config, adapter: Adapter, plan: Plan, adapter_name: str,
+        task_id: str | None) -> list[str]:
+    if not cfg.workflow_task:
+        return []
+    requests: list[InvocationRequest] = []
+    try:
+        for task in plan.tasks:
+            if (task.status not in ("TODO", "WIP")
+                    or (task_id is not None and task.id != task_id)):
+                continue
+            for index, step in enumerate(cfg.workflow_task):
+                session = _workflow_task_session(
+                    cfg, adapter, task, step, adapter_name)
+                requests.append(InvocationRequest(
+                    task_id=f"{task.id} workflow[{index}]",
+                    model=step.resolved_role.model or task.model,
+                    effort=session.effort,
+                    requested_model=session.requested_model,
+                    requested_effort=session.requested_effort))
+    except AssentError as error:
+        return [str(error)]
+    return adapter.preflight(requests)
+
+
+def _plan_step_session(
+        cfg: Config, adapter: Adapter, plan: Plan, step: WorkflowPlanStep,
+        adapter_name: str) -> SessionIdentity:
+    """Resolve a whole-plan worker step through its role or the first task profile."""
+    if step.requested_model is not None:
+        return SessionIdentity(
+            agent=step.adapter or adapter_name,
+            requested_model=step.requested_model,
+            effort=step.effort,
+            requested_effort=step.requested_effort)
+    first = plan.tasks[0]
+    model = step.model or first.model
+    stated_effort = (step.effort if step.effort is not None else first.effort)
+    settings = cfg.adapter_settings(adapter_name)
+    effort = settings.resolve_effort(stated_effort, model)
+    return SessionIdentity(
+        agent=adapter_name,
+        requested_model=adapter.resolve_model(model),
+        effort=effort,
+        requested_effort=settings.resolve_requested_effort(model, effort))
+
+
+def _plan_workflow_capability_errors(
+        cfg: Config, adapter: Adapter, plan: Plan,
+        adapter_name: str) -> list[str]:
+    requests: list[InvocationRequest] = []
+    try:
+        for index, step in enumerate(cfg.workflow_plan):
+            if step.adapter is not None and step.adapter != adapter_name:
+                continue
+            session = _plan_step_session(
+                cfg, adapter, plan, step, adapter_name)
+            requests.append(InvocationRequest(
+                task_id=f"{cfg.tasks_name} workflow.plan[{index}]",
+                model=step.model or plan.tasks[0].model,
+                effort=session.effort,
+                requested_model=session.requested_model,
+                requested_effort=session.requested_effort))
+    except AssentError as error:
+        return [str(error)]
+    return adapter.preflight(requests)
+
+
+def _task_workflow_suffix(
+        step: WorkflowTaskStep, index: int, total: int) -> str:
+    final = index == total - 1
+    closeout = (
+        "This is the final task workflow step; follow the ordinary task closeout "
+        "instructions above."
+        if final else
+        "More task workflow steps remain. Do not mark the task DONE. Leave its "
+        "status WIP (or mark BLOCKED only for a genuine blocker), and append this "
+        "session's one journal entry before returning. The scheduler advances the "
+        "derived workflow cursor."
+    )
+    return _TASK_WORKFLOW_SUFFIX.format(
+        position=index + 1, total=total, role=step.role,
+        role_policy=_role_policy(step), closeout_policy=closeout)
+
+
 def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
-                  session: SessionIdentity, resumed: bool = False) -> str:
+                  session: SessionIdentity, resumed: bool = False, *,
+                  workflow_step: WorkflowTaskStep | None = None,
+                  workflow_index: int = 0,
+                  workflow_total: int = 0) -> str:
     text = (_PROMPT_TEMPLATE
             .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
             .replace("{instructions_path}", str(contracts.instructions_path()))
@@ -570,6 +719,9 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
         text += _CLOSEOUT_RETRY_SUFFIX.replace("{verify_command}", task.verify)
     elif failure_reason:
         text += _RETRY_SUFFIX.replace("{failure_reason}", failure_reason)
+    if workflow_step is not None:
+        text += _task_workflow_suffix(
+            workflow_step, workflow_index, workflow_total)
     return text
 
 
@@ -949,8 +1101,15 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     rotation = _AdapterRotation(cfg.adapter_names, tuple(adapters))
     preflight_failures: list[tuple[str, list[str]]] = []
     for name, current_adapter in zip(rotation.names, rotation.adapters):
-        errors = capability_errors(
-            cfg, current_adapter, plan, task_id, name)
+        if cfg.workflow_task is None:
+            errors = capability_errors(
+                cfg, current_adapter, plan, task_id, name)
+        elif cfg.workflow_task:
+            errors = _workflow_task_capability_errors(
+                cfg, current_adapter, plan, name, task_id)
+        else:
+            errors = _plan_workflow_capability_errors(
+                cfg, current_adapter, plan, name)
         if errors:
             preflight_failures.append((name, errors))
     if preflight_failures:
@@ -998,6 +1157,13 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     blocker_evidence: list[_AutoFixBlockerEvidence] = []
     gate_passes = _FocusedGateLedger()
     try:
+        if cfg.workflow_task == ():
+            if task_id is not None:
+                print("[workflow].task = [] makes the whole plan one unit; "
+                      "--task cannot select part of it")
+                return 1
+            return _process_plan_workflow(
+                cfg, plan, rotation, sleep, now, trusted_contracts)
         # Read the durable state even for an ordinary run.  A pending FAIL is
         # not an additional task status and ordinary execution may still make
         # limited progress, but a complete folder must not silently close over
@@ -3308,6 +3474,21 @@ def _try_recover_attributable_worktree(cfg: Config,
         plan = Plan.parse(cfg.tasks_dir)
     except AssentError:
         return False
+    try:
+        cursor = read_workflow_state(cfg.tasks_dir)
+    except AssentError:
+        return False
+    if cursor is not None and cursor.unit == "plan":
+        if gitops.changes_outside_scope(
+                cfg.root, _plan_scope(plan), excludes=cfg.git_excludes):
+            return False
+        gitops.commit_if_dirty(
+            cfg.root,
+            f"wip({cfg.tasks_name}): recovered plan workflow progress",
+            cfg.git_excludes)
+        print("Recovered dirty plan-workflow progress; scope-verified against "
+              "the plan scope union and kept in a wip checkpoint.")
+        return True
     origin = _UNCLEAN_EXIT_DIRT
     owner = _resumable_dirt_owner(cfg, plan) or _uncheckpointed_done_dirt_owner(cfg, plan)
     if owner is None:
@@ -3642,6 +3823,211 @@ def _repair_dispositions_from_journal(
         expected_fingerprints=expected_fingerprints)
 
 
+def _plan_scope(plan: Plan) -> list[str]:
+    return list(dict.fromkeys(path for task in plan.tasks for path in task.scope))
+
+
+def _plan_verify_commands(plan: Plan) -> list[str]:
+    return list(dict.fromkeys(task.verify for task in plan.tasks))
+
+
+def _plan_cumulative_diff(cfg: Config, base_ref: str) -> str:
+    result = subprocess.run(
+        ["git", "diff", "--find-renames", base_ref, "--"], cwd=str(cfg.root),
+        capture_output=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise AssentError(
+            "Unable to render plan workflow diff: "
+            + _bounded_adapter_diagnostic(result.stderr or result.stdout))
+    return (result.stdout or "(no cumulative changes)").rstrip()
+
+
+def _plan_worker_prompt(
+        cfg: Config, plan: Plan, step: WorkflowPlanStep, state: WorkflowState,
+        trusted_contracts: dict[str, str], failure_reason: str | None) -> str:
+    contracts_text = "\n\n".join(
+        f"--- {task.id}: {task.path} ---\n{trusted_contracts[task.id].rstrip()}"
+        for task in plan.tasks)
+    completed = ""
+    if state.step_index > 0:
+        completed = (
+            "\nCumulative checkpoint diff and working changes:\n"
+            f"{_plan_cumulative_diff(cfg, state.base_ref)}\n\n"
+            "Focused evidence from completed plan steps:\n"
+            + "\n".join(state.focused_evidence) + "\n")
+    prompt = _PLAN_WORKER_PROMPT.format(
+        agents_md_path=_agents_md_path_for_prompt(cfg),
+        instructions_path=contracts.instructions_path(),
+        position=state.step_index + 1, total=len(cfg.workflow_plan),
+        role=step.role, role_policy="\n\n".join(
+            ability.prompt for ability in step.resolved_role.abilities),
+        scope="\n".join(f"- {path}" for path in _plan_scope(plan)),
+        verify_commands="\n".join(
+            f"- {command}" for command in _plan_verify_commands(plan)),
+        contracts=contracts_text,
+        dependency_state=_auto_fix_dependency_state(plan),
+        completed_context=completed)
+    if state.started and failure_reason is None:
+        prompt += _RESUME_SUFFIX
+    if failure_reason:
+        prompt += _RETRY_SUFFIX.replace("{failure_reason}", failure_reason)
+    return prompt
+
+
+def _evaluate_plan_step(
+        cfg: Config, plan: Plan, base_ref: str,
+        trusted_contracts: dict[str, str]) -> tuple[bool, str, tuple[str, ...]]:
+    for task in plan.tasks:
+        try:
+            current = task.path.read_text(encoding="utf-8")
+        except OSError as error:
+            return False, f"Task contract became unreadable: {error}", ()
+        if current != trusted_contracts[task.id]:
+            return False, f"Plan worker modified protected task contract {task.id}", ()
+    outside = gitops.changes_outside_scope(
+        cfg.root, _plan_scope(plan), since_ref=base_ref,
+        excludes=cfg.git_excludes)
+    if outside:
+        shown = ", ".join(outside[:5]) + (" ..." if len(outside) > 5 else "")
+        return False, f"Changes outside the plan scope union appeared: {shown}", ()
+    evidence: list[str] = []
+    for command in _plan_verify_commands(plan):
+        rc = _run_verify(cfg, command)
+        evidence.append(f"{'PASS' if rc == 0 else 'FAIL'}: exit {rc}: {command}")
+        if rc != 0:
+            return False, ("Plan workflow gate exit code is non-zero "
+                           f"(={rc}): {command}"), tuple(evidence)
+    try:
+        contract = _shared_paths_contract(cfg)
+    except AssentError as error:
+        return False, f"Shared-path contract could not be classified: {error}", tuple(evidence)
+    refusal = shared_paths.closeout_refusal(contract)
+    if refusal:
+        return False, refusal[:1].upper() + refusal[1:], tuple(evidence)
+    return True, "", tuple(evidence)
+
+
+def _finish_plan_unit(
+        cfg: Config, plan: Plan, step: WorkflowPlanStep,
+        now: Callable[[], datetime]) -> None:
+    for task in plan.tasks:
+        if task.status != "SKIP":
+            set_status(task.path, "DONE")
+            append_entry(
+                task.journal_path, by="scheduler", event="done",
+                summary=(f"Plan workflow step {step.role!r} completed "
+                         f"the plan accountability unit for {task.id}"),
+                detail=(f"[workflow].task = []; completed by plan step "
+                        f"{step.role!r}; focused plan gate passed."),
+                time_str=now().isoformat(timespec="seconds"))
+    workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
+    subject = f"auto({cfg.tasks_name}): workflow plan step {step.role}"
+    if not gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
+        gitops.commit_empty(cfg.root, subject)
+
+
+def _block_plan_unit(
+        cfg: Config, plan: Plan, step: WorkflowPlanStep, reason: str,
+        now: Callable[[], datetime]) -> None:
+    for task in plan.tasks:
+        if task.status != "SKIP":
+            set_status(task.path, "BLOCKED")
+            append_entry(
+                task.journal_path, by="scheduler", event="blocked",
+                summary=f"Plan workflow step {step.role!r} exhausted retries",
+                detail=reason,
+                time_str=now().isoformat(timespec="seconds"))
+    workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
+    subject = f"auto({cfg.tasks_name}): BLOCKED (plan step {step.role})"
+    if not gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
+        gitops.commit_empty(cfg.root, subject)
+
+
+def _process_plan_workflow(
+        cfg: Config, plan: Plan, rotation: _AdapterRotation,
+        sleep: Callable[[float], None], now: Callable[[], datetime],
+        trusted_contracts: dict[str, str]) -> int:
+    """Run a `[workflow].task = []` folder as one plan-owned unit."""
+    if not cfg.workflow_plan:
+        print("[workflow].task = [] has no [workflow].plan step to execute")
+        return 1
+    if all(task.status in ("DONE", "SKIP") for task in plan.tasks):
+        _print_summary(plan)
+        try_write_report(cfg)
+        return 0
+    state = read_workflow_state(cfg.tasks_dir)
+    if state is None:
+        state = WorkflowState(
+            "plan", "", 0, False, gitops.head_ref(cfg.root) or "HEAD")
+        write_workflow_state(cfg.tasks_dir, state)
+    if state.unit != "plan" or state.step_index >= len(cfg.workflow_plan):
+        raise AssentError("Workflow cursor does not match the configured plan unit")
+    attempts = 0
+    failure_reason: str | None = None
+    while True:
+        step = cfg.workflow_plan[state.step_index]
+        adapter = rotation.adapter
+        adapter_name = rotation.name
+        if step.adapter is not None and step.adapter != adapter_name:
+            adapter_name = step.adapter
+            adapter = get_adapter(adapter_name, cfg)
+        session = _plan_step_session(cfg, adapter, plan, step, adapter_name)
+        prompt = _plan_worker_prompt(
+            cfg, plan, step, state, trusted_contracts, failure_reason)
+        print(f"\nPlan workflow step {state.step_index + 1}/{len(cfg.workflow_plan)}: "
+              f"{step.role}")
+        state = replace(state, started=True)
+        write_workflow_state(cfg.tasks_dir, state)
+        result = adapter.run_task(
+            prompt, session.requested_model, session.requested_effort, cfg.root)
+        if result.checkpoint_resume and not result.quota_exhausted:
+            gitops.commit_if_dirty(
+                cfg.root, f"wip({cfg.tasks_name}): plan workflow resume",
+                cfg.git_excludes)
+            failure_reason = None
+            continue
+        if result.quota_exhausted:
+            gitops.commit_if_dirty(
+                cfg.root, f"wip({cfg.tasks_name}): plan workflow quota interrupt",
+                cfg.git_excludes)
+            _wait_for_quota(cfg, result.reset_at, sleep, now)
+            failure_reason = None
+            continue
+        if result.exit_code != 0 or result.stalled:
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output,
+                result.failure_kind)
+            passed, evidence = False, ()
+        else:
+            passed, reason, evidence = _evaluate_plan_step(
+                cfg, plan, state.base_ref, trusted_contracts)
+        if passed:
+            combined = state.focused_evidence + evidence
+            if state.step_index == len(cfg.workflow_plan) - 1:
+                _finish_plan_unit(cfg, plan, step, now)
+                final = Plan.parse(cfg.tasks_dir)
+                _print_summary(final)
+                try_write_report(cfg)
+                return 0
+            state = replace(
+                state, step_index=state.step_index + 1, started=False,
+                focused_evidence=combined)
+            write_workflow_state(cfg.tasks_dir, state)
+            attempts = 0
+            failure_reason = None
+            continue
+        print(f"  Plan workflow acceptance failed: {reason}")
+        if attempts < cfg.retry_per_task:
+            attempts += 1
+            failure_reason = reason
+            continue
+        _block_plan_unit(cfg, plan, step, reason, now)
+        final = Plan.parse(cfg.tasks_dir)
+        _print_summary(final)
+        try_write_report(cfg)
+        return 0
+
+
 def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   sleep: Callable[[float], None],
                   now: Callable[[], datetime], session_state: _SessionState,
@@ -3664,8 +4050,22 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     may make to the on-disk version is the status line (compared in _evaluate).
     """
     print(f"\nTask {task.id}: {task.title}")
+
+    workflow = cfg.workflow_task or ()
+    workflow_state: WorkflowState | None = None
+    if workflow:
+        workflow_state = read_workflow_state(cfg.tasks_dir)
+        if workflow_state is None:
+            workflow_state = WorkflowState(
+                "task", task.id, 0, False, gitops.head_ref(cfg.root) or "HEAD")
+            write_workflow_state(cfg.tasks_dir, workflow_state)
+        if (workflow_state.unit != "task" or workflow_state.task_id != task.id
+                or workflow_state.step_index >= len(workflow)):
+            raise AssentError(
+                "Workflow cursor does not match the selected task workflow")
+        resumed = workflow_state.started
     if resumed:
-        print("  (WIP detected: task interrupted last time, resuming with a continue prompt)")
+        print("  (interrupted workflow step detected; resuming with a continue prompt)")
 
     # The HEAD at this task's start: the scope check must cover all changes since the start
     # (including wip checkpoints).
@@ -3682,14 +4082,34 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     while True:
         adapter = rotation.adapter
         adapter_name = rotation.name
+        workflow_step = (
+            workflow[workflow_state.step_index]
+            if workflow_state is not None else None)
         session = (session_override or
-                   resolve_session(cfg, adapter, task, adapter_name))
+                   (_workflow_task_session(
+                       cfg, adapter, task, workflow_step, adapter_name)
+                    if workflow_step is not None else
+                    resolve_session(cfg, adapter, task, adapter_name)))
         session_state.identity = session
-        prompt = _build_prompt(cfg, task, failure_reason, session, resumed)
+        prompt = _build_prompt(
+            cfg, task, failure_reason, session, resumed,
+            workflow_step=workflow_step,
+            workflow_index=(workflow_state.step_index
+                            if workflow_state is not None else 0),
+            workflow_total=len(workflow))
         if auto_fix_context:
             prompt += auto_fix_context
         print(_session_line(
-            adapter_name, task, session, model=profile_model))
+            adapter_name, task, session,
+            model=profile_model or (
+                workflow_step.resolved_role.model
+                if workflow_step is not None else None)))
+        workflow_journal_start = (
+            len(read_entries(task.journal_path))
+            if workflow_step is not None else 0)
+        if workflow_state is not None:
+            workflow_state = replace(workflow_state, started=True)
+            write_workflow_state(cfg.tasks_dir, workflow_state)
         main_tree_baseline = (gitops.dirty_paths(cfg.source_root, _task_excludes(cfg, task))
                               if cfg.source_root is not None else None)
         try:
@@ -3810,8 +4230,41 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             outcome = "fail"
             focused_evidence = (
                 "NOT RUN: the worker adapter or structural safety gate failed first.")
+        elif (workflow_step is not None and workflow_state is not None
+              and workflow_state.step_index < len(workflow) - 1):
+            outcome, reason, focused_evidence = _evaluate_task_workflow_step(
+                cfg, task, workflow_step, workflow_journal_start, start_ref)
         else:
             outcome, reason, focused_evidence = _evaluate(cfg, task, start_ref)
+            if workflow_step is not None and outcome in {"done", "self_blocked"}:
+                worker_entries = [
+                    item for item in read_entries(task.journal_path)[
+                        workflow_journal_start:]
+                    if item.get("by") != "scheduler"]
+                if not worker_entries:
+                    outcome = "fail"
+                    reason = "Workflow session did not append its journal entry"
+        if outcome == "step_done":
+            assert workflow_state is not None and workflow_step is not None
+            set_status(task.path, "WIP")
+            completed_step = workflow_state.step_index
+            workflow_state = replace(
+                workflow_state, step_index=completed_step + 1,
+                started=False,
+                focused_evidence=(workflow_state.focused_evidence
+                                  + (focused_evidence,)))
+            write_workflow_state(cfg.tasks_dir, workflow_state)
+            gitops.commit_if_dirty(
+                cfg.root, _checkpoint_subject(
+                    cfg, "wip", task,
+                    f"workflow step {completed_step + 1} ({workflow_step.role})"),
+                cfg.git_excludes)
+            print(f"  Workflow step {completed_step + 1}/{len(workflow)} passed; "
+                  "advancing to the next session")
+            attempts_used = 0
+            failure_reason = None
+            resumed = False
+            continue
         if outcome in {"done", "self_blocked"} and auto_fix_fingerprints:
             try:
                 dispositions = _repair_dispositions_from_journal(
@@ -3839,10 +4292,14 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 # command having exited 0; the closeout-only probe and every
                 # failed gate leave through the failure path below.
                 gate_passes.record(cfg, task.verify)
+            if workflow_state is not None:
+                workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
             try_write_report(cfg)
             return None
         if outcome == "self_blocked":
             print("  Execution AI self-marked BLOCKED (legal output, handed to a human) -> creating checkpoint")
+            if workflow_state is not None:
+                workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
             gitops.commit_if_dirty(
                 cfg.root, _checkpoint_subject(
                     cfg, "auto", task, "BLOCKED (execution AI self-marked)"),
@@ -3889,6 +4346,8 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         print("  Retries exhausted -> scheduler marks BLOCKED (the not-yet-passing work is kept too)")
         _mark_blocked(cfg, task, session, reason or "acceptance failed", now,
                       attempts=attempts_used)
+        if workflow_state is not None:
+            workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
         if blocker_evidence is not None:
             combined_reason = " | ".join(dict.fromkeys(
                 item[0] for item in attempted_failures))
@@ -3941,6 +4400,36 @@ def _inspect_task_safety(cfg: Config, task: Task,
         shown = ", ".join(outside[:5]) + (" ..." if len(outside) > 5 else "")
         issues.append(f"Changes outside scope appeared: {shown}")
     return fresh, "; ".join(issues) if issues else None
+
+
+def _evaluate_task_workflow_step(
+        cfg: Config, task: Task, step: WorkflowTaskStep,
+        journal_start: int,
+        start_ref: str | None = None) -> tuple[str, str | None, str]:
+    """Accept one non-final role session without completing its task."""
+    fresh, safety_reason = _inspect_task_safety(cfg, task, start_ref)
+    if safety_reason:
+        return ("fail", safety_reason,
+                "NOT RUN: structural/scope safety failed before the step gate.")
+    assert fresh is not None
+    worker_entries = [
+        item for item in read_entries(task.journal_path)[journal_start:]
+        if item.get("by") != "scheduler"]
+    if not worker_entries:
+        return ("fail", "Workflow session did not append its journal entry",
+                "NOT RUN: workflow journal closeout failed before the step gate.")
+    if fresh.status == "BLOCKED":
+        return ("self_blocked", None,
+                "NOT RUN: self-marked BLOCKED closeout skips the step gate.")
+    if step.resolved_role.gate:
+        rc = _run_verify(cfg, task.verify)
+        evidence = f"{'PASS' if rc == 0 else 'FAIL'}: exit {rc}: {task.verify}"
+        if rc != 0:
+            return ("fail", "Workflow step gate exit code is non-zero "
+                    f"(={rc}): {task.verify}", evidence)
+    else:
+        evidence = "NOT REQUIRED: this workflow role has no gate ability."
+    return "step_done", None, evidence
 
 
 def _evaluate(cfg: Config, task: Task,

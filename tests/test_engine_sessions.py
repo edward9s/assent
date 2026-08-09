@@ -26,7 +26,8 @@ from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess, wake_stop_waiters)
 from assent.config import load_config
 from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
-                         read_entries, set_status)
+                         read_entries, read_workflow_state, set_status,
+                         workflow_state_path)
 from tests.engine_support import (EngineTestCase, ScriptedAdapter, ok_result,
                                   task_text)
 from tests.test_contracts import GlobalContractsMixin
@@ -884,7 +885,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         # failure, so it exits zero and the task keeps the status its own
         # closeout gave it.
         self.assertEqual(len(reviewer.calls), 2)
-        self.assertEqual(len(worker.calls), 2)
+        # Only the writable workflow step between the two verdict steps can
+        # consume the first verdict's durable finding.
+        self.assertEqual(len(worker.calls), 1)
         self.assertEqual(parse_task_file(task_path).status, "DONE")
         self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", out.getvalue())
 
@@ -1194,7 +1197,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
         self.assertIn("Folder auto-fix: SELF-FIXED, UNREVIEWED (fresh)", report)
         self.assertIn(
-            f"Self-fixed round: 2 of 2 ({review.adapter}/"
+            f"Self-fixed round: 4 of 4 ({review.adapter}/"
             f"{review.requested_model}/{review.requested_effort})", report)
         self.assertIn("Terminal: SELF-FIXED, UNREVIEWED", report)
 
@@ -1465,7 +1468,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 encoding="utf-8"),
             "second repair\n")
         self.assertTrue(any(
-            "review round 1 repaired its own finding" in subject
+            "review round 2 repaired its own finding" in subject
             for subject in self.subjects()))
 
     def test_a_fixed_round_writing_outside_the_named_task_scope_is_refused(self):
@@ -1506,6 +1509,133 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 encoding="utf-8"),
             "reviewer overreach\n")
         self.assertEqual(len(reviewer.calls), 1)
+
+
+class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
+    TASK_ROLES = (
+        '\n[abilities.prepare]\nprompt = "Prepare the implementation."\n'
+        'writes = true\ngate = false\n'
+        '[abilities.implement]\nprompt = "Implement and verify."\n'
+        'writes = true\ngate = true\n'
+        '[agents.preparer]\nability = ["prepare"]\n'
+        '[agents.implementer]\nability = ["prepare", "implement"]\n'
+        '[workflow]\ntask = [{ role = "preparer" }, '
+        '{ role = "implementer" }]\n')
+    PLAN_ROLE = (
+        '\n[abilities.implement_plan]\nprompt = "Implement the whole plan."\n'
+        'writes = true\ngate = true\n'
+        '[agents.plan_worker]\nability = ["implement_plan"]\n'
+        'model = "lite"\n'
+        '[workflow]\ntask = []\nplan = [{ role = "plan_worker" }]\n')
+
+    def test_task_roles_run_as_separate_sessions(self):
+        path = self.write_task(1)
+        cfg = self.build(extra_config=self.TASK_ROLES)
+        self.commit_all()
+
+        def prepare(_prompt):
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="progress",
+                         summary="Preparation completed")
+            return ok_result()
+
+        adapter = ScriptedAdapter([prepare, self.ai_done(path)])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertIn("scheduled role: preparer", adapter.calls[0][0])
+        self.assertIn("scheduled role: implementer", adapter.calls[1][0])
+        self.assertEqual(len([
+            item for item in read_entries(journal_path_for(path))
+            if item.get("by") != "scheduler"]), 2)
+        self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
+    def test_never_started_next_task_step_has_no_interrupt_prompt(self):
+        path = self.write_task(1)
+        cfg = self.build(extra_config=self.TASK_ROLES)
+        self.commit_all()
+
+        def prepare(_prompt):
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="progress",
+                         summary="Preparation completed")
+            return ok_result()
+
+        real_write = engine.write_workflow_state
+        interrupted = False
+
+        def stop_after_advance(tasks_dir, state):
+            nonlocal interrupted
+            real_write(tasks_dir, state)
+            if state.step_index == 1 and not state.started and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt()
+
+        with mock.patch.object(
+                engine, "write_workflow_state", side_effect=stop_after_advance):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([prepare])), 130)
+
+        resumed = ScriptedAdapter([self.ai_done(path)])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=resumed), 0)
+        self.assertNotIn("previous adapter session was interrupted",
+                         resumed.calls[0][0])
+
+    def test_empty_task_workflow_runs_one_plan_unit(self):
+        first = self.write_task(1, scope=("src/a.txt",))
+        second = self.write_task(
+            2, deps=("t001",), scope=("src/b.txt",))
+        cfg = self.build(extra_config=self.PLAN_ROLE)
+        (self.root / "src").mkdir()
+        (self.root / "src" / "a.txt").write_text("old\n", encoding="utf-8")
+        (self.root / "src" / "b.txt").write_text("old\n", encoding="utf-8")
+        self.commit_all()
+
+        def implement(prompt):
+            self.assertIn(str(first), prompt)
+            self.assertIn(str(second), prompt)
+            self.assertIn("t002: TODO; deps: t001", prompt)
+            self.assertNotIn("Cumulative checkpoint diff", prompt)
+            for name in ("a.txt", "b.txt"):
+                target = self.execution_root() / "src" / name
+                target.parent.mkdir(exist_ok=True)
+                target.write_text("done\n", encoding="utf-8")
+            return ok_result()
+
+        adapter = ScriptedAdapter([implement])
+        self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertEqual(
+            [task.status for task in Plan.parse(cfg.tasks_dir).tasks],
+            ["DONE", "DONE"])
+        for path in (first, second):
+            entry = read_entries(journal_path_for(path))[-1]
+            self.assertEqual(entry["by"], "scheduler")
+            self.assertIn("plan_worker", entry["summary"])
+        self.assertTrue(self.subjects()[0].startswith(
+            "auto(plan01): workflow plan step plan_worker"))
+        self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
+    def test_plan_gate_failure_retries_step_then_blocks_every_task(self):
+        failing = 'python -c "raise SystemExit(3)"'
+        first = self.write_task(1, verify=failing)
+        second = self.write_task(2, deps=("t001",), verify=failing)
+        cfg = self.build(retry=1, extra_config=self.PLAN_ROLE)
+        self.commit_all()
+        adapter = ScriptedAdapter([ok_result(), ok_result()])
+
+        self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertEqual(
+            [task.status for task in Plan.parse(cfg.tasks_dir).tasks],
+            ["BLOCKED", "BLOCKED"])
+        for path in (first, second):
+            entry = read_entries(journal_path_for(path))[-1]
+            self.assertIn("plan_worker", entry["summary"])
+            self.assertIn("exit code is non-zero", entry["detail"])
+        self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
 
 
 class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):

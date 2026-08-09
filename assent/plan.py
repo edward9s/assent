@@ -47,6 +47,19 @@ _SCOPE_LINE_RE = re.compile(
 # a whole run.  Naming it here would make every task re-run the whole suite, and on
 # a slow project it outlives what a session can wait for at all.
 _FULL_VERIFIER_RE = re.compile(r'\.assent[\\/]verify\.py\b')
+WORKFLOW_STATE_NAME = "_workflow.toml"
+
+
+@dataclass(frozen=True)
+class WorkflowState:
+    """Deletable cursor for the currently executing workflow accountability unit."""
+
+    unit: str
+    task_id: str
+    step_index: int
+    started: bool
+    base_ref: str = ""
+    focused_evidence: tuple[str, ...] = ()
 
 
 @dataclass
@@ -65,6 +78,59 @@ class Task:
     notes: str
     path: Path                     # Absolute task file path
     journal_path: Path             # Absolute path of the matching .r.toml journal
+
+
+def workflow_state_path(tasks_dir: Path) -> Path:
+    return tasks_dir / WORKFLOW_STATE_NAME
+
+
+def read_workflow_state(tasks_dir: Path) -> WorkflowState | None:
+    """Read the folder workflow cursor; absence means no unit is in flight."""
+    path = workflow_state_path(tasks_dir)
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "rb") as source:
+            data = tomllib.load(source)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise AssentError(f"Workflow state {path.name} is unreadable: {error}") from error
+    expected = {"version", "unit", "task_id", "step_index", "started",
+                "base_ref", "focused_evidence"}
+    if set(data) != expected or data.get("version") != 1:
+        raise AssentError(f"Workflow state {path.name} has an invalid schema")
+    unit = data.get("unit")
+    task_id = data.get("task_id")
+    step_index = data.get("step_index")
+    started = data.get("started")
+    base_ref = data.get("base_ref")
+    evidence = data.get("focused_evidence")
+    if (unit not in {"task", "plan"} or not isinstance(task_id, str)
+            or not isinstance(step_index, int) or isinstance(step_index, bool)
+            or step_index < 0 or not isinstance(started, bool)
+            or not isinstance(base_ref, str) or not isinstance(evidence, list)
+            or not all(isinstance(item, str) for item in evidence)
+            or (unit == "task" and not _ID_RE.fullmatch(task_id))
+            or (unit == "plan" and task_id)):
+        raise AssentError(f"Workflow state {path.name} has invalid values")
+    return WorkflowState(
+        unit, task_id, step_index, started, base_ref, tuple(evidence))
+
+
+def write_workflow_state(tasks_dir: Path, state: WorkflowState) -> None:
+    """Atomically persist the next workflow position and its start boundary."""
+    text = "\n".join((
+        "version = 1",
+        f"unit = {json.dumps(state.unit)}",
+        f"task_id = {json.dumps(state.task_id)}",
+        f"step_index = {state.step_index}",
+        f"started = {'true' if state.started else 'false'}",
+        f"base_ref = {json.dumps(state.base_ref)}",
+        "focused_evidence = [" + ", ".join(
+            json.dumps(item, ensure_ascii=False)
+            for item in state.focused_evidence) + "]",
+        "",
+    ))
+    atomic_write_text(workflow_state_path(tasks_dir), text)
 
 
 def _require_str(data: dict, path: Path, key: str, *, allow_empty: bool = False) -> str:

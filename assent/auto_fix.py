@@ -64,7 +64,7 @@ _PHASE_FOR_VERDICT = {
 _PROTECTED_SCOPE_BASENAMES = frozenset({
     "agents.md", ".gitignore", ".gitattributes", ".gitmodules",
     "_auto_fix.toml", "_verification.toml", "_batch_verification.toml",
-    "_archived.toml", "_report.md", "assent.lock",
+    "_workflow.toml", "_archived.toml", "_report.md", "assent.lock",
 })
 
 MAX_REVIEW_OUTPUT_BYTES = 1_048_576

@@ -379,6 +379,11 @@ class Config:
         return self.git_rel(self.tasks_dir / "_auto_fix.toml")
 
     @property
+    def workflow_state_rel(self) -> str:
+        """The folder-local, derived workflow execution cursor."""
+        return self.git_rel(self.tasks_dir / "_workflow.toml")
+
+    @property
     def shared_paths_manifest_rel(self) -> str:
         """The local reviewed-shared-path cache; local memory, never project source."""
         return self.git_rel(self.assent_dir / MANIFEST_NAME)
@@ -392,6 +397,7 @@ class Config:
         """Runtime artifacts: excluded from the clean check, scope check, and checkpoint commit."""
         return (self.runtime_log_rel, self.report_rel, self.lockfile_rel,
                 self.verification_receipt_rel, self.auto_fix_state_rel,
+                self.workflow_state_rel,
                 self.shared_paths_manifest_rel, self.shared_paths_lock_rel)
 
 
@@ -1002,7 +1008,8 @@ def load_config(path: str | Path, folder: str) -> Config:
             role, name, resolved, adapter_settings.command,
             adapter_settings.extra_args,
             adapter_settings.resolve_model(resolved.model), requested_effort))
-    if steps and not any(step.produces_verdict for step in steps):
+    if (steps and not any(step.produces_verdict for step in steps)
+            and raw_workflow_task != []):
         raise AssentError(
             "Config [workflow].plan cannot open any session: no step's role produces a verdict")
     cfg.workflow_plan = tuple(steps)

@@ -9,9 +9,11 @@ from pathlib import Path
 from assent import AssentError
 from assent.plan import (Plan, add_scope_entries, append_entry,
                          journal_path_for, parse_task_file, read_entries,
+                         read_workflow_state,
                          same_except_status, scope_text_with_entries,
                          scope_text_without_entries,
-                         set_status, task_text_sha256)
+                         set_status, task_text_sha256, WorkflowState,
+                         workflow_state_path, write_workflow_state)
 
 _OK = 'python -c "raise SystemExit(0)"'
 
@@ -63,6 +65,14 @@ class TestParseTaskFile(PlanTestCase):
         self.assertEqual(task.id, "t001")
         self.assertEqual(task.path, path.resolve())
         self.assertEqual(task.journal_path.name, "t001_demo.r.toml")
+
+    def test_workflow_state_round_trips_started_boundary(self):
+        state = WorkflowState(
+            "task", "t001", 2, False, "abc123", ("PASS: focused",))
+        write_workflow_state(self.dir, state)
+
+        self.assertEqual(read_workflow_state(self.dir), state)
+        self.assertEqual(workflow_state_path(self.dir).name, "_workflow.toml")
 
     def test_unicode_name_keeps_english_title_and_pairs_journal_without_translation(self):
         path = self.write("t001_中文任務.e.toml", task_text(title="English task title"))
