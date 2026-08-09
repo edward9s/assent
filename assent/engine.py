@@ -1163,6 +1163,12 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     whole_plan_workflow = (
         cfg.workflow_task == ()
         and all(task.workflow is None for task in plan.tasks))
+    selected_plan_unit = whole_plan_workflow or any(
+        task.status in ("TODO", "WIP")
+        and (task_id is None or task.id == task_id)
+        and (task.workflow == ()
+             or (task.workflow is None and cfg.workflow_task == ()))
+        for task in plan.tasks)
     for name, current_adapter in zip(rotation.names, rotation.adapters):
         if whole_plan_workflow:
             errors = _plan_workflow_capability_errors(
@@ -1172,6 +1178,23 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 cfg, current_adapter, plan, name, task_id)
         if errors:
             preflight_failures.append((name, errors))
+    if selected_plan_unit:
+        # Verdict roles carry an explicit adapter even though plan-unit mode
+        # executes every step as an ordinary worker session.  Prove adapters
+        # outside the worker rotation before opening any session too.
+        external_names = dict.fromkeys(
+            step.adapter for step in cfg.workflow_plan
+            if step.adapter is not None and step.adapter not in rotation.names)
+        try:
+            for name in external_names:
+                current_adapter = get_adapter(name, cfg)
+                errors = _plan_workflow_capability_errors(
+                    cfg, current_adapter, plan, name)
+                if errors:
+                    preflight_failures.append((name, errors))
+        except AssentError as e:
+            print(str(e))
+            return 1
     if preflight_failures:
         for name, errors in preflight_failures:
             print(f"{name} capability preflight: FAIL "
@@ -1180,7 +1203,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 print(f"  - {message}")
         return 1
 
-    if auto_fix_enabled and cfg.workflow_plan:
+    if (auto_fix_enabled
+            and any(step.produces_verdict for step in cfg.workflow_plan)):
         first_review = next(
             step for step in cfg.workflow_plan if step.produces_verdict)
         try:
@@ -2649,6 +2673,8 @@ def _auto_fix_failure_state(
         task_plan_sha256=auto_fix.sha256_files(
             task.path for task in plan.tasks),
         review_prompt_sha256=state.review_prompt_sha256,
+        reviewer_role=state.reviewer_role,
+        reviewer_step_index=state.reviewer_step_index,
         reviewer_adapter=state.reviewer_adapter,
         reviewer_model=state.reviewer_model,
         reviewer_effort=state.reviewer_effort)

@@ -86,6 +86,35 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             return ok_result()
         return step
 
+    def test_repair_gate_failure_preserves_reviewer_step_identity(self):
+        task_path = self.write_task(1, status="DONE")
+        cfg = self.build(extra_config=self.review_rounds(1))
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        task = parse_task_file(task_path)
+        review = cfg.workflow_plan[1]
+        finding = auto_fix.ReviewFinding(
+            task.id, "src/value.txt", "Repair is incomplete",
+            "The task-focused gate failed after repair.")
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (finding,)),
+            source_tree=gitops.tree_of(cfg.root, "HEAD"),
+            task_plan_sha256=auto_fix.sha256_files(
+                item.path for item in plan.tasks),
+            review_prompt_sha256="a" * 64,
+            reviewer_role=review.role, reviewer_step_index=1,
+            reviewer_adapter=review.adapter,
+            reviewer_model=review.requested_model,
+            reviewer_effort=review.requested_effort,
+            workflow_step_index=2)
+
+        failed = engine._auto_fix_failure_state(
+            cfg, state, [(task, "focused gate failed")])
+
+        self.assertEqual(failed.reviewer_role, review.role)
+        self.assertEqual(failed.reviewer_step_index, 1)
+        self.assertIsNone(engine._auto_fix_recovery_config_error(cfg, failed))
+
     @staticmethod
     def recheck_record(finding):
         fingerprint = auto_fix.finding_fingerprint(finding)
@@ -1786,6 +1815,40 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         self.assertTrue(self.subjects()[0].startswith(
             "auto(plan01): workflow plan step plan_worker"))
         self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
+    def test_non_verdict_plan_unit_tolerates_auto_fix_flag(self):
+        task = self.write_task(1)
+        cfg = self.build(extra_config=self.PLAN_ROLE)
+        self.commit_all()
+
+        adapter = ScriptedAdapter([ok_result()])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=adapter, auto_fix=True), 0)
+
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertEqual(parse_task_file(task).status, "DONE")
+
+    def test_plan_unit_preflights_explicit_adapter_outside_rotation(self):
+        task = self.write_task(1)
+        self.set_task_workflow(task, ())
+        cfg = self.build(extra_config=(
+            '\n[abilities.review_plan]\n'
+            'prompt = "Review the whole plan."\n'
+            'writes = true\ngate = true\nproduces_verdict = true\n'
+            '[agents.plan_reviewer]\nability = ["review_plan"]\n'
+            'model = "lite"\neffort = "normal"\n'
+            '[workflow]\ntask = []\n'
+            'plan = [{ role = "plan_reviewer", adapter = "codex" }]\n'))
+        self.commit_all()
+        worker = ScriptedAdapter([])
+        explicit = ScriptedAdapter([ok_result()])
+        explicit.preflight = mock.Mock(return_value=["unsupported identity"])
+
+        with mock.patch.object(engine, "get_adapter", return_value=explicit):
+            self.assertEqual(self.run_quiet(cfg, adapter=worker), 1)
+
+        explicit.preflight.assert_called_once()
+        self.assertEqual(explicit.calls, [])
 
     def test_plan_gate_failure_retries_step_then_blocks_every_task(self):
         failing = 'python -c "raise SystemExit(3)"'
