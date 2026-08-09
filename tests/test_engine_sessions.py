@@ -28,6 +28,7 @@ from assent.config import load_config
 from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
                          read_entries, read_workflow_state, set_status,
                          workflow_state_path)
+from assent.verification_common import FullVerifyEvidence
 from tests.engine_support import (EngineTestCase, ScriptedAdapter, ok_result,
                                   task_text)
 from tests.test_contracts import GlobalContractsMixin
@@ -85,6 +86,69 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 summary="Repair completed", detail=detail)
             return ok_result()
         return step
+
+    def test_selection_verifier_failure_repairs_and_rechecks_in_one_call(self):
+        task_path = self.write_task(1, status="TODO", scope=("src/",))
+        extra = (
+            '\n[abilities.selection_review]\n'
+            'prompt = "Diagnose the failed selection verifier."\n'
+            'writes = false\ngate = true\nproduces_verdict = true\n'
+            '[agents.selection_reviewer]\nability = ["selection_review"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nselection = [{ action = "full_verify" }, '
+            '{ role = "selection_reviewer", adapter = "claude" }, '
+            '{ action = "full_verify" }]\n')
+        cfg = self.build(extra_config=extra)
+        (self.root / ".assent" / "verify.py").write_text(
+            "raise SystemExit(0)\n", encoding="utf-8")
+        self.commit_all()
+        worker = ScriptedAdapter([
+            self.ai_done(task_path, {"src/value.txt": "broken\n"})])
+        self.assertEqual(self.run_quiet(cfg, adapter=worker), 0)
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "The selected candidate is broken",
+            "The complete verifier reported the wrong value.")
+        reviewer_and_fixer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+            self.repair_done(
+                task_path, {"src/value.txt": "fixed\n"}),
+        ])
+        calls = 0
+        rechecks = []
+
+        def verify_action(_cfg, *, recheck=False):
+            nonlocal calls
+            calls += 1
+            rechecks.append(recheck)
+            _branch, source, _worktree = engine.source_snapshot(
+                cfg, gitops.main_worktree(cfg.root))
+            return FullVerifyEvidence(
+                "VERIFIER_FAILED" if calls == 1 else "PASSED",
+                ("plan01",), gitops.commit_of(cfg.root, "HEAD"), (source,),
+                ("a" if calls == 1 else "b") * 40,
+                engine.verification.verifier_digest(cfg), "c" * 64,
+                1 if calls == 1 else 0,
+                ("src/value.txt failed",) if calls == 1 else (), False)
+
+        with mock.patch("assent.engine.get_adapter",
+                        return_value=reviewer_and_fixer), \
+                mock.patch("assent.engine.verify_folder_action",
+                           side_effect=verify_action):
+            self.assertEqual(engine.run_selection_workflow(
+                str(self.root / ".assent" / "assent.toml"),
+                self.root / ".assent", ["plan01"], auto_fix=True), 0)
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(rechecks, [False, True])
+        self.assertEqual(parse_task_file(task_path).status, "DONE")
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.review_context, "selection_verification")
+        self.assertEqual(state.verdict, "PASS")
+        self.assertEqual(
+            (self.execution_root() / "src" / "value.txt").read_text(
+                encoding="utf-8"), "fixed\n")
 
     def test_repair_gate_failure_preserves_reviewer_step_identity(self):
         task_path = self.write_task(1, status="DONE")

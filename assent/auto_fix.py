@@ -40,7 +40,9 @@ REVIEW_TRANSITION_KINDS = frozenset({
     "initial", "still_present", "repair_regression", "newly_exposed",
 })
 SCOPE_PATH_STATES = frozenset({"existing_file", "new_file"})
-REVIEW_CONTEXTS = frozenset({"completed_folder", "blocked_adjudication"})
+REVIEW_CONTEXTS = frozenset({
+    "completed_folder", "blocked_adjudication", "selection_verification",
+})
 REVIEW_STAGES = frozenset({"initial", "recheck"})
 FAILURE_TRIGGERS = frozenset({"worker_blocked", "focused_gate_failure"})
 REPAIR_DISPOSITIONS = frozenset({
@@ -1433,10 +1435,11 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         raise AssentError("Auto-fix state review_context is invalid")
     if state.review_stage not in REVIEW_STAGES:
         raise AssentError("Auto-fix state review_stage is invalid")
-    if state.review_context == "completed_folder":
+    if state.review_context in {"completed_folder", "selection_verification"}:
         if state.failure_trigger is not None:
             raise AssentError(
-                "A completed-folder review must not have a failure trigger")
+                f"A {state.review_context.replace('_', '-')} review must not "
+                "have a failure trigger")
     elif state.failure_trigger not in FAILURE_TRIGGERS:
         raise AssentError(
             "A blocked adjudication requires a worker_blocked or focused_gate_failure trigger")

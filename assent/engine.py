@@ -366,6 +366,47 @@ not_reproducible; still_blocked requires BLOCKED. These acknowledgement lines
 do not replace any structural, scope, focused, or independent-review gate.
 """
 
+_SELECTION_VERIFICATION_REVIEW_PROMPT = """You are the Assent selection verifier reviewer.
+
+Review context: SELECTION_VERIFICATION
+Scheduled workflow role: {workflow_role}
+Role abilities:
+{role_policy}
+
+This is a read-only decision gate. Do not edit source, task, journal, Git, or
+management files and do not run tests or generators. The complete verifier has
+already failed against the exact candidate identified below. Diagnose only
+that bounded failure and return the existing Assent review record. Do not
+create a task, change task status or requirements, accept a source, shrink the
+selection, or propose unrelated work.
+
+Every finding must name one existing task id and a normalized project-relative
+path owned by that task's declared scope. When the exact blocker is an omitted
+scope path, use kind "scope_amendment" and the existing exact scope-addition
+contract. Task ids may repeat between folders; the task id plus path must
+resolve to exactly one selected plan, or the scheduler will retain the evidence
+for a human decision.
+
+Finish with exactly one JSON object on the last non-empty output line and no
+later text. Because the supplied verifier result failed, PASS and FIXED are not
+valid here. Return verdict FAIL with one or more schema-complete findings.
+
+Selection and verifier evidence:
+{selection_evidence}
+
+Focused evidence:
+{focused_evidence}
+
+Cumulative source diffs:
+{cumulative_diffs}
+
+Prior selection-review evidence:
+{prior_evidence}
+
+Authoritative task contracts and journals:
+{management_evidence}
+"""
+
 _AUTO_FIX_EVIDENCE_LIMIT = 64_000
 # The prior-review section is lineage bookkeeping rendered from the durable
 # state a new verdict then replaces, so a recheck's own prompt can never be
@@ -1306,14 +1347,545 @@ def _selection_locks(configs: tuple[Config, ...]):
         yield
 
 
-def run_selection_workflow(config_path: str, assent_dir, folders,
-                           *, auto_fix: bool = False) -> int:
-    """Walk the exact invocation's selection actions after all run locks exit.
+def _selection_worktree_configs(
+        configs: tuple[Config, ...]) -> tuple[Config, ...]:
+    """Resolve the persistent source worktree for every selected folder."""
+    main = gitops.main_worktree(configs[0].root)
+    resolved: list[Config] = []
+    for cfg in configs:
+        _branch, _tip, worktree = source_snapshot(cfg, main)
+        if worktree is None:
+            raise AssentError(
+                f"selection repair requires the source worktree for "
+                f"{cfg.tasks_name}")
+        resolved.append(cfg.for_worktree(worktree))
+    return tuple(resolved)
 
-    This task introduces the scheduler-owned ``full_verify`` action. Selection
-    repair roles consume its typed failure in later workflow work; a passing
-    action skips those failure-only roles now.
-    """
+
+def _selection_bounded(text: str) -> str:
+    if len(text) <= _AUTO_FIX_EVIDENCE_LIMIT:
+        return text
+    return text[:_AUTO_FIX_EVIDENCE_LIMIT] + "\n... [evidence truncated]"
+
+
+def _selection_review_material(
+        work_configs: tuple[Config, ...], state: SelectionWorkflowState,
+        step: WorkflowPlanStep) -> tuple[str, str]:
+    """Build the source-bound verifier review prompt and its digest."""
+    focused: list[str] = []
+    diffs: list[str] = []
+    management: list[str] = []
+    prior: list[str] = []
+    for cfg in work_configs:
+        plan = Plan.parse(cfg.tasks_dir)
+        focused.extend(
+            f"- {cfg.tasks_name}/{task.id}: PASS before selection full_verify: "
+            f"{task.verify}"
+            for task in plan.tasks if task.status == "DONE")
+        base = resolve_stack_state(cfg).base.resolved_base
+        merge_base = gitops.merge_base(cfg.root, base, "HEAD")
+        diffs.append(
+            f"## {cfg.tasks_name}\n{_auto_fix_diff(cfg, merge_base)}")
+        for task in plan.tasks:
+            try:
+                contract = task.path.read_text(encoding="utf-8")
+                journal = (task.journal_path.read_text(encoding="utf-8")
+                           if task.journal_path.exists() else "(no journal)")
+            except OSError as error:
+                raise AssentError(
+                    f"selection review evidence is unreadable for "
+                    f"{cfg.tasks_name}/{task.id}: {error}") from error
+            management.append(
+                f"## {cfg.tasks_name}/{task.id}\n"
+                f"Authoritative contract:\n{contract}\nJournal:\n{journal}")
+        path = auto_fix.auto_fix_state_path(cfg)
+        if path.exists():
+            previous = auto_fix.read_auto_fix_state(path)
+            if previous.review_context == "selection_verification":
+                current = set(previous.current_finding_fingerprints)
+                lines = [
+                    f"- {item.fingerprint} {cfg.tasks_name}/"
+                    f"{item.task_id or 'unassigned'} {item.path}: {item.summary}"
+                    for item in previous.findings
+                    if item.fingerprint in current]
+                prior.append(
+                    f"## {cfg.tasks_name} ({previous.verdict}/"
+                    f"{previous.phase})\n" + ("\n".join(lines) or "- none"))
+
+    selection_evidence = "\n".join((
+        f"Folders: {', '.join(state.folders)}",
+        f"Target ref: {state.target_ref}",
+        f"Target commit: {state.target_commit}",
+        f"Source commits: {', '.join(state.source_commits)}",
+        f"Candidate tree: {state.action_candidate_tree}",
+        f"Verifier digest: {state.verification_script_sha256}",
+        f"Shared-input digest: {state.shared_inputs_sha256}",
+        f"Verifier exit code: {state.action_exit_code}",
+        "Verifier outcome and bounded output:",
+        *(f"- {item}" for item in state.action_evidence),
+    ))
+    prompt = _SELECTION_VERIFICATION_REVIEW_PROMPT.format(
+        workflow_role=step.role,
+        role_policy="\n".join(
+            ability.prompt for ability in step.resolved_role.abilities),
+        selection_evidence=_selection_bounded(selection_evidence),
+        focused_evidence=_selection_bounded(
+            "\n".join(focused) or "- none"),
+        cumulative_diffs=_selection_bounded("\n\n".join(diffs)),
+        prior_evidence=_selection_bounded("\n\n".join(prior) or "- none"),
+        management_evidence=_selection_bounded("\n\n".join(management)),
+    )
+    return prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def _selection_surface_baseline(cfg: Config):
+    return (
+        _auto_fix_surface_snapshot(cfg),
+        gitops.commit_of(cfg.root, "HEAD"),
+        gitops.working_tree_status(cfg.root, cfg.git_excludes),
+        gitops.commit_of(cfg.source_root, "HEAD") if cfg.source_root else None,
+        (gitops.working_tree_status(cfg.source_root, cfg.git_excludes)
+         if cfg.source_root else None),
+    )
+
+
+def _selection_surface_changes(
+        work_configs: tuple[Config, ...], baselines) -> tuple[str, ...]:
+    changed: list[str] = []
+    for cfg, baseline in zip(work_configs, baselines):
+        paths = _auto_fix_surface_change(
+            baseline[0], cfg, baseline[1], baseline[2],
+            baseline[3], baseline[4])
+        changed.extend(f"{cfg.tasks_name}:{path}" for path in paths)
+    return tuple(dict.fromkeys(changed))
+
+
+def _run_selection_reviewer(
+        work_configs: tuple[Config, ...], state: SelectionWorkflowState,
+        step: WorkflowPlanStep, *, sleep: Callable[[float], None],
+        now: Callable[[], datetime]) -> tuple[auto_fix.ReviewRecord, str]:
+    """Run one read-only selection review against settled verifier evidence."""
+    if not state.action_evidence or state.action_evidence[0] != "VERIFIER_FAILED":
+        raise AssentError(
+            "selection repair requires a durable VERIFIER_FAILED action result")
+    if not step.produces_verdict or step.adapter is None:
+        raise AssentError(
+            f"selection role {step.role!r} cannot produce the required verdict")
+    assert step.requested_model is not None
+    assert step.requested_effort is not None
+    reviewer = get_adapter(step.adapter, work_configs[0])
+    request = InvocationRequest(
+        task_id="selection-verification-review", model=step.model,
+        effort=step.effort, requested_model=step.requested_model,
+        requested_effort=step.requested_effort)
+    errors = reviewer.preflight([request])
+    if errors:
+        raise AssentError("selection reviewer capability unavailable: "
+                          + "; ".join(errors))
+    prompt, prompt_digest = _selection_review_material(
+        work_configs, state, step)
+    baselines = tuple(
+        _selection_surface_baseline(cfg) for cfg in work_configs)
+    invalid_attempts = 0
+    attempt_prompt = prompt
+    while True:
+        print(f"Selection review session: {step.adapter} | "
+              f"{step.model}->{step.requested_model} | "
+              f"{step.effort}->{step.requested_effort}")
+        result = reviewer.run_structured_task(
+            attempt_prompt, step.requested_model,
+            step.requested_effort, work_configs[0].root)
+        changed = _selection_surface_changes(work_configs, baselines)
+        if changed:
+            raise AssentError(
+                "selection reviewer wrote protected project paths; exact edits "
+                "were preserved: " + ", ".join(changed[:8]))
+        if (result.checkpoint_resume and not result.quota_exhausted
+                and not result.stalled and result.exit_code != 0):
+            continue
+        if result.quota_exhausted:
+            _wait_for_quota(work_configs[0], result.reset_at, sleep, now)
+            continue
+        if result.exit_code != 0 or result.stalled:
+            raise AssentError("selection reviewer adapter failure: "
+                              + _adapter_failure_reason(
+                                  result.exit_code, result.stalled,
+                                  result.output, result.failure_kind))
+        output = (result.structured_output
+                  if result.structured_output is not None else result.output)
+        try:
+            if result.structured_output_error is not None:
+                raise AssentError(result.structured_output_error)
+            record = auto_fix.parse_review_output(output)
+            if record.verdict != "FAIL" or not record.findings:
+                raise AssentError(
+                    "a failed selection verifier requires a FAIL verdict with "
+                    "at least one finding")
+            return record, prompt_digest
+        except AssentError as error:
+            if invalid_attempts >= work_configs[0].retry_per_task:
+                raise
+            invalid_attempts += 1
+            diagnostic = _bounded_adapter_diagnostic(output)
+            attempt_prompt = prompt + _auto_fix_review_correction(
+                str(error), diagnostic)
+
+
+def _selection_owned_findings(
+        record: auto_fix.ReviewRecord,
+        work_configs: tuple[Config, ...]) -> dict[str, auto_fix.ReviewRecord]:
+    """Resolve each unchanged finding contract to exactly one selected task."""
+    plans = {cfg.tasks_name: Plan.parse(cfg.tasks_dir) for cfg in work_configs}
+    grouped: dict[str, list[auto_fix.ReviewFinding]] = {}
+    for finding in record.findings:
+        if finding.task_id is None:
+            raise AssentError(
+                f"selection finding {finding.path!r} names no existing task")
+        candidates: list[tuple[str, auto_fix.ReviewFinding]] = []
+        for cfg in work_configs:
+            try:
+                resolved = auto_fix.validate_review_findings(
+                    auto_fix.ReviewRecord("FAIL", (finding,)),
+                    plans[cfg.tasks_name])
+            except AssentError:
+                continue
+            candidates.append((cfg.tasks_name, resolved.findings[0]))
+        if len(candidates) != 1:
+            shown = ", ".join(folder for folder, _item in candidates) or "none"
+            raise AssentError(
+                f"selection finding {finding.task_id} {finding.path!r} must "
+                f"resolve to exactly one selected plan (matched: {shown})")
+        folder, resolved = candidates[0]
+        grouped.setdefault(folder, []).append(resolved)
+    return {
+        folder: auto_fix.ReviewRecord("FAIL", tuple(findings))
+        for folder, findings in grouped.items()
+    }
+
+
+def _persist_selection_findings(
+        work_configs: tuple[Config, ...], selection: SelectionWorkflowState,
+        step: WorkflowPlanStep, record: auto_fix.ReviewRecord,
+        prompt_digest: str) -> dict[str, auto_fix.AutoFixState]:
+    """Persist every plan assignment before selection repair can begin."""
+    grouped = _selection_owned_findings(record, work_configs)
+    states: dict[str, auto_fix.AutoFixState] = {}
+    blocker = "\n".join(selection.action_evidence)
+    focused = "Selection full_verify ran only after every selected plan's " \
+              "focused closeout passed."
+    for cfg in work_configs:
+        subset = grouped.get(cfg.tasks_name)
+        if subset is None:
+            continue
+        plan = Plan.parse(cfg.tasks_dir)
+        previous = None
+        path = auto_fix.auto_fix_state_path(cfg)
+        if path.exists():
+            candidate = auto_fix.read_auto_fix_state(path)
+            if candidate.review_context == "selection_verification":
+                previous = candidate
+        stage = "recheck" if previous is not None else "initial"
+        subset = auto_fix.validate_review_transitions(
+            subset, review_stage=stage, previous=previous,
+            repair_changed_paths=(
+                _auto_fix_changed_paths(cfg, previous.source_tree)
+                if previous is not None else None))
+        contracts_by_id = _task_contract_snapshots(plan)
+        next_state = auto_fix.state_for_review(
+            subset, source_tree=selection.action_candidate_tree,
+            task_plan_sha256=_contracts_digest(plan, contracts_by_id),
+            review_prompt_sha256=prompt_digest,
+            reviewer_role=step.role, reviewer_step_index=selection.step_index,
+            reviewer_adapter=step.adapter or "",
+            reviewer_model=step.requested_model or "",
+            reviewer_effort=step.requested_effort or "",
+            previous=previous, review_context="selection_verification",
+            review_stage=stage, workflow_step_index=selection.step_index + 1,
+            enforce_transitions=False)
+        next_state = _auto_fix_attach_repair_briefs(
+            cfg, plan, next_state, blocker_evidence=blocker,
+            focused_evidence=focused)
+        auto_fix.write_auto_fix_state(path, next_state)
+        states[cfg.tasks_name] = next_state
+    return states
+
+
+def _selection_repair_states(
+        work_configs: tuple[Config, ...]) -> dict[str, auto_fix.AutoFixState]:
+    states: dict[str, auto_fix.AutoFixState] = {}
+    for cfg in work_configs:
+        path = auto_fix.auto_fix_state_path(cfg)
+        if not path.exists():
+            continue
+        state = auto_fix.read_auto_fix_state(path)
+        if (state.review_context == "selection_verification"
+                and state.verdict != "PASS"):
+            states[cfg.tasks_name] = state
+    if not states:
+        raise AssentError("selection repair has no durable assigned findings")
+    return states
+
+
+def _selection_findings_already_persisted(
+        work_configs: tuple[Config, ...],
+        selection: SelectionWorkflowState) -> bool:
+    """Recognize the crash boundary after findings but before cursor advance."""
+    found = False
+    for cfg in work_configs:
+        path = auto_fix.auto_fix_state_path(cfg)
+        if not path.exists():
+            continue
+        state = auto_fix.read_auto_fix_state(path)
+        if state.review_context != "selection_verification":
+            continue
+        if (state.reviewer_step_index == selection.step_index
+                and state.source_tree == selection.action_candidate_tree
+                and state.verdict == "FAIL"):
+            found = True
+    return found
+
+
+def _selection_assignment_detail(
+        selection: SelectionWorkflowState, task: Task,
+        state: auto_fix.AutoFixState) -> str:
+    return (
+        "The selection-verification finding ledger and repair brief were "
+        "persisted before any write-capable session in this repair wave.\n"
+        f"selection candidate: {selection.action_candidate_tree}\n"
+        f"task: {task.id}\n"
+        "finding fingerprints: "
+        + json.dumps(list(state.current_finding_fingerprints),
+                     separators=(",", ":")))
+
+
+def _selection_assignment_recorded(task: Task, detail: str) -> bool:
+    return any(
+        entry.get("by") == "scheduler"
+        and entry.get("event") == "auto_fix_attempt"
+        and entry.get("detail") in {detail, detail + "\n"}
+        for entry in read_entries(task.journal_path))
+
+
+def _mark_selection_reviews_passed(
+        work_configs: tuple[Config, ...], candidate_tree: str,
+        workflow_step_index: int) -> None:
+    """Close durable repair ledgers only after the real receipt passes."""
+    for cfg in work_configs:
+        path = auto_fix.auto_fix_state_path(cfg)
+        if not path.exists():
+            continue
+        previous = auto_fix.read_auto_fix_state(path)
+        if (previous.review_context != "selection_verification"
+                or previous.verdict == "PASS"):
+            continue
+        plan = Plan.parse(cfg.tasks_dir)
+        passed = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("PASS", ()), previous=previous,
+            source_tree=candidate_tree,
+            task_plan_sha256=_contracts_digest(
+                plan, _task_contract_snapshots(plan)),
+            review_prompt_sha256=previous.review_prompt_sha256,
+            reviewer_role=previous.reviewer_role,
+            reviewer_step_index=previous.reviewer_step_index,
+            reviewer_adapter=previous.reviewer_adapter,
+            reviewer_model=previous.reviewer_model,
+            reviewer_effort=previous.reviewer_effort,
+            review_context="selection_verification", review_stage="recheck",
+            workflow_step_index=workflow_step_index)
+        auto_fix.write_auto_fix_state(path, passed)
+
+
+def _run_selection_repairs(
+        configs: tuple[Config, ...], state: SelectionWorkflowState,
+        step: WorkflowPlanStep, *, sleep: Callable[[float], None],
+        now: Callable[[], datetime]) -> tuple[int, SelectionWorkflowState]:
+    """Resume one coalesced selection finding wave through its focused sweep."""
+    work_configs = _selection_worktree_configs(configs)
+    if state.step_index + 1 >= len(configs[0].workflow_selection) or not isinstance(
+            configs[0].workflow_selection[state.step_index + 1],
+            WorkflowActionStep):
+        print("Selection auto-fix exhausted: a selection reviewer must be "
+              "followed by an explicit full_verify action.")
+        return 1, state
+    if state.repair_phase == "NONE":
+        if not _selection_findings_already_persisted(work_configs, state):
+            record, prompt_digest = _run_selection_reviewer(
+                work_configs, state, step, sleep=sleep, now=now)
+            _persist_selection_findings(
+                work_configs, state, step, record, prompt_digest)
+        state = replace(state, repair_phase="NEEDS_REPAIR")
+        write_selection_workflow_state(configs[0].assent_dir, state)
+
+    repair_states = _selection_repair_states(work_configs)
+    assignments: list[tuple[Config, Task, _FixerProfile, Adapter,
+                            SessionIdentity]] = []
+    for cfg in work_configs:
+        review_state = repair_states.get(cfg.tasks_name)
+        if review_state is None:
+            continue
+        plan = Plan.parse(cfg.tasks_dir)
+        implicated = list(dict.fromkeys(
+            item.task_id for item in review_state.findings
+            if item.fingerprint in review_state.current_finding_fingerprints
+            and item.task_id is not None))
+        for task in _auto_fix_cascade_tasks(plan, implicated):
+            profile = _auto_fix_profile_for_task(cfg, task)
+            fixer = get_adapter(profile.adapter, cfg)
+            session, errors = auto_fix_fixer_capability_errors(
+                cfg, fixer, profile.adapter, profile.model, profile.effort)
+            if errors or session is None:
+                raise AssentError(
+                    f"selection fixer capability unavailable for "
+                    f"{cfg.tasks_name}/{task.id}: " + "; ".join(errors))
+            assignments.append((cfg, task, profile, fixer, session))
+
+    for cfg, task, profile, _fixer, session in assignments:
+        review_state = repair_states[cfg.tasks_name]
+        detail = _selection_assignment_detail(state, task, review_state)
+        if not _selection_assignment_recorded(task, detail):
+            append_entry(
+                task.journal_path, by="scheduler", event="auto_fix_attempt",
+                summary=("Selection verification repair assignment: "
+                         f"{profile.adapter}/{profile.model}/{profile.effort}"),
+                detail=detail, agent=session.agent,
+                requested_model=session.requested_model,
+                requested_effort=session.requested_effort,
+                time_str=now().isoformat(timespec="seconds"))
+
+    with _selection_locks(configs):
+        current_target_ref, current_target, _current_sources = (
+            _selection_snapshot(configs))
+        if (current_target_ref != state.target_ref
+                or current_target != state.target_commit):
+            raise AssentError(
+                "selection target changed while verification repair was pending")
+        if state.repair_phase == "NEEDS_REPAIR":
+            for cfg in work_configs:
+                review_state = repair_states.get(cfg.tasks_name)
+                if review_state is None:
+                    continue
+                plan = Plan.parse(cfg.tasks_dir)
+                review_state, _plan, _contracts = (
+                    _apply_reviewed_scope_amendments(
+                        cfg, review_state, plan,
+                        _task_contract_snapshots(plan), now))
+                review_state = auto_fix.with_repair_phase(
+                    review_state, "REPAIRING")
+                auto_fix.write_auto_fix_state(
+                    auto_fix.auto_fix_state_path(cfg), review_state)
+                repair_states[cfg.tasks_name] = review_state
+            state = replace(state, repair_phase="REPAIRING")
+            write_selection_workflow_state(configs[0].assent_dir, state)
+            for cfg in work_configs:
+                review_state = repair_states.get(cfg.tasks_name)
+                if review_state is None:
+                    continue
+                implicated = list(dict.fromkeys(
+                    item.task_id for item in review_state.findings
+                    if item.fingerprint in review_state.current_finding_fingerprints
+                    and item.task_id is not None))
+                if rework.rework_tasks_locked(
+                        cfg, implicated,
+                        "Automatic repair of durable selection-verification "
+                        "findings") != 0:
+                    return 1, state
+
+        active = _ActiveTask()
+        dispositions: dict[str, list[auto_fix.WorkerDisposition]] = {}
+        for cfg in work_configs:
+            review_state = repair_states.get(cfg.tasks_name)
+            if review_state is None:
+                continue
+            recovered = _auto_fix_recover_dispositions(
+                review_state, Plan.parse(cfg.tasks_dir))
+            if recovered != review_state:
+                review_state = recovered
+                auto_fix.write_auto_fix_state(
+                    auto_fix.auto_fix_state_path(cfg), review_state)
+                repair_states[cfg.tasks_name] = review_state
+            dispositions[cfg.tasks_name] = list(
+                review_state.worker_dispositions)
+
+        for cfg, assigned, profile, fixer, session in assignments:
+            task = Plan.parse(cfg.tasks_dir).get(assigned.id)
+            if task is None or task.status in ("DONE", "SKIP"):
+                continue
+            if task.status not in ("TODO", "WIP"):
+                print(f"Selection repair stopped: {cfg.tasks_name}/{task.id} "
+                      f"is {task.status}, not TODO/WIP.")
+                return 1, state
+            review_state = repair_states[cfg.tasks_name]
+            task_dispositions = dispositions[cfg.tasks_name]
+            session_state = _SessionState()
+            active.task = task
+            active.session = session_state
+            failure = _process_task(
+                cfg, task, _AdapterRotation((profile.adapter,), (fixer,)),
+                sleep, now, session_state, resumed=task.status == "WIP",
+                session_override=session, profile_model=profile.model,
+                auto_fix_context=_auto_fix_repair_context(task, review_state),
+                retry_limit=0, billing_is_failure=True,
+                auto_fix_fingerprints=(
+                    review_state.current_finding_fingerprints),
+                repair_dispositions=task_dispositions)
+            active.task = None
+            active.session = None
+            updated = auto_fix.with_worker_dispositions(
+                review_state, tuple(task_dispositions))
+            auto_fix.write_auto_fix_state(
+                auto_fix.auto_fix_state_path(cfg), updated)
+            repair_states[cfg.tasks_name] = updated
+            if failure is not None:
+                print(f"Selection repair focused closeout failed for "
+                      f"{cfg.tasks_name}/{task.id}: {failure}")
+                return 1, state
+
+        for cfg in work_configs:
+            review_state = repair_states.get(cfg.tasks_name)
+            if review_state is None:
+                continue
+            incomplete = [
+                f"{task.id}={task.status}" for task in Plan.parse(cfg.tasks_dir).tasks
+                if task.status not in ("DONE", "SKIP")]
+            if incomplete:
+                print(f"Selection repair remains incomplete in {cfg.tasks_name}: "
+                      + ", ".join(incomplete))
+                return 1, state
+            review_state = auto_fix.with_repair_phase(
+                review_state, "AWAITING_REVIEW")
+            auto_fix.write_auto_fix_state(
+                auto_fix.auto_fix_state_path(cfg), review_state)
+            repair_states[cfg.tasks_name] = review_state
+
+        state = replace(state, repair_phase="RECHECK")
+        write_selection_workflow_state(configs[0].assent_dir, state)
+        for cfg in work_configs:
+            if not any(task.status == "DONE"
+                       for task in Plan.parse(cfg.tasks_dir).tasks):
+                continue
+            if _verify_focused_locked(cfg) != 0:
+                return 1, state
+            gitops.ensure_clean(cfg.root, cfg.git_excludes)
+
+        target_ref, target_commit, source_commits = _selection_snapshot(configs)
+        if target_ref != state.target_ref or target_commit != state.target_commit:
+            raise AssentError(
+                "selection target changed during the focused repair sweep")
+        state = replace(
+            state, source_commits=source_commits,
+            step_index=state.step_index + 1, action_status="STALE",
+            repair_phase="RECHECK")
+        write_selection_workflow_state(configs[0].assent_dir, state)
+    return 0, state
+
+
+def run_selection_workflow(config_path: str, assent_dir, folders,
+                           *, auto_fix: bool = False,
+                           sleep: Callable[[float], None] | None = None,
+                           now: Callable[[], datetime] | None = None) -> int:
+    """Walk and recover the exact selection verification/repair workflow."""
+    sleep = sleep or interruptible_sleep
+    now = now or (lambda: datetime.now(timezone.utc))
     try:
         assent_dir = os.fspath(assent_dir)
         graph = parse_folder_dependency_graph(assent_dir)
@@ -1331,15 +1903,33 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
     if not any(isinstance(step, WorkflowActionStep) for step in steps):
         steps = steps + (WorkflowActionStep("full_verify"),)
     identity = (ordered, target_ref, target_commit, source_commits)
-    if (state is None
-            or (state.folders, state.target_ref, state.target_commit,
-                state.source_commits) != identity):
+    pending_repair = bool(
+        state is not None and state.folders == ordered
+        and state.repair_phase != "NONE")
+    if (pending_repair
+            and (state.target_ref != target_ref
+                 or state.target_commit != target_commit)):
+        print("Selection repair stopped: the integration target changed while "
+              "durable verifier findings were pending.")
+        return 1
+    active_repair = pending_repair
+    if (state is None or ((state.folders, state.target_ref, state.target_commit,
+                           state.source_commits) != identity
+                          and not active_repair)):
         state = SelectionWorkflowState(
             ordered, target_ref, target_commit, source_commits, 0)
         write_selection_workflow_state(configs[0].assent_dir, state)
     elif state.step_index >= len(steps):
-        state = replace(state, step_index=0)
-        write_selection_workflow_state(configs[0].assent_dir, state)
+        if state.action_status == "PASSED":
+            try:
+                _mark_selection_reviews_passed(
+                    _selection_worktree_configs(configs),
+                    state.action_candidate_tree, state.step_index)
+            except (AssentError, OSError) as error:
+                print(f"Selection repair closeout failed: {error}")
+                return 1
+            return 0
+        return 1
 
     while state.step_index < len(steps):
         step = steps[state.step_index]
@@ -1352,18 +1942,33 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
                 print("Selection full_verify: failure-only selection roles require "
                       "run --auto-fix")
             else:
-                print("Selection full_verify: repairable evidence is ready for the "
-                      f"configured {step.role} role")
+                print("Selection full_verify: repairing durable verifier "
+                      f"evidence with configured role {step.role!r}")
+                try:
+                    code, state = _run_selection_repairs(
+                        configs, state, step, sleep=sleep, now=now)
+                except KeyboardInterrupt:
+                    print("Selection repair interrupted; durable evidence and "
+                          "edits were preserved for resume.")
+                    return 130
+                except (AssentError, OSError) as error:
+                    print(f"Selection repair stopped: {error}")
+                    return 1
+                if code == 0:
+                    continue
+                return code
             return 1
 
         assert step.action == "full_verify"
         print(f"Selection workflow step {state.step_index + 1}/{len(steps)}: "
               "full_verify")
         if len(configs) == 1:
-            result = verify_folder_action(configs[0])
+            result = verify_folder_action(
+                configs[0], recheck=state.repair_phase == "RECHECK")
         else:
             result = verify_selected_batch_action(
-                config_path, configs[0].assent_dir, ordered)
+                config_path, configs[0].assent_dir, ordered,
+                recheck=state.repair_phase == "RECHECK")
         if (not result.target_commit or not result.source_commits
                 or not result.candidate_tree
                 or not result.verification_script_sha256
@@ -1374,12 +1979,13 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
         try:
             with _selection_locks(configs):
                 current = _selection_snapshot(configs)
-                if current != (target_ref, target_commit, source_commits):
+                if current != (state.target_ref, state.target_commit,
+                               state.source_commits):
                     raise AssentError(
                         "selection source or target changed after verification")
                 if (result.folders != ordered
-                        or result.target_commit != target_commit
-                        or result.source_commits != source_commits
+                        or result.target_commit != state.target_commit
+                        or result.source_commits != state.source_commits
                         or result.verification_script_sha256
                         != verification.verifier_digest(configs[0])):
                     raise AssentError(
@@ -1391,11 +1997,21 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
                     action_status="PASSED" if result.passed else "FAILED",
                     action_candidate_tree=result.candidate_tree,
                     action_exit_code=result.exit_code,
-                    action_evidence=(result.outcome,) + result.evidence,
+                    action_evidence=(
+                        result.outcome,
+                        f"target: {result.target_commit}",
+                        "sources: " + ", ".join(result.source_commits),
+                        f"candidate: {result.candidate_tree}",
+                    ) + result.evidence,
                     verification_script_sha256=(
                         result.verification_script_sha256),
-                    shared_inputs_sha256=result.shared_inputs_sha256)
+                    shared_inputs_sha256=result.shared_inputs_sha256,
+                    repair_phase="NONE")
                 write_selection_workflow_state(configs[0].assent_dir, state)
+                if result.passed:
+                    _mark_selection_reviews_passed(
+                        _selection_worktree_configs(configs),
+                        result.candidate_tree, state.step_index)
         except (AssentError, lockfile.LockBusy) as error:
             print(f"Selection full_verify: failed ({error})")
             return 1
@@ -1658,6 +2274,17 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         # unresolved review evidence just because the invocation omitted the
         # repair authorization.
         existing_auto_fix = _auto_fix_existing_state(cfg)
+        # Selection-verification repair is coordinated only after every folder
+        # run lock has exited.  A restarted invocation therefore leaves its
+        # reopened TODO/WIP tasks untouched here and lets the exact selection
+        # cursor resume the durable repair wave in ``_close_run``.
+        if (existing_auto_fix is not None
+                and existing_auto_fix.review_context
+                == "selection_verification"
+                and existing_auto_fix.verdict != "PASS"):
+            print("Selection verification repair is pending; deferring this "
+                  "folder to the exact selection coordinator.")
+            return 0
         # A settled SELF-FIXED, UNREVIEWED folder is terminal, not a resumable
         # phase: a later run must not reopen, re-review, or re-run anything for
         # it just because that durable record exists.  A human who reopens a
@@ -1879,6 +2506,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     # and REVIEW UNRESOLVED -- whose remaining decision is the human accept
     # rather than another round.
     if (pending is not None and pending.verdict != "PASS"
+            and pending.review_context != "selection_verification"
             and pending.self_fixed_unreviewed is None
             and pending.unresolved_review is None):
         print("Auto-fix closeout refused: the folder has a pending "

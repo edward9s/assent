@@ -74,6 +74,32 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
             return ok_result()
         return step
 
+    def test_pending_selection_repair_defers_ordinary_folder_execution(self):
+        task_path = self.write_task(1, status="TODO", scope=("src/",))
+        cfg = self.build()
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "Selection repair is pending",
+            "The durable complete-verifier evidence owns this repair.")
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (finding,)),
+            source_tree=gitops.tree_of(cfg.root, "HEAD"),
+            task_plan_sha256=engine._contracts_digest(
+                plan, engine._task_contract_snapshots(plan)),
+            review_prompt_sha256="2" * 64,
+            reviewer_role="selection_reviewer",
+            reviewer_adapter="claude", reviewer_model="prime",
+            reviewer_effort="high",
+            review_context="selection_verification")
+        auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
+        adapter = ScriptedAdapter([])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=adapter, auto_fix=True), 0)
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(parse_task_file(task_path).status, "TODO")
+
     def test_interrupt_preserves_edits_and_restart_reuses_the_same_profile(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"
