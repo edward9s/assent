@@ -35,15 +35,26 @@ from tests.test_contracts import GlobalContractsMixin
 class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
     @staticmethod
     def review_rounds(count, *names):
-        """A [auto_fix.review] adapter list of exactly `count` review rounds.
+        """A workflow with exactly ``count`` verdict-producing review steps.
 
         The merged reviewer-fixer loop is finite because it walks this list
         position by position, so a case needing N reviewer sessions must
         configure N rounds.
         """
         adapters = list(names) or ["claude"] * count
-        rendered = ", ".join(json.dumps(name) for name in adapters)
-        return f"\n[auto_fix.review]\nadapter = [{rendered}]\n"
+        rendered = ", ".join(
+            item for name in adapters for item in (
+                '{ role = "bounded_fixer" }',
+                f'{{ role = "folder_reviewer", adapter = {json.dumps(name)} }}'))
+        return (
+            '\n[abilities.review_fix]\nprompt = "Review and repair."\n'
+            'writes = true\ngate = true\nproduces_verdict = true\n'
+            '[abilities.fix]\nprompt = "Repair durable findings."\n'
+            'writes = true\ngate = false\n'
+            '[agents.folder_reviewer]\nability = ["review_fix"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[agents.bounded_fixer]\nability = ["fix"]\n'
+            f'[workflow]\nplan = [{rendered}]\n')
 
     @staticmethod
     def review_session_agents(output):
@@ -132,7 +143,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(state.verdict, "PASS")
         # The recheck ran as the second configured round and, having passed,
         # leaves the position on the round that decided it.
-        self.assertEqual(state.review_round_index, 1)
+        self.assertEqual(state.workflow_step_index, 3)
         self.assertEqual(len(worker.calls), 1)
         self.assertEqual(len(reviewer.calls), 2)
         repair_prompt = worker.calls[0][0]
@@ -234,7 +245,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             auto_fix=True), 0)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
-        self.assertEqual(state.review_round_index, 2)
+        self.assertEqual(state.workflow_step_index, 5)
         # Every repair keeps the reopened task's own ordinary profile; only the
         # review round position advances.
         self.assertEqual(
@@ -380,7 +391,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         source.mkdir()
         (source / "base.py").write_text("base = 1\n", encoding="utf-8")
         (source / "needed.py").write_text("value = 1\n", encoding="utf-8")
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(1))
         plan = Plan.parse(cfg.tasks_dir)
         contracts = engine._task_contract_snapshots(plan)
         plan_digest = engine._contracts_digest(plan, contracts)
@@ -479,7 +490,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         (self.root / "tests" / "base.py").write_text("base = 1\n", encoding="utf-8")
         (self.root / "src" / "needed.py").write_text("value = 1\n", encoding="utf-8")
         (self.root / "tests" / "needed.py").write_text("value = 1\n", encoding="utf-8")
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(1))
         plan = Plan.parse(cfg.tasks_dir)
         contracts = engine._task_contract_snapshots(plan)
         plan_digest = engine._contracts_digest(plan, contracts)
@@ -544,7 +555,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(1))
 
         reviewer = ScriptedAdapter([
             TaskResult(0, auto_fix.review_record_json(
@@ -597,7 +608,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         # twice under t001's ordinary profile, and only the round index moves.
         self.assertEqual([(model, effort) for _prompt, model, effort in worker.calls],
                          [("lite", "medium"), ("lite", "medium")])
-        self.assertEqual(state.review_round_index, 2)
+        self.assertEqual(state.workflow_step_index, 5)
 
     def test_multi_task_finding_round_gives_every_task_the_normal_profile(self):
         first = self.write_task(
@@ -634,7 +645,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             [("lite", "medium"), ("lite", "medium")])
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
-        self.assertEqual(state.review_round_index, 1)
+        self.assertEqual(state.workflow_step_index, 3)
 
     def test_dependency_cascade_shares_the_same_normal_repair_round(self):
         first = self.write_task(
@@ -671,7 +682,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(parse_task_file(second).status, "DONE")
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
-        self.assertEqual(state.review_round_index, 1)
+        self.assertEqual(state.workflow_step_index, 3)
 
     def test_interrupted_multi_task_round_resumes_on_the_same_profile(self):
         first = self.write_task(
@@ -707,7 +718,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         interrupted = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(interrupted.phase, "REPAIRING")
-        self.assertEqual(interrupted.review_round_index, 1)
+        self.assertEqual(interrupted.workflow_step_index, 3)
 
         resumed = ScriptedAdapter([
             self.repair_done(first, {"src/one.txt": "new one\n"}),
@@ -724,7 +735,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         completed = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(completed.verdict, "PASS")
-        self.assertEqual(completed.review_round_index, 1)
+        self.assertEqual(completed.workflow_step_index, 3)
 
     def test_process_creation_failure_leaves_the_same_repair_resumable(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
@@ -760,7 +771,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         failed_start = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(failed_start.phase, "REPAIRING")
-        self.assertEqual(failed_start.review_round_index, 1)
+        self.assertEqual(failed_start.workflow_step_index, 3)
         self.assertEqual(parse_task_file(task_path).status, "TODO")
         entries = read_entries(journal_path_for(task_path))
         self.assertEqual(sum(
@@ -879,15 +890,15 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
         fingerprint = auto_fix.finding_fingerprint(finding)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.review_round_index, 2)
+        self.assertEqual(state.workflow_step_index, 4)
         self.assertEqual(state.current_finding_fingerprints, (fingerprint,))
         outcome = state.unresolved_review
         self.assertIsNotNone(outcome)
-        review = cfg.auto_fix_review[1]
+        review = cfg.workflow_plan[3]
         self.assertEqual(
             (outcome.round_index, outcome.rounds_used, outcome.adapter,
              outcome.model, outcome.effort, outcome.finding_fingerprints),
-            (1, 2, review.adapter, review.requested_model,
+            (3, 4, review.adapter, review.requested_model,
              review.requested_effort, (fingerprint,)))
         self.assertIsNone(state.self_fixed_unreviewed)
 
@@ -895,8 +906,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertIn(
             "Folder auto-fix: REVIEW UNRESOLVED, HUMAN DECISION (fresh)",
             report)
-        self.assertIn("Terminal: REVIEW UNRESOLVED, HUMAN DECISION (round 2 "
-                      f"of 2, {review.adapter}/{review.requested_model}/"
+        self.assertIn("Terminal: REVIEW UNRESOLVED, HUMAN DECISION (round 4 "
+                      f"of 4, {review.adapter}/{review.requested_model}/"
                       f"{review.requested_effort}", report)
         self.assertIn(fingerprint, report)
 
@@ -1168,11 +1179,11 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         outcome = state.self_fixed_unreviewed
         self.assertIsNotNone(outcome)
-        review = cfg.auto_fix_review[1]
+        review = cfg.workflow_plan[3]
         self.assertEqual(
             (outcome.round_index, outcome.rounds_used, outcome.adapter,
              outcome.model, outcome.effort, outcome.finding_fingerprints),
-            (1, 2, review.adapter, review.requested_model,
+            (3, 4, review.adapter, review.requested_model,
              review.requested_effort,
              (auto_fix.finding_fingerprint(finding),)))
         # The settled record is rebound to the tree the last round's repair was
@@ -1403,10 +1414,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         def fix(text, expected_round, expected_remaining):
             def step(prompt):
                 self.assertIn(
-                    f"This is review round {expected_round} of 3.", prompt)
+                    f"This is workflow plan step {expected_round * 2} of 6.", prompt)
                 self.assertIn(
-                    "Review rounds remaining after this one: "
-                    f"{expected_remaining}.", prompt)
+                    "Workflow steps remaining after this one: "
+                    f"{expected_remaining * 2}.", prompt)
                 self.assertIn("you may repair it directly", prompt)
                 (self.execution_root() / "src" / "value.txt").write_text(
                     text, encoding="utf-8")
@@ -1418,9 +1429,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             return step
 
         def final(prompt):
-            self.assertIn("This is review round 3 of 3.", prompt)
-            self.assertIn("Review rounds remaining after this one: 0.", prompt)
-            self.assertIn("This is the FINAL review round.", prompt)
+            self.assertIn("This is workflow plan step 6 of 6.", prompt)
+            self.assertIn("Workflow steps remaining after this one: 0.", prompt)
+            self.assertIn("This is the FINAL workflow plan step.", prompt)
             self.assertIn("No further review will occur after this one.", prompt)
             return TaskResult(0, auto_fix.review_record_json(
                 auto_fix.ReviewRecord("PASS", ())), False, None)
@@ -1447,7 +1458,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
         self.assertEqual(state.reviewer_adapter, "claude")
-        self.assertEqual(state.review_round_index, 2)
+        self.assertEqual(state.workflow_step_index, 5)
         self.assertEqual(parse_task_file(task_path).status, "DONE")
         self.assertEqual(
             (self.execution_root() / "src" / "value.txt").read_text(

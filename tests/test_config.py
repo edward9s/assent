@@ -2,6 +2,7 @@
 import contextlib
 import io
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +19,29 @@ from assent.init import _split_config_template, init as run_init
 from assent.user_home import ASSENT_HOME_ENV, user_assent_dir, user_config_path
 
 _MINIMAL = ""
+_WORKFLOW_ROLES = '''
+[abilities.review]
+prompt = "Review the folder."
+writes = false
+gate = true
+produces_verdict = true
+[abilities.fix]
+prompt = "Repair the durable findings."
+writes = true
+gate = false
+[abilities.observe]
+prompt = "Observe only."
+writes = false
+gate = false
+[agents.reviewer]
+ability = ["review"]
+model = "prime"
+effort = "heavy"
+[agents.fixer]
+ability = ["fix"]
+[agents.observer]
+ability = ["observe"]
+'''
 
 
 class ConfigTestCase(unittest.TestCase):
@@ -203,95 +227,74 @@ class TestLoadConfig(ConfigTestCase):
                           ".assent/parallel02/_auto_fix.toml",
                           ".assent/manifest.toml", ".assent/manifest.lock"))
 
-    def test_auto_fix_review_policy_resolves_without_an_override_table(self):
-        rounds = load_config(self.write(_MINIMAL), "plan01").auto_fix_review
-        self.assertEqual(len(rounds), 1)
-        builtin = rounds[0]
-        self.assertEqual(
-            (builtin.adapter, builtin.model, builtin.effort,
-             builtin.requested_model, builtin.requested_effort),
-            ("claude", "prime", "heavy", "fable", "high"))
-        cfg = load_config(self.write(
-            '[adapter]\nname = ["codex", "claude"]\n'
-            ), "plan01")
-        self.assertEqual(len(cfg.auto_fix_review), 1)
-        review = cfg.auto_fix_review[0]
-        self.assertEqual(review.adapter, "codex")
-        self.assertEqual(review.model, "prime")
-        self.assertEqual(review.effort, "heavy")
-        self.assertEqual(review.command, "codex")
-        self.assertEqual(review.requested_model, "gpt-5.6-sol")
-        self.assertEqual(review.requested_effort, "high")
+    def test_workflow_omitted_and_empty_boundaries(self):
+        absent = load_config(self.write(_MINIMAL), "plan01")
+        self.assertEqual(absent.workflow_plan, ())
+        self.assertIsNone(absent.workflow_task)
+        omitted = load_config(self.write("[workflow]\n"), "plan01")
+        self.assertEqual(omitted.workflow_plan, ())
+        self.assertIsNone(omitted.workflow_task)
+        empty_plan = load_config(self.write(
+            "[workflow]\nplan = []\n"), "plan01")
+        self.assertEqual(empty_plan.workflow_plan, ())
+        self.assertIsNone(empty_plan.workflow_task)
+        empty_task = load_config(self.write(
+            "[workflow]\ntask = []\n"), "plan01")
+        self.assertEqual(empty_task.workflow_plan, ())
+        self.assertEqual(empty_task.workflow_task, ())
 
-    def test_auto_fix_review_explicit_adapter_reuses_its_mappings(self):
+    def test_workflow_verdict_step_reuses_adapter_mappings(self):
         cfg = load_config(self.write(
+            _WORKFLOW_ROLES +
             '[adapter]\nname = "claude"\n'
             '[adapter.codex]\ncommand = "codex-review.cmd"\n'
             '[adapter.codex.models]\ncore = "review-model"\n'
             '[adapter.codex.efforts.core]\nslight = "review-effort"\n'
-            '[auto_fix.review]\nadapter = "codex"\nmodel = "core"\n'
-            'effort = "slight"\n'), "plan01")
-        review = cfg.auto_fix_review[0]
+            '[agents.reviewer_core]\nability = ["review"]\nmodel = "core"\n'
+            'effort = "slight"\n'
+            '[workflow]\nplan = [{ role = "reviewer_core", adapter = "codex" }]\n'), "plan01")
+        review = cfg.workflow_plan[0]
         self.assertEqual(review.adapter, "codex")
         self.assertNotIn(review.adapter, cfg.adapter_names)
         self.assertEqual(review.command, "codex-review.cmd")
         self.assertEqual(review.requested_model, "review-model")
         self.assertEqual(review.requested_effort, "review-effort")
 
-    def test_auto_fix_review_rejects_invalid_shapes_and_values(self):
+    def test_workflow_rejects_invalid_shapes_and_values(self):
         cases = (
             ('auto_fix = true\n', r"\[auto_fix\].*table"),
-            ('[auto_fix]\nreview = true\n', r"\[review\].*table"),
             ('[auto_fix]\nextra = true\n', "unknown keys"),
-            ('[auto_fix.review]\nextra = true\n', "unknown keys"),
-            ('[auto_fix.review]\nadapter = 1\n', "wrong type"),
-            ('[auto_fix.review]\nadapter = "  "\n', "is blank"),
-            ('[auto_fix.review]\nadapter = "elsewhere"\n', "registered adapter"),
-            ('[auto_fix.review]\nadapter = []\n', "non-empty list"),
-            ('[auto_fix.review]\nadapter = ["claude", 1]\n', "wrong type"),
-            ('[auto_fix.review]\nadapter = ["claude", "  "]\n', "is blank"),
-            ('[auto_fix.review]\nadapter = ["claude", "elsewhere"]\n',
-             "registered adapter"),
-            ('[auto_fix.review]\nmodel = "max"\n', "valid model tier"),
-            ('[auto_fix.review]\neffort = "medium"\n', "valid effort"),
+            ('workflow = true\n', r"\[workflow\].*table"),
+            ('[workflow]\nextra = true\n', "unknown keys"),
+            ('[workflow]\nplan = true\n', "wrong type"),
+            (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "reviewer" }]\n',
+             "requires adapter"),
+            (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "fixer", adapter = "codex" }]\n',
+             "must not state adapter"),
+            (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "observer" }]\n',
+             "cannot open any session"),
         )
         for text, message in cases:
             with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):
                 load_config(self.write(text), "plan01")
 
-    def test_auto_fix_review_adapter_list_resolves_ordered_rounds(self):
-        """A bare string is exactly a one-round list, and a list keeps order and repeats."""
-        single = load_config(self.write(
-            '[auto_fix.review]\nadapter = "codex"\n'), "plan01").auto_fix_review
-        listed = load_config(self.write(
-            '[auto_fix.review]\nadapter = ["codex"]\n'), "plan01").auto_fix_review
-        self.assertEqual(single, listed)
-        self.assertEqual(len(single), 1)
-
-        rounds = load_config(self.write(
-            '[auto_fix.review]\nadapter = ["claude", "codex", "claude"]\n'
-            'model = "core"\neffort = "slight"\n'), "plan01").auto_fix_review
-        self.assertEqual([item.adapter for item in rounds],
-                         ["claude", "codex", "claude"])
-        # model and effort stay single fields that apply to every round.
-        self.assertEqual({(item.model, item.effort) for item in rounds},
-                         {("core", "slight")})
-        self.assertEqual([item.requested_model for item in rounds],
-                         ["opus", "gpt-5.6-terra", "opus"])
-        self.assertEqual(rounds[0], rounds[2])
-
-    def test_auto_fix_review_uses_normal_layer_precedence(self):
-        self.write_user(
-            '[auto_fix.review]\nadapter = "codex"\nmodel = "core"\n'
-            'effort = "slight"\n')
+    def test_workflow_plan_preserves_step_order_and_fix_only_has_no_adapter(self):
         cfg = load_config(self.write(
-            '[auto_fix.review]\nmodel = "lite"\n'), "plan01")
-        review = cfg.auto_fix_review[0]
-        self.assertEqual(
-            (review.adapter, review.model, review.effort),
-            ("codex", "lite", "slight"))
-        self.assertEqual(cfg.source_of("auto_fix.review.adapter"), USER_LAYER)
-        self.assertEqual(cfg.source_of("auto_fix.review.model"), PROJECT_LAYER)
+            _WORKFLOW_ROLES +
+            '[workflow]\nplan = ['
+            '{ role = "reviewer", adapter = "claude" }, '
+            '{ role = "fixer" }, '
+            '{ role = "reviewer", adapter = "codex" }]\n'), "plan01")
+        self.assertEqual([step.role for step in cfg.workflow_plan],
+                         ["reviewer", "fixer", "reviewer"])
+        self.assertEqual([step.adapter for step in cfg.workflow_plan],
+                         ["claude", None, "codex"])
+
+    def test_removed_auto_fix_review_names_table_and_layer_file(self):
+        path = self.write('[auto_fix.review]\nadapter = "codex"\n')
+        with self.assertRaisesRegex(
+                AssentError, rf"\[auto_fix\.review\].*{re.escape(str(path.resolve()))}"):
+            load_config(path, "plan01")
 
     def test_missing_file_raises(self):
         with self.assertRaises(AssentError):

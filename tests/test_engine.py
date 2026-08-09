@@ -1014,24 +1014,42 @@ class TestReworkPromptSuffix(GlobalContractsMixin, EngineTestCase):
 
 
 class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
-    def build_review(self, retry=1, rounds=1):
+    def build_review(self, retry=1, rounds=1, model="core"):
         # The merged reviewer-fixer loop walks this list position by position,
         # so a case needing more than one reviewer session configures more than
         # one round.
-        adapters = ", ".join(['"codex"'] * rounds)
+        steps = ", ".join(
+            item
+            for _ in range(rounds)
+            for item in (
+                '{ role = "bounded_fixer" }',
+                '{ role = "reviewer_fixer", adapter = "codex" }'))
         return self.build(
             retry=retry,
             extra_config=(
-                '[auto_fix.review]\n'
-                f'adapter = [{adapters}]\n'
-                'model = "core"\n'
-                'effort = "heavy"\n'))
+                '[abilities.review_fix]\n'
+                'prompt = "Review and repair within the named task scope."\n'
+                'writes = true\n'
+                'gate = true\n'
+                'produces_verdict = true\n'
+                '[abilities.fix]\n'
+                'prompt = "Repair the durable findings."\n'
+                'writes = true\n'
+                'gate = false\n'
+                '[agents.reviewer_fixer]\n'
+                'ability = ["review_fix"]\n'
+                f'model = "{model}"\n'
+                'effort = "heavy"\n'
+                '[agents.bounded_fixer]\n'
+                'ability = ["fix"]\n'
+                '[workflow]\n'
+                f'plan = [{steps}]\n'))
 
     def write_pending_fail(self, cfg, verdict="FAIL"):
         task = parse_task_file(self.plan_dir / "t001_task.e.toml")
         rounds = cfg.auto_fix_review
         self.assertTrue(rounds)
-        review = rounds[0]
+        review = next(step for step in rounds if step.produces_verdict)
         # A PASS carries no findings; every other verdict must carry at least
         # one, so the fixture follows the verdict rather than the caller.
         findings = () if verdict == "PASS" else (auto_fix.ReviewFinding(
@@ -1042,9 +1060,12 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
             source_tree=gitops.tree_of(cfg.root, "HEAD"),
             task_plan_sha256=auto_fix.sha256_files((task.path,)),
             review_prompt_sha256="a" * 64,
+            reviewer_role=review.role,
+            reviewer_step_index=1,
             reviewer_adapter=review.adapter,
             reviewer_model=review.requested_model,
-            reviewer_effort=review.requested_effort)
+            reviewer_effort=review.requested_effort,
+            workflow_step_index=2)
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
         return state
 
@@ -1394,8 +1415,8 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertIn("never an\nimplementation session", prompt)
         self.assertIn("single read-only\ndecision gate", prompt)
         self.assertNotIn("you may repair it directly", prompt)
-        self.assertNotIn("This is the FINAL review round.", prompt)
-        self.assertNotIn("This is review round", prompt)
+        self.assertNotIn("This is the FINAL workflow plan step.", prompt)
+        self.assertNotIn("This is workflow plan step", prompt)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.phase, "NEEDS_REPAIR")
         self.assertEqual(state.failure_trigger, "worker_blocked")
@@ -1812,7 +1833,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 drifted, adapter=worker, auto_fix=True), 1)
 
         self.assertEqual(worker.calls, [])
-        self.assertIn("reviewer identity no longer matches", out.getvalue())
+        self.assertIn("requires a configured [workflow].plan", out.getvalue())
         self.assertEqual(
             auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(drifted)),
             before)
@@ -1822,11 +1843,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         cfg = self.build_review()
         self.commit_all()
         before = self.write_pending_fail(cfg)
-        drifted = self.build(extra_config=(
-            '[auto_fix.review]\n'
-            'adapter = "codex"\n'
-            'model = "prime"\n'
-            'effort = "heavy"\n'))
+        drifted = self.build_review(model="prime")
         worker = ScriptedAdapter([])
         reviewer = ScriptedAdapter([])
         out = io.StringIO()
@@ -1945,15 +1962,16 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         # Text that only a round permitted to write may ever be given.
         repair_instructions = (
             "you may repair it directly",
-            "This is the FINAL review round.",
+            "This is the FINAL workflow plan step.",
             "and return FIXED",
         )
 
         for context in contexts:
             for stage in stages:
-                for index in range(total):
+                for review_number in range(total):
+                    index = review_number * 2 + 1
                     with self.subTest(context=context, stage=stage,
-                                      round_index=index):
+                                      workflow_step_index=index):
                         _tree, _digest, prompt, _prompt_digest = (
                             engine._auto_fix_review_identity(
                                 cfg, plan, "focused evidence",
@@ -1966,20 +1984,20 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                                 self.assertNotIn(phrase, prompt)
                             # It is outside the sequence, so it must not claim
                             # a position in it either.
-                            self.assertNotIn("This is review round", prompt)
+                            self.assertNotIn("This is workflow plan step", prompt)
                             continue
                         self.assertIn("you may repair it directly", prompt)
                         self.assertIn(
-                            f"This is review round {index + 1} of {total}.",
+                            f"This is workflow plan step {index + 1} of {len(cfg.workflow_plan)}.",
                             prompt)
                         self.assertIn(
-                            "Review rounds remaining after this one: "
-                            f"{total - index - 1}.", prompt)
+                            "Workflow steps remaining after this one: "
+                            f"{len(cfg.workflow_plan) - index - 1}.", prompt)
                         # Only the last position may claim finality, and it
                         # always must.
                         self.assertEqual(
-                            "This is the FINAL review round." in prompt,
-                            index == total - 1)
+                            "This is the FINAL workflow plan step." in prompt,
+                            index == len(cfg.workflow_plan) - 1)
 
     def test_invalid_response_retries_then_persists_valid_fail(self):
         self.write_task(1, status="DONE")
@@ -2061,6 +2079,22 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertNotIn("Auto-fix folder review", out.getvalue())
         self.assertNotIn(f"verify: {_FAILV}", out.getvalue())
         self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
+
+    def test_auto_fix_without_workflow_plan_reports_no_effect_and_runs_normally(self):
+        task = self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            code = engine.run(
+                cfg, adapter=ScriptedAdapter([self.ai_done(task)]),
+                auto_fix=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(parse_task_file(task).status, "DONE")
+        self.assertIn("had no effect", out.getvalue())
+        self.assertIn("[workflow].plan", out.getvalue())
 
 
 class TestReworkPromptFallbacks(GlobalContractsMixin, EngineTestCase):
@@ -2169,7 +2203,13 @@ class TestSelfFixedUnreviewedSelection(GlobalContractsMixin, EngineTestCase):
                                encoding="utf-8", newline="\n")
         config_path = self.root / ".assent" / "assent.toml"
         self.build(extra_config=(
-            '[auto_fix.review]\nadapter = ["claude", "claude"]\n'))
+            '[abilities.review_fix]\nprompt = "Review and repair."\n'
+            'writes = true\ngate = true\nproduces_verdict = true\n'
+            '[agents.folder_reviewer]\nability = ["review_fix"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nplan = ['
+            '{ role = "folder_reviewer", adapter = "claude" }, '
+            '{ role = "folder_reviewer", adapter = "claude" }]\n'))
         self.commit_all()
 
         finding = auto_fix.ReviewFinding(

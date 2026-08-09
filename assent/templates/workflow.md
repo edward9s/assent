@@ -466,21 +466,48 @@ and `archive --all` are the routine, unattended one.
 
 ## Opt-in folder review and bounded repair
 
-The optional `[auto_fix.review]` table overrides the folder reviewer identity;
-only `run --auto-fix` starts its review rounds and authorizes bounded repair.
-When the table is absent, the first effective worker adapter is resolved at
-`prime`/`heavy` by the normal settings layer. This default works without
-rerunning `assent init` or editing `~/.assent/assent.toml`:
+The `[workflow]` table is the one configuration surface for task sessions and
+the folder's post-completion review/repair sequence. Only `run --auto-fix`
+walks `plan` and authorizes its bounded repair:
 
 ```text
 assent run FOLDER --auto-fix
 ```
 
-Its `adapter` may be a single name or an ordered list of names. Each entry is
-one review round, and a repeated name is meaningful: it states another round
-with the same identity. The table's single `model` and `effort` apply to every
-entry, so the list resolves to one adapter/model/effort identity per round, in
-order, and the number of entries is the finite bound on the whole loop.
+```toml
+[workflow]
+plan = [
+  { role = "folder_reviewer", adapter = "codex" },
+  { role = "bounded_fixer" },
+  { role = "folder_reviewer", adapter = "antigravity" },
+]
+# task = [{ role = "task_worker" }]
+```
+
+`plan` is an ordered array of `{ role, adapter }` steps. A verdict-producing
+role requires `adapter`; a role with `produces_verdict = false` must omit it,
+because that step opens no reviewer session. A writable non-verdict step
+instead authorizes one bounded repair from the nearest earlier verdict step's
+durable brief, always using each implicated task's own profile. A role combining
+verdict production and writing is a merged reviewer-fixer and may report
+`FIXED` from that same session. A non-verdict, non-writing step is a legal
+no-op, but a non-empty plan with no verdict-producing step is refused because
+no session could ever open. Every verdict step resolves its role's model and
+effort through its own adapter mappings. Preflight is keyed by the full
+`(adapter, requested_model, requested_effort)` identity, so two steps using the
+same adapter with different models are both proven.
+
+All omitted and empty boundaries are explicit. An absent `[workflow]` table is
+identical to both keys being omitted. An omitted `plan` and `plan = []` both
+configure no folder review; there is no third state because the built-in plan
+default is empty. With no plan, `run --auto-fix` prints that the flag had no
+effect because `[workflow].plan` states no step, then completes as an ordinary
+run. An omitted `task` keeps today's implicit one session per task using that
+task's own model and effort. `task = []` is intentionally different and is
+reserved for the task-workflow behavior defined by the next schema revision.
+The removed `[auto_fix.review]` table is never recognized alongside this one:
+the config load fails closed and names both the removed table and the exact
+settings-layer file that must be edited.
 
 The flag is selection-orthogonal: it is forwarded for automatic, explicit
 single/multi-folder, prefix-plus-`...`, and `--all` selections and is compatible
@@ -488,7 +515,7 @@ with `--once`, `--task`, and `--verify`, whose own ordering and scope rules do
 not change. A limited run defers the completed-folder loop when it leaves work
 incomplete; a quiescent blocked dependency with durable worker or focused-gate
 evidence may enter the separate blocked-adjudication review. Neither path
-spends a review token before its own evidence gate. Without the flag, configured
+spends a workflow step before its own evidence gate. Without the flag, configured
 review is inert. Complete verification requested by `--verify` follows only a
 successful run and loop according to the existing receipt policy; auto-fix
 neither performs that verification nor accepts. A missing receipt, an unrun
@@ -516,7 +543,7 @@ The folder-level order is:
    never edit task files. Reopen only existing implicated tasks, repair, then
    repeat the task gate, final sweep when applicable, and review.
 7. Stop on PASS, adapter/infrastructure failure, an unresolved ownership or
-   scope decision, or the end of the configured round list, always retaining
+   scope decision, or the end of the configured plan, always retaining
    edits and evidence. No runtime human adjudication step is inserted into
    the loop.
 
@@ -537,9 +564,9 @@ adjudication, which stays read-only and must write nothing. The configured
 force; this prompt-plus-detection rule is cooperative write detection, not a
 security sandbox or a preventive permission boundary.
 
-The loop terminates by walking the configured round list. Each round advances
-the durable `review_round_index` by exactly one, and reaching the end of the
-list ends automation finitely. A sequence that runs out on a `FIXED` round does
+The loop terminates by walking `[workflow].plan` by position. Every step
+advances the durable `workflow_step_index` exactly once, and reaching the end
+ends automation finitely. A sequence that runs out on a `FIXED` verdict step does
 not settle immediately: the scheduler first re-runs the implicated task's own
 focused gate against the repaired source, reusing the same de-duplicating
 ledger that skips a command already proven earlier in this invocation, so the
@@ -590,15 +617,16 @@ artifact. It is included in the runtime exclusions with `_assent.log`,
 `_report.md`, locks, and verification receipts; it is not a task file, a new
 task status, acceptance evidence, or a source-of-truth database. It may be
 rebuilt from the current folder run and must never be staged or committed.
-Version 6 has exactly these scalar fields and ordered table collections. The
+Version 7 has exactly these scalar fields and ordered table collections. The
 `phase` field is required; it makes crash recovery explicit rather than
 inferring a repair boundary from task statuses alone:
 
 ```toml
-version = 6
+version = 7
 source_tree = "<40-or-64 lowercase hexadecimal tree id>"
 task_plan_sha256 = "<64 lowercase hexadecimal digest>"
 review_prompt_sha256 = "<64 lowercase hexadecimal digest>"
+reviewer_role = "folder_reviewer"
 reviewer_adapter = "<registered adapter>"
 reviewer_model = "<resolved requested model>"
 reviewer_effort = "<resolved requested effort>"
@@ -607,7 +635,8 @@ verdict = "PASS"                 # PASS, FIXED or FAIL
 review_context = "completed_folder" # completed_folder / blocked_adjudication
 review_stage = "initial"          # initial / recheck
 failure_trigger = ""              # worker_blocked / focused_gate_failure / empty
-review_round_index = 0            # rounds consumed from the configured list
+workflow_step_index = 0           # next [workflow].plan position to walk
+reviewer_step_index = 0           # exact position that produced this verdict
 current_finding_fingerprints = []
 
 [[findings]]
@@ -666,8 +695,8 @@ transition = "initial"        # initial | still_present | repair_regression | ne
 prior_fingerprint = ""
 transition_evidence = ""
 
-# At most one settled outcome, written only when the round list ran out on a
-# FIXED round.
+# At most one settled outcome, written only when the workflow plan ran out on a
+# FIXED verdict step.
 [self_fixed_unreviewed]
 round_index = 1                  # zero-based position of the self-fixed round
 rounds_used = 2
@@ -686,10 +715,11 @@ canonical JSON. A `PASS`
 has no current findings; a `FAIL` or `FIXED` has at least one. The findings
 ledger and `observed_states` retain prior evidence.
 
-Version 6 keeps the crash-resumable `scope_amendments` records for the one
-scheduler-owned exact scope transaction, adds the `review_round_index` cursor
-into the configured round list, and adds the at-most-one
-`self_fixed_unreviewed` settled outcome. It removes version 5's
+Version 7 retains every applicable version-6 ledger and recovery field. It
+adds `reviewer_role`, `workflow_step_index`, and `reviewer_step_index` so
+freshness and restart bind the exact configured role, resolved identity, and
+step position. Version 6 had added the
+at-most-one `self_fixed_unreviewed` outcome and removed version 5's
 `repair_round_assignments` and `consumed_fixer_profiles`: there is no
 escalation ladder to record, because each reopened task is repaired under its
 own ordinary task profile and nothing is consumed, so an interrupted round
@@ -703,12 +733,12 @@ completed and the next configured round must run; and `COMPLETE` is valid only
 for a `PASS` with no current findings. `review_context` distinguishes a completed-folder review
 from blocked adjudication, and `review_stage` distinguishes the first review
 from a recheck. A restart resumes `REPAIRING` or `AWAITING_REVIEW` from the
-stored evidence, while a missing or drifted reviewer configuration
+stored evidence, while a missing or drifted workflow configuration
 refuses repair and closeout rather than treating the state as a cache miss.
 
 An unclean exit that interrupts a round after it has already written a repair
 -- during `REPAIRING` or `AWAITING_REVIEW`, before the verdict that would
-advance `review_round_index` is recorded -- preserves the edit and leaves the
+advance `workflow_step_index` is recorded -- preserves the edit and leaves the
 round index unmoved. The next run's startup recovery gate attributes that dirt
 to the task this durable state's current findings implicate, using the same
 scope-containment proof its other recovery owners use, and gathers it into a
@@ -809,9 +839,9 @@ settles nothing and ends the run nonzero. There is no runtime human
 adjudication prompt inside the loop.
 
 Interruption, quota wait, adapter/focused failure retains edits and state. A
-later `run --auto-fix` resumes the pending ledger, WIP, and round cursor only
-when `[auto_fix.review]` still resolves to a round list containing the identity
-that decided the stored state; missing or drifted policy refuses repair and
+later `run --auto-fix` resumes the pending ledger, WIP, and workflow cursor only
+when `[workflow].plan` still has the exact role, resolved identity, and step
+position that decided the stored state; missing or drifted policy refuses repair and
 closeout. A settled SELF-FIXED, UNREVIEWED or REVIEW UNRESOLVED, HUMAN
 DECISION folder is terminal: it is reported again and no further round starts.
 A run without the flag

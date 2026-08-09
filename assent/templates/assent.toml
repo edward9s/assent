@@ -25,28 +25,16 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 # whether the integration candidate is green.
 # receipt_refresh = "manual"
 
-# Optional bounded folder-level AI review and repair. The commented table is an
-# override example, not a required activation or migration step. If it is
-# absent, `run --auto-fix` resolves the first effective worker adapter at
-# `prime`/`heavy`; no `assent init` rerun or ~/.assent/assent.toml edit is needed.
-# only an explicit `run --auto-fix` invocation starts the review and authorizes
-# repair; an ordinary run without the flag does neither. It never accepts.
-# [auto_fix.review]
-# adapter = ["antigravity"]      # ordered list of review rounds, one entry per round
-# model = "prime"                # abstract tier only: prime | core | lite
-# effort = "heavy"               # abstract value only: heavy | normal | slight
-# An explicit adapter reuses its own [adapter.<name>] model/effort mappings,
-# so it can select a different vendor from the worker rotation without changing
-# the worker rotation used by ordinary task sessions. The list states one review
-# round per entry, repeats included; the number of entries is the finite bound on
-# the review loop, so a folder that ends its last round on an unrepaired blocker
-# hands back to a human. A completed-folder round is a merged reviewer-fixer
-# session: it may repair a blocker directly,
-# but only inside the declared scope of the one existing task its finding
-# names, and reports that with the verdict FIXED. Blocked adjudication stays
-# read-only. A later recovery requires the identity that decided a pending
-# state to still be one of the configured rounds; removing or changing an
-# override refuses repair and closeout.
+# Optional post-completion workflow. An absent/omitted/empty [workflow].plan configures no
+# folder review; `run --auto-fix` then says the flag had no effect and continues
+# as an ordinary run. Roles are defined through [abilities] and [agents]. A
+# verdict-producing step requires an adapter. A non-verdict step must omit it;
+# when writable, that step authorizes one bounded repair under each implicated
+# task's own profile. Blocked adjudication is always read-only regardless of role.
+# [workflow]
+# plan = [{ role = "folder_reviewer", adapter = "antigravity" }]
+# `task` omitted keeps one implicit session per task under its own model/effort.
+# `task = []` is intentionally different; see workflow.md.
 
 [adapter]
 # One adapter name or a non-empty list of names. A list rotates in order and

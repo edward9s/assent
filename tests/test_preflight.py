@@ -236,6 +236,21 @@ class TestAutoFixReviewRoundPreflight(GlobalContractsMixin, EngineTestCase):
     """
 
     BAD_PRIME_HEAVY = '[adapter.antigravity.efforts.prime]\nheavy = "medium"\n'
+    ROLES = '''
+[abilities.review]
+prompt = "Review."
+writes = false
+gate = true
+produces_verdict = true
+[agents.prime_review]
+ability = ["review"]
+model = "prime"
+effort = "heavy"
+[agents.core_review]
+ability = ["review"]
+model = "core"
+effort = "heavy"
+'''
 
     def setUp(self):
         super().setUp()
@@ -263,8 +278,11 @@ class TestAutoFixReviewRoundPreflight(GlobalContractsMixin, EngineTestCase):
 
     def test_a_later_listed_round_fails_the_preflight_before_the_run(self):
         session, errors = self.review_errors(
+            self.ROLES +
             '[adapter]\nname = "claude"\n'
-            '[auto_fix.review]\nadapter = ["claude", "antigravity"]\n'
+            '[workflow]\nplan = ['
+            '{ role = "prime_review", adapter = "claude" }, '
+            '{ role = "prime_review", adapter = "antigravity" }]\n'
             + self.BAD_PRIME_HEAVY, "claude")
         self.assertEqual(session.agent, "claude")   # round 1 still drives the call
         self.assertTrue(errors)
@@ -276,19 +294,26 @@ class TestAutoFixReviewRoundPreflight(GlobalContractsMixin, EngineTestCase):
 
     def test_one_round_keeps_todays_unprefixed_diagnostics(self):
         session, errors = self.review_errors(
-            '[adapter]\nname = "antigravity"\n' + self.BAD_PRIME_HEAVY,
+            self.ROLES + '[adapter]\nname = "antigravity"\n'
+            '[workflow]\nplan = [{ role = "prime_review", adapter = "antigravity" }]\n'
+            + self.BAD_PRIME_HEAVY,
             "antigravity")
         self.assertEqual(session.agent, "antigravity")
         self.assertTrue(errors)
         self.assertFalse(any(message.startswith("antigravity: ")
                              for message in errors), errors)
 
-    def test_a_repeated_adapter_is_proven_once(self):
+    def test_distinct_identities_on_one_adapter_are_each_preflighted(self):
         session, errors = self.review_errors(
+            self.ROLES +
             '[adapter]\nname = "claude"\n'
-            '[auto_fix.review]\nadapter = ["antigravity", "claude", "antigravity"]\n'
+            '[workflow]\nplan = ['
+            '{ role = "prime_review", adapter = "antigravity" }, '
+            '{ role = "core_review", adapter = "antigravity" }, '
+            '{ role = "prime_review", adapter = "antigravity" }]\n'
             + self.BAD_PRIME_HEAVY, "antigravity")
         self.assertEqual(session.agent, "antigravity")
+        self.assertTrue(errors)
         self.assertEqual(len(errors), len(set(errors)))
 
 

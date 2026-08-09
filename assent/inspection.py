@@ -194,17 +194,16 @@ def _auto_fix_binding_reasons(
     except AssentError as e:
         reasons.append(f"task contracts unavailable: {e}")
 
-    rounds = cfg.auto_fix_review
-    if rounds:
-        # Any configured round may have produced this state, so drift is
-        # "the round that decided it is no longer configured at all".
-        configured_reviewers = [
-            (review.adapter, review.requested_model, review.requested_effort)
-            for review in rounds]
-        stored_reviewer = (
-            state.reviewer_adapter, state.reviewer_model, state.reviewer_effort)
-        if stored_reviewer not in configured_reviewers:
-            reasons.append("reviewer configuration changed")
+    steps = cfg.workflow_plan
+    position = state.reviewer_step_index
+    stored_reviewer = (
+        state.reviewer_role, state.reviewer_adapter,
+        state.reviewer_model, state.reviewer_effort)
+    if (position >= len(steps)
+            or (steps[position].role, steps[position].adapter,
+                steps[position].requested_model,
+                steps[position].requested_effort) != stored_reviewer):
+        reasons.append("workflow role, identity, or step position changed")
     return reasons, current_tree
 
 
@@ -371,11 +370,9 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
                 f"    - {brief.task_id}: "
                 f"{_compact_report_text(brief.brief)}")
 
-    # The round index is the durable record of how far the merged reviewer-fixer
-    # loop has advanced; it replaced the per-round escalation-profile ledger.
     lines.append(
-        f"  Review round index: {state.review_round_index}"
-        f" (configured rounds: {len(cfg.auto_fix_review or ())})")
+        f"  Workflow step cursor: {state.workflow_step_index}"
+        f" (configured steps: {len(cfg.workflow_plan)})")
 
     lines.append("  Scope amendment transactions:")
     if not state.scope_amendments:
@@ -844,43 +841,23 @@ def _review_effort_source_key(cfg: Config, review) -> str:
 
 
 def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
-    """Show the fully resolved reviewer identity and each contributing layer."""
-    rounds = cfg.auto_fix_review
-    if not rounds:
-        return ["Auto-fix reviewer: unavailable (no resolved reviewer policy)"]
-    review = rounds[0]
-
-    if "auto_fix.review.adapter" in cfg.provenance:
-        adapter_source = _setting_source_label(
-            cfg, "auto_fix.review.adapter")
-    else:
-        adapter_source = (
-            f"{_setting_source_label(cfg, 'adapter.name')} "
-            "(first effective worker adapter fallback)")
-    model_mapping_key = (
-        f"adapter.{review.adapter}.models.{review.model}")
-    effort_mapping_key = _review_effort_source_key(cfg, review)
-    # Every configured round is shown, in order and with repeats, so a human sees
-    # the whole sequence before any round loop consumes it.
-    round_lines = [
-        f"  round {index}: {item.adapter} / {item.model}->{item.requested_model}"
-        f" / {item.effort}->{item.requested_effort}"
-        for index, item in enumerate(rounds, start=1)]
-    return [
-        "Auto-fix reviewer (resolved): "
-        f"{review.adapter} / {review.model}->{review.requested_model} / "
-        f"{review.effort}->{review.requested_effort}",
-        f"  reviewer adapter = {review.adapter} "
-        f"(source: {adapter_source})",
-        f"  reviewer model = {review.model} -> {review.requested_model} "
-        f"(setting source: {_setting_source_label(cfg, 'auto_fix.review.model')}; "
-        f"model mapping source: {_setting_source_label(cfg, model_mapping_key)})",
-        f"  reviewer effort = {review.effort} -> {review.requested_effort} "
-        f"(setting source: {_setting_source_label(cfg, 'auto_fix.review.effort')}; "
-        f"effort mapping source: {_setting_source_label(cfg, effort_mapping_key)})",
-        "Auto-fix reviewer rounds (configured order):",
-        *round_lines,
-    ]
+    """Show the configured workflow roles and fully resolved session identities."""
+    steps = cfg.workflow_plan
+    if not steps:
+        return ["Auto-fix workflow: no [workflow].plan step configured"]
+    lines = [
+        "Auto-fix workflow plan (configured order; source: "
+        f"{_setting_source_label(cfg, 'workflow.plan')}):"]
+    for index, step in enumerate(steps):
+        if not step.produces_verdict:
+            action = "bounded task-profile repair" if step.writes else "no session"
+            lines.append(f"  step {index}: role={step.role}; {action}")
+            continue
+        lines.append(
+            f"  step {index}: role={step.role}; {step.adapter} / "
+            f"{step.model}->{step.requested_model} / "
+            f"{step.effort}->{step.requested_effort}")
+    return lines
 
 
 def check(cfg: Config) -> int:

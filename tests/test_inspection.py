@@ -21,11 +21,30 @@ from tests.engine_support import (_FAILV, EngineTestCase, ScriptedAdapter,
 from tests.test_contracts import GlobalContractsMixin
 
 
+def _workflow_config(model="core", adapters=("claude",), writes=True):
+    ability = "review_fix" if writes else "review"
+    steps = ", ".join(
+        f'{{ role = "folder_reviewer", adapter = "{adapter}" }}'
+        for adapter in adapters)
+    return (
+        f'[abilities.{ability}]\n'
+        'prompt = "Review the folder."\n'
+        f'writes = {str(writes).lower()}\n'
+        'gate = true\n'
+        'produces_verdict = true\n'
+        '[agents.folder_reviewer]\n'
+        f'ability = ["{ability}"]\n'
+        f'model = "{model}"\n'
+        'effort = "slight"\n'
+        '[workflow]\n'
+        f'plan = [{steps}]\n')
+
+
 class TestQueries(GlobalContractsMixin, EngineTestCase):
     def test_status_reports_counts_and_next(self):
         self.write_task(1, status="DONE")
         self.write_task(2, deps=("t001",), title="第二個")
-        cfg = self.build()
+        cfg = self.build(extra_config=_workflow_config())
         self.commit_all()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -44,7 +63,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(inspection.check(cfg), 0)
         self.assertIn("Result: passed", out.getvalue())
 
-    def test_check_reports_default_auto_fix_reviewer_identity_and_provenance(self):
+    def test_check_reports_no_workflow_plan_by_default(self):
         self.write_task(1, model="core")
         cfg = self.build()
         self.commit_all()
@@ -53,26 +72,11 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(inspection.check(cfg), 0)
         text = out.getvalue()
-        self.assertIn(
-            "Auto-fix reviewer (resolved): claude / prime->fable / heavy->high",
-            text)
-        self.assertIn(
-            "reviewer adapter = claude (source: project "
-            "(explicit settings layer) (first effective worker adapter fallback))",
-            text)
-        self.assertIn(
-            "reviewer model = prime -> fable (setting source: "
-            "builtin (built-in fallback)", text)
-        self.assertIn(
-            "reviewer effort = heavy -> high (setting source: "
-            "builtin (built-in fallback)", text)
+        self.assertIn("Auto-fix workflow: no [workflow].plan step configured", text)
 
     def test_check_reports_explicit_auto_fix_reviewer_settings(self):
         self.write_task(1, model="core")
-        cfg = self.build(extra_config=(
-            "[auto_fix.review]\n"
-            'model = "core"\n'
-            'effort = "slight"\n'))
+        cfg = self.build(extra_config=_workflow_config())
         self.commit_all()
 
         out = io.StringIO()
@@ -80,32 +84,24 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(inspection.check(cfg), 0)
         text = out.getvalue()
         self.assertIn(
-            "Auto-fix reviewer (resolved): claude / core->opus / slight->low",
+            "step 0: role=folder_reviewer; claude / core->opus / slight->low",
             text)
-        self.assertIn(
-            "reviewer model = core -> opus (setting source: project "
-            "(explicit settings layer)", text)
-        self.assertIn(
-            "reviewer effort = slight -> low (setting source: project "
-            "(explicit settings layer)", text)
+        self.assertNotIn("reviewer round", text.lower())
 
     def test_check_lists_every_configured_reviewer_round_in_order(self):
         self.write_task(1, model="core")
-        cfg = self.build(extra_config=(
-            "[auto_fix.review]\n"
-            'adapter = ["claude", "codex", "claude"]\n'
-            'model = "core"\n'
-            'effort = "slight"\n'))
+        cfg = self.build(extra_config=_workflow_config(
+            adapters=("claude", "codex", "claude")))
         self.commit_all()
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(inspection.check(cfg), 0)
         text = out.getvalue()
-        self.assertIn("Auto-fix reviewer rounds (configured order):", text)
-        self.assertIn("round 1: claude / core->opus / slight->low", text)
-        self.assertIn("round 2: codex / core->gpt-5.6-terra / slight->low", text)
-        self.assertIn("round 3: claude / core->opus / slight->low", text)
+        self.assertIn("Auto-fix workflow plan (configured order", text)
+        self.assertIn("step 0: role=folder_reviewer; claude / core->opus / slight->low", text)
+        self.assertIn("step 1: role=folder_reviewer; codex / core->gpt-5.6-terra / slight->low", text)
+        self.assertIn("step 2: role=folder_reviewer; claude / core->opus / slight->low", text)
 
     def test_check_fails_on_dependency_cycle(self):
         self.write_task(1, deps=("t002",))
@@ -144,8 +140,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             '[adapter.codex.efforts.core]\n'
             'heavy = "max"\n'
             '[adapter.codex.efforts.lite]\n'
-            'heavy = "max"\n'
-            '[auto_fix.review]\nmodel = "core"\n'))
+            'heavy = "max"\n'))
         self.commit_all()
 
         out = io.StringIO()
@@ -167,8 +162,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         cfg = self.build(adapter_name="codex", extra_config=(
             '[adapter.codex]\ncommand = "python"\n'
             '[adapter.codex.models]\ncore = "gpt-core"\n'
-            '[adapter.codex.default_effort]\n'
-            '[auto_fix.review]\nmodel = "core"\n'))
+            '[adapter.codex.default_effort]\n'))
         self.commit_all()
 
         out = io.StringIO()
@@ -245,27 +239,24 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             auto_fix.ReviewFinding(
                 "t001", "src/main.py", "Blocking implementation issue",
                 "The implementation does not satisfy the task contract."),)
-        rounds = cfg.auto_fix_review
-        review = rounds[0] if rounds else None
-        reviewer_adapter = review.adapter if review is not None else "codex"
-        reviewer_model = (review.requested_model
-                          if review is not None else "gpt-5.6-sol")
-        reviewer_effort = (review.requested_effort
-                           if review is not None else "max")
+        review = next(step for step in cfg.workflow_plan
+                      if step.produces_verdict)
         state = auto_fix.state_for_review(
             auto_fix.ReviewRecord(verdict, findings),
             source_tree=source_tree,
             task_plan_sha256=auto_fix.sha256_files(
                 task.path for task in plan.tasks),
             review_prompt_sha256="3" * 64,
-            reviewer_adapter=reviewer_adapter, reviewer_model=reviewer_model,
-            reviewer_effort=reviewer_effort)
+            reviewer_role=review.role, reviewer_step_index=0,
+            reviewer_adapter=review.adapter,
+            reviewer_model=review.requested_model,
+            reviewer_effort=review.requested_effort)
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), state)
 
     def test_report_renders_fresh_auto_fix_pass_and_fail_evidence(self):
         self.write_task(1, status="DONE")
-        cfg = self.build()
+        cfg = self.build(extra_config=_workflow_config())
         self.commit_all()
 
         self._write_auto_fix_state(cfg, "PASS")
@@ -280,7 +271,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
 
     def test_report_renders_missing_malformed_and_stale_auto_fix_evidence(self):
         self.write_task(1, status="DONE")
-        cfg = self.build()
+        cfg = self.build(extra_config=_workflow_config())
         self.commit_all()
         state_path = auto_fix.auto_fix_state_path(cfg)
 
@@ -299,14 +290,11 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
 
     def test_report_names_the_self_fixed_unreviewed_outcome_distinctly(self):
         self.write_task(1, status="DONE")
-        cfg = self.build(extra_config=(
-            '[auto_fix.review]\n'
-            'adapter = ["claude", "codex"]\n'
-            'model = "prime"\n'
-            'effort = "heavy"\n'))
+        cfg = self.build(extra_config=_workflow_config(
+            model="prime", adapters=("claude", "codex")))
         self.commit_all()
         plan = Plan.parse(cfg.tasks_dir)
-        review = cfg.auto_fix_review[1]
+        review = cfg.workflow_plan[1]
         state = auto_fix.state_for_review(
             auto_fix.ReviewRecord("FIXED", (auto_fix.ReviewFinding(
                 "t001", "src/main.py", "Blocking implementation issue",
@@ -315,10 +303,11 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             task_plan_sha256=auto_fix.sha256_files(
                 task.path for task in plan.tasks),
             review_prompt_sha256="6" * 64,
+            reviewer_role=review.role, reviewer_step_index=1,
             reviewer_adapter=review.adapter,
             reviewer_model=review.requested_model,
             reviewer_effort=review.requested_effort,
-            review_round_index=2)
+            workflow_step_index=2)
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg),
             auto_fix.with_self_fixed_unreviewed(state))
@@ -339,14 +328,11 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
 
     def test_report_names_the_unresolved_review_outcome_distinctly(self):
         self.write_task(1, status="DONE")
-        cfg = self.build(extra_config=(
-            '[auto_fix.review]\n'
-            'adapter = ["claude", "codex"]\n'
-            'model = "prime"\n'
-            'effort = "heavy"\n'))
+        cfg = self.build(extra_config=_workflow_config(
+            model="prime", adapters=("claude", "codex")))
         self.commit_all()
         plan = Plan.parse(cfg.tasks_dir)
-        review = cfg.auto_fix_review[1]
+        review = cfg.workflow_plan[1]
         finding = auto_fix.ReviewFinding(
             "t001", "src/main.py", "Blocking implementation issue",
             "No configured round repaired the declared behavior.")
@@ -356,10 +342,11 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             task_plan_sha256=auto_fix.sha256_files(
                 task.path for task in plan.tasks),
             review_prompt_sha256="7" * 64,
+            reviewer_role=review.role, reviewer_step_index=1,
             reviewer_adapter=review.adapter,
             reviewer_model=review.requested_model,
             reviewer_effort=review.requested_effort,
-            review_round_index=2)
+            workflow_step_index=2)
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg),
             auto_fix.with_unresolved_review(state))
@@ -385,27 +372,21 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
 
     def test_report_marks_reviewer_configuration_drift_stale(self):
         self.write_task(1, status="DONE")
-        cfg = self.build(extra_config=(
-            '[auto_fix.review]\n'
-            'adapter = "codex"\n'
-            'model = "prime"\n'
-            'effort = "heavy"\n'))
+        cfg = self.build(extra_config=_workflow_config(
+            model="prime", adapters=("codex",)))
         self.commit_all()
         self._write_auto_fix_state(cfg, "PASS")
 
-        drifted = self.build(extra_config=(
-            '[auto_fix.review]\n'
-            'adapter = "codex"\n'
-            'model = "core"\n'
-            'effort = "heavy"\n'))
+        drifted = self.build(extra_config=_workflow_config(
+            model="core", adapters=("codex",)))
         text = inspection.render_report(
             drifted, Plan.parse(drifted.tasks_dir))
-        self.assertIn("Folder auto-fix: STALE (reviewer configuration changed)",
+        self.assertIn("Folder auto-fix: STALE (workflow role, identity, or step position changed)",
                       text)
 
     def test_report_ignores_scheduler_status_transitions_but_detects_contract_edits(self):
         task_path = self.write_task(1, status="DONE")
-        cfg = self.build()
+        cfg = self.build(extra_config=_workflow_config())
         self.commit_all()
         self._write_auto_fix_state(cfg, "PASS")
 
@@ -423,7 +404,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
 
     def test_report_defers_blocked_human_guidance_to_pending_auto_fix(self):
         self.write_task(1, status="BLOCKED")
-        cfg = self.build()
+        cfg = self.build(extra_config=_workflow_config())
         self.commit_all()
         plan = Plan.parse(cfg.tasks_dir)
         finding = auto_fix.ReviewFinding(
@@ -443,6 +424,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                     task_plan_sha256=auto_fix.sha256_files(
                         task.path for task in plan.tasks),
                     review_prompt_sha256="5" * 64,
+                    reviewer_role=cfg.workflow_plan[0].role,
                     reviewer_adapter=cfg.auto_fix_review[0].adapter,
                     reviewer_model=cfg.auto_fix_review[0].requested_model,
                     reviewer_effort=cfg.auto_fix_review[0].requested_effort,
@@ -459,7 +441,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
 
     def test_report_renders_recovery_evidence_and_persistent_debt_agenda(self):
         task_path = self.write_task(1, status="DONE")
-        cfg = self.build()
+        cfg = self.build(extra_config=_workflow_config())
         self.commit_all()
         plan = Plan.parse(cfg.tasks_dir)
         source_tree = gitops.tree_of(cfg.root, "HEAD")
@@ -480,6 +462,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             source_tree=source_tree,
             task_plan_sha256=task_digest,
             review_prompt_sha256="4" * 64,
+            reviewer_role=cfg.workflow_plan[0].role,
             reviewer_adapter=cfg.auto_fix_review[0].adapter,
             reviewer_model=cfg.auto_fix_review[0].requested_model,
             reviewer_effort=cfg.auto_fix_review[0].requested_effort)
@@ -497,7 +480,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 (auto_fix.finding_fingerprint(scope_finding),), "t001",
                 ("tests/test_inspection.py",), ("existing_file",),
                 "1" * 64, "2" * 64, "3" * 64, "4" * 64),))
-        state = auto_fix.with_review_round_index(state, 1)
+        state = auto_fix.with_workflow_step_index(state, 1)
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), state)
 
@@ -512,7 +495,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertIn("Approved scope additions:", report)
         self.assertIn("Repair acknowledgements:", report)
         self.assertIn("fixed; Focused regression passes.", report)
-        self.assertIn("Review round index: 1 (configured rounds: 1)", report)
+        self.assertIn("Workflow step cursor: 1 (configured steps: 1)", report)
         self.assertIn("Scope amendment transactions:", report)
         self.assertIn("tests/test_inspection.py (existing_file)", report)
         self.assertIn("TECHNICAL DEBT REVIEW REQUIRED", report)
@@ -680,8 +663,7 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
         self.write_user_config(
             '[adapter]\nname = "codex"\n'
             '[adapter.codex]\ncommand = "python"\n'
-            '[adapter.codex.models]\ncore = "gpt-from-user"\n'
-            '[auto_fix.review]\nmodel = "core"\n')
+            '[adapter.codex.models]\ncore = "gpt-from-user"\n')
         cfg = self.load()
         self.commit_all()
 
@@ -701,8 +683,7 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
             '[adapter]\nname = "codex"\n'
             '[adapter.codex]\ncommand = "python"\n'
             '[adapter.codex.models]\ncore = "gpt-from-user"\n'
-            '[adapter.codex.default_effort]\ncore = "slight"\n'
-            '[auto_fix.review]\nmodel = "core"\n')
+            '[adapter.codex.default_effort]\ncore = "slight"\n')
         (self.root / ".assent" / "assent.toml").write_text(
             '[adapter.codex.models]\ncore = "gpt-from-project"\n',
             encoding="utf-8")
@@ -727,7 +708,6 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
             '[adapter.claude]\ncommand = "python"\n'
             '[adapter.claude.models]\nlite = "haiku-from-user"\n'
             '[adapter.codex]\ncommand = "python"\n'
-            '[auto_fix.review]\nmodel = "lite"\n'
             '[run]\nretry_per_task = 3\n')
         cfg = self.load()
         self.commit_all()

@@ -32,7 +32,7 @@ from assent.user_home import user_config_path
 
 _TOP_LEVEL_KEYS = {
     "watchdog", "run", "adapter", "verification", "auto_fix", "abilities",
-    "agents",
+    "agents", "workflow",
 }
 
 # The ordered settings layers, lowest priority first.  The built-in layer contributes no
@@ -161,21 +161,45 @@ class AdapterSettings:
 
 
 @dataclass(frozen=True)
-class AutoFixReviewSettings:
-    """Resolved identity for the invocation-opt-in folder AI reviewer."""
+class WorkflowPlanStep:
+    """One resolved post-completion workflow step."""
 
-    adapter: str
-    model: str
-    effort: str
-    command: str
-    extra_args: tuple[str, ...]
-    requested_model: str
-    requested_effort: str
+    role: str
+    adapter: str | None
+    resolved_role: ResolvedAgent
+    command: str | None = None
+    extra_args: tuple[str, ...] = ()
+    requested_model: str | None = None
+    requested_effort: str | None = None
+
+    @property
+    def model(self) -> str | None:
+        return self.resolved_role.model
+
+    @property
+    def effort(self) -> str | None:
+        return self.resolved_role.effort
+
+    @property
+    def writes(self) -> bool:
+        return self.resolved_role.writes
+
+    @property
+    def produces_verdict(self) -> bool:
+        return self.resolved_role.produces_verdict
 
     @property
     def adapter_name(self) -> str:
         """Compatibility with call sites that name adapter selections explicitly."""
         return self.adapter
+
+
+@dataclass(frozen=True)
+class WorkflowTaskStep:
+    """One parsed task-session role; execution is introduced by the next task."""
+
+    role: str
+    resolved_role: ResolvedAgent
 
 
 @dataclass(frozen=True)
@@ -231,8 +255,9 @@ class Config:
     # adapter always states one instead of inheriting the CLI default.
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
     receipt_refresh: str = "manual"  # "manual" = explicit verify only, "auto" = also at run closeout
-    # The reviewer rounds in configured order; today only the first is used.
-    auto_fix_review: tuple[AutoFixReviewSettings, ...] | None = None
+    workflow_plan: tuple[WorkflowPlanStep, ...] = ()
+    # None means today's implicit task session; an explicit empty tuple is distinct.
+    workflow_task: tuple[WorkflowTaskStep, ...] | None = None
     abilities: dict[str, Ability] = field(default_factory=dict)
     agents: dict[str, Agent] = field(default_factory=dict)
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
@@ -262,6 +287,11 @@ class Config:
     def resolve_agent(self, name: str) -> ResolvedAgent:
         """Return one role with its ordered ability definitions and derived flags."""
         return resolve_agent_role(name, self.agents, self.abilities)
+
+    @property
+    def auto_fix_review(self) -> tuple[WorkflowPlanStep, ...]:
+        """Temporary internal compatibility alias for the renamed workflow plan."""
+        return self.workflow_plan
 
     @property
     def branch_prefix(self) -> str:
@@ -521,32 +551,49 @@ class _BlankGuard:
         return mapping
 
 
-def _parse_review_adapters(section: dict, guard: "_BlankGuard",
-                           default: str) -> tuple[str, ...]:
-    """Parse the reviewer adapter as one name or an ordered list of review rounds.
-
-    Unlike the worker rotation, a repeated name is meaningful here: it states another
-    review round with the same identity, so the entries are kept exactly as written.
-    """
-    if "adapter" not in section:
-        return (default,)
-    raw = section["adapter"]
-    if isinstance(raw, str):
-        return (guard.text(raw, "auto_fix.review.adapter"),)
-    if not isinstance(raw, list):
-        raise AssentError(
-            "Config [auto_fix.review].adapter has the wrong type: expected a"
-            " string or a list of strings")
-    if not raw:
-        raise AssentError(
-            "Config [auto_fix.review].adapter must be a non-empty list of adapter names")
-    for index, name in enumerate(raw):
-        if not isinstance(name, str):
-            raise AssentError(
-                f"Config [auto_fix.review].adapter[{index}] has the wrong type:"
-                " expected str")
-        guard.text(name, "auto_fix.review.adapter")
-    return tuple(raw)
+def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
+                            agents: dict[str, Agent], abilities: dict[str, Ability]):
+    """Parse one workflow array without inventing defaults for an omitted key."""
+    if key not in section:
+        return None
+    raw = _typed(section, "[workflow]", key, list, None)
+    entries = []
+    for index, value in enumerate(raw):
+        owner = f"workflow.{key}[{index}]"
+        if not isinstance(value, dict):
+            raise AssentError(f"Config {owner} must be an inline table")
+        allowed = {"role", "adapter"} if key == "plan" else {"role"}
+        _known_keys(value, owner, allowed)
+        if "role" not in value:
+            raise AssentError(f"Config {owner} is missing required key: role")
+        role = guard.text(_typed(value, f"[{owner}]", "role", str, None),
+                          f"workflow.{key}.{index}.role")
+        resolved = resolve_agent_role(role, agents, abilities)
+        if key == "task":
+            entries.append(WorkflowTaskStep(role, resolved))
+            continue
+        adapter = value.get("adapter")
+        if resolved.produces_verdict:
+            if adapter is None:
+                raise AssentError(
+                    f"Config {owner} role {role!r} produces a verdict and requires adapter")
+            adapter = guard.text(
+                _typed(value, f"[{owner}]", "adapter", str, None),
+                f"workflow.plan.{index}.adapter")
+            if adapter not in _ADAPTER_NAMES:
+                raise AssentError(
+                    f"Config {owner}.adapter = {adapter!r} is not a registered adapter"
+                    f" ({'/'.join(sorted(_ADAPTER_NAMES))})")
+            if resolved.model is None or resolved.effort is None:
+                raise AssentError(
+                    f"Config {owner} verdict-producing role {role!r} must state model and effort")
+            entries.append((role, adapter, resolved))
+        else:
+            if "adapter" in value:
+                raise AssentError(
+                    f"Config {owner} role {role!r} produces_verdict = false and must not state adapter")
+            entries.append((role, None, resolved))
+    return entries
 
 
 def _parse_adapter_names(section: dict, guard: "_BlankGuard") -> tuple[str, ...]:
@@ -693,6 +740,11 @@ def _read_layer(path: Path, label: str) -> dict:
             f"{label} config file ({path}) has unknown top-level keys:"
             f" {', '.join(unknown)}"
             f" (valid keys: {', '.join(sorted(_TOP_LEVEL_KEYS))})")
+    auto_fix = data.get("auto_fix")
+    if isinstance(auto_fix, dict) and "review" in auto_fix:
+        raise AssentError(
+            f"Config table [auto_fix.review] was removed; edit the layer file"
+            f" that states it ({path}) and use [workflow].plan")
     return data
 
 
@@ -839,21 +891,18 @@ def load_config(path: str | Path, folder: str) -> Config:
     antigravity = (_section(adapter, "antigravity")
                    if "antigravity" in adapter else {})
     verification_section = _section(data, "verification")
-    auto_fix = _section(data, "auto_fix")
     abilities = _parse_abilities(_section(data, "abilities"))
     agents = _parse_agents(_section(data, "agents"), abilities)
-    _known_keys(auto_fix, "auto_fix", {"review"})
-    review = _section(auto_fix, "review") if "review" in auto_fix else {}
-    _known_keys(review, "auto_fix.review", {"adapter", "model", "effort"})
+    auto_fix = _section(data, "auto_fix")
+    _known_keys(auto_fix, "auto_fix", set())
+    workflow = _section(data, "workflow")
+    _known_keys(workflow, "workflow", {"plan", "task"})
     guard = _BlankGuard(provenance, sources)
     adapter_names = _parse_adapter_names(adapter, guard)
-    review_adapters = _parse_review_adapters(review, guard, adapter_names[0])
-    review_model = guard.text(
-        _typed(review, "[auto_fix.review]", "model", str, "prime"),
-        "auto_fix.review.model")
-    review_effort = guard.text(
-        _typed(review, "[auto_fix.review]", "effort", str, "heavy"),
-        "auto_fix.review.effort")
+    raw_workflow_plan = _parse_workflow_entries(
+        workflow, "plan", guard, agents, abilities)
+    raw_workflow_task = _parse_workflow_entries(
+        workflow, "task", guard, agents, abilities)
     claude_efforts, claude_tier_efforts = _effort_maps(
         claude, "adapter.claude", guard)
     codex_efforts, codex_tier_efforts = _effort_maps(
@@ -937,47 +986,26 @@ def load_config(path: str | Path, folder: str) -> Config:
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
-    unknown_review_adapters = [name for name in review_adapters
-                               if name not in _ADAPTER_NAMES]
-    if unknown_review_adapters and "adapter" not in review:
-        # An unspecified reviewer defaults to the primary run adapter, whose
-        # validity the single-name [adapter].name path defers to
-        # adapter_settings() at point of use (see its docstring) so run/check
-        # can report their own unknown-adapter error. The default must defer
-        # the same way instead of failing config load on an unrelated label.
-        pass
-    else:
-        if unknown_review_adapters:
+    steps: list[WorkflowPlanStep] = []
+    for role, name, resolved in raw_workflow_plan or ():
+        if name is None:
+            steps.append(WorkflowPlanStep(role, None, resolved))
+            continue
+        adapter_settings = cfg.adapter_settings(name)
+        assert resolved.model is not None and resolved.effort is not None
+        requested_effort = adapter_settings.resolve_requested_effort(
+            resolved.model, resolved.effort)
+        if requested_effort is None:
             raise AssentError(
-                f"[auto_fix.review] adapter = {unknown_review_adapters[0]!r} is not a"
-                f" registered adapter ({'/'.join(sorted(_ADAPTER_NAMES))})")
-        if review_model not in _MODEL_TIERS:
-            raise AssentError(
-                f"[auto_fix.review] model = {review_model!r} is not a valid model"
-                f" tier ({'/'.join(sorted(_MODEL_TIERS))})")
-        if review_effort not in _EFFORT_LEVELS:
-            raise AssentError(
-                f"[auto_fix.review] effort = {review_effort!r} is not a valid"
-                f" effort ({'/'.join(sorted(_EFFORT_LEVELS))})")
-        # One resolved identity per configured round, in order and with repeats
-        # kept: model and effort are single fields that apply to every entry.
-        rounds = []
-        for name in review_adapters:
-            adapter_settings = cfg.adapter_settings(name)
-            requested_model = adapter_settings.resolve_model(review_model)
-            requested_effort = adapter_settings.resolve_requested_effort(
-                review_model, review_effort)
-            if requested_effort is None:
-                raise AssentError(
-                    "[auto_fix.review] effort did not resolve to a requested value")
-            rounds.append(AutoFixReviewSettings(
-                adapter=name,
-                model=review_model,
-                effort=review_effort,
-                command=adapter_settings.command,
-                extra_args=adapter_settings.extra_args,
-                requested_model=requested_model,
-                requested_effort=requested_effort,
-            ))
-        cfg.auto_fix_review = tuple(rounds)
+                f"[workflow].plan role {role!r} effort did not resolve to a requested value")
+        steps.append(WorkflowPlanStep(
+            role, name, resolved, adapter_settings.command,
+            adapter_settings.extra_args,
+            adapter_settings.resolve_model(resolved.model), requested_effort))
+    if steps and not any(step.produces_verdict for step in steps):
+        raise AssentError(
+            "Config [workflow].plan cannot open any session: no step's role produces a verdict")
+    cfg.workflow_plan = tuple(steps)
+    cfg.workflow_task = (None if raw_workflow_task is None
+                         else tuple(raw_workflow_task))
     return cfg

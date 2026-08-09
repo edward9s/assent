@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from assent.plan import Plan
 
 AUTO_FIX_STATE_NAME = "_auto_fix.toml"
-AUTO_FIX_STATE_VERSION = 6
+AUTO_FIX_STATE_VERSION = 7
 REVIEW_RECORD_TYPE = "assent.auto_fix_review"
 # FIXED is the merged reviewer-fixer verdict: the round found a genuine blocker
 # and repaired it inside the declared scope of the one task it named.  FAIL
@@ -85,8 +85,9 @@ _FINDING_KEYS = {
 _SCOPE_ADDITION_KEYS = {"path", "path_state"}
 _STATE_KEYS = {
     "version", "source_tree", "task_plan_sha256", "review_prompt_sha256",
-    "reviewer_adapter", "reviewer_model", "reviewer_effort", "phase", "verdict",
-    "review_context", "review_stage", "failure_trigger", "review_round_index",
+    "reviewer_role", "reviewer_adapter", "reviewer_model", "reviewer_effort", "phase", "verdict",
+    "review_context", "review_stage", "failure_trigger",
+    "workflow_step_index", "reviewer_step_index",
     "current_finding_fingerprints", "findings", "observed_states",
     "reviewer_recommendations", "approved_scope_additions",
     "scope_amendments", "worker_dispositions", "repair_briefs",
@@ -382,16 +383,13 @@ class AutoFixState:
     current_finding_fingerprints: tuple[str, ...]
     findings: tuple[PersistedFinding, ...]
     observed_states: tuple[ObservedState, ...]
+    reviewer_role: str = "folder_reviewer"
     review_context: str = "completed_folder"
     review_stage: str = "initial"
     failure_trigger: str | None = None
-    # The 0-based position in the configured ``[auto_fix.review]`` adapter list
-    # the folder's next review round must use.  A folder's first review is 0,
-    # and a round that leaves anything for another round to confirm advances it
-    # by exactly one, so the loop terminates finitely once it reaches the end of
-    # the configured list.  A settled PASS needs no further round and leaves the
-    # position on the round that decided it.
-    review_round_index: int = 0
+    # The next 0-based ``[workflow].plan`` position the folder must walk.
+    workflow_step_index: int = 0
+    reviewer_step_index: int = 0
     reviewer_recommendations: tuple[ReviewerRecommendation, ...] = ()
     approved_scope_additions: tuple[ApprovedScopeAddition, ...] = ()
     scope_amendments: tuple[ScopeAmendment, ...] = ()
@@ -1157,10 +1155,10 @@ def current_review_record(state: AutoFixState) -> ReviewRecord:
     return _validate_review_record(ReviewRecord(state.verdict, findings))
 
 
-def with_review_round_index(state: AutoFixState, index: int) -> AutoFixState:
-    """Durably move the folder to the next configured review-round position."""
+def with_workflow_step_index(state: AutoFixState, index: int) -> AutoFixState:
+    """Durably move the folder to the next configured workflow position."""
     state = _validate_state(state)
-    return _validate_state(replace(state, review_round_index=index))
+    return _validate_state(replace(state, workflow_step_index=index))
 
 
 def with_self_fixed_unreviewed(
@@ -1179,12 +1177,12 @@ def with_self_fixed_unreviewed(
     if state.verdict != "FIXED":
         raise AssentError(
             "Only a FIXED auto-fix state can settle as self-fixed, unreviewed")
-    if state.review_round_index < 1:
+    if state.workflow_step_index < 1:
         raise AssentError(
             "A self-fixed, unreviewed outcome requires at least one used round")
     outcome = SelfFixedOutcome(
-        round_index=state.review_round_index - 1,
-        rounds_used=state.review_round_index,
+        round_index=state.workflow_step_index - 1,
+        rounds_used=state.workflow_step_index,
         adapter=state.reviewer_adapter,
         model=state.reviewer_model,
         effort=state.reviewer_effort,
@@ -1212,12 +1210,12 @@ def with_unresolved_review(
     if state.verdict != "FAIL":
         raise AssentError(
             "Only a FAIL auto-fix state can settle as an unresolved review")
-    if state.review_round_index < 1:
+    if state.workflow_step_index < 1:
         raise AssentError(
             "An unresolved-review outcome requires at least one used round")
     outcome = UnresolvedReviewOutcome(
-        round_index=state.review_round_index - 1,
-        rounds_used=state.review_round_index,
+        round_index=state.workflow_step_index - 1,
+        rounds_used=state.workflow_step_index,
         adapter=state.reviewer_adapter,
         model=state.reviewer_model,
         effort=state.reviewer_effort,
@@ -1418,15 +1416,19 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
     _require_digest(state.task_plan_sha256, "Auto-fix state task_plan_sha256")
     _require_digest(state.review_prompt_sha256,
                     "Auto-fix state review_prompt_sha256")
-    for name in ("reviewer_adapter", "reviewer_model", "reviewer_effort"):
+    for name in ("reviewer_role", "reviewer_adapter", "reviewer_model", "reviewer_effort"):
         _require_text(getattr(state, name), f"Auto-fix state {name}", 1024)
     if not isinstance(state.phase, str) or state.phase not in AUTO_FIX_PHASES:
         raise AssentError("Auto-fix state phase is invalid")
     if not isinstance(state.verdict, str) or state.verdict not in REVIEW_VERDICTS:
         raise AssentError("Auto-fix state verdict must be PASS, FIXED or FAIL")
-    if type(state.review_round_index) is not int or state.review_round_index < 0:
+    if (type(state.workflow_step_index) is not int
+            or state.workflow_step_index < 0):
         raise AssentError(
-            "Auto-fix state review_round_index must be a non-negative integer")
+            "Auto-fix state workflow_step_index must be a non-negative integer")
+    if type(state.reviewer_step_index) is not int or state.reviewer_step_index < 0:
+        raise AssentError(
+            "Auto-fix state reviewer_step_index must be a non-negative integer")
     if state.review_context not in REVIEW_CONTEXTS:
         raise AssentError("Auto-fix state review_context is invalid")
     if state.review_stage not in REVIEW_STAGES:
@@ -1697,6 +1699,7 @@ def _state_text(state: AutoFixState) -> str:
         f"source_tree = {toml_string(state.source_tree)}\n"
         f"task_plan_sha256 = {toml_string(state.task_plan_sha256)}\n"
         f"review_prompt_sha256 = {toml_string(state.review_prompt_sha256)}\n"
+        f"reviewer_role = {toml_string(state.reviewer_role)}\n"
         f"reviewer_adapter = {toml_string(state.reviewer_adapter)}\n"
         f"reviewer_model = {toml_string(state.reviewer_model)}\n"
         f"reviewer_effort = {toml_string(state.reviewer_effort)}\n"
@@ -1705,7 +1708,8 @@ def _state_text(state: AutoFixState) -> str:
         f"review_context = {toml_string(state.review_context)}\n"
         f"review_stage = {toml_string(state.review_stage)}\n"
         f"failure_trigger = {toml_string(state.failure_trigger or '')}\n"
-        f"review_round_index = {state.review_round_index}\n"
+        f"workflow_step_index = {state.workflow_step_index}\n"
+        f"reviewer_step_index = {state.reviewer_step_index}\n"
         "current_finding_fingerprints = "
         f"{_toml_array(state.current_finding_fingerprints)}\n"
     )
@@ -1965,6 +1969,7 @@ def auto_fix_state_is_fresh(
         state: AutoFixState, *, source_tree: str, task_plan_sha256: str,
         review_prompt_sha256: str, reviewer_adapter: str,
         reviewer_model: str, reviewer_effort: str,
+        reviewer_role: str | None = None,
         review_context: str = "completed_folder",
         failure_trigger: str | None = None) -> bool:
     """True only when an exact PASS can be reused without another review."""
@@ -1976,6 +1981,7 @@ def auto_fix_state_is_fresh(
         and state.source_tree == source_tree
         and state.task_plan_sha256 == task_plan_sha256
         and state.review_prompt_sha256 == review_prompt_sha256
+        and (reviewer_role is None or state.reviewer_role == reviewer_role)
         and state.reviewer_adapter == reviewer_adapter
         and state.reviewer_model == reviewer_model
         and state.reviewer_effort == reviewer_effort
@@ -1986,13 +1992,15 @@ def state_for_review(
         record: ReviewRecord, *, source_tree: str, task_plan_sha256: str,
         review_prompt_sha256: str, reviewer_adapter: str,
         reviewer_model: str, reviewer_effort: str,
+        reviewer_role: str = "folder_reviewer",
+        reviewer_step_index: int = 0,
         previous: AutoFixState | None = None,
         review_context: str = "completed_folder",
         review_stage: str | None = None,
         failure_trigger: str | None = None,
         worker_dispositions: tuple[WorkerDisposition, ...] | None = None,
         repair_briefs: tuple[RepairBrief, ...] | None = None,
-        review_round_index: int | None = None,
+        workflow_step_index: int | None = None,
         plan_digest_transitions: tuple[PlanDigestTransition, ...] | None = None,
         approved_scope_additions: tuple[ApprovedScopeAddition, ...] | None = None,
         scope_amendments: tuple[ScopeAmendment, ...] | None = None,
@@ -2064,12 +2072,12 @@ def state_for_review(
         approved_scope_additions = tuple(additions)
     if scope_amendments is None:
         scope_amendments = prior_amendments
-    if review_round_index is None:
+    if workflow_step_index is None:
         # A caller that records something other than a completed review round
         # -- a scheduler-authored gate failure, for instance -- leaves the
         # folder's round position exactly where the last round left it.
-        review_round_index = (
-            previous.review_round_index if previous is not None else 0)
+        workflow_step_index = (
+            previous.workflow_step_index if previous is not None else 0)
     transitions = prior_review_transitions + tuple(
         ReviewTransition(
             finding_fingerprint(item), item.transition, item.prior_fingerprint,
@@ -2087,6 +2095,8 @@ def state_for_review(
         source_tree=source_tree,
         task_plan_sha256=task_plan_sha256,
         review_prompt_sha256=review_prompt_sha256,
+        reviewer_role=reviewer_role,
+        reviewer_step_index=reviewer_step_index,
         reviewer_adapter=reviewer_adapter,
         reviewer_model=reviewer_model,
         reviewer_effort=reviewer_effort,
@@ -2095,7 +2105,7 @@ def state_for_review(
         current_finding_fingerprints=current_tuple,
         findings=tuple(ledger.values()),
         observed_states=observations,
-        review_round_index=review_round_index,
+        workflow_step_index=workflow_step_index,
         review_context=review_context,
         review_stage=review_stage,
         failure_trigger=failure_trigger,

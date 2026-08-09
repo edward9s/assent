@@ -115,6 +115,10 @@ _AUTO_FIX_REVIEW_PROMPT = """You are the Assent folder reviewer.
 Review context: {review_context}
 Review stage: {review_stage}
 
+Scheduled workflow role: {workflow_role}
+Role abilities:
+{role_policy}
+
 {write_policy}
 
 {round_policy}
@@ -207,8 +211,8 @@ reported blocker uses: what was wrong in summary and evidence, and what you
 changed in recommendation. Return "PASS" only when nothing blocking remains
 and you wrote nothing at all."""
 
-_AUTO_FIX_ROUND_POLICY = """This is review round {position} of {total}.
-Review rounds remaining after this one: {remaining}."""
+_AUTO_FIX_ROUND_POLICY = """This is workflow plan step {position} of {total}.
+Workflow steps remaining after this one: {remaining}."""
 
 # Blocked adjudication is a separate read-only entry point, not one of the
 # merged reviewer-fixer rounds, so it must never receive the round sequence's
@@ -218,7 +222,7 @@ _AUTO_FIX_BLOCKED_ROUND_POLICY = """This adjudication is a single read-only
 decision gate, not one of the merged reviewer-fixer rounds. Report what you
 find; repairing it yourself is not available in this context."""
 
-_AUTO_FIX_FINAL_ROUND_POLICY = """This is the FINAL review round.
+_AUTO_FIX_FINAL_ROUND_POLICY = """This is the FINAL workflow plan step.
 No further review will occur after this one. Anything you leave merely
 reported will never be repaired, rechecked, or confirmed by another round.
 Decide now -- either PASS, or fix the blocker inside the naming task's declared
@@ -957,6 +961,23 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 print(f"  - {message}")
         return 1
 
+    if auto_fix_enabled and cfg.workflow_plan:
+        first_review = next(
+            step for step in cfg.workflow_plan if step.produces_verdict)
+        try:
+            reviewer_adapter = (
+                auto_fix_adapter or get_adapter(first_review.adapter, cfg))
+            _session, review_errors = auto_fix_review_capability_errors(
+                cfg, reviewer_adapter)
+        except AssentError as e:
+            review_errors = [str(e)]
+        if review_errors:
+            print("Auto-fix workflow capability preflight: FAIL "
+                  "(refusing before any AI session)")
+            for message in review_errors:
+                print(f"  - {message}")
+            return 1
+
     if cfg.source_root is None:
         try:
             cfg = _prepare_worktree(cfg)
@@ -1026,7 +1047,10 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             if recovery_error is not None:
                 print(f"Auto-fix recovery refused: {recovery_error}.")
                 return 1
-        review_enabled = auto_fix_enabled and cfg.auto_fix_review is not None
+        review_enabled = auto_fix_enabled and bool(cfg.workflow_plan)
+        if auto_fix_enabled and not cfg.workflow_plan:
+            print("Auto-fix had no effect because [workflow].plan states no step; "
+                  "continuing as an ordinary run.")
         while not resuming_auto_fix:
             current_plan = Plan.parse(cfg.tasks_dir)
             plan = (_authoritative_status_plan(trusted_plan, current_plan)
@@ -1074,7 +1098,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 trusted_plan=trusted_plan,
                 trusted_contracts=trusted_contracts)
 
-        if auto_fix_enabled and cfg.auto_fix_review is not None:
+        if auto_fix_enabled and cfg.workflow_plan:
             review_outcome = _run_auto_fix_review_once(
                 cfg, once=once, task_id=task_id,
                 injected_adapter=auto_fix_adapter, sleep=sleep, now=now,
@@ -1196,7 +1220,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             and pending.unresolved_review is None):
         print("Auto-fix closeout refused: the folder has a pending "
               f"{pending.verdict} state; "
-              "rerun with --auto-fix and its current [auto_fix.review] policy.")
+              "rerun with --auto-fix and its current [workflow].plan policy.")
         _print_summary(final_plan)
         try_write_report(cfg)
         return 1
@@ -1422,7 +1446,7 @@ def _auto_fix_review_identity(
         review_stage: str = "initial",
         round_index: int = 0,
         blockers: tuple[_AutoFixBlockerEvidence, ...] = (),
-        previous: auto_fix.AutoFixState | None = None,
+    previous: auto_fix.AutoFixState | None = None,
         ) -> tuple[str, str, str, str]:
     """Return source tree, task-plan digest, prompt text, and prompt digest."""
     source_tree = gitops.tree_of(cfg.root, "HEAD")
@@ -1439,15 +1463,24 @@ def _auto_fix_review_identity(
         source_tree=source_tree,
         review_context=review_context.upper(),
         review_stage=review_stage.upper(),
+        workflow_role=(cfg.workflow_plan[round_index].role
+                       if round_index < len(cfg.workflow_plan)
+                       else "unavailable"),
+        role_policy=("\n".join(
+            ability.prompt for ability in
+            cfg.workflow_plan[round_index].resolved_role.abilities)
+            if round_index < len(cfg.workflow_plan) else "- none"),
         write_policy=(
             _AUTO_FIX_READ_ONLY_POLICY
-            if review_context == "blocked_adjudication"
+            if (review_context == "blocked_adjudication"
+                or round_index >= len(cfg.workflow_plan)
+                or not cfg.workflow_plan[round_index].writes)
             else _AUTO_FIX_MERGED_WRITE_POLICY),
         round_policy=(
             _AUTO_FIX_BLOCKED_ROUND_POLICY
             if review_context == "blocked_adjudication"
             else _auto_fix_round_policy(
-                round_index, len(cfg.auto_fix_review or ()) or 1)),
+                round_index, len(cfg.workflow_plan) or 1)),
         context_policy=(
             _AUTO_FIX_BLOCKED_POLICY
             if review_context == "blocked_adjudication"
@@ -1489,25 +1522,27 @@ def _auto_fix_existing_state(cfg: Config) -> auto_fix.AutoFixState | None:
 def _auto_fix_recovery_config_error(
         cfg: Config, state: auto_fix.AutoFixState) -> str | None:
     """Refuse stale unfinished recovery unless its reviewer is still configured."""
-    rounds = cfg.auto_fix_review
+    rounds = cfg.workflow_plan
     if not rounds:
-        return ("the pending FAIL state requires a configured [auto_fix.review] "
+        return ("the pending FAIL state requires a configured [workflow].plan "
                 "before repair or closeout can resume")
     stored = (state.reviewer_adapter, state.reviewer_model,
               state.reviewer_effort)
-    configured = [(item.adapter, item.requested_model, item.requested_effort)
-                  for item in rounds]
-    # The round that produced this state must still be a configured round; a
-    # rewritten reviewer list is policy drift, not a resumable position.
-    if stored not in configured:
-        shown = ", ".join(f"{item[0]}/{item[1]}/{item[2]}"
-                          for item in configured)
+    position = state.reviewer_step_index
+    configured = [
+        (item.role, item.adapter, item.requested_model, item.requested_effort)
+        for item in rounds]
+    expected = (state.reviewer_role, *stored)
+    if position >= len(configured) or configured[position] != expected:
+        shown = ", ".join(
+            f"{item[0]}@{index}:{item[1]}/{item[2]}/{item[3]}"
+            for index, item in enumerate(configured))
         return ("the pending FAIL state reviewer identity no longer matches "
-                "the configured [auto_fix.review] identity "
-                f"({stored[0]}/{stored[1]}/{stored[2]} -> {shown})")
-    if state.review_round_index > len(rounds):
-        return ("the pending FAIL state round index is outside the configured "
-                f"[auto_fix.review] sequence ({state.review_round_index} > "
+                "the configured [workflow].plan role, identity, and step position "
+                f"({expected[0]}@{position}:{stored[0]}/{stored[1]}/{stored[2]} -> {shown})")
+    if state.workflow_step_index > len(rounds):
+        return ("the pending FAIL state step index is outside the configured "
+                f"[workflow].plan sequence ({state.workflow_step_index} > "
                 f"{len(rounds)})")
     return None
 
@@ -1664,20 +1699,26 @@ def _run_auto_fix_review_once(
         gate_passes: _FocusedGateLedger | None = None,
         ) -> _AutoFixReviewOutcome:
     """Run one merged reviewer-fixer round or quiescent blocked adjudication."""
-    rounds = cfg.auto_fix_review
+    rounds = cfg.workflow_plan
     if not rounds:
         return _AutoFixReviewOutcome(0)
     # The folder walks the configured reviewer list position by position, and
     # the durable index is what survives a restart mid-sequence.
     existing = _auto_fix_existing_state(cfg)
-    round_index = existing.review_round_index if existing is not None else 0
+    round_index = existing.workflow_step_index if existing is not None else 0
+    while round_index < len(rounds) and not rounds[round_index].produces_verdict:
+        round_index += 1
     if round_index >= len(rounds):
-        print(f"Auto-fix folder review: all {len(rounds)} configured review "
-              "rounds have been used; no further round starts.")
+        print(f"Auto-fix folder review: all {len(rounds)} configured workflow "
+              "steps have been used; no further verdict step starts.")
         return _AutoFixReviewOutcome(
-            1, existing, human_reason="configured review rounds are exhausted",
+            1, existing, human_reason="configured workflow steps are exhausted",
             rounds_exhausted=True)
     review = rounds[round_index]
+    assert review.adapter is not None
+    assert review.model is not None and review.effort is not None
+    assert review.requested_model is not None
+    assert review.requested_effort is not None
 
     plan = (_authoritative_status_plan(trusted_plan)
             if trusted_plan is not None else Plan.parse(cfg.tasks_dir))
@@ -1784,6 +1825,8 @@ def _run_auto_fix_review_once(
                 task_plan_sha256=plan_digest,
                 review_prompt_sha256=prompt_digest,
                 reviewer_adapter=review.adapter,
+                reviewer_role=review.role,
+                reviewer_step_index=round_index,
                 reviewer_model=review.requested_model,
                 reviewer_effort=review.requested_effort)
             state = _auto_fix_attach_repair_briefs(
@@ -1841,6 +1884,7 @@ def _run_auto_fix_review_once(
                 task_plan_sha256=reuse_plan_digest,
                 review_prompt_sha256=reuse_digest,
                 reviewer_adapter=review.adapter,
+                reviewer_role=review.role,
                 reviewer_model=review.requested_model,
                 reviewer_effort=review.requested_effort,
                 review_context=existing.review_context,
@@ -1888,6 +1932,8 @@ def _run_auto_fix_review_once(
         task_plan_sha256=plan_digest,
         review_prompt_sha256=prompt_digest,
         reviewer_adapter=review.adapter,
+        reviewer_role=review.role,
+        reviewer_step_index=round_index,
         reviewer_model=review.requested_model,
         reviewer_effort=review.requested_effort,
         review_context=review_context,
@@ -1898,16 +1944,8 @@ def _run_auto_fix_review_once(
     except AssentError as e:
         print(f"Auto-fix reviewer resolution failed: {e}")
         return finish(_AutoFixReviewOutcome(1, human_reason=str(e)))
-    _first_round_session, errors = auto_fix_review_capability_errors(cfg, reviewer)
-    if errors:
-        print(f"{review.adapter} auto-fix review capability preflight: FAIL "
-              "(refusing before the review session)")
-        for message in errors:
-            print(f"  - {message}")
-        return finish(_AutoFixReviewOutcome(1, human_reason="; ".join(errors)))
-    assert _first_round_session is not None
-    # The preflight covers every configured round's adapter; this round runs
-    # under its own position's already-resolved identity, not the first one's.
+    # The top-level run gate preflighted every distinct configured identity
+    # before any task or reviewer session started.
     session = SessionIdentity(
         agent=review.adapter, requested_model=review.requested_model,
         effort=review.effort, requested_effort=review.requested_effort)
@@ -1962,7 +2000,8 @@ def _run_auto_fix_review_once(
         # anything at all during a read-only blocked adjudication -- still
         # refuse here, before the verdict is even parsed.
         forbidden = _auto_fix_forbidden_writes(changed)
-        if changed and (review_context == "blocked_adjudication" or forbidden):
+        if changed and (review_context == "blocked_adjudication"
+                        or not review.writes or forbidden):
             reported = forbidden or list(changed)
             shown = ", ".join(reported[:8]) + (
                 " ..." if len(reported) > 8 else "")
@@ -2069,7 +2108,7 @@ def _run_auto_fix_review_once(
 
         state = auto_fix.state_for_review(
             resolved_record, previous=ledger_previous, review_stage=review_stage,
-            review_round_index=(
+            workflow_step_index=(
                 round_index if resolved_record.verdict == "PASS"
                 else round_index + 1),
             **freshness)
@@ -2644,7 +2683,7 @@ def _auto_fix_finish_rounds_exhausted(
             auto_fix.write_auto_fix_state(
                 auto_fix.auto_fix_state_path(cfg), state)
             print(f"Auto-fix review rounds exhausted after "
-                  f"{state.review_round_index} round(s); the final round's "
+                  f"{state.workflow_step_index} workflow step(s); the final step's "
                   "repair was not proven by the focused gate of the task it "
                   "repaired, so the folder did not settle. Every finding, "
                   "edit, and journal entry was preserved without another "
@@ -2895,7 +2934,7 @@ def _auto_fix_journal_self_fixed(
             summary=(f"Review round {outcome.round_index + 1} of "
                      f"{outcome.rounds_used} ({identity}) repaired this task's "
                      "own finding and no further configured round confirmed it"),
-            detail=("The configured [auto_fix.review] round list ended on that "
+            detail=("The configured [workflow].plan sequence ended on that "
                     "repair, so the folder is SELF-FIXED, UNREVIEWED: the task "
                     "keeps the status its own focused gate proved and nothing "
                     "was reopened, reverted, or marked BLOCKED. Only "
@@ -2974,6 +3013,42 @@ def _run_auto_fix_repairs(
     # reuses a PASS its own round proved against the current state.
     round_passes = _FocusedGateLedger()
     while True:
+        if state.phase == "NEEDS_REPAIR":
+            repair_authorized = False
+            while state.workflow_step_index < len(cfg.workflow_plan):
+                step = cfg.workflow_plan[state.workflow_step_index]
+                if step.produces_verdict:
+                    outcome = _run_auto_fix_review_once(
+                        cfg, once=False, task_id=None,
+                        injected_adapter=injected_reviewer, sleep=sleep, now=now,
+                        trusted_plan=trusted_plan,
+                        trusted_contracts=trusted_contracts,
+                        gate_passes=round_passes)
+                    if outcome.rounds_exhausted:
+                        return _auto_fix_finish_rounds_exhausted(
+                            cfg, outcome.state or state, now,
+                            gate_passes=round_passes)
+                    if outcome.code == 0:
+                        return 0
+                    if outcome.state is None or outcome.human_reason is not None:
+                        return outcome.code
+                    state = outcome.state
+                    break
+                state = auto_fix.with_workflow_step_index(
+                    state, state.workflow_step_index + 1)
+                auto_fix.write_auto_fix_state(state_path, state)
+                if step.writes:
+                    repair_authorized = True
+                    print(f"Auto-fix workflow step {state.workflow_step_index}: "
+                          f"role {step.role!r} authorizes bounded task-profile repair.")
+                    break
+            if state.phase != "NEEDS_REPAIR":
+                continue
+            if not repair_authorized:
+                if state.workflow_step_index >= len(cfg.workflow_plan):
+                    return _auto_fix_finish_rounds_exhausted(
+                        cfg, state, now, gate_passes=round_passes)
+                continue
         # Every reviewer decision that enters NEEDS_REPAIR is amended here,
         # not only the first one: a recheck may be what first exposes the
         # omitted path, and its addition must be durable before that decision

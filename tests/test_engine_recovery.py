@@ -22,10 +22,32 @@ from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
 from tests.test_contracts import GlobalContractsMixin
 
-# The merged reviewer-fixer loop is finite because it walks the configured
-# [auto_fix.review] list position by position, so a case that needs a first
-# round and a later confirming round must configure exactly two rounds.
-TWO_REVIEW_ROUNDS = '\n[auto_fix.review]\nadapter = ["claude", "claude"]\n'
+# A repair step precedes each verdict step so scheduler-authored focused
+# failures and reviewer findings both have an explicit bounded repair handoff.
+TWO_REVIEW_ROUNDS = '''
+[abilities.review_fix]
+prompt = "Review and repair."
+writes = true
+gate = true
+produces_verdict = true
+[abilities.fix]
+prompt = "Repair durable findings."
+writes = true
+gate = false
+[agents.folder_reviewer]
+ability = ["review_fix"]
+model = "prime"
+effort = "heavy"
+[agents.bounded_fixer]
+ability = ["fix"]
+[workflow]
+plan = [
+  { role = "bounded_fixer" },
+  { role = "folder_reviewer", adapter = "claude" },
+  { role = "bounded_fixer" },
+  { role = "folder_reviewer", adapter = "claude" },
+]
+'''
 
 
 class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
@@ -100,8 +122,9 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
             [(item["agent"], item["requested_model"], item["requested_effort"])
              for item in attempts],
             [("claude", "lite", "medium"), ("claude", "lite", "medium")])
-        # Round 0 failed and advanced the position; round 1 passed there.
-        self.assertEqual(state.review_round_index, 1)
+        # The first verdict step failed, its following repair step ran, and the
+        # second verdict step passed at workflow position 3.
+        self.assertEqual(state.workflow_step_index, 3)
         self.assertEqual((self.execution_root() / "src" / "value.txt").read_text(
             encoding="utf-8"), "fixed\n")
         self.assertIn(durable_brief, second_worker.calls[0][0])
@@ -146,7 +169,7 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(parse_task_file(task_path).status, "DONE")
         # The failed round already moved the durable position forward, so the
         # restart resumes at that round instead of replaying the sequence.
-        self.assertEqual(crashed.review_round_index, 1)
+        self.assertEqual(crashed.workflow_step_index, 3)
         checkpoint_subjects = self.subjects()
 
         restart_worker = ScriptedAdapter([])
@@ -160,8 +183,7 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
 
         recovered = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(recovered.phase, "COMPLETE")
-        self.assertEqual(recovered.review_round_index,
-                         crashed.review_round_index)
+        self.assertEqual(recovered.workflow_step_index, 3)
         self.assertEqual(restart_worker.calls, [])
         self.assertEqual(len(restart_reviewer.calls), 1)
         self.assertIn("- PASS:", restart_reviewer.calls[0][0])
@@ -457,7 +479,8 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
         """The durable record a review round in flight left behind, exactly as the loop writes
         it: the round that decided FAIL, its findings, and the phase it was interrupted in."""
         plan = Plan.parse(cfg.tasks_dir)
-        review = cfg.auto_fix_review[0]
+        review = next(step for step in cfg.workflow_plan
+                      if step.produces_verdict)
         findings = tuple(
             auto_fix.ReviewFinding(task_id, "src/value.txt", "stale value",
                                    "review evidence")
@@ -468,10 +491,12 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
             task_plan_sha256=auto_fix.sha256_files(
                 task.path for task in plan.tasks),
             review_prompt_sha256="3" * 64,
+            reviewer_role=review.role,
+            reviewer_step_index=1,
             reviewer_adapter=review.adapter,
             reviewer_model=review.requested_model,
             reviewer_effort=review.requested_effort,
-            review_round_index=1)
+            workflow_step_index=2)
         if state.phase != phase:
             state = auto_fix.with_repair_phase(state, phase)
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
