@@ -417,7 +417,8 @@ class AutoFixStateSchema(unittest.TestCase):
         from assent import auto_fix
 
         self.assertEqual(auto_fix.REVIEW_CONTEXTS,
-                         {"completed_folder", "blocked_adjudication"})
+                         {"completed_folder", "blocked_adjudication",
+                          "selection_verification"})
         self.assertEqual(auto_fix.REVIEW_STAGES, {"initial", "recheck"})
         self.assertNotIn("complete_verification", auto_fix.REVIEW_FINDING_KINDS)
         self.assertNotIn("receipt_absence", auto_fix.REVIEW_FINDING_KINDS)

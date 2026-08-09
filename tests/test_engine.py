@@ -1951,7 +1951,10 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         """
         contexts = sorted(auto_fix.REVIEW_CONTEXTS)
         stages = sorted(auto_fix.REVIEW_STAGES)
-        self.assertEqual(contexts, ["blocked_adjudication", "completed_folder"])
+        self.assertEqual(contexts, [
+            "blocked_adjudication", "completed_folder",
+            "selection_verification",
+        ])
         self.assertEqual(stages, ["initial", "recheck"])
 
         self.write_task(1, status="DONE")
