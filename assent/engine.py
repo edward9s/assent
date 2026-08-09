@@ -40,15 +40,18 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, TextIO
 
-from assent import (AssentError, auto_fix, contracts, gitops, lockfile, rework,
-                    shared_paths, verification)
+from assent import (AssentError, auto_fix, contracts, gitops, lockfile,
+                    reconcile, rework, shared_paths, verification)
 from assent.adapters import Adapter, InvocationRequest, get_adapter
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess as _adapter_run_subprocess,
                                      stop_wake_requested)
 from assent.config import (Config, WorkflowActionStep, WorkflowPlanStep,
                            WorkflowTaskStep, load_config)
-from assent.batch_verification import verify_selected_batch_action
+from assent.batch_verification import (SelectionCandidateConflict,
+                                       selection_conflict_line,
+                                       selection_conflicts_from_evidence,
+                                       verify_selected_batch_action)
 from assent.folderdeps import (find_unfinished_prerequisites,
                                order_folders_by_dependency,
                                parse_folder_dependency_graph)
@@ -374,9 +377,10 @@ Role abilities:
 {role_policy}
 
 This is a read-only decision gate. Do not edit source, task, journal, Git, or
-management files and do not run tests or generators. The complete verifier has
-already failed against the exact candidate identified below. Diagnose only
-that bounded failure and return the existing Assent review record. Do not
+management files and do not run tests or generators. Candidate construction or
+the complete verifier has failed against the exact selection identified below;
+for typed candidate conflicts the verifier deliberately did not run. Diagnose
+only that bounded failure and return the existing Assent review record. Do not
 create a task, change task status or requirements, accept a source, shrink the
 selection, or propose unrelated work.
 
@@ -386,6 +390,12 @@ scope path, use kind "scope_amendment" and the existing exact scope-addition
 contract. Task ids may repeat between folders; the task id plus path must
 resolve to exactly one selected plan, or the scheduler will retain the evidence
 for a human decision.
+
+For typed candidate-conflict evidence, return one finding for every exact
+folder/path pair in the complete wave and no unrelated finding. Preserve the
+folder ownership implied by task id plus scope. A target-alone finding will be
+edited in Assent's managed reconcile worktree; a peer-only finding will reopen
+the existing owning task. Never recommend accepting or omitting a prefix.
 
 Finish with exactly one JSON object on the last non-empty output line and no
 later text. Because the supplied verifier result failed, PASS and FIXED are not
@@ -405,6 +415,36 @@ Prior selection-review evidence:
 
 Authoritative task contracts and journals:
 {management_evidence}
+"""
+
+_SELECTION_RECONCILE_PROMPT = """You are the Assent selection conflict fixer.
+
+Scheduled workflow role: {workflow_role}
+Role abilities:
+{role_policy}
+
+The user authorized automatic conflict repair for one exact selection. Assent
+has prepared a source-first reconcile merge in the worktree below. Edit only
+the exact conflict paths listed here. Do not stage or commit, run Git or Assent,
+change refs or task files, run tests or the full verifier, or edit any other
+path. Assent owns validation, staging, the merge commit, source fast-forward,
+focused gates, candidate rebuild, and cleanup.
+
+Folder: {folder}
+Worktree: {worktree}
+Source tip (ours): {source_tip}
+Target tip (theirs): {target_tip}
+Exact conflict paths:
+{conflict_paths}
+
+Scheduler-captured three-way conflict evidence:
+{three_way_evidence}
+
+Authoritative task contracts for this folder:
+{contracts}
+
+Resolve every listed conflict semantically and return normally. Leave the
+files unstaged so the scheduler can prove the conflict scene before continuing.
 """
 
 _AUTO_FIX_EVIDENCE_LIMIT = 64_000
@@ -1465,9 +1505,12 @@ def _run_selection_reviewer(
         step: WorkflowPlanStep, *, sleep: Callable[[float], None],
         now: Callable[[], datetime]) -> tuple[auto_fix.ReviewRecord, str]:
     """Run one read-only selection review against settled verifier evidence."""
-    if not state.action_evidence or state.action_evidence[0] != "VERIFIER_FAILED":
+    if (not state.action_evidence
+            or state.action_evidence[0] not in {
+                "VERIFIER_FAILED", "TARGET_CONFLICT", "PEER_CONFLICT"}):
         raise AssentError(
-            "selection repair requires a durable VERIFIER_FAILED action result")
+            "selection repair requires a durable verifier failure or candidate "
+            "conflict action result")
     if not step.produces_verdict or step.adapter is None:
         raise AssentError(
             f"selection role {step.role!r} cannot produce the required verdict")
@@ -1563,12 +1606,101 @@ def _selection_owned_findings(
     }
 
 
+def _selection_conflicts(
+        state: SelectionWorkflowState) -> tuple[SelectionCandidateConflict, ...]:
+    conflicts = selection_conflicts_from_evidence(state.action_evidence)
+    if state.action_evidence and state.action_evidence[0] in {
+            "TARGET_CONFLICT", "PEER_CONFLICT"} and not conflicts:
+        raise AssentError(
+            "selection candidate conflict action has no typed conflict wave")
+    return conflicts
+
+
+def _validate_selection_conflict_assignments(
+        grouped: dict[str, auto_fix.ReviewRecord],
+        conflicts: tuple[SelectionCandidateConflict, ...]) -> None:
+    """Require the reviewer to map every conflict path and nothing unrelated."""
+    if not conflicts:
+        return
+    allowed = {
+        (conflict.folder, path)
+        for conflict in conflicts for path in conflict.paths
+    }
+    assigned = {
+        (folder, finding.path)
+        for folder, record in grouped.items() for finding in record.findings
+    }
+    missing = sorted(allowed - assigned)
+    extra = sorted(assigned - allowed)
+    if missing or extra:
+        detail: list[str] = []
+        if missing:
+            detail.append("unassigned: " + ", ".join(
+                f"{folder}:{path}" for folder, path in missing))
+        if extra:
+            detail.append("outside conflict wave: " + ", ".join(
+                f"{folder}:{path}" for folder, path in extra))
+        raise AssentError(
+            "selection conflict ownership is incomplete (" + "; ".join(detail)
+            + ")")
+
+
+def _git_blob_text(root, object_id: str, path: str) -> str:
+    result = subprocess.run(
+        ["git", "show", f"{object_id}:{path}"], cwd=str(root),
+        capture_output=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        return "(path absent)"
+    return _selection_bounded(result.stdout)
+
+
+def _selection_three_way_evidence(
+        root, conflict: SelectionCandidateConflict, *, target_reconcile: bool
+        ) -> str:
+    base = gitops.merge_base(root, conflict.target_tip, conflict.source_tip)
+    ours = conflict.source_tip if target_reconcile else conflict.prefix_tree
+    theirs = conflict.target_tip if target_reconcile else conflict.source_tip
+    sections: list[str] = []
+    for path in conflict.paths:
+        sections.append(
+            f"### {path}\nBASE ({base}):\n{_git_blob_text(root, base, path)}\n"
+            f"OURS ({ours}):\n{_git_blob_text(root, ours, path)}\n"
+            f"THEIRS ({theirs}):\n{_git_blob_text(root, theirs, path)}")
+    return _selection_bounded("\n\n".join(sections))
+
+
+def _selection_peer_context(
+        cfg: Config, conflicts: tuple[SelectionCandidateConflict, ...]) -> str:
+    relevant = [item for item in conflicts
+                if item.folder == cfg.tasks_name and item.kind == "peer_only"]
+    if not relevant:
+        return ""
+    parts = ["\n\nSelection peer-conflict context (read-only evidence):"]
+    for conflict in relevant:
+        prefix = ", ".join(
+            f"{folder}@{tip}" for folder, tip in conflict.prefix_sources)
+        parts.append(
+            f"\nFolder: {conflict.folder}\nCompatible prefix: "
+            f"{prefix or '(target only)'}\nCompatible prefix tree: "
+            f"{conflict.prefix_tree}\nDependent exclusions: "
+            + (", ".join(conflict.dependent_exclusions) or "none") + "\n"
+            + _selection_three_way_evidence(
+                cfg.root, conflict, target_reconcile=False))
+    parts.append(
+        "\nModify only this task's declared source scope into a form that "
+        "merges with the complete exact selection. Do not accept a prefix, "
+        "change the integration target, or create an implicit base.")
+    return _selection_bounded("\n".join(parts))
+
+
 def _persist_selection_findings(
         work_configs: tuple[Config, ...], selection: SelectionWorkflowState,
         step: WorkflowPlanStep, record: auto_fix.ReviewRecord,
         prompt_digest: str) -> dict[str, auto_fix.AutoFixState]:
     """Persist every plan assignment before selection repair can begin."""
     grouped = _selection_owned_findings(record, work_configs)
+    _validate_selection_conflict_assignments(
+        grouped, _selection_conflicts(selection))
     states: dict[str, auto_fix.AutoFixState] = {}
     blocker = "\n".join(selection.action_evidence)
     focused = "Selection full_verify ran only after every selected plan's " \
@@ -1695,16 +1827,185 @@ def _mark_selection_reviews_passed(
         auto_fix.write_auto_fix_state(path, passed)
 
 
+def _selection_fixer_session(
+        cfg: Config, task: Task, step: WorkflowPlanStep
+        ) -> tuple[str, Adapter, SessionIdentity]:
+    """Resolve one explicit selection fixer role through the primary adapter."""
+    adapter_name = cfg.adapter_names[0]
+    adapter = get_adapter(adapter_name, cfg)
+    plan = Plan.parse(cfg.tasks_dir)
+    session = _plan_step_session(cfg, adapter, plan, step, adapter_name)
+    errors = adapter.preflight([InvocationRequest(
+        task_id=f"{cfg.tasks_name} selection conflict fixer",
+        model=step.model or task.model, effort=session.effort,
+        requested_model=session.requested_model,
+        requested_effort=session.requested_effort)])
+    if errors:
+        raise AssentError(
+            f"selection conflict fixer capability unavailable for "
+            f"{cfg.tasks_name}: " + "; ".join(errors))
+    return adapter_name, adapter, session
+
+
+def _selection_fixer_profile(
+        cfg: Config, task: Task, step: WorkflowPlanStep) -> _FixerProfile:
+    adapter_name = cfg.adapter_names[0]
+    model = step.model or task.model
+    stated_effort = step.effort if step.effort is not None else task.effort
+    settings = cfg.adapter_settings(adapter_name)
+    effort = settings.resolve_effort(stated_effort, model)
+    if effort is None:
+        raise AssentError(
+            f"selection fixer role has no concrete effort for {task.id}")
+    return _FixerProfile(adapter_name, model, effort)
+
+
+def _selection_reconcile_prompt(
+        cfg: Config, conflict: SelectionCandidateConflict,
+        step: WorkflowPlanStep, worktree) -> str:
+    plan = Plan.parse(cfg.tasks_dir)
+    contracts: list[str] = []
+    for task in plan.tasks:
+        try:
+            text = task.path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise AssentError(
+                f"unable to read reconcile contract {task.id}: {error}") from error
+        contracts.append(f"--- {task.id}: {task.path} ---\n{text.rstrip()}")
+    return _SELECTION_RECONCILE_PROMPT.format(
+        workflow_role=step.role,
+        role_policy="\n\n".join(
+            ability.prompt for ability in step.resolved_role.abilities),
+        folder=cfg.tasks_name, worktree=worktree,
+        source_tip=conflict.source_tip, target_tip=conflict.target_tip,
+        conflict_paths="\n".join(f"- {path}" for path in conflict.paths),
+        three_way_evidence=_selection_three_way_evidence(
+            cfg.root, conflict, target_reconcile=True),
+        contracts=_selection_bounded("\n\n".join(contracts)))
+
+
+def _selection_transition_recorded(task: Task, detail: str) -> bool:
+    return any(
+        entry.get("by") == "scheduler"
+        and entry.get("event") == "selection_source_transition"
+        and entry.get("detail") in {detail, detail + "\n"}
+        for entry in read_entries(task.journal_path))
+
+
+def _run_selection_target_reconciles(
+        work_configs: tuple[Config, ...],
+        conflicts: tuple[SelectionCandidateConflict, ...],
+        fixer_step: WorkflowPlanStep, *, sleep: Callable[[float], None],
+        now: Callable[[], datetime]) -> None:
+    """Resolve every target-alone member of one reviewed conflict wave."""
+    configs = {cfg.tasks_name: cfg for cfg in work_configs}
+    for conflict in conflicts:
+        if conflict.kind != "target_alone":
+            continue
+        cfg = configs.get(conflict.folder)
+        if cfg is None:
+            raise AssentError(
+                f"selection conflict names unknown folder {conflict.folder}")
+        plan = Plan.parse(cfg.tasks_dir)
+        review_record = auto_fix.current_review_record(
+            _selection_repair_states(work_configs)[cfg.tasks_name])
+        owner_ids = {
+            finding.task_id for finding in review_record.findings
+            if finding.path in conflict.paths and finding.task_id is not None
+        }
+        owner = next((task for task in plan.tasks
+                      if task.id in owner_ids), None)
+        if owner is None:
+            raise AssentError(
+                f"target conflict in {cfg.tasks_name} has no reviewed task owner")
+        adapter_name, adapter, session = _selection_fixer_session(
+            cfg, owner, fixer_step)
+        context = reconcile.automatic_reconcile_prepare_locked(
+            cfg, conflict.target_tip, conflict.source_tip, conflict.paths)
+        if context.needs_editing:
+            assert context.worktree is not None
+            prompt = _selection_reconcile_prompt(
+                cfg, conflict, fixer_step, context.worktree)
+            baselines = tuple(
+                _selection_surface_baseline(item) for item in work_configs)
+            while True:
+                print(f"Selection reconcile session: {adapter_name} | "
+                      f"{fixer_step.model or owner.model}->"
+                      f"{session.requested_model} | "
+                      f"{session.effort}->{session.requested_effort}")
+                result = adapter.run_task(
+                    prompt, session.requested_model,
+                    session.requested_effort, context.worktree)
+                changed = _selection_surface_changes(
+                    work_configs, baselines)
+                if changed:
+                    raise AssentError(
+                        "selection reconcile fixer wrote protected source or "
+                        "management paths; exact edits were preserved: "
+                        + ", ".join(changed[:8]))
+                if (result.checkpoint_resume and not result.quota_exhausted
+                        and not result.stalled and result.exit_code != 0):
+                    continue
+                if result.quota_exhausted:
+                    _wait_for_quota(cfg, result.reset_at, sleep, now)
+                    continue
+                if result.exit_code != 0 or result.stalled:
+                    raise AssentError(
+                        "selection reconcile fixer adapter failure: "
+                        + _adapter_failure_reason(
+                            result.exit_code, result.stalled, result.output,
+                            result.failure_kind))
+                break
+        merge_commit = reconcile.automatic_reconcile_continue_locked(
+            cfg, conflict.target_tip, conflict.source_tip, conflict.paths)
+        detail = (
+            f"selection target: {conflict.target_tip}\n"
+            f"source before: {conflict.source_tip}\n"
+            f"source after: {merge_commit}\n"
+            "conflict paths: " + json.dumps(
+                list(conflict.paths), separators=(",", ":")))
+        for task in plan.tasks:
+            if task.id not in owner_ids:
+                continue
+            if not _selection_transition_recorded(task, detail):
+                append_entry(
+                    task.journal_path, by="scheduler",
+                    event="selection_source_transition",
+                    summary=("Automatic selection reconciliation advanced "
+                             f"{cfg.tasks_name} without changing the target"),
+                    detail=detail, agent=session.agent,
+                    requested_model=session.requested_model,
+                    requested_effort=session.requested_effort,
+                    time_str=now().isoformat(timespec="seconds"))
+
+
 def _run_selection_repairs(
         configs: tuple[Config, ...], state: SelectionWorkflowState,
         step: WorkflowPlanStep, *, sleep: Callable[[float], None],
         now: Callable[[], datetime]) -> tuple[int, SelectionWorkflowState]:
     """Resume one coalesced selection finding wave through its focused sweep."""
     work_configs = _selection_worktree_configs(configs)
-    if state.step_index + 1 >= len(configs[0].workflow_selection) or not isinstance(
-            configs[0].workflow_selection[state.step_index + 1],
-            WorkflowActionStep):
-        print("Selection auto-fix exhausted: a selection reviewer must be "
+    conflicts = _selection_conflicts(state)
+    fixer_step: WorkflowPlanStep | None = None
+    next_action_index = state.step_index + 1
+    if conflicts:
+        if (next_action_index < len(configs[0].workflow_selection)
+                and isinstance(
+                    configs[0].workflow_selection[next_action_index],
+                    WorkflowPlanStep)):
+            candidate = configs[0].workflow_selection[next_action_index]
+            if candidate.writes and not candidate.produces_verdict:
+                fixer_step = candidate
+                next_action_index += 1
+        if fixer_step is None:
+            print("Selection auto-fix exhausted: a reviewed candidate-conflict "
+                  "wave requires an explicit write-capable fixer role.")
+            return 1, state
+    if (next_action_index >= len(configs[0].workflow_selection)
+            or not isinstance(
+                configs[0].workflow_selection[next_action_index],
+                WorkflowActionStep)):
+        print("Selection auto-fix exhausted: a selection repair wave must be "
               "followed by an explicit full_verify action.")
         return 1, state
     if state.repair_phase == "NONE":
@@ -1717,11 +2018,17 @@ def _run_selection_repairs(
         write_selection_workflow_state(configs[0].assent_dir, state)
 
     repair_states = _selection_repair_states(work_configs)
+    peer_folders = {
+        conflict.folder for conflict in conflicts
+        if conflict.kind == "peer_only"
+    }
     assignments: list[tuple[Config, Task, _FixerProfile, Adapter,
                             SessionIdentity]] = []
     for cfg in work_configs:
         review_state = repair_states.get(cfg.tasks_name)
         if review_state is None:
+            continue
+        if conflicts and cfg.tasks_name not in peer_folders:
             continue
         plan = Plan.parse(cfg.tasks_dir)
         implicated = list(dict.fromkeys(
@@ -1729,7 +2036,9 @@ def _run_selection_repairs(
             if item.fingerprint in review_state.current_finding_fingerprints
             and item.task_id is not None))
         for task in _auto_fix_cascade_tasks(plan, implicated):
-            profile = _auto_fix_profile_for_task(cfg, task)
+            profile = (_selection_fixer_profile(cfg, task, fixer_step)
+                       if fixer_step is not None
+                       else _auto_fix_profile_for_task(cfg, task))
             fixer = get_adapter(profile.adapter, cfg)
             session, errors = auto_fix_fixer_capability_errors(
                 cfg, fixer, profile.adapter, profile.model, profile.effort)
@@ -1759,7 +2068,8 @@ def _run_selection_repairs(
                 or current_target != state.target_commit):
             raise AssentError(
                 "selection target changed while verification repair was pending")
-        if state.repair_phase == "NEEDS_REPAIR":
+        entering_repair = state.repair_phase == "NEEDS_REPAIR"
+        if entering_repair:
             for cfg in work_configs:
                 review_state = repair_states.get(cfg.tasks_name)
                 if review_state is None:
@@ -1776,9 +2086,18 @@ def _run_selection_repairs(
                 repair_states[cfg.tasks_name] = review_state
             state = replace(state, repair_phase="REPAIRING")
             write_selection_workflow_state(configs[0].assent_dir, state)
+
+        if conflicts:
+            assert fixer_step is not None
+            _run_selection_target_reconciles(
+                work_configs, conflicts, fixer_step, sleep=sleep, now=now)
+
+        if entering_repair:
             for cfg in work_configs:
                 review_state = repair_states.get(cfg.tasks_name)
                 if review_state is None:
+                    continue
+                if conflicts and cfg.tasks_name not in peer_folders:
                     continue
                 implicated = list(dict.fromkeys(
                     item.task_id for item in review_state.findings
@@ -1823,7 +2142,9 @@ def _run_selection_repairs(
                 cfg, task, _AdapterRotation((profile.adapter,), (fixer,)),
                 sleep, now, session_state, resumed=task.status == "WIP",
                 session_override=session, profile_model=profile.model,
-                auto_fix_context=_auto_fix_repair_context(task, review_state),
+                auto_fix_context=(
+                    _auto_fix_repair_context(task, review_state)
+                    + _selection_peer_context(cfg, conflicts)),
                 retry_limit=0, billing_is_failure=True,
                 auto_fix_fingerprints=(
                     review_state.current_finding_fingerprints),
@@ -1873,7 +2194,7 @@ def _run_selection_repairs(
                 "selection target changed during the focused repair sweep")
         state = replace(
             state, source_commits=source_commits,
-            step_index=state.step_index + 1, action_status="STALE",
+            step_index=next_action_index, action_status="STALE",
             repair_phase="RECHECK")
         write_selection_workflow_state(configs[0].assent_dir, state)
     return 0, state
@@ -1965,6 +2286,21 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
         if len(configs) == 1:
             result = verify_folder_action(
                 configs[0], recheck=state.repair_phase == "RECHECK")
+            if result.outcome == "TARGET_CONFLICT" and result.source_commits:
+                paths = tuple(dict.fromkeys(
+                    item.split(":", 1)[1]
+                    for item in result.evidence
+                    if item.startswith(configs[0].tasks_name + ":")
+                    and ":" in item))
+                if paths:
+                    conflict = SelectionCandidateConflict(
+                        configs[0].tasks_name, paths,
+                        result.source_commits[0], result.target_commit, (),
+                        result.candidate_tree, (), "target_alone")
+                    result = replace(
+                        result,
+                        evidence=result.evidence
+                        + (selection_conflict_line(conflict),))
         else:
             result = verify_selected_batch_action(
                 config_path, configs[0].assent_dir, ordered,

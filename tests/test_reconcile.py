@@ -13,12 +13,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import engine, gitops, pathops, shared_paths, verification
+from assent import AssentError, engine, gitops, pathops, shared_paths, verification
 from assent import accept as accept_mod
 from assent import batch_accept as batch_accept_mod
 from assent import plan as plan_mod
 from assent.config import load_config
-from assent.reconcile import (reconcile_abort, reconcile_commit_message,
+from assent.reconcile import (automatic_reconcile_continue_locked,
+                              automatic_reconcile_prepare_locked,
+                              reconcile_abort, reconcile_commit_message,
                               reconcile_continue, reconcile_start)
 from tests.link_support import (cleanup_worktree, make_directory_link,
                                 safe_rmtree)
@@ -175,6 +177,53 @@ class ReconcileRepositoryCase(unittest.TestCase):
         _git(path, "add", "-A")
         _git(path, "commit", "-m", reconcile_commit_message(self.folder))
         return gitops.commit_of(path, "HEAD")
+
+    def test_automatic_reconcile_reuses_the_managed_source_first_lifecycle(
+            self) -> None:
+        self._conflicting_repository()
+        cfg = self._config()
+
+        context = automatic_reconcile_prepare_locked(
+            cfg, self.target_tip, self.source_tip, ("shared.txt",))
+        self.assertTrue(context.needs_editing)
+        self.assertEqual(context.worktree, self._managed_path())
+        self._resolve("automatic resolution\n")
+        merge = automatic_reconcile_continue_locked(
+            cfg, self.target_tip, self.source_tip, ("shared.txt",))
+
+        self.assertEqual(
+            gitops.commit_parents(self.root, merge),
+            (self.source_tip, self.target_tip))
+        self.assertEqual(gitops.branch_tip(self.root, self.source_branch), merge)
+        self._assert_target_untouched(self.target_tip)
+        self.assertFalse(self._managed_path().exists())
+        self.assertFalse(gitops.branch_exists(self.root, self._managed_branch()))
+
+        resumed = automatic_reconcile_prepare_locked(
+            cfg, self.target_tip, self.source_tip, ("shared.txt",))
+        self.assertFalse(resumed.needs_editing)
+        self.assertEqual(
+            automatic_reconcile_continue_locked(
+                cfg, self.target_tip, self.source_tip, ("shared.txt",)),
+            merge)
+
+    def test_automatic_reconcile_retains_out_of_scene_ai_edits(self) -> None:
+        self._conflicting_repository()
+        cfg = self._config()
+        automatic_reconcile_prepare_locked(
+            cfg, self.target_tip, self.source_tip, ("shared.txt",))
+        self._resolve()
+        (self._managed_path() / "outside.txt").write_text(
+            "unexpected\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+                AssentError, "outside the exact conflict scene"):
+            automatic_reconcile_continue_locked(
+                cfg, self.target_tip, self.source_tip, ("shared.txt",))
+
+        self.assertTrue((self._managed_path() / "outside.txt").exists())
+        self._assert_source_untouched()
+        self._assert_target_untouched(self.target_tip)
 
     # --- assertions shared by several cases ---
 

@@ -164,7 +164,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--auto-fix", action="store_true",
         help="After task execution, run the configured bounded folder review "
-             "and repair policy")
+             "and repair policy; with --verify, configured selection "
+             "reviewer/fixer positions may also repair candidate conflicts "
+             "before the exact full verification")
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "

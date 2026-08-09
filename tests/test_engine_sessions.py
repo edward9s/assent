@@ -150,6 +150,73 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             (self.execution_root() / "src" / "value.txt").read_text(
                 encoding="utf-8"), "fixed\n")
 
+    def test_selection_target_conflict_uses_ai_reconcile_before_full_verify(self):
+        task_path = self.write_task(
+            1, status="DONE", scope=("src/value.txt",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "value.txt").write_text("base\n", encoding="utf-8")
+        extra = (
+            '\n[abilities.selection_review]\n'
+            'prompt = "Assign every selection conflict path."\n'
+            'writes = false\ngate = true\nproduces_verdict = true\n'
+            '[abilities.selection_fix]\n'
+            'prompt = "Resolve the assigned conflict."\n'
+            'writes = true\ngate = false\n'
+            '[agents.selection_reviewer]\nability = ["selection_review"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[agents.selection_fixer]\nability = ["selection_fix"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nselection = [{ action = "full_verify" }, '
+            '{ role = "selection_reviewer", adapter = "claude" }, '
+            '{ role = "selection_fixer" }, '
+            '{ action = "full_verify" }]\n')
+        cfg = self.build(extra_config=extra)
+        (self.root / ".assent" / "verify.py").write_text(
+            "raise SystemExit(0)\n", encoding="utf-8")
+        self.commit_all()
+        worktree = gitops.ensure_worktree(self.root, "plan01")
+        branch = gitops.ensure_branch(worktree, "plan01/")
+        (worktree / "src" / "value.txt").write_text(
+            "from source\n", encoding="utf-8")
+        gitops.commit_all(worktree, "source change")
+        source_tip = gitops.branch_tip(self.root, branch)
+        (self.root / "src" / "value.txt").write_text(
+            "from target\n", encoding="utf-8")
+        self.commit_all("target change")
+        target_tip = gitops.commit_of(self.root, "HEAD")
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "Selection target conflict",
+            "The source and target both changed the task-owned path.")
+
+        def resolve(_prompt):
+            managed = gitops.reconcile_worktree_path(self.root, "plan01")
+            (managed / "src" / "value.txt").write_text(
+                "resolved automatically\n", encoding="utf-8")
+            return ok_result()
+
+        reviewer_and_fixer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+            resolve,
+        ])
+        with mock.patch("assent.engine.get_adapter",
+                        return_value=reviewer_and_fixer):
+            code = engine.run_selection_workflow(
+                str(self.root / ".assent" / "assent.toml"),
+                self.root / ".assent", ["plan01"], auto_fix=True)
+
+        self.assertEqual(code, 0)
+        resolved_tip = gitops.branch_tip(self.root, branch)
+        self.assertEqual(
+            gitops.commit_parents(self.root, resolved_tip),
+            (source_tip, target_tip))
+        self.assertEqual(gitops.commit_of(self.root, "HEAD"), target_tip)
+        self.assertEqual(len(reviewer_and_fixer.calls), 2)
+        self.assertIn("Do not stage or commit", reviewer_and_fixer.calls[1][0])
+        self.assertEqual(parse_task_file(task_path).status, "DONE")
+
     def test_repair_gate_failure_preserves_reviewer_step_identity(self):
         task_path = self.write_task(1, status="DONE")
         cfg = self.build(extra_config=self.review_rounds(1))

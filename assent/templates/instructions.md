@@ -186,7 +186,10 @@ create base ambiguity or a refusal. If an upstream advances, preserve the
 downstream result but treat its stack as stale and use rework/reject or a new
 folder. Verify the combined candidate before accepting upstream then
 dependent; matching receipts can be reused, and accept does not rerun the
-complete suite. Conflicts are human decisions. Cleanup is upstream-first and
+complete suite. Conflicts are human decisions unless the same invocation
+explicitly combines `run --verify --auto-fix` with a configured selection
+reviewer/fixer/action sequence; that bounded exception still leaves final
+approval to `accept`. Cleanup is upstream-first and
 must retain source evidence until direct dependents are accepted and proven
 integrated.
 
@@ -401,6 +404,18 @@ Complete verification still follows a successful run under the configured
 receipt policy or an explicit `--verify`. Its absence, a missing receipt, or an
 unrun full suite is never a reviewer failure; only a concrete local focused-test
 gap tied to an existing task requirement may be considered by review.
+
+For an exact selection, `full_verify` owns candidate construction and complete
+verification; task and plan sessions never run either. Under the combined
+`run --verify --auto-fix` authorization only, a candidate conflict is collected
+as one complete typed wave before any full verifier. The read-only selection
+reviewer assigns every conflict path to existing task ownership, and the next
+explicit write-capable selection fixer position repairs target-alone conflicts
+inside Assent's managed reconcile worktree or peer-only conflicts in their own
+source tasks. A conflict fixer may not run Git, Assent, focused tests, or the
+full suite; the scheduler owns every Git mutation and every gate. Each explicit
+reviewer/fixer/action position is finite, content-identical completed work is
+reused on resume, and exhaustion retains all edits for human adjudication.
 
 ## Review and acceptance meeting handoff
 

@@ -9,6 +9,7 @@ evidence itself -- its schema, bytes, and freshness rules -- belongs to
 from __future__ import annotations
 
 import contextlib
+import json
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -472,6 +473,81 @@ class BatchConflict:
 
 
 @dataclass(frozen=True)
+class SelectionCandidateConflict:
+    """One source-bound conflict found before an exact-selection verifier runs."""
+
+    folder: str
+    paths: tuple[str, ...]
+    source_tip: str
+    target_tip: str
+    prefix_sources: tuple[tuple[str, str], ...]
+    prefix_tree: str
+    dependent_exclusions: tuple[str, ...]
+    kind: str
+
+
+@dataclass(frozen=True)
+class SelectionConflictEvidence(FullVerifyEvidence):
+    """Complete candidate-conflict wave carried beside ordinary action evidence."""
+
+    conflicts: tuple[SelectionCandidateConflict, ...] = ()
+
+
+_SELECTION_CONFLICT_PREFIX = "SELECTION_CONFLICT "
+
+
+def selection_conflict_line(conflict: SelectionCandidateConflict) -> str:
+    """Encode one typed conflict for the durable selection workflow cursor."""
+    return _SELECTION_CONFLICT_PREFIX + json.dumps({
+        "folder": conflict.folder,
+        "paths": list(conflict.paths),
+        "source_tip": conflict.source_tip,
+        "target_tip": conflict.target_tip,
+        "prefix_sources": [list(item) for item in conflict.prefix_sources],
+        "prefix_tree": conflict.prefix_tree,
+        "dependent_exclusions": list(conflict.dependent_exclusions),
+        "kind": conflict.kind,
+    }, separators=(",", ":"), sort_keys=True)
+
+
+def selection_conflicts_from_evidence(
+        evidence: Sequence[str]) -> tuple[SelectionCandidateConflict, ...]:
+    """Decode and validate the conflict wave persisted by a selection action."""
+    conflicts: list[SelectionCandidateConflict] = []
+    for line in evidence:
+        if not line.startswith(_SELECTION_CONFLICT_PREFIX):
+            continue
+        try:
+            value = json.loads(line[len(_SELECTION_CONFLICT_PREFIX):])
+            prefix = value["prefix_sources"]
+            conflict = SelectionCandidateConflict(
+                value["folder"], tuple(value["paths"]), value["source_tip"],
+                value["target_tip"],
+                tuple((item[0], item[1]) for item in prefix),
+                value["prefix_tree"], tuple(value["dependent_exclusions"]),
+                value["kind"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError,
+                IndexError) as error:
+            raise AssentError(
+                "selection candidate conflict evidence is malformed") from error
+        if (not conflict.folder or not conflict.paths
+                or not all(isinstance(item, str) and item
+                           for item in conflict.paths)
+                or not conflict.source_tip or not conflict.target_tip
+                or not conflict.prefix_tree
+                or conflict.kind not in {"target_alone", "peer_only"}
+                or not all(isinstance(folder, str) and folder
+                           and isinstance(tip, str) and tip
+                           for folder, tip in conflict.prefix_sources)
+                or not all(isinstance(item, str) and item
+                           for item in conflict.dependent_exclusions)):
+            raise AssentError(
+                "selection candidate conflict evidence has invalid values")
+        conflicts.append(conflict)
+    return tuple(conflicts)
+
+
+@dataclass(frozen=True)
 class FilteredBatchChain:
     """The merge chain that survived, plus every folder it had to leave out.
 
@@ -495,6 +571,62 @@ class FilteredBatchChain:
         """Every excluded folder: the conflicting ones, then their downstream."""
         return (tuple(conflict.folder for conflict in self.conflicts)
                 + tuple(folder for folder, _cause in self.skipped_after))
+
+
+@dataclass(frozen=True)
+class _ReviewedSelectionChain:
+    """One complete conflict scan, including every independent clean merge."""
+
+    sources: tuple[tuple[str, str], ...]
+    step_trees: tuple[str, ...]
+    conflicts: tuple[SelectionCandidateConflict, ...]
+
+
+def _merge_chain_collecting_selection_conflicts(
+        candidate: Path, main: Path, target_tip: str,
+        sources: Sequence[tuple[str, str]], graph: dict
+        ) -> _ReviewedSelectionChain:
+    """Collect one complete exact-selection conflict wave without verifying.
+
+    A conflicting folder and every selected dependent are excluded from the
+    remainder of this diagnostic build, while later independent sources are
+    still attempted.  This is evidence collection only: the exact selection is
+    neither shrunk nor certified, and the caller starts no verifier when any
+    conflict was found.
+    """
+    queued = [folder for folder, _tip in sources]
+    excluded: set[str] = set()
+    merged: list[tuple[str, str]] = []
+    step_trees: list[str] = []
+    conflicts: list[SelectionCandidateConflict] = []
+    for folder, source_tip in sources:
+        if folder in excluded:
+            continue
+        prefix_sources = tuple(merged)
+        prefix_tree = gitops.tree_of(candidate, "HEAD")
+        previous = gitops.commit_of(candidate, "HEAD")
+        outcome = gitops.merge_no_ff(
+            candidate, source_tip,
+            f"verify(batch/{folder}): temporary integration candidate")
+        if not outcome.ok:
+            dependents = _dependent_folders(graph, folder, queued)
+            excluded.update(dependents)
+            target_alone = _conflicts_with_target_alone(
+                main, BatchConflict(folder, tuple(outcome.conflicts),
+                                    source_tip), target_tip)
+            conflicts.append(SelectionCandidateConflict(
+                folder, tuple(outcome.conflicts), source_tip, target_tip,
+                prefix_sources, prefix_tree, dependents,
+                "target_alone" if target_alone else "peer_only"))
+            continue
+        if gitops.commit_parents(candidate, "HEAD") != (previous, source_tip):
+            raise AssentError(
+                f"merging {folder} did not produce the expected two-parent "
+                "selection candidate")
+        merged.append((folder, source_tip))
+        step_trees.append(gitops.tree_of(candidate, "HEAD"))
+    return _ReviewedSelectionChain(
+        tuple(merged), tuple(step_trees), tuple(conflicts))
 
 
 def _merge_chain_skipping_conflicts(
@@ -703,6 +835,23 @@ def _report_selected_conflict(chain: BatchCandidate, main: Path,
           f"{folder}` remain explicit alternatives.")
 
 
+def _report_selection_conflict_wave(
+        conflicts: Sequence[SelectionCandidateConflict]) -> None:
+    """Report the complete scheduler-owned conflict scan without human advice."""
+    print("verify selected: candidate construction encountered merge "
+          "conflicts; the full verifier did not run.")
+    for conflict in conflicts:
+        print(f"verify selected: {conflict.folder} has a "
+              f"{conflict.kind.replace('_', '-')} conflict on:")
+        for path in conflict.paths:
+            print(f"  - {path}")
+        if conflict.dependent_exclusions:
+            print("  dependent exclusions: "
+                  + ", ".join(conflict.dependent_exclusions))
+    print("verify selected: the complete exact selection remains required; "
+          "no prefix was accepted and no full verifier ran.")
+
+
 def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                          confirm: Callable[[str], bool],
                          selected_folders: Sequence[str] | None = None, *,
@@ -813,7 +962,34 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
         with gitops.temporary_integration_worktree(
                 main, "batch", target_tip) as (candidate, _branch):
             if exact:
-                chain = merge_chain(candidate, selection.sources)
+                reviewed = (_merge_chain_collecting_selection_conflicts(
+                    candidate, main, target_tip, selection.sources, graph)
+                    if action_results is not None else None)
+                if reviewed is not None and reviewed.conflicts:
+                    _report_selection_conflict_wave(reviewed.conflicts)
+                    encoded = tuple(
+                        selection_conflict_line(item)
+                        for item in reviewed.conflicts)
+                    if len(encoded) > 15 or any(len(item) > 4096
+                                               for item in encoded):
+                        raise AssentError(
+                            "selection conflict wave is too large for durable "
+                            "workflow evidence")
+                    action_results.append(SelectionConflictEvidence(
+                        ("TARGET_CONFLICT" if all(
+                            item.kind == "target_alone"
+                            for item in reviewed.conflicts)
+                         else "PEER_CONFLICT"),
+                        selection.folders, target_tip,
+                        tuple(tip for _folder, tip in selection.sources),
+                        (reviewed.step_trees[-1] if reviewed.step_trees else
+                         gitops.tree_of(main, target_tip)),
+                        digest, shared_before, 1, encoded, False,
+                        reviewed.conflicts))
+                    return 1
+                chain = (BatchCandidate(reviewed.step_trees)
+                         if reviewed is not None
+                         else merge_chain(candidate, selection.sources))
                 if not chain.ok:
                     _report_selected_conflict(
                         chain, main, target_tip, selection.sources)

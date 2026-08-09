@@ -471,6 +471,27 @@ summary = "checkpoint-resume requested; progress kept, immediately resuming the 
 detail = '''The exact final control record was received; no quota wait, adapter rotation, or retry was used.'''
 ```
 
+## Workflow ownership and scheduler actions
+
+`[workflow].task` roles own one task's implementation and may write only that
+task's scope. `[workflow].plan` roles own the plan accountability unit and may
+write only the union of its task scopes. `[workflow].selection` roles own an
+exact multi-plan decision or repair assignment; they never acquire task-file,
+receipt, acceptance, target-ref, or Git ownership. The scheduler alone owns
+the `full_test` action available at task/plan positions and the `full_verify`
+action available at selection positions. No AI role may invoke either action,
+the complete suite, Git, or Assent directly when its scheduler prompt forbids
+them.
+
+A selection conflict-repair unit is expressed only by explicit ordered
+positions: `full_verify`, a verdict-producing read-only reviewer, a writable
+non-verdict fixer authorization, then another `full_verify`. Repeating those
+positions is the finite repair budget; omission or exhaustion authorizes no
+implicit session. Candidate-conflict evidence and the selection cursor are
+derived runtime state. Resume reuses content-identical source, target, prefix,
+merge, focused-gate, and receipt evidence; it never invents a current-folder
+pointer, silently shrinks the selection, or treats a receipt as source truth.
+
 ## CLI and task-selection rules
 
 The exact `run`/`verify`/`accept`/`clean`/`archive`/`reject`/`rework` command

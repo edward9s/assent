@@ -153,12 +153,13 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
 
-    def test_workflow_contract_and_template_define_the_two_execution_layers(self):
+    def test_workflow_contract_and_template_define_the_three_execution_layers(self):
         workflow = " ".join(
             contracts.installed_contract_text("workflow.md").split())
         for phrase in (
                 "`task` selects task-scoped context",
                 "`plan` selects plan-scoped context",
+                "[workflow].selection",
                 "not permission",
                 "The selected role's `[abilities]` carry what that session does",
                 "The only special behavior the engine infers from a role",
@@ -181,7 +182,7 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(template_phrase=phrase):
                 self.assertIn(phrase, configuration)
         prompts = re.findall(r'^# prompt = "([^"]+)"$', configuration, re.MULTILINE)
-        self.assertEqual(len(prompts), 2)
+        self.assertEqual(len(prompts), 3)
         for prompt in prompts:
             with self.subTest(prompt=prompt):
                 self.assertFalse(
@@ -814,6 +815,34 @@ class TestContractContent(unittest.TestCase):
         for phrase in translated_required:
             with self.subTest(chinese_contract=phrase):
                 self.assertIn("".join(phrase.split()), chinese_contract)
+
+    def test_selection_conflict_repair_is_owned_by_packaged_contracts(self):
+        install_global_contracts(self)
+        format_text = contracts.installed_contract_text("format.md")
+        workflow_text = " ".join(
+            contracts.installed_contract_text("workflow.md").split())
+        instructions_text = " ".join(
+            contracts.installed_contract_text("instructions.md").split())
+        configuration = (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
+            encoding="utf-8")
+
+        for phrase in (
+                "[workflow].task", "[workflow].plan", "[workflow].selection",
+                "full_test", "full_verify", "content-identical"):
+            with self.subTest(format_phrase=phrase):
+                self.assertIn(phrase, format_text)
+        for phrase in (
+                "typed conflict wave", "target-alone", "peer-only",
+                "base/ours/theirs", "zero full-test runs", "never accepts a prefix"):
+            with self.subTest(workflow_phrase=phrase):
+                self.assertIn(phrase, workflow_text)
+        for phrase in (
+                "run --verify --auto-fix", "may not run Git", "full suite",
+                "reviewer/fixer/action"):
+            with self.subTest(instructions_phrase=phrase):
+                self.assertIn(phrase, instructions_text)
+        self.assertIn("selection = [", configuration)
+        self.assertIn('role = "selection_fixer"', configuration)
 
     def test_round_interruption_and_gated_settle_are_documented(self):
         """Interrupted-round recovery, the gated settle, the failing-gate

@@ -39,15 +39,31 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 # writes = false
 # gate = true
 # produces_verdict = true
+# [abilities.selection_fix]
+# prompt = "Resolve the reviewed exact-selection conflict assignment."
+# writes = true
+# gate = false
 # [agents.worker]
 # ability = ["execute"]
 # [agents.folder_reviewer]
 # ability = ["review"]
 # model = "prime"
 # effort = "heavy"
+# [agents.selection_fixer]
+# ability = ["selection_fix"]
+# model = "prime"
+# effort = "heavy"
 # [workflow]
 # task = [{ role = "worker" }]
 # plan = [{ role = "folder_reviewer", adapter = "codex" }]
+# selection = [
+#   { action = "full_verify" },
+#   { role = "folder_reviewer", adapter = "codex" },
+#   { role = "selection_fixer" },
+#   { action = "full_verify" },
+# ]
+# Each reviewer/fixer pair is one finite conflict-repair position. Repeat the
+# pair plus full_verify explicitly to authorize another candidate rebuild.
 
 [adapter]
 # One adapter name or a non-empty list of names. A list rotates in order and

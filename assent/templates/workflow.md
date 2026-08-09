@@ -238,6 +238,39 @@ conflicting folder against the advanced target; `assent rework <FOLDER> <TASK>`
 and `assent reject <FOLDER>` remain explicit alternatives. The exact request
 never asks to skip or silently shrinks its set.
 
+The only automatic exception is the combined `assent run ... --verify
+--auto-fix` `[workflow].selection` sequence. Its `full_verify` action first performs a
+candidate-only scan and starts zero full-test runs when conflicts exist. One
+typed conflict wave records every independently discoverable conflicting
+folder and path, target/source/compatible-prefix identities, excluded selected
+dependents, and `target_alone` versus `peer_only`. The next explicit read-only
+selection reviewer must assign every folder/path to exactly one existing task;
+the following explicit write-capable selection fixer position authorizes the
+whole wave, and a later `full_verify` action is the only way to rebuild and run
+the real full verifier. The selection remains exact throughout: Assent never
+accepts a prefix, asks to skip, changes the target, or publishes anything.
+
+A target-alone assignment reuses the source-first `assent-reconcile/<folder>`
+transaction. The scheduler supplies the configured fixer every task contract
+and bounded base/ours/theirs evidence and permits writes only to Git's exact
+conflict paths; the AI may not stage, commit, change refs, invoke Assent, or run
+focused or complete tests. Assent then applies the ordinary continue checks,
+creates the merge, fast-forwards only the source, invalidates source-bound
+receipts, and cleans managed resources. A peer-only assignment never merges a
+speculative peer: it reopens the exact reviewed existing task set and supplies
+the compatible-prefix and three-way evidence as read-only repair context.
+Normal scope gates, task focused checks, final focused sweep, checkpoints, and
+source-transition evidence apply before the exact candidate is rebuilt.
+
+The selection cursor and reconcile Git facts recover preparation, AI editing,
+continue, source fast-forward, cleanup, and rebuild by content identity. A
+matching completed merge or PASSED receipt is reused instead of duplicated;
+target/source drift, malformed evidence, ambiguous ownership, out-of-scene
+writes, remaining markers, and exhausted reviewer/fixer/action positions fail
+closed while retaining edits. A conflict wave consumes no `full_verify`; a
+real verifier starts only after a complete rebuild is conflict-free, and final
+success requires one fresh PASSED receipt for the entire snapshotted set.
+
 When `status`, `check`, and `report` state `FOLDER` explicitly they act only on
 that folder, and act on all folders when it is omitted. `check` additionally
 validates the full dependency graph and cycles; a read-only command that hits an
