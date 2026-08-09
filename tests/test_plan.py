@@ -9,11 +9,15 @@ from pathlib import Path
 from assent import AssentError
 from assent.plan import (Plan, add_scope_entries, append_entry,
                          journal_path_for, parse_task_file, read_entries,
+                         read_selection_workflow_state,
                          read_workflow_state,
+                         SelectionWorkflowState,
                          same_except_status, scope_text_with_entries,
                          scope_text_without_entries,
-                         set_status, task_text_sha256, WorkflowState,
-                         workflow_state_path, write_workflow_state)
+                         set_status, task_text_sha256, TaskWorkflowAction,
+                         WorkflowState, selection_workflow_state_path,
+                         workflow_state_path, write_selection_workflow_state,
+                         write_workflow_state)
 
 _OK = 'python -c "raise SystemExit(0)"'
 
@@ -71,11 +75,50 @@ class TestParseTaskFile(PlanTestCase):
 
     def test_workflow_state_round_trips_started_boundary(self):
         state = WorkflowState(
-            "task", "t001", 2, False, "abc123", ("PASS: focused",))
+            "task", "t001", 2, False, "abc123", ("PASS: focused",),
+            "full_test", "PASSED", "tree123", 0, ("tests passed",))
         write_workflow_state(self.dir, state)
 
         self.assertEqual(read_workflow_state(self.dir), state)
         self.assertEqual(workflow_state_path(self.dir).name, "_workflow.toml")
+
+    def test_selection_workflow_state_round_trips_exact_identities(self):
+        state = SelectionWorkflowState(
+            ("one", "two"), "refs/heads/main", "target123",
+            ("source1", "source2"), 1, "full_verify", "FAILED",
+            "candidate123", 1, ("verification failed",), "verify123",
+            "shared123", "NEEDS_REPAIR")
+        write_selection_workflow_state(self.dir, state)
+
+        self.assertEqual(read_selection_workflow_state(self.dir), state)
+        self.assertEqual(
+            selection_workflow_state_path(self.dir).name,
+            "_selection_workflow.toml")
+
+    def test_workflow_cursors_reject_invalid_status_and_phase(self):
+        folder = WorkflowState(
+            "task", "t001", 0, True, "base", (), "full_test", "PASSED",
+            "tree", 0, ())
+        write_workflow_state(self.dir, folder)
+        path = workflow_state_path(self.dir)
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                'action_status = "PASSED"', 'action_status = "UNKNOWN"'),
+            encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "invalid values"):
+            read_workflow_state(self.dir)
+
+        selection = SelectionWorkflowState(
+            ("one",), "main", "target", ("source",), 0,
+            repair_phase="RECHECK")
+        write_selection_workflow_state(self.dir, selection)
+        path = selection_workflow_state_path(self.dir)
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                'repair_phase = "RECHECK"', 'repair_phase = "UNKNOWN"'),
+            encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "invalid values"):
+            read_selection_workflow_state(self.dir)
 
     def test_unicode_name_keeps_english_title_and_pairs_journal_without_translation(self):
         path = self.write("t001_中文任務.e.toml", task_text(title="English task title"))
@@ -142,6 +185,33 @@ class TestParseTaskFile(PlanTestCase):
         self.assertIsNone(absent.workflow)
         self.assertEqual(stated.workflow, ("prepare", "implement"))
         self.assertEqual(empty.workflow, ())
+
+    def test_task_workflow_accepts_full_test_beside_a_role(self):
+        task = parse_task_file(self.write(
+            "t001_action.e.toml", task_text(
+                extra_line=('workflow = [{ role = "implement" }, '
+                            '{ action = "full_test" }]'))))
+
+        self.assertEqual(
+            task.workflow, ("implement", TaskWorkflowAction("full_test")))
+
+    def test_task_workflow_rejects_action_only_mixed_and_wrong_action(self):
+        cases = (
+            ('[{ action = "full_test" }]', "at least one role"),
+            ('[{ role = "implement", action = "full_test" }]', "exactly one"),
+            ('[{ role = "implement" }, { action = "full_verify" }]',
+             "not valid"),
+            ('[{ role = "implement" }, { action = "deploy" }]',
+             "unknown action"),
+            ('[{ role = "implement" }, { action = "full_test", adapter = "codex" }]',
+             "undefined fields"),
+        )
+        for value, message in cases:
+            with self.subTest(value=value):
+                path = self.write(
+                    "t001_bad.e.toml", task_text(extra_line=f"workflow = {value}"))
+                with self.assertRaisesRegex(AssentError, message):
+                    parse_task_file(path)
 
     def test_task_workflow_rejects_malformed_entries(self):
         for value in ('"implement"', '["implement"]', '[{ role = "" }]',

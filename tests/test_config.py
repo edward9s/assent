@@ -14,7 +14,7 @@ from unittest import mock
 from assent import AssentError
 from assent.config import (BUILTIN_LAYER, PROJECT_LAYER, USER_LAYER,
                            _ADAPTER_NAMES, list_task_folders, load_config,
-                           validate_config)
+                           validate_config, WorkflowActionStep)
 from assent.init import _split_config_template, init as run_init
 from assent.user_home import ASSENT_HOME_ENV, user_assent_dir, user_config_path
 
@@ -102,6 +102,7 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.codex_efforts, {})
         self.assertEqual(cfg.codex_tier_efforts, {})
         self.assertEqual(cfg.receipt_refresh, "manual")
+        self.assertEqual(cfg.workflow_selection, ())
 
     def test_scalar_and_singleton_adapter_name_are_equivalent(self):
         scalar = load_config(self.write('[adapter]\nname = "claude"\n'), "plan01")
@@ -206,6 +207,7 @@ class TestLoadConfig(ConfigTestCase):
                          ".assent/plan01/_verification.toml",
                          ".assent/plan01/_auto_fix.toml",
                          ".assent/plan01/_workflow.toml",
+                         ".assent/_selection_workflow.toml",
                          ".assent/manifest.toml", ".assent/manifest.lock"))
 
     def test_provided_folder_updates_all_derived_paths(self):
@@ -227,6 +229,7 @@ class TestLoadConfig(ConfigTestCase):
                           ".assent/parallel02/_verification.toml",
                           ".assent/parallel02/_auto_fix.toml",
                           ".assent/parallel02/_workflow.toml",
+                          ".assent/_selection_workflow.toml",
                           ".assent/manifest.toml", ".assent/manifest.lock"))
 
     def test_workflow_omitted_and_empty_boundaries(self):
@@ -244,6 +247,53 @@ class TestLoadConfig(ConfigTestCase):
             "[workflow]\ntask = []\n"), "plan01")
         self.assertEqual(empty_task.workflow_plan, ())
         self.assertEqual(empty_task.workflow_task, ())
+
+    def test_workflow_builtin_actions_are_level_specific(self):
+        cfg = load_config(self.write(
+            _WORKFLOW_ROLES +
+            '[workflow]\n'
+            'task = [{ role = "fixer" }, { action = "full_test" }]\n'
+            'plan = [{ action = "full_test" }]\n'
+            'selection = [{ action = "full_verify" }]\n'), "plan01")
+
+        self.assertEqual(cfg.workflow_task[0].role, "fixer")
+        self.assertEqual(cfg.workflow_task[1], WorkflowActionStep("full_test"))
+        self.assertEqual(cfg.workflow_plan, (WorkflowActionStep("full_test"),))
+        self.assertEqual(
+            cfg.workflow_selection, (WorkflowActionStep("full_verify"),))
+
+    def test_workflow_actions_reject_mixed_wrong_level_and_action_only_task(self):
+        cases = (
+            ('[workflow]\nplan = [{ role = "x", action = "full_test" }]\n',
+             "exactly one"),
+            ('[workflow]\nplan = [{ action = "full_test", adapter = "codex" }]\n',
+             "unknown keys"),
+            ('[workflow]\ntask = [{ action = "full_verify" }]\n',
+             r"not valid.*task"),
+            ('[workflow]\nplan = [{ action = "full_verify" }]\n',
+             r"not valid.*plan"),
+            ('[workflow]\nselection = [{ action = "full_test" }]\n',
+             r"not valid.*selection"),
+            ('[workflow]\nselection = [{ action = "deploy" }]\n',
+             "unknown action"),
+            ('[workflow]\ntask = [{ action = "full_test" }]\n',
+             "at least one role"),
+        )
+        for text, message in cases:
+            with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):
+                load_config(self.write(text), "plan01")
+
+    def test_workflow_selection_role_uses_plan_role_resolution(self):
+        cfg = load_config(self.write(
+            _WORKFLOW_ROLES +
+            '[workflow]\nselection = ['
+            '{ role = "reviewer", adapter = "codex" }]\n'), "plan01")
+
+        step = cfg.workflow_selection[0]
+        self.assertEqual(step.role, "reviewer")
+        self.assertEqual(step.adapter, "codex")
+        self.assertEqual(step.requested_model, "gpt-5.6-sol")
+        self.assertEqual(step.requested_effort, "high")
 
     def test_workflow_verdict_step_reuses_adapter_mappings(self):
         cfg = load_config(self.write(

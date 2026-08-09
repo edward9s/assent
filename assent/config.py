@@ -203,6 +203,13 @@ class WorkflowTaskStep:
 
 
 @dataclass(frozen=True)
+class WorkflowActionStep:
+    """One narrowly supported scheduler-owned workflow action."""
+
+    action: str
+
+
+@dataclass(frozen=True)
 class ConfigSource:
     """One layer that contributed to the effective settings."""
 
@@ -255,9 +262,10 @@ class Config:
     # adapter always states one instead of inheriting the CLI default.
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
     receipt_refresh: str = "manual"  # "manual" = explicit verify only, "auto" = also at run closeout
-    workflow_plan: tuple[WorkflowPlanStep, ...] = ()
+    workflow_plan: tuple[WorkflowPlanStep | WorkflowActionStep, ...] = ()
     # None means today's implicit task session; an explicit empty tuple is distinct.
-    workflow_task: tuple[WorkflowTaskStep, ...] | None = None
+    workflow_task: tuple[WorkflowTaskStep | WorkflowActionStep, ...] | None = None
+    workflow_selection: tuple[WorkflowPlanStep | WorkflowActionStep, ...] = ()
     abilities: dict[str, Ability] = field(default_factory=dict)
     agents: dict[str, Agent] = field(default_factory=dict)
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
@@ -384,6 +392,11 @@ class Config:
         return self.git_rel(self.tasks_dir / "_workflow.toml")
 
     @property
+    def selection_workflow_state_rel(self) -> str:
+        """The project-level, derived exact-selection workflow cursor."""
+        return self.git_rel(self.assent_dir / "_selection_workflow.toml")
+
+    @property
     def shared_paths_manifest_rel(self) -> str:
         """The local reviewed-shared-path cache; local memory, never project source."""
         return self.git_rel(self.assent_dir / MANIFEST_NAME)
@@ -397,7 +410,7 @@ class Config:
         """Runtime artifacts: excluded from the clean check, scope check, and checkpoint commit."""
         return (self.runtime_log_rel, self.report_rel, self.lockfile_rel,
                 self.verification_receipt_rel, self.auto_fix_state_rel,
-                self.workflow_state_rel,
+                self.workflow_state_rel, self.selection_workflow_state_rel,
                 self.shared_paths_manifest_rel, self.shared_paths_lock_rel)
 
 
@@ -568,10 +581,30 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
         owner = f"workflow.{key}[{index}]"
         if not isinstance(value, dict):
             raise AssentError(f"Config {owner} must be an inline table")
-        allowed = {"role", "adapter"} if key == "plan" else {"role"}
+        has_role = "role" in value
+        has_action = "action" in value
+        if has_role == has_action:
+            raise AssentError(
+                f"Config {owner} must contain exactly one of role or action")
+        if has_action:
+            _known_keys(value, owner, {"action"})
+            action = guard.text(
+                _typed(value, f"[{owner}]", "action", str, None),
+                f"workflow.{key}.{index}.action")
+            allowed_actions = {"task": {"full_test"},
+                               "plan": {"full_test"},
+                               "selection": {"full_verify"}}[key]
+            if action not in {"full_test", "full_verify"}:
+                raise AssentError(f"Config {owner} has unknown action {action!r}")
+            if action not in allowed_actions:
+                valid = "/".join(sorted(allowed_actions))
+                raise AssentError(
+                    f"Config {owner} action {action!r} is not valid under"
+                    f" [workflow].{key} (valid action: {valid})")
+            entries.append(WorkflowActionStep(action))
+            continue
+        allowed = {"role", "adapter"} if key in {"plan", "selection"} else {"role"}
         _known_keys(value, owner, allowed)
-        if "role" not in value:
-            raise AssentError(f"Config {owner} is missing required key: role")
         role = guard.text(_typed(value, f"[{owner}]", "role", str, None),
                           f"workflow.{key}.{index}.role")
         resolved = resolve_agent_role(role, agents, abilities)
@@ -585,7 +618,7 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
                     f"Config {owner} role {role!r} produces a verdict and requires adapter")
             adapter = guard.text(
                 _typed(value, f"[{owner}]", "adapter", str, None),
-                f"workflow.plan.{index}.adapter")
+                f"workflow.{key}.{index}.adapter")
             if adapter not in _ADAPTER_NAMES:
                 raise AssentError(
                     f"Config {owner}.adapter = {adapter!r} is not a registered adapter"
@@ -599,7 +632,39 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
                 raise AssentError(
                     f"Config {owner} role {role!r} produces_verdict = false and must not state adapter")
             entries.append((role, None, resolved))
+    if key == "task" and entries and not any(
+            isinstance(entry, WorkflowTaskStep) for entry in entries):
+        raise AssentError(
+            "Config [workflow].task must include at least one role")
     return entries
+
+
+def _resolve_accountability_steps(
+        cfg: Config, raw_steps, owner: str
+) -> tuple[WorkflowPlanStep | WorkflowActionStep, ...]:
+    """Resolve plan/selection roles while preserving built-in action positions."""
+    steps: list[WorkflowPlanStep | WorkflowActionStep] = []
+    for raw in raw_steps or ():
+        if isinstance(raw, WorkflowActionStep):
+            steps.append(raw)
+            continue
+        role, name, resolved = raw
+        if name is None:
+            steps.append(WorkflowPlanStep(role, None, resolved))
+            continue
+        adapter_settings = cfg.adapter_settings(name)
+        assert resolved.model is not None and resolved.effort is not None
+        requested_effort = adapter_settings.resolve_requested_effort(
+            resolved.model, resolved.effort)
+        if requested_effort is None:
+            raise AssentError(
+                f"[workflow].{owner} role {role!r} effort did not resolve"
+                " to a requested value")
+        steps.append(WorkflowPlanStep(
+            role, name, resolved, adapter_settings.command,
+            adapter_settings.extra_args,
+            adapter_settings.resolve_model(resolved.model), requested_effort))
+    return tuple(steps)
 
 
 def _parse_adapter_names(section: dict, guard: "_BlankGuard") -> tuple[str, ...]:
@@ -902,13 +967,15 @@ def load_config(path: str | Path, folder: str) -> Config:
     auto_fix = _section(data, "auto_fix")
     _known_keys(auto_fix, "auto_fix", set())
     workflow = _section(data, "workflow")
-    _known_keys(workflow, "workflow", {"plan", "task"})
+    _known_keys(workflow, "workflow", {"plan", "selection", "task"})
     guard = _BlankGuard(provenance, sources)
     adapter_names = _parse_adapter_names(adapter, guard)
     raw_workflow_plan = _parse_workflow_entries(
         workflow, "plan", guard, agents, abilities)
     raw_workflow_task = _parse_workflow_entries(
         workflow, "task", guard, agents, abilities)
+    raw_workflow_selection = _parse_workflow_entries(
+        workflow, "selection", guard, agents, abilities)
     claude_efforts, claude_tier_efforts = _effort_maps(
         claude, "adapter.claude", guard)
     codex_efforts, codex_tier_efforts = _effort_maps(
@@ -992,27 +1059,27 @@ def load_config(path: str | Path, folder: str) -> Config:
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
-    steps: list[WorkflowPlanStep] = []
-    for role, name, resolved in raw_workflow_plan or ():
-        if name is None:
-            steps.append(WorkflowPlanStep(role, None, resolved))
-            continue
-        adapter_settings = cfg.adapter_settings(name)
-        assert resolved.model is not None and resolved.effort is not None
-        requested_effort = adapter_settings.resolve_requested_effort(
-            resolved.model, resolved.effort)
-        if requested_effort is None:
-            raise AssentError(
-                f"[workflow].plan role {role!r} effort did not resolve to a requested value")
-        steps.append(WorkflowPlanStep(
-            role, name, resolved, adapter_settings.command,
-            adapter_settings.extra_args,
-            adapter_settings.resolve_model(resolved.model), requested_effort))
-    if (steps and not any(step.produces_verdict for step in steps)
+    plan_steps = _resolve_accountability_steps(cfg, raw_workflow_plan, "plan")
+    selection_steps = _resolve_accountability_steps(
+        cfg, raw_workflow_selection, "selection")
+    plan_roles = [step for step in plan_steps
+                  if isinstance(step, WorkflowPlanStep)]
+    plan_has_action = len(plan_roles) != len(plan_steps)
+    if (plan_roles and not plan_has_action
+            and not any(step.produces_verdict for step in plan_roles)
             and raw_workflow_task != []):
         raise AssentError(
             "Config [workflow].plan cannot open any session: no step's role produces a verdict")
-    cfg.workflow_plan = tuple(steps)
+    selection_roles = [step for step in selection_steps
+                       if isinstance(step, WorkflowPlanStep)]
+    selection_has_action = len(selection_roles) != len(selection_steps)
+    if (selection_roles and not selection_has_action
+            and not any(step.produces_verdict for step in selection_roles)):
+        raise AssentError(
+            "Config [workflow].selection cannot open any session:"
+            " no step's role produces a verdict")
+    cfg.workflow_plan = plan_steps
     cfg.workflow_task = (None if raw_workflow_task is None
                          else tuple(raw_workflow_task))
+    cfg.workflow_selection = selection_steps
     return cfg
