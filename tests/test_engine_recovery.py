@@ -545,6 +545,79 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
         self.assertNotIn("agent", recovery)
         self.assertNotIn("requested_model", recovery)
 
+    def test_terminal_invalid_reviewer_writes_are_checkpointed_for_same_round(self):
+        cfg, path, worktree = self._reviewed_folder()
+        malformed = TaskResult(
+            0,
+            '{"type":"assent.auto_fix_review","verdict":"FIXED",'
+            '"findings":[{"task_id":"t001","path":"src/value.txt",'
+            '"summary":"stale","evidence":"missing required keys"}]}',
+            False, None)
+
+        def final_invalid(prompt):
+            self.assertIn("REVIEW OUTPUT CORRECTION REQUIRED", prompt)
+            (worktree / "src" / "value.txt").write_text(
+                "preserved malformed-review repair\n", encoding="utf-8")
+            return malformed
+
+        reviewer = ScriptedAdapter([malformed, final_invalid])
+        worker = ScriptedAdapter([])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 1)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
+        self.assertTrue(gitops.working_tree_status(
+            worktree, cfg.git_excludes).is_clean)
+        self.assertIn(
+            "wip(plan01/t001): recovered invalid reviewer writes, "
+            "scope-verified", self.subjects())
+        recovery = next(
+            entry for entry in read_entries(journal_path_for(path))
+            if entry["event"] == "auto_fix_invalid_output_recovery")
+        self.assertIn("did not advance the review cursor", recovery["detail"])
+        self.assertEqual(
+            (worktree / "src" / "value.txt").read_text(encoding="utf-8"),
+            "preserved malformed-review repair\n")
+
+        resumed_reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=resumed_reviewer,
+            auto_fix=True), 0)
+        self.assertEqual(worker.calls, [])
+        self.assertEqual(len(resumed_reviewer.calls), 1)
+        self.assertIn("Review stage: INITIAL", resumed_reviewer.calls[0][0])
+
+    def test_terminal_invalid_reviewer_writes_with_ambiguous_owner_stay_dirty(self):
+        cfg, _path, worktree = self._reviewed_folder(
+            extra_tasks=((2, "also"),))
+        malformed = TaskResult(
+            0,
+            '{"type":"assent.auto_fix_review","verdict":"FIXED",'
+            '"findings":[{"task_id":"t001","path":"src/value.txt",'
+            '"summary":"stale","evidence":"missing required keys"}]}',
+            False, None)
+
+        def write_then_fail(_prompt):
+            (worktree / "src" / "value.txt").write_text(
+                "ambiguous malformed-review repair\n", encoding="utf-8")
+            return malformed
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter([]),
+                auto_fix_adapter=ScriptedAdapter([malformed, write_then_fail]),
+                auto_fix=True), 1)
+        self.assertIn("explicit human recovery", out.getvalue())
+        self.assertFalse(gitops.working_tree_status(
+            worktree, cfg.git_excludes).is_clean)
+        self.assertFalse(any(
+            subject.startswith("wip(plan01/") for subject in self.subjects()))
+
     def _assert_refused(self, cfg, worktree):
         """The dirt reaches ensure_clean: no session, no checkpoint, nothing committed."""
         worker = ScriptedAdapter([])

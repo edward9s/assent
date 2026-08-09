@@ -227,6 +227,30 @@ Task contracts and journals:
 {management_evidence}
 """
 
+_AUTO_FIX_REVIEW_CORRECTION_EXAMPLE = (
+    '{"type":"assent.auto_fix_review","verdict":"FAIL","findings":['
+    '{"kind":"scope_amendment","task_id":"t001",'
+    '"path":"src/example.py","summary":"Required file is outside scope",'
+    '"evidence":"The task requires this exact file.",'
+    '"recommendation":"Add this exact path to the task scope.",'
+    '"scope_addition":{"path":"src/example.py",'
+    '"path_state":"existing_file"},"transition":"initial",'
+    '"prior_fingerprint":null,"transition_evidence":null}]}')
+
+
+def _auto_fix_review_correction(error: str, diagnostic: str) -> str:
+    """Tell the same reviewer exactly how its rejected terminal record failed."""
+    return (
+        "\n\nREVIEW OUTPUT CORRECTION REQUIRED\n"
+        "The exact review-record validator rejected the previous output:\n"
+        f"{error}\n"
+        "Bounded diagnostic of the rejected output:\n"
+        f"{diagnostic}\n"
+        "Return a corrected record without inferring, moving, or omitting fields. "
+        "Here is one schema-complete non-PASS JSON example; optional values "
+        "that are absent are null:\n"
+        f"{_AUTO_FIX_REVIEW_CORRECTION_EXAMPLE}")
+
 _AUTO_FIX_READ_ONLY_POLICY = """This is a blocking decision gate, never an
 implementation session. Do not edit, create, delete, rename, format, or
 otherwise write any project or management-plane file. Do not run tests,
@@ -2170,13 +2194,15 @@ def _run_auto_fix_review_once(
         gitops.working_tree_status(cfg.source_root, cfg.git_excludes)
         if cfg.source_root is not None else None)
     invalid_attempts = 0
+    attempt_prompt = prompt
     while True:
         print(f"Auto-fix review session: {session.agent} | "
               f"{review.model}->{session.requested_model} | "
               f"{review.effort}->{session.requested_effort}")
         try:
             result = reviewer.run_structured_task(
-                prompt, session.requested_model, session.requested_effort, cfg.root)
+                attempt_prompt, session.requested_model,
+                session.requested_effort, cfg.root)
         except KeyboardInterrupt:
             changed = _auto_fix_surface_change(
                 baseline, cfg, baseline_head, baseline_status,
@@ -2185,8 +2211,8 @@ def _run_auto_fix_review_once(
                 print("Auto-fix reviewer interruption interval contains project writes; "
                       "exact edits are preserved: "
                       + ", ".join(changed[:8]))
-                return _AutoFixReviewOutcome(
-                    130, human_reason="reviewer interrupted")
+                return finish(_AutoFixReviewOutcome(
+                    130, human_reason="reviewer interrupted"))
             else:
                 print("Auto-fix reviewer interrupted; no verdict was recorded.")
             return finish(_AutoFixReviewOutcome(
@@ -2199,7 +2225,7 @@ def _run_auto_fix_review_once(
                       if changed else "")
             print(f"Auto-fix reviewer infrastructure failure: {e}{suffix}")
             outcome = _AutoFixReviewOutcome(1, human_reason=str(e))
-            return outcome if changed else finish(outcome)
+            return finish(outcome)
 
         changed = _auto_fix_surface_change(
             baseline, cfg, baseline_head, baseline_status,
@@ -2218,9 +2244,9 @@ def _run_auto_fix_review_once(
                 " ..." if len(reported) > 8 else "")
             print("Protected project writes were detected during the reviewer interval; "
                   "the verdict was ignored and the exact edits are preserved "
-                  f"({shown}).")
-            return _AutoFixReviewOutcome(
-                1, human_reason="reviewer project writes detected")
+                  f"for explicit human recovery ({shown}).")
+            return finish(_AutoFixReviewOutcome(
+                1, human_reason="reviewer project writes detected"))
 
         if (result.checkpoint_resume and not result.quota_exhausted
                 and not result.stalled and result.exit_code != 0):
@@ -2261,10 +2287,16 @@ def _run_auto_fix_review_once(
                 print(f"Auto-fix reviewer returned invalid output ({e}); retrying "
                       f"({invalid_attempts}/{cfg.retry_per_task}). "
                       f"bounded diagnostic: {diagnostic}")
+                attempt_prompt = prompt + _auto_fix_review_correction(
+                    str(e), diagnostic)
                 continue
             print(f"Auto-fix reviewer returned invalid output after configured retries: {e}; "
                   f"bounded diagnostic: {diagnostic}")
-            return finish(_AutoFixReviewOutcome(1, human_reason=str(e)))
+            outcome = _AutoFixReviewOutcome(1, human_reason=str(e))
+            if changed:
+                outcome = _recover_invalid_reviewer_writes(
+                    cfg, plan, outcome, now)
+            return finish(outcome)
 
         try:
             resolved_record = auto_fix.validate_review_findings(record, plan)
@@ -2298,9 +2330,10 @@ def _run_auto_fix_review_once(
                     " ..." if len(outside) > 8 else "")
                 print("The review round wrote outside the declared scope of the "
                       "task its finding names; the verdict was ignored and the "
-                      f"exact edits are preserved ({shown}).")
-                return _AutoFixReviewOutcome(
-                    1, human_reason="review round wrote outside the named task scope")
+                      f"exact edits are preserved for explicit human recovery "
+                      f"({shown}).")
+                return finish(_AutoFixReviewOutcome(
+                    1, human_reason="review round wrote outside the named task scope"))
             # Git state belongs to the scheduler alone, so the round's approved
             # in-scope repair is checkpointed here.  The next round then reviews
             # a clean worktree and can name the exact repaired paths.
@@ -2372,6 +2405,76 @@ def _auto_fix_out_of_scope_writes(
             scope.extend(task.scope)
     return gitops.changes_outside_scope(
         cfg.root, list(dict.fromkeys(scope)), excludes=cfg.git_excludes)
+
+
+def _recover_invalid_reviewer_writes(
+        cfg: Config, plan: Plan, outcome: _AutoFixReviewOutcome,
+        now: Callable[[], datetime]) -> _AutoFixReviewOutcome:
+    """Checkpoint terminal malformed-output writes only for one proven owner."""
+    if gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
+        print("Invalid reviewer output changed project surfaces but left no "
+              "checkpointable source path; retained for explicit human recovery.")
+        return _AutoFixReviewOutcome(
+            outcome.code, outcome.state,
+            "invalid reviewer writes require explicit human recovery")
+
+    owners = [
+        task for task in plan.tasks
+        if not gitops.changes_outside_scope(
+            cfg.root, task.scope, excludes=_task_excludes(cfg, task))
+    ]
+    if len(owners) != 1:
+        reason = ("no task uniquely contains every preserved path"
+                  if not owners else
+                  "more than one task could own every preserved path")
+        print("Invalid reviewer output left source writes that cannot be "
+              f"attributed safely ({reason}); edits are retained for explicit "
+              "human recovery.")
+        return _AutoFixReviewOutcome(
+            outcome.code, outcome.state,
+            "invalid reviewer writes require explicit human recovery")
+
+    owner = owners[0]
+    try:
+        committed = gitops.commit_if_dirty(
+            cfg.root,
+            _checkpoint_subject(
+                cfg, "wip", owner,
+                "recovered invalid reviewer writes, scope-verified"),
+            cfg.git_excludes)
+    except (AssentError, OSError) as e:
+        print("Invalid reviewer source writes were scope-verified against "
+              f"{owner.id}, but the WIP checkpoint failed: {e}; edits are "
+              "retained for explicit human recovery.")
+        return _AutoFixReviewOutcome(
+            outcome.code, outcome.state,
+            "invalid reviewer writes could not be checkpointed")
+    if not committed:
+        print("Invalid reviewer source writes were scope-verified but no WIP "
+              "checkpoint could be created; retained for explicit human recovery.")
+        return _AutoFixReviewOutcome(
+            outcome.code, outcome.state,
+            "invalid reviewer writes could not be checkpointed")
+
+    try:
+        append_entry(
+            owner.journal_path, by="scheduler",
+            event="auto_fix_invalid_output_recovery",
+            summary=("Recovered invalid reviewer writes; scope-verified against "
+                     f"{owner.id} and kept in a WIP checkpoint"),
+            detail=("The write-capable reviewer exhausted its invalid-output "
+                    "retries after changing source. Every preserved path was "
+                    "mechanically contained by this task's declared scope; "
+                    "the scheduler kept its already-proven status and did not "
+                    "advance the review cursor."),
+            time_str=now().isoformat(timespec="seconds"))
+    except (AssentError, OSError) as e:
+        print("The invalid-reviewer WIP checkpoint was created, but scheduler "
+              f"recovery evidence could not be journaled: {e}")
+    print("Invalid reviewer source writes were scope-verified against "
+          f"{owner.id} and kept in a WIP checkpoint; the task status and "
+          "review cursor were not advanced.")
+    return outcome
 
 
 def _auto_fix_profile_for_task(cfg: Config, task: Task) -> _FixerProfile:

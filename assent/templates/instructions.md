@@ -290,6 +290,17 @@ exhaustion are normal lifecycle evidence and do not by themselves make a report
 stale; edits to task requirements, scope, verification, or other contract bytes
 remain structural drift.
 
+An invalid reviewer record is retried only within the configured adapter retry
+bound. The next prompt carries the exact validator error, a bounded diagnostic
+of the rejected output, and a schema-complete non-PASS example; the review
+context, workflow position, identity, source evidence, and durable cursor do
+not move. If the final invalid response left source edits, Assent creates a WIP
+checkpoint only when every path is mechanically contained by exactly one
+existing task's declared scope, journals scheduler recovery evidence, and
+keeps that task's already-proven status. Ambiguous, out-of-scope, protected, or
+uncheckpointable writes are retained for explicit human recovery and are never
+attributed by guesswork.
+
 A `FAIL` record may be repaired only when `--auto-fix` was stated. Every
 finding must resolve to one existing task and that task's declared scope;
 unknown or ambiguous findings stop for a human. The reviewer may return one

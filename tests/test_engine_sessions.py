@@ -100,6 +100,97 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 transition_evidence="The repair diff still reproduces the issue."),
         )))
 
+    def test_invalid_record_retry_carries_validator_error_and_can_amend_scope(self):
+        task_path = self.write_task(
+            1, status="DONE", scope=("src/base.py",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "base.py").write_text("base = 1\n", encoding="utf-8")
+        (source / "needed.py").write_text("value = 1\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(retry=1, extra_config=self.review_rounds(2))
+
+        malformed = json.dumps({
+            "type": "assent.auto_fix_review",
+            "verdict": "FAIL",
+            "findings": [{
+                "task_id": "t001",
+                "path": "src/needed.py",
+                "summary": "Required source file was omitted from scope",
+                "evidence": (
+                    "recommendation: append src/needed.py; scope amendment: "
+                    "existing_file"),
+            }],
+        })
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/needed.py",
+            "Required source file was omitted from scope",
+            "The task requires the exact existing file.",
+            kind="scope_amendment",
+            recommendation="Append the exact existing file to t001 scope.",
+            scope_addition=auto_fix.ScopeAddition(
+                "src/needed.py", "existing_file"))
+
+        def corrected(prompt):
+            self.assertIn("REVIEW OUTPUT CORRECTION REQUIRED", prompt)
+            self.assertIn(
+                "Review findings[0] is missing keys: kind, prior_fingerprint, "
+                "recommendation, scope_addition, transition, "
+                "transition_evidence", prompt)
+            self.assertIn("Bounded diagnostic of the rejected output", prompt)
+            self.assertIn("recommendation: append src/needed.py", prompt)
+            self.assertIn('"scope_addition":{"path":"src/example.py",', prompt)
+            self.assertIn('"prior_fingerprint":null', prompt)
+            self.assertIn("Review context: COMPLETED_FOLDER", prompt)
+            self.assertIn("Source tree:", prompt)
+            return TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None)
+
+        reviewer = ScriptedAdapter([
+            TaskResult(0, malformed, False, None),
+            corrected,
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+        worker = ScriptedAdapter([
+            self.repair_done(task_path, {"src/needed.py": "value = 2\n"})])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        self.assertNotIn(
+            "REVIEW OUTPUT CORRECTION REQUIRED", reviewer.calls[0][0])
+        self.assertEqual(parse_task_file(task_path).scope,
+                         ["src/base.py", "src/needed.py"])
+        self.assertEqual(len(worker.calls), 1)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
+
+    def test_terminal_invalid_records_write_no_state_or_scope_change(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(retry=1, extra_config=self.review_rounds(1))
+        malformed = TaskResult(
+            0,
+            '{"type":"assent.auto_fix_review","verdict":"FAIL",'
+            '"findings":[{"task_id":"t001","path":"src/value.txt",'
+            '"summary":"bad","evidence":"missing required keys"}]}',
+            False, None)
+        reviewer = ScriptedAdapter([malformed, malformed])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([]),
+            auto_fix_adapter=reviewer, auto_fix=True), 1)
+        self.assertEqual(len(reviewer.calls), 2)
+        self.assertEqual(parse_task_file(task_path).scope, ["src/"])
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
+        self.assertFalse(any(
+            subject.startswith("wip(plan01/t001): recovered invalid reviewer")
+            for subject in self.subjects()))
+
     def test_review_failure_reopens_repairs_and_reviews_with_the_task_profile(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
         source = self.root / "src" / "value.txt"

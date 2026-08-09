@@ -748,6 +748,18 @@ owner, an unreadable state file, or no `REPAIRING`/`AWAITING_REVIEW` phase
 recorded -- recovery still refuses fail-closed at `ensure_clean` rather than
 guessing.
 
+A schema-invalid reviewer record writes no auto-fix state and advances no
+workflow cursor. While an adapter retry remains, the scheduler feeds the exact
+validation error, a bounded rejected-output diagnostic, and one complete
+non-PASS JSON example into the next otherwise unchanged reviewer prompt. If the
+final invalid response wrote source, the scheduler gathers it into a
+`wip(<folder>/<task>)` checkpoint only when all uncommitted paths fit exactly
+one existing task's declared scope, then records recovery evidence without
+changing the task's already-proven status. Ambiguous ownership, out-of-scope or
+protected writes, and checkpoint failure retain the edits and refuse with an
+explicit human-recovery diagnostic; Assent never widens scope, reverts, or
+guesses an owner.
+
 An exact fresh `PASS` requires all of `source_tree`, `task_plan_sha256`,
 `review_prompt_sha256`, `reviewer_adapter`, `reviewer_model`, and
 `reviewer_effort` to match the current invocation. A source or task-contract
