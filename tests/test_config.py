@@ -1,6 +1,9 @@
 """Tests for loading and validating assent.toml."""
+import contextlib
+import io
 import os
 import shutil
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -11,6 +14,7 @@ from assent import AssentError
 from assent.config import (BUILTIN_LAYER, PROJECT_LAYER, USER_LAYER,
                            _ADAPTER_NAMES, list_task_folders, load_config,
                            validate_config)
+from assent.init import _split_config_template, init as run_init
 from assent.user_home import ASSENT_HOME_ENV, user_assent_dir, user_config_path
 
 _MINIMAL = ""
@@ -41,6 +45,11 @@ class ConfigTestCase(unittest.TestCase):
         path = self.user_dir / "assent.toml"
         path.write_text(text, encoding="utf-8")
         return path.resolve()
+
+    def write_adapter(self, text: str) -> Path:
+        path = self.assent_dir / "adapter.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
 
     @property
     def project_config(self) -> Path:
@@ -435,6 +444,35 @@ class TestUserHomePath(unittest.TestCase):
 
 
 class TestLayeredConfig(ConfigTestCase):
+    def test_project_adapter_file_matches_inline_adapter_layout(self):
+        inline = self.write(
+            '[adapter]\nname = ["codex"]\n'
+            '[adapter.codex]\ncommand = "codex-test"\n')
+        inline_cfg = load_config(inline, "plan01")
+
+        self.write(_MINIMAL)
+        split = self.write_adapter(
+            '[adapter]\nname = ["codex"]\n'
+            '[adapter.codex]\ncommand = "codex-test"\n')
+        split_cfg = load_config(self.project_config, "plan01")
+
+        self.assertEqual(split_cfg, inline_cfg)
+        self.assertEqual(split.resolve(), self.assent_dir / "adapter.toml")
+
+    def test_inline_and_split_adapter_tables_use_split_file_as_same_layer_overlay(self):
+        self.write(
+            '[adapter]\nname = "claude"\n'
+            '[adapter.claude]\ncommand = "inline"\n')
+        self.write_adapter(
+            '[adapter.claude]\ncommand = "split"\n'
+            'extra_args = ["--split"]\n')
+
+        cfg = load_config(self.project_config, "plan01")
+
+        self.assertEqual(cfg.adapter_name, "claude")
+        self.assertEqual(cfg.claude_command, "split")
+        self.assertEqual(cfg.claude_extra_args, ["--split"])
+
     def test_user_config_alone_loads_and_still_locates_the_project(self):
         user = self.write_user(
             '[adapter]\nname = "codex"\n'
@@ -597,6 +635,44 @@ class TestLayeredConfig(ConfigTestCase):
         # a worktree copy keeps the same answer about where a setting came from
         self.assertEqual(cfg.for_worktree(self.root).source_of("adapter.name"),
                          PROJECT_LAYER)
+
+    def test_fresh_init_writes_adapter_tables_to_adapter_toml(self):
+        subprocess.run(["git", "init"], cwd=self.root, check=True,
+                       capture_output=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root, test="unittest"), 0)
+
+        user_config = self.user_dir / "assent.toml"
+        user_adapter = self.user_dir / "adapter.toml"
+        config = tomllib.loads(user_config.read_text(encoding="utf-8"))
+        adapter = tomllib.loads(user_adapter.read_text(encoding="utf-8"))
+        self.assertNotIn("adapter", config)
+        self.assertIn("adapter", adapter)
+        self.assertEqual(load_config(self.project_config, "plan01").adapter_names,
+                         ("claude", "codex"))
+
+    def test_init_preserves_existing_inline_adapter_layout(self):
+        template = (Path(__file__).resolve().parents[1]
+                    / "assent" / "templates" / "assent.toml").read_bytes()
+        user_config = self.user_dir / "assent.toml"
+        user_config.write_bytes(template)
+        before = user_config.read_bytes()
+        subprocess.run(["git", "init"], cwd=self.root, check=True,
+                       capture_output=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root), 0)
+
+        self.assertEqual(user_config.read_bytes(), before)
+        self.assertFalse((self.user_dir / "adapter.toml").exists())
+
+    def test_template_split_refuses_non_adapter_table_in_adapter_half(self):
+        template = (
+            "[watchdog]\nstall_minutes = 0\n"
+            "[adapter]\nname = \"claude\"\n"
+            "[verification]\nreceipt_refresh = \"manual\"\n")
+
+        with self.assertRaisesRegex(AssentError, "non-adapter table"):
+            _split_config_template(template)
 
 
 class TestBlankOverrideSemantics(ConfigTestCase):

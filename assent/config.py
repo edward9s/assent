@@ -1,8 +1,9 @@
 """Loading assent.toml, and enumerating and validating task folders.
 
 - Settings are layered: built-in defaults, then the user-wide
-  ~/.assent/assent.toml, then the optional project .assent/assent.toml
-  override.  Tables merge by key; scalars and arrays are replaced whole.
+  ~/.assent/assent.toml plus its optional adapter.toml, then the optional
+  project .assent/assent.toml plus its optional adapter.toml override.  Tables
+  merge by key; scalars and arrays are replaced whole.
 - The config path the caller supplies stays the project locator: the project
   root is the parent of the .assent directory that path lives in, whether or
   not the project file itself exists.
@@ -632,6 +633,16 @@ def _read_layer(path: Path, label: str) -> dict:
     return data
 
 
+def _read_layer_with_adapter(path: Path, label: str) -> dict:
+    """Read one assent layer and overlay its optional sibling adapter file."""
+    data = _read_layer(path, label)
+    adapter_path = path.with_name("adapter.toml")
+    if adapter_path.is_file():
+        data = _merge_layer(
+            data, _read_layer(adapter_path, label), path, adapter_path)
+    return data
+
+
 def _shape(value: object) -> str:
     return "a table" if isinstance(value, dict) else "a value"
 
@@ -701,10 +712,11 @@ def _load_layers(path: str | Path
     # The same file cannot be two layers; a user home pointed at this project keeps
     # its higher-priority project role.
     if user_path.is_file() and user_path != project_path:
-        layers.append((USER_LAYER, user_path, _read_layer(user_path, "User")))
+        layers.append((USER_LAYER, user_path,
+                       _read_layer_with_adapter(user_path, "User")))
     if project_path.is_file():
         layers.append((PROJECT_LAYER, project_path,
-                       _read_layer(project_path, "Project")))
+                       _read_layer_with_adapter(project_path, "Project")))
     if not layers:
         raise AssentError(
             f"Config file not found: neither the user config {user_path} nor the"

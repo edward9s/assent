@@ -3,11 +3,13 @@
 The two contracts and the shared settings belong to the machine's ``~/.assent``:
 initialization refreshes the contracts to this installation's packaged text and
 adds only missing active settings to the operator's configuration, never
-replacing a stated value.  A project keeps only what is genuinely its own -- the
-verifier, whose test is chosen once before a fresh skeleton is written, plus the
-AGENTS bridge and the ignore entry.  An older project copy of a contract is
-removed only when it matches the packaged text exactly, and an existing project
-``assent.toml`` is preserved untouched as a higher-priority override.
+replacing a stated value.  Adapter settings are generated in the sibling
+``adapter.toml`` while an existing inline ``assent.toml`` remains supported.  A
+project keeps only what is genuinely its own -- the verifier, whose test is
+chosen once before a fresh skeleton is written, plus the AGENTS bridge and the
+ignore entry.  An older project copy of a contract is removed only when it
+matches the packaged text exactly, and an existing project ``assent.toml`` is
+preserved untouched as a higher-priority override.
 """
 from __future__ import annotations
 
@@ -375,6 +377,30 @@ def _template_config_entries(text: str) -> list[tuple[tuple[str, ...], str]]:
     return entries
 
 
+def _split_config_template(text: str) -> tuple[str, str]:
+    """Separate adapter tables, refusing unrelated tables in the adapter half."""
+    lines = text.splitlines()
+    adapter_start = next(
+        (index for index, line in enumerate(lines)
+         if _header_path(line) == ("adapter",)),
+        None,
+    )
+    if adapter_start is None:
+        raise AssentError("built-in assent.toml template has no [adapter] table")
+
+    for line in lines[adapter_start:]:
+        path = _header_path(line)
+        if path is not None and path[:1] != ("adapter",):
+            raise AssentError(
+                "built-in assent.toml template has a non-adapter table after"
+                f" [adapter]: {line.strip()}")
+
+    def finish(block: list[str]) -> str:
+        return "\n".join(block).rstrip() + "\n"
+
+    return finish(lines[:adapter_start]), finish(lines[adapter_start:])
+
+
 def _header_path(line: str) -> tuple[str, ...] | None:
     stripped = line.strip()
     if not stripped or stripped.startswith("#") or stripped.startswith("[["):
@@ -587,18 +613,43 @@ def init(path: str | Path = ".",
         # The user home: settings the operator owns, contracts assent owns.
         user_dir = user_assent_dir()
         user_config = user_config_path()
-        config_template = _template("assent.toml")
+        config_template, adapter_template = _split_config_template(
+            _template("assent.toml"))
+        user_adapter = user_config.with_name("adapter.toml")
+        user_adapter_content: str | None = None
+        user_adapter_plan: tuple[str, str] | None = None
         if user_config.exists():
+            existing_user_config = _read_file(user_config, "the user assent.toml")
             user_config_content, added = _merge_config(
-                _read_file(user_config, "the user assent.toml"),
+                existing_user_config,
                 config_template, str(user_config))
             user_config_plan = (
                 "updated", f"{user_config} (added {added} packaged setting(s))"
             ) if added else (
                 "preserved", f"{user_config} (your settings preserved)")
+            if "adapter" in tomllib.loads(existing_user_config):
+                # Compatibility layout: do not move or duplicate an author's
+                # existing inline adapter settings.
+                if user_adapter.exists():
+                    user_adapter_plan = (
+                        "preserved",
+                        f"{user_adapter} (existing adapter settings preserved)")
+            elif user_adapter.exists():
+                user_adapter_content, added = _merge_config(
+                    _read_file(user_adapter, "the user adapter.toml"),
+                    adapter_template, str(user_adapter))
+                user_adapter_plan = (
+                    "updated", f"{user_adapter} (added {added} packaged setting(s))"
+                ) if added else (
+                    "preserved", f"{user_adapter} (your settings preserved)")
+            else:
+                user_adapter_content = adapter_template
+                user_adapter_plan = ("created", str(user_adapter))
         else:
             user_config_content = config_template
             user_config_plan = ("created", str(user_config))
+            user_adapter_content = adapter_template
+            user_adapter_plan = ("created", str(user_adapter))
 
         contract_plans = []
         for name in contracts.CONTRACT_NAMES:
@@ -658,6 +709,8 @@ def init(path: str | Path = ".",
             contracts.install_contract(name)
             print(f"  {state.title()}: {description}")
         _apply(user_config, user_config_content, user_config_plan)
+        if user_adapter_content is not None and user_adapter_plan is not None:
+            _apply(user_adapter, user_adapter_content, user_adapter_plan)
 
         print(f"Project {root}:")
         _apply(verifier, verifier_content, verifier_plan)
