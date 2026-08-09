@@ -28,6 +28,7 @@ Acceptance defences added by assent (the format contract's "defence rules"):
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -46,22 +47,30 @@ from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess as _adapter_run_subprocess,
                                      stop_wake_requested)
 from assent.config import (Config, WorkflowActionStep, WorkflowPlanStep,
-                           WorkflowTaskStep)
-from assent.folderdeps import find_unfinished_prerequisites
+                           WorkflowTaskStep, load_config)
+from assent.batch_verification import verify_selected_batch_action
+from assent.folderdeps import (find_unfinished_prerequisites,
+                               order_folders_by_dependency,
+                               parse_folder_dependency_graph)
+from assent.folder_verification_closeout import verify_folder_action
 from assent.inspection import try_write_report
 from assent.plan import (Plan, Task, TaskWorkflowAction, append_entry,
                          parse_task_file,
-                         read_entries, read_workflow_state, same_except_status,
+                         read_entries, read_selection_workflow_state,
+                         read_workflow_state, same_except_status,
                          set_status, WorkflowState,
+                         SelectionWorkflowState,
                          add_scope_entries, scope_text_without_entries,
                          scope_text_with_entries, task_text_sha256,
-                         workflow_state_path, write_workflow_state)
+                         workflow_state_path, write_selection_workflow_state,
+                         write_workflow_state)
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               StackState, auto_fix_fixer_capability_errors,
                               auto_fix_review_capability_errors,
                               has_git_marker, resolve_session, resolve_stack_state,
                               worktree_configuration_errors)
-from assent.verification_common import summary as verification_summary
+from assent.verification_common import (source_snapshot,
+                                        summary as verification_summary)
 
 # The worker session's opening prompt (variables are substituted literally,
 # tolerating other braces inside the template).
@@ -1266,6 +1275,158 @@ def _prepare_worktree(cfg: Config) -> Config:
 # --------------------------------------------------------------------------- #
 # run: main loop
 # --------------------------------------------------------------------------- #
+def _selection_snapshot(configs: tuple[Config, ...]) -> tuple[
+        str, str, tuple[str, ...]]:
+    """Read the exact target and source identity for a completed selection."""
+    main = gitops.main_worktree(configs[0].root)
+    target_ref = gitops.require_current_branch(main)
+    target_commit = gitops.commit_of(main, target_ref)
+    sources: list[str] = []
+    for cfg in configs:
+        plan = Plan.parse(cfg.tasks_dir)
+        unfinished = [f"{task.id}={task.status}" for task in plan.tasks
+                      if task.status not in ("DONE", "SKIP")]
+        if unfinished:
+            raise AssentError(
+                f"selection folder {cfg.tasks_name} is incomplete: "
+                + ", ".join(unfinished))
+        _branch, tip, _worktree = source_snapshot(cfg, main)
+        sources.append(tip)
+    return target_ref, target_commit, tuple(sources)
+
+
+@contextlib.contextmanager
+def _selection_locks(configs: tuple[Config, ...]):
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            lockfile.hold_integration_lock(configs[0].assent_dir))
+        for cfg in configs:
+            stack.enter_context(
+                lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name))
+        yield
+
+
+def run_selection_workflow(config_path: str, assent_dir, folders,
+                           *, auto_fix: bool = False) -> int:
+    """Walk the exact invocation's selection actions after all run locks exit.
+
+    This task introduces the scheduler-owned ``full_verify`` action. Selection
+    repair roles consume its typed failure in later workflow work; a passing
+    action skips those failure-only roles now.
+    """
+    try:
+        assent_dir = os.fspath(assent_dir)
+        graph = parse_folder_dependency_graph(assent_dir)
+        ordered = tuple(order_folders_by_dependency(graph, set(folders)))
+        if len(ordered) != len(folders):
+            raise AssentError("exact folder selection is invalid")
+        configs = tuple(load_config(config_path, folder) for folder in ordered)
+        target_ref, target_commit, source_commits = _selection_snapshot(configs)
+        state = read_selection_workflow_state(configs[0].assent_dir)
+    except AssentError as error:
+        print(f"Selection full_verify: failed ({error})")
+        return 1
+
+    steps = configs[0].workflow_selection
+    if not any(isinstance(step, WorkflowActionStep) for step in steps):
+        steps = steps + (WorkflowActionStep("full_verify"),)
+    identity = (ordered, target_ref, target_commit, source_commits)
+    if (state is None
+            or (state.folders, state.target_ref, state.target_commit,
+                state.source_commits) != identity):
+        state = SelectionWorkflowState(
+            ordered, target_ref, target_commit, source_commits, 0)
+        write_selection_workflow_state(configs[0].assent_dir, state)
+    elif state.step_index >= len(steps):
+        state = replace(state, step_index=0)
+        write_selection_workflow_state(configs[0].assent_dir, state)
+
+    while state.step_index < len(steps):
+        step = steps[state.step_index]
+        if isinstance(step, WorkflowPlanStep):
+            if state.action_status == "PASSED":
+                state = replace(state, step_index=state.step_index + 1)
+                write_selection_workflow_state(configs[0].assent_dir, state)
+                continue
+            if not auto_fix:
+                print("Selection full_verify: failure-only selection roles require "
+                      "run --auto-fix")
+            else:
+                print("Selection full_verify: repairable evidence is ready for the "
+                      f"configured {step.role} role")
+            return 1
+
+        assert step.action == "full_verify"
+        print(f"Selection workflow step {state.step_index + 1}/{len(steps)}: "
+              "full_verify")
+        if len(configs) == 1:
+            result = verify_folder_action(configs[0])
+        else:
+            result = verify_selected_batch_action(
+                config_path, configs[0].assent_dir, ordered)
+        if (not result.target_commit or not result.source_commits
+                or not result.candidate_tree
+                or not result.verification_script_sha256
+                or not result.shared_inputs_sha256):
+            detail = result.evidence[0] if result.evidence else result.outcome
+            print(f"Selection full_verify: {result.outcome} ({detail})")
+            return 1
+        try:
+            with _selection_locks(configs):
+                current = _selection_snapshot(configs)
+                if current != (target_ref, target_commit, source_commits):
+                    raise AssentError(
+                        "selection source or target changed after verification")
+                if (result.folders != ordered
+                        or result.target_commit != target_commit
+                        or result.source_commits != source_commits
+                        or result.verification_script_sha256
+                        != verification.verifier_digest(configs[0])):
+                    raise AssentError(
+                        "verification evidence does not match the pending "
+                        "selection action")
+                state = replace(
+                    state, step_index=state.step_index + 1,
+                    action="full_verify",
+                    action_status="PASSED" if result.passed else "FAILED",
+                    action_candidate_tree=result.candidate_tree,
+                    action_exit_code=result.exit_code,
+                    action_evidence=(result.outcome,) + result.evidence,
+                    verification_script_sha256=(
+                        result.verification_script_sha256),
+                    shared_inputs_sha256=result.shared_inputs_sha256)
+                write_selection_workflow_state(configs[0].assent_dir, state)
+        except (AssentError, lockfile.LockBusy) as error:
+            print(f"Selection full_verify: failed ({error})")
+            return 1
+        if not result.passed and state.step_index >= len(steps):
+            return 1
+    return 0 if state.action_status == "PASSED" else 1
+
+
+def run_dynamic_selection_workflow(config_path: str, assent_dir, *,
+                                   auto_fix: bool = False) -> int:
+    """Snapshot a whole-project run's current verification selection once."""
+    try:
+        assent_dir = os.fspath(assent_dir)
+        root = os.path.dirname(assent_dir)
+        main = gitops.main_worktree(root)
+        target = gitops.commit_of(
+            main, gitops.require_current_branch(main))
+        selection, _configs = verification.select_batch_folders(
+            config_path, assent_dir, main, target)
+    except AssentError as error:
+        print(f"Selection full_verify: failed ({error})")
+        return 1
+    for folder, reason in selection.skipped:
+        print(f"Selection full_verify: skip {folder} ({reason})")
+    if not selection.folders:
+        print("Selection full_verify: no folder has anything left to verify")
+        return 0
+    return run_selection_workflow(
+        config_path, assent_dir, selection.folders, auto_fix=auto_fix)
+
+
 def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         adapter: Adapter | None = None,
         auto_fix_adapter: Adapter | None = None,
@@ -1336,14 +1497,21 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         return 1
     if all(task.status in ("DONE", "SKIP") for task in plan.tasks):
         source_full_test = _plan_uses_full_test(cfg, plan)
-        if cfg.receipt_refresh == "auto" and not source_full_test:
+        selection_verify = (run_level_verify
+                            or os.environ.get(
+                                "ASSENT_SELECTION_FULL_VERIFY") == "1")
+        if (cfg.receipt_refresh == "auto" and not source_full_test
+                and not selection_verify):
             result = verification.verify_folder_if_needed(cfg)
         else:
             # Manual policy deliberately defers this per-folder receipt.  When
             # the invoking CLI already requested run-level verification, its
             # selected or dynamic candidate follows immediately after this
             # closeout and is the next step the user should see.
-            if source_full_test:
+            if selection_verify:
+                print(f"verify {cfg.tasks_name}: per-folder receipt refresh "
+                      "deferred to the invocation selection full_verify")
+            elif source_full_test:
                 print(f"verify {cfg.tasks_name}: source-workflow full_test "
                       "creates no acceptance receipt; selection full_verify "
                       "remains explicit")

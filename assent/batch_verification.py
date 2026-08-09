@@ -18,14 +18,15 @@ from pathlib import Path
 from assent import AssentError, gitops, shared_paths
 from assent.batch_receipt import (BATCH_RECEIPT_VERSION, BatchSource,
                                   BatchVerificationReceipt, batch_receipt_path,
-                                  read_batch_receipt, write_batch_receipt)
+                                  batch_receipt_staleness, read_batch_receipt,
+                                  write_batch_receipt)
 from assent.config import Config, load_config
 from assent.folderdeps import (infer_folder_completion, live_upstreams,
                                order_folders_by_dependency,
                                parse_folder_dependency_graph)
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.verification_common import (VERIFY_COMMAND, candidate_tree,
-                                        BatchCandidate,
+                                        BatchCandidate, FullVerifyEvidence,
                                         ignored_input_diagnosis,
                                         invalidate_receipt, merge_chain,
                                         print_ignored_input_diagnosis,
@@ -68,6 +69,26 @@ def _new_batch_receipt(*, status: str, target_tip: str,
         completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         failure_summary=summary(failure_summary),
     )
+
+
+def _batch_evidence(receipt: BatchVerificationReceipt, *,
+                    reused: bool) -> FullVerifyEvidence:
+    outcome = ("PASSED" if receipt.status == "PASSED" else
+               "INFRASTRUCTURE_FAILED" if receipt.failure_summary.startswith(
+                   ("Unable to start verification:",
+                    "target branch changed", "target tip changed",
+                    "target worktree became dirty", "source tip changed",
+                    "source worktree became dirty", "source for ",
+                    "verification script changed",
+                    "a declared shared input changed",
+                    "shared inputs became unreadable")) else
+               "VERIFIER_FAILED")
+    return FullVerifyEvidence(
+        outcome, receipt.folders, receipt.target_tip,
+        tuple(source.source_tip for source in receipt.sources),
+        receipt.final_tree, receipt.verify_script_sha256,
+        receipt.shared_inputs_sha256, receipt.exit_code,
+        tuple(item for item in (receipt.failure_summary,) if item), reused)
 
 
 def select_batch_folders(config_path: str, assent_dir: Path, main: Path,
@@ -684,7 +705,9 @@ def _report_selected_conflict(chain: BatchCandidate, main: Path,
 
 def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                          confirm: Callable[[str], bool],
-                         selected_folders: Sequence[str] | None = None) -> int:
+                         selected_folders: Sequence[str] | None = None, *,
+                         action_results: list[FullVerifyEvidence] | None = None,
+                         recheck: bool = False) -> int:
     """Build, verify, and record one batch candidate with every lock held.
 
     ``selected_folders`` switches the inherited dynamic skip/confirm policy to
@@ -698,8 +721,7 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
     path = batch_receipt_path(assent_dir)
     # A malformed batch receipt is evidence of an unsafe state, not permission
     # to erase it; this mirrors the single-folder path.
-    if path.exists():
-        read_batch_receipt(path, main)
+    existing = read_batch_receipt(path, main) if path.exists() else None
 
     target_branch = gitops.require_current_branch(main)
     target_tip = gitops.commit_of(main, target_branch)
@@ -759,6 +781,21 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
             raise AssentError(f"Verification script not found: {script}")
         digest = sha256_file(script)
 
+        if (exact and existing is not None
+                and existing.folders == selection.folders
+                and tuple(source.source_tip for source in existing.sources)
+                == tuple(tip for _folder, tip in selection.sources)
+                and existing.verify_script_sha256 == digest
+                and existing.shared_inputs_sha256 == shared_before
+                and not batch_receipt_staleness(
+                    configs[selection.folders[0]], existing)
+                and (existing.status == "PASSED" or not recheck)):
+            print(f"{label}: existing {existing.status} receipt is fresh; "
+                  "full suite skipped")
+            if action_results is not None:
+                action_results.append(_batch_evidence(existing, reused=True))
+            return 0 if existing.status == "PASSED" else 1
+
         print(f"{label}: merging "
               f"{len(selection.sources)} folder(s) in dependency order: "
               + ", ".join(selection.folders))
@@ -780,6 +817,23 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                 if not chain.ok:
                     _report_selected_conflict(
                         chain, main, target_tip, selection.sources)
+                    if action_results is not None:
+                        source_tip = dict(selection.sources)[chain.conflict_folder]
+                        target_conflict = _conflicts_with_target_alone(
+                            main, BatchConflict(
+                                chain.conflict_folder, chain.conflicts,
+                                source_tip), target_tip)
+                        action_results.append(FullVerifyEvidence(
+                            "TARGET_CONFLICT" if target_conflict
+                            else "PEER_CONFLICT",
+                            selection.folders, target_tip,
+                            tuple(tip for _folder, tip in selection.sources),
+                            (chain.step_trees[-1] if chain.step_trees else
+                             gitops.tree_of(main, target_tip)),
+                            digest, shared_before, 1,
+                            (f"Conflict while merging {chain.conflict_folder}",
+                             *(f"{chain.conflict_folder}:{item}"
+                               for item in chain.conflicts))))
                     return 1
                 batch_sources = tuple(selection.sources)
                 batch_step_trees = chain.step_trees
@@ -869,6 +923,9 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
 
         write_batch_receipt(path, receipt, main)
 
+        if action_results is not None:
+            action_results.append(_batch_evidence(receipt, reused=False))
+
     for source in receipt.sources:
         print(f"  {source.folder}: source {source.source_tip[:12]} "
               f"-> tree {source.step_tree}")
@@ -942,6 +999,32 @@ def verify_selected_batch(config_path: str, assent_dir: str | Path,
     except AssentError as e:
         print(f"verify selected: failed ({e})")
         return 1
+
+
+def verify_selected_batch_action(
+        config_path: str, assent_dir: str | Path, folders: Sequence[str], *,
+        recheck: bool = False) -> FullVerifyEvidence:
+    """Run or reuse one exact selected transaction and return typed evidence."""
+    assent_dir = Path(assent_dir)
+    results: list[FullVerifyEvidence] = []
+    try:
+        with hold_integration_lock(assent_dir):
+            _verify_batch_locked(
+                config_path, assent_dir, False, confirm_on_terminal, folders,
+                action_results=results, recheck=recheck)
+    except LockBusy as e:
+        print(f"verify selected: refused ({e})")
+        detail = str(e)
+    except AssentError as e:
+        print(f"verify selected: failed ({e})")
+        detail = str(e)
+    else:
+        if results:
+            return results[-1]
+        detail = "selected verification ended without typed evidence"
+    return FullVerifyEvidence(
+        "INFRASTRUCTURE_FAILED", tuple(folders), "", (), "", "", "", 1,
+        (detail,))
 
 
 # Keep both word orders discoverable for library callers while the CLI uses the

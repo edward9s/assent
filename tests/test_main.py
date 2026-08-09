@@ -936,7 +936,7 @@ class TestRunVerifyChaining(MainTestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(out.count("per-folder receipt"), 2)
-        self.assertEqual(out.count("run-level verification follows this invocation"), 2)
+        self.assertEqual(out.count("invocation selection full_verify"), 2)
         self.assertNotIn("assent verify [--batch]", out)
         self.assertEqual(batch.call_args.args[2], ["alpha", "beta"])
 
@@ -1277,11 +1277,12 @@ class TestRunVerifyFullSuiteCount(MainTestCase):
         return self.run_main(
             ["run", self.FOLDER, "--verify", "--config", str(self.config)])
 
-    def test_auto_closeout_receipt_replaces_the_second_full_run(self):
+    def test_auto_closeout_defers_the_only_full_run_to_the_selection(self):
         code, out = self.run_verify("auto")
         self.assertEqual(code, 0)
         self.assertEqual(self.verifier_runs(), 1)
-        self.assertIn("full suite skipped", out)
+        self.assertIn("invocation selection full_verify", out)
+        self.assertNotIn("full suite skipped", out)
         self.assertTrue((self.tasks_dir / "_verification.toml").exists())
 
     def test_manual_closeout_still_produces_one_fresh_receipt(self):
