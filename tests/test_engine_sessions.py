@@ -1647,6 +1647,10 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         '[agents.plan_worker]\nability = ["implement_plan"]\n'
         'model = "lite"\n'
         '[workflow]\ntask = []\nplan = [{ role = "plan_worker" }]\n')
+    ACTION_AGENT = (
+        '\n[abilities.work]\nprompt = "Work from the supplied evidence."\n'
+        'writes = true\ngate = false\n'
+        '[agents.worker]\nability = ["work"]\n')
 
     @staticmethod
     def set_task_workflow(path, roles):
@@ -1656,6 +1660,11 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         path.write_text(
             text.replace('status = ', f'workflow = [{rendered}]\nstatus = ', 1),
             encoding="utf-8", newline="\n")
+
+    def install_full_verifier(self):
+        script = self.root / ".assent" / "verify.py"
+        script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        return script.resolve()
 
     def test_task_roles_run_as_separate_sessions(self):
         path = self.write_task(1)
@@ -1921,6 +1930,175 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         blocked = next(entry for entry in entries
                        if entry.get("event") == "blocked")
         self.assertIn("outside the plan's scope union", blocked["detail"])
+
+    def test_task_full_test_runs_between_roles_and_reruns_after_source_change(self):
+        path = self.write_task(1)
+        script = self.install_full_verifier()
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ action = "full_test" }, '
+              '{ role = "worker" }, { action = "full_test" }]\n'))
+        self.commit_all()
+
+        def repair(prompt):
+            self.assertIn("FULL TEST EVIDENCE", prompt)
+            self.assertIn("Status: FAILED", prompt)
+            self.assertIn("Do not run the full project verifier", prompt)
+            target = self.execution_root() / "src" / "fixed.py"
+            target.parent.mkdir(exist_ok=True)
+            target.write_text("fixed\n", encoding="utf-8")
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="progress",
+                         summary="Repaired from full-test evidence")
+            return ok_result()
+
+        runs = [
+            subprocess.CompletedProcess([], 3, "raw failure output\n", ""),
+            subprocess.CompletedProcess([], 0, "raw passing output\n", ""),
+        ]
+        adapter = ScriptedAdapter([repair])
+        out = io.StringIO()
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                side_effect=runs) as full_test, contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(full_test.call_count, 2)
+        for call in full_test.call_args_list:
+            self.assertEqual(call.args, (script, self.execution_root()))
+        self.assertIn("raw failure output", out.getvalue())
+        self.assertIn("raw passing output", out.getvalue())
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertFalse((self.plan_dir / "_verification.toml").exists())
+
+    def test_unchanged_failed_full_test_is_reused_and_blocks_terminal_task(self):
+        path = self.write_task(1)
+        self.install_full_verifier()
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ action = "full_test" }, '
+              '{ role = "worker" }, { action = "full_test" }]\n'))
+        self.commit_all()
+
+        def inspect(prompt):
+            self.assertIn("Status: FAILED", prompt)
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="progress",
+                         summary="Failure inspected without a source write")
+            return ok_result()
+
+        failed = subprocess.CompletedProcess([], 4, "unchanged failure\n", "")
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=failed) as full_test:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([inspect])), 0)
+
+        full_test.assert_called_once()
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+
+    def test_passing_full_test_survives_restart_without_duplicate_process(self):
+        path = self.write_task(1)
+        self.install_full_verifier()
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ action = "full_test" }, '
+              '{ role = "worker" }]\n'))
+        self.commit_all()
+        result = subprocess.CompletedProcess([], 0, "passed once\n", "")
+        real_write = engine.write_workflow_state
+        interrupted = False
+
+        def stop_after_action(tasks_dir, state):
+            nonlocal interrupted
+            real_write(tasks_dir, state)
+            if (state.step_index == 1 and state.action_status == "PASSED"
+                    and not interrupted):
+                interrupted = True
+                raise KeyboardInterrupt()
+
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=result) as full_test, mock.patch.object(
+                    engine, "write_workflow_state",
+                    side_effect=stop_after_action):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([])), 130)
+
+        adapter = ScriptedAdapter([self.ai_done(path)])
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=result) as resumed_full_test:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=adapter), 0)
+
+        full_test.assert_called_once()
+        resumed_full_test.assert_not_called()
+        self.assertIn("Status: PASSED", adapter.calls[0][0])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+    def test_role_write_after_full_test_requires_a_later_action(self):
+        path = self.write_task(1)
+        self.install_full_verifier()
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ action = "full_test" }, '
+              '{ role = "worker" }]\n'))
+        self.commit_all()
+        passed = subprocess.CompletedProcess([], 0, "passed\n", "")
+        adapter = ScriptedAdapter([
+            self.ai_done(path, files={"src/changed.py": "changed\n"})])
+
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=passed) as full_test:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=adapter), 0)
+
+        full_test.assert_called_once()
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        blocked = read_entries(journal_path_for(path))[-1]
+        self.assertIn("STALE", blocked["summary"])
+
+    def test_plan_action_only_passes_and_failed_evidence_reaches_plan_role(self):
+        action_only = self.write_task(1)
+        script = self.install_full_verifier()
+        cfg = self.build(extra_config=(
+            '[workflow]\ntask = []\nplan = [{ action = "full_test" }]\n'))
+        cfg.receipt_refresh = "auto"
+        self.commit_all()
+        passed = subprocess.CompletedProcess([], 0, "plan pass\n", "")
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=passed) as full_test, mock.patch.object(
+                    engine.verification, "verify_folder_if_needed") as receipt:
+            self.assertEqual(self.run_quiet(
+                cfg, adapter=ScriptedAdapter([])), 0)
+        full_test.assert_called_once_with(script, self.execution_root())
+        receipt.assert_not_called()
+        self.assertEqual(parse_task_file(action_only).status, "DONE")
+        self.assertFalse((self.plan_dir / "_verification.toml").exists())
+
+        second = self.write_task(2)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = []\nplan = [{ action = "full_test" }, '
+              '{ role = "worker" }]\n'))
+
+        def inspect(prompt):
+            self.assertIn("FULL TEST EVIDENCE", prompt)
+            self.assertIn("Status: FAILED", prompt)
+            self.assertIn("creates no verification receipt", prompt)
+            return ok_result()
+
+        failed = subprocess.CompletedProcess([], 5, "plan failure\n", "")
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=failed) as failed_full_test:
+            self.assertEqual(self.run_quiet(
+                cfg, adapter=ScriptedAdapter([inspect])), 0)
+        failed_full_test.assert_called_once()
+        self.assertEqual(parse_task_file(second).status, "BLOCKED")
 
 
 class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):

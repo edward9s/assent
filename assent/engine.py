@@ -45,10 +45,12 @@ from assent.adapters import Adapter, InvocationRequest, get_adapter
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess as _adapter_run_subprocess,
                                      stop_wake_requested)
-from assent.config import Config, WorkflowPlanStep, WorkflowTaskStep
+from assent.config import (Config, WorkflowActionStep, WorkflowPlanStep,
+                           WorkflowTaskStep)
 from assent.folderdeps import find_unfinished_prerequisites
 from assent.inspection import try_write_report
-from assent.plan import (Plan, Task, append_entry, parse_task_file,
+from assent.plan import (Plan, Task, TaskWorkflowAction, append_entry,
+                         parse_task_file,
                          read_entries, read_workflow_state, same_except_status,
                          set_status, WorkflowState,
                          add_scope_entries, scope_text_without_entries,
@@ -59,6 +61,7 @@ from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               auto_fix_review_capability_errors,
                               has_git_marker, resolve_session, resolve_stack_state,
                               worktree_configuration_errors)
+from assent.verification_common import summary as verification_summary
 
 # The worker session's opening prompt (variables are substituted literally,
 # tolerating other braces inside the template).
@@ -601,6 +604,202 @@ def _shared_paths_contract(cfg: Config) -> "shared_paths.Contract":
     return contract
 
 
+_PLAN_FULL_TEST_PREFIX = "FULL TEST ACTION STATE: "
+
+
+@dataclass(frozen=True)
+class _FullTestEvidence:
+    status: str
+    identity: str
+    exit_code: int
+    command: str
+    summary: str
+
+
+def _full_test_script(cfg: Config) -> Path:
+    script = (cfg.assent_dir / "verify.py").resolve()
+    if not script.is_file():
+        raise AssentError(f"Verification script not found: {script}")
+    return script
+
+
+def _full_test_identity(cfg: Config) -> str:
+    """Bind source-worktree evidence to the checked-out tree and main verifier."""
+    if not gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
+        raise AssentError("source worktree is dirty at the full_test boundary")
+    return f"{gitops.tree_of(cfg.root, 'HEAD')}:{verification.verifier_digest(cfg)}"
+
+
+def _full_test_record(state: WorkflowState) -> _FullTestEvidence | None:
+    if state.unit == "task" and state.action == "full_test":
+        command, summary = (state.action_evidence + ("", ""))[:2]
+        return _FullTestEvidence(
+            state.action_status, state.action_source_tree,
+            state.action_exit_code, command, summary)
+    if state.unit != "plan":
+        return None
+    encoded = next((item[len(_PLAN_FULL_TEST_PREFIX):]
+                    for item in reversed(state.focused_evidence)
+                    if item.startswith(_PLAN_FULL_TEST_PREFIX)), None)
+    if encoded is None:
+        return None
+    try:
+        data = json.loads(encoded)
+        record = _FullTestEvidence(
+            data["status"], data["identity"], data["exit_code"],
+            data["command"], data["summary"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AssentError("Plan full_test action evidence is unreadable") from error
+    if (record.status not in {"PASSED", "FAILED", "STALE"}
+            or not record.identity or not isinstance(record.exit_code, int)
+            or not isinstance(record.command, str)
+            or not isinstance(record.summary, str)):
+        raise AssentError("Plan full_test action evidence has invalid values")
+    return record
+
+
+def _with_full_test_record(
+        state: WorkflowState, record: _FullTestEvidence) -> WorkflowState:
+    if state.unit == "task":
+        return replace(
+            state, action="full_test", action_status=record.status,
+            action_source_tree=record.identity,
+            action_exit_code=record.exit_code,
+            action_evidence=(record.command, record.summary))
+    data = json.dumps({
+        "status": record.status,
+        "identity": record.identity,
+        "exit_code": record.exit_code,
+        "command": record.command,
+        "summary": record.summary,
+    }, ensure_ascii=False, separators=(",", ":"))
+    ordinary = tuple(
+        item for item in state.focused_evidence
+        if not item.startswith(_PLAN_FULL_TEST_PREFIX))
+    return replace(
+        state, focused_evidence=ordinary + (_PLAN_FULL_TEST_PREFIX + data,))
+
+
+def _refresh_full_test_evidence(
+        cfg: Config, state: WorkflowState) -> WorkflowState:
+    """Turn prior evidence STALE as soon as source or verifier identity moves."""
+    record = _full_test_record(state)
+    if record is None or record.status == "STALE":
+        return state
+    try:
+        current = _full_test_identity(cfg)
+    except AssentError:
+        current = ""
+    if current == record.identity:
+        return state
+    return _with_full_test_record(
+        state, replace(record, status="STALE",
+                       summary="Source or verification script changed after full_test."))
+
+
+def _emit_full_test_output(result: subprocess.CompletedProcess[str]) -> None:
+    """Feed complete child output to the terminal tee; durable state stays bounded."""
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n",
+              file=sys.stderr)
+
+
+def _run_full_test_action(
+        cfg: Config, state: WorkflowState) -> tuple[WorkflowState, _FullTestEvidence, bool]:
+    """Run or reuse one source-bound full_test action without creating a receipt."""
+    identity = _full_test_identity(cfg)
+    existing = _full_test_record(state)
+    if (existing is not None and existing.identity == identity
+            and existing.status in {"PASSED", "FAILED"}):
+        print(f"  full_test {existing.status.lower()} evidence reused "
+              f"(exit {existing.exit_code})")
+        return state, existing, True
+
+    script = _full_test_script(cfg)
+    command = subprocess.list2cmdline([sys.executable, str(script)])
+    armed = _FullTestEvidence(
+        "STALE", identity, 0, command,
+        "Full verifier has not completed for this source identity.")
+    state = _with_full_test_record(state, armed)
+    write_workflow_state(cfg.tasks_dir, state)
+    try:
+        result = verification.run_full_verifier(script, cfg.root)
+    except OSError as error:
+        record = replace(
+            armed, status="FAILED", exit_code=1,
+            summary=verification_summary(f"Unable to start full verifier: {error}"))
+    else:
+        _emit_full_test_output(result)
+        fallback = ("Full verifier passed." if result.returncode == 0 else
+                    f"Full verifier failed (exit code {result.returncode}).")
+        record = replace(
+            armed, status="PASSED" if result.returncode == 0 else "FAILED",
+            exit_code=result.returncode,
+            summary=verification_summary(result.stdout, result.stderr, fallback))
+        try:
+            unchanged = _full_test_identity(cfg) == identity
+        except AssentError:
+            unchanged = False
+        if not unchanged:
+            record = replace(
+                record, status="STALE",
+                summary=verification_summary(
+                    record.summary,
+                    "Source or verification script changed during full_test."))
+    state = _with_full_test_record(state, record)
+    write_workflow_state(cfg.tasks_dir, state)
+    print(f"  full_test evidence: {record.status} (exit {record.exit_code})")
+    return state, record, False
+
+
+def _full_test_prompt(state: WorkflowState) -> str:
+    record = _full_test_record(state)
+    if record is None:
+        return ""
+    return (
+        "\nFULL TEST EVIDENCE\n"
+        f"Status: {record.status}\n"
+        f"Source/script identity: {record.identity}\n"
+        f"Command: {record.command}\n"
+        f"Exit code: {record.exit_code}\n"
+        f"Summary:\n{record.summary}\n"
+        "This is source-worktree test evidence only. It creates no verification "
+        "receipt and cannot authorize accept.\n")
+
+
+def _full_test_completion_refusal(
+        cfg: Config, state: WorkflowState) -> str | None:
+    record = _full_test_record(state)
+    if record is None:
+        return None
+    refreshed = _refresh_full_test_evidence(cfg, state)
+    current = _full_test_record(refreshed)
+    assert current is not None
+    if current.status == "PASSED":
+        return None
+    return (f"full_test action evidence is {current.status} "
+            f"(exit {current.exit_code}); a later explicit full_test must pass")
+
+
+def _block_task_action(
+        cfg: Config, task: Task, record: _FullTestEvidence, reason: str,
+        now: Callable[[], datetime]) -> None:
+    set_status(task.path, "BLOCKED")
+    append_entry(
+        task.journal_path, by="scheduler", event="blocked",
+        summary=f"Scheduler marked BLOCKED: {reason}",
+        detail=(f"Command: {record.command}\nExit code: {record.exit_code}\n"
+                f"Summary:\n{record.summary}"),
+        time_str=now().isoformat(timespec="seconds"))
+    workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
+    gitops.commit_if_dirty(
+        cfg.root, _checkpoint_subject(
+            cfg, "auto", task, f"BLOCKED - {_short(reason, 50)}"),
+        cfg.git_excludes)
+
+
 def _role_policy(step: WorkflowTaskStep | object) -> str:
     resolved = step.resolved_role
     return "\n\n".join(ability.prompt for ability in resolved.abilities)
@@ -624,19 +823,36 @@ def _workflow_task_session(
 
 
 def _effective_task_workflow(
-        cfg: Config, task: Task) -> tuple[WorkflowTaskStep, ...] | None:
+        cfg: Config, task: Task
+        ) -> tuple[WorkflowTaskStep | WorkflowActionStep, ...] | None:
     """Resolve a task override, or inherit the project task workflow when omitted."""
     if task.workflow is None:
         return cfg.workflow_task
-    steps: list[WorkflowTaskStep] = []
-    for index, role in enumerate(task.workflow):
+    steps: list[WorkflowTaskStep | WorkflowActionStep] = []
+    for index, entry in enumerate(task.workflow):
+        if isinstance(entry, TaskWorkflowAction):
+            steps.append(WorkflowActionStep(entry.action))
+            continue
         try:
-            resolved = cfg.resolve_agent(role)
+            resolved = cfg.resolve_agent(entry)
         except AssentError as error:
             raise AssentError(
-                f"Task {task.id} workflow[{index}] names missing agent role {role!r}") from error
-        steps.append(WorkflowTaskStep(role, resolved))
+                f"Task {task.id} workflow[{index}] names missing agent role {entry!r}") from error
+        steps.append(WorkflowTaskStep(entry, resolved))
     return tuple(steps)
+
+
+def _plan_uses_full_test(cfg: Config, plan: Plan) -> bool:
+    if any(isinstance(step, WorkflowActionStep)
+           for step in cfg.workflow_plan) and any(
+               task.workflow == ()
+               or (task.workflow is None and cfg.workflow_task == ())
+               for task in plan.tasks):
+        return True
+    return any(
+        any(isinstance(step, WorkflowActionStep)
+            for step in (_effective_task_workflow(cfg, task) or ()))
+        for task in plan.tasks)
 
 
 def _workflow_task_capability_errors(
@@ -659,6 +875,8 @@ def _workflow_task_capability_errors(
             if not workflow:
                 task_plan = Plan([task], plan.dir)
                 for index, step in enumerate(cfg.workflow_plan):
+                    if isinstance(step, WorkflowActionStep):
+                        continue
                     if step.adapter is not None and step.adapter != adapter_name:
                         continue
                     session = _plan_step_session(
@@ -671,6 +889,8 @@ def _workflow_task_capability_errors(
                         requested_effort=session.requested_effort))
                 continue
             for index, step in enumerate(workflow):
+                if isinstance(step, WorkflowActionStep):
+                    continue
                 session = _workflow_task_session(
                     cfg, adapter, task, step, adapter_name)
                 requests.append(InvocationRequest(
@@ -712,6 +932,8 @@ def _plan_workflow_capability_errors(
     requests: list[InvocationRequest] = []
     try:
         for index, step in enumerate(cfg.workflow_plan):
+            if isinstance(step, WorkflowActionStep):
+                continue
             if step.adapter is not None and step.adapter != adapter_name:
                 continue
             session = _plan_step_session(
@@ -748,7 +970,9 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
                   session: SessionIdentity, resumed: bool = False, *,
                   workflow_step: WorkflowTaskStep | None = None,
                   workflow_index: int = 0,
-                  workflow_total: int = 0) -> str:
+                  workflow_total: int = 0,
+                  full_test_evidence: str = "",
+                  full_test_action_present: bool = False) -> str:
     text = (_PROMPT_TEMPLATE
             .replace("{agents_md_path}", _agents_md_path_for_prompt(cfg))
             .replace("{instructions_path}", str(contracts.instructions_path()))
@@ -782,6 +1006,10 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
     if workflow_step is not None:
         text += _task_workflow_suffix(
             workflow_step, workflow_index, workflow_total)
+    if full_test_action_present:
+        text += ("\nDo not run the full project verifier in this AI session. "
+                 "Only the scheduler-owned full_test action may run it.\n")
+    text += full_test_evidence
     return text
 
 
@@ -1107,14 +1335,19 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         print(f"Failed to parse task folder after run: {e}")
         return 1
     if all(task.status in ("DONE", "SKIP") for task in plan.tasks):
-        if cfg.receipt_refresh == "auto":
+        source_full_test = _plan_uses_full_test(cfg, plan)
+        if cfg.receipt_refresh == "auto" and not source_full_test:
             result = verification.verify_folder_if_needed(cfg)
         else:
             # Manual policy deliberately defers this per-folder receipt.  When
             # the invoking CLI already requested run-level verification, its
             # selected or dynamic candidate follows immediately after this
             # closeout and is the next step the user should see.
-            if run_level_verify:
+            if source_full_test:
+                print(f"verify {cfg.tasks_name}: source-workflow full_test "
+                      "creates no acceptance receipt; selection full_verify "
+                      "remains explicit")
+            elif run_level_verify:
                 print(f"verify {cfg.tasks_name}: receipt refresh deferred "
                       "(default) for the per-folder receipt under manual "
                       "policy; run-level verification follows this invocation")
@@ -1184,7 +1417,8 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         # outside the worker rotation before opening any session too.
         external_names = dict.fromkeys(
             step.adapter for step in cfg.workflow_plan
-            if step.adapter is not None and step.adapter not in rotation.names)
+            if isinstance(step, WorkflowPlanStep)
+            and step.adapter is not None and step.adapter not in rotation.names)
         try:
             for name in external_names:
                 current_adapter = get_adapter(name, cfg)
@@ -1204,9 +1438,11 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         return 1
 
     if (auto_fix_enabled
-            and any(step.produces_verdict for step in cfg.workflow_plan)):
+            and any(isinstance(step, WorkflowPlanStep) and step.produces_verdict
+                    for step in cfg.workflow_plan)):
         first_review = next(
-            step for step in cfg.workflow_plan if step.produces_verdict)
+            step for step in cfg.workflow_plan
+            if isinstance(step, WorkflowPlanStep) and step.produces_verdict)
         try:
             reviewer_adapter = (
                 auto_fix_adapter or get_adapter(first_review.adapter, cfg))
@@ -4039,11 +4275,15 @@ def _plan_worker_prompt(
         for task in plan.tasks)
     completed = ""
     if state.step_index > 0:
+        focused = tuple(
+            item for item in state.focused_evidence
+            if not item.startswith(_PLAN_FULL_TEST_PREFIX))
         completed = (
             "\nCumulative checkpoint diff and working changes:\n"
             f"{_plan_cumulative_diff(cfg, state.base_ref)}\n\n"
             "Focused evidence from completed plan steps:\n"
-            + "\n".join(state.focused_evidence) + "\n")
+            + "\n".join(focused) + "\n"
+            + _full_test_prompt(state))
     prompt = _PLAN_WORKER_PROMPT.format(
         agents_md_path=_agents_md_path_for_prompt(cfg),
         instructions_path=contracts.instructions_path(),
@@ -4097,8 +4337,9 @@ def _evaluate_plan_step(
 
 
 def _finish_plan_unit(
-        cfg: Config, plan: Plan, step: WorkflowPlanStep,
+        cfg: Config, plan: Plan, step: WorkflowPlanStep | WorkflowActionStep,
         now: Callable[[], datetime]) -> None:
+    step_name = step.role if isinstance(step, WorkflowPlanStep) else step.action
     for task in plan.tasks:
         if task.status != "SKIP":
             set_status(task.path, "DONE")
@@ -4107,30 +4348,35 @@ def _finish_plan_unit(
                 else "[workflow].task = []")
             append_entry(
                 task.journal_path, by="scheduler", event="done",
-                summary=(f"Plan workflow step {step.role!r} completed "
+                summary=(f"Plan workflow step {step_name!r} completed "
                          f"the plan accountability unit for {task.id}"),
-                detail=(f"{workflow_source}; completed by plan step "
-                        f"{step.role!r}; focused plan gate passed."),
+                detail=(
+                    f"{workflow_source}; completed by plan step {step_name!r}; "
+                    + ("focused plan gate passed."
+                       if isinstance(step, WorkflowPlanStep)
+                       else "scheduler-owned full_test action passed.")),
                 time_str=now().isoformat(timespec="seconds"))
     workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
-    subject = f"auto({cfg.tasks_name}): workflow plan step {step.role}"
+    subject = f"auto({cfg.tasks_name}): workflow plan step {step_name}"
     if not gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
         gitops.commit_empty(cfg.root, subject)
 
 
 def _block_plan_unit(
-        cfg: Config, plan: Plan, step: WorkflowPlanStep, reason: str,
+        cfg: Config, plan: Plan,
+        step: WorkflowPlanStep | WorkflowActionStep, reason: str,
         now: Callable[[], datetime]) -> None:
+    step_name = step.role if isinstance(step, WorkflowPlanStep) else step.action
     for task in plan.tasks:
         if task.status != "SKIP":
             set_status(task.path, "BLOCKED")
             append_entry(
                 task.journal_path, by="scheduler", event="blocked",
-                summary=f"Plan workflow step {step.role!r} exhausted retries",
+                summary=f"Plan workflow step {step_name!r} exhausted retries",
                 detail=reason,
                 time_str=now().isoformat(timespec="seconds"))
     workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
-    subject = f"auto({cfg.tasks_name}): BLOCKED (plan step {step.role})"
+    subject = f"auto({cfg.tasks_name}): BLOCKED (plan step {step_name})"
     if not gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes):
         gitops.commit_empty(cfg.root, subject)
 
@@ -4157,7 +4403,39 @@ def _process_plan_workflow(
     attempts = 0
     failure_reason: str | None = None
     while True:
+        refreshed = _refresh_full_test_evidence(cfg, state)
+        if refreshed != state:
+            state = refreshed
+            write_workflow_state(cfg.tasks_dir, state)
         step = cfg.workflow_plan[state.step_index]
+        if isinstance(step, WorkflowActionStep):
+            print(f"\nPlan workflow step {state.step_index + 1}/"
+                  f"{len(cfg.workflow_plan)}: {step.action}")
+            gitops.commit_if_dirty(
+                cfg.root,
+                f"wip({cfg.tasks_name}): plan workflow before {step.action}",
+                cfg.git_excludes)
+            state, record, _reused = _run_full_test_action(cfg, state)
+            final = state.step_index == len(cfg.workflow_plan) - 1
+            later_role = (not final and isinstance(
+                cfg.workflow_plan[state.step_index + 1], WorkflowPlanStep))
+            if record.status == "PASSED" and final:
+                _finish_plan_unit(cfg, plan, step, now)
+                _print_summary(Plan.parse(cfg.tasks_dir))
+                return 0
+            if record.status != "PASSED" and not later_role:
+                reason = (f"full_test action evidence is {record.status} "
+                          f"(exit {record.exit_code})")
+                _block_plan_unit(cfg, plan, step, reason, now)
+                _print_summary(Plan.parse(cfg.tasks_dir))
+                return 0
+            state = replace(
+                state, step_index=state.step_index + 1, started=False)
+            write_workflow_state(cfg.tasks_dir, state)
+            attempts = 0
+            failure_reason = None
+            continue
+
         adapter = rotation.adapter
         adapter_name = rotation.name
         if step.adapter is not None and step.adapter != adapter_name:
@@ -4203,6 +4481,14 @@ def _process_plan_workflow(
         else:
             passed, reason, evidence = _evaluate_plan_step(
                 cfg, plan, state.base_ref, trusted_contracts)
+            refreshed = _refresh_full_test_evidence(cfg, state)
+            if refreshed != state:
+                state = refreshed
+                write_workflow_state(cfg.tasks_dir, state)
+            if passed and state.step_index == len(cfg.workflow_plan) - 1:
+                full_test_refusal = _full_test_completion_refusal(cfg, state)
+                if full_test_refusal is not None:
+                    passed, reason = False, full_test_refusal
         if passed:
             combined = state.focused_evidence + evidence
             if state.step_index == len(cfg.workflow_plan) - 1:
@@ -4282,11 +4568,95 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     journal_start = (len(read_entries(task.journal_path))
                      if auto_fix_fingerprints else 0)
     while True:
-        adapter = rotation.adapter
-        adapter_name = rotation.name
+        if workflow_state is not None:
+            refreshed = _refresh_full_test_evidence(cfg, workflow_state)
+            if refreshed != workflow_state:
+                workflow_state = refreshed
+                write_workflow_state(cfg.tasks_dir, workflow_state)
         workflow_step = (
             workflow[workflow_state.step_index]
             if workflow_state is not None else None)
+        if isinstance(workflow_step, WorkflowActionStep):
+            print(f"  Task workflow step {workflow_state.step_index + 1}/"
+                  f"{len(workflow)}: {workflow_step.action}")
+            gitops.commit_if_dirty(
+                cfg.root,
+                _checkpoint_subject(
+                    cfg, "wip", task, f"before {workflow_step.action}"),
+                cfg.git_excludes)
+            workflow_state, record, _reused = _run_full_test_action(
+                cfg, workflow_state)
+            final = workflow_state.step_index == len(workflow) - 1
+            later_role = (not final and isinstance(
+                workflow[workflow_state.step_index + 1], WorkflowTaskStep))
+            if record.status == "PASSED" and final:
+                _fresh, reason = _inspect_task_safety(cfg, task, start_ref)
+                if reason is None:
+                    focused_rc = _run_verify(cfg, task.verify)
+                    if focused_rc != 0:
+                        reason = ("Verify command exit code is non-zero "
+                                  f"(={focused_rc}): {task.verify}")
+                    else:
+                        refreshed = _refresh_full_test_evidence(
+                            cfg, workflow_state)
+                        if refreshed != workflow_state:
+                            workflow_state = refreshed
+                            write_workflow_state(cfg.tasks_dir, workflow_state)
+                            record = _full_test_record(workflow_state) or record
+                        refusal = _full_test_completion_refusal(
+                            cfg, workflow_state)
+                        if refusal is not None:
+                            reason = refusal
+                        else:
+                            _fresh, reason = _inspect_task_safety(
+                                cfg, task, start_ref)
+                if reason is None:
+                    try:
+                        contract = _shared_paths_contract(cfg)
+                    except AssentError as error:
+                        reason = f"Shared-path contract could not be classified: {error}"
+                    else:
+                        refusal = shared_paths.closeout_refusal(contract)
+                        if refusal:
+                            reason = refusal[:1].upper() + refusal[1:]
+                if reason is None:
+                    set_status(task.path, "DONE")
+                    append_entry(
+                        task.journal_path, by="scheduler", event="done",
+                        summary=("Scheduler-owned full_test action completed "
+                                 f"the task workflow for {task.id}"),
+                        detail=(f"Command: {record.command}\n"
+                                f"Exit code: {record.exit_code}\n"
+                                f"Summary:\n{record.summary}"),
+                        time_str=now().isoformat(timespec="seconds"))
+                    workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
+                    _commit_terminal_checkpoint(
+                        cfg, task, resumed=True, session_state=session_state)
+                    if gate_passes is not None:
+                        gate_passes.record(cfg, task.verify)
+                    print("  full_test and focused task gate passed -> "
+                          "creating checkpoint")
+                    return None
+                _block_task_action(cfg, task, record, reason, now)
+                return reason
+            if record.status != "PASSED" and not later_role:
+                reason = (f"full_test action evidence is {record.status} "
+                          f"(exit {record.exit_code})")
+                _block_task_action(cfg, task, record, reason, now)
+                return reason
+            workflow_state = replace(
+                workflow_state,
+                step_index=workflow_state.step_index + 1,
+                started=False)
+            write_workflow_state(cfg.tasks_dir, workflow_state)
+            attempts_used = 0
+            failure_reason = None
+            resumed = False
+            continue
+
+        adapter = rotation.adapter
+        adapter_name = rotation.name
+        assert workflow_step is None or isinstance(workflow_step, WorkflowTaskStep)
         session = (session_override or
                    (_workflow_task_session(
                        cfg, adapter, task, workflow_step, adapter_name)
@@ -4298,7 +4668,12 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             workflow_step=workflow_step,
             workflow_index=(workflow_state.step_index
                             if workflow_state is not None else 0),
-            workflow_total=len(workflow))
+            workflow_total=len(workflow),
+            full_test_evidence=(
+                _full_test_prompt(workflow_state)
+                if workflow_state is not None else ""),
+            full_test_action_present=any(
+                isinstance(item, WorkflowActionStep) for item in workflow))
         if auto_fix_context:
             prompt += auto_fix_context
         print(_session_line(
@@ -4446,6 +4821,17 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 if not worker_entries:
                     outcome = "fail"
                     reason = "Workflow session did not append its journal entry"
+        if workflow_state is not None:
+            refreshed = _refresh_full_test_evidence(cfg, workflow_state)
+            if refreshed != workflow_state:
+                workflow_state = refreshed
+                write_workflow_state(cfg.tasks_dir, workflow_state)
+            if outcome == "done":
+                full_test_refusal = _full_test_completion_refusal(
+                    cfg, workflow_state)
+                if full_test_refusal is not None:
+                    outcome = "fail"
+                    reason = full_test_refusal
         if outcome == "step_done":
             assert workflow_state is not None and workflow_step is not None
             set_status(task.path, "WIP")
