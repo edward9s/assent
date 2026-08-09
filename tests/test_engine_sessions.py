@@ -1870,6 +1870,58 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
             self.assertIn("exit code is non-zero", entry["detail"])
         self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
 
+    def test_plan_unit_ports_primary_tree_escape_and_journals_every_task(self):
+        first = self.write_task(1, scope=("src/a.txt",))
+        second = self.write_task(2, deps=("t001",), scope=("src/b.txt",))
+        (self.root / "src").mkdir()
+        (self.root / "src" / "a.txt").write_text("old\n", encoding="utf-8")
+        (self.root / "src" / "b.txt").write_text("old\n", encoding="utf-8")
+        cfg = self.build(retry=1, extra_config=self.PLAN_ROLE)
+        self.commit_all()
+
+        def escape_into_primary(_prompt):
+            (self.root / "src" / "a.txt").write_text(
+                "escaped\n", encoding="utf-8")
+            return ok_result()
+
+        adapter = ScriptedAdapter([escape_into_primary, ok_result()])
+        self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertEqual(
+            (self.root / "src" / "a.txt").read_text(encoding="utf-8"), "old\n")
+        self.assertEqual(
+            (self.execution_root() / "src" / "a.txt").read_text(encoding="utf-8"),
+            "escaped\n")
+        for path in (first, second):
+            escapes = [entry for entry in read_entries(journal_path_for(path))
+                       if entry.get("event") == "main_tree_escape"]
+            self.assertEqual(len(escapes), 1)
+            self.assertIn("src/a.txt", escapes[0]["detail"])
+
+    def test_plan_unit_retains_out_of_scope_primary_tree_escape(self):
+        task = self.write_task(1, scope=("src/",))
+        cfg = self.build(retry=0, extra_config=self.PLAN_ROLE)
+        self.commit_all()
+
+        def escape_outside_plan(_prompt):
+            (self.root / "outside.txt").write_text("stray\n", encoding="utf-8")
+            return ok_result()
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([escape_outside_plan])), 0)
+
+        self.assertEqual(parse_task_file(task).status, "BLOCKED")
+        self.assertEqual(
+            (self.root / "outside.txt").read_text(encoding="utf-8"), "stray\n")
+        self.assertFalse((self.execution_root() / "outside.txt").exists())
+        entries = read_entries(journal_path_for(task))
+        self.assertFalse(any(entry.get("event") == "main_tree_escape"
+                             for entry in entries))
+        blocked = next(entry for entry in entries
+                       if entry.get("event") == "blocked")
+        self.assertIn("outside the plan's scope union", blocked["detail"])
+
 
 class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
     def setUp(self):

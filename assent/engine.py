@@ -3926,8 +3926,9 @@ def _terminal_checkpoint_matches_attempt(
                for _commit, parents, subject in history)
 
 
-def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
-                             now: Callable[[], datetime]) -> str | None:
+def _handle_main_tree_escape(cfg: Config, task: Task | None, baseline: set[str],
+                             now: Callable[[], datetime], *,
+                             plan: Plan | None = None) -> str | None:
     """Detect and, where possible, port back paths a just-finished session wrote into the main
     tree (``cfg.source_root``) instead of its isolated worktree (``cfg.root``).
 
@@ -3938,9 +3939,9 @@ def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
     that wrote outside its isolated worktree cannot be trusted to have produced attributable,
     verifiable output, regardless of what verify/status on the worktree side would otherwise
     have said:
-    - every escaped path inside this task's scope -> ported into the worktree and restored in
-      the main tree (all-or-nothing), with a mechanical scheduler journal record of exactly
-      what moved;
+    - every escaped path inside the task scope or plan scope union -> ported into the
+      worktree and restored in the main tree (all-or-nothing), with a mechanical scheduler
+      journal record for every participating task describing exactly what moved;
     - any escaped path outside scope -> unattributable, main tree left untouched entirely;
     - a proven in-scope path that still fails to port (e.g. the worktree copy already
       diverged) -> fail closed, both trees left untouched, needs a human to port manually.
@@ -3950,17 +3951,29 @@ def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
     path, but the fail-closed branch above guarantees it never silently corrupts the main
     tree's content.
     """
-    current = gitops.dirty_paths(cfg.source_root, _task_excludes(cfg, task))
+    if plan is None:
+        assert task is not None
+        scope = task.scope
+        excludes = _task_excludes(cfg, task)
+        scope_label = "this task's scope"
+        journal_tasks = (task,)
+    else:
+        scope = _plan_scope(plan)
+        excludes = cfg.git_excludes
+        scope_label = "the plan's scope union"
+        journal_tasks = tuple(item for item in plan.tasks if item.status != "SKIP")
+
+    current = gitops.dirty_paths(cfg.source_root, excludes)
     escaped = sorted(current - baseline)
     if not escaped:
         return None
 
     outside = set(gitops.changes_outside_scope(
-        cfg.source_root, task.scope, excludes=_task_excludes(cfg, task)))
+        cfg.source_root, scope, excludes=excludes))
     outside_escaped = sorted(outside & set(escaped))
     if outside_escaped:
         shown = ", ".join(outside_escaped[:5]) + (" ..." if len(outside_escaped) > 5 else "")
-        return (f"session wrote outside the isolated worktree, outside this task's scope "
+        return (f"session wrote outside the isolated worktree, outside {scope_label} "
                 f"(main tree not touched): {shown}")
 
     ok, apply_reason = gitops.port_back_main_tree_escape(
@@ -3970,12 +3983,14 @@ def _handle_main_tree_escape(cfg: Config, task: Task, baseline: set[str],
                 f"({apply_reason}); main tree and worktree left unchanged, port back manually")
 
     shown = ", ".join(escaped[:5]) + (" ..." if len(escaped) > 5 else "")
-    append_entry(
-        task.journal_path, by="scheduler", event="main_tree_escape",
-        summary=(f"Ported {len(escaped)} path(s) that escaped into the main tree back "
-                 "into the isolated worktree"),
-        detail=f"paths ported back and restored in the main tree: {', '.join(escaped)}",
-        time_str=now().isoformat(timespec="seconds"))
+    time_str = now().isoformat(timespec="seconds")
+    for journal_task in journal_tasks:
+        append_entry(
+            journal_task.journal_path, by="scheduler", event="main_tree_escape",
+            summary=(f"Ported {len(escaped)} path(s) that escaped into the main tree "
+                     "back into the isolated worktree"),
+            detail=f"paths ported back and restored in the main tree: {', '.join(escaped)}",
+            time_str=time_str)
     return f"session wrote outside the isolated worktree; changes ported back ({shown})"
 
 
@@ -4155,22 +4170,32 @@ def _process_plan_workflow(
               f"{step.role}")
         state = replace(state, started=True)
         write_workflow_state(cfg.tasks_dir, state)
+        main_tree_baseline = (
+            gitops.dirty_paths(cfg.source_root, cfg.git_excludes)
+            if cfg.source_root is not None else None)
         result = adapter.run_task(
             prompt, session.requested_model, session.requested_effort, cfg.root)
-        if result.checkpoint_resume and not result.quota_exhausted:
+        escape_reason = (
+            _handle_main_tree_escape(
+                cfg, None, main_tree_baseline, now, plan=plan)
+            if main_tree_baseline is not None else None)
+        if escape_reason is not None:
+            reason = escape_reason
+            passed, evidence = False, ()
+        elif result.checkpoint_resume and not result.quota_exhausted:
             gitops.commit_if_dirty(
                 cfg.root, f"wip({cfg.tasks_name}): plan workflow resume",
                 cfg.git_excludes)
             failure_reason = None
             continue
-        if result.quota_exhausted:
+        elif result.quota_exhausted:
             gitops.commit_if_dirty(
                 cfg.root, f"wip({cfg.tasks_name}): plan workflow quota interrupt",
                 cfg.git_excludes)
             _wait_for_quota(cfg, result.reset_at, sleep, now)
             failure_reason = None
             continue
-        if result.exit_code != 0 or result.stalled:
+        elif result.exit_code != 0 or result.stalled:
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output,
                 result.failure_kind)
