@@ -56,7 +56,7 @@ from assent.plan import (Plan, Task, append_entry, parse_task_file,
                          workflow_state_path, write_workflow_state)
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               StackState, auto_fix_fixer_capability_errors,
-                              auto_fix_review_capability_errors, capability_errors,
+                              auto_fix_review_capability_errors,
                               has_git_marker, resolve_session, resolve_stack_state,
                               worktree_configuration_errors)
 
@@ -599,18 +599,54 @@ def _workflow_task_session(
     )
 
 
+def _effective_task_workflow(
+        cfg: Config, task: Task) -> tuple[WorkflowTaskStep, ...] | None:
+    """Resolve a task override, or inherit the project task workflow when omitted."""
+    if task.workflow is None:
+        return cfg.workflow_task
+    steps: list[WorkflowTaskStep] = []
+    for index, role in enumerate(task.workflow):
+        try:
+            resolved = cfg.resolve_agent(role)
+        except AssentError as error:
+            raise AssentError(
+                f"Task {task.id} workflow[{index}] names missing agent role {role!r}") from error
+        steps.append(WorkflowTaskStep(role, resolved))
+    return tuple(steps)
+
+
 def _workflow_task_capability_errors(
         cfg: Config, adapter: Adapter, plan: Plan, adapter_name: str,
         task_id: str | None) -> list[str]:
-    if not cfg.workflow_task:
-        return []
     requests: list[InvocationRequest] = []
     try:
         for task in plan.tasks:
             if (task.status not in ("TODO", "WIP")
                     or (task_id is not None and task.id != task_id)):
                 continue
-            for index, step in enumerate(cfg.workflow_task):
+            workflow = _effective_task_workflow(cfg, task)
+            if workflow is None:
+                session = resolve_session(cfg, adapter, task, adapter_name)
+                requests.append(InvocationRequest(
+                    task_id=task.id, model=task.model, effort=session.effort,
+                    requested_model=session.requested_model,
+                    requested_effort=session.requested_effort))
+                continue
+            if not workflow:
+                task_plan = Plan([task], plan.dir)
+                for index, step in enumerate(cfg.workflow_plan):
+                    if step.adapter is not None and step.adapter != adapter_name:
+                        continue
+                    session = _plan_step_session(
+                        cfg, adapter, task_plan, step, adapter_name)
+                    requests.append(InvocationRequest(
+                        task_id=f"{task.id} workflow.plan[{index}]",
+                        model=step.model or task.model,
+                        effort=session.effort,
+                        requested_model=session.requested_model,
+                        requested_effort=session.requested_effort))
+                continue
+            for index, step in enumerate(workflow):
                 session = _workflow_task_session(
                     cfg, adapter, task, step, adapter_name)
                 requests.append(InvocationRequest(
@@ -1100,16 +1136,16 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
 
     rotation = _AdapterRotation(cfg.adapter_names, tuple(adapters))
     preflight_failures: list[tuple[str, list[str]]] = []
+    whole_plan_workflow = (
+        cfg.workflow_task == ()
+        and all(task.workflow is None for task in plan.tasks))
     for name, current_adapter in zip(rotation.names, rotation.adapters):
-        if cfg.workflow_task is None:
-            errors = capability_errors(
-                cfg, current_adapter, plan, task_id, name)
-        elif cfg.workflow_task:
-            errors = _workflow_task_capability_errors(
-                cfg, current_adapter, plan, name, task_id)
-        else:
+        if whole_plan_workflow:
             errors = _plan_workflow_capability_errors(
                 cfg, current_adapter, plan, name)
+        else:
+            errors = _workflow_task_capability_errors(
+                cfg, current_adapter, plan, name, task_id)
         if errors:
             preflight_failures.append((name, errors))
     if preflight_failures:
@@ -1157,7 +1193,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     blocker_evidence: list[_AutoFixBlockerEvidence] = []
     gate_passes = _FocusedGateLedger()
     try:
-        if cfg.workflow_task == ():
+        if whole_plan_workflow:
             if task_id is not None:
                 print("[workflow].task = [] makes the whole plan one unit; "
                       "--task cannot select part of it")
@@ -1244,14 +1280,23 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 task, resumed = selected
 
             session = _SessionState()
-            active.task = task
-            active.session = session
-            _process_task(
-                cfg, task, rotation, sleep, now, session, resumed,
-                blocker_evidence=(blocker_evidence if review_enabled else None),
-                gate_passes=gate_passes if review_enabled else None)
-            active.task = None
-            active.session = None
+            workflow = _effective_task_workflow(cfg, task)
+            if workflow == ():
+                task_plan = Plan([task], plan.dir)
+                result = _process_plan_workflow(
+                    cfg, task_plan, rotation, sleep, now,
+                    {task.id: trusted_contracts[task.id]})
+                if result != 0:
+                    return result
+            else:
+                active.task = task
+                active.session = session
+                _process_task(
+                    cfg, task, rotation, sleep, now, session, resumed,
+                    blocker_evidence=(blocker_evidence if review_enabled else None),
+                    gate_passes=gate_passes if review_enabled else None)
+                active.task = None
+                active.session = None
 
             if once or task_id is not None:
                 break
@@ -3913,11 +3958,14 @@ def _finish_plan_unit(
     for task in plan.tasks:
         if task.status != "SKIP":
             set_status(task.path, "DONE")
+            workflow_source = (
+                "task workflow = []" if task.workflow == ()
+                else "[workflow].task = []")
             append_entry(
                 task.journal_path, by="scheduler", event="done",
                 summary=(f"Plan workflow step {step.role!r} completed "
                          f"the plan accountability unit for {task.id}"),
-                detail=(f"[workflow].task = []; completed by plan step "
+                detail=(f"{workflow_source}; completed by plan step "
                         f"{step.role!r}; focused plan gate passed."),
                 time_str=now().isoformat(timespec="seconds"))
     workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
@@ -4051,7 +4099,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     """
     print(f"\nTask {task.id}: {task.title}")
 
-    workflow = cfg.workflow_task or ()
+    workflow = _effective_task_workflow(cfg, task) or ()
     workflow_state: WorkflowState | None = None
     if workflow:
         workflow_state = read_workflow_state(cfg.tasks_dir)

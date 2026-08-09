@@ -29,7 +29,7 @@ _STATUS_VALUES = {"TODO", "WIP", "DONE", "BLOCKED", "SKIP"}
 _MODEL_TIERS = {"prime", "core", "lite"}
 _EFFORT_LEVELS = {"heavy", "normal", "slight"}
 _KNOWN_KEYS = {"title", "deps", "model", "effort", "status", "scope", "verify",
-               "goal", "behavior", "acceptance", "notes"}
+               "goal", "behavior", "acceptance", "notes", "workflow"}
 # Journal identities a new write may claim.  Reading is deliberately unrestricted, so a
 # journal written before an adapter existed (including the retired catch-all by = "ai")
 # still parses and still reports.
@@ -76,6 +76,7 @@ class Task:
     behavior: str
     acceptance: str
     notes: str
+    workflow: tuple[str, ...] | None  # None inherits [workflow].task; () selects no task session
     path: Path                     # Absolute task file path
     journal_path: Path             # Absolute path of the matching .r.toml journal
 
@@ -162,6 +163,32 @@ def _str_list(data: dict, path: Path, key: str) -> list[str]:
     if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
         raise AssentError(f"Task file {path.name} field {key} must be an array of strings")
     return [x.strip() for x in val if x.strip()]
+
+
+def _task_workflow(data: dict, path: Path) -> tuple[str, ...] | None:
+    """Parse an optional task-local workflow role sequence without resolving settings."""
+    if "workflow" not in data:
+        return None
+    raw = data["workflow"]
+    if not isinstance(raw, list):
+        raise AssentError(
+            f"Task file {path.name} field workflow must be an array of inline tables")
+    roles: list[str] = []
+    for index, item in enumerate(raw):
+        owner = f"workflow[{index}]"
+        if not isinstance(item, dict):
+            raise AssentError(f"Task file {path.name} {owner} must be an inline table")
+        unknown = sorted(set(item) - {"role"})
+        if unknown:
+            raise AssentError(
+                f"Task file {path.name} {owner} has undefined fields: "
+                f"{', '.join(unknown)} (valid fields: role)")
+        role = item.get("role")
+        if not isinstance(role, str) or not role.strip():
+            raise AssentError(
+                f"Task file {path.name} {owner}.role must be a non-empty string")
+        roles.append(role.strip())
+    return tuple(roles)
 
 
 def journal_path_for(task_path: Path) -> Path:
@@ -268,6 +295,7 @@ def parse_task_file(path: Path) -> Task:
         behavior=_optional_str(data, path, "behavior"),
         acceptance=_require_str(data, path, "acceptance"),
         notes=_optional_str(data, path, "notes"),
+        workflow=_task_workflow(data, path),
         path=path.resolve(),
         journal_path=journal_path_for(path.resolve()),
     )
@@ -518,7 +546,7 @@ def same_except_status(a: Task, b: Task) -> list[str]:
     against loosening one's own acceptance criteria).
     """
     diff = []
-    for name in ("title", "deps", "model", "effort", "scope", "verify",
+    for name in ("title", "deps", "model", "effort", "workflow", "scope", "verify",
                  "goal", "behavior", "acceptance", "notes"):
         if getattr(a, name) != getattr(b, name):
             diff.append(name)

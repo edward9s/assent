@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import AssentError, contracts
+from assent.plan import _KNOWN_KEYS
 from assent.user_home import ASSENT_HOME_ENV
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -124,6 +125,18 @@ class TestContractPaths(unittest.TestCase):
 
 class TestContractContent(unittest.TestCase):
     """Durable rules a reader must be able to find in the shipped contract."""
+
+    def test_task_skeleton_matches_all_twelve_parser_fields(self):
+        format_text = contracts.installed_contract_text("format.md")
+        match = re.search(
+            r'```toml\n(title = "Skeleton and test infrastructure".*?\n)```',
+            format_text, re.DOTALL)
+        self.assertIsNotNone(match)
+        skeleton = tomllib.loads(match.group(1))
+
+        self.assertEqual(len(_KNOWN_KEYS), 12)
+        self.assertEqual(set(skeleton), _KNOWN_KEYS)
+        self.assertIn("workflow", skeleton)
 
     def test_quota_examples_describe_rotation_action(self):
         install_global_contracts(self)

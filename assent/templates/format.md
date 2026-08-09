@@ -217,6 +217,7 @@ title = "Skeleton and test infrastructure"
 deps = []                        # array of upstream task ids; write [] even with none
 model = "prime"                  # prime | core | lite (never write a vendor model name)
 effort = "heavy"                 # heavy | normal | slight; usually omitted, written only to deliberately deviate from the default
+workflow = [{ role = "implementer" }]  # optional task-local override of [workflow].task
 status = "TODO"                  # TODO | WIP | DONE | BLOCKED | SKIP
 scope = ["assent/", "tests/"]    # allowed path prefixes for changes; fail-closed, must not be empty
 verify = "python -m unittest tests.test_thing"  # this task's focused gate, exit 0 = pass;
@@ -241,9 +242,17 @@ Known facts, references, risks; reference shared knowledge, do not copy it.
 
 Rules:
 
-- The fields are fixed at these 11; writing more is a format error;
+- The fields are fixed at these 12; writing more is a format error;
   `title / deps / model / status / scope / verify / goal / acceptance` are
   required.
+- `workflow` is optional. Each entry is exactly `{ role = "..." }`, where the
+  role name comes from the effective `[agents]` settings. When omitted, the task
+  inherits `[workflow].task`; when neither is stated, the scheduler opens one
+  implicit session using the task's own `model` and `effort`. An explicit
+  `workflow = []` selects no per-task session for this task, like
+  `[workflow].task = []` scoped to this task's plan accountability unit. A role
+  absent from the effective settings refuses the whole run before any session
+  starts, with an error naming the task and missing role.
 - **Structural fields first, multi-line prose after** (as in the example order)
   — the status line must appear before any multi-line string, because the
   scheduler relies on this for precise write-back.
@@ -254,6 +263,8 @@ Rules:
   log and must not enter the task set.
 - A task file must be "self-contained for execution": an AI with zero memory can
   start work unambiguously from only AGENTS.md + instructions.md + this file.
+  A workflow role does not add its configured prompt to the task schema; the
+  scheduler supplies that prompt to the selected session.
 
 ### The three tiers (model)
 
@@ -363,8 +374,9 @@ capabilities.
 
 Status has no write-permission model: humans only review and issue directions;
 file changes are made by the AI following those directions. During an ordinary
-task session, the executing AI may change only its own status line; the
-scheduler replaces that line precisely, leaving every other byte untouched.
+task session, the executing AI may change only its own status line; `workflow`
+is protected alongside every other task contract field. The scheduler replaces
+that line precisely, leaving every other byte untouched.
 The scheduler has one additional, separately reviewed exception: after a
 validated auto-fix scope decision it may append the exact approved paths to
 the named existing task's `scope` array in one transaction. The worker and

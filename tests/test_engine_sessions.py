@@ -1528,6 +1528,15 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         'model = "lite"\n'
         '[workflow]\ntask = []\nplan = [{ role = "plan_worker" }]\n')
 
+    @staticmethod
+    def set_task_workflow(path, roles):
+        rendered = ", ".join(
+            f'{{ role = {json.dumps(role)} }}' for role in roles)
+        text = path.read_text(encoding="utf-8")
+        path.write_text(
+            text.replace('status = ', f'workflow = [{rendered}]\nstatus = ', 1),
+            encoding="utf-8", newline="\n")
+
     def test_task_roles_run_as_separate_sessions(self):
         path = self.write_task(1)
         cfg = self.build(extra_config=self.TASK_ROLES)
@@ -1549,6 +1558,76 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
             item for item in read_entries(journal_path_for(path))
             if item.get("by") != "scheduler"]), 2)
         self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
+    def test_task_workflow_overrides_project_task_roles(self):
+        path = self.write_task(1)
+        self.set_task_workflow(path, ("implementer",))
+        cfg = self.build(extra_config=self.TASK_ROLES)
+        self.commit_all()
+
+        adapter = ScriptedAdapter([self.ai_done(path)])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertIn("scheduled role: implementer", adapter.calls[0][0])
+        self.assertNotIn("scheduled role: preparer", adapter.calls[0][0])
+
+    def test_empty_task_workflow_uses_only_its_plan_unit(self):
+        path = self.write_task(1)
+        self.set_task_workflow(path, ())
+        cfg = self.build(extra_config=self.PLAN_ROLE)
+        self.commit_all()
+
+        adapter = ScriptedAdapter([ok_result()])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertIn("Plan workflow step 1 of 1", adapter.calls[0][0])
+        self.assertNotIn("Task workflow step", adapter.calls[0][0])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+    def test_task_workflow_missing_role_refuses_before_any_session(self):
+        path = self.write_task(1)
+        self.set_task_workflow(path, ("missing",))
+        cfg = self.build(extra_config=self.TASK_ROLES)
+        self.commit_all()
+        adapter = ScriptedAdapter([])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = engine.run(cfg, once=True, adapter=adapter)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(adapter.calls, [])
+        self.assertIn("Task t001", out.getvalue())
+        self.assertIn("missing agent role 'missing'", out.getvalue())
+
+    def test_task_session_cannot_change_its_workflow(self):
+        path = self.write_task(1)
+        self.set_task_workflow(path, ("implementer",))
+        cfg = self.build(retry=0, extra_config=self.TASK_ROLES)
+        self.commit_all()
+
+        def tamper(_prompt):
+            text = path.read_text(encoding="utf-8")
+            path.write_text(
+                text.replace('{ role = "implementer" }',
+                             '{ role = "preparer" }'),
+                encoding="utf-8", newline="\n")
+            set_status(path, "DONE")
+            append_entry(
+                journal_path_for(path), by="claude", requested_model="lite",
+                event="done", summary="Attempted closeout")
+            return ok_result()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(
+                engine.run(cfg, once=True, adapter=ScriptedAdapter([tamper])), 0)
+
+        self.assertIn("fields other than status were modified: workflow",
+                      out.getvalue())
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
 
     def test_never_started_next_task_step_has_no_interrupt_prompt(self):
         path = self.write_task(1)

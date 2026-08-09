@@ -21,7 +21,7 @@ _OK = 'python -c "raise SystemExit(0)"'
 def task_text(*, title="Task", deps=(), model="lite", effort=None,
               status="TODO", scope=("src/",), verify=_OK,
               goal="Do one thing.", behavior="", acceptance="- done", notes="",
-              extra_line=None, drop=()) -> str:
+              workflow=None, extra_line=None, drop=()) -> str:
     lines = []
 
     def add(key, line):
@@ -33,6 +33,9 @@ def task_text(*, title="Task", deps=(), model="lite", effort=None,
     add("model", f"model = {json.dumps(model)}")
     if effort:
         add("effort", f"effort = {json.dumps(effort)}")
+    if workflow is not None:
+        add("workflow", "workflow = [" + ", ".join(
+            f"{{ role = {json.dumps(role)} }}" for role in workflow) + "]")
     add("status", f"status = {json.dumps(status)}")
     add("scope", "scope = [" + ", ".join(json.dumps(s) for s in scope) + "]")
     add("verify", f"verify = {json.dumps(verify, ensure_ascii=False)}")
@@ -128,6 +131,26 @@ class TestParseTaskFile(PlanTestCase):
         path = self.write("t001_x.e.toml", task_text(extra_line='oops = "x"'))
         with self.assertRaisesRegex(AssentError, "undefined fields"):
             parse_task_file(path)
+
+    def test_task_workflow_is_optional_ordered_and_may_be_empty(self):
+        absent = parse_task_file(self.write("t001_absent.e.toml", task_text()))
+        stated = parse_task_file(self.write(
+            "t002_stated.e.toml", task_text(workflow=("prepare", "implement"))))
+        empty = parse_task_file(self.write(
+            "t003_empty.e.toml", task_text(workflow=())))
+
+        self.assertIsNone(absent.workflow)
+        self.assertEqual(stated.workflow, ("prepare", "implement"))
+        self.assertEqual(empty.workflow, ())
+
+    def test_task_workflow_rejects_malformed_entries(self):
+        for value in ('"implement"', '["implement"]', '[{ role = "" }]',
+                      '[{ role = "implement", extra = true }]'):
+            with self.subTest(value=value):
+                path = self.write(
+                    "t001_bad.e.toml", task_text(extra_line=f"workflow = {value}"))
+                with self.assertRaisesRegex(AssentError, "workflow"):
+                    parse_task_file(path)
 
     def test_invalid_toml_rejected(self):
         path = self.write("t001_x.e.toml", "title = [unclosed\n")
@@ -424,6 +447,15 @@ class TestStructuralCompare(PlanTestCase):
         diff = same_except_status(a, b)
         self.assertIn("scope", diff)
         self.assertIn("verify", diff)
+
+    def test_tampered_workflow_is_reported(self):
+        path = self.write("t001_x.e.toml", task_text(workflow=("prepare",)))
+        original = parse_task_file(path)
+        self.write("t001_x.e.toml", task_text(
+            status="DONE", workflow=("implement",)))
+
+        self.assertEqual(
+            same_except_status(original, parse_task_file(path)), ["workflow"])
 
 
 class TestJournal(PlanTestCase):
