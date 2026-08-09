@@ -8,6 +8,8 @@ with current contracts in place.
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -18,6 +20,50 @@ from assent import AssentError, contracts
 from assent.user_home import ASSENT_HOME_ENV
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+class TestTestPackageIsolation(unittest.TestCase):
+    def test_importing_tests_ignores_a_hostile_user_home(self):
+        with tempfile.TemporaryDirectory() as hostile_directory:
+            hostile_home = Path(hostile_directory)
+            hostile_config = hostile_home / "assent.toml"
+            hostile_text = "[hostile]\nsetting = true\n"
+            hostile_config.write_text(hostile_text, encoding="utf-8")
+            marker = hostile_home / "package-home.txt"
+            environment = os.environ.copy()
+            environment[ASSENT_HOME_ENV] = str(hostile_home)
+            environment["ASSENT_TEST_HOME_MARKER"] = str(marker)
+            script = """
+import os
+import tempfile
+from pathlib import Path
+
+import tests
+from assent.config import load_config
+
+home = Path(os.environ["ASSENT_HOME"])
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    config = root / ".assent" / "assent.toml"
+    config.parent.mkdir()
+    config.write_text("", encoding="utf-8")
+    loaded = load_config(config, "empty")
+    if loaded.root != root.resolve():
+        raise SystemExit(f"unexpected project root: {loaded.root}")
+Path(os.environ["ASSENT_TEST_HOME_MARKER"]).write_text(
+    str(home), encoding="utf-8")
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", script], cwd=_PROJECT_ROOT,
+                env=environment, capture_output=True, encoding="utf-8",
+                errors="replace")
+            self.assertEqual(result.returncode, 0,
+                             result.stdout + result.stderr)
+            package_home = Path(marker.read_text(encoding="utf-8"))
+            self.assertNotEqual(package_home, hostile_home)
+            self.assertFalse(package_home.exists())
+            self.assertEqual(hostile_config.read_text(encoding="utf-8"),
+                             hostile_text)
 
 
 def install_global_contracts(case: unittest.TestCase) -> Path:
