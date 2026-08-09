@@ -24,12 +24,15 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from assent import AssentError
+from assent.agents import (Ability, Agent, ResolvedAgent,
+                           resolve_agent as resolve_agent_role)
 from assent.lockfile import LOCK_NAME
 from assent.shared_paths import MANIFEST_LOCK_NAME, MANIFEST_NAME
 from assent.user_home import user_config_path
 
 _TOP_LEVEL_KEYS = {
-    "watchdog", "run", "adapter", "verification", "auto_fix",
+    "watchdog", "run", "adapter", "verification", "auto_fix", "abilities",
+    "agents",
 }
 
 # The ordered settings layers, lowest priority first.  The built-in layer contributes no
@@ -230,6 +233,8 @@ class Config:
     receipt_refresh: str = "manual"  # "manual" = explicit verify only, "auto" = also at run closeout
     # The reviewer rounds in configured order; today only the first is used.
     auto_fix_review: tuple[AutoFixReviewSettings, ...] | None = None
+    abilities: dict[str, Ability] = field(default_factory=dict)
+    agents: dict[str, Agent] = field(default_factory=dict)
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
     # Where the effective settings came from: the layers that were present, lowest priority
     # first, and each stated leaf setting's dotted key mapped to the layer that stated it.
@@ -253,6 +258,10 @@ class Config:
         when the built-in default is the value in effect.
         """
         return self.provenance.get(key, BUILTIN_LAYER)
+
+    def resolve_agent(self, name: str) -> ResolvedAgent:
+        """Return one role with its ordered ability definitions and derived flags."""
+        return resolve_agent_role(name, self.agents, self.abilities)
 
     @property
     def branch_prefix(self) -> str:
@@ -397,6 +406,60 @@ def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> di
     if not all(isinstance(v, str) for v in val.values()):
         raise AssentError(f"Config [{owner}.{key}] must have all-string values")
     return dict(val)
+
+
+def _parse_abilities(section: dict) -> dict[str, Ability]:
+    """Parse atomic ability definitions from the effective config layer."""
+    abilities: dict[str, Ability] = {}
+    required = ("prompt", "writes", "gate")
+    allowed = {*required, "produces_verdict"}
+    for name, value in section.items():
+        owner = f"abilities.{name}"
+        if not isinstance(value, dict):
+            raise AssentError(f"Config [{owner}] must be a table, not a scalar")
+        _known_keys(value, owner, allowed)
+        missing = [key for key in required if key not in value]
+        if missing:
+            raise AssentError(
+                f"Config [{owner}] is missing required keys: {', '.join(missing)}")
+        abilities[name] = Ability(
+            prompt=_typed(value, f"[{owner}]", "prompt", str, None),
+            writes=_typed(value, f"[{owner}]", "writes", bool, None),
+            gate=_typed(value, f"[{owner}]", "gate", bool, None),
+            produces_verdict=_typed(
+                value, f"[{owner}]", "produces_verdict", bool, False),
+        )
+    return abilities
+
+
+def _parse_agents(section: dict, abilities: dict[str, Ability]) -> dict[str, Agent]:
+    """Parse named roles and validate every ability reference."""
+    agents: dict[str, Agent] = {}
+    for name, value in section.items():
+        owner = f"agents.{name}"
+        if not isinstance(value, dict):
+            raise AssentError(f"Config [{owner}] must be a table, not a scalar")
+        _known_keys(value, owner, {"ability", "model", "effort"})
+        ability_names = _str_list(value, f"[{owner}]", "ability", [])
+        if not ability_names:
+            raise AssentError(f"Config [{owner}].ability must be a non-empty array")
+        for ability_name in ability_names:
+            if ability_name not in abilities:
+                raise AssentError(
+                    f"Config [{owner}].ability references missing ability"
+                    f" {ability_name!r}")
+        model = _typed(value, f"[{owner}]", "model", str, None)
+        effort = _typed(value, f"[{owner}]", "effort", str, None)
+        if model is not None and model not in _MODEL_TIERS:
+            raise AssentError(
+                f"Config [{owner}].model = {model!r} is not a valid model tier"
+                f" ({'/'.join(sorted(_MODEL_TIERS))})")
+        if effort is not None and effort not in _EFFORT_LEVELS:
+            raise AssentError(
+                f"Config [{owner}].effort = {effort!r} is not a valid effort"
+                f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
+        agents[name] = Agent(tuple(ability_names), model, effort)
+    return agents
 
 
 def _default_effort_map(section: dict, owner: str,
@@ -777,6 +840,8 @@ def load_config(path: str | Path, folder: str) -> Config:
                    if "antigravity" in adapter else {})
     verification_section = _section(data, "verification")
     auto_fix = _section(data, "auto_fix")
+    abilities = _parse_abilities(_section(data, "abilities"))
+    agents = _parse_agents(_section(data, "agents"), abilities)
     _known_keys(auto_fix, "auto_fix", {"review"})
     review = _section(auto_fix, "review") if "review" in auto_fix else {}
     _known_keys(review, "auto_fix.review", {"adapter", "model", "effort"})
@@ -851,6 +916,8 @@ def load_config(path: str | Path, folder: str) -> Config:
             _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES),
         receipt_refresh=_typed(verification_section, "[verification]",
                                "receipt_refresh", str, "manual"),
+        abilities=abilities,
+        agents=agents,
         sources=sources,
         provenance=provenance,
     )
