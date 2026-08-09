@@ -5,10 +5,8 @@ reached a model: each one stops inside ``--model``/``--effort`` validation or at
 transport, so the whole contract was recorded without spending a token.
 
 - ``agy --version`` prints ``1.1.5``.
-- ``agy models`` lists expanded slugs only (verbatim copy in
-  ``tests/fixtures/agy_models_1.1.5.txt``): ``gemini-3.6-flash-{high,medium,low}``,
-  ``gemini-3.5-flash-medium``, ``gemini-3.5-flash``, ``gemini-3.5-flash-low``,
-  ``gemini-3.1-pro-{low,high}``, ``gemini-3-flash``.
+- ``agy models`` lists one tab-separated expanded slug and description per line
+  (verbatim copy in ``tests/fixtures/agy_models_1.1.5.txt``).
 - ``--model`` and ``--effort`` are validated as a pair before the request is sent
   (transcript in ``tests/fixtures/agy_selection_1.1.5.toml``):
   a family base slug requires an ``--effort`` from its own set (``gemini-3.1-pro`` ->
@@ -158,7 +156,16 @@ def parse_models_catalog(text: str) -> ModelCatalog:
     a slug that is itself a family base (``gemini-3.5-flash``) is therefore a base slug and
     not a standalone model, which is exactly how the CLI resolves it.
     """
-    listed = tuple(line.strip() for line in text.splitlines() if line.strip())
+    listed = []
+    for line in text.splitlines():
+        record = line.strip()
+        if not record:
+            continue
+        slug = record.split("\t", 1)[0].strip()
+        if not slug or any(character.isspace() for character in slug):
+            continue
+        listed.append(slug)
+    listed = tuple(listed)
     if not listed:
         raise AssentError("the AGY model catalog is empty")
 

@@ -31,12 +31,29 @@ from assent.plan import append_entry, read_entries
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CATALOG_TEXT = (FIXTURES / "agy_models_1.1.5.txt").read_text(encoding="utf-8")
+# The retired 1.1.5 output contained only bare slugs.  Keep this small recorded
+# fixture so compatibility is exercised independently of the tabular capture.
+LEGACY_CATALOG_TEXT = """\
+gemini-3.6-flash-high
+gemini-3.6-flash-medium
+gemini-3.6-flash-low
+gemini-3.5-flash-medium
+gemini-3.5-flash
+gemini-3.5-flash-low
+gemini-3.1-pro-low
+gemini-3.1-pro-high
+gemini-3-flash
+"""
 SELECTION = tomllib.loads(
     (FIXTURES / "agy_selection_1.1.5.toml").read_text(encoding="utf-8"))
 
 
 def catalog():
     return parse_models_catalog(CATALOG_TEXT)
+
+
+def legacy_catalog():
+    return parse_models_catalog(LEGACY_CATALOG_TEXT)
 
 
 def make_cfg(**overrides) -> Config:
@@ -65,16 +82,28 @@ class TestCapabilityCatalog(unittest.TestCase):
         parsed = catalog()
         self.assertEqual(parsed.families, {
             "gemini-3.6-flash": ("low", "medium", "high"),
-            "gemini-3.5-flash": ("low", "medium"),
+            "gemini-3.5-flash": ("low", "medium", "high"),
             "gemini-3.1-pro": ("low", "high"),
+            "gpt-oss-120b": ("medium",),
         })
-        # the bare 3.5 Flash slug is a family base, not a model that takes no effort
+        # A family base is derived from its expanded variants, not treated as standalone.
         self.assertNotIn("gemini-3.5-flash", parsed.standalone)
-        self.assertEqual(parsed.standalone, ("gemini-3-flash",))
+        self.assertEqual(parsed.standalone,
+                         ("claude-sonnet-4-6", "claude-opus-4-6-thinking"))
         self.assertEqual(parsed.variants["gemini-3.1-pro-high"], "high")
+        self.assertIsNone(parsed.check("gemini-3.5-flash", "high"))
+
+    def test_retired_bare_slug_form_matches_the_same_tabular_slugs(self):
+        tabular = "\n".join(
+            f"{slug}\tDescription" for slug in legacy_catalog().listed)
+        self.assertEqual(legacy_catalog(), parse_models_catalog(tabular))
+
+    def test_progress_line_without_a_slug_is_ignored(self):
+        parsed = parse_models_catalog("Fetching available models...\n" + CATALOG_TEXT)
+        self.assertEqual(parsed, catalog())
 
     def test_derived_rules_reproduce_every_recorded_cli_verdict(self):
-        parsed = catalog()
+        parsed = legacy_catalog()
         for probe in SELECTION["accepted"]:
             with self.subTest(accepted=probe):
                 self.assertIsNone(
@@ -85,7 +114,7 @@ class TestCapabilityCatalog(unittest.TestCase):
                 self.assertIsNotNone(reason)
 
     def test_recorded_available_effort_sets_match_the_diagnostics(self):
-        parsed = catalog()
+        parsed = legacy_catalog()
         # The CLI names the effort set it does support; ours must name the same one, so a
         # diagnostic can be acted on without rerunning the CLI.
         self.assertIn("available: low, high",
@@ -108,7 +137,7 @@ class TestCapabilityCatalog(unittest.TestCase):
     def test_historical_observation_is_not_treated_as_the_current_catalog(self):
         # 3.1 Pro medium and a 3.5 Flash high slug were plausible from the older planning
         # notes; the current catalog proves neither exists, so neither may be sent.
-        parsed = catalog()
+        parsed = legacy_catalog()
         self.assertNotIn("gemini-3.5-flash-high", parsed.listed)
         self.assertNotIn("medium", parsed.families["gemini-3.1-pro"])
         self.assertIsNotNone(parsed.check("gemini-3.5-flash-high", None))
@@ -261,14 +290,14 @@ class TestEffortPrecedence(unittest.TestCase):
 
     def test_omitted_effort_sends_no_flag_and_invents_no_cli_default(self):
         cfg = make_cfg(antigravity_default_effort={},
-                       antigravity_models={"lite": "gemini-3-flash"})
+                       antigravity_models={"lite": "claude-sonnet-4-6"})
         settings = cfg.adapter_settings(NAME)
         effort = settings.resolve_effort(None, "lite")
         self.assertIsNone(effort)
         self.assertIsNone(settings.resolve_requested_effort("lite", effort))
         cmd = build_command(cfg, "p", settings.resolve_model("lite"), None)
         self.assertNotIn("--effort", cmd)
-        self.assertIsNone(catalog().check("gemini-3-flash", None))
+        self.assertIsNone(catalog().check("claude-sonnet-4-6", None))
 
     def test_expanded_slug_never_pairs_with_a_contradictory_effort_flag(self):
         # Configuring an expanded slug is legal, but only without a conflicting effort.
@@ -338,7 +367,7 @@ class TestPreflight(unittest.TestCase):
         self.assertIn("[adapter.antigravity.models] prime", errors[0])
 
     def test_effortless_model_with_an_effort_is_refused(self):
-        cfg = make_cfg(antigravity_models={"lite": "gemini-3-flash"})
+        cfg = make_cfg(antigravity_models={"lite": "claude-sonnet-4-6"})
         adapter = AntigravityAdapter(cfg, catalog=catalog())
         errors = adapter.preflight([request("t002", "lite", "heavy", cfg=cfg)])
         self.assertEqual(len(errors), 1)
