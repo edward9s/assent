@@ -105,10 +105,11 @@ def _documentation_and_templates() -> list[Path]:
 
 
 def _tracked_old_brand_matches() -> list[tuple[str, int, str]]:
-    """Return tracked old-brand spellings, with path and one-based line number."""
+    """Return unambiguous tracked legacy paths and imports."""
     result = subprocess.run(
         ["git", "grep", "-n", "-I", "-i", "-E",
-         r"(^|[^[:alnum:]_])agents([^[:alnum:]_]|$)"],
+         r"(\.agents[/\\]|(^|[^[:alnum:]_.])agents[/\\]|"
+         r"(^|[[:space:]])(from|import)[[:space:]]+agents([^[:alnum:]_]|$))"],
         cwd=ROOT, check=False, capture_output=True, text=True, encoding="utf-8",
     )
     if result.returncode not in (0, 1):
@@ -121,7 +122,7 @@ def _tracked_old_brand_matches() -> list[tuple[str, int, str]]:
 
 
 def _is_audited_old_brand_exception(path: str, text: str) -> bool:
-    """Allow only verbatim history evidence, fixtures, and the AGENTS.md filename."""
+    """Allow only verbatim fixtures and this audit's own patterns."""
     if path == "tests/fixtures/stream_json_ok.txt":
         return True  # Verbatim external-protocol fixture.
     if "AGENTS" in text and ".agents" not in text:
@@ -137,7 +138,7 @@ def _is_audited_old_brand_exception(path: str, text: str) -> bool:
 
 class LanguagePolicyTests(unittest.TestCase):
     def test_tracked_old_brand_audit_has_only_narrow_exceptions(self):
-        """Current product text must not regain the former package or path names."""
+        """Current product text must not regain retired paths or root imports."""
         unexpected = [
             f"{path}:{line}: {text}"
             for path, line, text in _tracked_old_brand_matches()

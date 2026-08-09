@@ -384,7 +384,7 @@ class TestAcceptCliFailures(AcceptCliCase):
                 [self.tasks_dir / "t001_任務.e.toml"]),
             review_prompt_sha256="5" * 64,
             reviewer_adapter="codex", reviewer_model="prime",
-            reviewer_effort="heavy", review_round_index=1)
+            reviewer_effort="heavy", workflow_step_index=1)
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg),
             auto_fix.with_self_fixed_unreviewed(state))
@@ -427,7 +427,7 @@ class TestAcceptCliFailures(AcceptCliCase):
                 [self.tasks_dir / "t001_任務.e.toml"]),
             review_prompt_sha256="5" * 64,
             reviewer_adapter="codex", reviewer_model="prime",
-            reviewer_effort="heavy", review_round_index=1)
+            reviewer_effort="heavy", workflow_step_index=1)
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg),
             auto_fix.with_unresolved_review(state))

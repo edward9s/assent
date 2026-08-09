@@ -660,7 +660,7 @@ class TestSelfFixedConfirmation(AcceptRepositoryCase):
             task_plan_sha256=auto_fix.sha256_files([self.task_path]),
             review_prompt_sha256="7" * 64,
             reviewer_adapter="claude", reviewer_model="prime",
-            reviewer_effort="heavy", review_round_index=2)
+            reviewer_effort="heavy", workflow_step_index=2)
         if self_fixed:
             state = auto_fix.with_self_fixed_unreviewed(state)
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
@@ -778,7 +778,7 @@ class TestUnresolvedReviewConfirmation(AcceptRepositoryCase):
             task_plan_sha256=auto_fix.sha256_files([self.task_path]),
             review_prompt_sha256="7" * 64,
             reviewer_adapter="codex", reviewer_model="prime",
-            reviewer_effort="heavy", review_round_index=3)
+            reviewer_effort="heavy", workflow_step_index=3)
 
     def _write_state(self, state: auto_fix.AutoFixState) -> None:
         auto_fix.write_auto_fix_state(
