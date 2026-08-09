@@ -54,6 +54,12 @@ NAME = "antigravity"
 MINIMUM_VERSION = (1, 1, 5)
 # AGY model slug suffixes and vendor effort values; unrelated to abstract task levels.
 _EFFORT_ORDER = ("low", "medium", "high")
+# AGY 1.1.5 lists this exact slug, but its argument validator does not accept the
+# corresponding base-model/effort pair.  Keep that recorded selection contract separate
+# from the exact slugs the catalog reports.
+_BASE_EFFORT_OVERRIDES = {
+    "gemini-3.5-flash": ("low", "medium"),
+}
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 # Flags this adapter owns.  Repeating one in extra_args can only contradict the resolved
@@ -152,9 +158,9 @@ class ModelCatalog:
 def parse_models_catalog(text: str) -> ModelCatalog:
     """Derive the capability matrix from ``agy models`` output.
 
-    Every slug ending in a known effort suffix contributes that effort to its base family;
-    a slug that is itself a family base (``gemini-3.5-flash``) is therefore a base slug and
-    not a standalone model, which is exactly how the CLI resolves it.
+    Every slug ending in a known effort suffix contributes that effort to its base family,
+    subject to recorded base-model selection contracts.  An exact expanded slug remains a
+    separately selectable variant even when its suffix is not accepted for the base model.
     """
     listed = []
     for line in text.splitlines():
@@ -176,8 +182,10 @@ def parse_models_catalog(text: str) -> ModelCatalog:
         if base and suffix in _EFFORT_ORDER:
             collected.setdefault(base, set()).add(suffix)
             variants[slug] = suffix
-    families = {base: tuple(e for e in _EFFORT_ORDER if e in efforts)
-                for base, efforts in collected.items()}
+    families = {}
+    for base, efforts in collected.items():
+        allowed = _BASE_EFFORT_OVERRIDES.get(base, _EFFORT_ORDER)
+        families[base] = tuple(e for e in allowed if e in efforts)
     standalone = tuple(slug for slug in listed
                        if slug not in variants and slug not in families)
     return ModelCatalog(listed=listed, families=families, variants=variants,

@@ -82,7 +82,7 @@ class TestCapabilityCatalog(unittest.TestCase):
         parsed = catalog()
         self.assertEqual(parsed.families, {
             "gemini-3.6-flash": ("low", "medium", "high"),
-            "gemini-3.5-flash": ("low", "medium", "high"),
+            "gemini-3.5-flash": ("low", "medium"),
             "gemini-3.1-pro": ("low", "high"),
             "gpt-oss-120b": ("medium",),
         })
@@ -90,8 +90,11 @@ class TestCapabilityCatalog(unittest.TestCase):
         self.assertNotIn("gemini-3.5-flash", parsed.standalone)
         self.assertEqual(parsed.standalone,
                          ("claude-sonnet-4-6", "claude-opus-4-6-thinking"))
+        self.assertEqual(parsed.variants["gemini-3.5-flash-high"], "high")
         self.assertEqual(parsed.variants["gemini-3.1-pro-high"], "high")
-        self.assertIsNone(parsed.check("gemini-3.5-flash", "high"))
+        self.assertIsNone(parsed.check("gemini-3.5-flash-high", None))
+        self.assertIsNone(parsed.check("gemini-3.5-flash-high", "high"))
+        self.assertIsNotNone(parsed.check("gemini-3.5-flash", "high"))
 
     def test_retired_bare_slug_form_matches_the_same_tabular_slugs(self):
         tabular = "\n".join(
