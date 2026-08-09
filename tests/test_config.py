@@ -205,6 +205,7 @@ class TestLoadConfig(ConfigTestCase):
                          ".assent/plan01/assent.lock",
                          ".assent/plan01/_verification.toml",
                          ".assent/plan01/_auto_fix.toml",
+                         ".assent/plan01/_workflow.toml",
                          ".assent/manifest.toml", ".assent/manifest.lock"))
 
     def test_provided_folder_updates_all_derived_paths(self):
@@ -225,6 +226,7 @@ class TestLoadConfig(ConfigTestCase):
                           ".assent/parallel02/assent.lock",
                           ".assent/parallel02/_verification.toml",
                           ".assent/parallel02/_auto_fix.toml",
+                          ".assent/parallel02/_workflow.toml",
                           ".assent/manifest.toml", ".assent/manifest.lock"))
 
     def test_workflow_omitted_and_empty_boundaries(self):
