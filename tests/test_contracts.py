@@ -138,6 +138,63 @@ class TestContractContent(unittest.TestCase):
         self.assertEqual(set(skeleton), _KNOWN_KEYS)
         self.assertIn("workflow", skeleton)
 
+    def test_planning_contract_requires_owner_scope_audit_and_narrow_gates(self):
+        text = " ".join(contracts.installed_contract_text("format.md").split())
+        for phrase in (
+                "audit every `goal`, `behavior`, and `acceptance` clause item by item",
+                "owning implementation, focused-test, and contract files",
+                "read-only context or a possible write",
+                "covered by an exact `scope` entry",
+                "inspect the repository",
+                "not a completeness proof",
+                "module, class, case, or command",
+                "whole high-I/O module",
+                "smallest representative integration test"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_workflow_contract_and_template_define_the_two_execution_layers(self):
+        workflow = " ".join(
+            contracts.installed_contract_text("workflow.md").split())
+        for phrase in (
+                "`task` selects task-scoped context",
+                "`plan` selects plan-scoped context",
+                "not permission",
+                "The selected role's `[abilities]` carry what that session does",
+                "The only special behavior the engine infers from a role",
+                "`produces_verdict`",
+                "makes the whole plan one unit",
+                "every `plan` step is an ordinary worker session",
+                "according to the plan's focused gate",
+                "when no task can make further progress",
+                "quiescent-blocked"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, workflow)
+
+        configuration = (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
+            encoding="utf-8")
+        self.assertNotIn("[auto_fix.review]", configuration)
+        self.assertNotIn("reviewer round", configuration.lower())
+        for phrase in ("# [abilities.execute]", "# [abilities.review]",
+                       "# [agents.worker]", "# [agents.folder_reviewer]",
+                       "# [workflow]", "# task =", "# plan ="):
+            with self.subTest(template_phrase=phrase):
+                self.assertIn(phrase, configuration)
+        prompts = re.findall(r'^# prompt = "([^"]+)"$', configuration, re.MULTILINE)
+        self.assertEqual(len(prompts), 2)
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertFalse(
+                    {"task", "plan", "folder"}.intersection(prompt.lower().split()))
+
+        instructions = contracts.installed_contract_text("instructions.md")
+        reading_guide = instructions.split(
+            "A **meeting / interactive session** reads only", 1)[1].split(
+                "An **assent-scheduled task session** reads only:", 1)[0]
+        for key in ("`[workflow]`", "`[agents]`", "`[abilities]`"):
+            self.assertIn(key, reading_guide)
+        self.assertIn("canonical owner", reading_guide)
+
     def test_quota_examples_describe_rotation_action(self):
         install_global_contracts(self)
         format_text = contracts.installed_contract_text("format.md")

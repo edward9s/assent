@@ -317,6 +317,18 @@ left to the actual argument sent to that adapter's CLI on its right, so the
 line retains the adapter, tier, model, and effort audit facts without expanding
 back into verbose labels.
 
+### Planning scope audit
+
+Before planning closeout, audit every `goal`, `behavior`, and `acceptance`
+clause item by item. For each item, locate its owning implementation,
+focused-test, and contract files, then classify every located file as read-only
+context or a possible write. Every possible write must be covered by an exact
+`scope` entry; read-only context need not be. When ownership is not already
+known, inspect the repository to find the symbol, configuration key, or
+contract owner before settling scope. Scanning only the paths named in the
+task's prose is not a completeness proof: the audit must catch both a directly
+named omitted file and an owner that first has to be discovered.
+
 ### Planning for session cost
 
 A task-file author already knows things a zero-memory executing AI must
@@ -337,11 +349,14 @@ a failed `verify` restarts a whole session under [Lifecycle and review].
   question to a human: an ambiguous condition does not just cost a
   clarification, it costs a full retried session before the ambiguity even
   surfaces.
-- Point each task's `verify` at the narrowest test module(s) that
-  exercise its `scope`, not the full suite: the scheduler already runs
-  `.assent/verify.py` in full, once, automatically, after every task in
-  the folder reaches DONE/SKIP (see "Lifecycle and review"); repeating it
-  per task multiplies suite runtime by task count for no added safety.
+- Point each task's `verify` at the narrowest deterministic target the runner
+  supports -- a module, class, case, or command -- that exercises its scope.
+  Do not select a whole high-I/O module merely because it contains relevant
+  tests. When the behavior itself depends on filesystem, Git, or process I/O,
+  keep the smallest representative integration test instead of replacing it
+  with a unit-only check. Never use the full suite here: complete verification
+  runs outside the AI task session, and repeating it per task multiplies suite
+  runtime by task count for no added safety.
 
 ### Media inputs and outputs
 
@@ -485,14 +500,15 @@ cleanup lifecycle" section, not here.
 
 ### Opt-in folder review and bounded repair
 
-When `run --auto-fix` is passed, Assent runs one bounded, read-only
-review-and-repair loop after a folder's tasks and final focused checks all
-pass: a configured reviewer returns `PASS` or `FAIL` against the cumulative
-diff and task contracts; `FAIL` may trigger one bounded repair round that
-reopens only the implicated existing tasks, never widening scope or task
-requirements on its own. Without the flag, this loop never runs. It is not a
-second task status, not implicit acceptance, and not a substitute for
-complete verification — `_report.md`'s auto-fix line only ever means one of:
+When `run --auto-fix` is passed, Assent considers its bounded review-and-repair
+workflow when no task can make further progress: either the folder is complete,
+or it is quiescent-blocked. The complete path first requires the final focused
+checks to pass; the blocked path uses durable worker or focused-gate evidence
+for read-only adjudication. Repair reopens only implicated existing tasks and
+never widens scope or task requirements on its own. Without the flag, this
+workflow never runs. It is not a second task status, not implicit acceptance,
+and not a substitute for complete verification — `_report.md`'s auto-fix line
+only ever means one of:
 
 - `NOT RUN` — no review state exists;
 - `STALE` — the source, task contracts, or reviewer identity drifted since

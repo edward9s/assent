@@ -875,12 +875,15 @@ def check(cfg: Config) -> int:
     for line in contract_lines:
         print(line)
 
-    # Task folder and task-file format (parsing is the full check: required fields, tiers,
-    # non-empty scope, deps exist without cycles, no duplicate ids)
+    # Parsing proves the task-file schema, including non-empty scope declarations.
+    # Whether those declarations cover every semantic owner remains a planning review.
     plan: Plan | None = None
     try:
         plan = Plan.parse(cfg.tasks_dir)
-        print(f"Task-file format: OK ({len(plan.tasks)} tasks, dependencies acyclic)")
+        print(
+            f"Task-file format: OK ({len(plan.tasks)} tasks; scope declarations "
+            "syntactically valid and non-empty; dependencies acyclic). Semantic "
+            "scope completeness remains a planning-review decision.")
         try:
             blocks = resolve_task_assignments(cfg, plan)
             print_task_assignments(blocks)

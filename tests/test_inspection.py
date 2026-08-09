@@ -74,6 +74,19 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         text = out.getvalue()
         self.assertIn("Auto-fix workflow: no [workflow].plan step configured", text)
 
+    def test_check_distinguishes_scope_syntax_from_semantic_completeness(self):
+        self.write_task(1)
+        cfg = self.build()
+        self.commit_all()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 0)
+        text = out.getvalue()
+        self.assertIn("scope declarations syntactically valid and non-empty", text)
+        self.assertIn(
+            "Semantic scope completeness remains a planning-review decision", text)
+
     def test_check_reports_explicit_auto_fix_reviewer_settings(self):
         self.write_task(1, model="core")
         cfg = self.build(extra_config=_workflow_config())

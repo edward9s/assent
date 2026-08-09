@@ -25,16 +25,29 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 # whether the integration candidate is green.
 # receipt_refresh = "manual"
 
-# Optional post-completion workflow. An absent/omitted/empty [workflow].plan configures no
-# folder review; `run --auto-fix` then says the flag had no effect and continues
-# as an ordinary run. Roles are defined through [abilities] and [agents]. A
-# verdict-producing step requires an adapter. A non-verdict step must omit it;
-# when writable, that step authorizes one bounded repair under each implicated
-# task's own profile. Blocked adjudication is always read-only regardless of role.
+# Optional execution workflow. The entire example is commented out: omission
+# keeps ordinary task sessions unchanged and leaves folder review via
+# `run --auto-fix` disabled.
+# Ability prompts describe only reusable actions; the selected [workflow].task
+# or [workflow].plan key supplies its context and accountability.
+# [abilities.execute]
+# prompt = "Implement the supplied requirements and satisfy the supplied gate."
+# writes = true
+# gate = true
+# [abilities.review]
+# prompt = "Review the supplied change and evidence and return the required verdict."
+# writes = false
+# gate = true
+# produces_verdict = true
+# [agents.worker]
+# ability = ["execute"]
+# [agents.folder_reviewer]
+# ability = ["review"]
+# model = "prime"
+# effort = "heavy"
 # [workflow]
-# plan = [{ role = "folder_reviewer", adapter = "antigravity" }]
-# `task` omitted keeps one implicit session per task under its own model/effort.
-# `task = []` is intentionally different; see workflow.md.
+# task = [{ role = "worker" }]
+# plan = [{ role = "folder_reviewer", adapter = "codex" }]
 
 [adapter]
 # One adapter name or a non-empty list of names. A list rotates in order and

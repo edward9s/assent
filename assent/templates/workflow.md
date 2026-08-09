@@ -466,9 +466,18 @@ and `archive --all` are the routine, unattended one.
 
 ## Opt-in folder review and bounded repair
 
-The `[workflow]` table is the one configuration surface for task sessions and
-the folder's post-completion review/repair sequence. Only `run --auto-fix`
-walks `plan` and authorizes its bounded repair:
+The `[workflow]` table has exactly two keys. `task` selects task-scoped context
+and task-by-task accountability; `plan` selects plan-scoped context and plan
+accountability. A key selects the scheduler-supplied execution layer and its
+granularity, not permission. The selected role's `[abilities]` carry what that
+session does (`prompt`, `writes`, and `gate`), and `[agents]` only compose those
+abilities with optional model and effort choices. Ability prompts therefore do
+not decide whether their context is a task, plan, or folder. The only special
+behavior the engine infers from a role is an ability's `produces_verdict`; it
+activates the provider-neutral folder-review verdict protocol.
+
+With ordinary task execution, only `run --auto-fix` walks `plan` as the
+folder-level review/repair workflow:
 
 ```text
 assent run FOLDER --auto-fix
@@ -484,32 +493,34 @@ plan = [
 # task = [{ role = "task_worker" }]
 ```
 
-`plan` is an ordered array of `{ role, adapter }` steps. A verdict-producing
-role requires `adapter`; a role with `produces_verdict = false` must omit it,
-because that step opens no reviewer session. A writable non-verdict step
-instead authorizes one bounded repair from the nearest earlier verdict step's
-durable brief, always using each implicated task's own profile. A role combining
-verdict production and writing is a merged reviewer-fixer and may report
-`FIXED` from that same session. A non-verdict, non-writing step is a legal
-no-op, but a non-empty plan with no verdict-producing step is refused because
-no session could ever open. Every verdict step resolves its role's model and
-effort through its own adapter mappings. Preflight is keyed by the full
+Both keys are ordered arrays of role steps. A verdict-producing `plan` role
+requires `adapter`; a role with `produces_verdict = false` omits it. In the
+folder-review layer, a writable non-verdict step authorizes the bounded
+task-profile repair described below, while a verdict-and-write role is a merged
+reviewer-fixer and may report `FIXED`. Every verdict step resolves its role's
+model and effort through its adapter mappings. Preflight is keyed by the full
 `(adapter, requested_model, requested_effort)` identity, so two steps using the
 same adapter with different models are both proven.
 
 All omitted and empty boundaries are explicit. An absent `[workflow]` table is
 identical to both keys being omitted. An omitted `plan` and `plan = []` both
-configure no folder review; there is no third state because the built-in plan
-default is empty. With no plan, `run --auto-fix` prints that the flag had no
-effect because `[workflow].plan` states no step, then completes as an ordinary
-run. An omitted `task` keeps today's implicit one session per task using that
-task's own model and effort. `task = []` is intentionally different and is
-reserved for the task-workflow behavior defined by the next schema revision.
-The removed `[auto_fix.review]` table is never recognized alongside this one:
-the config load fails closed and names both the removed table and the exact
+configure no folder review; with no plan, `run --auto-fix` reports that the flag
+had no effect and continues as an ordinary run. An omitted `task` keeps one
+implicit session per task using that task's own model and effort. A non-empty
+`task` runs its stated roles for each task with task-scoped context and keeps
+each task as its own accountability unit. `task = []` is intentionally
+different: it disables per-task sessions and makes the whole plan one unit,
+executed by the `plan` steps with plan-wide context and the union of task scope
+and focused gates. In that plan-execution mode, every `plan` step is an ordinary
+worker session; a non-verdict step succeeds or retries according to the plan's
+focused gate, not a reviewer verdict. An empty `plan` then leaves nothing able
+to execute and is refused. The removed `[auto_fix.review]` table is never
+recognized alongside this one: config loading fails closed and names the exact
 settings-layer file that must be edited.
 
-The flag is selection-orthogonal: it is forwarded for automatic, explicit
+The folder-level workflow is considered when no task can make further progress:
+the folder is complete, or it is quiescent-blocked with durable worker or
+focused-gate evidence. The flag is selection-orthogonal: it is forwarded for automatic, explicit
 single/multi-folder, prefix-plus-`...`, and `--all` selections and is compatible
 with `--once`, `--task`, and `--verify`, whose own ordering and scope rules do
 not change. A limited run defers the completed-folder loop when it leaves work

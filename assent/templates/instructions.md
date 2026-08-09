@@ -37,8 +37,9 @@ A **meeting / interactive session** reads only, to get started:
 3. `~/.assent/format.md` (required before creating or modifying a task file)
 4. `~/.assent/workflow.md` (during a review or acceptance meeting, to judge
    whether a worktree's implementation matches its task file's spec, or
-   whenever CLI/scheduler mechanics matter directly — not required merely to
-   draft a task file)
+   whenever CLI/scheduler mechanics matter directly, including any change to
+   `[workflow]`, `[agents]`, or `[abilities]` — not required merely to draft a
+   task file; that contract remains the canonical owner of those settings)
 5. The current work folder's task files and `_report.md` (during a review
    meeting)
 6. The source and tests the task directly touches
@@ -235,16 +236,15 @@ and may accompany an implicit folder, explicit folders, `...`, `--all`,
 `--once`, `--task`, or `--verify`; the ordinary selection and verification rules
 still apply.
 
-The order is fixed: task sessions run their ordinary focused gates; when the
-folder is complete, each distinct `DONE`-task `verify` command runs once more;
-only if all of those checks pass and the source remains clean does the completed-
-folder reviewer start. A limited `--once`/`--task` run that remains incomplete
-defers that review and spends no review token. A quiescent blocked dependency
-with durable worker `BLOCKED` or task-focused-gate evidence enters the separate
-blocked-adjudication reviewer path; it does not run a new focused command just
-to create evidence. A folder containing only `SKIP` tasks needs no
-implementation review. Focused failure writes the scheduler's finding evidence
-and starts no completed-folder reviewer.
+The workflow is considered when no task can make further progress: the folder
+is complete, or it is quiescent-blocked. On the complete path, each distinct
+`DONE`-task `verify` command runs once more, and only passing checks plus clean
+source start the completed-folder reviewer. A limited `--once`/`--task` run that
+remains runnable defers review. On the quiescent-blocked path, durable worker
+`BLOCKED` or task-focused-gate evidence enters read-only blocked adjudication;
+it does not run a new focused command merely to create evidence. A folder
+containing only `SKIP` tasks needs no implementation review. Focused failure
+writes the scheduler's finding evidence and starts no completed-folder reviewer.
 
 `[auto_fix.review].adapter` names either one adapter or an ordered list of
 them; `model` and `effort` stay single values that apply to every entry, so the
