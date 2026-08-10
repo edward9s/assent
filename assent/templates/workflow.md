@@ -517,15 +517,27 @@ and `archive --all` are the routine, unattended one.
 
 ## Opt-in folder review and bounded repair
 
-The `[workflow]` table has exactly two keys. `task` selects task-scoped context
-and task-by-task accountability; `plan` selects plan-scoped context and plan
-accountability. A key selects the scheduler-supplied execution layer and its
-granularity, not permission. The selected role's `[abilities]` carry what that
-session does (`prompt`, `writes`, and `gate`), and `[agents]` only compose those
-abilities with optional model and effort choices. Ability prompts therefore do
-not decide whether their context is a task, plan, or folder. The only special
-behavior the engine infers from a role is an ability's `produces_verdict`; it
-activates the provider-neutral folder-review verdict protocol.
+The `[workflow]` table has exactly three keys. `task` selects task-scoped
+context and task-by-task accountability; `plan` selects plan-scoped context
+and plan accountability; `selection` owns the exact invocation selection after
+every contributing plan boundary is complete. A key selects the
+scheduler-supplied execution layer and its granularity, not permission. Every
+entry is a tagged union containing exactly one of `role` or `action`. The
+selected role's `[abilities]` carry what that session does (`prompt`, `writes`,
+and `gate`), and `[agents]` only compose those abilities with optional model
+and effort choices. Ability prompts therefore do not decide whether their
+context is a task, plan, or selection. The only special behavior the engine
+infers from a role is an ability's `produces_verdict`; it activates the
+provider-neutral review verdict protocol.
+
+There are exactly two scheduler-owned actions. `full_test` is legal at task or
+plan positions and runs the primary worktree's `.assent/verify.py` against the
+current source worktree without constructing an integration candidate or
+writing a receipt. `full_verify` is legal only at selection positions and owns
+the existing folder or exact-batch candidate transaction and its receipt. An
+action accepts no adapter, role, model, effort, prompt, ability, or arbitrary
+command string. AI roles remain forbidden from running either action or the
+complete suite themselves.
 
 With ordinary task execution, only `run --auto-fix` walks `plan` as the
 folder-level review/repair workflow:
@@ -536,15 +548,24 @@ assent run FOLDER --auto-fix
 
 ```toml
 [workflow]
-plan = [
-  { role = "folder_reviewer", adapter = "codex" },
-  { role = "bounded_fixer" },
-  { role = "folder_reviewer", adapter = "antigravity" },
+task = [
+  { role = "task_worker" },
 ]
-# task = [{ role = "task_worker" }]
+plan = [
+  { action = "full_test" },
+  { role = "folder_reviewer", adapter = "codex" },
+  { action = "full_test" },
+]
+selection = [
+  { action = "full_verify" },
+  { role = "folder_reviewer", adapter = "codex" },
+  { role = "selection_fixer" },
+  { action = "full_verify" },
+]
 ```
 
-Both keys are ordered arrays of role steps. A verdict-producing `plan` role
+All three keys are ordered arrays of tagged role/action steps. A
+verdict-producing `plan` role
 requires `adapter`; a role with `produces_verdict = false` omits it. In the
 folder-review layer, a writable non-verdict step authorizes the bounded
 task-profile repair described below, while a verdict-and-write role is a merged
@@ -554,7 +575,7 @@ model and effort through its adapter mappings. Preflight is keyed by the full
 same adapter with different models are both proven.
 
 All omitted and empty boundaries are explicit. An absent `[workflow]` table is
-identical to both keys being omitted. An omitted `plan` and `plan = []` both
+identical to all three keys being omitted. An omitted `plan` and `plan = []` both
 configure no folder review; with no plan, `run --auto-fix` reports that the flag
 had no effect and continues as an ordinary run. An omitted `task` keeps one
 implicit session per task using that task's own model and effort. A non-empty
@@ -562,10 +583,14 @@ implicit session per task using that task's own model and effort. A non-empty
 each task as its own accountability unit. `task = []` is intentionally
 different: it disables per-task sessions and makes the whole plan one unit,
 executed by the `plan` steps with plan-wide context and the union of task scope
-and focused gates. In that plan-execution mode, every `plan` step is an ordinary
-worker session; a non-verdict step succeeds or retries according to the plan's
-focused gate, not a reviewer verdict. An empty `plan` then leaves nothing able
-to execute and is refused. The removed `[auto_fix.review]` table is never
+and focused gates. In that plan-execution mode, every `plan` role step is an
+ordinary worker session and a `full_test` action is an objective
+source-worktree gate. A non-verdict role succeeds or retries according to the
+plan's focused gate, not a reviewer verdict. An empty `plan` then leaves
+nothing able to execute and is refused. An omitted or empty `selection`
+preserves direct invocation-level verification; automatic verifier-failure and
+conflict repair requires explicit `full_verify`/reviewer/fixer positions. The
+removed `[auto_fix.review]` table is never
 recognized alongside this one: config loading fails closed and names the exact
 settings-layer file that must be edited.
 
@@ -577,12 +602,14 @@ with `--once`, `--task`, and `--verify`, whose own ordering and scope rules do
 not change. A limited run defers the completed-folder loop when it leaves work
 incomplete; a quiescent blocked dependency with durable worker or focused-gate
 evidence may enter the separate blocked-adjudication review. Neither path
-spends a workflow step before its own evidence gate. Without the flag, configured
-review is inert. Complete verification requested by `--verify` follows only a
-successful run and loop according to the existing receipt policy; auto-fix
-neither performs that verification nor accepts. A missing receipt, an unrun
-full suite, or the absence of complete verification is never a reviewer
-failure.
+spends a workflow step before its own evidence gate. Without the flag,
+configured review roles are inert. Complete verification requested by
+`--verify` follows only a successful task and plan workflow. When
+`[workflow].selection` is configured, its `full_verify` action owns that
+verification and `--auto-fix` authorizes only its explicitly positioned repair
+roles; otherwise the ordinary direct verification path remains. Neither path
+accepts. A missing receipt, an unrun full suite, or the absence of complete
+verification is never a folder-review failure.
 
 The folder-level order is:
 

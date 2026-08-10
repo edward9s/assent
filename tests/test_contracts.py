@@ -160,6 +160,10 @@ class TestContractContent(unittest.TestCase):
                 "`task` selects task-scoped context",
                 "`plan` selects plan-scoped context",
                 "[workflow].selection",
+                "exactly three keys",
+                "tagged union",
+                "`full_test` is legal at task or plan positions",
+                "`full_verify` is legal only at selection positions",
                 "not permission",
                 "The selected role's `[abilities]` carry what that session does",
                 "The only special behavior the engine infers from a role",
@@ -171,6 +175,7 @@ class TestContractContent(unittest.TestCase):
                 "quiescent-blocked"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, workflow)
+        self.assertNotIn("exactly two keys", workflow)
 
         configuration = (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
             encoding="utf-8")
@@ -178,7 +183,8 @@ class TestContractContent(unittest.TestCase):
         self.assertNotIn("reviewer round", configuration.lower())
         for phrase in ("# [abilities.execute]", "# [abilities.review]",
                        "# [agents.worker]", "# [agents.folder_reviewer]",
-                       "# [workflow]", "# task =", "# plan ="):
+                       "# [workflow]", "# task =", "# plan =",
+                       "# selection ="):
             with self.subTest(template_phrase=phrase):
                 self.assertIn(phrase, configuration)
         prompts = re.findall(r'^# prompt = "([^"]+)"$', configuration, re.MULTILINE)
@@ -189,6 +195,11 @@ class TestContractContent(unittest.TestCase):
                     {"task", "plan", "folder"}.intersection(prompt.lower().split()))
 
         instructions = contracts.installed_contract_text("instructions.md")
+        self.assertNotIn("[auto_fix.review]", instructions)
+        self.assertNotIn("version-6 record", instructions)
+        self.assertNotIn("review_round_index", instructions)
+        self.assertIn("[workflow].plan", instructions)
+        self.assertIn("workflow_step_index", instructions)
         reading_guide = instructions.split(
             "A **meeting / interactive session** reads only", 1)[1].split(
                 "An **assent-scheduled task session** reads only:", 1)[0]
