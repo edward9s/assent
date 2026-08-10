@@ -240,13 +240,12 @@ class TestAutoFixReviewRoundPreflight(GlobalContractsMixin, EngineTestCase):
 [abilities.review]
 prompt = "Review."
 writes = false
-gate = true
 produces_verdict = true
-[agents.prime_review]
+[roles.prime_review]
 ability = ["review"]
 model = "prime"
 effort = "heavy"
-[agents.core_review]
+[roles.core_review]
 ability = ["review"]
 model = "core"
 effort = "heavy"

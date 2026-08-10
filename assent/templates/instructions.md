@@ -38,7 +38,7 @@ A **meeting / interactive session** reads only, to get started:
 4. `~/.assent/workflow.md` (during a review or acceptance meeting, to judge
    whether a worktree's implementation matches its task file's spec, or
    whenever CLI/scheduler mechanics matter directly, including any change to
-   `[workflow]`, `[agents]`, or `[abilities]` — not required merely to draft a
+   `[workflow]`, `[roles]`, or `[abilities]` — not required merely to draft a
    task file; that contract remains the canonical owner of those settings)
 5. The current work folder's task files and `_report.md` (during a review
    meeting)
@@ -224,13 +224,16 @@ and account environments; Assent does not create a container or VM sandbox.
 
 ## Opt-in folder review and bounded repair
 
-`[workflow].plan` supplies the ordered folder review-and-repair policy. The
+The ordered per-plan review-and-repair policy comes from a non-empty
+`[workflow].plan`, or otherwise from the role prefix before
+`[workflow].selection`'s first action. The
 entire loop is invocation-level opt-in: only `run --auto-fix` starts its
 folder-level review after the final focused checks and authorizes repair. An
 ordinary `run` without the flag starts neither review nor repair. Each role's
 agent resolves its adapter, abstract model, and effort through the configured
-adapter mappings. An omitted or empty plan configures no folder review and
-`run --auto-fix` reports that the flag had no effect. The flag is orthogonal to
+adapter mappings. An omitted or empty plan with no leading selection role
+configures no review and `run --auto-fix` reports that the flag had no effect.
+The flag is orthogonal to
 selection and may accompany an implicit folder, explicit folders, `...`,
 `--all`, `--once`, `--task`, or `--verify`; the ordinary selection and
 verification rules still apply.
@@ -245,8 +248,8 @@ it does not run a new focused command merely to create evidence. A folder
 containing only `SKIP` tasks needs no implementation review. Focused failure
 writes the scheduler's finding evidence and starts no completed-folder reviewer.
 
-Each explicit `[workflow].plan` position contributes to the finite bound on the
-loop. Verdict-producing roles open their configured adapter session; a
+Each explicit position in that configured review sequence contributes to the
+finite bound on the loop. Verdict-producing roles open their configured adapter session; a
 write-capable non-verdict role authorizes the bounded task-profile repair for
 the nearest earlier durable verdict instead of opening its own session.
 
@@ -387,7 +390,8 @@ amendment, and all Git state.
 Interruption, quota exhaustion, adapter failure, and a failed repair gate keep
 all edits and state. A later `run --auto-fix` reads the existing pending state,
 resumes WIP work, and continues from the durable workflow position, but only
-while the current `[workflow].plan` still contains the exact role and identity
+while the current configured per-plan review sequence still contains the exact
+role and identity
 that decided that state. Removing or changing that policy refuses
 repair and closeout; a settled `SELF-FIXED, UNREVIEWED` or `REVIEW UNRESOLVED,
 HUMAN DECISION` folder is terminal and resumes nothing. Running

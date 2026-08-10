@@ -51,12 +51,12 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 f'{{ role = "folder_reviewer", adapter = {json.dumps(name)} }}'))
         return (
             '\n[abilities.review_fix]\nprompt = "Review and repair."\n'
-            'writes = true\ngate = true\nproduces_verdict = true\n'
+            'writes = true\nproduces_verdict = true\n'
             '[abilities.fix]\nprompt = "Repair durable findings."\n'
-            'writes = true\ngate = false\n'
-            '[agents.folder_reviewer]\nability = ["review_fix"]\n'
+            'writes = true\n'
+            '[roles.folder_reviewer]\nability = ["review_fix"]\n'
             'model = "prime"\neffort = "heavy"\n'
-            '[agents.bounded_fixer]\nability = ["fix"]\n'
+            '[roles.bounded_fixer]\nability = ["fix"]\n'
             f'[workflow]\nplan = [{rendered}]\n')
 
     @staticmethod
@@ -88,16 +88,90 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             return ok_result()
         return step
 
+    def test_selection_role_prefix_supplies_plan_review_when_plan_is_empty(self):
+        task_path = self.write_task(1, status="TODO", scope=("src/",))
+        cfg = self.build(extra_config=(
+            '\n[abilities.write_tests]\n'
+            'prompt = "Write the requirement tests."\n'
+            'writes = true\n'
+            '[abilities.implement_source]\n'
+            'prompt = "Implement the production source."\n'
+            'writes = true\n'
+            '[abilities.review]\n'
+            'prompt = "Review the completed plan."\n'
+            'writes = false\nproduces_verdict = true\n'
+            '[abilities.fix]\n'
+            'prompt = "Repair reviewed findings."\n'
+            'writes = true\n'
+            '[roles.implementer]\n'
+            'ability = ["write_tests", "implement_source"]\n'
+            '[roles.reviewer_fixer]\nability = ["review", "fix"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\n'
+            'task = [{ role = "implementer" }]\n'
+            'plan = []\n'
+            'selection = ['
+            '{ role = "reviewer_fixer", adapter = "claude" }, '
+            '{ role = "reviewer_fixer", adapter = "claude" }, '
+            '{ action = "full_verify" }]\n'))
+        (self.root / ".assent" / "verify.py").write_text(
+            "raise SystemExit(0)\n", encoding="utf-8")
+        self.commit_all()
+        worker = ScriptedAdapter([
+            self.ai_done(task_path, {"src/value.txt": "implemented\n"})])
+        reviewer = ScriptedAdapter([TaskResult(
+            0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer, auto_fix=True), 0)
+
+        self.assertEqual(cfg.workflow_plan, ())
+        self.assertEqual([step.role for step in cfg.auto_fix_review],
+                         ["reviewer_fixer", "reviewer_fixer"])
+        self.assertEqual(len(worker.calls), 1)
+        self.assertIn("Write the requirement tests.", worker.calls[0][0])
+        self.assertIn("Implement the production source.", worker.calls[0][0])
+        self.assertEqual(len(reviewer.calls), 1)
+        self.assertIn("Review the completed plan.", reviewer.calls[0][0])
+        self.assertIn("Repair reviewed findings.", reviewer.calls[0][0])
+
+        verify_calls = 0
+
+        def verify_action(_cfg, *, recheck=False):
+            nonlocal verify_calls
+            verify_calls += 1
+            _branch, source, _worktree = engine.source_snapshot(
+                cfg, gitops.main_worktree(cfg.root))
+            return FullVerifyEvidence(
+                "PASSED", ("plan01",), gitops.commit_of(cfg.root, "HEAD"),
+                (source,), "a" * 40,
+                engine.verification.verifier_digest(cfg), "b" * 64, 0, (),
+                False)
+
+        with mock.patch("assent.engine.verify_folder_action",
+                        side_effect=verify_action):
+            self.assertEqual(engine.run_selection_workflow(
+                str(self.root / ".assent" / "assent.toml"),
+                self.root / ".assent", ["plan01"], auto_fix=True), 0)
+        self.assertEqual(verify_calls, 1)
+
     def test_selection_verifier_failure_repairs_and_rechecks_in_one_call(self):
         task_path = self.write_task(1, status="TODO", scope=("src/",))
         extra = (
-            '\n[abilities.selection_review]\n'
+            '\n[abilities.review]\n'
             'prompt = "Diagnose the failed selection verifier."\n'
-            'writes = false\ngate = true\nproduces_verdict = true\n'
-            '[agents.selection_reviewer]\nability = ["selection_review"]\n'
+            'writes = false\nproduces_verdict = true\n'
+            '[abilities.fix]\n'
+            'prompt = "Resolve the assigned conflict."\n'
+            'writes = true\n'
+            '[roles.reviewer]\nability = ["review"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[roles.fixer]\nability = ["fix"]\n'
             'model = "prime"\neffort = "heavy"\n'
             '[workflow]\nselection = [{ action = "full_verify" }, '
-            '{ role = "selection_reviewer", adapter = "claude" }, '
+            '{ role = "reviewer", adapter = "claude" }, '
+            '{ role = "fixer" }, '
             '{ action = "full_verify" }]\n')
         cfg = self.build(extra_config=extra)
         (self.root / ".assent" / "verify.py").write_text(
@@ -170,19 +244,19 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         source.mkdir()
         (source / "value.txt").write_text("base\n", encoding="utf-8")
         extra = (
-            '\n[abilities.selection_review]\n'
+            '\n[abilities.review]\n'
             'prompt = "Assign every selection conflict path."\n'
-            'writes = false\ngate = true\nproduces_verdict = true\n'
-            '[abilities.selection_fix]\n'
+            'writes = false\nproduces_verdict = true\n'
+            '[abilities.fix]\n'
             'prompt = "Resolve the assigned conflict."\n'
-            'writes = true\ngate = false\n'
-            '[agents.selection_reviewer]\nability = ["selection_review"]\n'
+            'writes = true\n'
+            '[roles.reviewer]\nability = ["review"]\n'
             'model = "prime"\neffort = "heavy"\n'
-            '[agents.selection_fixer]\nability = ["selection_fix"]\n'
+            '[roles.fixer]\nability = ["fix"]\n'
             'model = "prime"\neffort = "heavy"\n'
             '[workflow]\nselection = [{ action = "full_verify" }, '
-            '{ role = "selection_reviewer", adapter = "claude" }, '
-            '{ role = "selection_fixer" }, '
+            '{ role = "reviewer", adapter = "claude" }, '
+            '{ role = "fixer" }, '
             '{ action = "full_verify" }]\n')
         cfg = self.build(extra_config=extra)
         (self.root / ".assent" / "verify.py").write_text(
@@ -1847,23 +1921,23 @@ class TestProviderUsageRecording(GlobalContractsMixin, EngineTestCase):
 class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
     TASK_ROLES = (
         '\n[abilities.prepare]\nprompt = "Prepare the implementation."\n'
-        'writes = true\ngate = false\n'
+        'writes = true\n'
         '[abilities.implement]\nprompt = "Implement and verify."\n'
-        'writes = true\ngate = true\n'
-        '[agents.preparer]\nability = ["prepare"]\n'
-        '[agents.implementer]\nability = ["prepare", "implement"]\n'
+        'writes = true\n'
+        '[roles.preparer]\nability = ["prepare"]\n'
+        '[roles.implementer]\nability = ["prepare", "implement"]\n'
         '[workflow]\ntask = [{ role = "preparer" }, '
         '{ role = "implementer" }]\n')
     PLAN_ROLE = (
         '\n[abilities.implement_plan]\nprompt = "Implement the whole plan."\n'
-        'writes = true\ngate = true\n'
-        '[agents.plan_worker]\nability = ["implement_plan"]\n'
+        'writes = true\n'
+        '[roles.plan_worker]\nability = ["implement_plan"]\n'
         'model = "lite"\n'
         '[workflow]\ntask = []\nplan = [{ role = "plan_worker" }]\n')
     ACTION_AGENT = (
         '\n[abilities.work]\nprompt = "Work from the supplied evidence."\n'
-        'writes = true\ngate = false\n'
-        '[agents.worker]\nability = ["work"]\n')
+        'writes = true\n'
+        '[roles.worker]\nability = ["work"]\n')
 
     @staticmethod
     def set_task_workflow(path, roles):
@@ -2064,8 +2138,8 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         cfg = self.build(extra_config=(
             '\n[abilities.review_plan]\n'
             'prompt = "Review the whole plan."\n'
-            'writes = true\ngate = true\nproduces_verdict = true\n'
-            '[agents.plan_reviewer]\nability = ["review_plan"]\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.plan_reviewer]\nability = ["review_plan"]\n'
             'model = "lite"\neffort = "normal"\n'
             '[workflow]\ntask = []\n'
             'plan = [{ role = "plan_reviewer", adapter = "codex" }]\n'))
@@ -2191,6 +2265,78 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         self.assertIn("raw passing output", out.getvalue())
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertFalse((self.plan_dir / "_verification.toml").exists())
+
+    def test_focused_test_action_closes_task_without_duplicate_focused_run(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ role = "worker" }, '
+              '{ action = "focused_test" }]\n'))
+        self.commit_all()
+        passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
+
+        def finish(prompt):
+            self.assertIn("scheduler-owned focused_test action", prompt)
+            self.assertNotIn("To verify yourself", prompt)
+            return self.ai_done(path)(prompt)
+
+        with mock.patch.object(
+                engine, "_verify_subprocess", return_value=passed) as focused:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True,
+                adapter=ScriptedAdapter([finish])), 0)
+
+        focused.assert_called_once()
+        self.assertEqual(focused.call_args.args[1], parse_task_file(path).verify)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
+    def test_failed_focused_test_reaches_role_and_reruns_after_source_change(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ action = "focused_test" }, '
+              '{ role = "worker" }, { action = "focused_test" }]\n'))
+        self.commit_all()
+
+        def repair(prompt):
+            self.assertIn("FOCUSED TEST EVIDENCE", prompt)
+            self.assertIn("Status: FAILED", prompt)
+            return self.ai_done(
+                path, files={"src/fixed.py": "fixed\n"})(prompt)
+
+        results = [
+            subprocess.CompletedProcess([], 3, "focused failure\n", ""),
+            subprocess.CompletedProcess([], 0, "focused pass\n", ""),
+        ]
+        with mock.patch.object(
+                engine, "_verify_subprocess", side_effect=results) as focused:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([repair])), 0)
+
+        self.assertEqual(focused.call_count, 2)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+    def test_role_write_after_focused_test_requires_a_later_action(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ action = "focused_test" }, '
+              '{ role = "worker" }]\n'))
+        self.commit_all()
+        passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
+
+        with mock.patch.object(
+                engine, "_verify_subprocess", return_value=passed) as focused:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([
+                    self.ai_done(
+                        path, files={"src/changed.py": "changed\n"})])), 0)
+
+        focused.assert_called_once()
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        self.assertIn(
+            "STALE", read_entries(journal_path_for(path))[-1]["summary"])
 
     def test_unchanged_failed_full_test_is_reused_and_blocks_terminal_task(self):
         path = self.write_task(1)

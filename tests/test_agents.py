@@ -11,7 +11,7 @@ from assent.config import load_config
 from assent.user_home import ASSENT_HOME_ENV
 
 
-class AgentConfigTestCase(unittest.TestCase):
+class RoleConfigTestCase(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
@@ -31,33 +31,30 @@ class AgentConfigTestCase(unittest.TestCase):
         return load_config(path, "plan01")
 
 
-class TestAgents(AgentConfigTestCase):
+class TestRoles(RoleConfigTestCase):
     def test_composed_role_resolves_in_order_and_derives_flags(self):
         cfg = self.load("""
 [abilities.build]
 prompt = "Implement the requested change."
 writes = true
-gate = false
 
 [abilities.review]
 prompt = "Return a scheduler verdict."
 writes = false
-gate = true
 produces_verdict = true
 
-[agents.builder_reviewer]
+[roles.builder_reviewer]
 ability = ["build", "review"]
 model = "core"
 effort = "heavy"
 """)
 
-        resolved = cfg.resolve_agent("builder_reviewer")
+        resolved = cfg.resolve_role("builder_reviewer")
         self.assertEqual(resolved.abilities,
                          (cfg.abilities["build"], cfg.abilities["review"]))
         self.assertEqual(resolved.model, "core")
         self.assertEqual(resolved.effort, "heavy")
         self.assertTrue(resolved.writes)
-        self.assertTrue(resolved.gate)
         self.assertTrue(resolved.produces_verdict)
 
     def test_review_name_does_not_imply_a_verdict(self):
@@ -65,50 +62,70 @@ effort = "heavy"
 [abilities.review]
 prompt = "Inspect without a scheduler verdict."
 writes = false
-gate = false
 produces_verdict = false
 
-[agents.reader]
+[roles.reader]
 ability = ["review"]
 """)
 
-        resolved = cfg.resolve_agent("reader")
+        resolved = cfg.resolve_role("reader")
         self.assertFalse(resolved.writes)
-        self.assertFalse(resolved.gate)
         self.assertFalse(resolved.produces_verdict)
 
     def test_missing_ability_and_empty_role_refuse_to_load(self):
         with self.assertRaisesRegex(AssentError, "missing ability 'absent'"):
-            self.load("[agents.worker]\nability = [\"absent\"]\n")
+            self.load("[roles.worker]\nability = [\"absent\"]\n")
         with self.assertRaisesRegex(AssentError, "non-empty array"):
-            self.load("[agents.worker]\nability = []\n")
+            self.load("[roles.worker]\nability = []\n")
+
+    def test_removed_agents_table_refuses_as_an_unknown_top_level_key(self):
+        with self.assertRaisesRegex(AssentError, "unknown top-level keys: agents"):
+            self.load("[agents.worker]\nability = [\"build\"]\n")
 
     def test_wrong_types_unknown_keys_and_invalid_tiers_refuse_to_load(self):
         cases = (
-            ("[abilities.build]\nprompt = 1\nwrites = true\ngate = false\n",
+            ("[abilities.build]\nprompt = 1\nwrites = true\n",
              "wrong type"),
-            ("[abilities.build]\nprompt = \"x\"\nwrites = true\ngate = false\nextra = 1\n",
+            ("[abilities.build]\nprompt = \"x\"\nwrites = true\nextra = 1\n",
              "unknown keys"),
-            ("[agents.worker]\nability = [1]\n", "all-string"),
-            ("[agents.worker]\nability = [\"build\"]\nextra = 1\n",
+            ("[abilities.build]\nprompt = \"x\"\nwrites = true\ngate = true\n",
              "unknown keys"),
-            ("[abilities.build]\nprompt = \"x\"\nwrites = false\ngate = false\n"
-             "[agents.worker]\nability = [\"build\"]\nmodel = \"max\"\n",
+            ("[roles.worker]\nability = [1]\n", "all-string"),
+            ("[roles.worker]\nability = [\"build\"]\nextra = 1\n",
+             "unknown keys"),
+            ("[abilities.build]\nprompt = \"x\"\nwrites = false\n"
+             "[roles.worker]\nability = [\"build\"]\nmodel = \"max\"\n",
              "not a valid model tier"),
-            ("[abilities.build]\nprompt = \"x\"\nwrites = false\ngate = false\n"
-             "[agents.worker]\nability = [\"build\"]\neffort = \"high\"\n",
+            ("[abilities.build]\nprompt = \"x\"\nwrites = false\n"
+             "[roles.worker]\nability = [\"build\"]\neffort = \"high\"\n",
              "not a valid effort"),
         )
         for text, message in cases:
             with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):
                 self.load(text)
 
-    def test_existing_config_fixture_loads_with_empty_tables(self):
+    def test_shipped_config_activates_default_roles_and_workflows(self):
         template = (Path(__file__).resolve().parents[1]
                     / "assent" / "templates" / "assent.toml")
         cfg = self.load(template.read_text(encoding="utf-8"))
-        self.assertEqual(cfg.abilities, {})
-        self.assertEqual(cfg.agents, {})
+        self.assertEqual(set(cfg.abilities),
+                         {"write_tests", "implement_source", "review", "fix"})
+        self.assertEqual(set(cfg.roles),
+                         {"implementer", "reviewer", "fixer",
+                          "reviewer_fixer"})
+        self.assertEqual(
+            [step.action if hasattr(step, "action") else step.role
+             for step in cfg.workflow_task],
+            ["implementer", "focused_test"])
+        self.assertEqual(cfg.workflow_plan, ())
+        self.assertEqual([step.role for step in cfg.auto_fix_review],
+                         ["reviewer_fixer", "reviewer_fixer"])
+        self.assertEqual(
+            cfg.roles["implementer"].ability,
+            ("write_tests", "implement_source"))
+        self.assertEqual(cfg.roles["reviewer_fixer"].ability,
+                         ("review", "fix"))
+        self.assertEqual(len(cfg.workflow_selection), 6)
 
 
 if __name__ == "__main__":

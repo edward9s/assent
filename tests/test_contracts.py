@@ -172,23 +172,47 @@ class TestContractContent(unittest.TestCase):
                 "every `plan` role step is an ordinary worker session",
                 "according to the plan's focused gate",
                 "when no task can make further progress",
-                "quiescent-blocked"):
+                "quiescent-blocked",
+                "A following writable non-verdict fixer is conflict-only",
+                "the first role after `full_verify` must produce a verdict",
+                "without repeating a successful complete verification"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, workflow)
         self.assertNotIn("exactly two keys", workflow)
 
         configuration = (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
             encoding="utf-8")
+        adapter_configuration = (
+            _PROJECT_ROOT / "assent/templates/adapter.toml").read_text(
+                encoding="utf-8")
         self.assertNotIn("[auto_fix.review]", configuration)
         self.assertNotIn("reviewer round", configuration.lower())
-        for phrase in ("# [abilities.execute]", "# [abilities.review]",
-                       "# [agents.worker]", "# [agents.folder_reviewer]",
-                       "# [workflow]", "# task =", "# plan =",
-                       "# selection ="):
+        self.assertNotIn("[adapter]", configuration)
+        self.assertIn("[adapter]", adapter_configuration)
+        for phrase in ("[abilities.write_tests]", "[abilities.implement_source]",
+                       "[abilities.review]", "[abilities.fix]",
+                       "[roles.implementer]", "[roles.reviewer_fixer]",
+                       "[workflow]", "task =", "plan =", "selection =",
+                       'receipt_refresh = "manual"',
+                       "# focused_test is legal only in workflow.task"):
             with self.subTest(template_phrase=phrase):
                 self.assertIn(phrase, configuration)
-        prompts = re.findall(r'^# prompt = "([^"]+)"$', configuration, re.MULTILINE)
-        self.assertEqual(len(prompts), 3)
+        parsed_configuration = tomllib.loads(configuration)
+        self.assertNotIn("agents", parsed_configuration)
+        self.assertIn("roles", parsed_configuration)
+        self.assertEqual(parsed_configuration["workflow"]["task"],
+                         [{"role": "implementer"},
+                          {"action": "focused_test"}])
+        self.assertTrue(all(
+            "gate" not in ability
+            for ability in parsed_configuration["abilities"].values()))
+        self.assertEqual(parsed_configuration["workflow"]["plan"], [])
+        self.assertEqual(parsed_configuration["workflow"]["selection"][0],
+                         {"role": "reviewer_fixer", "adapter": "codex"})
+        self.assertEqual(parsed_configuration["workflow"]["selection"][-1],
+                         {"action": "full_verify"})
+        prompts = re.findall(r'^prompt = "([^"]+)"$', configuration, re.MULTILINE)
+        self.assertEqual(len(prompts), 4)
         for prompt in prompts:
             with self.subTest(prompt=prompt):
                 self.assertFalse(
@@ -203,7 +227,7 @@ class TestContractContent(unittest.TestCase):
         reading_guide = instructions.split(
             "A **meeting / interactive session** reads only", 1)[1].split(
                 "An **assent-scheduled task session** reads only:", 1)[0]
-        for key in ("`[workflow]`", "`[agents]`", "`[abilities]`"):
+        for key in ("`[workflow]`", "`[roles]`", "`[abilities]`"):
             self.assertIn(key, reading_guide)
         self.assertIn("canonical owner", reading_guide)
 
@@ -798,10 +822,11 @@ class TestContractContent(unittest.TestCase):
 
         configuration = (root / "assent/templates/assent.toml").read_text(
             encoding="utf-8")
-        self.assertIn("# [workflow]", configuration)
-        self.assertIn('role = "folder_reviewer"', configuration)
-        self.assertIn("folder review", configuration)
-        self.assertIn("[workflow].plan", configuration)
+        self.assertIn("[workflow]", configuration)
+        self.assertIn('role = "reviewer_fixer"', configuration)
+        self.assertNotIn("folder_reviewer", configuration)
+        self.assertIn("plan review", configuration)
+        self.assertIn("plan = []", configuration)
 
         chinese = {
             "WORKFLOW.zh-TW.md": (root / "docs/zh-TW/WORKFLOW.md").read_text(
@@ -853,7 +878,8 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(instructions_phrase=phrase):
                 self.assertIn(phrase, instructions_text)
         self.assertIn("selection = [", configuration)
-        self.assertIn('role = "selection_fixer"', configuration)
+        self.assertIn('role = "fixer"', configuration)
+        self.assertIn('ability = ["review", "fix"]', configuration)
 
     def test_round_interruption_and_gated_settle_are_documented(self):
         """Interrupted-round recovery, the gated settle, the failing-gate

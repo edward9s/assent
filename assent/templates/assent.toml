@@ -3,7 +3,7 @@
 # later inits only add settings a new version brings; your own values and
 # comments are never rewritten. A project may still keep its own
 # .assent/assent.toml, which overrides this file for that project alone.
-# The work folder is stated explicitly on the command line or derived from
+# The plan is stated explicitly on the command line or derived from
 # current task-file state.
 # All relative paths are based on the project root (= the parent of .assent).
 
@@ -16,145 +16,66 @@ quota_poll_minutes = 30           # polling interval when the quota reset time c
 rotation_poll_minutes = 1         # polling interval after every adapter in the rotation is quota-exhausted
 
 [verification]
-# Who refreshes a folder's verification receipt.
+# Who refreshes a plan's verification receipt.
 # "manual" (default): run closeout does not build a candidate or run the full
 # suite; it prints the next step and the receipt comes only from an explicit
-# `assent verify [--batch]`. Best for batch workflows, where one batch
-# verification replaces N per-folder ones.
+# `assent verify [--batch]`. Best for selection workflows, where one selection
+# verification replaces N individual plan verification runs.
 # "auto": run closeout refreshes a stale receipt itself, so a run ends knowing
 # whether the integration candidate is green.
-# receipt_refresh = "manual"
+receipt_refresh = "manual"
 
-# Optional execution workflow. The entire example is commented out: omission
-# keeps ordinary task sessions unchanged and leaves folder review via
-# `run --auto-fix` disabled.
-# Ability prompts describe only reusable actions; the selected [workflow].task
-# or [workflow].plan key supplies its context and accountability.
-# [abilities.execute]
-# prompt = "Implement the supplied requirements and satisfy the supplied gate."
-# writes = true
-# gate = true
-# [abilities.review]
-# prompt = "Review the supplied change and evidence and return the required verdict."
-# writes = false
-# gate = true
-# produces_verdict = true
-# [abilities.selection_fix]
-# prompt = "Resolve the reviewed exact-selection conflict assignment."
-# writes = true
-# gate = false
-# [agents.worker]
-# ability = ["execute"]
-# [agents.folder_reviewer]
-# ability = ["review"]
-# model = "prime"
-# effort = "heavy"
-# [agents.selection_fixer]
-# ability = ["selection_fix"]
-# model = "prime"
-# effort = "heavy"
-# [workflow]
-# task = [{ role = "worker" }]
-# plan = [{ role = "folder_reviewer", adapter = "codex" }]
-# selection = [
-#   { action = "full_verify" },
-#   { role = "folder_reviewer", adapter = "codex" },
-#   { role = "selection_fixer" },
-#   { action = "full_verify" },
-# ]
-# Each reviewer/fixer pair is one finite conflict-repair position. Repeat the
-# pair plus full_verify explicitly to authorize another candidate rebuild.
-
-[adapter]
-# One adapter name or a non-empty list of names. A list rotates in order and
-# wraps around; a single string has the same behavior as a one-item list.
-name = ["claude", "codex"]            # "claude", "codex", or "antigravity"
-
-[adapter.claude]
-command = "claude"
-# Extra arguments passed to the Claude CLI; the default skips the interactive
-# permission prompt for unattended execution.
-# If switching to acceptEdits, use --allowedTools to permit the verification
-# command and the tools needed for task closeout.
-extra_args = ["--permission-mode", "bypassPermissions"]
-# abstract tier -> CLI --model argument (task files write only prime/core/lite)
-[adapter.claude.models]
-prime = "fable"
-core  = "opus"
-lite  = "sonnet"
-# default value per tier when a task file states no effort (heavy/normal/slight).
-# This table overrides per tier; it does not replace the built-in defaults, so an
-# absent, empty, or partial table keeps the built-in value for every omitted tier.
-# Every tier therefore resolves to a concrete effort -- assent never falls back to
-# the vendor CLI's own default.
-[adapter.claude.default_effort]
-prime = "heavy"
-core  = "heavy"
-lite  = "normal"
-# abstract effort -> actual CLI value; lookup order: tier subsection > flat > built-in baseline.
-# built-in baseline: heavy = "high", normal = "medium", slight = "low".
-# Abstract words are not legal CLI values, so they are never sent directly.
-# [adapter.claude.efforts]
-# heavy = "high"
-# normal = "medium"
-# slight = "low"
-# [adapter.claude.efforts.lite]
-# heavy = "max"                  # overrides only lite/heavy, other tiers unaffected
-
-[adapter.codex]
-command = "codex"
-# Extra arguments passed to the Codex CLI; the default permits writing to the
-# system temp directory and the main-tree `.assent/`.
-# See "Hard requirements for the adapter sandbox" in format.md for the permission
-# needs and the limits when tightening.
-extra_args = ["--sandbox", "danger-full-access"]
-[adapter.codex.models]
-prime = "gpt-5.6-sol"
-core  = "gpt-5.6-terra"
-lite  = "gpt-5.6-luna"
-# Per-tier override of the built-in defaults; omitted tiers keep their built-in value.
-[adapter.codex.default_effort]
-prime = "heavy"
-core  = "normal"
-lite  = "slight"
-# [adapter.codex.efforts]
-# heavy = "high"
-# normal = "medium"
-# slight = "low"
-# [adapter.codex.efforts.prime]
-# heavy = "xhigh"                # vendor-specific values appear only in the config translation layer
-
-[adapter.antigravity]
-command = "agy"
-# Antigravity requires an interactive Google sign-in before unattended use. Start
-# `agy` and complete the browser or printed-URL sign-in before `assent run`.
-# See Google's official Antigravity CLI installation and authentication docs:
-# https://antigravity.google/docs/cli/install
-# Sign out with `/logout` only at the interactive AGY prompt; it is not a shell
-# subcommand. Assent uses credentials already held by AGY and does not open the
-# login browser, read or modify credentials, switch Google accounts, or alter
-# workspace trust. Headless execution cannot answer permission prompts, so
-# unattended runs use --dangerously-skip-permissions.
-extra_args = ["--dangerously-skip-permissions"]
-# Print mode timeout: how long AGY will wait for a single --print invocation.
-# Do not set lower than your longest expected task time. The watchdog timeout
-# (in the [watchdog] section above) is independent and limits total session time.
-# Antigravity 1.1.5+ defaults to 5 minutes; Assent requires this to be explicit.
-print_timeout_minutes = 120
-[adapter.antigravity.models]
-# These must be base family slugs that AGY 1.1.5+ accepts; verify with `agy models`
-prime = "gemini-3.1-pro"     # Gemini 3.1 Pro (low, high only)
-core  = "gemini-3.6-flash"   # Gemini 3.6 Flash (low, medium, high)
-lite  = "gemini-3.5-flash"   # Gemini 3.5 Flash (low, medium; no high)
-# Per-tier override of the built-in defaults; omitted tiers keep their built-in value.
-[adapter.antigravity.default_effort]
-prime = "heavy"
-core  = "heavy"
-lite  = "heavy"
-# Effort translation: Gemini 3.1 Pro does not support medium, so map normal up to high
-# (quality-first, never silent downgrade). Gemini 3.5 Flash has no high, so map heavy
-# to medium (the family's ceiling), visible in the config for auditability.
-[adapter.antigravity.efforts.prime]
-normal = "high"
-[adapter.antigravity.efforts.lite]
-heavy = "medium"
+# The default workflow is active. `run --auto-fix` remains the invocation-level
+# opt-in for plan review and bounded repair.
+# Abilities are atomic and reusable; roles compose them for each workflow step.
+# prompt: instructions added to a session that uses this ability.
+# writes: whether that session may edit source inside its scheduler-owned scope.
+# produces_verdict: use the scheduler's structured review-verdict protocol.
+[abilities.write_tests]
+prompt = "Write or update tests that prove the supplied requirements."
+writes = true
+[abilities.implement_source]
+prompt = "Implement the supplied requirements and satisfy the supplied focused checks."
+writes = true
+[abilities.review]
+prompt = "Review the supplied change and evidence and return the required verdict."
+writes = false
+produces_verdict = true
+[abilities.fix]
+prompt = "Repair authorized blocking findings within the assigned scope."
+writes = true
+# ability: ordered ability names composed into this role.
+# model/effort: optional abstract execution tiers for this role.
+[roles.implementer]
+ability = ["write_tests", "implement_source"]
+[roles.reviewer]
+ability = ["review"]
+model = "prime"
+effort = "heavy"
+[roles.fixer]
+ability = ["fix"]
+model = "prime"
+effort = "heavy"
+[roles.reviewer_fixer]
+ability = ["review", "fix"]
+model = "prime"
+effort = "heavy"
+# Actions are scheduler-owned objective gates, not agent abilities.
+# focused_test is legal only in workflow.task. It runs the current task's
+# focused verify command outside the AI session and binds the result to source.
+# full_test is legal only in workflow.task and workflow.plan. It runs the full
+# suite against the current source worktree without an integration candidate or
+# verification receipt.
+# full_verify is legal only in workflow.selection. It verifies the reconstructed
+# integration candidate and writes the matching plan or exact-selection receipt.
+# An action accepts only its action name: no role, adapter, model, or effort.
+# role: a name defined under [roles]; adapter: the verdict role's AI provider.
+# After full_verify: one verdict role, an optional writes-only fixer, then
+# another full_verify. Invalid repair positions fail before verification starts.
+[workflow]
+task = [{ role = "implementer" }, { action = "focused_test" }]
+plan = []
+selection = [{ role = "reviewer_fixer", adapter = "codex" }, { role = "reviewer_fixer", adapter = "codex" }, { action = "full_verify" }, { role = "reviewer", adapter = "codex" }, { role = "fixer" }, { action = "full_verify" }]
+# Roles before the first action are the bounded per-plan review sequence. Roles
+# after full_verify repair only its durable failure evidence. The fixer is used
+# for candidate conflicts; verifier failures use the implicated task profiles.

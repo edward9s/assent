@@ -24,15 +24,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from assent import AssentError
-from assent.agents import (Ability, Agent, ResolvedAgent,
-                           resolve_agent as resolve_agent_role)
+from assent.agents import Ability, ResolvedRole, Role, resolve_role
 from assent.lockfile import LOCK_NAME
 from assent.shared_paths import MANIFEST_LOCK_NAME, MANIFEST_NAME
 from assent.user_home import user_config_path
 
 _TOP_LEVEL_KEYS = {
     "watchdog", "run", "adapter", "verification", "auto_fix", "abilities",
-    "agents", "workflow",
+    "roles", "workflow",
 }
 
 # The ordered settings layers, lowest priority first.  The built-in layer contributes no
@@ -166,7 +165,7 @@ class WorkflowPlanStep:
 
     role: str
     adapter: str | None
-    resolved_role: ResolvedAgent
+    resolved_role: ResolvedRole
     command: str | None = None
     extra_args: tuple[str, ...] = ()
     requested_model: str | None = None
@@ -199,7 +198,7 @@ class WorkflowTaskStep:
     """One parsed task-session role; execution is introduced by the next task."""
 
     role: str
-    resolved_role: ResolvedAgent
+    resolved_role: ResolvedRole
 
 
 @dataclass(frozen=True)
@@ -267,7 +266,7 @@ class Config:
     workflow_task: tuple[WorkflowTaskStep | WorkflowActionStep, ...] | None = None
     workflow_selection: tuple[WorkflowPlanStep | WorkflowActionStep, ...] = ()
     abilities: dict[str, Ability] = field(default_factory=dict)
-    agents: dict[str, Agent] = field(default_factory=dict)
+    roles: dict[str, Role] = field(default_factory=dict)
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
     # Where the effective settings came from: the layers that were present, lowest priority
     # first, and each stated leaf setting's dotted key mapped to the layer that stated it.
@@ -292,14 +291,26 @@ class Config:
         """
         return self.provenance.get(key, BUILTIN_LAYER)
 
-    def resolve_agent(self, name: str) -> ResolvedAgent:
+    def resolve_role(self, name: str) -> ResolvedRole:
         """Return one role with its ordered ability definitions and derived flags."""
-        return resolve_agent_role(name, self.agents, self.abilities)
+        return resolve_role(name, self.roles, self.abilities)
 
     @property
     def auto_fix_review(self) -> tuple[WorkflowPlanStep, ...]:
-        """Temporary internal compatibility alias for the renamed workflow plan."""
-        return self.workflow_plan
+        """Return the configured per-plan review sequence.
+
+        An explicit plan sequence remains supported. When it is empty, the
+        role prefix before selection's first action supplies the same bounded
+        review policy without forcing a separate workflow layer.
+        """
+        if self.workflow_plan:
+            return self.workflow_plan
+        prefix: list[WorkflowPlanStep] = []
+        for step in self.workflow_selection:
+            if isinstance(step, WorkflowActionStep):
+                break
+            prefix.append(step)
+        return tuple(prefix)
 
     @property
     def branch_prefix(self) -> str:
@@ -460,7 +471,7 @@ def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> di
 def _parse_abilities(section: dict) -> dict[str, Ability]:
     """Parse atomic ability definitions from the effective config layer."""
     abilities: dict[str, Ability] = {}
-    required = ("prompt", "writes", "gate")
+    required = ("prompt", "writes")
     allowed = {*required, "produces_verdict"}
     for name, value in section.items():
         owner = f"abilities.{name}"
@@ -474,18 +485,17 @@ def _parse_abilities(section: dict) -> dict[str, Ability]:
         abilities[name] = Ability(
             prompt=_typed(value, f"[{owner}]", "prompt", str, None),
             writes=_typed(value, f"[{owner}]", "writes", bool, None),
-            gate=_typed(value, f"[{owner}]", "gate", bool, None),
             produces_verdict=_typed(
                 value, f"[{owner}]", "produces_verdict", bool, False),
         )
     return abilities
 
 
-def _parse_agents(section: dict, abilities: dict[str, Ability]) -> dict[str, Agent]:
+def _parse_roles(section: dict, abilities: dict[str, Ability]) -> dict[str, Role]:
     """Parse named roles and validate every ability reference."""
-    agents: dict[str, Agent] = {}
+    roles: dict[str, Role] = {}
     for name, value in section.items():
-        owner = f"agents.{name}"
+        owner = f"roles.{name}"
         if not isinstance(value, dict):
             raise AssentError(f"Config [{owner}] must be a table, not a scalar")
         _known_keys(value, owner, {"ability", "model", "effort"})
@@ -507,8 +517,8 @@ def _parse_agents(section: dict, abilities: dict[str, Ability]) -> dict[str, Age
             raise AssentError(
                 f"Config [{owner}].effort = {effort!r} is not a valid effort"
                 f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
-        agents[name] = Agent(tuple(ability_names), model, effort)
-    return agents
+        roles[name] = Role(tuple(ability_names), model, effort)
+    return roles
 
 
 def _default_effort_map(section: dict, owner: str,
@@ -571,7 +581,7 @@ class _BlankGuard:
 
 
 def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
-                            agents: dict[str, Agent], abilities: dict[str, Ability]):
+                            roles: dict[str, Role], abilities: dict[str, Ability]):
     """Parse one workflow array without inventing defaults for an omitted key."""
     if key not in section:
         return None
@@ -591,10 +601,10 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
             action = guard.text(
                 _typed(value, f"[{owner}]", "action", str, None),
                 f"workflow.{key}.{index}.action")
-            allowed_actions = {"task": {"full_test"},
+            allowed_actions = {"task": {"focused_test", "full_test"},
                                "plan": {"full_test"},
                                "selection": {"full_verify"}}[key]
-            if action not in {"full_test", "full_verify"}:
+            if action not in {"focused_test", "full_test", "full_verify"}:
                 raise AssentError(f"Config {owner} has unknown action {action!r}")
             if action not in allowed_actions:
                 valid = "/".join(sorted(allowed_actions))
@@ -607,7 +617,7 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
         _known_keys(value, owner, allowed)
         role = guard.text(_typed(value, f"[{owner}]", "role", str, None),
                           f"workflow.{key}.{index}.role")
-        resolved = resolve_agent_role(role, agents, abilities)
+        resolved = resolve_role(role, roles, abilities)
         if key == "task":
             entries.append(WorkflowTaskStep(role, resolved))
             continue
@@ -665,6 +675,41 @@ def _resolve_accountability_steps(
             adapter_settings.extra_args,
             adapter_settings.resolve_model(resolved.model), requested_effort))
     return tuple(steps)
+
+
+def _validate_selection_repair_steps(
+        steps: tuple[WorkflowPlanStep | WorkflowActionStep, ...]) -> None:
+    """Reject only role arrangements the built-in full_verify protocol cannot run."""
+    actions = [index for index, step in enumerate(steps)
+               if isinstance(step, WorkflowActionStep)]
+    if not actions:
+        return
+    if actions[-1] != len(steps) - 1:
+        raise AssentError(
+            "Config [workflow].selection roles after the final full_verify "
+            "have no later full_verify action to prove a repair")
+    for left, right in zip(actions, actions[1:]):
+        roles = steps[left + 1:right]
+        if not roles:
+            continue
+        reviewer = roles[0]
+        assert isinstance(reviewer, WorkflowPlanStep)
+        if not reviewer.produces_verdict:
+            raise AssentError(
+                f"Config [workflow].selection[{left + 1}] is the first role "
+                "after full_verify and must produce a verdict")
+        if len(roles) > 2:
+            raise AssentError(
+                "Config [workflow].selection may place only one verdict role "
+                "and one optional fixer between full_verify actions")
+        if len(roles) == 2:
+            fixer = roles[1]
+            assert isinstance(fixer, WorkflowPlanStep)
+            if not fixer.writes or fixer.produces_verdict:
+                raise AssentError(
+                    f"Config [workflow].selection[{left + 2}] is the optional "
+                    "fixer after a verdict role and must write without producing "
+                    "a verdict")
 
 
 def _parse_adapter_names(section: dict, guard: "_BlankGuard") -> tuple[str, ...]:
@@ -963,7 +1008,7 @@ def load_config(path: str | Path, folder: str) -> Config:
                    if "antigravity" in adapter else {})
     verification_section = _section(data, "verification")
     abilities = _parse_abilities(_section(data, "abilities"))
-    agents = _parse_agents(_section(data, "agents"), abilities)
+    roles = _parse_roles(_section(data, "roles"), abilities)
     auto_fix = _section(data, "auto_fix")
     _known_keys(auto_fix, "auto_fix", set())
     workflow = _section(data, "workflow")
@@ -971,11 +1016,11 @@ def load_config(path: str | Path, folder: str) -> Config:
     guard = _BlankGuard(provenance, sources)
     adapter_names = _parse_adapter_names(adapter, guard)
     raw_workflow_plan = _parse_workflow_entries(
-        workflow, "plan", guard, agents, abilities)
+        workflow, "plan", guard, roles, abilities)
     raw_workflow_task = _parse_workflow_entries(
-        workflow, "task", guard, agents, abilities)
+        workflow, "task", guard, roles, abilities)
     raw_workflow_selection = _parse_workflow_entries(
-        workflow, "selection", guard, agents, abilities)
+        workflow, "selection", guard, roles, abilities)
     claude_efforts, claude_tier_efforts = _effort_maps(
         claude, "adapter.claude", guard)
     codex_efforts, codex_tier_efforts = _effort_maps(
@@ -1039,7 +1084,7 @@ def load_config(path: str | Path, folder: str) -> Config:
         receipt_refresh=_typed(verification_section, "[verification]",
                                "receipt_refresh", str, "manual"),
         abilities=abilities,
-        agents=agents,
+        roles=roles,
         sources=sources,
         provenance=provenance,
     )
@@ -1062,6 +1107,7 @@ def load_config(path: str | Path, folder: str) -> Config:
     plan_steps = _resolve_accountability_steps(cfg, raw_workflow_plan, "plan")
     selection_steps = _resolve_accountability_steps(
         cfg, raw_workflow_selection, "selection")
+    _validate_selection_repair_steps(selection_steps)
     plan_roles = [step for step in plan_steps
                   if isinstance(step, WorkflowPlanStep)]
     plan_has_action = len(plan_roles) != len(plan_steps)

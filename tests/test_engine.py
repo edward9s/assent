@@ -1030,17 +1030,15 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 '[abilities.review_fix]\n'
                 'prompt = "Review and repair within the named task scope."\n'
                 'writes = true\n'
-                'gate = true\n'
                 'produces_verdict = true\n'
                 '[abilities.fix]\n'
                 'prompt = "Repair the durable findings."\n'
                 'writes = true\n'
-                'gate = false\n'
-                '[agents.reviewer_fixer]\n'
+                '[roles.reviewer_fixer]\n'
                 'ability = ["review_fix"]\n'
                 f'model = "{model}"\n'
                 'effort = "heavy"\n'
-                '[agents.bounded_fixer]\n'
+                '[roles.bounded_fixer]\n'
                 'ability = ["fix"]\n'
                 '[workflow]\n'
                 f'plan = [{steps}]\n'))
@@ -1833,7 +1831,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 drifted, adapter=worker, auto_fix=True), 1)
 
         self.assertEqual(worker.calls, [])
-        self.assertIn("requires a configured [workflow].plan", out.getvalue())
+        self.assertIn("requires a configured plan review sequence", out.getvalue())
         self.assertEqual(
             auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(drifted)),
             before)
@@ -2097,7 +2095,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(parse_task_file(task).status, "DONE")
         self.assertIn("had no effect", out.getvalue())
-        self.assertIn("[workflow].plan", out.getvalue())
+        self.assertIn("no plan review step is configured", out.getvalue())
 
 
 class TestReworkPromptFallbacks(GlobalContractsMixin, EngineTestCase):
@@ -2207,8 +2205,8 @@ class TestSelfFixedUnreviewedSelection(GlobalContractsMixin, EngineTestCase):
         config_path = self.root / ".assent" / "assent.toml"
         self.build(extra_config=(
             '[abilities.review_fix]\nprompt = "Review and repair."\n'
-            'writes = true\ngate = true\nproduces_verdict = true\n'
-            '[agents.folder_reviewer]\nability = ["review_fix"]\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.folder_reviewer]\nability = ["review_fix"]\n'
             'model = "prime"\neffort = "heavy"\n'
             '[workflow]\nplan = ['
             '{ role = "folder_reviewer", adapter = "claude" }, '

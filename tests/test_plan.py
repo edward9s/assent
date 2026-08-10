@@ -195,6 +195,14 @@ class TestParseTaskFile(PlanTestCase):
         self.assertEqual(
             task.workflow, ("implement", TaskWorkflowAction("full_test")))
 
+        focused = parse_task_file(self.write(
+            "t002_focused.e.toml", task_text(
+                extra_line=('workflow = [{ role = "implement" }, '
+                            '{ action = "focused_test" }]'))))
+        self.assertEqual(
+            focused.workflow,
+            ("implement", TaskWorkflowAction("focused_test")))
+
     def test_task_workflow_rejects_action_only_mixed_and_wrong_action(self):
         cases = (
             ('[{ action = "full_test" }]', "at least one role"),

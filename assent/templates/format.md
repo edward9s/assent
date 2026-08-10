@@ -258,8 +258,9 @@ Rules:
 - The fields are fixed at these 12; writing more is a format error;
   `title / deps / model / status / scope / verify / goal / acceptance` are
   required.
-- `workflow` is optional. Each entry is exactly `{ role = "..." }`, where the
-  role name comes from the effective `[agents]` settings. When omitted, the task
+- `workflow` is optional. Each entry contains exactly one of `{ role = "..." }`
+  or `{ action = "focused_test" }` / `{ action = "full_test" }`. Role names
+  come from the effective `[roles]` settings. When omitted, the task
   inherits `[workflow].task`; when neither is stated, the scheduler opens one
   implicit session using the task's own `model` and `effort`. An explicit
   `workflow = []` selects no per-task session for this task, like
@@ -488,13 +489,15 @@ detail = '''The exact final control record was received; no quota wait, adapter 
 
 `[workflow].task` roles own one task's implementation and may write only that
 task's scope. `[workflow].plan` roles own the plan accountability unit and may
-write only the union of its task scopes. `[workflow].selection` roles own an
-exact multi-plan decision or repair assignment; they never acquire task-file,
-receipt, acceptance, target-ref, or Git ownership. The scheduler alone owns
-the `full_test` action available at task/plan positions and the `full_verify`
-action available at selection positions. No AI role may invoke either action,
-the complete suite, Git, or Assent directly when its scheduler prompt forbids
-them.
+write only the union of its task scopes. When `plan` is empty, the role prefix
+before `[workflow].selection`'s first action supplies that same per-plan review
+unit; later selection roles own an exact multi-plan decision or repair
+assignment. They never acquire task-file, receipt, acceptance, target-ref, or
+Git ownership. The scheduler alone owns the `focused_test` action available at
+task positions, the `full_test` action available at task/plan positions, and
+the `full_verify` action available at selection positions. No AI role may invoke
+these actions, the complete suite, Git, or Assent directly when its scheduler
+prompt forbids them.
 
 A selection conflict-repair unit is expressed only by explicit ordered
 positions: `full_verify`, a verdict-producing read-only reviewer, a writable

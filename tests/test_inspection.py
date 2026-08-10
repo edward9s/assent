@@ -32,9 +32,8 @@ def _workflow_config(model="core", adapters=("claude",), writes=True):
         f'[abilities.{ability}]\n'
         'prompt = "Review the folder."\n'
         f'writes = {str(writes).lower()}\n'
-        'gate = true\n'
         'produces_verdict = true\n'
-        '[agents.folder_reviewer]\n'
+        '[roles.folder_reviewer]\n'
         f'ability = ["{ability}"]\n'
         f'model = "{model}"\n'
         'effort = "slight"\n'
@@ -74,7 +73,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(inspection.check(cfg), 0)
         text = out.getvalue()
-        self.assertIn("Auto-fix workflow: no [workflow].plan step configured", text)
+        self.assertIn("Auto-fix workflow: no plan review step configured", text)
 
     def test_check_distinguishes_scope_syntax_from_semantic_completeness(self):
         self.write_task(1)

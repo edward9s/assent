@@ -377,30 +377,6 @@ def _template_config_entries(text: str) -> list[tuple[tuple[str, ...], str]]:
     return entries
 
 
-def _split_config_template(text: str) -> tuple[str, str]:
-    """Separate adapter tables, refusing unrelated tables in the adapter half."""
-    lines = text.splitlines()
-    adapter_start = next(
-        (index for index, line in enumerate(lines)
-         if _header_path(line) == ("adapter",)),
-        None,
-    )
-    if adapter_start is None:
-        raise AssentError("built-in assent.toml template has no [adapter] table")
-
-    for line in lines[adapter_start:]:
-        path = _header_path(line)
-        if path is not None and path[:1] != ("adapter",):
-            raise AssentError(
-                "built-in assent.toml template has a non-adapter table after"
-                f" [adapter]: {line.strip()}")
-
-    def finish(block: list[str]) -> str:
-        return "\n".join(block).rstrip() + "\n"
-
-    return finish(lines[:adapter_start]), finish(lines[adapter_start:])
-
-
 def _header_path(line: str) -> tuple[str, ...] | None:
     stripped = line.strip()
     if not stripped or stripped.startswith("#") or stripped.startswith("[["):
@@ -613,8 +589,8 @@ def init(path: str | Path = ".",
         # The user home: settings the operator owns, contracts assent owns.
         user_dir = user_assent_dir()
         user_config = user_config_path()
-        config_template, adapter_template = _split_config_template(
-            _template("assent.toml"))
+        config_template = _template("assent.toml")
+        adapter_template = _template("adapter.toml")
         user_adapter = user_config.with_name("adapter.toml")
         user_adapter_content: str | None = None
         user_adapter_plan: tuple[str, str] | None = None

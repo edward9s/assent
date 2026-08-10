@@ -28,17 +28,15 @@ TWO_REVIEW_ROUNDS = '''
 [abilities.review_fix]
 prompt = "Review and repair."
 writes = true
-gate = true
 produces_verdict = true
 [abilities.fix]
 prompt = "Repair durable findings."
 writes = true
-gate = false
-[agents.folder_reviewer]
+[roles.folder_reviewer]
 ability = ["review_fix"]
 model = "prime"
 effort = "heavy"
-[agents.bounded_fixer]
+[roles.bounded_fixer]
 ability = ["fix"]
 [workflow]
 plan = [

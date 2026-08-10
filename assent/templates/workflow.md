@@ -524,23 +524,31 @@ every contributing plan boundary is complete. A key selects the
 scheduler-supplied execution layer and its granularity, not permission. Every
 entry is a tagged union containing exactly one of `role` or `action`. The
 selected role's `[abilities]` carry what that session does (`prompt`, `writes`,
-and `gate`), and `[agents]` only compose those abilities with optional model
-and effort choices. Ability prompts therefore do not decide whether their
+and optionally `produces_verdict`), and `[roles]` only compose those abilities
+with optional model and effort choices. Ability prompts therefore do not decide whether their
 context is a task, plan, or selection. The only special behavior the engine
 infers from a role is an ability's `produces_verdict`; it activates the
 provider-neutral review verdict protocol.
 
-There are exactly two scheduler-owned actions. `full_test` is legal at task or
-plan positions and runs the primary worktree's `.assent/verify.py` against the
-current source worktree without constructing an integration candidate or
-writing a receipt. `full_verify` is legal only at selection positions and owns
-the existing folder or exact-batch candidate transaction and its receipt. An
-action accepts no adapter, role, model, effort, prompt, ability, or arbitrary
-command string. AI roles remain forbidden from running either action or the
-complete suite themselves.
+There are exactly three scheduler-owned actions. `focused_test` is legal only
+at task positions and runs that task's `verify` command. Its PASS is bound to
+the source tree and command: unchanged evidence is reused, while a later source
+write makes it STALE and requires another explicit `focused_test`. When no
+`focused_test` is configured, the final task closeout retains the legacy
+focused check. When it is configured, task roles leave that command to the
+scheduler action instead of running it inside the AI session. `full_test` is
+legal at task or plan positions and runs the
+primary worktree's `.assent/verify.py` against the current source worktree
+without constructing an integration candidate or writing a receipt.
+`full_verify` is legal only at selection positions and owns the existing plan
+or exact-batch candidate transaction and its receipt. An action accepts no
+adapter, role, model, effort, prompt, ability, or arbitrary command string. AI
+roles remain forbidden from running these actions or the complete suite
+themselves.
 
-With ordinary task execution, only `run --auto-fix` walks `plan` as the
-folder-level review/repair workflow:
+With ordinary task execution, only `run --auto-fix` walks the bounded per-plan
+review sequence. A non-empty `plan` supplies it directly; otherwise the role
+prefix before `selection`'s first action supplies it:
 
 ```text
 assent run FOLDER --auto-fix
@@ -549,25 +557,24 @@ assent run FOLDER --auto-fix
 ```toml
 [workflow]
 task = [
-  { role = "task_worker" },
+  { role = "implementer" },
+  { action = "focused_test" },
 ]
-plan = [
-  { action = "full_test" },
-  { role = "folder_reviewer", adapter = "codex" },
-  { action = "full_test" },
-]
+plan = []
 selection = [
+  { role = "reviewer_fixer", adapter = "codex" },
+  { role = "reviewer_fixer", adapter = "codex" },
   { action = "full_verify" },
-  { role = "folder_reviewer", adapter = "codex" },
-  { role = "selection_fixer" },
+  { role = "reviewer", adapter = "codex" },
+  { role = "fixer" },
   { action = "full_verify" },
 ]
 ```
 
 All three keys are ordered arrays of tagged role/action steps. A
-verdict-producing `plan` role
+verdict-producing `plan` or leading `selection` role
 requires `adapter`; a role with `produces_verdict = false` omits it. In the
-folder-review layer, a writable non-verdict step authorizes the bounded
+per-plan review layer, a writable non-verdict step authorizes the bounded
 task-profile repair described below, while a verdict-and-write role is a merged
 reviewer-fixer and may report `FIXED`. Every verdict step resolves its role's
 model and effort through its adapter mappings. Preflight is keyed by the full
@@ -575,12 +582,13 @@ model and effort through its adapter mappings. Preflight is keyed by the full
 same adapter with different models are both proven.
 
 All omitted and empty boundaries are explicit. An absent `[workflow]` table is
-identical to all three keys being omitted. An omitted `plan` and `plan = []` both
-configure no folder review; with no plan, `run --auto-fix` reports that the flag
-had no effect and continues as an ordinary run. An omitted `task` keeps one
+identical to all three keys being omitted. An omitted `plan` and `plan = []`
+delegate per-plan review to the leading `selection` role prefix; when that
+prefix is also empty, `run --auto-fix` reports that the flag had no effect and
+continues as an ordinary run. An omitted `task` keeps one
 implicit session per task using that task's own model and effort. A non-empty
-`task` runs its stated roles for each task with task-scoped context and keeps
-each task as its own accountability unit. `task = []` is intentionally
+`task` runs its stated roles and actions for each task with task-scoped context
+and keeps each task as its own accountability unit. `task = []` is intentionally
 different: it disables per-task sessions and makes the whole plan one unit,
 executed by the `plan` steps with plan-wide context and the union of task scope
 and focused gates. In that plan-execution mode, every `plan` role step is an
@@ -590,7 +598,17 @@ plan's focused gate, not a reviewer verdict. An empty `plan` then leaves
 nothing able to execute and is refused. An omitted or empty `selection`
 preserves direct invocation-level verification; automatic verifier-failure and
 conflict repair requires explicit `full_verify`/reviewer/fixer positions. The
-removed `[auto_fix.review]` table is never
+reviewer handles both outcomes. A following writable non-verdict fixer is
+conflict-only: a candidate conflict consumes it, while `VERIFIER_FAILED` uses
+the implicated tasks' normal repair profiles, skips that fixer, and proceeds to
+the following `full_verify`. Thus the same finite four-step selection handles
+both outcomes without repeating a successful complete verification. The
+config loader validates this built-in repair segment before any verifier runs:
+the first role after `full_verify` must produce a verdict, a second role when
+present must write without producing a verdict, and the segment must end at
+another `full_verify`. Leading roles before the first action remain the freely
+configured per-plan review sequence; role names never acquire built-in meaning.
+The removed `[auto_fix.review]` table is never
 recognized alongside this one: config loading fails closed and names the exact
 settings-layer file that must be edited.
 
@@ -653,7 +671,8 @@ adjudication, which stays read-only and must write nothing. The configured
 force; this prompt-plus-detection rule is cooperative write detection, not a
 security sandbox or a preventive permission boundary.
 
-The loop terminates by walking `[workflow].plan` by position. Every step
+The loop terminates by walking the configured per-plan review sequence by
+position. Every step
 advances the durable `workflow_step_index` exactly once, and reaching the end
 ends automation finitely. A sequence that runs out on a `FIXED` verdict step does
 not settle immediately: the scheduler first re-runs the implicated task's own
@@ -724,7 +743,7 @@ verdict = "PASS"                 # PASS, FIXED or FAIL
 review_context = "completed_folder" # completed_folder / blocked_adjudication
 review_stage = "initial"          # initial / recheck
 failure_trigger = ""              # worker_blocked / focused_gate_failure / empty
-workflow_step_index = 0           # next [workflow].plan position to walk
+workflow_step_index = 0           # next configured plan-review position to walk
 reviewer_step_index = 0           # exact position that produced this verdict
 current_finding_fingerprints = []
 
@@ -941,7 +960,8 @@ adjudication prompt inside the loop.
 
 Interruption, quota wait, adapter/focused failure retains edits and state. A
 later `run --auto-fix` resumes the pending ledger, WIP, and workflow cursor only
-when `[workflow].plan` still has the exact role, resolved identity, and step
+when the configured per-plan review sequence still has the exact role,
+resolved identity, and step
 position that decided the stored state; missing or drifted policy refuses repair and
 closeout. A settled SELF-FIXED, UNREVIEWED or REVIEW UNRESOLVED, HUMAN
 DECISION folder is terminal: it is reported again and no further round starts.

@@ -15,7 +15,7 @@ from assent import AssentError
 from assent.config import (BUILTIN_LAYER, PROJECT_LAYER, USER_LAYER,
                            _ADAPTER_NAMES, list_task_folders, load_config,
                            validate_config, WorkflowActionStep)
-from assent.init import _split_config_template, init as run_init
+from assent.init import init as run_init
 from assent.user_home import ASSENT_HOME_ENV, user_assent_dir, user_config_path
 
 _MINIMAL = ""
@@ -23,23 +23,20 @@ _WORKFLOW_ROLES = '''
 [abilities.review]
 prompt = "Review the folder."
 writes = false
-gate = true
 produces_verdict = true
 [abilities.fix]
 prompt = "Repair the durable findings."
 writes = true
-gate = false
 [abilities.observe]
 prompt = "Observe only."
 writes = false
-gate = false
-[agents.reviewer]
+[roles.reviewer]
 ability = ["review"]
 model = "prime"
 effort = "heavy"
-[agents.fixer]
+[roles.fixer]
 ability = ["fix"]
-[agents.observer]
+[roles.observer]
 ability = ["observe"]
 '''
 
@@ -252,12 +249,14 @@ class TestLoadConfig(ConfigTestCase):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
             '[workflow]\n'
-            'task = [{ role = "fixer" }, { action = "full_test" }]\n'
+            'task = [{ role = "fixer" }, { action = "focused_test" }, '
+            '{ action = "full_test" }]\n'
             'plan = [{ action = "full_test" }]\n'
             'selection = [{ action = "full_verify" }]\n'), "plan01")
 
         self.assertEqual(cfg.workflow_task[0].role, "fixer")
-        self.assertEqual(cfg.workflow_task[1], WorkflowActionStep("full_test"))
+        self.assertEqual(cfg.workflow_task[1], WorkflowActionStep("focused_test"))
+        self.assertEqual(cfg.workflow_task[2], WorkflowActionStep("full_test"))
         self.assertEqual(cfg.workflow_plan, (WorkflowActionStep("full_test"),))
         self.assertEqual(
             cfg.workflow_selection, (WorkflowActionStep("full_verify"),))
@@ -271,6 +270,8 @@ class TestLoadConfig(ConfigTestCase):
             ('[workflow]\ntask = [{ action = "full_verify" }]\n',
              r"not valid.*task"),
             ('[workflow]\nplan = [{ action = "full_verify" }]\n',
+             r"not valid.*plan"),
+            ('[workflow]\nplan = [{ action = "focused_test" }]\n',
              r"not valid.*plan"),
             ('[workflow]\nselection = [{ action = "full_test" }]\n',
              r"not valid.*selection"),
@@ -295,6 +296,41 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(step.requested_model, "gpt-5.6-sol")
         self.assertEqual(step.requested_effort, "high")
 
+    def test_empty_plan_uses_only_the_leading_selection_roles_for_review(self):
+        cfg = load_config(self.write(
+            _WORKFLOW_ROLES +
+            '[workflow]\nplan = []\nselection = ['
+            '{ role = "reviewer", adapter = "codex" }, '
+            '{ role = "reviewer", adapter = "codex" }, '
+            '{ action = "full_verify" }, '
+            '{ role = "reviewer", adapter = "codex" }, '
+            '{ action = "full_verify" }]\n'), "plan01")
+
+        self.assertEqual(cfg.workflow_plan, ())
+        self.assertEqual([step.role for step in cfg.auto_fix_review],
+                         ["reviewer", "reviewer"])
+
+    def test_selection_full_verify_repair_positions_are_validated(self):
+        cases = (
+            ('{ action = "full_verify" }, { role = "fixer" }, '
+             '{ action = "full_verify" }',
+             "first role after full_verify.*must produce a verdict"),
+            ('{ action = "full_verify" }, '
+             '{ role = "reviewer", adapter = "codex" }, '
+             '{ role = "reviewer", adapter = "codex" }, '
+             '{ action = "full_verify" }',
+             "optional fixer.*must write without producing a verdict"),
+            ('{ action = "full_verify" }, '
+             '{ role = "reviewer", adapter = "codex" }',
+             "no later full_verify action"),
+        )
+        for selection, message in cases:
+            with self.subTest(selection=selection), self.assertRaisesRegex(
+                    AssentError, message):
+                load_config(self.write(
+                    _WORKFLOW_ROLES + '[workflow]\nselection = ['
+                    + selection + ']\n'), "plan01")
+
     def test_workflow_verdict_step_reuses_adapter_mappings(self):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
@@ -302,7 +338,7 @@ class TestLoadConfig(ConfigTestCase):
             '[adapter.codex]\ncommand = "codex-review.cmd"\n'
             '[adapter.codex.models]\ncore = "review-model"\n'
             '[adapter.codex.efforts.core]\nslight = "review-effort"\n'
-            '[agents.reviewer_core]\nability = ["review"]\nmodel = "core"\n'
+            '[roles.reviewer_core]\nability = ["review"]\nmodel = "core"\n'
             'effort = "slight"\n'
             '[workflow]\nplan = [{ role = "reviewer_core", adapter = "codex" }]\n'), "plan01")
         review = cfg.workflow_plan[0]
@@ -703,31 +739,43 @@ class TestLayeredConfig(ConfigTestCase):
         adapter = tomllib.loads(user_adapter.read_text(encoding="utf-8"))
         self.assertNotIn("adapter", config)
         self.assertIn("adapter", adapter)
-        self.assertEqual(load_config(self.project_config, "plan01").adapter_names,
-                         ("claude", "codex"))
+        cfg = load_config(self.project_config, "plan01")
+        self.assertEqual(cfg.adapter_names, ("claude", "codex"))
+        self.assertEqual(cfg.receipt_refresh, "manual")
+        self.assertEqual(
+            [step.action if isinstance(step, WorkflowActionStep) else step.role
+             for step in cfg.workflow_task],
+            ["implementer", "focused_test"])
+        self.assertEqual(cfg.workflow_plan, ())
+        self.assertEqual([step.role for step in cfg.auto_fix_review],
+                         ["reviewer_fixer", "reviewer_fixer"])
+        self.assertTrue(cfg.auto_fix_review[0].writes)
+        self.assertTrue(cfg.auto_fix_review[0].produces_verdict)
+        self.assertEqual(
+            [step.action if isinstance(step, WorkflowActionStep) else step.role
+             for step in cfg.workflow_selection],
+            ["reviewer_fixer", "reviewer_fixer", "full_verify", "reviewer",
+             "fixer", "full_verify"])
 
     def test_init_preserves_existing_inline_adapter_layout(self):
-        template = (Path(__file__).resolve().parents[1]
-                    / "assent" / "templates" / "assent.toml").read_bytes()
+        templates = Path(__file__).resolve().parents[1] / "assent" / "templates"
+        template = (
+            templates.joinpath("assent.toml").read_text(encoding="utf-8").rstrip()
+            + "\n\n"
+            + templates.joinpath("adapter.toml").read_text(encoding="utf-8")
+        ).encode("utf-8")
         user_config = self.user_dir / "assent.toml"
         user_config.write_bytes(template)
         before = user_config.read_bytes()
         subprocess.run(["git", "init"], cwd=self.root, check=True,
                        capture_output=True)
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(self.root), 0)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = run_init(self.root)
+        self.assertEqual(result, 0, output.getvalue())
 
         self.assertEqual(user_config.read_bytes(), before)
         self.assertFalse((self.user_dir / "adapter.toml").exists())
-
-    def test_template_split_refuses_non_adapter_table_in_adapter_half(self):
-        template = (
-            "[watchdog]\nstall_minutes = 0\n"
-            "[adapter]\nname = \"claude\"\n"
-            "[verification]\nreceipt_refresh = \"manual\"\n")
-
-        with self.assertRaisesRegex(AssentError, "non-adapter table"):
-            _split_config_template(template)
 
 
 class TestBlankOverrideSemantics(ConfigTestCase):
@@ -878,7 +926,7 @@ class TestAdapterSettings(ConfigTestCase):
     def test_codex_builtin_extra_args_match_the_packaged_default(self):
         cfg = load_config(self.write(_MINIMAL), "plan01")
         template_path = (Path(__file__).resolve().parents[1]
-                         / "assent" / "templates" / "assent.toml")
+                         / "assent" / "templates" / "adapter.toml")
         packaged = tomllib.loads(template_path.read_text(encoding="utf-8"))
 
         self.assertEqual(

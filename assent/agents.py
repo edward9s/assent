@@ -1,4 +1,4 @@
-"""Typed ability and agent-role configuration data."""
+"""Typed ability and role configuration data."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,12 +12,11 @@ class Ability:
 
     prompt: str
     writes: bool
-    gate: bool
     produces_verdict: bool = False
 
 
 @dataclass(frozen=True)
-class Agent:
+class Role:
     """A named role composed from ordered ability references."""
 
     ability: tuple[str, ...]
@@ -26,31 +25,29 @@ class Agent:
 
 
 @dataclass(frozen=True)
-class ResolvedAgent:
+class ResolvedRole:
     """A role with its ability references resolved and aggregate flags derived."""
 
     abilities: tuple[Ability, ...]
     model: str | None
     effort: str | None
     writes: bool
-    gate: bool
     produces_verdict: bool
 
 
-def resolve_agent(name: str, agents: dict[str, Agent],
-                  abilities: dict[str, Ability]) -> ResolvedAgent:
+def resolve_role(name: str, roles: dict[str, Role],
+                 abilities: dict[str, Ability]) -> ResolvedRole:
     """Resolve one named role without inferring behavior from ability names."""
     try:
-        agent = agents[name]
+        role = roles[name]
     except KeyError as e:
-        raise AssentError(f"Unknown agent role: {name!r}") from e
+        raise AssentError(f"Unknown role: {name!r}") from e
 
-    resolved = tuple(abilities[ability] for ability in agent.ability)
-    return ResolvedAgent(
+    resolved = tuple(abilities[ability] for ability in role.ability)
+    return ResolvedRole(
         abilities=resolved,
-        model=agent.model,
-        effort=agent.effort,
+        model=role.model,
+        effort=role.effort,
         writes=any(ability.writes for ability in resolved),
-        gate=any(ability.gate for ability in resolved),
         produces_verdict=any(ability.produces_verdict for ability in resolved),
     )

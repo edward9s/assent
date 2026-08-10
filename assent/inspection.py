@@ -195,7 +195,7 @@ def _auto_fix_binding_reasons(
     except AssentError as e:
         reasons.append(f"task contracts unavailable: {e}")
 
-    steps = cfg.workflow_plan
+    steps = cfg.auto_fix_review
     position = state.reviewer_step_index
     stored_reviewer = (
         state.reviewer_role, state.reviewer_adapter,
@@ -373,7 +373,7 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
 
     lines.append(
         f"  Workflow step cursor: {state.workflow_step_index}"
-        f" (configured steps: {len(cfg.workflow_plan)})")
+        f" (configured steps: {len(cfg.auto_fix_review)})")
 
     lines.append("  Scope amendment transactions:")
     if not state.scope_amendments:
@@ -843,12 +843,15 @@ def _review_effort_source_key(cfg: Config, review) -> str:
 
 def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
     """Show the configured workflow roles and fully resolved session identities."""
-    steps = cfg.workflow_plan
+    steps = cfg.auto_fix_review
     if not steps:
-        return ["Auto-fix workflow: no [workflow].plan step configured"]
+        return ["Auto-fix workflow: no plan review step configured"]
+    source_key = ("workflow.plan" if cfg.workflow_plan
+                  else "workflow.selection")
+    owner = ("plan" if cfg.workflow_plan else "selection prefix")
     lines = [
-        "Auto-fix workflow plan (configured order; source: "
-        f"{_setting_source_label(cfg, 'workflow.plan')}):"]
+        f"Auto-fix workflow {owner} (configured order; source: "
+        f"{_setting_source_label(cfg, source_key)}):"]
     for index, step in enumerate(steps):
         if not step.produces_verdict:
             action = "bounded task-profile repair" if step.writes else "no session"

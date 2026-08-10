@@ -49,7 +49,7 @@ _SCOPE_LINE_RE = re.compile(
 _FULL_VERIFIER_RE = re.compile(r'\.assent[\\/]verify\.py\b')
 WORKFLOW_STATE_NAME = "_workflow.toml"
 SELECTION_WORKFLOW_STATE_NAME = "_selection_workflow.toml"
-_WORKFLOW_ACTIONS = {"full_test", "full_verify"}
+_WORKFLOW_ACTIONS = {"focused_test", "full_test", "full_verify"}
 _ACTION_STATUS_VALUES = {"PASSED", "FAILED", "STALE"}
 _SELECTION_REPAIR_PHASES = {"NONE", "NEEDS_REPAIR", "REPAIRING", "RECHECK"}
 _MAX_ACTION_EVIDENCE_ITEMS = 20
@@ -382,10 +382,10 @@ def _task_workflow(
         if action not in _WORKFLOW_ACTIONS:
             raise AssentError(
                 f"Task file {path.name} {owner} has unknown action {action!r}")
-        if action != "full_test":
+        if action not in {"focused_test", "full_test"}:
             raise AssentError(
                 f"Task file {path.name} {owner} action {action!r} is not valid"
-                " at task level (valid action: full_test)")
+                " at task level (valid actions: focused_test/full_test)")
         entries.append(TaskWorkflowAction(action))
     if entries and not any(isinstance(entry, str) for entry in entries):
         raise AssentError(
