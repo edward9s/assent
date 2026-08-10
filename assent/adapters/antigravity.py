@@ -1,4 +1,4 @@
-"""Antigravity (``agy``) CLI adapter: headless print mode, capability preflight, plain text.
+"""Antigravity (``agy``) CLI adapter: headless stream mode and capability preflight.
 
 Capability evidence, probed on 2026-07-23 against the installed CLI.  No probe below ever
 reached a model: each one stops inside ``--model``/``--effort`` validation or at the
@@ -26,24 +26,24 @@ Two facts from that evidence shape the shipped mapping in ``assent/config.py``:
   not reachable through ``--effort``.  ``lite`` high therefore maps to that ceiling in the
   configuration table, where it is visible, rather than in adapter code.
 
-1.1.5 is the shipped minimum because this probe shows it is the version that carries
-``--effort``, the stable ``--model`` slugs accepted above, and the headless fixes this
-scheduler depends on (``-p`` honouring persisted permission policy, a real non-zero exit
-code on server-side failure, and usable Windows non-TTY output).  Anything older is refused
-rather than run with a guess.
+1.1.8 is the shipped minimum because it adds the typed ``stream-json`` result and usage
+object required for provider-reported accounting, on top of the model, effort, and
+headless contracts established by 1.1.5. Anything older is refused rather than run with
+an output contract it does not support.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
 from assent import AssentError
-from assent.adapters import (Adapter, InvocationRequest, TaskResult,
-                             is_checkpoint_resume_line,
+from assent.adapters import (Adapter, InvocationRequest, TaskResult, TokenUsage,
+                             is_checkpoint_resume_line, normalize_token_usage,
                              parse_checkpoint_resume_output)
 from assent.adapters.process import run_subprocess
 
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from assent.config import Config
 
 NAME = "antigravity"
-MINIMUM_VERSION = (1, 1, 5)
+MINIMUM_VERSION = (1, 1, 8)
 # AGY model slug suffixes and vendor effort values; unrelated to abstract task levels.
 _EFFORT_ORDER = ("low", "medium", "high")
 # AGY 1.1.5 lists this exact slug, but its argument validator does not accept the
@@ -74,6 +74,7 @@ _RESERVED_ARGS = {
     "--effort": (f"the effort comes from [adapter.{NAME}.default_effort] and "
                  f"[adapter.{NAME}.efforts]"),
     "--mode": "the adapter always runs --mode accept-edits",
+    "--output-format": "the adapter always consumes stream-json output",
     "--print-timeout": (f"the adapter sets the print timeout from [adapter.{NAME}] "
                         "print_timeout_minutes"),
     "--log-file": "the adapter keeps the CLI log out of the isolated worktree",
@@ -284,6 +285,7 @@ def build_command(cfg: "Config", prompt: str, requested_model: str,
     if requested_effort:
         cmd += ["--effort", requested_effort]
     cmd += ["--mode", "accept-edits",
+            "--output-format", "stream-json",
             "--print-timeout", f"{cfg.antigravity_print_timeout_minutes}m",
             "--log-file", str(log_file(cfg))]
     for directory in workspace_dirs(cfg):
@@ -296,20 +298,97 @@ def build_command(cfg: "Config", prompt: str, requested_model: str,
 # Output handling
 # --------------------------------------------------------------------------- #
 def format_output_line(raw_line: str) -> str | None:
-    """Render one print-mode line for the terminal.
-
-    Print mode emits prose on stdout and diagnostics on stderr, so the text is shown as it
-    arrived.  No JSON event, token count, tool call or server-selected model is inferred:
-    a line that merely looks like JSON is still just a line of output.
-    """
+    """Render one AGY stream-json event or stderr diagnostic."""
     if is_checkpoint_resume_line(raw_line):
         return None
     text = raw_line.rstrip("\r\n")
     if not text.strip():
         return None
+    try:
+        event = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        event = None
+    if isinstance(event, dict):
+        kind = event.get("event")
+        if kind == "init":
+            model = event.get("model") or "?"
+            return f"  --| session started (model={model})"
+        if kind == "step_update":
+            message = event.get("message") or event.get("text")
+            return f"  AI| {message}" if isinstance(message, str) and message.strip() else None
+        if kind == "result":
+            result = event.get("result")
+            result = result if isinstance(result, dict) else {}
+            usage = result.get("usage")
+            usage = usage if isinstance(usage, dict) else {}
+            parts = [f"session ended ({result.get('status', '?')})"]
+            if isinstance(usage.get("output_tokens"), int):
+                parts.append(f"output {usage['output_tokens']} tokens")
+            if isinstance(usage.get("thinking_tokens"), int):
+                parts.append(f"reasoning {usage['thinking_tokens']} tokens")
+            return "  --| " + ",".join(parts)
+        return None
     if text.lstrip().lower().startswith("error"):
         return f"  !| {text.strip()}"
     return f"  AI| {text}"
+
+
+def parse_output_for_usage(output: str) -> tuple[TokenUsage, ...] | None:
+    """Read the terminal AGY stream result's provider-reported usage."""
+    provider_model: str | None = None
+    terminal: dict | None = None
+    for raw in output.splitlines():
+        try:
+            event = json.loads(raw.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("event") == "init":
+            model = event.get("model")
+            if isinstance(model, str) and model.strip():
+                provider_model = model.strip()
+        elif event.get("event") == "result" and isinstance(event.get("result"), dict):
+            terminal = event["result"]
+    if terminal is None:
+        return None
+    model = terminal.get("model")
+    if isinstance(model, str) and model.strip():
+        provider_model = model.strip()
+    raw_usage = terminal.get("usage")
+    if isinstance(raw_usage, dict):
+        model_usage = raw_usage.get("model_usage") or raw_usage.get("modelUsage")
+        buckets: list[TokenUsage] = []
+        if isinstance(model_usage, dict):
+            for bucket_model, counters in model_usage.items():
+                if isinstance(bucket_model, str) and bucket_model.strip():
+                    normalized = normalize_token_usage(counters, bucket_model)
+                    if normalized is not None:
+                        buckets.append(normalized)
+        if buckets:
+            return tuple(buckets)
+    normalized = normalize_token_usage(raw_usage, provider_model)
+    return (normalized,) if normalized is not None else None
+
+
+def _extract_result_text(output: str) -> tuple[str | None, str | None]:
+    """Extract AGY's final response from the typed terminal result event."""
+    response: str | None = None
+    for raw in output.splitlines():
+        try:
+            event = json.loads(raw.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if (isinstance(event, dict) and event.get("event") == "result"
+                and isinstance(event.get("result"), dict)):
+            candidate = event["result"].get("response")
+            if isinstance(candidate, str):
+                response = candidate
+    if response is None:
+        return None, "Antigravity structured output is missing a terminal result response"
+    if not response.strip():
+        return None, "Antigravity structured output is empty"
+    return response, None
 
 
 def classify_output(exit_code: int, stalled: bool, output: str) -> str | None:
@@ -382,8 +461,7 @@ class AntigravityAdapter(Adapter):
             found = ".".join(str(part) for part in version)
             return False, (
                 f"agy {found} is older than the required {minimum}, which is the first "
-                "version carrying --effort, the stable --model slugs and the headless "
-                "print-mode fixes this scheduler depends on")
+                "version carrying the structured result usage this scheduler consumes")
         return True, message
 
     def preflight(self, requests: Sequence[InvocationRequest]) -> list[str]:
@@ -459,7 +537,16 @@ class AntigravityAdapter(Adapter):
                           reset_at=None,        # print mode states no reset time; none is invented
                           stalled=stalled,
                           checkpoint_resume=checkpoint_resume,
-                          failure_kind=None if checkpoint_resume else kind)
+                          failure_kind=None if checkpoint_resume else kind,
+                          usage=parse_output_for_usage(output))
+
+    def run_structured_task(self, prompt: str, requested_model: str,
+                            requested_effort: str | None,
+                            cwd: Path) -> TaskResult:
+        result = self.run_task(prompt, requested_model, requested_effort, cwd)
+        structured_output, error = _extract_result_text(result.output)
+        return replace(result, structured_output=structured_output,
+                       structured_output_error=error)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

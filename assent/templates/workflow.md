@@ -367,6 +367,24 @@ A `BLOCKED` task only blocks tasks that have it as an upstream; other tasks run
 as usual. When every task is `DONE` / `BLOCKED` / `SKIP` it finishes, prints a
 summary, and updates the `_report.md` inside the work folder.
 
+Every completed task, plan, or exact-selection adapter invocation gets one
+best-effort record in the repository-level `_usage.jsonl`, including distinct
+retry, quota, and checkpoint-resume invocations. One selection record names its
+exact folder set and is presented in every contributing folder's report without
+being duplicated in the evidence. Missing, malformed, interrupted, unsupported,
+or unwritable usage evidence never changes adapter handling, retries, task
+status, verification, receipts, exit codes, or acceptance.
+
+`_report.md` includes `AI usage (provider-reported)`. It groups by adapter and
+provider-reported actual model; a missing actual model is visibly labeled
+`requested:<requested_model>`, or `unknown` when neither identity exists. Each
+token category is summed separately and shows available-record coverage, so a
+missing counter is never estimated or reinterpreted as zero and no misleading
+cross-category total is shown. The section states unavailable or partial
+coverage, ignores malformed derived records, and does not reconstruct sessions
+from before collection existed. Usage is observability only: there is no price,
+budget, quota-control, receipt-freshness, verification, or acceptance meaning.
+
 ## Review, acceptance, and cleanup lifecycle
 
 `assent accept <FOLDER>` is a human's explicit acceptance decision, made after

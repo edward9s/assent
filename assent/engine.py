@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, TextIO
 
 from assent import (AssentError, auto_fix, contracts, gitops, lockfile,
-                    reconcile, rework, shared_paths, verification)
+                    reconcile, rework, shared_paths, usage, verification)
 from assent.adapters import Adapter, InvocationRequest, get_adapter
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess as _adapter_run_subprocess,
@@ -74,6 +74,28 @@ from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               worktree_configuration_errors)
 from assent.verification_common import (source_snapshot,
                                         summary as verification_summary)
+
+
+def _invoke_adapter(
+        cfg: Config, adapter: Adapter, adapter_name: str, prompt: str,
+        requested_model: str, requested_effort: str | None, cwd, *,
+        context_kind: str, context_id: str,
+        folders: tuple[str, ...] | None = None, structured: bool = False):
+    """Run one provider command and record its result without making usage gating."""
+    invocation_id = usage.new_invocation_id()
+    method = adapter.run_structured_task if structured else adapter.run_task
+    result = method(prompt, requested_model, requested_effort, cwd)
+    try:
+        usage.record_invocation(
+            cfg.assent_dir, invocation_id=invocation_id, adapter=adapter_name,
+            requested_model=requested_model, context_kind=context_kind,
+            context_id=context_id, folders=folders or (cfg.tasks_name,),
+            evidence=result.usage)
+    except Exception:
+        # Telemetry is derived observability evidence and can never replace the
+        # provider result with a workflow failure.
+        pass
+    return result
 
 # The worker session's opening prompt (variables are substituted literally,
 # tolerating other braces inside the template).
@@ -1535,9 +1557,12 @@ def _run_selection_reviewer(
         print(f"Selection review session: {step.adapter} | "
               f"{step.model}->{step.requested_model} | "
               f"{step.effort}->{step.requested_effort}")
-        result = reviewer.run_structured_task(
-            attempt_prompt, step.requested_model,
-            step.requested_effort, work_configs[0].root)
+        result = _invoke_adapter(
+            work_configs[0], reviewer, step.adapter, attempt_prompt,
+            step.requested_model, step.requested_effort,
+            work_configs[0].root, context_kind="selection",
+            context_id=f"workflow.selection[{state.step_index}].review",
+            folders=state.folders, structured=True)
         changed = _selection_surface_changes(work_configs, baselines)
         if changed:
             raise AssentError(
@@ -1933,9 +1958,12 @@ def _run_selection_target_reconciles(
                       f"{fixer_step.model or owner.model}->"
                       f"{session.requested_model} | "
                       f"{session.effort}->{session.requested_effort}")
-                result = adapter.run_task(
-                    prompt, session.requested_model,
-                    session.requested_effort, context.worktree)
+                result = _invoke_adapter(
+                    cfg, adapter, adapter_name, prompt,
+                    session.requested_model, session.requested_effort,
+                    context.worktree, context_kind="selection",
+                    context_id="workflow.selection.reconcile",
+                    folders=tuple(item.tasks_name for item in work_configs))
                 changed = _selection_surface_changes(
                     work_configs, baselines)
                 if changed:
@@ -2148,7 +2176,10 @@ def _run_selection_repairs(
                 retry_limit=0, billing_is_failure=True,
                 auto_fix_fingerprints=(
                     review_state.current_finding_fingerprints),
-                repair_dispositions=task_dispositions)
+                repair_dispositions=task_dispositions,
+                usage_context_kind="selection",
+                usage_context_id=f"workflow.selection.repair:{task.id}",
+                usage_folders=state.folders)
             active.task = None
             active.session = None
             updated = auto_fix.with_worker_dispositions(
@@ -3592,9 +3623,11 @@ def _run_auto_fix_review_once(
               f"{review.model}->{session.requested_model} | "
               f"{review.effort}->{session.requested_effort}")
         try:
-            result = reviewer.run_structured_task(
-                attempt_prompt, session.requested_model,
-                session.requested_effort, cfg.root)
+            result = _invoke_adapter(
+                cfg, reviewer, session.agent, attempt_prompt,
+                session.requested_model, session.requested_effort, cfg.root,
+                context_kind="plan",
+                context_id=f"workflow.plan[{round_index}]", structured=True)
         except KeyboardInterrupt:
             changed = _auto_fix_surface_change(
                 baseline, cfg, baseline_head, baseline_status,
@@ -5583,8 +5616,10 @@ def _process_plan_workflow(
         main_tree_baseline = (
             gitops.dirty_paths(cfg.source_root, cfg.git_excludes)
             if cfg.source_root is not None else None)
-        result = adapter.run_task(
-            prompt, session.requested_model, session.requested_effort, cfg.root)
+        result = _invoke_adapter(
+            cfg, adapter, adapter_name, prompt, session.requested_model,
+            session.requested_effort, cfg.root, context_kind="plan",
+            context_id=f"workflow.plan[{state.step_index}]")
         escape_reason = (
             _handle_main_tree_escape(
                 cfg, None, main_tree_baseline, now, plan=plan)
@@ -5661,6 +5696,9 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   auto_fix_fingerprints: tuple[str, ...] = (),
                   repair_dispositions: list[auto_fix.WorkerDisposition] | None = None,
                   gate_passes: _FocusedGateLedger | None = None,
+                  usage_context_kind: str = "task",
+                  usage_context_id: str | None = None,
+                  usage_folders: tuple[str, ...] | None = None,
                   ) -> str | None:
     """Run a single task's full lifecycle; internally handles quota/control resumption and
     retries, and by the end the task is DONE/BLOCKED.
@@ -5822,9 +5860,12 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         main_tree_baseline = (gitops.dirty_paths(cfg.source_root, _task_excludes(cfg, task))
                               if cfg.source_root is not None else None)
         try:
-            result = adapter.run_task(
-                prompt, session.requested_model, session.requested_effort,
-                cfg.root)
+            result = _invoke_adapter(
+                cfg, adapter, adapter_name, prompt, session.requested_model,
+                session.requested_effort, cfg.root,
+                context_kind=usage_context_kind,
+                context_id=usage_context_id or task.id,
+                folders=usage_folders)
         except OSError as e:
             if _adapter_process_creation_failed(e):
                 raise _AdapterProcessCreationError(str(e)) from e

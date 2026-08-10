@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from assent import AssentError, auto_fix
-from assent.adapters import (Adapter, TaskResult, is_checkpoint_resume_line,
+from assent.adapters import (Adapter, TaskResult, TokenUsage,
+                             is_checkpoint_resume_line, normalize_token_usage,
                              parse_checkpoint_resume_output)
 from assent.adapters.process import run_subprocess
 
@@ -195,6 +196,44 @@ def parse_output_for_billing(output: str) -> bool:
     return False
 
 
+def parse_output_for_usage(output: str) -> tuple[TokenUsage, ...] | None:
+    """Read the last completed Codex turn without coercing missing counters."""
+    provider_model: str | None = None
+    terminal: dict | None = None
+    for raw in output.splitlines():
+        try:
+            event = json.loads(raw.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        model = event.get("model")
+        if isinstance(model, str) and model.strip():
+            provider_model = model.strip()
+        if event.get("type") == "turn.completed":
+            terminal = event
+    if terminal is None:
+        return None
+    usage = terminal.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    model_usage = usage.get("model_usage") or usage.get("modelUsage")
+    buckets: list[TokenUsage] = []
+    if isinstance(model_usage, dict):
+        for model, counters in model_usage.items():
+            if isinstance(model, str) and model.strip():
+                normalized = normalize_token_usage(counters, model)
+                if normalized is not None:
+                    buckets.append(normalized)
+    if buckets:
+        return tuple(buckets)
+    model = usage.get("model")
+    if isinstance(model, str) and model.strip():
+        provider_model = model.strip()
+    normalized = normalize_token_usage(usage, provider_model)
+    return (normalized,) if normalized is not None else None
+
+
 def _path_is_within(path: Path, parent: Path) -> bool:
     try:
         path.relative_to(parent)
@@ -321,7 +360,8 @@ class CodexAdapter(Adapter):
                           stalled=stalled, checkpoint_resume=checkpoint_resume,
                           failure_kind=failure_kind,
                           structured_output=structured_output,
-                          structured_output_error=structured_output_error)
+                          structured_output_error=structured_output_error,
+                          usage=parse_output_for_usage(output))
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

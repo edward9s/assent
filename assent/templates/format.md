@@ -33,6 +33,8 @@ project/
 └── .assent/
     ├── verify.py                # this project's full verification script (run outside every AI session; a task file's verify never names it)
     ├── assent.toml              # optional: a deliberate or legacy project-only settings override
+    ├── _usage.jsonl             # deletable provider-usage evidence for all folders (not versioned)
+    ├── _usage.lock              # repository-level usage append lock (not versioned)
     └── bootstrap01/             # work folder (named after the nature of the work, decided by the meeting, = git branch prefix)
         ├── assent.lock          # this folder's run lock; the file persists as diagnostics
         ├── _assent.log          # this folder's runtime terminal output (not versioned)
@@ -115,6 +117,17 @@ to prevent a worktree from producing a second source of truth.
 own responsibility. Git is always enabled and always isolated into a worktree,
 not to be replaced by a toggle or a git-less degraded mode; this is what makes
 running multiple work folders in parallel safe.
+
+`_usage.jsonl` is Assent-owned, derived, deletable runtime evidence. Each
+version-1 JSON line has one stable `invocation_id`, time, adapter, requested
+model, a `context` with `kind` (`task`, `plan`, or `selection`) and `id`, the
+exact owning `folders` set, and zero or more `models` buckets. A bucket may
+name `provider_model` and may contain only non-negative provider-reported
+`input_tokens`, `cached_input_tokens`, `cache_creation_input_tokens`,
+`output_tokens`, and `reasoning_output_tokens`; an absent counter stays absent.
+The artifact never stores prompts, credentials, raw provider output, prices,
+estimates, task state, or acceptance evidence. `_usage.lock` serializes appends
+across concurrent folder runs; duplicate invocation identities are ignored.
 
 ### Bounded optimistic stacking and cleanup
 

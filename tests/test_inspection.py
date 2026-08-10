@@ -13,7 +13,9 @@ import io
 import unittest
 from unittest import mock
 
-from assent import AssentError, auto_fix, contracts, gitops, inspection, preflight
+from assent import (AssentError, auto_fix, contracts, gitops, inspection,
+                    preflight, usage)
+from assent.adapters import TokenUsage
 from assent.config import load_config
 from assent.plan import Plan, journal_path_for, set_status
 from tests.engine_support import (_FAILV, EngineTestCase, ScriptedAdapter,
@@ -244,6 +246,47 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         # _report.md written out, but not version-controlled
         self.assertTrue((cfg.tasks_dir / "_report.md").is_file())
         self.assertNotIn("_report.md", self._git_execution("ls-files"))
+
+    def test_report_groups_usage_with_fallbacks_coverage_and_folder_filter(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build()
+        self.commit_all()
+
+        def record(identity, requested, evidence, folders=("plan01",)):
+            self.assertTrue(usage.record_invocation(
+                cfg.assent_dir, invocation_id=identity, adapter="claude",
+                requested_model=requested, context_kind="selection",
+                context_id="workflow.selection[1]", folders=folders,
+                evidence=evidence))
+
+        record("actual", "requested-a", (
+            TokenUsage(provider_model="actual-a", input_tokens=10),))
+        record("fallback", "requested-b", (
+            TokenUsage(cached_input_tokens=4, output_tokens=2),))
+        record("unknown", None, None)
+        record("selection", "requested-c", (
+            TokenUsage(provider_model="selection-model",
+                       reasoning_output_tokens=3),), ("plan01", "plan02"))
+        record("other", "requested-z", (
+            TokenUsage(provider_model="excluded-model", output_tokens=999),),
+               ("plan02",))
+        with (cfg.assent_dir / usage.USAGE_NAME).open(
+                "a", encoding="utf-8") as handle:
+            handle.write("not-json\n")
+
+        text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
+        self.assertIn("AI usage (provider-reported)", text)
+        self.assertIn("claude / actual-a: 1 session(s)", text)
+        self.assertIn("input_tokens: 10 (1/1 records)", text)
+        self.assertIn("output_tokens: unavailable (0/1 records)", text)
+        self.assertIn("claude / requested:requested-b", text)
+        self.assertIn("cached_input_tokens: 4 (1/1 records)", text)
+        self.assertIn("claude / unknown", text)
+        self.assertIn("claude / selection-model", text)
+        self.assertNotIn("excluded-model", text)
+        self.assertNotIn("999", text)
+        self.assertIn("Ignored malformed usage records: 1", text)
+        self.assertIn("usage never gates workflow outcomes", text)
 
     def _write_auto_fix_state(self, cfg, verdict="PASS"):
         plan = Plan.parse(cfg.tasks_dir)

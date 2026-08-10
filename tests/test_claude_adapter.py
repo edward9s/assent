@@ -20,7 +20,7 @@ from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult, get_adapter
 from assent.adapters import process as process_runner
 from assent.adapters.claude import (
     ClaudeAdapter, build_command, format_stream_event, parse_output_for_billing,
-    parse_output_for_quota, run_subprocess)
+    parse_output_for_quota, parse_output_for_usage, run_subprocess)
 from assent.adapters.process import clear_stop_wake, wake_stop_waiters
 from assent.config import Config
 
@@ -381,6 +381,34 @@ class TestFormatStreamEvent(unittest.TestCase):
     def test_non_json_line_passthrough_and_blank_hidden(self):
         self.assertIn("boom", format_stream_event("Error: boom"))
         self.assertIsNone(format_stream_event("   \n"))
+
+
+class TestUsage(unittest.TestCase):
+    def test_fixture_preserves_actual_model_and_cache_categories(self):
+        output = (FIXTURES / "stream_json_ok.txt").read_text(encoding="utf-8")
+        usage = parse_output_for_usage(output)
+        self.assertEqual(len(usage), 1)
+        self.assertEqual(usage[0].provider_model, "claude-sonnet-5")
+        self.assertEqual(usage[0].input_tokens, 2)
+        self.assertEqual(usage[0].cached_input_tokens, 0)
+        self.assertEqual(usage[0].cache_creation_input_tokens, 32980)
+        self.assertEqual(usage[0].output_tokens, 4)
+        self.assertIsNone(usage[0].reasoning_output_tokens)
+
+    def test_multiple_model_buckets_stay_separate_and_invalid_is_unavailable(self):
+        event = {"type": "result", "usage": {"output_tokens": 99},
+                 "modelUsage": {
+                     "model-a": {"inputTokens": 3, "outputTokens": 4},
+                     "model-b": {"cacheReadInputTokens": 5,
+                                 "outputTokens": -1}}}
+        usage = parse_output_for_usage(json.dumps(event))
+        self.assertEqual([item.provider_model for item in usage],
+                         ["model-a", "model-b"])
+        self.assertEqual(usage[1].cached_input_tokens, 5)
+        self.assertIsNone(usage[1].output_tokens)
+        self.assertIsNone(parse_output_for_usage(json.dumps({
+            "type": "result", "usage": {"input_tokens": -1,
+                                         "output_tokens": True}})))
 
 
 class TestRunTask(unittest.TestCase):

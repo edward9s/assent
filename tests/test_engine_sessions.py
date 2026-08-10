@@ -20,8 +20,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from assent import AssentError, auto_fix, engine, folder_scheduler, gitops
-from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult
+from assent import (AssentError, auto_fix, engine, folder_scheduler, gitops,
+                    usage)
+from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult, TokenUsage
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess, wake_stop_waiters)
 from assent.config import load_config
@@ -111,7 +112,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             "The complete verifier reported the wrong value.")
         reviewer_and_fixer = ScriptedAdapter([
             TaskResult(0, auto_fix.review_record_json(
-                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None,
+                usage=(TokenUsage(provider_model="claude-review",
+                                  input_tokens=10, output_tokens=2),)),
             self.repair_done(
                 task_path, {"src/value.txt": "fixed\n"}),
         ])
@@ -149,6 +152,16 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(
             (self.execution_root() / "src" / "value.txt").read_text(
                 encoding="utf-8"), "fixed\n")
+        records, invalid = usage.read_records(cfg.assent_dir)
+        selection = [record for record in records
+                     if record["context"]["kind"] == "selection"]
+        self.assertEqual(invalid, 0)
+        self.assertEqual(len(selection), 2)
+        self.assertTrue(all(record["folders"] == ["plan01"]
+                            for record in selection))
+        reviewed = next(record for record in selection if record["models"])
+        self.assertEqual(reviewed["models"][0]["provider_model"],
+                         "claude-review")
 
     def test_selection_target_conflict_uses_ai_reconcile_before_full_verify(self):
         task_path = self.write_task(
@@ -1762,6 +1775,75 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(len(reviewer.calls), 1)
 
 
+class TestProviderUsageRecording(GlobalContractsMixin, EngineTestCase):
+    def test_task_retry_records_distinct_invocations(self):
+        task = self.write_task(1)
+        cfg = self.build(retry=1)
+        self.commit_all()
+
+        first = TaskResult(0, "", False, None, usage=(
+            TokenUsage(provider_model="model-a", input_tokens=3),))
+
+        def finish(prompt):
+            result = self.ai_done(task)(prompt)
+            result.usage = (TokenUsage(provider_model="model-a",
+                                       output_tokens=4),)
+            return result
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = engine.run(
+                cfg, once=True, adapter=ScriptedAdapter([first, finish]))
+        self.assertEqual(result, 0, out.getvalue())
+        records, invalid = usage.read_records(cfg.assent_dir)
+        task_records = [record for record in records
+                        if record["context"] == {"kind": "task", "id": "t001"}]
+        self.assertEqual(invalid, 0)
+        self.assertEqual(len(task_records), 2)
+        self.assertEqual(len({item["invocation_id"] for item in task_records}), 2)
+
+    def test_usage_write_failure_does_not_change_task_outcome(self):
+        task = self.write_task(1)
+        cfg = self.build(retry=0)
+        self.commit_all()
+        with mock.patch("assent.engine.usage.record_invocation",
+                        side_effect=OSError("telemetry disk unavailable")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                result = engine.run(
+                    cfg, once=True,
+                    adapter=ScriptedAdapter([self.ai_done(task)]))
+        self.assertEqual(result, 0, out.getvalue())
+        self.assertEqual(parse_task_file(task).status, "DONE")
+
+    def test_concurrent_records_are_complete_and_duplicate_identity_is_idempotent(self):
+        cfg = self.build()
+        identities = [f"session-{index}" for index in range(12)]
+        threads = [threading.Thread(
+            target=usage.record_invocation,
+            kwargs=dict(
+                assent_dir=cfg.assent_dir, invocation_id=identity,
+                adapter="claude", requested_model="requested",
+                context_kind="task", context_id="t001",
+                folders=("plan01",),
+                evidence=(TokenUsage(input_tokens=1),)))
+            for identity in identities]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        usage.record_invocation(
+            cfg.assent_dir, invocation_id=identities[0], adapter="claude",
+            requested_model="requested", context_kind="task",
+            context_id="t001", folders=("plan01",),
+            evidence=(TokenUsage(input_tokens=99),))
+        records, invalid = usage.read_records(cfg.assent_dir)
+        self.assertEqual(invalid, 0)
+        self.assertEqual(len(records), len(identities))
+        self.assertTrue(all(record["models"][0]["input_tokens"] == 1
+                            for record in records))
+
+
 class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
     TASK_ROLES = (
         '\n[abilities.prepare]\nprompt = "Prepare the implementation."\n'
@@ -1838,13 +1920,21 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         cfg = self.build(extra_config=self.PLAN_ROLE)
         self.commit_all()
 
-        adapter = ScriptedAdapter([ok_result()])
+        result = ok_result()
+        result.usage = (TokenUsage(output_tokens=9),)
+        adapter = ScriptedAdapter([result])
         self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
 
         self.assertEqual(len(adapter.calls), 1)
         self.assertIn("Plan workflow step 1 of 1", adapter.calls[0][0])
         self.assertNotIn("Task workflow step", adapter.calls[0][0])
         self.assertEqual(parse_task_file(path).status, "DONE")
+        records, invalid = usage.read_records(cfg.assent_dir)
+        plan_records = [record for record in records
+                        if record["context"]["kind"] == "plan"]
+        self.assertEqual(invalid, 0)
+        self.assertEqual(len(plan_records), 1)
+        self.assertEqual(plan_records[0]["models"][0]["output_tokens"], 9)
 
     def test_task_workflow_missing_role_refuses_before_any_session(self):
         path = self.write_task(1)

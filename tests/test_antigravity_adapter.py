@@ -5,6 +5,7 @@ tests/fixtures/agy_models_1.1.5.txt and tests/fixtures/agy_selection_1.1.5.toml,
 CLI release that changes the contract fails here instead of failing during a paid run.
 """
 import _thread
+import json
 import os
 import shutil
 import subprocess
@@ -23,7 +24,8 @@ from assent.adapters import (CHECKPOINT_RESUME_RECORD, InvocationRequest,
 from assent.adapters.antigravity import (
     AntigravityAdapter, NAME, build_command, classify_output,
     format_output_line, load_catalog, log_file, parse_models_catalog,
-    parse_version, recommended_effort, reserved_argument_errors,
+    parse_output_for_usage, parse_version, recommended_effort,
+    reserved_argument_errors,
 )
 from assent.adapters.process import run_subprocess
 from assent.config import Config
@@ -170,8 +172,8 @@ class TestVersionGate(unittest.TestCase):
 
     def test_shipped_minimum_accepts_probed_version_and_refuses_older(self):
         adapter = make_adapter()
-        cases = {"1.1.5": True, "1.2.0": True, "2.0.0": True,
-                 "1.1.4": False, "1.0.9": False, "0.9.9": False}
+        cases = {"1.1.8": True, "1.2.0": True, "2.0.0": True,
+                 "1.1.7": False, "1.0.9": False, "0.9.9": False}
         for banner, expected in cases.items():
             with self.subTest(version=banner), mock.patch(
                     "assent.adapters.Adapter.probe_cli",
@@ -179,7 +181,7 @@ class TestVersionGate(unittest.TestCase):
                 ok, message = adapter.probe_cli()
                 self.assertEqual(ok, expected, message)
                 if not expected:
-                    self.assertIn("older than the required 1.1.5", message)
+                    self.assertIn("older than the required 1.1.8", message)
 
     def test_unparseable_banner_and_failed_probe_are_reported(self):
         adapter = make_adapter()
@@ -205,6 +207,7 @@ class TestBuildCommand(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--model") + 1], "gemini-3.1-pro")
         self.assertEqual(cmd[cmd.index("--effort") + 1], "high")
         self.assertEqual(cmd[cmd.index("--mode") + 1], "accept-edits")
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "stream-json")
         self.assertEqual(cmd[cmd.index("--print-timeout") + 1], "120m")
         self.assertIn("--dangerously-skip-permissions", cmd)
         # the CLI log stays outside the isolated worktree
@@ -419,14 +422,49 @@ class TestPreflight(unittest.TestCase):
 
 
 class TestOutputContract(unittest.TestCase):
-    def test_plain_text_is_shown_without_inventing_events(self):
+    def test_plain_diagnostics_and_structured_result_are_shown(self):
         self.assertEqual(format_output_line("done\n"), "  AI| done")
         self.assertIn("!|", format_output_line("Error: something broke"))
         self.assertIsNone(format_output_line("   \n"))
-        # a line that merely looks structured is still only a line of text
-        rendered = format_output_line('{"type": "result", "usage": {"output_tokens": 5}}')
-        self.assertTrue(rendered.startswith("  AI| "))
-        self.assertIn('{"type": "result"', rendered)
+        rendered = format_output_line(json.dumps({
+            "event": "result", "result": {"status": "SUCCESS", "usage": {
+                "output_tokens": 5, "thinking_tokens": 2}}}))
+        self.assertIn("output 5 tokens", rendered)
+        self.assertIn("reasoning 2 tokens", rendered)
+
+    def test_usage_normalizes_stream_result_and_rejects_invalid_counters(self):
+        output = "\n".join((
+            json.dumps({"event": "init", "model": "gemini-3.1-pro-high"}),
+            json.dumps({"event": "result", "result": {
+                "status": "SUCCESS", "usage": {
+                    "input_tokens": 8, "cache_read_tokens": 3,
+                    "output_tokens": 5, "thinking_tokens": 2}}})))
+        usage = parse_output_for_usage(output)
+        self.assertEqual(usage[0].provider_model, "gemini-3.1-pro-high")
+        self.assertEqual(usage[0].cached_input_tokens, 3)
+        self.assertEqual(usage[0].reasoning_output_tokens, 2)
+        multiple = parse_output_for_usage(json.dumps({
+            "event": "result", "result": {"usage": {"model_usage": {
+                "gemini-a": {"input_tokens": 1},
+                "gemini-b": {"output_tokens": 2}}}}}))
+        self.assertEqual([item.provider_model for item in multiple],
+                         ["gemini-a", "gemini-b"])
+        self.assertIsNone(parse_output_for_usage(json.dumps({
+            "event": "result", "result": {"usage": {
+                "input_tokens": -2, "output_tokens": False}}})))
+
+    def test_structured_task_exposes_terminal_response_and_usage(self):
+        output = json.dumps({"event": "result", "result": {
+            "status": "SUCCESS", "response": '{"verdict":"PASS"}',
+            "usage": {"output_tokens": 7}}}) + "\n"
+        adapter = make_adapter()
+        with mock.patch("assent.adapters.antigravity.run_subprocess",
+                        return_value=(0, output, False)):
+            result = adapter.run_structured_task(
+                "prompt", "gemini-3.1-pro", "high", Path("."))
+        self.assertEqual(result.structured_output, '{"verdict":"PASS"}')
+        self.assertIsNone(result.structured_output_error)
+        self.assertEqual(result.usage[0].output_tokens, 7)
 
     def test_checkpoint_resume_record_is_hidden_from_live_output(self):
         self.assertIsNone(format_output_line(CHECKPOINT_RESUME_RECORD + "\n"))

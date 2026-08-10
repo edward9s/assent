@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from assent import AssentError, auto_fix, contracts, gitops
+from assent import AssentError, auto_fix, contracts, gitops, usage
 from assent.adapters import Adapter, get_adapter
 from assent.config import PROJECT_LAYER, Config
 from assent.folderdeps import parse_folder_dependencies
@@ -153,7 +153,8 @@ def render_report(cfg: Config, plan: Plan,
                       + " covers BLOCKED task(s) " + ", ".join(task_ids)
                       + "; inspect the Folder auto-fix lifecycle below and defer "
                         "human task-file disposition until it reaches a terminal outcome."]
-    lines += ["", *auto_fix_report_lines(cfg, plan),
+    lines += ["", *usage.report_lines(cfg.assent_dir, cfg.tasks_name),
+              "", *auto_fix_report_lines(cfg, plan),
               "", *receipt_report_lines(cfg)]
     return "\n".join(lines) + "\n"
 
