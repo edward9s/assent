@@ -29,7 +29,7 @@ _STATUS_VALUES = {"TODO", "WIP", "DONE", "BLOCKED", "SKIP"}
 _MODEL_TIERS = {"prime", "core", "lite"}
 _EFFORT_LEVELS = {"heavy", "normal", "slight"}
 _KNOWN_KEYS = {"title", "deps", "model", "effort", "status", "scope", "verify",
-               "goal", "behavior", "acceptance", "notes"}
+               "goal", "behavior", "acceptance", "notes", "workflow"}
 # Journal identities a new write may claim.  Reading is deliberately unrestricted, so a
 # journal written before an adapter existed (including the retired catch-all by = "ai")
 # still parses and still reports.
@@ -47,6 +47,64 @@ _SCOPE_LINE_RE = re.compile(
 # a whole run.  Naming it here would make every task re-run the whole suite, and on
 # a slow project it outlives what a session can wait for at all.
 _FULL_VERIFIER_RE = re.compile(r'\.assent[\\/]verify\.py\b')
+WORKFLOW_STATE_NAME = "_workflow.toml"
+SELECTION_WORKFLOW_STATE_NAME = "_selection_workflow.toml"
+_WORKFLOW_ACTIONS = {"full_test", "full_verify"}
+_ACTION_STATUS_VALUES = {"PASSED", "FAILED", "STALE"}
+_SELECTION_REPAIR_PHASES = {"NONE", "NEEDS_REPAIR", "REPAIRING", "RECHECK"}
+_MAX_ACTION_EVIDENCE_ITEMS = 20
+_MAX_ACTION_EVIDENCE_CHARS = 4096
+
+
+@dataclass(frozen=True)
+class TaskWorkflowAction:
+    """One scheduler-owned action in a task-file workflow override."""
+
+    action: str
+
+
+class TaskWorkflowRole(str):
+    """A tagged task-workflow role that remains compatible with role-name strings."""
+
+    @property
+    def role(self) -> str:
+        return str(self)
+
+
+@dataclass(frozen=True)
+class WorkflowState:
+    """Deletable cursor for the currently executing workflow accountability unit."""
+
+    unit: str
+    task_id: str
+    step_index: int
+    started: bool
+    base_ref: str = ""
+    focused_evidence: tuple[str, ...] = ()
+    action: str = ""
+    action_status: str = ""
+    action_source_tree: str = ""
+    action_exit_code: int = 0
+    action_evidence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SelectionWorkflowState:
+    """Deletable cursor for one exact, source-bound folder selection."""
+
+    folders: tuple[str, ...]
+    target_ref: str
+    target_commit: str
+    source_commits: tuple[str, ...]
+    step_index: int
+    action: str = ""
+    action_status: str = ""
+    action_candidate_tree: str = ""
+    action_exit_code: int = 0
+    action_evidence: tuple[str, ...] = ()
+    verification_script_sha256: str = ""
+    shared_inputs_sha256: str = ""
+    repair_phase: str = "NONE"
 
 
 @dataclass
@@ -63,8 +121,193 @@ class Task:
     behavior: str
     acceptance: str
     notes: str
+    workflow: tuple[TaskWorkflowRole | TaskWorkflowAction, ...] | None
     path: Path                     # Absolute task file path
     journal_path: Path             # Absolute path of the matching .r.toml journal
+
+
+def workflow_state_path(tasks_dir: Path) -> Path:
+    return tasks_dir / WORKFLOW_STATE_NAME
+
+
+def selection_workflow_state_path(assent_dir: Path) -> Path:
+    return assent_dir / SELECTION_WORKFLOW_STATE_NAME
+
+
+def _valid_action_evidence(evidence: object) -> bool:
+    return (isinstance(evidence, list)
+            and len(evidence) <= _MAX_ACTION_EVIDENCE_ITEMS
+            and all(isinstance(item, str)
+                    and len(item) <= _MAX_ACTION_EVIDENCE_CHARS
+                    for item in evidence))
+
+
+def _valid_action_result(action: object, status: object, identity: object,
+                         exit_code: object, evidence: object,
+                         *, allowed_action: str) -> bool:
+    if (not isinstance(action, str) or not isinstance(status, str)
+            or not isinstance(identity, str)
+            or not isinstance(exit_code, int) or isinstance(exit_code, bool)
+            or not _valid_action_evidence(evidence)):
+        return False
+    if not action:
+        return not status and not identity and exit_code == 0 and not evidence
+    if action != allowed_action:
+        return False
+    if not status:
+        return not identity and exit_code == 0 and not evidence
+    return status in _ACTION_STATUS_VALUES and bool(identity)
+
+
+def read_workflow_state(tasks_dir: Path) -> WorkflowState | None:
+    """Read the folder workflow cursor; absence means no unit is in flight."""
+    path = workflow_state_path(tasks_dir)
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "rb") as source:
+            data = tomllib.load(source)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise AssentError(f"Workflow state {path.name} is unreadable: {error}") from error
+    expected = {"version", "unit", "task_id", "step_index", "started",
+                "base_ref", "focused_evidence", "action", "action_status",
+                "action_source_tree", "action_exit_code", "action_evidence"}
+    if set(data) != expected or data.get("version") != 2:
+        raise AssentError(f"Workflow state {path.name} has an invalid schema")
+    unit = data.get("unit")
+    task_id = data.get("task_id")
+    step_index = data.get("step_index")
+    started = data.get("started")
+    base_ref = data.get("base_ref")
+    evidence = data.get("focused_evidence")
+    action = data.get("action")
+    action_status = data.get("action_status")
+    action_source_tree = data.get("action_source_tree")
+    action_exit_code = data.get("action_exit_code")
+    action_evidence = data.get("action_evidence")
+    if (unit not in {"task", "plan"} or not isinstance(task_id, str)
+            or not isinstance(step_index, int) or isinstance(step_index, bool)
+            or step_index < 0 or not isinstance(started, bool)
+            or not isinstance(base_ref, str) or not isinstance(evidence, list)
+            or not all(isinstance(item, str) for item in evidence)
+            or (unit == "task" and not _ID_RE.fullmatch(task_id))
+            or (unit == "plan" and task_id)
+            or not _valid_action_result(
+                action, action_status, action_source_tree, action_exit_code,
+                action_evidence, allowed_action="full_test")
+            or (action and unit != "task")):
+        raise AssentError(f"Workflow state {path.name} has invalid values")
+    return WorkflowState(
+        unit, task_id, step_index, started, base_ref, tuple(evidence), action,
+        action_status, action_source_tree, action_exit_code,
+        tuple(action_evidence))
+
+
+def write_workflow_state(tasks_dir: Path, state: WorkflowState) -> None:
+    """Atomically persist the next workflow position and its start boundary."""
+    text = "\n".join((
+        "version = 2",
+        f"unit = {json.dumps(state.unit)}",
+        f"task_id = {json.dumps(state.task_id)}",
+        f"step_index = {state.step_index}",
+        f"started = {'true' if state.started else 'false'}",
+        f"base_ref = {json.dumps(state.base_ref)}",
+        "focused_evidence = [" + ", ".join(
+            json.dumps(item, ensure_ascii=False)
+            for item in state.focused_evidence) + "]",
+        f"action = {json.dumps(state.action)}",
+        f"action_status = {json.dumps(state.action_status)}",
+        f"action_source_tree = {json.dumps(state.action_source_tree)}",
+        f"action_exit_code = {state.action_exit_code}",
+        "action_evidence = [" + ", ".join(
+            json.dumps(item, ensure_ascii=False)
+            for item in state.action_evidence) + "]",
+        "",
+    ))
+    atomic_write_text(workflow_state_path(tasks_dir), text)
+
+
+def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | None:
+    """Read the project-level exact-selection cursor."""
+    path = selection_workflow_state_path(assent_dir)
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "rb") as source:
+            data = tomllib.load(source)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise AssentError(f"Selection workflow state {path.name} is unreadable: {error}") from error
+    expected = {
+        "version", "folders", "target_ref", "target_commit", "source_commits",
+        "step_index", "action", "action_status", "action_candidate_tree",
+        "action_exit_code", "action_evidence", "verification_script_sha256",
+        "shared_inputs_sha256", "repair_phase",
+    }
+    if set(data) != expected or data.get("version") != 1:
+        raise AssentError(f"Selection workflow state {path.name} has an invalid schema")
+    folders = data.get("folders")
+    target_ref = data.get("target_ref")
+    target_commit = data.get("target_commit")
+    source_commits = data.get("source_commits")
+    step_index = data.get("step_index")
+    action = data.get("action")
+    action_status = data.get("action_status")
+    action_candidate_tree = data.get("action_candidate_tree")
+    action_exit_code = data.get("action_exit_code")
+    action_evidence = data.get("action_evidence")
+    verification_script_sha256 = data.get("verification_script_sha256")
+    shared_inputs_sha256 = data.get("shared_inputs_sha256")
+    repair_phase = data.get("repair_phase")
+    action_valid = _valid_action_result(
+        action, action_status, action_candidate_tree, action_exit_code,
+        action_evidence, allowed_action="full_verify")
+    if (not isinstance(folders, list) or not folders
+            or not all(isinstance(item, str) and item for item in folders)
+            or len(set(folders)) != len(folders)
+            or not isinstance(target_ref, str) or not target_ref
+            or not isinstance(target_commit, str) or not target_commit
+            or not isinstance(source_commits, list)
+            or len(source_commits) != len(folders)
+            or not all(isinstance(item, str) and item for item in source_commits)
+            or not isinstance(step_index, int) or isinstance(step_index, bool)
+            or step_index < 0 or not action_valid
+            or not isinstance(verification_script_sha256, str)
+            or not isinstance(shared_inputs_sha256, str)
+            or repair_phase not in _SELECTION_REPAIR_PHASES
+            or (action_status and (not verification_script_sha256
+                                   or not shared_inputs_sha256))):
+        raise AssentError(f"Selection workflow state {path.name} has invalid values")
+    return SelectionWorkflowState(
+        tuple(folders), target_ref, target_commit, tuple(source_commits),
+        step_index, action, action_status, action_candidate_tree,
+        action_exit_code, tuple(action_evidence), verification_script_sha256,
+        shared_inputs_sha256, repair_phase)
+
+
+def write_selection_workflow_state(
+        assent_dir: Path, state: SelectionWorkflowState) -> None:
+    """Atomically persist one exact selection and its recovery boundary."""
+    text = "\n".join((
+        "version = 1",
+        "folders = [" + ", ".join(json.dumps(item) for item in state.folders) + "]",
+        f"target_ref = {json.dumps(state.target_ref)}",
+        f"target_commit = {json.dumps(state.target_commit)}",
+        "source_commits = [" + ", ".join(
+            json.dumps(item) for item in state.source_commits) + "]",
+        f"step_index = {state.step_index}",
+        f"action = {json.dumps(state.action)}",
+        f"action_status = {json.dumps(state.action_status)}",
+        f"action_candidate_tree = {json.dumps(state.action_candidate_tree)}",
+        f"action_exit_code = {state.action_exit_code}",
+        "action_evidence = [" + ", ".join(
+            json.dumps(item, ensure_ascii=False)
+            for item in state.action_evidence) + "]",
+        f"verification_script_sha256 = {json.dumps(state.verification_script_sha256)}",
+        f"shared_inputs_sha256 = {json.dumps(state.shared_inputs_sha256)}",
+        f"repair_phase = {json.dumps(state.repair_phase)}",
+        "",
+    ))
+    atomic_write_text(selection_workflow_state_path(assent_dir), text)
 
 
 def _require_str(data: dict, path: Path, key: str, *, allow_empty: bool = False) -> str:
@@ -96,6 +339,58 @@ def _str_list(data: dict, path: Path, key: str) -> list[str]:
     if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
         raise AssentError(f"Task file {path.name} field {key} must be an array of strings")
     return [x.strip() for x in val if x.strip()]
+
+
+def _task_workflow(
+        data: dict, path: Path
+) -> tuple[TaskWorkflowRole | TaskWorkflowAction, ...] | None:
+    """Parse an optional task-local role/action sequence without resolving settings."""
+    if "workflow" not in data:
+        return None
+    raw = data["workflow"]
+    if not isinstance(raw, list):
+        raise AssentError(
+            f"Task file {path.name} field workflow must be an array of inline tables")
+    entries: list[TaskWorkflowRole | TaskWorkflowAction] = []
+    for index, item in enumerate(raw):
+        owner = f"workflow[{index}]"
+        if not isinstance(item, dict):
+            raise AssentError(f"Task file {path.name} {owner} must be an inline table")
+        has_role = "role" in item
+        has_action = "action" in item
+        if has_role == has_action:
+            raise AssentError(
+                f"Task file {path.name} {owner} must contain exactly one of role or action")
+        allowed = {"role"} if has_role else {"action"}
+        unknown = sorted(set(item) - allowed)
+        if unknown:
+            raise AssentError(
+                f"Task file {path.name} {owner} has undefined fields: "
+                f"{', '.join(unknown)} (valid fields: {next(iter(allowed))})")
+        if has_role:
+            role = item.get("role")
+            if not isinstance(role, str) or not role.strip():
+                raise AssentError(
+                    f"Task file {path.name} {owner}.role must be a non-empty string")
+            entries.append(TaskWorkflowRole(role.strip()))
+            continue
+        action = item.get("action")
+        if not isinstance(action, str) or not action.strip():
+            raise AssentError(
+                f"Task file {path.name} {owner}.action must be a non-empty string")
+        action = action.strip()
+        if action not in _WORKFLOW_ACTIONS:
+            raise AssentError(
+                f"Task file {path.name} {owner} has unknown action {action!r}")
+        if action != "full_test":
+            raise AssentError(
+                f"Task file {path.name} {owner} action {action!r} is not valid"
+                " at task level (valid action: full_test)")
+        entries.append(TaskWorkflowAction(action))
+    if entries and not any(isinstance(entry, str) for entry in entries):
+        raise AssentError(
+            f"Task file {path.name} workflow must include at least one role")
+    return tuple(entries)
 
 
 def journal_path_for(task_path: Path) -> Path:
@@ -202,6 +497,7 @@ def parse_task_file(path: Path) -> Task:
         behavior=_optional_str(data, path, "behavior"),
         acceptance=_require_str(data, path, "acceptance"),
         notes=_optional_str(data, path, "notes"),
+        workflow=_task_workflow(data, path),
         path=path.resolve(),
         journal_path=journal_path_for(path.resolve()),
     )
@@ -452,7 +748,7 @@ def same_except_status(a: Task, b: Task) -> list[str]:
     against loosening one's own acceptance criteria).
     """
     diff = []
-    for name in ("title", "deps", "model", "effort", "scope", "verify",
+    for name in ("title", "deps", "model", "effort", "workflow", "scope", "verify",
                  "goal", "behavior", "acceptance", "notes"):
         if getattr(a, name) != getattr(b, name):
             diff.append(name)

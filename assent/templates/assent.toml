@@ -25,28 +25,45 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 # whether the integration candidate is green.
 # receipt_refresh = "manual"
 
-# Optional bounded folder-level AI review and repair. The commented table is an
-# override example, not a required activation or migration step. If it is
-# absent, `run --auto-fix` resolves the first effective worker adapter at
-# `prime`/`heavy`; no `assent init` rerun or ~/.assent/assent.toml edit is needed.
-# only an explicit `run --auto-fix` invocation starts the review and authorizes
-# repair; an ordinary run without the flag does neither. It never accepts.
-# [auto_fix.review]
-# adapter = ["antigravity"]      # ordered list of review rounds, one entry per round
-# model = "prime"                # abstract tier only: prime | core | lite
-# effort = "heavy"               # abstract value only: heavy | normal | slight
-# An explicit adapter reuses its own [adapter.<name>] model/effort mappings,
-# so it can select a different vendor from the worker rotation without changing
-# the worker rotation used by ordinary task sessions. The list states one review
-# round per entry, repeats included; the number of entries is the finite bound on
-# the review loop, so a folder that ends its last round on an unrepaired blocker
-# hands back to a human. A completed-folder round is a merged reviewer-fixer
-# session: it may repair a blocker directly,
-# but only inside the declared scope of the one existing task its finding
-# names, and reports that with the verdict FIXED. Blocked adjudication stays
-# read-only. A later recovery requires the identity that decided a pending
-# state to still be one of the configured rounds; removing or changing an
-# override refuses repair and closeout.
+# Optional execution workflow. The entire example is commented out: omission
+# keeps ordinary task sessions unchanged and leaves folder review via
+# `run --auto-fix` disabled.
+# Ability prompts describe only reusable actions; the selected [workflow].task
+# or [workflow].plan key supplies its context and accountability.
+# [abilities.execute]
+# prompt = "Implement the supplied requirements and satisfy the supplied gate."
+# writes = true
+# gate = true
+# [abilities.review]
+# prompt = "Review the supplied change and evidence and return the required verdict."
+# writes = false
+# gate = true
+# produces_verdict = true
+# [abilities.selection_fix]
+# prompt = "Resolve the reviewed exact-selection conflict assignment."
+# writes = true
+# gate = false
+# [agents.worker]
+# ability = ["execute"]
+# [agents.folder_reviewer]
+# ability = ["review"]
+# model = "prime"
+# effort = "heavy"
+# [agents.selection_fixer]
+# ability = ["selection_fix"]
+# model = "prime"
+# effort = "heavy"
+# [workflow]
+# task = [{ role = "worker" }]
+# plan = [{ role = "folder_reviewer", adapter = "codex" }]
+# selection = [
+#   { action = "full_verify" },
+#   { role = "folder_reviewer", adapter = "codex" },
+#   { role = "selection_fixer" },
+#   { action = "full_verify" },
+# ]
+# Each reviewer/fixer pair is one finite conflict-repair position. Repeat the
+# pair plus full_verify explicitly to authorize another candidate rebuild.
 
 [adapter]
 # One adapter name or a non-empty list of names. A list rotates in order and

@@ -63,6 +63,18 @@ class _Managed:
     branch: str
 
 
+@dataclass(frozen=True)
+class AutomaticReconcile:
+    """Git-proven state handed to one scheduler-owned conflict editor."""
+
+    worktree: Path | None
+    source_branch: str
+    source_tip: str
+    target_tip: str
+    conflict_paths: tuple[str, ...]
+    needs_editing: bool
+
+
 def _managed(cfg: Config) -> _Managed:
     main = gitops.main_worktree(cfg.root)
     folder = cfg.tasks_name
@@ -324,6 +336,155 @@ def _finish(cfg: Config, managed: _Managed, source_branch: str,
           "verification of the resolved source against the current target (the "
           f"expensive step), and `assent accept {folder}` afterwards as the "
           "explicit approval that integrates it.")
+
+
+def _is_expected_automatic_merge(managed: _Managed, commit: str,
+                                 source_tip: str, target_tip: str) -> bool:
+    """Recognize only this folder's exact source-first reconcile merge."""
+    try:
+        return (gitops.commit_parents(managed.main, commit)
+                == (source_tip, target_tip)
+                and gitops.commit_message(managed.main, commit).strip()
+                == reconcile_commit_message(managed.folder).strip())
+    except AssentError:
+        return False
+
+
+def _automatic_reconcile_context(
+        cfg: Config, expected_target: str, expected_source: str,
+        expected_paths: tuple[str, ...], *, may_prepare: bool
+        ) -> AutomaticReconcile:
+    """Reconstruct one automatic reconciliation from Git facts only."""
+    managed = _managed(cfg)
+    target_branch = gitops.require_current_branch(managed.main)
+    current_target = gitops.commit_of(managed.main, target_branch)
+    if current_target != expected_target:
+        raise AssentError(
+            f"automatic reconcile target drifted from {expected_target} to "
+            f"{current_target}")
+    source_branch, current_source, source_worktree = _require_source(
+        cfg, managed.main)
+    expected = tuple(sorted(dict.fromkeys(expected_paths)))
+    if not expected:
+        raise AssentError("automatic reconcile has no exact conflict paths")
+
+    resources_exist = (managed.path.exists()
+                       or gitops.branch_exists(managed.main, managed.branch))
+    source_completed = _is_expected_automatic_merge(
+        managed, current_source, expected_source, expected_target)
+    if current_source not in {expected_source} and not source_completed:
+        raise AssentError(
+            f"automatic reconcile source drifted from {expected_source} to "
+            f"{current_source}")
+
+    if not resources_exist:
+        if source_completed:
+            return AutomaticReconcile(
+                None, source_branch, current_source, expected_target,
+                expected, False)
+        if not may_prepare:
+            raise AssentError(
+                "automatic reconciliation resources disappeared before "
+                "the source transition was proven")
+        if _start(cfg) != 0:
+            raise AssentError("automatic reconcile preparation was refused")
+        return _automatic_reconcile_context(
+            cfg, expected_target, expected_source, expected,
+            may_prepare=False)
+
+    if not managed.path.exists():
+        if not gitops.branch_exists(managed.main, managed.branch):
+            raise AssentError("automatic reconcile resources are incomplete")
+        branch_tip = gitops.branch_tip(managed.main, managed.branch)
+        if not _is_expected_automatic_merge(
+                managed, branch_tip, expected_source, expected_target):
+            raise AssentError(
+                "automatic reconcile branch without a worktree is not the "
+                "expected merge")
+        return AutomaticReconcile(
+            None, source_branch, current_source, expected_target,
+            expected, False)
+
+    if (not gitops.is_repo_worktree(managed.main, managed.path)
+            or gitops.current_branch(managed.path) != managed.branch):
+        raise AssentError(
+            "automatic reconcile worktree ownership cannot be proven")
+    problem = shared_paths.application_problem(managed.main, managed.path)
+    if problem:
+        raise AssentError(
+            f"automatic reconcile shared-path evidence is invalid: {problem}")
+    head = gitops.commit_of(managed.path, "HEAD")
+    pending = gitops.merge_head(managed.path)
+    if pending is None:
+        if not _is_expected_automatic_merge(
+                managed, head, expected_source, expected_target):
+            raise AssentError(
+                "automatic reconcile worktree has neither the expected "
+                "in-progress merge nor its completed merge commit")
+        return AutomaticReconcile(
+            managed.path, source_branch, current_source, expected_target,
+            expected, False)
+    if (head != expected_source or pending != expected_target
+            or current_source != expected_source):
+        raise AssentError(
+            "automatic reconcile source/target/parent identity drifted")
+    current_conflicts = tuple(sorted(gitops.conflict_paths(managed.path)))
+    if current_conflicts != expected:
+        raise AssentError(
+            "automatic reconcile conflict paths changed (expected "
+            + ", ".join(expected) + "; found "
+            + (", ".join(current_conflicts) or "none") + ")")
+    status = gitops.working_tree_status(managed.path)
+    touched = set(status.staged) | set(status.unstaged) | set(status.untracked)
+    outside = sorted(touched - set(expected))
+    if outside:
+        raise AssentError(
+            "automatic reconcile contains edits outside the exact conflict "
+            "scene: " + ", ".join(outside))
+    return AutomaticReconcile(
+        managed.path, source_branch, current_source, expected_target,
+        expected, True)
+
+
+def automatic_reconcile_prepare_locked(
+        cfg: Config, expected_target: str, expected_source: str,
+        expected_paths: tuple[str, ...]) -> AutomaticReconcile:
+    """Prepare or resume the exact reconcile merge while caller holds locks."""
+    return _automatic_reconcile_context(
+        cfg, expected_target, expected_source, expected_paths,
+        may_prepare=True)
+
+
+def automatic_reconcile_continue_locked(
+        cfg: Config, expected_target: str, expected_source: str,
+        expected_paths: tuple[str, ...]) -> str:
+    """Continue one AI-edited merge through the ordinary reconcile lifecycle."""
+    context = _automatic_reconcile_context(
+        cfg, expected_target, expected_source, expected_paths,
+        may_prepare=False)
+    if context.worktree is not None and context.needs_editing:
+        status = gitops.working_tree_status(context.worktree)
+        touched = set(status.staged) | set(status.unstaged) | set(status.untracked)
+        outside = sorted(touched - set(context.conflict_paths))
+        if outside:
+            raise AssentError(
+                "automatic reconcile contains edits outside the exact conflict "
+                "scene: " + ", ".join(outside))
+    if context.worktree is not None or gitops.branch_exists(
+            _managed(cfg).main, _managed(cfg).branch):
+        if _continue(cfg) != 0:
+            raise AssentError("automatic reconcile continue was refused")
+    managed = _managed(cfg)
+    target_now = gitops.commit_of(
+        managed.main, gitops.require_current_branch(managed.main))
+    if target_now != expected_target:
+        raise AssentError("automatic reconcile changed the integration target")
+    _branch, source_now, _worktree = _require_source(cfg, managed.main)
+    if not _is_expected_automatic_merge(
+            managed, source_now, expected_source, expected_target):
+        raise AssentError(
+            "automatic reconcile did not produce the exact source-first merge")
+    return source_now
 
 
 def _start(cfg: Config) -> int:

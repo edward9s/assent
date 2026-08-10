@@ -142,11 +142,11 @@ def _review_round_session(review) -> SessionIdentity:
 
 def resolve_auto_fix_review_session(cfg: Config,
                                     adapter: Adapter) -> SessionIdentity:
-    """Resolve the folder reviewer the next review call uses (the first round)."""
-    rounds = cfg.auto_fix_review
-    if not rounds:
+    """Resolve the first verdict-producing folder workflow step."""
+    steps = [step for step in cfg.workflow_plan if step.produces_verdict]
+    if not steps:
         raise AssentError("Auto-fix folder review is not configured")
-    return _review_round_session(rounds[0])
+    return _review_round_session(steps[0])
 
 
 def auto_fix_review_capability_errors(
@@ -156,16 +156,21 @@ def auto_fix_review_capability_errors(
     A later round naming an adapter this machine cannot invoke is then caught before the
     run starts, instead of only when that round is finally reached.
     """
-    rounds = cfg.auto_fix_review
+    rounds = [step for step in cfg.workflow_plan if step.produces_verdict]
     if not rounds:
         return None, []
-    by_adapter: dict[str, object] = {}
+    by_identity: dict[tuple[str, str, str], object] = {}
     for review in rounds:
-        by_adapter.setdefault(review.adapter, review)
+        assert review.adapter is not None
+        assert review.requested_model is not None
+        assert review.requested_effort is not None
+        by_identity.setdefault(
+            (review.adapter, review.requested_model, review.requested_effort),
+            review)
     errors: list[str] = []
     try:
         session = resolve_auto_fix_review_session(cfg, adapter)
-        for name, review in by_adapter.items():
+        for (name, _model, _effort), review in by_identity.items():
             round_adapter = (adapter if name == rounds[0].adapter
                              else get_adapter(name, cfg))
             identity = _review_round_session(review)
@@ -177,7 +182,7 @@ def auto_fix_review_capability_errors(
                 requested_effort=identity.requested_effort,
             )
             for message in round_adapter.preflight([request]):
-                errors.append(message if len(by_adapter) == 1
+                errors.append(message if len(by_identity) == 1
                               else f"{name}: {message}")
     except AssentError as e:
         return None, [str(e)]

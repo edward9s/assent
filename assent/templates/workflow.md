@@ -238,6 +238,39 @@ conflicting folder against the advanced target; `assent rework <FOLDER> <TASK>`
 and `assent reject <FOLDER>` remain explicit alternatives. The exact request
 never asks to skip or silently shrinks its set.
 
+The only automatic exception is the combined `assent run ... --verify
+--auto-fix` `[workflow].selection` sequence. Its `full_verify` action first performs a
+candidate-only scan and starts zero full-test runs when conflicts exist. One
+typed conflict wave records every independently discoverable conflicting
+folder and path, target/source/compatible-prefix identities, excluded selected
+dependents, and `target_alone` versus `peer_only`. The next explicit read-only
+selection reviewer must assign every folder/path to exactly one existing task;
+the following explicit write-capable selection fixer position authorizes the
+whole wave, and a later `full_verify` action is the only way to rebuild and run
+the real full verifier. The selection remains exact throughout: Assent never
+accepts a prefix, asks to skip, changes the target, or publishes anything.
+
+A target-alone assignment reuses the source-first `assent-reconcile/<folder>`
+transaction. The scheduler supplies the configured fixer every task contract
+and bounded base/ours/theirs evidence and permits writes only to Git's exact
+conflict paths; the AI may not stage, commit, change refs, invoke Assent, or run
+focused or complete tests. Assent then applies the ordinary continue checks,
+creates the merge, fast-forwards only the source, invalidates source-bound
+receipts, and cleans managed resources. A peer-only assignment never merges a
+speculative peer: it reopens the exact reviewed existing task set and supplies
+the compatible-prefix and three-way evidence as read-only repair context.
+Normal scope gates, task focused checks, final focused sweep, checkpoints, and
+source-transition evidence apply before the exact candidate is rebuilt.
+
+The selection cursor and reconcile Git facts recover preparation, AI editing,
+continue, source fast-forward, cleanup, and rebuild by content identity. A
+matching completed merge or PASSED receipt is reused instead of duplicated;
+target/source drift, malformed evidence, ambiguous ownership, out-of-scene
+writes, remaining markers, and exhausted reviewer/fixer/action positions fail
+closed while retaining edits. A conflict wave consumes no `full_verify`; a
+real verifier starts only after a complete rebuild is conflict-free, and final
+success requires one fresh PASSED receipt for the entire snapshotted set.
+
 When `status`, `check`, and `report` state `FOLDER` explicitly they act only on
 that folder, and act on all folders when it is omitted. `check` additionally
 validates the full dependency graph and cycles; a read-only command that hits an
@@ -333,6 +366,24 @@ not treated as spec.
 A `BLOCKED` task only blocks tasks that have it as an upstream; other tasks run
 as usual. When every task is `DONE` / `BLOCKED` / `SKIP` it finishes, prints a
 summary, and updates the `_report.md` inside the work folder.
+
+Every completed task, plan, or exact-selection adapter invocation gets one
+best-effort record in the repository-level `_usage.jsonl`, including distinct
+retry, quota, and checkpoint-resume invocations. One selection record names its
+exact folder set and is presented in every contributing folder's report without
+being duplicated in the evidence. Missing, malformed, interrupted, unsupported,
+or unwritable usage evidence never changes adapter handling, retries, task
+status, verification, receipts, exit codes, or acceptance.
+
+`_report.md` includes `AI usage (provider-reported)`. It groups by adapter and
+provider-reported actual model; a missing actual model is visibly labeled
+`requested:<requested_model>`, or `unknown` when neither identity exists. Each
+token category is summed separately and shows available-record coverage, so a
+missing counter is never estimated or reinterpreted as zero and no misleading
+cross-category total is shown. The section states unavailable or partial
+coverage, ignores malformed derived records, and does not reconstruct sessions
+from before collection existed. Usage is observability only: there is no price,
+budget, quota-control, receipt-freshness, verification, or acceptance meaning.
 
 ## Review, acceptance, and cleanup lifecycle
 
@@ -466,34 +517,99 @@ and `archive --all` are the routine, unattended one.
 
 ## Opt-in folder review and bounded repair
 
-The optional `[auto_fix.review]` table overrides the folder reviewer identity;
-only `run --auto-fix` starts its review rounds and authorizes bounded repair.
-When the table is absent, the first effective worker adapter is resolved at
-`prime`/`heavy` by the normal settings layer. This default works without
-rerunning `assent init` or editing `~/.assent/assent.toml`:
+The `[workflow]` table has exactly three keys. `task` selects task-scoped
+context and task-by-task accountability; `plan` selects plan-scoped context
+and plan accountability; `selection` owns the exact invocation selection after
+every contributing plan boundary is complete. A key selects the
+scheduler-supplied execution layer and its granularity, not permission. Every
+entry is a tagged union containing exactly one of `role` or `action`. The
+selected role's `[abilities]` carry what that session does (`prompt`, `writes`,
+and `gate`), and `[agents]` only compose those abilities with optional model
+and effort choices. Ability prompts therefore do not decide whether their
+context is a task, plan, or selection. The only special behavior the engine
+infers from a role is an ability's `produces_verdict`; it activates the
+provider-neutral review verdict protocol.
+
+There are exactly two scheduler-owned actions. `full_test` is legal at task or
+plan positions and runs the primary worktree's `.assent/verify.py` against the
+current source worktree without constructing an integration candidate or
+writing a receipt. `full_verify` is legal only at selection positions and owns
+the existing folder or exact-batch candidate transaction and its receipt. An
+action accepts no adapter, role, model, effort, prompt, ability, or arbitrary
+command string. AI roles remain forbidden from running either action or the
+complete suite themselves.
+
+With ordinary task execution, only `run --auto-fix` walks `plan` as the
+folder-level review/repair workflow:
 
 ```text
 assent run FOLDER --auto-fix
 ```
 
-Its `adapter` may be a single name or an ordered list of names. Each entry is
-one review round, and a repeated name is meaningful: it states another round
-with the same identity. The table's single `model` and `effort` apply to every
-entry, so the list resolves to one adapter/model/effort identity per round, in
-order, and the number of entries is the finite bound on the whole loop.
+```toml
+[workflow]
+task = [
+  { role = "task_worker" },
+]
+plan = [
+  { action = "full_test" },
+  { role = "folder_reviewer", adapter = "codex" },
+  { action = "full_test" },
+]
+selection = [
+  { action = "full_verify" },
+  { role = "folder_reviewer", adapter = "codex" },
+  { role = "selection_fixer" },
+  { action = "full_verify" },
+]
+```
 
-The flag is selection-orthogonal: it is forwarded for automatic, explicit
+All three keys are ordered arrays of tagged role/action steps. A
+verdict-producing `plan` role
+requires `adapter`; a role with `produces_verdict = false` omits it. In the
+folder-review layer, a writable non-verdict step authorizes the bounded
+task-profile repair described below, while a verdict-and-write role is a merged
+reviewer-fixer and may report `FIXED`. Every verdict step resolves its role's
+model and effort through its adapter mappings. Preflight is keyed by the full
+`(adapter, requested_model, requested_effort)` identity, so two steps using the
+same adapter with different models are both proven.
+
+All omitted and empty boundaries are explicit. An absent `[workflow]` table is
+identical to all three keys being omitted. An omitted `plan` and `plan = []` both
+configure no folder review; with no plan, `run --auto-fix` reports that the flag
+had no effect and continues as an ordinary run. An omitted `task` keeps one
+implicit session per task using that task's own model and effort. A non-empty
+`task` runs its stated roles for each task with task-scoped context and keeps
+each task as its own accountability unit. `task = []` is intentionally
+different: it disables per-task sessions and makes the whole plan one unit,
+executed by the `plan` steps with plan-wide context and the union of task scope
+and focused gates. In that plan-execution mode, every `plan` role step is an
+ordinary worker session and a `full_test` action is an objective
+source-worktree gate. A non-verdict role succeeds or retries according to the
+plan's focused gate, not a reviewer verdict. An empty `plan` then leaves
+nothing able to execute and is refused. An omitted or empty `selection`
+preserves direct invocation-level verification; automatic verifier-failure and
+conflict repair requires explicit `full_verify`/reviewer/fixer positions. The
+removed `[auto_fix.review]` table is never
+recognized alongside this one: config loading fails closed and names the exact
+settings-layer file that must be edited.
+
+The folder-level workflow is considered when no task can make further progress:
+the folder is complete, or it is quiescent-blocked with durable worker or
+focused-gate evidence. The flag is selection-orthogonal: it is forwarded for automatic, explicit
 single/multi-folder, prefix-plus-`...`, and `--all` selections and is compatible
 with `--once`, `--task`, and `--verify`, whose own ordering and scope rules do
 not change. A limited run defers the completed-folder loop when it leaves work
 incomplete; a quiescent blocked dependency with durable worker or focused-gate
 evidence may enter the separate blocked-adjudication review. Neither path
-spends a review token before its own evidence gate. Without the flag, configured
-review is inert. Complete verification requested by `--verify` follows only a
-successful run and loop according to the existing receipt policy; auto-fix
-neither performs that verification nor accepts. A missing receipt, an unrun
-full suite, or the absence of complete verification is never a reviewer
-failure.
+spends a workflow step before its own evidence gate. Without the flag,
+configured review roles are inert. Complete verification requested by
+`--verify` follows only a successful task and plan workflow. When
+`[workflow].selection` is configured, its `full_verify` action owns that
+verification and `--auto-fix` authorizes only its explicitly positioned repair
+roles; otherwise the ordinary direct verification path remains. Neither path
+accepts. A missing receipt, an unrun full suite, or the absence of complete
+verification is never a folder-review failure.
 
 The folder-level order is:
 
@@ -516,7 +632,7 @@ The folder-level order is:
    never edit task files. Reopen only existing implicated tasks, repair, then
    repeat the task gate, final sweep when applicable, and review.
 7. Stop on PASS, adapter/infrastructure failure, an unresolved ownership or
-   scope decision, or the end of the configured round list, always retaining
+   scope decision, or the end of the configured plan, always retaining
    edits and evidence. No runtime human adjudication step is inserted into
    the loop.
 
@@ -537,9 +653,9 @@ adjudication, which stays read-only and must write nothing. The configured
 force; this prompt-plus-detection rule is cooperative write detection, not a
 security sandbox or a preventive permission boundary.
 
-The loop terminates by walking the configured round list. Each round advances
-the durable `review_round_index` by exactly one, and reaching the end of the
-list ends automation finitely. A sequence that runs out on a `FIXED` round does
+The loop terminates by walking `[workflow].plan` by position. Every step
+advances the durable `workflow_step_index` exactly once, and reaching the end
+ends automation finitely. A sequence that runs out on a `FIXED` verdict step does
 not settle immediately: the scheduler first re-runs the implicated task's own
 focused gate against the repaired source, reusing the same de-duplicating
 ledger that skips a command already proven earlier in this invocation, so the
@@ -590,15 +706,16 @@ artifact. It is included in the runtime exclusions with `_assent.log`,
 `_report.md`, locks, and verification receipts; it is not a task file, a new
 task status, acceptance evidence, or a source-of-truth database. It may be
 rebuilt from the current folder run and must never be staged or committed.
-Version 6 has exactly these scalar fields and ordered table collections. The
+Version 7 has exactly these scalar fields and ordered table collections. The
 `phase` field is required; it makes crash recovery explicit rather than
 inferring a repair boundary from task statuses alone:
 
 ```toml
-version = 6
+version = 7
 source_tree = "<40-or-64 lowercase hexadecimal tree id>"
 task_plan_sha256 = "<64 lowercase hexadecimal digest>"
 review_prompt_sha256 = "<64 lowercase hexadecimal digest>"
+reviewer_role = "folder_reviewer"
 reviewer_adapter = "<registered adapter>"
 reviewer_model = "<resolved requested model>"
 reviewer_effort = "<resolved requested effort>"
@@ -607,7 +724,8 @@ verdict = "PASS"                 # PASS, FIXED or FAIL
 review_context = "completed_folder" # completed_folder / blocked_adjudication
 review_stage = "initial"          # initial / recheck
 failure_trigger = ""              # worker_blocked / focused_gate_failure / empty
-review_round_index = 0            # rounds consumed from the configured list
+workflow_step_index = 0           # next [workflow].plan position to walk
+reviewer_step_index = 0           # exact position that produced this verdict
 current_finding_fingerprints = []
 
 [[findings]]
@@ -666,8 +784,8 @@ transition = "initial"        # initial | still_present | repair_regression | ne
 prior_fingerprint = ""
 transition_evidence = ""
 
-# At most one settled outcome, written only when the round list ran out on a
-# FIXED round.
+# At most one settled outcome, written only when the workflow plan ran out on a
+# FIXED verdict step.
 [self_fixed_unreviewed]
 round_index = 1                  # zero-based position of the self-fixed round
 rounds_used = 2
@@ -686,10 +804,11 @@ canonical JSON. A `PASS`
 has no current findings; a `FAIL` or `FIXED` has at least one. The findings
 ledger and `observed_states` retain prior evidence.
 
-Version 6 keeps the crash-resumable `scope_amendments` records for the one
-scheduler-owned exact scope transaction, adds the `review_round_index` cursor
-into the configured round list, and adds the at-most-one
-`self_fixed_unreviewed` settled outcome. It removes version 5's
+Version 7 retains every applicable version-6 ledger and recovery field. It
+adds `reviewer_role`, `workflow_step_index`, and `reviewer_step_index` so
+freshness and restart bind the exact configured role, resolved identity, and
+step position. Version 6 had added the
+at-most-one `self_fixed_unreviewed` outcome and removed version 5's
 `repair_round_assignments` and `consumed_fixer_profiles`: there is no
 escalation ladder to record, because each reopened task is repaired under its
 own ordinary task profile and nothing is consumed, so an interrupted round
@@ -703,12 +822,12 @@ completed and the next configured round must run; and `COMPLETE` is valid only
 for a `PASS` with no current findings. `review_context` distinguishes a completed-folder review
 from blocked adjudication, and `review_stage` distinguishes the first review
 from a recheck. A restart resumes `REPAIRING` or `AWAITING_REVIEW` from the
-stored evidence, while a missing or drifted reviewer configuration
+stored evidence, while a missing or drifted workflow configuration
 refuses repair and closeout rather than treating the state as a cache miss.
 
 An unclean exit that interrupts a round after it has already written a repair
 -- during `REPAIRING` or `AWAITING_REVIEW`, before the verdict that would
-advance `review_round_index` is recorded -- preserves the edit and leaves the
+advance `workflow_step_index` is recorded -- preserves the edit and leaves the
 round index unmoved. The next run's startup recovery gate attributes that dirt
 to the task this durable state's current findings implicate, using the same
 scope-containment proof its other recovery owners use, and gathers it into a
@@ -717,6 +836,18 @@ this way -- dirt outside that task's declared scope, more than one plausible
 owner, an unreadable state file, or no `REPAIRING`/`AWAITING_REVIEW` phase
 recorded -- recovery still refuses fail-closed at `ensure_clean` rather than
 guessing.
+
+A schema-invalid reviewer record writes no auto-fix state and advances no
+workflow cursor. While an adapter retry remains, the scheduler feeds the exact
+validation error, a bounded rejected-output diagnostic, and one complete
+non-PASS JSON example into the next otherwise unchanged reviewer prompt. If the
+final invalid response wrote source, the scheduler gathers it into a
+`wip(<folder>/<task>)` checkpoint only when all uncommitted paths fit exactly
+one existing task's declared scope, then records recovery evidence without
+changing the task's already-proven status. Ambiguous ownership, out-of-scope or
+protected writes, and checkpoint failure retain the edits and refuse with an
+explicit human-recovery diagnostic; Assent never widens scope, reverts, or
+guesses an owner.
 
 An exact fresh `PASS` requires all of `source_tree`, `task_plan_sha256`,
 `review_prompt_sha256`, `reviewer_adapter`, `reviewer_model`, and
@@ -809,9 +940,9 @@ settles nothing and ends the run nonzero. There is no runtime human
 adjudication prompt inside the loop.
 
 Interruption, quota wait, adapter/focused failure retains edits and state. A
-later `run --auto-fix` resumes the pending ledger, WIP, and round cursor only
-when `[auto_fix.review]` still resolves to a round list containing the identity
-that decided the stored state; missing or drifted policy refuses repair and
+later `run --auto-fix` resumes the pending ledger, WIP, and workflow cursor only
+when `[workflow].plan` still has the exact role, resolved identity, and step
+position that decided the stored state; missing or drifted policy refuses repair and
 closeout. A settled SELF-FIXED, UNREVIEWED or REVIEW UNRESOLVED, HUMAN
 DECISION folder is terminal: it is reported again and no further round starts.
 A run without the flag

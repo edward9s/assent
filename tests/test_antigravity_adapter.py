@@ -5,6 +5,7 @@ tests/fixtures/agy_models_1.1.5.txt and tests/fixtures/agy_selection_1.1.5.toml,
 CLI release that changes the contract fails here instead of failing during a paid run.
 """
 import _thread
+import json
 import os
 import shutil
 import subprocess
@@ -23,7 +24,8 @@ from assent.adapters import (CHECKPOINT_RESUME_RECORD, InvocationRequest,
 from assent.adapters.antigravity import (
     AntigravityAdapter, NAME, build_command, classify_output,
     format_output_line, load_catalog, log_file, parse_models_catalog,
-    parse_version, recommended_effort, reserved_argument_errors,
+    parse_output_for_usage, parse_version, recommended_effort,
+    reserved_argument_errors,
 )
 from assent.adapters.process import run_subprocess
 from assent.config import Config
@@ -31,12 +33,29 @@ from assent.plan import append_entry, read_entries
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CATALOG_TEXT = (FIXTURES / "agy_models_1.1.5.txt").read_text(encoding="utf-8")
+# The retired 1.1.5 output contained only bare slugs.  Keep this small recorded
+# fixture so compatibility is exercised independently of the tabular capture.
+LEGACY_CATALOG_TEXT = """\
+gemini-3.6-flash-high
+gemini-3.6-flash-medium
+gemini-3.6-flash-low
+gemini-3.5-flash-medium
+gemini-3.5-flash
+gemini-3.5-flash-low
+gemini-3.1-pro-low
+gemini-3.1-pro-high
+gemini-3-flash
+"""
 SELECTION = tomllib.loads(
     (FIXTURES / "agy_selection_1.1.5.toml").read_text(encoding="utf-8"))
 
 
 def catalog():
     return parse_models_catalog(CATALOG_TEXT)
+
+
+def legacy_catalog():
+    return parse_models_catalog(LEGACY_CATALOG_TEXT)
 
 
 def make_cfg(**overrides) -> Config:
@@ -67,14 +86,29 @@ class TestCapabilityCatalog(unittest.TestCase):
             "gemini-3.6-flash": ("low", "medium", "high"),
             "gemini-3.5-flash": ("low", "medium"),
             "gemini-3.1-pro": ("low", "high"),
+            "gpt-oss-120b": ("medium",),
         })
-        # the bare 3.5 Flash slug is a family base, not a model that takes no effort
+        # A family base is derived from its expanded variants, not treated as standalone.
         self.assertNotIn("gemini-3.5-flash", parsed.standalone)
-        self.assertEqual(parsed.standalone, ("gemini-3-flash",))
+        self.assertEqual(parsed.standalone,
+                         ("claude-sonnet-4-6", "claude-opus-4-6-thinking"))
+        self.assertEqual(parsed.variants["gemini-3.5-flash-high"], "high")
         self.assertEqual(parsed.variants["gemini-3.1-pro-high"], "high")
+        self.assertIsNone(parsed.check("gemini-3.5-flash-high", None))
+        self.assertIsNone(parsed.check("gemini-3.5-flash-high", "high"))
+        self.assertIsNotNone(parsed.check("gemini-3.5-flash", "high"))
+
+    def test_retired_bare_slug_form_matches_the_same_tabular_slugs(self):
+        tabular = "\n".join(
+            f"{slug}\tDescription" for slug in legacy_catalog().listed)
+        self.assertEqual(legacy_catalog(), parse_models_catalog(tabular))
+
+    def test_progress_line_without_a_slug_is_ignored(self):
+        parsed = parse_models_catalog("Fetching available models...\n" + CATALOG_TEXT)
+        self.assertEqual(parsed, catalog())
 
     def test_derived_rules_reproduce_every_recorded_cli_verdict(self):
-        parsed = catalog()
+        parsed = legacy_catalog()
         for probe in SELECTION["accepted"]:
             with self.subTest(accepted=probe):
                 self.assertIsNone(
@@ -85,7 +119,7 @@ class TestCapabilityCatalog(unittest.TestCase):
                 self.assertIsNotNone(reason)
 
     def test_recorded_available_effort_sets_match_the_diagnostics(self):
-        parsed = catalog()
+        parsed = legacy_catalog()
         # The CLI names the effort set it does support; ours must name the same one, so a
         # diagnostic can be acted on without rerunning the CLI.
         self.assertIn("available: low, high",
@@ -108,7 +142,7 @@ class TestCapabilityCatalog(unittest.TestCase):
     def test_historical_observation_is_not_treated_as_the_current_catalog(self):
         # 3.1 Pro medium and a 3.5 Flash high slug were plausible from the older planning
         # notes; the current catalog proves neither exists, so neither may be sent.
-        parsed = catalog()
+        parsed = legacy_catalog()
         self.assertNotIn("gemini-3.5-flash-high", parsed.listed)
         self.assertNotIn("medium", parsed.families["gemini-3.1-pro"])
         self.assertIsNotNone(parsed.check("gemini-3.5-flash-high", None))
@@ -138,8 +172,8 @@ class TestVersionGate(unittest.TestCase):
 
     def test_shipped_minimum_accepts_probed_version_and_refuses_older(self):
         adapter = make_adapter()
-        cases = {"1.1.5": True, "1.2.0": True, "2.0.0": True,
-                 "1.1.4": False, "1.0.9": False, "0.9.9": False}
+        cases = {"1.1.8": True, "1.2.0": True, "2.0.0": True,
+                 "1.1.7": False, "1.0.9": False, "0.9.9": False}
         for banner, expected in cases.items():
             with self.subTest(version=banner), mock.patch(
                     "assent.adapters.Adapter.probe_cli",
@@ -147,7 +181,7 @@ class TestVersionGate(unittest.TestCase):
                 ok, message = adapter.probe_cli()
                 self.assertEqual(ok, expected, message)
                 if not expected:
-                    self.assertIn("older than the required 1.1.5", message)
+                    self.assertIn("older than the required 1.1.8", message)
 
     def test_unparseable_banner_and_failed_probe_are_reported(self):
         adapter = make_adapter()
@@ -173,6 +207,7 @@ class TestBuildCommand(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--model") + 1], "gemini-3.1-pro")
         self.assertEqual(cmd[cmd.index("--effort") + 1], "high")
         self.assertEqual(cmd[cmd.index("--mode") + 1], "accept-edits")
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "stream-json")
         self.assertEqual(cmd[cmd.index("--print-timeout") + 1], "120m")
         self.assertIn("--dangerously-skip-permissions", cmd)
         # the CLI log stays outside the isolated worktree
@@ -261,14 +296,14 @@ class TestEffortPrecedence(unittest.TestCase):
 
     def test_omitted_effort_sends_no_flag_and_invents_no_cli_default(self):
         cfg = make_cfg(antigravity_default_effort={},
-                       antigravity_models={"lite": "gemini-3-flash"})
+                       antigravity_models={"lite": "claude-sonnet-4-6"})
         settings = cfg.adapter_settings(NAME)
         effort = settings.resolve_effort(None, "lite")
         self.assertIsNone(effort)
         self.assertIsNone(settings.resolve_requested_effort("lite", effort))
         cmd = build_command(cfg, "p", settings.resolve_model("lite"), None)
         self.assertNotIn("--effort", cmd)
-        self.assertIsNone(catalog().check("gemini-3-flash", None))
+        self.assertIsNone(catalog().check("claude-sonnet-4-6", None))
 
     def test_expanded_slug_never_pairs_with_a_contradictory_effort_flag(self):
         # Configuring an expanded slug is legal, but only without a conflicting effort.
@@ -338,7 +373,7 @@ class TestPreflight(unittest.TestCase):
         self.assertIn("[adapter.antigravity.models] prime", errors[0])
 
     def test_effortless_model_with_an_effort_is_refused(self):
-        cfg = make_cfg(antigravity_models={"lite": "gemini-3-flash"})
+        cfg = make_cfg(antigravity_models={"lite": "claude-sonnet-4-6"})
         adapter = AntigravityAdapter(cfg, catalog=catalog())
         errors = adapter.preflight([request("t002", "lite", "heavy", cfg=cfg)])
         self.assertEqual(len(errors), 1)
@@ -387,17 +422,65 @@ class TestPreflight(unittest.TestCase):
 
 
 class TestOutputContract(unittest.TestCase):
-    def test_plain_text_is_shown_without_inventing_events(self):
+    def test_plain_diagnostics_and_structured_result_are_shown(self):
         self.assertEqual(format_output_line("done\n"), "  AI| done")
         self.assertIn("!|", format_output_line("Error: something broke"))
         self.assertIsNone(format_output_line("   \n"))
-        # a line that merely looks structured is still only a line of text
-        rendered = format_output_line('{"type": "result", "usage": {"output_tokens": 5}}')
-        self.assertTrue(rendered.startswith("  AI| "))
-        self.assertIn('{"type": "result"', rendered)
+        rendered = format_output_line(json.dumps({
+            "event": "result", "result": {"status": "SUCCESS", "usage": {
+                "output_tokens": 5, "thinking_tokens": 2}}}))
+        self.assertIn("output 5 tokens", rendered)
+        self.assertIn("reasoning 2 tokens", rendered)
+
+    def test_usage_normalizes_stream_result_and_rejects_invalid_counters(self):
+        output = "\n".join((
+            json.dumps({"event": "init", "model": "gemini-3.1-pro-high"}),
+            json.dumps({"event": "result", "result": {
+                "status": "SUCCESS", "usage": {
+                    "input_tokens": 8, "cache_read_tokens": 3,
+                    "output_tokens": 5, "thinking_tokens": 2}}})))
+        usage = parse_output_for_usage(output)
+        self.assertEqual(usage[0].provider_model, "gemini-3.1-pro-high")
+        self.assertEqual(usage[0].cached_input_tokens, 3)
+        self.assertEqual(usage[0].reasoning_output_tokens, 2)
+        multiple = parse_output_for_usage(json.dumps({
+            "event": "result", "result": {"usage": {"model_usage": {
+                "gemini-a": {"input_tokens": 1},
+                "gemini-b": {"output_tokens": 2}}}}}))
+        self.assertEqual([item.provider_model for item in multiple],
+                         ["gemini-a", "gemini-b"])
+        self.assertIsNone(parse_output_for_usage(json.dumps({
+            "event": "result", "result": {"usage": {
+                "input_tokens": -2, "output_tokens": False}}})))
+
+    def test_structured_task_exposes_terminal_response_and_usage(self):
+        output = json.dumps({"event": "result", "result": {
+            "status": "SUCCESS", "response": '{"verdict":"PASS"}',
+            "usage": {"output_tokens": 7}}}) + "\n"
+        adapter = make_adapter()
+        with mock.patch("assent.adapters.antigravity.run_subprocess",
+                        return_value=(0, output, False)):
+            result = adapter.run_structured_task(
+                "prompt", "gemini-3.1-pro", "high", Path("."))
+        self.assertEqual(result.structured_output, '{"verdict":"PASS"}')
+        self.assertIsNone(result.structured_output_error)
+        self.assertEqual(result.usage[0].output_tokens, 7)
 
     def test_checkpoint_resume_record_is_hidden_from_live_output(self):
         self.assertIsNone(format_output_line(CHECKPOINT_RESUME_RECORD + "\n"))
+
+    def test_stream_result_response_preserves_checkpoint_resume_control(self):
+        output = json.dumps({"event": "result", "result": {
+            "status": "FAILED", "response": CHECKPOINT_RESUME_RECORD,
+            "usage": {"output_tokens": 1}}}) + "\n"
+        adapter = make_adapter()
+        with mock.patch("assent.adapters.antigravity.run_subprocess",
+                        return_value=(1, output, False)):
+            result = adapter.run_task(
+                "prompt", "gemini-3.1-pro", "high", Path("."))
+        self.assertTrue(result.checkpoint_resume)
+        self.assertIsNone(result.failure_kind)
+        self.assertFalse(result.quota_exhausted)
 
 
 class TestCheckpointResume(unittest.TestCase):

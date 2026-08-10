@@ -35,7 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from assent.adapters import (Adapter, TaskResult, is_checkpoint_resume_line,
+from assent.adapters import (Adapter, TaskResult, TokenUsage,
+                             is_checkpoint_resume_line, normalize_token_usage,
                              parse_checkpoint_resume_output)
 # The subprocess runner is shared adapter infrastructure, not claude knowledge; it is
 # re-exported here because callers patch this module's name to fake a session.
@@ -257,6 +258,48 @@ def parse_output_for_billing(output: str) -> bool:
     return any(_BILLING_TEXT_RE.search(text) for text in human_texts)
 
 
+def parse_output_for_usage(output: str) -> tuple[TokenUsage, ...] | None:
+    """Read the terminal result's aggregate or per-model Claude counters."""
+    provider_model: str | None = None
+    terminal: dict | None = None
+    for raw in output.splitlines():
+        try:
+            event = json.loads(raw.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            model = event.get("model")
+            if isinstance(model, str) and model.strip():
+                provider_model = model.strip()
+        elif event.get("type") == "assistant":
+            message = event.get("message")
+            model = message.get("model") if isinstance(message, dict) else None
+            if isinstance(model, str) and model.strip():
+                provider_model = model.strip()
+        elif event.get("type") == "result":
+            terminal = event
+    if terminal is None:
+        return None
+    model_usage = terminal.get("modelUsage")
+    buckets: list[TokenUsage] = []
+    if isinstance(model_usage, dict):
+        for model, counters in model_usage.items():
+            if not isinstance(model, str) or not model.strip():
+                continue
+            normalized = normalize_token_usage(counters, model)
+            if normalized is not None:
+                buckets.append(normalized)
+    if buckets:
+        return tuple(buckets)
+    model = terminal.get("model")
+    if isinstance(model, str) and model.strip():
+        provider_model = model.strip()
+    normalized = normalize_token_usage(terminal.get("usage"), provider_model)
+    return (normalized,) if normalized is not None else None
+
+
 def _extract_result_text(output: str) -> tuple[str | None, str | None]:
     """Pull the model's final response text out of a stream-json transcript.
 
@@ -313,7 +356,11 @@ class ClaudeAdapter(Adapter):
             parse_output_for_quota(output) if returncode != 0 else (False, None))
         billing = (returncode != 0 and parse_output_for_billing(output)
                    if not exhausted else False)
-        terminal_record = parse_checkpoint_resume_output(output, returncode, stalled)
+        response, _response_error = _extract_result_text(output)
+        terminal_record = (
+            parse_checkpoint_resume_output(output, returncode, stalled)
+            or (response is not None and parse_checkpoint_resume_output(
+                response, returncode, stalled)))
         # Quota evidence wins; otherwise the exact final control record wins over
         # unrelated billing-like prose that appeared earlier in the transcript.
         checkpoint_resume = terminal_record and not exhausted
@@ -325,7 +372,8 @@ class ClaudeAdapter(Adapter):
         return TaskResult(exit_code=returncode, output=output,
                           quota_exhausted=exhausted, reset_at=reset_at,
                           stalled=False, checkpoint_resume=checkpoint_resume,
-                          failure_kind=failure_kind)
+                          failure_kind=failure_kind,
+                          usage=parse_output_for_usage(output))
 
     def run_structured_task(self, prompt: str, requested_model: str,
                             requested_effort: str | None,

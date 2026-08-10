@@ -20,13 +20,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from assent import AssentError, auto_fix, engine, folder_scheduler, gitops
-from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult
+from assent import (AssentError, auto_fix, engine, folder_scheduler, gitops,
+                    usage)
+from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult, TokenUsage
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess, wake_stop_waiters)
 from assent.config import load_config
 from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
-                         read_entries, set_status)
+                         read_entries, read_workflow_state, set_status,
+                         workflow_state_path)
+from assent.verification_common import FullVerifyEvidence
 from tests.engine_support import (EngineTestCase, ScriptedAdapter, ok_result,
                                   task_text)
 from tests.test_contracts import GlobalContractsMixin
@@ -35,15 +38,26 @@ from tests.test_contracts import GlobalContractsMixin
 class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
     @staticmethod
     def review_rounds(count, *names):
-        """A [auto_fix.review] adapter list of exactly `count` review rounds.
+        """A workflow with exactly ``count`` verdict-producing review steps.
 
         The merged reviewer-fixer loop is finite because it walks this list
         position by position, so a case needing N reviewer sessions must
         configure N rounds.
         """
         adapters = list(names) or ["claude"] * count
-        rendered = ", ".join(json.dumps(name) for name in adapters)
-        return f"\n[auto_fix.review]\nadapter = [{rendered}]\n"
+        rendered = ", ".join(
+            item for name in adapters for item in (
+                '{ role = "bounded_fixer" }',
+                f'{{ role = "folder_reviewer", adapter = {json.dumps(name)} }}'))
+        return (
+            '\n[abilities.review_fix]\nprompt = "Review and repair."\n'
+            'writes = true\ngate = true\nproduces_verdict = true\n'
+            '[abilities.fix]\nprompt = "Repair durable findings."\n'
+            'writes = true\ngate = false\n'
+            '[agents.folder_reviewer]\nability = ["review_fix"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[agents.bounded_fixer]\nability = ["fix"]\n'
+            f'[workflow]\nplan = [{rendered}]\n')
 
     @staticmethod
     def review_session_agents(output):
@@ -74,6 +88,177 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             return ok_result()
         return step
 
+    def test_selection_verifier_failure_repairs_and_rechecks_in_one_call(self):
+        task_path = self.write_task(1, status="TODO", scope=("src/",))
+        extra = (
+            '\n[abilities.selection_review]\n'
+            'prompt = "Diagnose the failed selection verifier."\n'
+            'writes = false\ngate = true\nproduces_verdict = true\n'
+            '[agents.selection_reviewer]\nability = ["selection_review"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nselection = [{ action = "full_verify" }, '
+            '{ role = "selection_reviewer", adapter = "claude" }, '
+            '{ action = "full_verify" }]\n')
+        cfg = self.build(extra_config=extra)
+        (self.root / ".assent" / "verify.py").write_text(
+            "raise SystemExit(0)\n", encoding="utf-8")
+        self.commit_all()
+        worker = ScriptedAdapter([
+            self.ai_done(task_path, {"src/value.txt": "broken\n"})])
+        self.assertEqual(self.run_quiet(cfg, adapter=worker), 0)
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "The selected candidate is broken",
+            "The complete verifier reported the wrong value.")
+        reviewer_and_fixer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None,
+                usage=(TokenUsage(provider_model="claude-review",
+                                  input_tokens=10, output_tokens=2),)),
+            self.repair_done(
+                task_path, {"src/value.txt": "fixed\n"}),
+        ])
+        calls = 0
+        rechecks = []
+
+        def verify_action(_cfg, *, recheck=False):
+            nonlocal calls
+            calls += 1
+            rechecks.append(recheck)
+            _branch, source, _worktree = engine.source_snapshot(
+                cfg, gitops.main_worktree(cfg.root))
+            return FullVerifyEvidence(
+                "VERIFIER_FAILED" if calls == 1 else "PASSED",
+                ("plan01",), gitops.commit_of(cfg.root, "HEAD"), (source,),
+                ("a" if calls == 1 else "b") * 40,
+                engine.verification.verifier_digest(cfg), "c" * 64,
+                1 if calls == 1 else 0,
+                ("src/value.txt failed",) if calls == 1 else (), False)
+
+        with mock.patch("assent.engine.get_adapter",
+                        return_value=reviewer_and_fixer), \
+                mock.patch("assent.engine.verify_folder_action",
+                           side_effect=verify_action):
+            self.assertEqual(engine.run_selection_workflow(
+                str(self.root / ".assent" / "assent.toml"),
+                self.root / ".assent", ["plan01"], auto_fix=True), 0)
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(rechecks, [False, True])
+        self.assertEqual(parse_task_file(task_path).status, "DONE")
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.review_context, "selection_verification")
+        self.assertEqual(state.verdict, "PASS")
+        self.assertEqual(
+            (self.execution_root() / "src" / "value.txt").read_text(
+                encoding="utf-8"), "fixed\n")
+        records, invalid = usage.read_records(cfg.assent_dir)
+        selection = [record for record in records
+                     if record["context"]["kind"] == "selection"]
+        self.assertEqual(invalid, 0)
+        self.assertEqual(len(selection), 2)
+        self.assertTrue(all(record["folders"] == ["plan01"]
+                            for record in selection))
+        reviewed = next(record for record in selection if record["models"])
+        self.assertEqual(reviewed["models"][0]["provider_model"],
+                         "claude-review")
+
+    def test_selection_target_conflict_uses_ai_reconcile_before_full_verify(self):
+        task_path = self.write_task(
+            1, status="DONE", scope=("src/value.txt",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "value.txt").write_text("base\n", encoding="utf-8")
+        extra = (
+            '\n[abilities.selection_review]\n'
+            'prompt = "Assign every selection conflict path."\n'
+            'writes = false\ngate = true\nproduces_verdict = true\n'
+            '[abilities.selection_fix]\n'
+            'prompt = "Resolve the assigned conflict."\n'
+            'writes = true\ngate = false\n'
+            '[agents.selection_reviewer]\nability = ["selection_review"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[agents.selection_fixer]\nability = ["selection_fix"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nselection = [{ action = "full_verify" }, '
+            '{ role = "selection_reviewer", adapter = "claude" }, '
+            '{ role = "selection_fixer" }, '
+            '{ action = "full_verify" }]\n')
+        cfg = self.build(extra_config=extra)
+        (self.root / ".assent" / "verify.py").write_text(
+            "raise SystemExit(0)\n", encoding="utf-8")
+        self.commit_all()
+        worktree = gitops.ensure_worktree(self.root, "plan01")
+        branch = gitops.ensure_branch(worktree, "plan01/")
+        (worktree / "src" / "value.txt").write_text(
+            "from source\n", encoding="utf-8")
+        gitops.commit_all(worktree, "source change")
+        source_tip = gitops.branch_tip(self.root, branch)
+        (self.root / "src" / "value.txt").write_text(
+            "from target\n", encoding="utf-8")
+        self.commit_all("target change")
+        target_tip = gitops.commit_of(self.root, "HEAD")
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "Selection target conflict",
+            "The source and target both changed the task-owned path.")
+
+        def resolve(_prompt):
+            managed = gitops.reconcile_worktree_path(self.root, "plan01")
+            (managed / "src" / "value.txt").write_text(
+                "resolved automatically\n", encoding="utf-8")
+            return ok_result()
+
+        reviewer_and_fixer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+            resolve,
+        ])
+        with mock.patch("assent.engine.get_adapter",
+                        return_value=reviewer_and_fixer):
+            code = engine.run_selection_workflow(
+                str(self.root / ".assent" / "assent.toml"),
+                self.root / ".assent", ["plan01"], auto_fix=True)
+
+        self.assertEqual(code, 0)
+        resolved_tip = gitops.branch_tip(self.root, branch)
+        self.assertEqual(
+            gitops.commit_parents(self.root, resolved_tip),
+            (source_tip, target_tip))
+        self.assertEqual(gitops.commit_of(self.root, "HEAD"), target_tip)
+        self.assertEqual(len(reviewer_and_fixer.calls), 2)
+        self.assertIn("Do not stage or commit", reviewer_and_fixer.calls[1][0])
+        self.assertEqual(parse_task_file(task_path).status, "DONE")
+
+    def test_repair_gate_failure_preserves_reviewer_step_identity(self):
+        task_path = self.write_task(1, status="DONE")
+        cfg = self.build(extra_config=self.review_rounds(1))
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        task = parse_task_file(task_path)
+        review = cfg.workflow_plan[1]
+        finding = auto_fix.ReviewFinding(
+            task.id, "src/value.txt", "Repair is incomplete",
+            "The task-focused gate failed after repair.")
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (finding,)),
+            source_tree=gitops.tree_of(cfg.root, "HEAD"),
+            task_plan_sha256=auto_fix.sha256_files(
+                item.path for item in plan.tasks),
+            review_prompt_sha256="a" * 64,
+            reviewer_role=review.role, reviewer_step_index=1,
+            reviewer_adapter=review.adapter,
+            reviewer_model=review.requested_model,
+            reviewer_effort=review.requested_effort,
+            workflow_step_index=2)
+
+        failed = engine._auto_fix_failure_state(
+            cfg, state, [(task, "focused gate failed")])
+
+        self.assertEqual(failed.reviewer_role, review.role)
+        self.assertEqual(failed.reviewer_step_index, 1)
+        self.assertIsNone(engine._auto_fix_recovery_config_error(cfg, failed))
+
     @staticmethod
     def recheck_record(finding):
         fingerprint = auto_fix.finding_fingerprint(finding)
@@ -87,6 +272,97 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 prior_fingerprint=fingerprint,
                 transition_evidence="The repair diff still reproduces the issue."),
         )))
+
+    def test_invalid_record_retry_carries_validator_error_and_can_amend_scope(self):
+        task_path = self.write_task(
+            1, status="DONE", scope=("src/base.py",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "base.py").write_text("base = 1\n", encoding="utf-8")
+        (source / "needed.py").write_text("value = 1\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(retry=1, extra_config=self.review_rounds(2))
+
+        malformed = json.dumps({
+            "type": "assent.auto_fix_review",
+            "verdict": "FAIL",
+            "findings": [{
+                "task_id": "t001",
+                "path": "src/needed.py",
+                "summary": "Required source file was omitted from scope",
+                "evidence": (
+                    "recommendation: append src/needed.py; scope amendment: "
+                    "existing_file"),
+            }],
+        })
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/needed.py",
+            "Required source file was omitted from scope",
+            "The task requires the exact existing file.",
+            kind="scope_amendment",
+            recommendation="Append the exact existing file to t001 scope.",
+            scope_addition=auto_fix.ScopeAddition(
+                "src/needed.py", "existing_file"))
+
+        def corrected(prompt):
+            self.assertIn("REVIEW OUTPUT CORRECTION REQUIRED", prompt)
+            self.assertIn(
+                "Review findings[0] is missing keys: kind, prior_fingerprint, "
+                "recommendation, scope_addition, transition, "
+                "transition_evidence", prompt)
+            self.assertIn("Bounded diagnostic of the rejected output", prompt)
+            self.assertIn("recommendation: append src/needed.py", prompt)
+            self.assertIn('"scope_addition":{"path":"src/example.py",', prompt)
+            self.assertIn('"prior_fingerprint":null', prompt)
+            self.assertIn("Review context: COMPLETED_FOLDER", prompt)
+            self.assertIn("Source tree:", prompt)
+            return TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None)
+
+        reviewer = ScriptedAdapter([
+            TaskResult(0, malformed, False, None),
+            corrected,
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+        worker = ScriptedAdapter([
+            self.repair_done(task_path, {"src/needed.py": "value = 2\n"})])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 0)
+        self.assertNotIn(
+            "REVIEW OUTPUT CORRECTION REQUIRED", reviewer.calls[0][0])
+        self.assertEqual(parse_task_file(task_path).scope,
+                         ["src/base.py", "src/needed.py"])
+        self.assertEqual(len(worker.calls), 1)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
+
+    def test_terminal_invalid_records_write_no_state_or_scope_change(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        cfg = self.build(retry=1, extra_config=self.review_rounds(1))
+        malformed = TaskResult(
+            0,
+            '{"type":"assent.auto_fix_review","verdict":"FAIL",'
+            '"findings":[{"task_id":"t001","path":"src/value.txt",'
+            '"summary":"bad","evidence":"missing required keys"}]}',
+            False, None)
+        reviewer = ScriptedAdapter([malformed, malformed])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([]),
+            auto_fix_adapter=reviewer, auto_fix=True), 1)
+        self.assertEqual(len(reviewer.calls), 2)
+        self.assertEqual(parse_task_file(task_path).scope, ["src/"])
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
+        self.assertFalse(any(
+            subject.startswith("wip(plan01/t001): recovered invalid reviewer")
+            for subject in self.subjects()))
 
     def test_review_failure_reopens_repairs_and_reviews_with_the_task_profile(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
@@ -132,7 +408,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(state.verdict, "PASS")
         # The recheck ran as the second configured round and, having passed,
         # leaves the position on the round that decided it.
-        self.assertEqual(state.review_round_index, 1)
+        self.assertEqual(state.workflow_step_index, 3)
         self.assertEqual(len(worker.calls), 1)
         self.assertEqual(len(reviewer.calls), 2)
         repair_prompt = worker.calls[0][0]
@@ -234,7 +510,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             auto_fix=True), 0)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
-        self.assertEqual(state.review_round_index, 2)
+        self.assertEqual(state.workflow_step_index, 5)
         # Every repair keeps the reopened task's own ordinary profile; only the
         # review round position advances.
         self.assertEqual(
@@ -380,7 +656,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         source.mkdir()
         (source / "base.py").write_text("base = 1\n", encoding="utf-8")
         (source / "needed.py").write_text("value = 1\n", encoding="utf-8")
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(1))
         plan = Plan.parse(cfg.tasks_dir)
         contracts = engine._task_contract_snapshots(plan)
         plan_digest = engine._contracts_digest(plan, contracts)
@@ -479,7 +755,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         (self.root / "tests" / "base.py").write_text("base = 1\n", encoding="utf-8")
         (self.root / "src" / "needed.py").write_text("value = 1\n", encoding="utf-8")
         (self.root / "tests" / "needed.py").write_text("value = 1\n", encoding="utf-8")
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(1))
         plan = Plan.parse(cfg.tasks_dir)
         contracts = engine._task_contract_snapshots(plan)
         plan_digest = engine._contracts_digest(plan, contracts)
@@ -544,7 +820,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         source.parent.mkdir()
         source.write_text("old\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config="\n[auto_fix.review]\n")
+        cfg = self.build(extra_config=self.review_rounds(1))
 
         reviewer = ScriptedAdapter([
             TaskResult(0, auto_fix.review_record_json(
@@ -597,7 +873,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         # twice under t001's ordinary profile, and only the round index moves.
         self.assertEqual([(model, effort) for _prompt, model, effort in worker.calls],
                          [("lite", "medium"), ("lite", "medium")])
-        self.assertEqual(state.review_round_index, 2)
+        self.assertEqual(state.workflow_step_index, 5)
 
     def test_multi_task_finding_round_gives_every_task_the_normal_profile(self):
         first = self.write_task(
@@ -634,7 +910,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             [("lite", "medium"), ("lite", "medium")])
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
-        self.assertEqual(state.review_round_index, 1)
+        self.assertEqual(state.workflow_step_index, 3)
 
     def test_dependency_cascade_shares_the_same_normal_repair_round(self):
         first = self.write_task(
@@ -671,7 +947,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(parse_task_file(second).status, "DONE")
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
-        self.assertEqual(state.review_round_index, 1)
+        self.assertEqual(state.workflow_step_index, 3)
 
     def test_interrupted_multi_task_round_resumes_on_the_same_profile(self):
         first = self.write_task(
@@ -707,7 +983,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         interrupted = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(interrupted.phase, "REPAIRING")
-        self.assertEqual(interrupted.review_round_index, 1)
+        self.assertEqual(interrupted.workflow_step_index, 3)
 
         resumed = ScriptedAdapter([
             self.repair_done(first, {"src/one.txt": "new one\n"}),
@@ -724,7 +1000,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         completed = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(completed.verdict, "PASS")
-        self.assertEqual(completed.review_round_index, 1)
+        self.assertEqual(completed.workflow_step_index, 3)
 
     def test_process_creation_failure_leaves_the_same_repair_resumable(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
@@ -760,7 +1036,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         failed_start = auto_fix.read_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(failed_start.phase, "REPAIRING")
-        self.assertEqual(failed_start.review_round_index, 1)
+        self.assertEqual(failed_start.workflow_step_index, 3)
         self.assertEqual(parse_task_file(task_path).status, "TODO")
         entries = read_entries(journal_path_for(task_path))
         self.assertEqual(sum(
@@ -873,21 +1149,23 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         # failure, so it exits zero and the task keeps the status its own
         # closeout gave it.
         self.assertEqual(len(reviewer.calls), 2)
-        self.assertEqual(len(worker.calls), 2)
+        # Only the writable workflow step between the two verdict steps can
+        # consume the first verdict's durable finding.
+        self.assertEqual(len(worker.calls), 1)
         self.assertEqual(parse_task_file(task_path).status, "DONE")
         self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", out.getvalue())
 
         fingerprint = auto_fix.finding_fingerprint(finding)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.review_round_index, 2)
+        self.assertEqual(state.workflow_step_index, 4)
         self.assertEqual(state.current_finding_fingerprints, (fingerprint,))
         outcome = state.unresolved_review
         self.assertIsNotNone(outcome)
-        review = cfg.auto_fix_review[1]
+        review = cfg.workflow_plan[3]
         self.assertEqual(
             (outcome.round_index, outcome.rounds_used, outcome.adapter,
              outcome.model, outcome.effort, outcome.finding_fingerprints),
-            (1, 2, review.adapter, review.requested_model,
+            (3, 4, review.adapter, review.requested_model,
              review.requested_effort, (fingerprint,)))
         self.assertIsNone(state.self_fixed_unreviewed)
 
@@ -895,8 +1173,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertIn(
             "Folder auto-fix: REVIEW UNRESOLVED, HUMAN DECISION (fresh)",
             report)
-        self.assertIn("Terminal: REVIEW UNRESOLVED, HUMAN DECISION (round 2 "
-                      f"of 2, {review.adapter}/{review.requested_model}/"
+        self.assertIn("Terminal: REVIEW UNRESOLVED, HUMAN DECISION (round 4 "
+                      f"of 4, {review.adapter}/{review.requested_model}/"
                       f"{review.requested_effort}", report)
         self.assertIn(fingerprint, report)
 
@@ -1168,11 +1446,11 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         outcome = state.self_fixed_unreviewed
         self.assertIsNotNone(outcome)
-        review = cfg.auto_fix_review[1]
+        review = cfg.workflow_plan[3]
         self.assertEqual(
             (outcome.round_index, outcome.rounds_used, outcome.adapter,
              outcome.model, outcome.effort, outcome.finding_fingerprints),
-            (1, 2, review.adapter, review.requested_model,
+            (3, 4, review.adapter, review.requested_model,
              review.requested_effort,
              (auto_fix.finding_fingerprint(finding),)))
         # The settled record is rebound to the tree the last round's repair was
@@ -1183,7 +1461,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
         self.assertIn("Folder auto-fix: SELF-FIXED, UNREVIEWED (fresh)", report)
         self.assertIn(
-            f"Self-fixed round: 2 of 2 ({review.adapter}/"
+            f"Self-fixed round: 4 of 4 ({review.adapter}/"
             f"{review.requested_model}/{review.requested_effort})", report)
         self.assertIn("Terminal: SELF-FIXED, UNREVIEWED", report)
 
@@ -1403,10 +1681,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         def fix(text, expected_round, expected_remaining):
             def step(prompt):
                 self.assertIn(
-                    f"This is review round {expected_round} of 3.", prompt)
+                    f"This is workflow plan step {expected_round * 2} of 6.", prompt)
                 self.assertIn(
-                    "Review rounds remaining after this one: "
-                    f"{expected_remaining}.", prompt)
+                    "Workflow steps remaining after this one: "
+                    f"{expected_remaining * 2}.", prompt)
                 self.assertIn("you may repair it directly", prompt)
                 (self.execution_root() / "src" / "value.txt").write_text(
                     text, encoding="utf-8")
@@ -1418,9 +1696,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             return step
 
         def final(prompt):
-            self.assertIn("This is review round 3 of 3.", prompt)
-            self.assertIn("Review rounds remaining after this one: 0.", prompt)
-            self.assertIn("This is the FINAL review round.", prompt)
+            self.assertIn("This is workflow plan step 6 of 6.", prompt)
+            self.assertIn("Workflow steps remaining after this one: 0.", prompt)
+            self.assertIn("This is the FINAL workflow plan step.", prompt)
             self.assertIn("No further review will occur after this one.", prompt)
             return TaskResult(0, auto_fix.review_record_json(
                 auto_fix.ReviewRecord("PASS", ())), False, None)
@@ -1447,14 +1725,14 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
         self.assertEqual(state.reviewer_adapter, "claude")
-        self.assertEqual(state.review_round_index, 2)
+        self.assertEqual(state.workflow_step_index, 5)
         self.assertEqual(parse_task_file(task_path).status, "DONE")
         self.assertEqual(
             (self.execution_root() / "src" / "value.txt").read_text(
                 encoding="utf-8"),
             "second repair\n")
         self.assertTrue(any(
-            "review round 1 repaired its own finding" in subject
+            "review round 2 repaired its own finding" in subject
             for subject in self.subjects()))
 
     def test_a_fixed_round_writing_outside_the_named_task_scope_is_refused(self):
@@ -1495,6 +1773,553 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 encoding="utf-8"),
             "reviewer overreach\n")
         self.assertEqual(len(reviewer.calls), 1)
+
+
+class TestProviderUsageRecording(GlobalContractsMixin, EngineTestCase):
+    def test_task_retry_records_distinct_invocations(self):
+        task = self.write_task(1)
+        cfg = self.build(retry=1)
+        self.commit_all()
+
+        first = TaskResult(0, "", False, None, usage=(
+            TokenUsage(provider_model="model-a", input_tokens=3),))
+
+        def finish(prompt):
+            result = self.ai_done(task)(prompt)
+            result.usage = (TokenUsage(provider_model="model-a",
+                                       output_tokens=4),)
+            return result
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = engine.run(
+                cfg, once=True, adapter=ScriptedAdapter([first, finish]))
+        self.assertEqual(result, 0, out.getvalue())
+        records, invalid = usage.read_records(cfg.assent_dir)
+        task_records = [record for record in records
+                        if record["context"] == {"kind": "task", "id": "t001"}]
+        self.assertEqual(invalid, 0)
+        self.assertEqual(len(task_records), 2)
+        self.assertEqual(len({item["invocation_id"] for item in task_records}), 2)
+
+    def test_usage_write_failure_does_not_change_task_outcome(self):
+        task = self.write_task(1)
+        cfg = self.build(retry=0)
+        self.commit_all()
+        with mock.patch("assent.engine.usage.record_invocation",
+                        side_effect=OSError("telemetry disk unavailable")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                result = engine.run(
+                    cfg, once=True,
+                    adapter=ScriptedAdapter([self.ai_done(task)]))
+        self.assertEqual(result, 0, out.getvalue())
+        self.assertEqual(parse_task_file(task).status, "DONE")
+
+    def test_concurrent_records_are_complete_and_duplicate_identity_is_idempotent(self):
+        cfg = self.build()
+        identities = [f"session-{index}" for index in range(12)]
+        threads = [threading.Thread(
+            target=usage.record_invocation,
+            kwargs=dict(
+                assent_dir=cfg.assent_dir, invocation_id=identity,
+                adapter="claude", requested_model="requested",
+                context_kind="task", context_id="t001",
+                folders=("plan01",),
+                evidence=(TokenUsage(input_tokens=1),)))
+            for identity in identities]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        usage.record_invocation(
+            cfg.assent_dir, invocation_id=identities[0], adapter="claude",
+            requested_model="requested", context_kind="task",
+            context_id="t001", folders=("plan01",),
+            evidence=(TokenUsage(input_tokens=99),))
+        records, invalid = usage.read_records(cfg.assent_dir)
+        self.assertEqual(invalid, 0)
+        self.assertEqual(len(records), len(identities))
+        self.assertTrue(all(record["models"][0]["input_tokens"] == 1
+                            for record in records))
+
+
+class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
+    TASK_ROLES = (
+        '\n[abilities.prepare]\nprompt = "Prepare the implementation."\n'
+        'writes = true\ngate = false\n'
+        '[abilities.implement]\nprompt = "Implement and verify."\n'
+        'writes = true\ngate = true\n'
+        '[agents.preparer]\nability = ["prepare"]\n'
+        '[agents.implementer]\nability = ["prepare", "implement"]\n'
+        '[workflow]\ntask = [{ role = "preparer" }, '
+        '{ role = "implementer" }]\n')
+    PLAN_ROLE = (
+        '\n[abilities.implement_plan]\nprompt = "Implement the whole plan."\n'
+        'writes = true\ngate = true\n'
+        '[agents.plan_worker]\nability = ["implement_plan"]\n'
+        'model = "lite"\n'
+        '[workflow]\ntask = []\nplan = [{ role = "plan_worker" }]\n')
+    ACTION_AGENT = (
+        '\n[abilities.work]\nprompt = "Work from the supplied evidence."\n'
+        'writes = true\ngate = false\n'
+        '[agents.worker]\nability = ["work"]\n')
+
+    @staticmethod
+    def set_task_workflow(path, roles):
+        rendered = ", ".join(
+            f'{{ role = {json.dumps(role)} }}' for role in roles)
+        text = path.read_text(encoding="utf-8")
+        path.write_text(
+            text.replace('status = ', f'workflow = [{rendered}]\nstatus = ', 1),
+            encoding="utf-8", newline="\n")
+
+    def install_full_verifier(self):
+        script = self.root / ".assent" / "verify.py"
+        script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        return script.resolve()
+
+    def test_task_roles_run_as_separate_sessions(self):
+        path = self.write_task(1)
+        cfg = self.build(extra_config=self.TASK_ROLES)
+        self.commit_all()
+
+        def prepare(_prompt):
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="progress",
+                         summary="Preparation completed")
+            return ok_result()
+
+        adapter = ScriptedAdapter([prepare, self.ai_done(path)])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertIn("scheduled role: preparer", adapter.calls[0][0])
+        self.assertIn("scheduled role: implementer", adapter.calls[1][0])
+        self.assertEqual(len([
+            item for item in read_entries(journal_path_for(path))
+            if item.get("by") != "scheduler"]), 2)
+        self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
+    def test_task_workflow_overrides_project_task_roles(self):
+        path = self.write_task(1)
+        self.set_task_workflow(path, ("implementer",))
+        cfg = self.build(extra_config=self.TASK_ROLES)
+        self.commit_all()
+
+        adapter = ScriptedAdapter([self.ai_done(path)])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertIn("scheduled role: implementer", adapter.calls[0][0])
+        self.assertNotIn("scheduled role: preparer", adapter.calls[0][0])
+
+    def test_empty_task_workflow_uses_only_its_plan_unit(self):
+        path = self.write_task(1)
+        self.set_task_workflow(path, ())
+        cfg = self.build(extra_config=self.PLAN_ROLE)
+        self.commit_all()
+
+        result = ok_result()
+        result.usage = (TokenUsage(output_tokens=9),)
+        adapter = ScriptedAdapter([result])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertIn("Plan workflow step 1 of 1", adapter.calls[0][0])
+        self.assertNotIn("Task workflow step", adapter.calls[0][0])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        records, invalid = usage.read_records(cfg.assent_dir)
+        plan_records = [record for record in records
+                        if record["context"]["kind"] == "plan"]
+        self.assertEqual(invalid, 0)
+        self.assertEqual(len(plan_records), 1)
+        self.assertEqual(plan_records[0]["models"][0]["output_tokens"], 9)
+
+    def test_task_workflow_missing_role_refuses_before_any_session(self):
+        path = self.write_task(1)
+        self.set_task_workflow(path, ("missing",))
+        cfg = self.build(extra_config=self.TASK_ROLES)
+        self.commit_all()
+        adapter = ScriptedAdapter([])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = engine.run(cfg, once=True, adapter=adapter)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(adapter.calls, [])
+        self.assertIn("Task t001", out.getvalue())
+        self.assertIn("missing agent role 'missing'", out.getvalue())
+
+    def test_task_session_cannot_change_its_workflow(self):
+        path = self.write_task(1)
+        self.set_task_workflow(path, ("implementer",))
+        cfg = self.build(retry=0, extra_config=self.TASK_ROLES)
+        self.commit_all()
+
+        def tamper(_prompt):
+            text = path.read_text(encoding="utf-8")
+            path.write_text(
+                text.replace('{ role = "implementer" }',
+                             '{ role = "preparer" }'),
+                encoding="utf-8", newline="\n")
+            set_status(path, "DONE")
+            append_entry(
+                journal_path_for(path), by="claude", requested_model="lite",
+                event="done", summary="Attempted closeout")
+            return ok_result()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(
+                engine.run(cfg, once=True, adapter=ScriptedAdapter([tamper])), 0)
+
+        self.assertIn("fields other than status were modified: workflow",
+                      out.getvalue())
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+
+    def test_never_started_next_task_step_has_no_interrupt_prompt(self):
+        path = self.write_task(1)
+        cfg = self.build(extra_config=self.TASK_ROLES)
+        self.commit_all()
+
+        def prepare(_prompt):
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="progress",
+                         summary="Preparation completed")
+            return ok_result()
+
+        real_write = engine.write_workflow_state
+        interrupted = False
+
+        def stop_after_advance(tasks_dir, state):
+            nonlocal interrupted
+            real_write(tasks_dir, state)
+            if state.step_index == 1 and not state.started and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt()
+
+        with mock.patch.object(
+                engine, "write_workflow_state", side_effect=stop_after_advance):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([prepare])), 130)
+
+        resumed = ScriptedAdapter([self.ai_done(path)])
+        self.assertEqual(self.run_quiet(cfg, once=True, adapter=resumed), 0)
+        self.assertNotIn("previous adapter session was interrupted",
+                         resumed.calls[0][0])
+
+    def test_empty_task_workflow_runs_one_plan_unit(self):
+        first = self.write_task(1, scope=("src/a.txt",))
+        second = self.write_task(
+            2, deps=("t001",), scope=("src/b.txt",))
+        cfg = self.build(extra_config=self.PLAN_ROLE)
+        (self.root / "src").mkdir()
+        (self.root / "src" / "a.txt").write_text("old\n", encoding="utf-8")
+        (self.root / "src" / "b.txt").write_text("old\n", encoding="utf-8")
+        self.commit_all()
+
+        def implement(prompt):
+            self.assertIn(str(first), prompt)
+            self.assertIn(str(second), prompt)
+            self.assertIn("t002: TODO; deps: t001", prompt)
+            self.assertNotIn("Cumulative checkpoint diff", prompt)
+            for name in ("a.txt", "b.txt"):
+                target = self.execution_root() / "src" / name
+                target.parent.mkdir(exist_ok=True)
+                target.write_text("done\n", encoding="utf-8")
+            return ok_result()
+
+        adapter = ScriptedAdapter([implement])
+        self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertEqual(
+            [task.status for task in Plan.parse(cfg.tasks_dir).tasks],
+            ["DONE", "DONE"])
+        for path in (first, second):
+            entry = read_entries(journal_path_for(path))[-1]
+            self.assertEqual(entry["by"], "scheduler")
+            self.assertIn("plan_worker", entry["summary"])
+        self.assertTrue(self.subjects()[0].startswith(
+            "auto(plan01): workflow plan step plan_worker"))
+        self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
+    def test_non_verdict_plan_unit_tolerates_auto_fix_flag(self):
+        task = self.write_task(1)
+        cfg = self.build(extra_config=self.PLAN_ROLE)
+        self.commit_all()
+
+        adapter = ScriptedAdapter([ok_result()])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=adapter, auto_fix=True), 0)
+
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertEqual(parse_task_file(task).status, "DONE")
+
+    def test_plan_unit_preflights_explicit_adapter_outside_rotation(self):
+        task = self.write_task(1)
+        self.set_task_workflow(task, ())
+        cfg = self.build(extra_config=(
+            '\n[abilities.review_plan]\n'
+            'prompt = "Review the whole plan."\n'
+            'writes = true\ngate = true\nproduces_verdict = true\n'
+            '[agents.plan_reviewer]\nability = ["review_plan"]\n'
+            'model = "lite"\neffort = "normal"\n'
+            '[workflow]\ntask = []\n'
+            'plan = [{ role = "plan_reviewer", adapter = "codex" }]\n'))
+        self.commit_all()
+        worker = ScriptedAdapter([])
+        explicit = ScriptedAdapter([ok_result()])
+        explicit.preflight = mock.Mock(return_value=["unsupported identity"])
+
+        with mock.patch.object(engine, "get_adapter", return_value=explicit):
+            self.assertEqual(self.run_quiet(cfg, adapter=worker), 1)
+
+        explicit.preflight.assert_called_once()
+        self.assertEqual(explicit.calls, [])
+
+    def test_plan_gate_failure_retries_step_then_blocks_every_task(self):
+        failing = 'python -c "raise SystemExit(3)"'
+        first = self.write_task(1, verify=failing)
+        second = self.write_task(2, deps=("t001",), verify=failing)
+        cfg = self.build(retry=1, extra_config=self.PLAN_ROLE)
+        self.commit_all()
+        adapter = ScriptedAdapter([ok_result(), ok_result()])
+
+        self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertEqual(
+            [task.status for task in Plan.parse(cfg.tasks_dir).tasks],
+            ["BLOCKED", "BLOCKED"])
+        for path in (first, second):
+            entry = read_entries(journal_path_for(path))[-1]
+            self.assertIn("plan_worker", entry["summary"])
+            self.assertIn("exit code is non-zero", entry["detail"])
+        self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
+    def test_plan_unit_ports_primary_tree_escape_and_journals_every_task(self):
+        first = self.write_task(1, scope=("src/a.txt",))
+        second = self.write_task(2, deps=("t001",), scope=("src/b.txt",))
+        (self.root / "src").mkdir()
+        (self.root / "src" / "a.txt").write_text("old\n", encoding="utf-8")
+        (self.root / "src" / "b.txt").write_text("old\n", encoding="utf-8")
+        cfg = self.build(retry=1, extra_config=self.PLAN_ROLE)
+        self.commit_all()
+
+        def escape_into_primary(_prompt):
+            (self.root / "src" / "a.txt").write_text(
+                "escaped\n", encoding="utf-8")
+            return ok_result()
+
+        adapter = ScriptedAdapter([escape_into_primary, ok_result()])
+        self.assertEqual(self.run_quiet(cfg, adapter=adapter), 0)
+
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertEqual(
+            (self.root / "src" / "a.txt").read_text(encoding="utf-8"), "old\n")
+        self.assertEqual(
+            (self.execution_root() / "src" / "a.txt").read_text(encoding="utf-8"),
+            "escaped\n")
+        for path in (first, second):
+            escapes = [entry for entry in read_entries(journal_path_for(path))
+                       if entry.get("event") == "main_tree_escape"]
+            self.assertEqual(len(escapes), 1)
+            self.assertIn("src/a.txt", escapes[0]["detail"])
+
+    def test_plan_unit_retains_out_of_scope_primary_tree_escape(self):
+        task = self.write_task(1, scope=("src/",))
+        cfg = self.build(retry=0, extra_config=self.PLAN_ROLE)
+        self.commit_all()
+
+        def escape_outside_plan(_prompt):
+            (self.root / "outside.txt").write_text("stray\n", encoding="utf-8")
+            return ok_result()
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([escape_outside_plan])), 0)
+
+        self.assertEqual(parse_task_file(task).status, "BLOCKED")
+        self.assertEqual(
+            (self.root / "outside.txt").read_text(encoding="utf-8"), "stray\n")
+        self.assertFalse((self.execution_root() / "outside.txt").exists())
+        entries = read_entries(journal_path_for(task))
+        self.assertFalse(any(entry.get("event") == "main_tree_escape"
+                             for entry in entries))
+        blocked = next(entry for entry in entries
+                       if entry.get("event") == "blocked")
+        self.assertIn("outside the plan's scope union", blocked["detail"])
+
+    def test_task_full_test_runs_between_roles_and_reruns_after_source_change(self):
+        path = self.write_task(1)
+        script = self.install_full_verifier()
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ action = "full_test" }, '
+              '{ role = "worker" }, { action = "full_test" }]\n'))
+        self.commit_all()
+
+        def repair(prompt):
+            self.assertIn("FULL TEST EVIDENCE", prompt)
+            self.assertIn("Status: FAILED", prompt)
+            self.assertIn("Do not run the full project verifier", prompt)
+            target = self.execution_root() / "src" / "fixed.py"
+            target.parent.mkdir(exist_ok=True)
+            target.write_text("fixed\n", encoding="utf-8")
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="progress",
+                         summary="Repaired from full-test evidence")
+            return ok_result()
+
+        runs = [
+            subprocess.CompletedProcess([], 3, "raw failure output\n", ""),
+            subprocess.CompletedProcess([], 0, "raw passing output\n", ""),
+        ]
+        adapter = ScriptedAdapter([repair])
+        out = io.StringIO()
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                side_effect=runs) as full_test, contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(cfg, once=True, adapter=adapter), 0)
+
+        self.assertEqual(full_test.call_count, 2)
+        for call in full_test.call_args_list:
+            self.assertEqual(call.args, (script, self.execution_root()))
+        self.assertIn("raw failure output", out.getvalue())
+        self.assertIn("raw passing output", out.getvalue())
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertFalse((self.plan_dir / "_verification.toml").exists())
+
+    def test_unchanged_failed_full_test_is_reused_and_blocks_terminal_task(self):
+        path = self.write_task(1)
+        self.install_full_verifier()
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ action = "full_test" }, '
+              '{ role = "worker" }, { action = "full_test" }]\n'))
+        self.commit_all()
+
+        def inspect(prompt):
+            self.assertIn("Status: FAILED", prompt)
+            append_entry(journal_path_for(path), by="claude",
+                         requested_model="lite", event="progress",
+                         summary="Failure inspected without a source write")
+            return ok_result()
+
+        failed = subprocess.CompletedProcess([], 4, "unchanged failure\n", "")
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=failed) as full_test:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([inspect])), 0)
+
+        full_test.assert_called_once()
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+
+    def test_passing_full_test_survives_restart_without_duplicate_process(self):
+        path = self.write_task(1)
+        self.install_full_verifier()
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ action = "full_test" }, '
+              '{ role = "worker" }]\n'))
+        self.commit_all()
+        result = subprocess.CompletedProcess([], 0, "passed once\n", "")
+        real_write = engine.write_workflow_state
+        interrupted = False
+
+        def stop_after_action(tasks_dir, state):
+            nonlocal interrupted
+            real_write(tasks_dir, state)
+            if (state.step_index == 1 and state.action_status == "PASSED"
+                    and not interrupted):
+                interrupted = True
+                raise KeyboardInterrupt()
+
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=result) as full_test, mock.patch.object(
+                    engine, "write_workflow_state",
+                    side_effect=stop_after_action):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=ScriptedAdapter([])), 130)
+
+        adapter = ScriptedAdapter([self.ai_done(path)])
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=result) as resumed_full_test:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=adapter), 0)
+
+        full_test.assert_called_once()
+        resumed_full_test.assert_not_called()
+        self.assertIn("Status: PASSED", adapter.calls[0][0])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+    def test_role_write_after_full_test_requires_a_later_action(self):
+        path = self.write_task(1)
+        self.install_full_verifier()
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ action = "full_test" }, '
+              '{ role = "worker" }]\n'))
+        self.commit_all()
+        passed = subprocess.CompletedProcess([], 0, "passed\n", "")
+        adapter = ScriptedAdapter([
+            self.ai_done(path, files={"src/changed.py": "changed\n"})])
+
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=passed) as full_test:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=adapter), 0)
+
+        full_test.assert_called_once()
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        blocked = read_entries(journal_path_for(path))[-1]
+        self.assertIn("STALE", blocked["summary"])
+
+    def test_plan_action_only_passes_and_failed_evidence_reaches_plan_role(self):
+        action_only = self.write_task(1)
+        script = self.install_full_verifier()
+        cfg = self.build(extra_config=(
+            '[workflow]\ntask = []\nplan = [{ action = "full_test" }]\n'))
+        cfg.receipt_refresh = "auto"
+        self.commit_all()
+        passed = subprocess.CompletedProcess([], 0, "plan pass\n", "")
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=passed) as full_test, mock.patch.object(
+                    engine.verification, "verify_folder_if_needed") as receipt:
+            self.assertEqual(self.run_quiet(
+                cfg, adapter=ScriptedAdapter([])), 0)
+        full_test.assert_called_once_with(script, self.execution_root())
+        receipt.assert_not_called()
+        self.assertEqual(parse_task_file(action_only).status, "DONE")
+        self.assertFalse((self.plan_dir / "_verification.toml").exists())
+
+        second = self.write_task(2)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = []\nplan = [{ action = "full_test" }, '
+              '{ role = "worker" }]\n'))
+
+        def inspect(prompt):
+            self.assertIn("FULL TEST EVIDENCE", prompt)
+            self.assertIn("Status: FAILED", prompt)
+            self.assertIn("creates no verification receipt", prompt)
+            return ok_result()
+
+        failed = subprocess.CompletedProcess([], 5, "plan failure\n", "")
+        with mock.patch.object(
+                engine.verification, "run_full_verifier",
+                return_value=failed) as failed_full_test:
+            self.assertEqual(self.run_quiet(
+                cfg, adapter=ScriptedAdapter([inspect])), 0)
+        failed_full_test.assert_called_once()
+        self.assertEqual(parse_task_file(second).status, "BLOCKED")
 
 
 class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):

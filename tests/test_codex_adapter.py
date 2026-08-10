@@ -7,7 +7,7 @@ from assent import AssentError
 from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult, get_adapter
 from assent.adapters.codex import (
     CodexAdapter, build_command, format_stream_event, parse_output_for_billing,
-    parse_output_for_quota,
+    parse_output_for_quota, parse_output_for_usage,
 )
 from assent.config import Config
 
@@ -87,6 +87,29 @@ class TestFormatStreamEvent(unittest.TestCase):
 
     def test_checkpoint_resume_record_is_hidden_from_live_output(self):
         self.assertIsNone(format_stream_event(CHECKPOINT_RESUME_RECORD + "\n"))
+
+
+class TestUsage(unittest.TestCase):
+    def test_fixture_normalizes_supported_categories(self):
+        output = (FIXTURES / "codex_json_ok.txt").read_text(encoding="utf-8")
+        usage = parse_output_for_usage(output)
+        self.assertEqual(len(usage), 1)
+        self.assertIsNone(usage[0].provider_model)
+        self.assertEqual(usage[0].input_tokens, 12046)
+        self.assertEqual(usage[0].cached_input_tokens, 9984)
+        self.assertEqual(usage[0].output_tokens, 5)
+        self.assertEqual(usage[0].reasoning_output_tokens, 0)
+
+    def test_model_buckets_and_invalid_counters(self):
+        event = {"type": "turn.completed", "usage": {"model_usage": {
+            "gpt-a": {"input_tokens": 1},
+            "gpt-b": {"reasoning_output_tokens": 2, "output_tokens": -1}}}}
+        usage = parse_output_for_usage(json.dumps(event))
+        self.assertEqual([item.provider_model for item in usage],
+                         ["gpt-a", "gpt-b"])
+        self.assertIsNone(usage[1].output_tokens)
+        self.assertIsNone(parse_output_for_usage(json.dumps({
+            "type": "turn.completed", "usage": {"input_tokens": 1.5}})))
 
 
 class TestQuota(unittest.TestCase):
@@ -234,6 +257,16 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(result.checkpoint_resume)
         self.assertFalse(result.quota_exhausted)
         self.assertEqual(result.output, output)
+        self.assertIsNone(result.failure_kind)
+
+    def test_stream_agent_message_preserves_checkpoint_resume_control(self):
+        output = json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": CHECKPOINT_RESUME_RECORD}}) + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = CodexAdapter(make_cfg()).run_task(
+            "p", "gpt-5.6-sol", "medium", Path("."))
+        self.assertTrue(result.checkpoint_resume)
+        self.assertFalse(result.quota_exhausted)
         self.assertIsNone(result.failure_kind)
 
     def test_quota_and_control_record_use_the_quota_path(self):

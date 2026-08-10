@@ -7,7 +7,9 @@ folder-verification outcome the same best-effort report handoff.
 from __future__ import annotations
 
 from assent.folder_verification import (verify_folder_receipt,
-                                        verify_folder_receipt_if_needed)
+                                        verify_folder_receipt_if_needed,
+                                        verify_folder_action as
+                                        _verify_folder_action)
 from assent.inspection import try_write_report as _try_write_report
 
 
@@ -41,5 +43,13 @@ def verify_folder_if_needed(cfg) -> int:
     """Run conditional folder verification with the same shared closeout."""
     try:
         return verify_folder_receipt_if_needed(cfg)
+    finally:
+        refresh_report(cfg)
+
+
+def verify_folder_action(cfg, *, recheck=False):
+    """Return typed selection evidence, then refresh after releasing locks."""
+    try:
+        return _verify_folder_action(cfg, recheck=recheck)
     finally:
         refresh_report(cfg)

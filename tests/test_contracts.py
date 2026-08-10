@@ -8,6 +8,8 @@ with current contracts in place.
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -15,9 +17,54 @@ from pathlib import Path
 from unittest import mock
 
 from assent import AssentError, contracts
+from assent.plan import _KNOWN_KEYS
 from assent.user_home import ASSENT_HOME_ENV
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+class TestTestPackageIsolation(unittest.TestCase):
+    def test_importing_tests_ignores_a_hostile_user_home(self):
+        with tempfile.TemporaryDirectory() as hostile_directory:
+            hostile_home = Path(hostile_directory)
+            hostile_config = hostile_home / "assent.toml"
+            hostile_text = "[hostile]\nsetting = true\n"
+            hostile_config.write_text(hostile_text, encoding="utf-8")
+            marker = hostile_home / "package-home.txt"
+            environment = os.environ.copy()
+            environment[ASSENT_HOME_ENV] = str(hostile_home)
+            environment["ASSENT_TEST_HOME_MARKER"] = str(marker)
+            script = """
+import os
+import tempfile
+from pathlib import Path
+
+import tests
+from assent.config import load_config
+
+home = Path(os.environ["ASSENT_HOME"])
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    config = root / ".assent" / "assent.toml"
+    config.parent.mkdir()
+    config.write_text("", encoding="utf-8")
+    loaded = load_config(config, "empty")
+    if loaded.root != root.resolve():
+        raise SystemExit(f"unexpected project root: {loaded.root}")
+Path(os.environ["ASSENT_TEST_HOME_MARKER"]).write_text(
+    str(home), encoding="utf-8")
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", script], cwd=_PROJECT_ROOT,
+                env=environment, capture_output=True, encoding="utf-8",
+                errors="replace")
+            self.assertEqual(result.returncode, 0,
+                             result.stdout + result.stderr)
+            package_home = Path(marker.read_text(encoding="utf-8"))
+            self.assertNotEqual(package_home, hostile_home)
+            self.assertFalse(package_home.exists())
+            self.assertEqual(hostile_config.read_text(encoding="utf-8"),
+                             hostile_text)
 
 
 def install_global_contracts(case: unittest.TestCase) -> Path:
@@ -78,6 +125,87 @@ class TestContractPaths(unittest.TestCase):
 
 class TestContractContent(unittest.TestCase):
     """Durable rules a reader must be able to find in the shipped contract."""
+
+    def test_task_skeleton_matches_all_twelve_parser_fields(self):
+        format_text = contracts.installed_contract_text("format.md")
+        match = re.search(
+            r'```toml\n(title = "Skeleton and test infrastructure".*?\n)```',
+            format_text, re.DOTALL)
+        self.assertIsNotNone(match)
+        skeleton = tomllib.loads(match.group(1))
+
+        self.assertEqual(len(_KNOWN_KEYS), 12)
+        self.assertEqual(set(skeleton), _KNOWN_KEYS)
+        self.assertIn("workflow", skeleton)
+
+    def test_planning_contract_requires_owner_scope_audit_and_narrow_gates(self):
+        text = " ".join(contracts.installed_contract_text("format.md").split())
+        for phrase in (
+                "audit every `goal`, `behavior`, and `acceptance` clause item by item",
+                "owning implementation, focused-test, and contract files",
+                "read-only context or a possible write",
+                "covered by an exact `scope` entry",
+                "inspect the repository",
+                "not a completeness proof",
+                "module, class, case, or command",
+                "whole high-I/O module",
+                "smallest representative integration test"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_workflow_contract_and_template_define_the_three_execution_layers(self):
+        workflow = " ".join(
+            contracts.installed_contract_text("workflow.md").split())
+        for phrase in (
+                "`task` selects task-scoped context",
+                "`plan` selects plan-scoped context",
+                "[workflow].selection",
+                "exactly three keys",
+                "tagged union",
+                "`full_test` is legal at task or plan positions",
+                "`full_verify` is legal only at selection positions",
+                "not permission",
+                "The selected role's `[abilities]` carry what that session does",
+                "The only special behavior the engine infers from a role",
+                "`produces_verdict`",
+                "makes the whole plan one unit",
+                "every `plan` role step is an ordinary worker session",
+                "according to the plan's focused gate",
+                "when no task can make further progress",
+                "quiescent-blocked"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, workflow)
+        self.assertNotIn("exactly two keys", workflow)
+
+        configuration = (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
+            encoding="utf-8")
+        self.assertNotIn("[auto_fix.review]", configuration)
+        self.assertNotIn("reviewer round", configuration.lower())
+        for phrase in ("# [abilities.execute]", "# [abilities.review]",
+                       "# [agents.worker]", "# [agents.folder_reviewer]",
+                       "# [workflow]", "# task =", "# plan =",
+                       "# selection ="):
+            with self.subTest(template_phrase=phrase):
+                self.assertIn(phrase, configuration)
+        prompts = re.findall(r'^# prompt = "([^"]+)"$', configuration, re.MULTILINE)
+        self.assertEqual(len(prompts), 3)
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertFalse(
+                    {"task", "plan", "folder"}.intersection(prompt.lower().split()))
+
+        instructions = contracts.installed_contract_text("instructions.md")
+        self.assertNotIn("[auto_fix.review]", instructions)
+        self.assertNotIn("version-6 record", instructions)
+        self.assertNotIn("review_round_index", instructions)
+        self.assertIn("[workflow].plan", instructions)
+        self.assertIn("workflow_step_index", instructions)
+        reading_guide = instructions.split(
+            "A **meeting / interactive session** reads only", 1)[1].split(
+                "An **assent-scheduled task session** reads only:", 1)[0]
+        for key in ("`[workflow]`", "`[agents]`", "`[abilities]`"):
+            self.assertIn(key, reading_guide)
+        self.assertIn("canonical owner", reading_guide)
 
     def test_quota_examples_describe_rotation_action(self):
         install_global_contracts(self)
@@ -652,9 +780,9 @@ class TestContractContent(unittest.TestCase):
             "workflow.md")
         for field in (
                 "source_tree", "task_plan_sha256", "review_prompt_sha256",
-                "reviewer_adapter", "reviewer_model", "reviewer_effort",
+                "reviewer_role", "reviewer_adapter", "reviewer_model", "reviewer_effort",
                 "current_finding_fingerprints", "observed_states",
-                "review_round_index"):
+                "workflow_step_index", "reviewer_step_index"):
             with self.subTest(state_field=field):
                 self.assertIn(field, format_text)
         for phrase in (
@@ -670,13 +798,10 @@ class TestContractContent(unittest.TestCase):
 
         configuration = (root / "assent/templates/assent.toml").read_text(
             encoding="utf-8")
-        self.assertIn("# [auto_fix.review]", configuration)
-        self.assertIn('# model = "prime"', configuration)
-        self.assertIn('# effort = "heavy"', configuration)
-        self.assertIn("different vendor from the worker rotation", configuration)
-        self.assertIn("only an explicit `run --auto-fix` invocation starts the review",
-                      configuration)
-        self.assertIn("ordinary run without the flag does neither", configuration)
+        self.assertIn("# [workflow]", configuration)
+        self.assertIn('role = "folder_reviewer"', configuration)
+        self.assertIn("folder review", configuration)
+        self.assertIn("[workflow].plan", configuration)
 
         chinese = {
             "WORKFLOW.zh-TW.md": (root / "docs/zh-TW/WORKFLOW.md").read_text(
@@ -701,6 +826,34 @@ class TestContractContent(unittest.TestCase):
         for phrase in translated_required:
             with self.subTest(chinese_contract=phrase):
                 self.assertIn("".join(phrase.split()), chinese_contract)
+
+    def test_selection_conflict_repair_is_owned_by_packaged_contracts(self):
+        install_global_contracts(self)
+        format_text = contracts.installed_contract_text("format.md")
+        workflow_text = " ".join(
+            contracts.installed_contract_text("workflow.md").split())
+        instructions_text = " ".join(
+            contracts.installed_contract_text("instructions.md").split())
+        configuration = (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
+            encoding="utf-8")
+
+        for phrase in (
+                "[workflow].task", "[workflow].plan", "[workflow].selection",
+                "full_test", "full_verify", "content-identical"):
+            with self.subTest(format_phrase=phrase):
+                self.assertIn(phrase, format_text)
+        for phrase in (
+                "typed conflict wave", "target-alone", "peer-only",
+                "base/ours/theirs", "zero full-test runs", "never accepts a prefix"):
+            with self.subTest(workflow_phrase=phrase):
+                self.assertIn(phrase, workflow_text)
+        for phrase in (
+                "run --verify --auto-fix", "may not run Git", "full suite",
+                "reviewer/fixer/action"):
+            with self.subTest(instructions_phrase=phrase):
+                self.assertIn(phrase, instructions_text)
+        self.assertIn("selection = [", configuration)
+        self.assertIn('role = "selection_fixer"', configuration)
 
     def test_round_interruption_and_gated_settle_are_documented(self):
         """Interrupted-round recovery, the gated settle, the failing-gate
@@ -764,7 +917,7 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(chinese_contract=phrase):
                 self.assertIn("".join(phrase.split()), chinese_contract)
 
-    def test_auto_fix_state_schema_matches_the_version_six_contract(self):
+    def test_auto_fix_state_schema_matches_the_version_seven_contract(self):
         """The executable state shape and packaged contract must advance together."""
         install_global_contracts(self)
         from dataclasses import fields
@@ -772,17 +925,17 @@ class TestContractContent(unittest.TestCase):
         from assent import auto_fix
 
         format_text = contracts.installed_contract_text("workflow.md")
-        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 6)
+        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 7)
         self.assertEqual(
             {field.name for field in fields(auto_fix.AutoFixState)},
             auto_fix._STATE_KEYS)
         for phrase in (
-                "Version 6 has exactly these scalar fields",
-                "version = 6",
+                "Version 7 has exactly these scalar fields",
+                "version = 7",
                 "phase = \"COMPLETE\"",
                 "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
                 "A restart resumes `REPAIRING` or `AWAITING_REVIEW`",
-                "missing or drifted reviewer configuration",
+                "missing or drifted workflow configuration",
                 "refuses repair and closeout",
         ):
             with self.subTest(format_phrase=phrase):
@@ -792,18 +945,19 @@ class TestContractContent(unittest.TestCase):
                 "review_context", "review_stage", "failure_trigger",
                 "reviewer_recommendations", "approved_scope_additions",
                 "scope_amendments", "worker_dispositions", "repair_briefs",
-                "review_round_index", "self_fixed_unreviewed",
+                "workflow_step_index",
+                "reviewer_step_index", "reviewer_role", "self_fixed_unreviewed",
                 "plan_digest_transitions", "review_transitions"):
             with self.subTest(state_field=field):
                 self.assertIn(field, format_text)
         self.assertIn("ASSENT_REPAIR_DISPOSITION", format_text)
 
-    def test_version_six_example_is_parseable_and_finding_identity_is_complete(self):
+    def test_version_seven_example_is_parseable_and_finding_identity_is_complete(self):
         """The packaged state example must be usable as TOML and describe its full identity."""
         format_text = contracts.installed_contract_text("format.md")
         workflow_text = contracts.installed_contract_text("workflow.md")
         match = re.search(
-            r"```toml\n(version = 6\n.*?)(?:\n```)", workflow_text, re.DOTALL)
+            r"```toml\n(version = 7\n.*?)(?:\n```)", workflow_text, re.DOTALL)
         self.assertIsNotNone(match)
         assert match is not None
         example = tomllib.loads(match.group(1))

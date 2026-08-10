@@ -23,7 +23,7 @@ from assent.auto_fix import (
     snapshot_project_surface,
     state_for_review, validate_review_findings, validate_review_transitions,
     validate_scope_additions,
-    with_repair_phase, with_review_round_index,
+    with_repair_phase, with_workflow_step_index,
     write_auto_fix_state,
 )
 
@@ -110,10 +110,10 @@ class TestReviewRecord(unittest.TestCase):
             task_plan_sha256="2" * 64, review_prompt_sha256="3" * 64,
             reviewer_adapter="claude", reviewer_model="review-model",
             reviewer_effort="high", review_stage="initial",
-            review_round_index=1)
+            workflow_step_index=1)
         self.assertEqual(state.verdict, "FIXED")
         self.assertEqual(state.phase, "AWAITING_REVIEW")
-        self.assertEqual(state.review_round_index, 1)
+        self.assertEqual(state.workflow_step_index, 1)
         self.assertEqual(state.current_finding_fingerprints,
                          (finding_fingerprint(self.finding),))
         # A repaired round is never a settled folder: only an independent PASS
@@ -400,7 +400,7 @@ class TestAutoFixState(unittest.TestCase):
             findings=(finding,),
             observed_states=(ObservedState(
                 self.tree, (finding.fingerprint,)),),
-            review_round_index=1,
+            workflow_step_index=1,
             reviewer_recommendations=(ReviewerRecommendation(
                 finding.fingerprint, finding.recommendation),),
             worker_dispositions=(WorkerDisposition(
@@ -419,7 +419,7 @@ class TestAutoFixState(unittest.TestCase):
         self.assertEqual(loaded, self.state)
         self.assertEqual(loaded.finding_ledger, self.state.findings)
         self.assertEqual(loaded.observed_states, self.state.observed_states)
-        self.assertEqual(loaded.review_round_index, 1)
+        self.assertEqual(loaded.workflow_step_index, 1)
         self.assertFalse(any(
             child.name.endswith(".tmp")
             for child in self.path.parent.iterdir()))
@@ -429,7 +429,7 @@ class TestAutoFixState(unittest.TestCase):
         text = self.path.read_text(encoding="utf-8")
         self.assertNotIn("consumed_fixer_profiles", text)
         self.assertNotIn("repair_round_assignments", text)
-        self.assertIn("review_round_index = 1\n", text)
+        self.assertIn("workflow_step_index = 1\n", text)
         for field in ("consumed_fixer_profiles", "repair_round_assignments"):
             with self.subTest(field=field):
                 self.path.write_text(f"{text}\n{field} = []\n", encoding="utf-8")
@@ -447,12 +447,12 @@ class TestAutoFixState(unittest.TestCase):
             read_auto_fix_state(self.path)
 
     def test_round_index_advances_and_the_current_record_is_recoverable(self):
-        advanced = with_review_round_index(self.state, 2)
-        self.assertEqual(advanced.review_round_index, 2)
+        advanced = with_workflow_step_index(self.state, 2)
+        self.assertEqual(advanced.workflow_step_index, 2)
         self.assertEqual(current_review_record(advanced).findings[0],
                          self.state.findings[0].finding)
-        with self.assertRaisesRegex(AssentError, "review_round_index"):
-            with_review_round_index(self.state, -1)
+        with self.assertRaisesRegex(AssentError, "workflow_step_index"):
+            with_workflow_step_index(self.state, -1)
         self.assertEqual(
             with_repair_phase(advanced, "AWAITING_REVIEW").phase,
             "AWAITING_REVIEW")
@@ -556,7 +556,7 @@ class TestAutoFixState(unittest.TestCase):
             failure_trigger="worker_blocked")
         self.assertEqual(updated.plan_digest_transitions, (
             PlanDigestTransition(self.plan_digest, "5" * 64),))
-        self.assertEqual(updated.review_round_index, state.review_round_index)
+        self.assertEqual(updated.workflow_step_index, state.workflow_step_index)
         write_auto_fix_state(self.path, updated)
         self.assertEqual(read_auto_fix_state(self.path), updated)
 
@@ -636,7 +636,7 @@ class TestAutoFixState(unittest.TestCase):
             review_prompt_sha256=self.prompt_digest,
             reviewer_adapter="codex", reviewer_model="gpt-5.6-sol",
             reviewer_effort="high", review_stage="initial",
-            review_round_index=1)
+            workflow_step_index=1)
         changed = ReviewFinding(
             "t001", "assent/auto_fix.py", "Repair introduced a regression",
             "The changed parser now accepts an unknown finding key.",
@@ -652,7 +652,7 @@ class TestAutoFixState(unittest.TestCase):
         self.assertEqual(len(second.findings), 2)
         self.assertEqual(second.approved_scope_additions,
                          first.approved_scope_additions)
-        self.assertEqual(second.review_round_index, first.review_round_index)
+        self.assertEqual(second.workflow_step_index, first.workflow_step_index)
 
     def test_surface_snapshot_reports_exact_changed_paths(self):
         source = self.root / "source"

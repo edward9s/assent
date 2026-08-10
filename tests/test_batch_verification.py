@@ -22,8 +22,10 @@ from assent.__main__ import _dispatch
 from assent.batch_accept import accept_all
 from assent.batch_receipt import (BatchVerificationReceipt, batch_receipt_path,
                                   read_batch_receipt)
-from assent.batch_verification import (confirm_on_terminal, verify_batch,
-                                       verify_selected_batch)
+from assent.batch_verification import (SelectionConflictEvidence,
+                                       confirm_on_terminal, verify_batch,
+                                       verify_selected_batch,
+                                       verify_selected_batch_action)
 from assent.config import load_config
 from assent.folder_verification import receipt_path
 from assent.lockfile import hold_integration_lock, hold_lock
@@ -348,6 +350,34 @@ class TestBatchCandidateAndReceipt(BatchVerifyRepositoryCase):
 
 
 class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
+    def test_selection_action_collects_the_complete_conflict_wave_before_verify(
+            self) -> None:
+        self.make_source("aa", filename="one.txt", content="from aa\n")
+        self.make_source("bb", filename="one.txt", content="from bb\n")
+        self.make_source("cc", filename="two.txt", content="from cc\n")
+        self.make_source("dd", filename="two.txt", content="from dd\n")
+        self.make_source("ee")
+        self.write_after("ee", ("bb",))
+
+        with mock.patch("assent.batch_verification.run_full_verifier") as verifier:
+            result = verify_selected_batch_action(
+                str(self.config_path), self.root / ".assent",
+                ("aa", "bb", "cc", "dd", "ee"))
+
+        self.assertIsInstance(result, SelectionConflictEvidence)
+        self.assertEqual(result.outcome, "PEER_CONFLICT")
+        self.assertEqual(
+            [(item.folder, item.paths, item.kind)
+             for item in result.conflicts],
+            [("bb", ("one.txt",), "peer_only"),
+             ("dd", ("two.txt",), "peer_only")])
+        self.assertEqual(result.conflicts[0].dependent_exclusions, ("ee",))
+        self.assertEqual(
+            tuple(folder for folder, _tip
+                  in result.conflicts[1].prefix_sources), ("aa", "cc"))
+        verifier.assert_not_called()
+        self.assertFalse(self.receipt_path().exists())
+
     def test_selected_names_are_normalized_and_receipt_is_exact(self) -> None:
         parent = self.make_source("parent")
         child = self.make_source("child")

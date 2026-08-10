@@ -26,6 +26,7 @@ from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
                                         SUMMARY_LIMIT, VERIFY_COMMAND,
+                                        CandidateConflict, FullVerifyEvidence,
                                         atomic_write_text, candidate_tree,
                                         ignored_input_diagnosis,
                                         invalidate_receipt,
@@ -260,7 +261,8 @@ def _new_receipt(*, status: str, source_tip: str, target_tip: str,
     )
 
 
-def _verify_locked(cfg: Config) -> VerificationReceipt:
+def _verify_locked(cfg: Config, *,
+                   record_conflict_receipt: bool = True) -> VerificationReceipt:
     path = receipt_path(cfg)
     main = gitops.main_worktree(cfg.root)
     # A malformed cache is evidence of an unsafe state, not permission to
@@ -312,6 +314,14 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
         outcome = gitops.merge_no_ff(candidate, source_tip, message)
         if not outcome.ok:
             conflicts = ", ".join(outcome.conflicts)
+            if not record_conflict_receipt:
+                raise CandidateConflict(FullVerifyEvidence(
+                    "TARGET_CONFLICT", (cfg.tasks_name,), target_tip,
+                    (source_tip,), integration_tree, digest, shared_inputs,
+                    outcome.exit_code or 1,
+                    (f"{_CONFLICT_SUMMARY_PREFIX}{conflicts}",
+                     *(f"{cfg.tasks_name}:{path}"
+                       for path in outcome.conflicts))))
             receipt = _new_receipt(
                 status="FAILED", source_tip=source_tip, target_tip=target_tip,
                 integration_tree=integration_tree, digest=digest,
@@ -407,33 +417,22 @@ def _verify_locked(cfg: Config) -> VerificationReceipt:
 def verify_folder_receipt(cfg: Config) -> int:
     """Verify exactly ``cfg.tasks_name`` and return zero only for PASSED."""
     folder = cfg.tasks_name
-    try:
-        # Repository lock first, then the selected folder lock, matching accept.
-        with hold_integration_lock(cfg.assent_dir):
-            with hold_lock(cfg.tasks_dir, folder):
-                receipt = _verify_locked(cfg)
-    except LockBusy as e:
-        print(f"verify {folder}: refused ({e})")
-        return 1
-    except AssentError as e:
-        print(f"verify {folder}: failed ({e})")
-        return 1
-    if receipt.status == "PASSED":
-        print(f"verify {folder}: passed ({receipt.integration_tree})")
+    result = verify_folder_action(cfg, _record_conflict_receipt=True)
+    if result.passed:
+        print(f"verify {folder}: passed ({result.candidate_tree})")
         return 0
-    print(f"verify {folder}: failed ({receipt.failure_summary})")
-    if receipt.failure_summary.startswith(_CONFLICT_SUMMARY_PREFIX):
+    detail = result.evidence[0] if result.evidence else result.outcome
+    print(f"verify {folder}: failed ({detail})")
+    if result.outcome == "TARGET_CONFLICT":
         print(f"Run `assent reconcile {folder}` to resolve the source-versus-"
               "target conflict in an isolated worktree, then verify again.")
     return 1
 
 
 def _receipt_matches_current_candidate_locked(cfg: Config) -> bool:
-    """Compare a PASSED receipt while the integration and folder locks are held."""
+    """Compare any settled receipt while integration and folder locks are held."""
     main = gitops.main_worktree(cfg.root)
     receipt = read_receipt(receipt_path(cfg), main)
-    if receipt.status != "PASSED":
-        return False
     script = (cfg.assent_dir / "verify.py").resolve()
     if receipt.verify_script_sha256 != sha256_file(script):
         return False
@@ -454,7 +453,64 @@ def _receipt_matches_current_candidate_locked(cfg: Config) -> bool:
         return False
     tree, outcome = candidate_tree(
         main, cfg.tasks_name, target_tip, source_tip)
-    return outcome.ok and tree == receipt.integration_tree
+    if outcome.ok:
+        return tree == receipt.integration_tree
+    expected = _CONFLICT_SUMMARY_PREFIX + ", ".join(outcome.conflicts)
+    return (receipt.status == "FAILED"
+            and receipt.target_tip == target_tip
+            and receipt.integration_tree == tree
+            and receipt.failure_summary == expected)
+
+
+def _evidence_from_receipt(cfg: Config, receipt: VerificationReceipt, *,
+                           reused: bool) -> FullVerifyEvidence:
+    if receipt.status == "PASSED":
+        outcome = "PASSED"
+    elif receipt.failure_summary.startswith(_CONFLICT_SUMMARY_PREFIX):
+        outcome = "TARGET_CONFLICT"
+    elif receipt.failure_summary.startswith((
+            "Unable to start verification:",
+            "target branch changed", "target tip changed",
+            "target worktree became dirty", "source tip changed",
+            "source worktree became dirty", "upstream stack changed",
+            "verification script changed", "shared inputs became unreadable",
+            _SHARED_INPUT_DRIFT)):
+        outcome = "INFRASTRUCTURE_FAILED"
+    else:
+        outcome = "VERIFIER_FAILED"
+    return FullVerifyEvidence(
+        outcome, (cfg.tasks_name,), receipt.target_tip,
+        (receipt.source_tip,), receipt.integration_tree,
+        receipt.verify_script_sha256, receipt.shared_inputs_sha256,
+        receipt.exit_code,
+        tuple(item for item in (receipt.failure_summary,) if item), reused)
+
+
+def verify_folder_action(cfg: Config, *, recheck: bool = False,
+                         _record_conflict_receipt: bool = False
+                         ) -> FullVerifyEvidence:
+    """Run or reuse the exact folder transaction and return typed evidence."""
+    folder = cfg.tasks_name
+    try:
+        with hold_integration_lock(cfg.assent_dir):
+            with hold_lock(cfg.tasks_dir, folder):
+                path = receipt_path(cfg)
+                if path.exists():
+                    receipt = read_receipt(path, gitops.main_worktree(cfg.root))
+                    if (_receipt_matches_current_candidate_locked(cfg)
+                            and (receipt.status == "PASSED" or not recheck)):
+                        print(f"verify {folder}: existing {receipt.status} receipt "
+                              "is fresh; full suite skipped")
+                        return _evidence_from_receipt(cfg, receipt, reused=True)
+                receipt = _verify_locked(
+                    cfg, record_conflict_receipt=_record_conflict_receipt)
+                return _evidence_from_receipt(cfg, receipt, reused=False)
+    except CandidateConflict as error:
+        return error.result
+    except (LockBusy, AssentError) as error:
+        return FullVerifyEvidence(
+            "INFRASTRUCTURE_FAILED", (folder,), "", (), "", "", "", 1,
+            (str(error),))
 
 
 def _current_shared_inputs(
@@ -537,9 +593,10 @@ def verify_folder_receipt_if_needed(cfg: Config) -> int:
                         return 1
                     if fresh:
                         receipt = read_receipt(path, gitops.main_worktree(cfg.root))
-                        print("verify " + folder + ": existing PASSED receipt is "
-                              f"fresh ({receipt.integration_tree}); full suite skipped")
-                        return 0
+                        print("verify " + folder + f": existing {receipt.status} "
+                              "receipt is fresh "
+                              f"({receipt.integration_tree}); full suite skipped")
+                        return 0 if receipt.status == "PASSED" else 1
                     print(f"verify {folder}: existing receipt is stale; refreshing")
                 receipt = _verify_locked(cfg)
     except LockBusy as e:

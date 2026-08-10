@@ -38,6 +38,38 @@ RECEIPT_STATUSES = ("PASSED", "FAILED")
 OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 SUMMARY_LIMIT = 4000
+FULL_VERIFY_OUTCOMES = (
+    "PASSED", "VERIFIER_FAILED", "TARGET_CONFLICT", "PEER_CONFLICT",
+    "INFRASTRUCTURE_FAILED",
+)
+
+
+@dataclass(frozen=True)
+class FullVerifyEvidence:
+    """Typed, source-bound result of one complete verification transaction."""
+
+    outcome: str
+    folders: tuple[str, ...]
+    target_commit: str
+    source_commits: tuple[str, ...]
+    candidate_tree: str
+    verification_script_sha256: str
+    shared_inputs_sha256: str
+    exit_code: int
+    evidence: tuple[str, ...] = ()
+    reused: bool = False
+
+    @property
+    def passed(self) -> bool:
+        return self.outcome == "PASSED"
+
+
+class CandidateConflict(AssentError):
+    """Candidate construction conflict carrying receipt-independent evidence."""
+
+    def __init__(self, result: FullVerifyEvidence):
+        super().__init__(result.evidence[0] if result.evidence else result.outcome)
+        self.result = result
 
 
 def _utf8_environment() -> dict[str, str]:

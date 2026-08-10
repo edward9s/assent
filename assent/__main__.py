@@ -164,7 +164,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--auto-fix", action="store_true",
         help="After task execution, run the configured bounded folder review "
-             "and repair policy")
+             "and repair policy; with --verify, configured selection "
+             "reviewer/fixer positions may also repair candidate conflicts "
+             "before the exact full verification")
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
@@ -532,8 +534,27 @@ def _dispatch_run_folders(
     return 0
 
 
+def _dispatch_run_all(config_path: str, assent_dir: Path, jobs: int, *,
+                      auto_fix: bool, run_level_verify: bool) -> int:
+    """Let scheduler children inherit the invocation-level verification owner."""
+    key = "ASSENT_SELECTION_FULL_VERIFY"
+    previous = os.environ.get(key)
+    if run_level_verify:
+        os.environ[key] = "1"
+    try:
+        if auto_fix:
+            return run_all(config_path, assent_dir, jobs, auto_fix=True)
+        return run_all(config_path, assent_dir, jobs)
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
 def _close_run(result: int, *, verify: bool, config_path: str,
-               assent_dir: Path, selection: list[str] | None) -> int:
+               assent_dir: Path, selection: list[str] | None,
+               auto_fix: bool = False) -> int:
     """Chain `run --verify`'s complete verification onto a successful run.
 
     A nonzero run is returned untouched and starts no verification: there is no
@@ -564,7 +585,26 @@ def _close_run(result: int, *, verify: bool, config_path: str,
     """
     if result != 0 or not verify:
         return result
+    if selection:
+        try:
+            selection_cfg = load_config(config_path, selection[0])
+        except AssentError as e:
+            print(f"Config error: {e}")
+            return 1
+        if selection_cfg.workflow_selection:
+            return engine.run_selection_workflow(
+                config_path, assent_dir, selection, auto_fix=auto_fix)
     if selection is None:
+        folders = list_task_folders(assent_dir)
+        if folders:
+            try:
+                selection_cfg = load_config(config_path, folders[0])
+            except AssentError as e:
+                print(f"Config error: {e}")
+                return 1
+            if selection_cfg.workflow_selection:
+                return engine.run_dynamic_selection_workflow(
+                    config_path, assent_dir, auto_fix=auto_fix)
         return verify_batch(config_path, assent_dir)
     if len(selection) > 1:
         return verify_selected_batch(config_path, assent_dir, selection)
@@ -731,7 +771,8 @@ def _dispatch(argv: list[str]) -> int:
             selection = list(args.folders)
         closeout = functools.partial(
             _close_run, verify=args.verify, config_path=args.config,
-            assent_dir=assent_dir, selection=selection)
+            assent_dir=assent_dir, selection=selection,
+            auto_fix=args.auto_fix)
         if args.folders:
             result = _dispatch_run_folders(
                 args.config, args.folders, once=args.once, task_id=args.task,
@@ -751,10 +792,9 @@ def _dispatch(argv: list[str]) -> int:
                 auto_fix=args.auto_fix,
                 run_level_verify=args.verify))
         if args.all_folders:
-            if args.auto_fix:
-                return closeout(run_all(
-                    args.config, assent_dir, args.jobs or 1, auto_fix=True))
-            return closeout(run_all(args.config, assent_dir, args.jobs or 1))
+            return closeout(_dispatch_run_all(
+                args.config, assent_dir, args.jobs or 1,
+                auto_fix=args.auto_fix, run_level_verify=args.verify))
         if args.folders:
             return closeout(0)
     if args.command == "accept":
@@ -891,7 +931,7 @@ def _dispatch(argv: list[str]) -> int:
                        auto_fix=args.auto_fix,
                        run_level_verify=args.verify),
             verify=args.verify, config_path=args.config, assent_dir=assent_dir,
-            selection=[folder])
+            selection=[folder], auto_fix=args.auto_fix)
     if args.command == "status":
         return inspection.status(cfg)
     if args.command == "check":

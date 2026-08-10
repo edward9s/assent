@@ -33,6 +33,8 @@ project/
 └── .assent/
     ├── verify.py                # this project's full verification script (run outside every AI session; a task file's verify never names it)
     ├── assent.toml              # optional: a deliberate or legacy project-only settings override
+    ├── _usage.jsonl             # deletable provider-usage evidence for all folders (not versioned)
+    ├── _usage.lock              # repository-level usage append lock (not versioned)
     └── bootstrap01/             # work folder (named after the nature of the work, decided by the meeting, = git branch prefix)
         ├── assent.lock          # this folder's run lock; the file persists as diagnostics
         ├── _assent.log          # this folder's runtime terminal output (not versioned)
@@ -115,6 +117,17 @@ to prevent a worktree from producing a second source of truth.
 own responsibility. Git is always enabled and always isolated into a worktree,
 not to be replaced by a toggle or a git-less degraded mode; this is what makes
 running multiple work folders in parallel safe.
+
+`_usage.jsonl` is Assent-owned, derived, deletable runtime evidence. Each
+version-1 JSON line has one stable `invocation_id`, time, adapter, requested
+model, a `context` with `kind` (`task`, `plan`, or `selection`) and `id`, the
+exact owning `folders` set, and zero or more `models` buckets. A bucket may
+name `provider_model` and may contain only non-negative provider-reported
+`input_tokens`, `cached_input_tokens`, `cache_creation_input_tokens`,
+`output_tokens`, and `reasoning_output_tokens`; an absent counter stays absent.
+The artifact never stores prompts, credentials, raw provider output, prices,
+estimates, task state, or acceptance evidence. `_usage.lock` serializes appends
+across concurrent folder runs; duplicate invocation identities are ignored.
 
 ### Bounded optimistic stacking and cleanup
 
@@ -217,6 +230,7 @@ title = "Skeleton and test infrastructure"
 deps = []                        # array of upstream task ids; write [] even with none
 model = "prime"                  # prime | core | lite (never write a vendor model name)
 effort = "heavy"                 # heavy | normal | slight; usually omitted, written only to deliberately deviate from the default
+workflow = [{ role = "implementer" }]  # optional task-local override of [workflow].task
 status = "TODO"                  # TODO | WIP | DONE | BLOCKED | SKIP
 scope = ["assent/", "tests/"]    # allowed path prefixes for changes; fail-closed, must not be empty
 verify = "python -m unittest tests.test_thing"  # this task's focused gate, exit 0 = pass;
@@ -241,9 +255,17 @@ Known facts, references, risks; reference shared knowledge, do not copy it.
 
 Rules:
 
-- The fields are fixed at these 11; writing more is a format error;
+- The fields are fixed at these 12; writing more is a format error;
   `title / deps / model / status / scope / verify / goal / acceptance` are
   required.
+- `workflow` is optional. Each entry is exactly `{ role = "..." }`, where the
+  role name comes from the effective `[agents]` settings. When omitted, the task
+  inherits `[workflow].task`; when neither is stated, the scheduler opens one
+  implicit session using the task's own `model` and `effort`. An explicit
+  `workflow = []` selects no per-task session for this task, like
+  `[workflow].task = []` scoped to this task's plan accountability unit. A role
+  absent from the effective settings refuses the whole run before any session
+  starts, with an error naming the task and missing role.
 - **Structural fields first, multi-line prose after** (as in the example order)
   — the status line must appear before any multi-line string, because the
   scheduler relies on this for precise write-back.
@@ -254,6 +276,8 @@ Rules:
   log and must not enter the task set.
 - A task file must be "self-contained for execution": an AI with zero memory can
   start work unambiguously from only AGENTS.md + instructions.md + this file.
+  A workflow role does not add its configured prompt to the task schema; the
+  scheduler supplies that prompt to the selected session.
 
 ### The three tiers (model)
 
@@ -306,6 +330,18 @@ left to the actual argument sent to that adapter's CLI on its right, so the
 line retains the adapter, tier, model, and effort audit facts without expanding
 back into verbose labels.
 
+### Planning scope audit
+
+Before planning closeout, audit every `goal`, `behavior`, and `acceptance`
+clause item by item. For each item, locate its owning implementation,
+focused-test, and contract files, then classify every located file as read-only
+context or a possible write. Every possible write must be covered by an exact
+`scope` entry; read-only context need not be. When ownership is not already
+known, inspect the repository to find the symbol, configuration key, or
+contract owner before settling scope. Scanning only the paths named in the
+task's prose is not a completeness proof: the audit must catch both a directly
+named omitted file and an owner that first has to be discovered.
+
 ### Planning for session cost
 
 A task-file author already knows things a zero-memory executing AI must
@@ -326,11 +362,14 @@ a failed `verify` restarts a whole session under [Lifecycle and review].
   question to a human: an ambiguous condition does not just cost a
   clarification, it costs a full retried session before the ambiguity even
   surfaces.
-- Point each task's `verify` at the narrowest test module(s) that
-  exercise its `scope`, not the full suite: the scheduler already runs
-  `.assent/verify.py` in full, once, automatically, after every task in
-  the folder reaches DONE/SKIP (see "Lifecycle and review"); repeating it
-  per task multiplies suite runtime by task count for no added safety.
+- Point each task's `verify` at the narrowest deterministic target the runner
+  supports -- a module, class, case, or command -- that exercises its scope.
+  Do not select a whole high-I/O module merely because it contains relevant
+  tests. When the behavior itself depends on filesystem, Git, or process I/O,
+  keep the smallest representative integration test instead of replacing it
+  with a unit-only check. Never use the full suite here: complete verification
+  runs outside the AI task session, and repeating it per task multiplies suite
+  runtime by task count for no added safety.
 
 ### Media inputs and outputs
 
@@ -363,8 +402,9 @@ capabilities.
 
 Status has no write-permission model: humans only review and issue directions;
 file changes are made by the AI following those directions. During an ordinary
-task session, the executing AI may change only its own status line; the
-scheduler replaces that line precisely, leaving every other byte untouched.
+task session, the executing AI may change only its own status line; `workflow`
+is protected alongside every other task contract field. The scheduler replaces
+that line precisely, leaving every other byte untouched.
 The scheduler has one additional, separately reviewed exception: after a
 validated auto-fix scope decision it may append the exact approved paths to
 the named existing task's `scope` array in one transaction. The worker and
@@ -444,6 +484,27 @@ summary = "checkpoint-resume requested; progress kept, immediately resuming the 
 detail = '''The exact final control record was received; no quota wait, adapter rotation, or retry was used.'''
 ```
 
+## Workflow ownership and scheduler actions
+
+`[workflow].task` roles own one task's implementation and may write only that
+task's scope. `[workflow].plan` roles own the plan accountability unit and may
+write only the union of its task scopes. `[workflow].selection` roles own an
+exact multi-plan decision or repair assignment; they never acquire task-file,
+receipt, acceptance, target-ref, or Git ownership. The scheduler alone owns
+the `full_test` action available at task/plan positions and the `full_verify`
+action available at selection positions. No AI role may invoke either action,
+the complete suite, Git, or Assent directly when its scheduler prompt forbids
+them.
+
+A selection conflict-repair unit is expressed only by explicit ordered
+positions: `full_verify`, a verdict-producing read-only reviewer, a writable
+non-verdict fixer authorization, then another `full_verify`. Repeating those
+positions is the finite repair budget; omission or exhaustion authorizes no
+implicit session. Candidate-conflict evidence and the selection cursor are
+derived runtime state. Resume reuses content-identical source, target, prefix,
+merge, focused-gate, and receipt evidence; it never invents a current-folder
+pointer, silently shrinks the selection, or treats a receipt as source truth.
+
 ## CLI and task-selection rules
 
 The exact `run`/`verify`/`accept`/`clean`/`archive`/`reject`/`rework` command
@@ -473,14 +534,15 @@ cleanup lifecycle" section, not here.
 
 ### Opt-in folder review and bounded repair
 
-When `run --auto-fix` is passed, Assent runs one bounded, read-only
-review-and-repair loop after a folder's tasks and final focused checks all
-pass: a configured reviewer returns `PASS` or `FAIL` against the cumulative
-diff and task contracts; `FAIL` may trigger one bounded repair round that
-reopens only the implicated existing tasks, never widening scope or task
-requirements on its own. Without the flag, this loop never runs. It is not a
-second task status, not implicit acceptance, and not a substitute for
-complete verification — `_report.md`'s auto-fix line only ever means one of:
+When `run --auto-fix` is passed, Assent considers its bounded review-and-repair
+workflow when no task can make further progress: either the folder is complete,
+or it is quiescent-blocked. The complete path first requires the final focused
+checks to pass; the blocked path uses durable worker or focused-gate evidence
+for read-only adjudication. Repair reopens only implicated existing tasks and
+never widens scope or task requirements on its own. Without the flag, this
+workflow never runs. It is not a second task status, not implicit acceptance,
+and not a substitute for complete verification — `_report.md`'s auto-fix line
+only ever means one of:
 
 - `NOT RUN` — no review state exists;
 - `STALE` — the source, task contracts, or reviewer identity drifted since

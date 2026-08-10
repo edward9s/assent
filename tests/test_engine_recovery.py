@@ -22,10 +22,32 @@ from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
 from tests.test_contracts import GlobalContractsMixin
 
-# The merged reviewer-fixer loop is finite because it walks the configured
-# [auto_fix.review] list position by position, so a case that needs a first
-# round and a later confirming round must configure exactly two rounds.
-TWO_REVIEW_ROUNDS = '\n[auto_fix.review]\nadapter = ["claude", "claude"]\n'
+# A repair step precedes each verdict step so scheduler-authored focused
+# failures and reviewer findings both have an explicit bounded repair handoff.
+TWO_REVIEW_ROUNDS = '''
+[abilities.review_fix]
+prompt = "Review and repair."
+writes = true
+gate = true
+produces_verdict = true
+[abilities.fix]
+prompt = "Repair durable findings."
+writes = true
+gate = false
+[agents.folder_reviewer]
+ability = ["review_fix"]
+model = "prime"
+effort = "heavy"
+[agents.bounded_fixer]
+ability = ["fix"]
+[workflow]
+plan = [
+  { role = "bounded_fixer" },
+  { role = "folder_reviewer", adapter = "claude" },
+  { role = "bounded_fixer" },
+  { role = "folder_reviewer", adapter = "claude" },
+]
+'''
 
 
 class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
@@ -51,6 +73,32 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
                 summary="Recovered repair completed", detail=detail)
             return ok_result()
         return step
+
+    def test_pending_selection_repair_defers_ordinary_folder_execution(self):
+        task_path = self.write_task(1, status="TODO", scope=("src/",))
+        cfg = self.build()
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "Selection repair is pending",
+            "The durable complete-verifier evidence owns this repair.")
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (finding,)),
+            source_tree=gitops.tree_of(cfg.root, "HEAD"),
+            task_plan_sha256=engine._contracts_digest(
+                plan, engine._task_contract_snapshots(plan)),
+            review_prompt_sha256="2" * 64,
+            reviewer_role="selection_reviewer",
+            reviewer_adapter="claude", reviewer_model="prime",
+            reviewer_effort="high",
+            review_context="selection_verification")
+        auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
+        adapter = ScriptedAdapter([])
+
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=adapter, auto_fix=True), 0)
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(parse_task_file(task_path).status, "TODO")
 
     def test_interrupt_preserves_edits_and_restart_reuses_the_same_profile(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))
@@ -100,8 +148,9 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
             [(item["agent"], item["requested_model"], item["requested_effort"])
              for item in attempts],
             [("claude", "lite", "medium"), ("claude", "lite", "medium")])
-        # Round 0 failed and advanced the position; round 1 passed there.
-        self.assertEqual(state.review_round_index, 1)
+        # The first verdict step failed, its following repair step ran, and the
+        # second verdict step passed at workflow position 3.
+        self.assertEqual(state.workflow_step_index, 3)
         self.assertEqual((self.execution_root() / "src" / "value.txt").read_text(
             encoding="utf-8"), "fixed\n")
         self.assertIn(durable_brief, second_worker.calls[0][0])
@@ -146,7 +195,7 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(parse_task_file(task_path).status, "DONE")
         # The failed round already moved the durable position forward, so the
         # restart resumes at that round instead of replaying the sequence.
-        self.assertEqual(crashed.review_round_index, 1)
+        self.assertEqual(crashed.workflow_step_index, 3)
         checkpoint_subjects = self.subjects()
 
         restart_worker = ScriptedAdapter([])
@@ -160,8 +209,7 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
 
         recovered = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(recovered.phase, "COMPLETE")
-        self.assertEqual(recovered.review_round_index,
-                         crashed.review_round_index)
+        self.assertEqual(recovered.workflow_step_index, 3)
         self.assertEqual(restart_worker.calls, [])
         self.assertEqual(len(restart_reviewer.calls), 1)
         self.assertIn("- PASS:", restart_reviewer.calls[0][0])
@@ -457,7 +505,8 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
         """The durable record a review round in flight left behind, exactly as the loop writes
         it: the round that decided FAIL, its findings, and the phase it was interrupted in."""
         plan = Plan.parse(cfg.tasks_dir)
-        review = cfg.auto_fix_review[0]
+        review = next(step for step in cfg.workflow_plan
+                      if step.produces_verdict)
         findings = tuple(
             auto_fix.ReviewFinding(task_id, "src/value.txt", "stale value",
                                    "review evidence")
@@ -468,10 +517,12 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
             task_plan_sha256=auto_fix.sha256_files(
                 task.path for task in plan.tasks),
             review_prompt_sha256="3" * 64,
+            reviewer_role=review.role,
+            reviewer_step_index=1,
             reviewer_adapter=review.adapter,
             reviewer_model=review.requested_model,
             reviewer_effort=review.requested_effort,
-            review_round_index=1)
+            workflow_step_index=2)
         if state.phase != phase:
             state = auto_fix.with_repair_phase(state, phase)
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
@@ -519,6 +570,79 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
         self.assertIn("reviewer-fixer round", recovery["detail"])
         self.assertNotIn("agent", recovery)
         self.assertNotIn("requested_model", recovery)
+
+    def test_terminal_invalid_reviewer_writes_are_checkpointed_for_same_round(self):
+        cfg, path, worktree = self._reviewed_folder()
+        malformed = TaskResult(
+            0,
+            '{"type":"assent.auto_fix_review","verdict":"FIXED",'
+            '"findings":[{"task_id":"t001","path":"src/value.txt",'
+            '"summary":"stale","evidence":"missing required keys"}]}',
+            False, None)
+
+        def final_invalid(prompt):
+            self.assertIn("REVIEW OUTPUT CORRECTION REQUIRED", prompt)
+            (worktree / "src" / "value.txt").write_text(
+                "preserved malformed-review repair\n", encoding="utf-8")
+            return malformed
+
+        reviewer = ScriptedAdapter([malformed, final_invalid])
+        worker = ScriptedAdapter([])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=reviewer,
+            auto_fix=True), 1)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
+        self.assertTrue(gitops.working_tree_status(
+            worktree, cfg.git_excludes).is_clean)
+        self.assertIn(
+            "wip(plan01/t001): recovered invalid reviewer writes, "
+            "scope-verified", self.subjects())
+        recovery = next(
+            entry for entry in read_entries(journal_path_for(path))
+            if entry["event"] == "auto_fix_invalid_output_recovery")
+        self.assertIn("did not advance the review cursor", recovery["detail"])
+        self.assertEqual(
+            (worktree / "src" / "value.txt").read_text(encoding="utf-8"),
+            "preserved malformed-review repair\n")
+
+        resumed_reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)])
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=worker, auto_fix_adapter=resumed_reviewer,
+            auto_fix=True), 0)
+        self.assertEqual(worker.calls, [])
+        self.assertEqual(len(resumed_reviewer.calls), 1)
+        self.assertIn("Review stage: INITIAL", resumed_reviewer.calls[0][0])
+
+    def test_terminal_invalid_reviewer_writes_with_ambiguous_owner_stay_dirty(self):
+        cfg, _path, worktree = self._reviewed_folder(
+            extra_tasks=((2, "also"),))
+        malformed = TaskResult(
+            0,
+            '{"type":"assent.auto_fix_review","verdict":"FIXED",'
+            '"findings":[{"task_id":"t001","path":"src/value.txt",'
+            '"summary":"stale","evidence":"missing required keys"}]}',
+            False, None)
+
+        def write_then_fail(_prompt):
+            (worktree / "src" / "value.txt").write_text(
+                "ambiguous malformed-review repair\n", encoding="utf-8")
+            return malformed
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(
+                cfg, adapter=ScriptedAdapter([]),
+                auto_fix_adapter=ScriptedAdapter([malformed, write_then_fail]),
+                auto_fix=True), 1)
+        self.assertIn("explicit human recovery", out.getvalue())
+        self.assertFalse(gitops.working_tree_status(
+            worktree, cfg.git_excludes).is_clean)
+        self.assertFalse(any(
+            subject.startswith("wip(plan01/") for subject in self.subjects()))
 
     def _assert_refused(self, cfg, worktree):
         """The dirt reaches ensure_clean: no session, no checkpoint, nothing committed."""

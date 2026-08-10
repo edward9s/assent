@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 from assent import AssentError
 
@@ -40,6 +40,59 @@ def parse_checkpoint_resume_output(output: str, exit_code: int,
 
 
 @dataclass
+class TokenUsage:
+    """One provider-reported model bucket; absent counters stay absent."""
+
+    provider_model: str | None = None
+    input_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
+
+
+_TOKEN_COUNTER_KEYS = {
+    "input_tokens": ("input_tokens", "inputTokens"),
+    "cached_input_tokens": (
+        "cached_input_tokens", "cache_read_input_tokens",
+        "cache_read_tokens", "cachedInputTokens", "cacheReadInputTokens"),
+    "cache_creation_input_tokens": (
+        "cache_creation_input_tokens", "cache_creation_tokens",
+        "cacheCreationInputTokens", "cacheCreationTokens"),
+    "output_tokens": ("output_tokens", "outputTokens"),
+    "reasoning_output_tokens": (
+        "reasoning_output_tokens", "thinking_tokens",
+        "reasoningOutputTokens", "thinkingTokens"),
+}
+
+
+def normalize_token_usage(
+        raw: object, provider_model: str | None = None) -> TokenUsage | None:
+    """Normalize one usage object without estimating or coercing counters."""
+    if not isinstance(raw, Mapping):
+        return None
+    normalized_model = (
+        provider_model.strip() if isinstance(provider_model, str)
+        and provider_model.strip() else None)
+    values: dict[str, int | str | None] = {
+        "provider_model": normalized_model,
+    }
+    available = False
+    for target, aliases in _TOKEN_COUNTER_KEYS.items():
+        value = None
+        for key in aliases:
+            candidate = raw.get(key)
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+                value = candidate
+                available = True
+                break
+        values[target] = value
+    if not available and normalized_model is None:
+        return None
+    return TokenUsage(**values)
+
+
+@dataclass
 class TaskResult:
     exit_code: int
     output: str                    # Full subprocess output (verbatim, line by line)
@@ -61,6 +114,9 @@ class TaskResult:
     # last-message file is missing or is not UTF-8).  Callers must not fall back to ``output``
     # when this is set.
     structured_output_error: str | None = None
+    # Provider-reported token accounting. ``None`` means unavailable; multiple entries
+    # preserve distinct actual-model buckets from one invocation.
+    usage: tuple[TokenUsage, ...] | None = None
 
 
 @dataclass(frozen=True)
