@@ -169,7 +169,7 @@ class TestContractContent(unittest.TestCase):
                 "The only special behavior the engine infers from a role",
                 "`produces_verdict`",
                 "makes the whole plan one unit",
-                "every `plan` step is an ordinary worker session",
+                "every `plan` role step is an ordinary worker session",
                 "according to the plan's focused gate",
                 "when no task can make further progress",
                 "quiescent-blocked"):
