@@ -400,12 +400,14 @@ class TestUsage(unittest.TestCase):
                  "modelUsage": {
                      "model-a": {"inputTokens": 3, "outputTokens": 4},
                      "model-b": {"cacheReadInputTokens": 5,
-                                 "outputTokens": -1}}}
+                                 "outputTokens": -1},
+                     "model-c": {"outputTokens": -1}}}
         usage = parse_output_for_usage(json.dumps(event))
         self.assertEqual([item.provider_model for item in usage],
-                         ["model-a", "model-b"])
+                         ["model-a", "model-b", "model-c"])
         self.assertEqual(usage[1].cached_input_tokens, 5)
         self.assertIsNone(usage[1].output_tokens)
+        self.assertIsNone(usage[2].output_tokens)
         self.assertIsNone(parse_output_for_usage(json.dumps({
             "type": "result", "usage": {"input_tokens": -1,
                                          "output_tokens": True}})))
@@ -519,6 +521,17 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(result.checkpoint_resume)
         self.assertFalse(result.quota_exhausted)
         self.assertEqual(result.output, output)
+        self.assertIsNone(result.failure_kind)
+
+    def test_stream_result_preserves_checkpoint_resume_control(self):
+        output = json.dumps({
+            "type": "result", "subtype": "error",
+            "result": CHECKPOINT_RESUME_RECORD}) + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = ClaudeAdapter(make_cfg()).run_task(
+            "p", "claude-sonnet", "high", Path("."))
+        self.assertTrue(result.checkpoint_resume)
+        self.assertFalse(result.quota_exhausted)
         self.assertIsNone(result.failure_kind)
 
     def test_quota_and_control_record_use_the_quota_path(self):

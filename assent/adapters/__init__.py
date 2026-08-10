@@ -71,10 +71,11 @@ def normalize_token_usage(
     """Normalize one usage object without estimating or coercing counters."""
     if not isinstance(raw, Mapping):
         return None
+    normalized_model = (
+        provider_model.strip() if isinstance(provider_model, str)
+        and provider_model.strip() else None)
     values: dict[str, int | str | None] = {
-        "provider_model": (
-            provider_model.strip() if isinstance(provider_model, str)
-            and provider_model.strip() else None),
+        "provider_model": normalized_model,
     }
     available = False
     for target, aliases in _TOKEN_COUNTER_KEYS.items():
@@ -86,7 +87,7 @@ def normalize_token_usage(
                 available = True
                 break
         values[target] = value
-    if not available:
+    if not available and normalized_model is None:
         return None
     return TokenUsage(**values)
 

@@ -356,7 +356,11 @@ class ClaudeAdapter(Adapter):
             parse_output_for_quota(output) if returncode != 0 else (False, None))
         billing = (returncode != 0 and parse_output_for_billing(output)
                    if not exhausted else False)
-        terminal_record = parse_checkpoint_resume_output(output, returncode, stalled)
+        response, _response_error = _extract_result_text(output)
+        terminal_record = (
+            parse_checkpoint_resume_output(output, returncode, stalled)
+            or (response is not None and parse_checkpoint_resume_output(
+                response, returncode, stalled)))
         # Quota evidence wins; otherwise the exact final control record wins over
         # unrelated billing-like prose that appeared earlier in the transcript.
         checkpoint_resume = terminal_record and not exhausted

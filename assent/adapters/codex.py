@@ -234,6 +234,23 @@ def parse_output_for_usage(output: str) -> tuple[TokenUsage, ...] | None:
     return (normalized,) if normalized is not None else None
 
 
+def _extract_last_agent_message(output: str) -> str | None:
+    """Return the last completed agent response from a Codex JSONL stream."""
+    response: str | None = None
+    for raw in output.splitlines():
+        try:
+            event = json.loads(raw.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if (isinstance(item, dict) and item.get("type") == "agent_message"
+                and isinstance(item.get("text"), str)):
+            response = item["text"]
+    return response
+
+
 def _path_is_within(path: Path, parent: Path) -> bool:
     try:
         path.relative_to(parent)
@@ -346,7 +363,11 @@ class CodexAdapter(Adapter):
             not stalled and returncode != 0 and parse_output_for_quota(output))
         billing = (not stalled and not exhausted and returncode != 0
                    and parse_output_for_billing(output))
-        terminal_record = parse_checkpoint_resume_output(output, returncode, stalled)
+        response = structured_output or _extract_last_agent_message(output)
+        terminal_record = (
+            parse_checkpoint_resume_output(output, returncode, stalled)
+            or (response is not None and parse_checkpoint_resume_output(
+                response, returncode, stalled)))
         # Quota evidence wins; otherwise the exact final control record wins over
         # unrelated billing-like prose that appeared earlier in the transcript.
         checkpoint_resume = terminal_record and not exhausted

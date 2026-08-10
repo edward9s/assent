@@ -469,6 +469,19 @@ class TestOutputContract(unittest.TestCase):
     def test_checkpoint_resume_record_is_hidden_from_live_output(self):
         self.assertIsNone(format_output_line(CHECKPOINT_RESUME_RECORD + "\n"))
 
+    def test_stream_result_response_preserves_checkpoint_resume_control(self):
+        output = json.dumps({"event": "result", "result": {
+            "status": "FAILED", "response": CHECKPOINT_RESUME_RECORD,
+            "usage": {"output_tokens": 1}}}) + "\n"
+        adapter = make_adapter()
+        with mock.patch("assent.adapters.antigravity.run_subprocess",
+                        return_value=(1, output, False)):
+            result = adapter.run_task(
+                "prompt", "gemini-3.1-pro", "high", Path("."))
+        self.assertTrue(result.checkpoint_resume)
+        self.assertIsNone(result.failure_kind)
+        self.assertFalse(result.quota_exhausted)
+
 
 class TestCheckpointResume(unittest.TestCase):
     def test_exact_final_record_is_recognized(self):

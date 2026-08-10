@@ -259,6 +259,16 @@ class TestRunTask(unittest.TestCase):
         self.assertEqual(result.output, output)
         self.assertIsNone(result.failure_kind)
 
+    def test_stream_agent_message_preserves_checkpoint_resume_control(self):
+        output = json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": CHECKPOINT_RESUME_RECORD}}) + "\n"
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+        result = CodexAdapter(make_cfg()).run_task(
+            "p", "gpt-5.6-sol", "medium", Path("."))
+        self.assertTrue(result.checkpoint_resume)
+        self.assertFalse(result.quota_exhausted)
+        self.assertIsNone(result.failure_kind)
+
     def test_quota_and_control_record_use_the_quota_path(self):
         quota = json.dumps({"type": "error", "message": "usage limit reached"})
         output = quota + "\n" + CHECKPOINT_RESUME_RECORD + "\n"

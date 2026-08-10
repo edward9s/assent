@@ -528,7 +528,11 @@ class AntigravityAdapter(Adapter):
         quota_evidence = _has_quota_evidence(returncode, stalled, output)
         kind = "quota" if quota_evidence else classify_output(
             returncode, stalled, output)
-        terminal_record = parse_checkpoint_resume_output(output, returncode, stalled)
+        response, _response_error = _extract_result_text(output)
+        terminal_record = (
+            parse_checkpoint_resume_output(output, returncode, stalled)
+            or (response is not None and parse_checkpoint_resume_output(
+                response, returncode, stalled)))
         # The exact final control record is authoritative over every non-quota prose
         # classifier.  Independently detected quota evidence remains the stronger outcome.
         checkpoint_resume = terminal_record and not quota_evidence
