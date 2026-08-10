@@ -202,7 +202,7 @@ class TestRunCloseoutReceiptPolicy(VerificationEngineCase):
         self.assertEqual(calls, [])
         self.assertTrue(self.engine_report_called)
         self.assertIn("per-folder receipt", output)
-        self.assertIn("run-level verification follows this invocation", output)
+        self.assertIn("invocation selection full_verify", output)
         self.assertNotIn("assent verify [--batch]", output)
 
     def test_auto_keeps_the_previous_closeout_behavior_and_output(self):
@@ -244,9 +244,13 @@ class TestFolderVerificationReportCloseout(VerificationEngineCase):
                 events: list[str] = []
                 integration_lock, folder_lock = self._locks(events)
                 receipt = SimpleNamespace(
-                    status=status, integration_tree="tree", failure_summary="")
+                    status=status, source_tip="source", target_tip="target",
+                    integration_tree="tree", verify_script_sha256="script",
+                    shared_inputs_sha256="shared", exit_code=(
+                        0 if status == "PASSED" else 1), failure_summary="")
 
-                def verify(_cfg):
+                def verify(_cfg, *, record_conflict_receipt):
+                    self.assertTrue(record_conflict_receipt)
                     events.append("receipt")
                     return receipt
 
@@ -276,7 +280,8 @@ class TestFolderVerificationReportCloseout(VerificationEngineCase):
                 events: list[str] = []
                 integration_lock, folder_lock = self._locks(events)
 
-                def verify(_cfg):
+                def verify(_cfg, *, record_conflict_receipt):
+                    self.assertTrue(record_conflict_receipt)
                     events.append("receipt")
                     raise outcome
 
@@ -305,23 +310,27 @@ class TestFolderVerificationReportCloseout(VerificationEngineCase):
     def test_report_failure_cannot_change_result_or_mask_interrupt(self):
         self.write_status("DONE")
         receipt = SimpleNamespace(
-            status="PASSED", integration_tree="tree", failure_summary="")
+            status="PASSED", source_tip="source", target_tip="target",
+            integration_tree="tree", verify_script_sha256="script",
+            shared_inputs_sha256="shared", exit_code=0, failure_summary="")
         with mock.patch("assent.folder_verification._verify_locked",
-                        return_value=receipt), \
+                        return_value=receipt) as full, \
                 mock.patch(
                     "assent.folder_verification_closeout.try_write_report",
                     side_effect=OSError("report unavailable")):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(verify_folder(self.cfg), 0)
+        full.assert_called_once_with(self.cfg, record_conflict_receipt=True)
 
         with mock.patch("assent.folder_verification._verify_locked",
-                        side_effect=KeyboardInterrupt), \
+                        side_effect=KeyboardInterrupt) as full, \
                 mock.patch(
                     "assent.folder_verification_closeout.try_write_report",
                     side_effect=OSError("report unavailable")):
             with contextlib.redirect_stdout(io.StringIO()), \
                     self.assertRaises(KeyboardInterrupt):
                 verify_folder(self.cfg)
+        full.assert_called_once_with(self.cfg, record_conflict_receipt=True)
 
     def test_incomplete_folder_and_fresh_reuse_refresh_once(self):
         events: list[str] = []
