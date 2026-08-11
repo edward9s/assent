@@ -489,21 +489,24 @@ detail = '''The exact final control record was received; no quota wait, adapter 
 
 `[workflow].task` roles own one task's implementation and may write only that
 task's scope. `[workflow].plan` roles own the plan accountability unit and may
-write only the union of its task scopes. When `plan` is empty, the role prefix
-before `[workflow].selection`'s first action supplies that same per-plan review
-unit; later selection roles own an exact multi-plan decision or repair
-assignment. They never acquire task-file, receipt, acceptance, target-ref, or
-Git ownership. The scheduler alone owns the `focused_test` action available at
+write only the union of its task scopes. `[workflow].selection` owns the exact
+one-or-more-plan source selection after every plan boundary is complete; its
+roles make failure-only decisions or repair assignments. They never acquire
+task-file, receipt, acceptance, target-ref, or Git ownership. An omitted
+`adapter` on any plan or selection role resolves to the first name under
+`[adapter].name`; an explicit adapter selects that registered provider. The
+scheduler alone owns the `focused_test` action available at
 task positions, the `full_test` action available at task/plan positions, and
 the `full_verify` action available at selection positions. No AI role may invoke
 these actions, the complete suite, Git, or Assent directly when its scheduler
 prompt forbids them.
 
-A selection conflict-repair unit is expressed only by explicit ordered
-positions: `full_verify`, a verdict-producing read-only reviewer, a writable
-non-verdict fixer authorization, then another `full_verify`. Repeating those
-positions is the finite repair budget; omission or exhaustion authorizes no
-implicit session. Candidate-conflict evidence and the selection cursor are
+A selection repair unit is expressed only by explicit ordered positions. The
+compact form is `full_verify`, one writable verdict-producing reviewer-fixer,
+then another `full_verify`; it reviews and repairs in one AI session. The split
+form uses a read-only verdict role followed by a writable non-verdict fixer.
+Repeating a unit is the finite repair budget; omission or exhaustion authorizes
+no implicit session. Candidate-conflict evidence and the selection cursor are
 derived runtime state. Resume reuses content-identical source, target, prefix,
 merge, focused-gate, and receipt evidence; it never invents a current-folder
 pointer, silently shrinks the selection, or treats a receipt as source truth.

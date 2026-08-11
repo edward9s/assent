@@ -846,15 +846,13 @@ def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
     steps = cfg.auto_fix_review
     if not steps:
         return ["Auto-fix workflow: no plan review step configured"]
-    source_key = ("workflow.plan" if cfg.workflow_plan
-                  else "workflow.selection")
-    owner = ("plan" if cfg.workflow_plan else "selection prefix")
     lines = [
-        f"Auto-fix workflow {owner} (configured order; source: "
-        f"{_setting_source_label(cfg, source_key)}):"]
+        "Auto-fix workflow plan (configured order; source: "
+        f"{_setting_source_label(cfg, 'workflow.plan')}):"]
     for index, step in enumerate(steps):
         if not step.produces_verdict:
-            action = "bounded task-profile repair" if step.writes else "no session"
+            action = (f"bounded repair via {step.adapter}"
+                      if step.writes else "no review session")
             lines.append(f"  step {index}: role={step.role}; {action}")
             continue
         lines.append(

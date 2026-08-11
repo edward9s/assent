@@ -111,21 +111,28 @@ ability = ["review"]
         self.assertEqual(set(cfg.abilities),
                          {"write_tests", "implement_source", "review", "fix"})
         self.assertEqual(set(cfg.roles),
-                         {"implementer", "reviewer", "fixer",
-                          "reviewer_fixer"})
+                         {"implementer", "test_writer", "source_implementer",
+                          "reviewer", "fixer", "reviewer_fixer"})
         self.assertEqual(
             [step.action if hasattr(step, "action") else step.role
              for step in cfg.workflow_task],
             ["implementer", "focused_test"])
-        self.assertEqual(cfg.workflow_plan, ())
+        self.assertEqual([step.role for step in cfg.workflow_plan],
+                         ["reviewer_fixer", "reviewer_fixer"])
         self.assertEqual([step.role for step in cfg.auto_fix_review],
                          ["reviewer_fixer", "reviewer_fixer"])
         self.assertEqual(
             cfg.roles["implementer"].ability,
             ("write_tests", "implement_source"))
+        self.assertEqual(cfg.roles["test_writer"].ability, ("write_tests",))
+        self.assertEqual(cfg.roles["source_implementer"].ability,
+                         ("implement_source",))
         self.assertEqual(cfg.roles["reviewer_fixer"].ability,
                          ("review", "fix"))
-        self.assertEqual(len(cfg.workflow_selection), 6)
+        self.assertEqual(
+            [step.action if hasattr(step, "action") else step.role
+             for step in cfg.workflow_selection],
+            ["full_verify", "reviewer_fixer", "full_verify"])
 
 
 if __name__ == "__main__":

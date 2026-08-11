@@ -243,11 +243,11 @@ The only automatic exception is the combined `assent run ... --verify
 candidate-only scan and starts zero full-test runs when conflicts exist. One
 typed conflict wave records every independently discoverable conflicting
 folder and path, target/source/compatible-prefix identities, excluded selected
-dependents, and `target_alone` versus `peer_only`. The next explicit read-only
-selection reviewer must assign every folder/path to exactly one existing task;
-the following explicit write-capable selection fixer position authorizes the
-whole wave, and a later `full_verify` action is the only way to rebuild and run
-the real full verifier. The selection remains exact throughout: Assent never
+dependents, and `target_alone` versus `peer_only`. The next writable verdict
+role may assign and repair the whole wave in one session; the split alternative
+uses a read-only verdict role followed by a write-capable fixer. A later
+`full_verify` action is the only way to rebuild and run the real full verifier.
+The selection remains exact throughout: Assent never
 accepts a prefix, asks to skip, changes the target, or publishes anything.
 
 A target-alone assignment reuses the source-first `assent-reconcile/<folder>`
@@ -266,7 +266,7 @@ The selection cursor and reconcile Git facts recover preparation, AI editing,
 continue, source fast-forward, cleanup, and rebuild by content identity. A
 matching completed merge or PASSED receipt is reused instead of duplicated;
 target/source drift, malformed evidence, ambiguous ownership, out-of-scene
-writes, remaining markers, and exhausted reviewer/fixer/action positions fail
+writes, remaining markers, and exhausted role/action positions fail
 closed while retaining edits. A conflict wave consumes no `full_verify`; a
 real verifier starts only after a complete rebuild is conflict-free, and final
 success requires one fresh PASSED receipt for the entire snapshotted set.
@@ -547,8 +547,7 @@ roles remain forbidden from running these actions or the complete suite
 themselves.
 
 With ordinary task execution, only `run --auto-fix` walks the bounded per-plan
-review sequence. A non-empty `plan` supplies it directly; otherwise the role
-prefix before `selection`'s first action supplies it:
+review sequence configured by `plan`:
 
 ```text
 assent run FOLDER --auto-fix
@@ -560,22 +559,22 @@ task = [
   { role = "implementer" },
   { action = "focused_test" },
 ]
-plan = []
+plan = [
+  { role = "reviewer_fixer", adapter = "codex" },
+  { role = "reviewer_fixer", adapter = "codex" },
+]
 selection = [
-  { role = "reviewer_fixer", adapter = "codex" },
-  { role = "reviewer_fixer", adapter = "codex" },
   { action = "full_verify" },
-  { role = "reviewer", adapter = "codex" },
-  { role = "fixer" },
+  { role = "reviewer_fixer", adapter = "codex" },
   { action = "full_verify" },
 ]
 ```
 
-All three keys are ordered arrays of tagged role/action steps. A
-verdict-producing `plan` or leading `selection` role
-requires `adapter`; a role with `produces_verdict = false` omits it. In the
+All three keys are ordered arrays of tagged role/action steps. Every `plan` or
+`selection` role may state a registered `adapter`; an omitted adapter resolves
+to the first name under `[adapter].name`. In the
 per-plan review layer, a writable non-verdict step authorizes the bounded
-task-profile repair described below, while a verdict-and-write role is a merged
+repair described below using that resolved adapter, while a verdict-and-write role is a merged
 reviewer-fixer and may report `FIXED`. Every verdict step resolves its role's
 model and effort through its adapter mappings. Preflight is keyed by the full
 `(adapter, requested_model, requested_effort)` identity, so two steps using the
@@ -583,9 +582,8 @@ same adapter with different models are both proven.
 
 All omitted and empty boundaries are explicit. An absent `[workflow]` table is
 identical to all three keys being omitted. An omitted `plan` and `plan = []`
-delegate per-plan review to the leading `selection` role prefix; when that
-prefix is also empty, `run --auto-fix` reports that the flag had no effect and
-continues as an ordinary run. An omitted `task` keeps one
+configure no per-plan review, so `run --auto-fix` reports that the flag had no
+effect and continues as an ordinary run. An omitted `task` keeps one
 implicit session per task using that task's own model and effort. A non-empty
 `task` runs its stated roles and actions for each task with task-scoped context
 and keeps each task as its own accountability unit. `task = []` is intentionally
@@ -597,17 +595,17 @@ source-worktree gate. A non-verdict role succeeds or retries according to the
 plan's focused gate, not a reviewer verdict. An empty `plan` then leaves
 nothing able to execute and is refused. An omitted or empty `selection`
 preserves direct invocation-level verification; automatic verifier-failure and
-conflict repair requires explicit `full_verify`/reviewer/fixer positions. The
-reviewer handles both outcomes. A following writable non-verdict fixer is
-conflict-only: a candidate conflict consumes it, while `VERIFIER_FAILED` uses
-the implicated tasks' normal repair profiles, skips that fixer, and proceeds to
-the following `full_verify`. Thus the same finite four-step selection handles
-both outcomes without repeating a successful complete verification. The
+conflict repair requires explicit role/action positions. A
+non-empty `selection` must start and end with `full_verify`; one `full_verify`
+alone is valid. A writable verdict role reviews and repairs either failure in
+one session, returns `FIXED`, and is followed by focused closeout and the final
+`full_verify`. With a read-only verdict role, a following writable non-verdict
+fixer retains the split-session alternative. Neither form repeats a successful
+complete verification. The
 config loader validates this built-in repair segment before any verifier runs:
 the first role after `full_verify` must produce a verdict, a second role when
 present must write without producing a verdict, and the segment must end at
-another `full_verify`. Leading roles before the first action remain the freely
-configured per-plan review sequence; role names never acquire built-in meaning.
+another `full_verify`. Role names never acquire built-in meaning.
 The removed `[auto_fix.review]` table is never
 recognized alongside this one: config loading fails closed and names the exact
 settings-layer file that must be edited.

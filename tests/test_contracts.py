@@ -173,9 +173,10 @@ class TestContractContent(unittest.TestCase):
                 "according to the plan's focused gate",
                 "when no task can make further progress",
                 "quiescent-blocked",
-                "A following writable non-verdict fixer is conflict-only",
+                "A non-empty `selection` must start and end with `full_verify`",
+                "A writable verdict role reviews and repairs either failure in one session",
                 "the first role after `full_verify` must produce a verdict",
-                "without repeating a successful complete verification"):
+                "Neither form repeats a successful complete verification"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, workflow)
         self.assertNotIn("exactly two keys", workflow)
@@ -191,7 +192,8 @@ class TestContractContent(unittest.TestCase):
         self.assertIn("[adapter]", adapter_configuration)
         for phrase in ("[abilities.write_tests]", "[abilities.implement_source]",
                        "[abilities.review]", "[abilities.fix]",
-                       "[roles.implementer]", "[roles.reviewer_fixer]",
+                       "[roles.implementer]", "[roles.test_writer]",
+                       "[roles.source_implementer]", "[roles.reviewer_fixer]",
                        "[workflow]", "task =", "plan =", "selection =",
                        'receipt_refresh = "manual"',
                        "# focused_test is legal only in workflow.task"):
@@ -203,14 +205,25 @@ class TestContractContent(unittest.TestCase):
         self.assertEqual(parsed_configuration["workflow"]["task"],
                          [{"role": "implementer"},
                           {"action": "focused_test"}])
+        for split_step in (
+                '#   { role = "test_writer" },',
+                '#   { role = "source_implementer" },',
+                '#   { action = "focused_test" },'):
+            self.assertIn(split_step, configuration)
         self.assertTrue(all(
             "gate" not in ability
             for ability in parsed_configuration["abilities"].values()))
-        self.assertEqual(parsed_configuration["workflow"]["plan"], [])
+        self.assertEqual(
+            parsed_configuration["workflow"]["plan"],
+            [{"role": "reviewer_fixer", "adapter": "codex"},
+             {"role": "reviewer_fixer", "adapter": "codex"}])
         self.assertEqual(parsed_configuration["workflow"]["selection"][0],
-                         {"role": "reviewer_fixer", "adapter": "codex"})
+                         {"action": "full_verify"})
         self.assertEqual(parsed_configuration["workflow"]["selection"][-1],
                          {"action": "full_verify"})
+        self.assertEqual(
+            parsed_configuration["workflow"]["selection"][1],
+            {"role": "reviewer_fixer", "adapter": "codex"})
         prompts = re.findall(r'^prompt = "([^"]+)"$', configuration, re.MULTILINE)
         self.assertEqual(len(prompts), 4)
         for prompt in prompts:
@@ -826,7 +839,7 @@ class TestContractContent(unittest.TestCase):
         self.assertIn('role = "reviewer_fixer"', configuration)
         self.assertNotIn("folder_reviewer", configuration)
         self.assertIn("plan review", configuration)
-        self.assertIn("plan = []", configuration)
+        self.assertIn("plan = [", configuration)
 
         chinese = {
             "WORKFLOW.zh-TW.md": (root / "docs/zh-TW/WORKFLOW.md").read_text(
@@ -873,12 +886,12 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(workflow_phrase=phrase):
                 self.assertIn(phrase, workflow_text)
         for phrase in (
-                "run --verify --auto-fix", "may not run Git", "full suite",
-                "reviewer/fixer/action"):
+                "run --verify --auto-fix", "Neither form may run Git", "full suite",
+                "review-and-repair action"):
             with self.subTest(instructions_phrase=phrase):
                 self.assertIn(phrase, instructions_text)
         self.assertIn("selection = [", configuration)
-        self.assertIn('role = "fixer"', configuration)
+        self.assertIn("[roles.fixer]", configuration)
         self.assertIn('ability = ["review", "fix"]', configuration)
 
     def test_round_interruption_and_gated_settle_are_documented(self):

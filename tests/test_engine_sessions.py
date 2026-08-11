@@ -64,7 +64,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         """The adapter each review round actually ran under, in order."""
         return re.findall(r"(?m)^Auto-fix review session: (\S+) \|", output)
 
-    def repair_done(self, task_path, files=None, *, requested_model="lite"):
+    def repair_done(self, task_path, files=None, *, requested_model="lite",
+                    by="claude"):
         def step(prompt):
             for rel, content in (files or {}).items():
                 path = self.execution_root() / rel
@@ -82,13 +83,13 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 for fingerprint in fingerprints)
             set_status(task_path, "DONE")
             append_entry(
-                journal_path_for(task_path), by="claude",
+                journal_path_for(task_path), by=by,
                 requested_model=requested_model, event="done",
                 summary="Repair completed", detail=detail)
             return ok_result()
         return step
 
-    def test_selection_role_prefix_supplies_plan_review_when_plan_is_empty(self):
+    def test_plan_roles_supply_plan_review_before_selection_verification(self):
         task_path = self.write_task(1, status="TODO", scope=("src/",))
         cfg = self.build(extra_config=(
             '\n[abilities.write_tests]\n'
@@ -109,11 +110,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             'model = "prime"\neffort = "heavy"\n'
             '[workflow]\n'
             'task = [{ role = "implementer" }]\n'
-            'plan = []\n'
-            'selection = ['
+            'plan = ['
             '{ role = "reviewer_fixer", adapter = "claude" }, '
-            '{ role = "reviewer_fixer", adapter = "claude" }, '
-            '{ action = "full_verify" }]\n'))
+            '{ role = "reviewer_fixer", adapter = "claude" }]\n'
+            'selection = [{ action = "full_verify" }]\n'))
         (self.root / ".assent" / "verify.py").write_text(
             "raise SystemExit(0)\n", encoding="utf-8")
         self.commit_all()
@@ -126,7 +126,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(self.run_quiet(
             cfg, adapter=worker, auto_fix_adapter=reviewer, auto_fix=True), 0)
 
-        self.assertEqual(cfg.workflow_plan, ())
+        self.assertEqual(len(cfg.workflow_plan), 2)
         self.assertEqual([step.role for step in cfg.auto_fix_review],
                          ["reviewer_fixer", "reviewer_fixer"])
         self.assertEqual(len(worker.calls), 1)
@@ -159,19 +159,13 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
     def test_selection_verifier_failure_repairs_and_rechecks_in_one_call(self):
         task_path = self.write_task(1, status="TODO", scope=("src/",))
         extra = (
-            '\n[abilities.review]\n'
-            'prompt = "Diagnose the failed selection verifier."\n'
-            'writes = false\nproduces_verdict = true\n'
-            '[abilities.fix]\n'
-            'prompt = "Resolve the assigned conflict."\n'
-            'writes = true\n'
-            '[roles.reviewer]\nability = ["review"]\n'
-            'model = "prime"\neffort = "heavy"\n'
-            '[roles.fixer]\nability = ["fix"]\n'
+            '\n[abilities.review_fix]\n'
+            'prompt = "Diagnose and repair the failed selection verifier."\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.reviewer_fixer]\nability = ["review_fix"]\n'
             'model = "prime"\neffort = "heavy"\n'
             '[workflow]\nselection = [{ action = "full_verify" }, '
-            '{ role = "reviewer", adapter = "claude" }, '
-            '{ role = "fixer" }, '
+            '{ role = "reviewer_fixer", adapter = "claude" }, '
             '{ action = "full_verify" }]\n')
         cfg = self.build(extra_config=extra)
         (self.root / ".assent" / "verify.py").write_text(
@@ -184,14 +178,18 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "The selected candidate is broken",
             "The complete verifier reported the wrong value.")
-        reviewer_and_fixer = ScriptedAdapter([
-            TaskResult(0, auto_fix.review_record_json(
-                auto_fix.ReviewRecord("FAIL", (finding,))), False, None,
+        def review_and_fix(prompt):
+            self.assertIn("write-capable merged review-and-repair", prompt)
+            self.assertIn(str(self.execution_root()), prompt)
+            (self.execution_root() / "src" / "value.txt").write_text(
+                "fixed\n", encoding="utf-8")
+            return TaskResult(
+                0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("FIXED", (finding,))), False, None,
                 usage=(TokenUsage(provider_model="claude-review",
-                                  input_tokens=10, output_tokens=2),)),
-            self.repair_done(
-                task_path, {"src/value.txt": "fixed\n"}),
-        ])
+                                  input_tokens=10, output_tokens=2),))
+
+        reviewer_and_fixer = ScriptedAdapter([review_and_fix])
         calls = 0
         rechecks = []
 
@@ -230,7 +228,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         selection = [record for record in records
                      if record["context"]["kind"] == "selection"]
         self.assertEqual(invalid, 0)
-        self.assertEqual(len(selection), 2)
+        self.assertEqual(len(selection), 1)
         self.assertTrue(all(record["folders"] == ["plan01"]
                             for record in selection))
         reviewed = next(record for record in selection if record["models"])
@@ -244,19 +242,13 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         source.mkdir()
         (source / "value.txt").write_text("base\n", encoding="utf-8")
         extra = (
-            '\n[abilities.review]\n'
-            'prompt = "Assign every selection conflict path."\n'
-            'writes = false\nproduces_verdict = true\n'
-            '[abilities.fix]\n'
-            'prompt = "Resolve the assigned conflict."\n'
-            'writes = true\n'
-            '[roles.reviewer]\nability = ["review"]\n'
-            'model = "prime"\neffort = "heavy"\n'
-            '[roles.fixer]\nability = ["fix"]\n'
+            '\n[abilities.review_fix]\n'
+            'prompt = "Assign and resolve every selection conflict path."\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.reviewer_fixer]\nability = ["review_fix"]\n'
             'model = "prime"\neffort = "heavy"\n'
             '[workflow]\nselection = [{ action = "full_verify" }, '
-            '{ role = "reviewer", adapter = "claude" }, '
-            '{ role = "fixer" }, '
+            '{ role = "reviewer_fixer", adapter = "codex" }, '
             '{ action = "full_verify" }]\n')
         cfg = self.build(extra_config=extra)
         (self.root / ".assent" / "verify.py").write_text(
@@ -277,19 +269,24 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             "t001", "src/value.txt", "Selection target conflict",
             "The source and target both changed the task-owned path.")
 
-        def resolve(_prompt):
+        def resolve(prompt):
+            self.assertIn("write-capable merged review-and-repair", prompt)
             managed = gitops.reconcile_worktree_path(self.root, "plan01")
+            self.assertIn(str(managed), prompt)
             (managed / "src" / "value.txt").write_text(
                 "resolved automatically\n", encoding="utf-8")
-            return ok_result()
+            return TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FIXED", (finding,))), False, None)
 
-        reviewer_and_fixer = ScriptedAdapter([
-            TaskResult(0, auto_fix.review_record_json(
-                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
-            resolve,
-        ])
+        reviewer_and_fixer = ScriptedAdapter([resolve])
+        requested_adapters = []
+
+        def configured_adapter(name, _cfg):
+            requested_adapters.append(name)
+            return reviewer_and_fixer
+
         with mock.patch("assent.engine.get_adapter",
-                        return_value=reviewer_and_fixer):
+                        side_effect=configured_adapter):
             code = engine.run_selection_workflow(
                 str(self.root / ".assent" / "assent.toml"),
                 self.root / ".assent", ["plan01"], auto_fix=True)
@@ -300,9 +297,56 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             gitops.commit_parents(self.root, resolved_tip),
             (source_tip, target_tip))
         self.assertEqual(gitops.commit_of(self.root, "HEAD"), target_tip)
-        self.assertEqual(len(reviewer_and_fixer.calls), 2)
-        self.assertIn("Do not stage or commit", reviewer_and_fixer.calls[1][0])
+        self.assertEqual(len(reviewer_and_fixer.calls), 1)
+        self.assertIn("codex", requested_adapters)
+        self.assertIn("do not run tests", reviewer_and_fixer.calls[0][0].lower())
         self.assertEqual(parse_task_file(task_path).status, "DONE")
+
+    def test_selection_merged_fail_without_edits_skips_final_full_verify(self):
+        task_path = self.write_task(1, status="TODO", scope=("src/",))
+        cfg = self.build(extra_config=(
+            '\n[abilities.review_fix]\n'
+            'prompt = "Diagnose and repair the failed selection verifier."\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.reviewer_fixer]\nability = ["review_fix"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nselection = [{ action = "full_verify" }, '
+            '{ role = "reviewer_fixer", adapter = "claude" }, '
+            '{ action = "full_verify" }]\n'))
+        (self.root / ".assent" / "verify.py").write_text(
+            "raise SystemExit(0)\n", encoding="utf-8")
+        self.commit_all()
+        self.assertEqual(self.run_quiet(
+            cfg, adapter=ScriptedAdapter([self.ai_done(
+                task_path, {"src/value.txt": "broken\n"})])), 0)
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "Repair could not be completed",
+            "The complete verifier still reports the wrong value.")
+        reviewer = ScriptedAdapter([TaskResult(
+            0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None)])
+        verify_calls = 0
+
+        def verify_action(_cfg, *, recheck=False):
+            nonlocal verify_calls
+            verify_calls += 1
+            _branch, source, _worktree = engine.source_snapshot(
+                cfg, gitops.main_worktree(cfg.root))
+            return FullVerifyEvidence(
+                "VERIFIER_FAILED", ("plan01",),
+                gitops.commit_of(cfg.root, "HEAD"), (source,), "a" * 40,
+                engine.verification.verifier_digest(cfg), "b" * 64, 1,
+                ("src/value.txt failed",), False)
+
+        with mock.patch("assent.engine.get_adapter", return_value=reviewer), \
+                mock.patch("assent.engine.verify_folder_action",
+                           side_effect=verify_action):
+            self.assertEqual(engine.run_selection_workflow(
+                str(self.root / ".assent" / "assent.toml"),
+                self.root / ".assent", ["plan01"], auto_fix=True), 1)
+
+        self.assertEqual(verify_calls, 1)
+        self.assertEqual(len(reviewer.calls), 1)
 
     def test_repair_gate_failure_preserves_reviewer_step_identity(self):
         task_path = self.write_task(1, status="DONE")
@@ -497,6 +541,38 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual((attempt["agent"], attempt["requested_model"],
                           attempt["requested_effort"]),
                          ("claude", "lite", "medium"))
+
+    def test_plan_fixer_explicit_adapter_dispatches_the_repair(self):
+        task_path = self.write_task(1, status="DONE", scope=("src/",))
+        source = self.root / "src" / "value.txt"
+        source.parent.mkdir()
+        source.write_text("old\n", encoding="utf-8")
+        self.commit_all()
+        workflow = self.review_rounds(2).replace(
+            '{ role = "bounded_fixer" }',
+            '{ role = "bounded_fixer", adapter = "codex" }')
+        cfg = self.build(extra_config=workflow)
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "value is stale", "repair it")
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
+            TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None),
+        ])
+        fixer = ScriptedAdapter([self.repair_done(
+            task_path, {"src/value.txt": "new\n"}, by="codex")])
+
+        with mock.patch.object(engine, "get_adapter", return_value=fixer) as get:
+            self.assertEqual(self.run_quiet(
+                cfg, adapter=ScriptedAdapter([]),
+                auto_fix_adapter=reviewer, auto_fix=True), 0)
+
+        self.assertTrue(any(call.args[0] == "codex" for call in get.call_args_list))
+        self.assertEqual(len(fixer.calls), 1)
+        attempt = next(entry for entry in read_entries(journal_path_for(task_path))
+                       if entry["event"] == "auto_fix_attempt")
+        self.assertEqual(attempt["agent"], "codex")
 
     def test_repair_round_pass_is_reused_by_its_own_recheck_gate(self):
         task_path = self.write_task(1, status="DONE", scope=("src/",))

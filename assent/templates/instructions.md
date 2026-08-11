@@ -188,7 +188,7 @@ folder. Verify the combined candidate before accepting upstream then
 dependent; matching receipts can be reused, and accept does not rerun the
 complete suite. Conflicts are human decisions unless the same invocation
 explicitly combines `run --verify --auto-fix` with a configured selection
-reviewer/fixer/action sequence; that bounded exception still leaves final
+review-and-repair action sequence; that bounded exception still leaves final
 approval to `accept`. Cleanup is upstream-first and
 must retain source evidence until direct dependents are accepted and proven
 integrated.
@@ -224,15 +224,14 @@ and account environments; Assent does not create a container or VM sandbox.
 
 ## Opt-in folder review and bounded repair
 
-The ordered per-plan review-and-repair policy comes from a non-empty
-`[workflow].plan`, or otherwise from the role prefix before
-`[workflow].selection`'s first action. The
+The ordered per-plan review-and-repair policy comes from
+`[workflow].plan`. The
 entire loop is invocation-level opt-in: only `run --auto-fix` starts its
 folder-level review after the final focused checks and authorizes repair. An
 ordinary `run` without the flag starts neither review nor repair. Each role's
 agent resolves its adapter, abstract model, and effort through the configured
-adapter mappings. An omitted or empty plan with no leading selection role
-configures no review and `run --auto-fix` reports that the flag had no effect.
+adapter mappings. An omitted or empty plan configures no review and
+`run --auto-fix` reports that the flag had no effect.
 The flag is orthogonal to
 selection and may accompany an implicit folder, explicit folders, `...`,
 `--all`, `--once`, `--task`, or `--verify`; the ordinary selection and
@@ -249,9 +248,10 @@ containing only `SKIP` tasks needs no implementation review. Focused failure
 writes the scheduler's finding evidence and starts no completed-folder reviewer.
 
 Each explicit position in that configured review sequence contributes to the
-finite bound on the loop. Verdict-producing roles open their configured adapter session; a
-write-capable non-verdict role authorizes the bounded task-profile repair for
-the nearest earlier durable verdict instead of opening its own session.
+finite bound on the loop. Every plan or selection role may name an adapter; an
+omitted adapter resolves to the first configured adapter. Verdict-producing
+roles open that adapter session; a write-capable non-verdict role authorizes
+bounded repair with that adapter for the nearest earlier durable verdict.
 
 A completed-folder round is a merged reviewer-fixer session, not a strictly
 read-only gate: when it finds a genuine blocking problem it may repair it
@@ -408,14 +408,14 @@ gap tied to an existing task requirement may be considered by review.
 For an exact selection, `full_verify` owns candidate construction and complete
 verification; task and plan sessions never run either. Under the combined
 `run --verify --auto-fix` authorization only, a candidate conflict is collected
-as one complete typed wave before any full verifier. The read-only selection
-reviewer assigns every conflict path to existing task ownership, and the next
-explicit write-capable selection fixer position repairs target-alone conflicts
-inside Assent's managed reconcile worktree or peer-only conflicts in their own
-source tasks. A conflict fixer may not run Git, Assent, focused tests, or the
-full suite; the scheduler owns every Git mutation and every gate. Each explicit
-reviewer/fixer/action position is finite, content-identical completed work is
-reused on resume, and exhaustion retains all edits for human adjudication.
+as one complete typed wave before any full verifier. A writable verdict role
+may assign every conflict path and repair it in the same session, using only
+Assent's listed source or managed reconcile worktrees. A read-only verdict role
+may instead hand its findings to the next explicit write-capable fixer. Neither
+form may run Git, Assent, focused tests, or the full suite; the scheduler owns
+every Git mutation and every gate. Each explicit role/action position is
+finite, content-identical completed work is reused on resume, and exhaustion
+retains all edits for human adjudication.
 
 ## Review and acceptance meeting handoff
 

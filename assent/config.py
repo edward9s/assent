@@ -164,7 +164,7 @@ class WorkflowPlanStep:
     """One resolved post-completion workflow step."""
 
     role: str
-    adapter: str | None
+    adapter: str
     resolved_role: ResolvedRole
     command: str | None = None
     extra_args: tuple[str, ...] = ()
@@ -297,20 +297,8 @@ class Config:
 
     @property
     def auto_fix_review(self) -> tuple[WorkflowPlanStep, ...]:
-        """Return the configured per-plan review sequence.
-
-        An explicit plan sequence remains supported. When it is empty, the
-        role prefix before selection's first action supplies the same bounded
-        review policy without forcing a separate workflow layer.
-        """
-        if self.workflow_plan:
-            return self.workflow_plan
-        prefix: list[WorkflowPlanStep] = []
-        for step in self.workflow_selection:
-            if isinstance(step, WorkflowActionStep):
-                break
-            prefix.append(step)
-        return tuple(prefix)
+        """Return the configured per-plan review sequence."""
+        return self.workflow_plan
 
     @property
     def branch_prefix(self) -> str:
@@ -622,10 +610,7 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
             entries.append(WorkflowTaskStep(role, resolved))
             continue
         adapter = value.get("adapter")
-        if resolved.produces_verdict:
-            if adapter is None:
-                raise AssentError(
-                    f"Config {owner} role {role!r} produces a verdict and requires adapter")
+        if adapter is not None:
             adapter = guard.text(
                 _typed(value, f"[{owner}]", "adapter", str, None),
                 f"workflow.{key}.{index}.adapter")
@@ -633,15 +618,11 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
                 raise AssentError(
                     f"Config {owner}.adapter = {adapter!r} is not a registered adapter"
                     f" ({'/'.join(sorted(_ADAPTER_NAMES))})")
+        if resolved.produces_verdict:
             if resolved.model is None or resolved.effort is None:
                 raise AssentError(
                     f"Config {owner} verdict-producing role {role!r} must state model and effort")
-            entries.append((role, adapter, resolved))
-        else:
-            if "adapter" in value:
-                raise AssentError(
-                    f"Config {owner} role {role!r} produces_verdict = false and must not state adapter")
-            entries.append((role, None, resolved))
+        entries.append((role, adapter, resolved))
     if key == "task" and entries and not any(
             isinstance(entry, WorkflowTaskStep) for entry in entries):
         raise AssentError(
@@ -658,12 +639,14 @@ def _resolve_accountability_steps(
         if isinstance(raw, WorkflowActionStep):
             steps.append(raw)
             continue
-        role, name, resolved = raw
-        if name is None:
-            steps.append(WorkflowPlanStep(role, None, resolved))
-            continue
+        role, configured_name, resolved = raw
+        name = configured_name or cfg.adapter_names[0]
         adapter_settings = cfg.adapter_settings(name)
-        assert resolved.model is not None and resolved.effort is not None
+        if resolved.model is None or resolved.effort is None:
+            steps.append(WorkflowPlanStep(
+                role, name, resolved, adapter_settings.command,
+                adapter_settings.extra_args))
+            continue
         requested_effort = adapter_settings.resolve_requested_effort(
             resolved.model, resolved.effort)
         if requested_effort is None:
@@ -680,14 +663,16 @@ def _resolve_accountability_steps(
 def _validate_selection_repair_steps(
         steps: tuple[WorkflowPlanStep | WorkflowActionStep, ...]) -> None:
     """Reject only role arrangements the built-in full_verify protocol cannot run."""
+    if not steps:
+        return
+    if not isinstance(steps[0], WorkflowActionStep):
+        raise AssentError(
+            "Config [workflow].selection must start with full_verify")
+    if not isinstance(steps[-1], WorkflowActionStep):
+        raise AssentError(
+            "Config [workflow].selection must end with full_verify")
     actions = [index for index, step in enumerate(steps)
                if isinstance(step, WorkflowActionStep)]
-    if not actions:
-        return
-    if actions[-1] != len(steps) - 1:
-        raise AssentError(
-            "Config [workflow].selection roles after the final full_verify "
-            "have no later full_verify action to prove a repair")
     for left, right in zip(actions, actions[1:]):
         roles = steps[left + 1:right]
         if not roles:
@@ -703,6 +688,11 @@ def _validate_selection_repair_steps(
                 "Config [workflow].selection may place only one verdict role "
                 "and one optional fixer between full_verify actions")
         if len(roles) == 2:
+            if reviewer.writes:
+                raise AssentError(
+                    f"Config [workflow].selection[{left + 1}] is a writable "
+                    "verdict role and must be the only role between "
+                    "full_verify actions")
             fixer = roles[1]
             assert isinstance(fixer, WorkflowPlanStep)
             if not fixer.writes or fixer.produces_verdict:

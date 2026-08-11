@@ -36,6 +36,10 @@ model = "prime"
 effort = "heavy"
 [roles.fixer]
 ability = ["fix"]
+[roles.reviewer_fixer]
+ability = ["review", "fix"]
+model = "prime"
+effort = "heavy"
 [roles.observer]
 ability = ["observe"]
 '''
@@ -288,30 +292,35 @@ class TestLoadConfig(ConfigTestCase):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
             '[workflow]\nselection = ['
-            '{ role = "reviewer", adapter = "codex" }]\n'), "plan01")
+            '{ action = "full_verify" }, '
+            '{ role = "reviewer", adapter = "codex" }, '
+            '{ role = "fixer", adapter = "claude" }, '
+            '{ action = "full_verify" }]\n'), "plan01")
 
-        step = cfg.workflow_selection[0]
+        step = cfg.workflow_selection[1]
         self.assertEqual(step.role, "reviewer")
         self.assertEqual(step.adapter, "codex")
         self.assertEqual(step.requested_model, "gpt-5.6-sol")
         self.assertEqual(step.requested_effort, "high")
+        self.assertEqual(cfg.workflow_selection[2].role, "fixer")
+        self.assertEqual(cfg.workflow_selection[2].adapter, "claude")
 
-    def test_empty_plan_uses_only_the_leading_selection_roles_for_review(self):
+    def test_plan_is_the_only_per_plan_review_source(self):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
-            '[workflow]\nplan = []\nselection = ['
+            '[workflow]\nplan = ['
             '{ role = "reviewer", adapter = "codex" }, '
-            '{ role = "reviewer", adapter = "codex" }, '
-            '{ action = "full_verify" }, '
-            '{ role = "reviewer", adapter = "codex" }, '
-            '{ action = "full_verify" }]\n'), "plan01")
+            '{ role = "reviewer", adapter = "codex" }]\n'
+            'selection = [{ action = "full_verify" }]\n'), "plan01")
 
-        self.assertEqual(cfg.workflow_plan, ())
         self.assertEqual([step.role for step in cfg.auto_fix_review],
                          ["reviewer", "reviewer"])
 
     def test_selection_full_verify_repair_positions_are_validated(self):
         cases = (
+            ('{ role = "reviewer", adapter = "codex" }, '
+             '{ action = "full_verify" }',
+             "must start with full_verify"),
             ('{ action = "full_verify" }, { role = "fixer" }, '
              '{ action = "full_verify" }',
              "first role after full_verify.*must produce a verdict"),
@@ -321,8 +330,13 @@ class TestLoadConfig(ConfigTestCase):
              '{ action = "full_verify" }',
              "optional fixer.*must write without producing a verdict"),
             ('{ action = "full_verify" }, '
+             '{ role = "reviewer_fixer", adapter = "codex" }, '
+             '{ role = "fixer", adapter = "codex" }, '
+             '{ action = "full_verify" }',
+             "writable verdict role.*must be the only role"),
+            ('{ action = "full_verify" }, '
              '{ role = "reviewer", adapter = "codex" }',
-             "no later full_verify action"),
+             "must end with full_verify"),
         )
         for selection, message in cases:
             with self.subTest(selection=selection), self.assertRaisesRegex(
@@ -355,10 +369,8 @@ class TestLoadConfig(ConfigTestCase):
             ('workflow = true\n', r"\[workflow\].*table"),
             ('[workflow]\nextra = true\n', "unknown keys"),
             ('[workflow]\nplan = true\n', "wrong type"),
-            (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "reviewer" }]\n',
-             "requires adapter"),
-            (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "fixer", adapter = "codex" }]\n',
-             "must not state adapter"),
+            (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "reviewer", adapter = "unknown" }]\n',
+             "not a registered adapter"),
             (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "observer" }]\n',
              "cannot open any session"),
         )
@@ -366,7 +378,7 @@ class TestLoadConfig(ConfigTestCase):
             with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):
                 load_config(self.write(text), "plan01")
 
-    def test_workflow_plan_preserves_step_order_and_fix_only_has_no_adapter(self):
+    def test_workflow_plan_roles_use_explicit_or_primary_adapter(self):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
             '[workflow]\nplan = ['
@@ -376,7 +388,21 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual([step.role for step in cfg.workflow_plan],
                          ["reviewer", "fixer", "reviewer"])
         self.assertEqual([step.adapter for step in cfg.workflow_plan],
-                         ["claude", None, "codex"])
+                         ["claude", "claude", "codex"])
+
+    def test_verdict_and_fixer_roles_may_omit_or_override_adapter(self):
+        cfg = load_config(self.write(
+            _WORKFLOW_ROLES +
+            '[adapter]\nname = ["claude", "codex"]\n'
+            '[workflow]\nplan = ['
+            '{ role = "reviewer" }, '
+            '{ role = "fixer", adapter = "codex" }]\n'), "plan01")
+
+        reviewer, fixer = cfg.workflow_plan
+        self.assertEqual(reviewer.adapter, "claude")
+        self.assertEqual(reviewer.requested_model, "fable")
+        self.assertEqual(reviewer.requested_effort, "high")
+        self.assertEqual(fixer.adapter, "codex")
 
     def test_removed_auto_fix_review_names_table_and_layer_file(self):
         path = self.write('[auto_fix.review]\nadapter = "codex"\n')
@@ -746,7 +772,8 @@ class TestLayeredConfig(ConfigTestCase):
             [step.action if isinstance(step, WorkflowActionStep) else step.role
              for step in cfg.workflow_task],
             ["implementer", "focused_test"])
-        self.assertEqual(cfg.workflow_plan, ())
+        self.assertEqual([step.role for step in cfg.workflow_plan],
+                         ["reviewer_fixer", "reviewer_fixer"])
         self.assertEqual([step.role for step in cfg.auto_fix_review],
                          ["reviewer_fixer", "reviewer_fixer"])
         self.assertTrue(cfg.auto_fix_review[0].writes)
@@ -754,8 +781,7 @@ class TestLayeredConfig(ConfigTestCase):
         self.assertEqual(
             [step.action if isinstance(step, WorkflowActionStep) else step.role
              for step in cfg.workflow_selection],
-            ["reviewer_fixer", "reviewer_fixer", "full_verify", "reviewer",
-             "fixer", "full_verify"])
+            ["full_verify", "reviewer_fixer", "full_verify"])
 
     def test_init_preserves_existing_inline_adapter_layout(self):
         templates = Path(__file__).resolve().parents[1] / "assent" / "templates"

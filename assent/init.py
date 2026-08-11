@@ -357,12 +357,16 @@ def _assignment_key(line: str) -> str | None:
 
 
 def _template_config_entries(text: str) -> list[tuple[tuple[str, ...], str]]:
-    """List active template assignments as (table path, source line)."""
+    """List active template assignments as (table path, source block)."""
     current: tuple[str, ...] = ()
     entries: list[tuple[tuple[str, ...], str]] = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
+            index += 1
             continue
         if stripped.startswith("["):
             match = re.match(r"^\[([^\[].*?)\]\s*(?:#.*)?$", stripped)
@@ -370,10 +374,24 @@ def _template_config_entries(text: str) -> list[tuple[tuple[str, ...], str]]:
                 raise AssentError(
                     f"built-in config template has an invalid table: {line}")
             current = _split_toml_path(match.group(1))
+            index += 1
             continue
         key = _assignment_key(line)
         if key is not None:
-            entries.append((current + _split_toml_path(key), line.strip()))
+            block = [line.rstrip()]
+            while True:
+                try:
+                    tomllib.loads("\n".join(block))
+                    break
+                except tomllib.TOMLDecodeError:
+                    index += 1
+                    if index >= len(lines):
+                        raise AssentError(
+                            f"built-in config template has an incomplete value: {line}")
+                    block.append(lines[index].rstrip())
+            entries.append((
+                current + _split_toml_path(key), "\n".join(block)))
+        index += 1
     return entries
 
 

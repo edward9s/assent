@@ -824,6 +824,28 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 1)
         self.assertEqual(mocked.call_count, 2)
 
+    def test_check_rejects_selection_before_any_plan_check_runs(self):
+        config = self.write_config(
+            '[abilities.review]\n'
+            'prompt = "Review the selection."\n'
+            'writes = false\n'
+            'produces_verdict = true\n'
+            '[roles.reviewer]\n'
+            'ability = ["review"]\n'
+            'model = "prime"\n'
+            'effort = "heavy"\n'
+            '[workflow]\nselection = ['
+            '{ role = "reviewer", adapter = "codex" }, '
+            '{ action = "full_verify" }]\n')
+        self.write_task("alpha")
+
+        with patch("assent.__main__.inspection.check") as mocked:
+            code, out = self.run_main(["check", "--config", str(config)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("selection must start with full_verify", out)
+        mocked.assert_not_called()
+
     def test_check_without_folder_rejects_bad_folder_graph(self):
         cases = {
             "bad-format": ('after = [\n',),
@@ -2016,6 +2038,13 @@ class TestInit(MainTestCase):
         self.assertEqual(config["run"]["custom_setting"], "keep")
         self.assertIn("quota_poll_minutes", config["run"])
         self.assertIn("watchdog", config)
+        self.assertEqual(
+            config["workflow"]["task"],
+            [{"role": "implementer"}, {"action": "focused_test"}])
+        self.assertEqual(config["workflow"]["selection"][0],
+                         {"action": "full_verify"})
+        self.assertEqual(config["workflow"]["selection"][-1],
+                         {"action": "full_verify"})
         config_after_first_upgrade = user_config.read_bytes()
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run_init(self.root), 0)
