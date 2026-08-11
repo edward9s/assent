@@ -161,12 +161,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "verifies only when that limited run left the single selected "
              "folder complete, and an incomplete folder fails the request "
              "without writing a receipt")
-    run_p.add_argument(
-        "--auto-fix", action="store_true",
-        help="After task execution, run the configured bounded folder review "
-             "and repair policy; with --verify, configured selection "
-             "reviewer/fixer positions may also repair candidate conflicts "
-             "before the exact full verification")
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
@@ -192,10 +186,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "dependency order into one candidate and verify it once; a "
              "conflicting source is reported and, after one confirmation, "
              "skipped together with the folders queued after it")
-    verify_p.add_argument(
-        "--no-bisect", action="store_false", dest="bisect",
-        help="With --batch or an exact selected batch, record a failure as-is "
-             "instead of localizing it to the first folder that breaks the batch")
     verify_p.add_argument(
         "--focus", action="store_true",
         help="With exactly one FOLDER, rerun its distinct DONE-task focused "
@@ -516,7 +506,7 @@ def _dispatch_check_all(config_path: str, assent_dir, folders: list[str]) -> int
 
 def _dispatch_run_folders(
         config_path: str, folders: list[str], *, once: bool,
-        task_id: str | None, auto_fix: bool = False,
+        task_id: str | None,
         run_level_verify: bool = False) -> int:
     """Run explicitly named folders in order, stopping on the first failure."""
     for folder in folders:
@@ -527,7 +517,6 @@ def _dispatch_run_folders(
             return 1
         result = engine.run(
             cfg, once=once, task_id=task_id,
-            auto_fix=auto_fix,
             run_level_verify=run_level_verify)
         if result != 0:
             return result
@@ -535,15 +524,13 @@ def _dispatch_run_folders(
 
 
 def _dispatch_run_all(config_path: str, assent_dir: Path, jobs: int, *,
-                      auto_fix: bool, run_level_verify: bool) -> int:
+                      run_level_verify: bool) -> int:
     """Let scheduler children inherit the invocation-level verification owner."""
     key = "ASSENT_SELECTION_FULL_VERIFY"
     previous = os.environ.get(key)
     if run_level_verify:
         os.environ[key] = "1"
     try:
-        if auto_fix:
-            return run_all(config_path, assent_dir, jobs, auto_fix=True)
         return run_all(config_path, assent_dir, jobs)
     finally:
         if previous is None:
@@ -552,48 +539,39 @@ def _dispatch_run_all(config_path: str, assent_dir: Path, jobs: int, *,
             os.environ[key] = previous
 
 
-def _close_run(result: int, *, verify: bool, config_path: str,
-               assent_dir: Path, selection: list[str] | None,
-               auto_fix: bool = False) -> int:
-    """Chain `run --verify`'s complete verification onto a successful run.
+def _close_run(result: int, *, config_path: str,
+               assent_dir: Path, selection: list[str] | None) -> int:
+    """Complete a successful run with its matching integration workflow.
 
-    A nonzero run is returned untouched and starts no verification: there is no
-    finished plan to certify.  ``--verify`` is an invocation-level request that
-    does not consult the configured receipt-refresh policy: it verifies whatever
-    the selection covers regardless of whether closeout already would have.
-
-    ``selection`` is the exact folder set the run covered, and ``None`` is a
-    whole-project request (``--all`` or a bare ``...``), which keeps the dynamic
-    batch's own discovery rather than freezing a set the scheduler may extend.
-
-    A complete single folder goes through ``verify_folder_if_needed`` so a
-    receipt the run's own closeout already produced for this exact candidate is
-    reported instead of running the identical full suite a second time; with no
-    fresh matching receipt it runs the suite exactly as ``verify_folder`` would.
-    The whole-project and multi-folder branches build a merged candidate no
-    per-folder receipt certifies, so their verification is never that duplicate
-    and stays unconditional.
-
-    A limited ``--once`` / ``--task`` run arrives here as its one selected
-    folder like any other single-folder selection, and it is the one selection
-    that can still be incomplete.  ``verify_folder_if_needed`` is the scheduler's
-    closeout entry point and treats an incomplete folder as a silent no-op, so
-    an invocation-level ``--verify`` sends that case to ``verify_folder``, whose
-    own pre-candidate gate names the unfinished task ids and refuses before any
-    candidate or verifier exists.  The routing reuses the CLI's existing
-    ``infer_folder_completion`` helper and states no refusal of its own.
+    ``selection`` is the exact folder set the run covered; ``None`` keeps the
+    whole-project dynamic discovery used by ``--all`` or a bare ``...``. A
+    limited run that leaves an explicit folder incomplete defers integration.
+    A nonzero task run starts no integration work.
     """
-    if result != 0 or not verify:
+    if result != 0 or os.environ.get("ASSENT_FOLDER_RUN") == "1":
         return result
     if selection:
+        incomplete: list[str] = []
+        for folder in selection:
+            try:
+                cfg = load_config(config_path, folder)
+            except AssentError as e:
+                print(f"Config error: {e}")
+                return 1
+            if not infer_folder_completion(cfg.tasks_dir).complete:
+                incomplete.append(folder)
+        if incomplete:
+            print("Integration workflow deferred: selected folder execution "
+                  "requires human adjudication (" + ", ".join(incomplete) + ")")
+            return 0
         try:
             selection_cfg = load_config(config_path, selection[0])
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
-        if selection_cfg.workflow_selection:
+        if selection_cfg.workflow_integration:
             return engine.run_selection_workflow(
-                config_path, assent_dir, selection, auto_fix=auto_fix)
+                config_path, assent_dir, selection)
     if selection is None:
         folders = list_task_folders(assent_dir)
         if folders:
@@ -602,9 +580,9 @@ def _close_run(result: int, *, verify: bool, config_path: str,
             except AssentError as e:
                 print(f"Config error: {e}")
                 return 1
-            if selection_cfg.workflow_selection:
+            if selection_cfg.workflow_integration:
                 return engine.run_dynamic_selection_workflow(
-                    config_path, assent_dir, auto_fix=auto_fix)
+                    config_path, assent_dir)
         return verify_batch(config_path, assent_dir)
     if len(selection) > 1:
         return verify_selected_batch(config_path, assent_dir, selection)
@@ -670,15 +648,9 @@ def _dispatch(argv: list[str]) -> int:
                 parser.error("verify's --focus and --batch cannot be used together")
             if len(args.folder) != 1:
                 parser.error("verify's --focus requires exactly one FOLDER")
-            if not args.bisect:
-                parser.error("verify's --no-bisect cannot be used with --focus")
         elif not args.batch:
             if not args.folder and not remainder:
                 parser.error("verify requires FOLDER, a selected batch, or --batch")
-            # With `...` the size of the batch is only known after expansion, so
-            # the same --no-bisect rule is applied again there.
-            if len(args.folder) == 1 and not args.bisect and not remainder:
-                parser.error("verify's --no-bisect only applies to a batch")
             if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
                 parser.error("verify does not allow duplicate FOLDER names")
 
@@ -770,13 +742,11 @@ def _dispatch(argv: list[str]) -> int:
         elif not args.all_folders:
             selection = list(args.folders)
         closeout = functools.partial(
-            _close_run, verify=args.verify, config_path=args.config,
-            assent_dir=assent_dir, selection=selection,
-            auto_fix=args.auto_fix)
+            _close_run, config_path=args.config,
+            assent_dir=assent_dir, selection=selection)
         if args.folders:
             result = _dispatch_run_folders(
                 args.config, args.folders, once=args.once, task_id=args.task,
-                auto_fix=args.auto_fix,
                 run_level_verify=args.verify)
             if result != 0:
                 return result
@@ -789,12 +759,11 @@ def _dispatch(argv: list[str]) -> int:
             # command over to the whole-project scheduler.
             return closeout(_dispatch_run_folders(
                 args.config, scheduled, once=False, task_id=None,
-                auto_fix=args.auto_fix,
                 run_level_verify=args.verify))
         if args.all_folders:
             return closeout(_dispatch_run_all(
                 args.config, assent_dir, args.jobs or 1,
-                auto_fix=args.auto_fix, run_level_verify=args.verify))
+                run_level_verify=args.verify))
         if args.folders:
             return closeout(0)
     if args.command == "accept":
@@ -838,8 +807,6 @@ def _dispatch(argv: list[str]) -> int:
             if expanded is None:
                 return 1
             selected = expanded
-            if len(selected) == 1 and not args.bisect:
-                parser.error("verify's --no-bisect only applies to a batch")
         if not args.batch:
             try:
                 cfg = load_config(args.config, selected[0])
@@ -848,13 +815,12 @@ def _dispatch(argv: list[str]) -> int:
                 return 1
         try:
             if args.batch:
-                return verify_batch(args.config, assent_dir, args.bisect)
+                return engine.run_dynamic_selection_workflow(
+                    args.config, assent_dir)
             if args.focus:
                 return engine.verify_focused(cfg)
-            if len(selected) == 1:
-                return verify_folder(cfg)
-            return verify_selected_batch(
-                args.config, assent_dir, selected, args.bisect)
+            return engine.run_selection_workflow(
+                args.config, assent_dir, selected)
         except KeyboardInterrupt:
             print("\nverify interrupted; temporary resources were cleaned up.")
             return 130
@@ -928,10 +894,9 @@ def _dispatch(argv: list[str]) -> int:
         # the same folder receipt an explicitly named one would get.
         return _close_run(
             engine.run(cfg, once=args.once, task_id=args.task,
-                       auto_fix=args.auto_fix,
                        run_level_verify=args.verify),
-            verify=args.verify, config_path=args.config, assent_dir=assent_dir,
-            selection=[folder], auto_fix=args.auto_fix)
+            config_path=args.config, assent_dir=assent_dir,
+            selection=[folder])
     if args.command == "status":
         return inspection.status(cfg)
     if args.command == "check":

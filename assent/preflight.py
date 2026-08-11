@@ -25,7 +25,7 @@ from pathlib import Path
 
 from assent import AssentError, gitops
 from assent.adapters import Adapter, InvocationRequest, get_adapter
-from assent.config import Config
+from assent.config import Config, WorkflowPlanStep
 from assent.folderdeps import FolderBaseResolution, resolve_folder_base
 from assent.plan import Plan, Task
 
@@ -143,7 +143,8 @@ def _review_round_session(review) -> SessionIdentity:
 def resolve_auto_fix_review_session(cfg: Config,
                                     adapter: Adapter) -> SessionIdentity:
     """Resolve the first verdict-producing plan review step."""
-    steps = [step for step in cfg.auto_fix_review if step.produces_verdict]
+    steps = [step for step in cfg.workflow_plan
+             if isinstance(step, WorkflowPlanStep) and step.produces_verdict]
     if not steps:
         raise AssentError("Auto-fix folder review is not configured")
     return _review_round_session(steps[0])
@@ -156,7 +157,8 @@ def auto_fix_review_capability_errors(
     A later round naming an adapter this machine cannot invoke is then caught before the
     run starts, instead of only when that round is finally reached.
     """
-    rounds = [step for step in cfg.auto_fix_review if step.produces_verdict]
+    rounds = [step for step in cfg.workflow_plan
+              if isinstance(step, WorkflowPlanStep) and step.produces_verdict]
     if not rounds:
         return None, []
     by_identity: dict[tuple[str, str, str], object] = {}

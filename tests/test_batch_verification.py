@@ -431,7 +431,8 @@ class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
             code, output = self.run_selected("aa", "bb")
 
         self.assertEqual(code, 1)
-        self.assertIn("exact selected set conflicts", output)
+        self.assertIn("candidate construction encountered merge conflicts", output)
+        self.assertIn("complete exact selection remains required", output)
         self.assertIn("verify selected:", output)
         self.assertNotIn("verify --batch:", output)
         self.assertIn("full verifier did not run", output)
@@ -561,8 +562,10 @@ class TestRemainderSelection(BatchVerifyRepositoryCase):
                 mock.patch("assent.batch_verification.run_full_verifier") as verifier:
             code, output = self.run_cli("aa", "...")
 
-        self.assertEqual(code, 1)
-        self.assertIn("exact selected set conflicts", output)
+        self.assertEqual(code, 0)
+        self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", output)
+        self.assertIn("candidate construction encountered merge conflicts", output)
+        self.assertIn("complete exact selection remains required", output)
         ask.assert_not_called()
         verifier.assert_not_called()
         self.assertFalse(self.receipt_path().exists())

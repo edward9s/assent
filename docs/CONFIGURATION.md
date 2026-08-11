@@ -242,60 +242,13 @@ Session: codex | core->gpt-5.6-terra | heavy->high
 The left side is the task's portable value and the right side is the actual
 CLI argument.
 
-## Optional folder review and auto-fix
+## Workflow roles, actions, and finite repair
 
-The optional `[auto_fix.review]` table overrides the folder-level reviewer.
-Its `adapter` must be a registered adapter name; `model` and `effort` remain
-the abstract `prime`/`core`/`lite` and `heavy`/`normal`/`slight` values. With no
-table, the first effective worker adapter from `[adapter].name` resolves at
-`prime`/`heavy`; this works without rerunning `assent init` or editing
-`~/.assent/assent.toml`. The reviewer reuses its adapter's normal model and
-effort mappings, so an explicit reviewer adapter may select a different vendor
-from the worker rotation:
+`[workflow]` accepts exactly `task`, `plan`, and `integration`. Each value is an ordered array whose entry contains exactly one `role` or `action`. The scheduler-owned actions are `focused_test` at task scope, `focused_sweep` at plan scope, and `full_verify` at integration scope. Removed workflow and verification settings are rejected rather than migrated.
 
-```toml
-[adapter]
-name = ["claude", "codex"]
+A passing action completes its layer without AI review. A failure advances through later configured reviewer/fixer positions, and a later action rechecks the repair. The reviewer prompt states its current round and total finite rounds and forbids invented acceptance criteria. Array exhaustion is the only convergence bound; Assent does not guess from no-progress or diff-oscillation heuristics.
 
-[auto_fix.review]
-adapter = ["antigravity"]     # one entry per review round; outside the worker rotation
-model = "prime"               # abstract tier
-effort = "heavy"              # abstract effort
-```
-
-The table or built-in fallback supplies the policy for a bounded read-only
-review-and-repair loop; only the invocation-level `assent run --auto-fix` flag
-starts the loop and authorizes its repair half. An ordinary run without the flag
-starts neither the review nor repair. The flag is independent of folder
-selection and can accompany explicit, remainder, `--all`, `--once`, `--task`,
-and `--verify` run forms. `assent check` prints the resolved reviewer adapter,
-abstract model and effort, actual CLI model and effort, and the provenance of
-each abstract setting and mapping as either a built-in fallback or an explicit
-user/project settings layer. The reviewer identity stored in `_auto_fix.toml`
-is the resolved adapter plus actual CLI model and effort, not an unverified
-reviewer-supplied identity. A configured reviewer remains read-only, and
-prompt-plus-detection write refusal is not a security sandbox.
-
-Automatic repair uses the worker rotation's finite abstract profiles. It selects
-and records the round's profile assignments before the first write-capable
-session in that round, so multi-task findings and dependency cascades do not
-consume the normal profile one task at a time. It reopens only existing
-in-scope tasks with the reason `Automatic repair of durable folder-review
-findings`. It preserves code by default and never creates tasks, reverts
-source, deletes source, or accepts work. Existing technical debt is eligible
-only when introduced by `COMPLETED_FOLDER + INITIAL`, encountered in changed or
-directly interacting code, local to an existing task scope, and reliably
-covered by focused tests; blocked adjudication and `RECHECK` cannot add debt.
-The soft-convergence recheck preserves still-present fingerprints, allows a new
-finding only for evidenced repair regression or newly exposed existing
-requirements, and must PASS once the prior set clears. Profile exhaustion,
-interruption, or a failed repair gate preserves the edits and state for
-recovery; no runtime human adjudication step is inserted. A pending `FAIL` can
-resume only with the same current reviewer identity; removing or changing that
-policy refuses repair and closeout. Complete verification follows a successful
-run according to receipt policy or explicit `--verify`; missing receipts and an
-unrun full suite are never reviewer failures. See [Workflow](WORKFLOW.md) and
-[Verification](VERIFICATION.md) for the state and report contract.
+An unresolved exhausted workflow retains all evidence and edits as `REVIEW UNRESOLVED, HUMAN DECISION` and exits zero. A failed `full_verify` still prevents acceptance. Adapter, model, and effort resolution continues to come from the role and adapter settings described above.
 
 ## Antigravity timeout and troubleshooting
 
@@ -354,8 +307,6 @@ adapter; the scheduler does not acquire vendor-specific semantics.
 
 ## Related settings
 
-The `[verification] receipt_refresh` setting controls whether complete
-folder-level evidence is refreshed automatically at folder closeout (`"auto"`)
-or waits for an explicit `assent verify` (`"manual"`, the default). It does
-not change the invocation-level `run --verify` request or acceptance rules.
-See [Verification](VERIFICATION.md) for the full evidence contract.
+The position of `full_verify` in `[workflow].integration` controls automatic
+complete verification and receipt creation. See
+[Verification](VERIFICATION.md) for the evidence contract.

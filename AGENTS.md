@@ -84,22 +84,22 @@ while operating an assent-managed session live in
 - Human approval is the explicit `assent accept FOLDER` action plus the resulting
   Git integration; do not add a second per-task `review` state alongside task
   execution status.
-- `run --auto-fix` is the invocation-level, selection-orthogonal opt-in for the
-  entire bounded review-and-repair loop. Its read-only reviewer handles both the
-  completed-folder review after distinct focused checks pass and adjudication of
-  durable worker `BLOCKED` or task-focused-gate failures. The reviewer decides
-  whether and how a bounded repair proceeds, including an exact mechanically valid
-  scope omission; only the scheduler may mutate task state, task contracts, or Git
-  state. An ordinary `run` starts neither review nor repair. The optional
-  `[auto_fix.review]` table overrides the built-in first-effective-adapter,
-  `prime`/`heavy` reviewer policy; it is not a second enable switch. Repair may
+- The configured `task`, `plan`, and `integration` workflow arrays are always
+  active. Their scheduler actions are `focused_test`, `focused_sweep` (the
+  distinct union of task verify commands without a receipt), and `full_verify`
+  (the reconstructed candidate and receipt). A passing action completes that
+  layer without an AI reviewer; a failing action advances to the next configured
+  reviewer/fixer and then rechecks. A reviewer may return an exact mechanically
+  valid scope omission; only the scheduler may mutate task state, task contracts,
+  or Git state. Repair may
   reopen only existing implicated tasks. Eligible pre-existing technical debt may
   originate only in the initial completed-folder review, must stay visible for the
   later human acceptance agenda, and may not be introduced by blocked adjudication
   or recheck. Each repair round carries its reason, selects its finite fixer-profile
   assignments against the pre-round history, and persists every assignment before
-  its first write-capable session. Profile exhaustion finitely terminates
-  automation with durable findings and edits for a human. Auto-fix never creates
+  its first write-capable session. The finite arrays are the only convergence
+  bound; exhaustion terminates automation as `REVIEW UNRESOLVED, HUMAN DECISION`,
+  exit zero, with durable findings and edits for a human. Workflow repair never creates
   tasks, reverts or deletes source, accepts a folder, or changes the explicit human
   `accept` boundary.
 - The default adapter permissions remain `danger-full-access` where configured:
@@ -126,17 +126,11 @@ while operating an assent-managed session live in
   remainder-expanded selection is an ordinary exact selection, so selected
   acceptance still requires evidence for exactly the expanded set and still
   never verifies.
-- `run --verify` chains complete verification onto a successful run only: a
-  nonzero run is returned as-is and verifies nothing, and the exit code of the
-  verification becomes the command's exit code. It matches the selection --
-  one folder as a folder receipt, an exact multi-folder selection as that
-  selected batch, `--all` or a bare `...` as the whole-project batch. With
-  `--once` or `--task` it verifies only when that limited run left the single
-  selected folder complete, and an incomplete folder fails the request without
-  writing a receipt: the CLI reuses `verify_folder`'s own pre-candidate gate,
-  which names the incomplete task ids and statuses and refuses before any
-  integration candidate or full verifier exists. It is an invocation-level
-  request and does not consult the configured receipt-refresh policy.
+- A successful `run` automatically follows the configured integration workflow
+  for the same exact selection until `full_verify` passes or the finite array is
+  exhausted. `--once` and `--task` defer integration when they leave the selected
+  folder incomplete. No run path accepts; publication remains the later human
+  `assent accept` action.
 - A multi-folder `archive A B` keeps `archive FOLDER`'s contract, not `--all`'s:
   the human named those folders, so an ineligible one is a refusal that exits
   nonzero after every named folder has been attempted, while `--all` skips an

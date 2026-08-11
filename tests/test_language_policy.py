@@ -253,7 +253,7 @@ class LanguagePolicyTests(unittest.TestCase):
             with self.subTest(language="English", path=path):
                 text = _read(path)
                 self.assertNotRegex(text, HAN_RE)
-                self.assertIn("run --auto-fix", text)
+                self.assertNotIn("run --auto-fix", text)
 
         chinese_paths = [
             Path("README.zh-TW.md"),
@@ -268,7 +268,7 @@ class LanguagePolicyTests(unittest.TestCase):
             with self.subTest(language="Traditional Chinese", path=path):
                 text = _read(path)
                 self.assertRegex(text, HAN_RE)
-                self.assertIn("run --auto-fix", text)
+                self.assertNotIn("run --auto-fix", text)
                 self.assertIn("English", text)
 
     def test_session_rules_have_one_packaged_name_and_fresh_init_path(self):

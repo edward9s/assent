@@ -73,32 +73,11 @@ Scheduler 不會在失敗時 revert workspace。失敗 review 的程式碼保留
 有界的 summary 與 adapter classification，不保存完整 raw adapter stream；各 folder 的
 `_assent.log` 保存 rendered terminal session output，且沒有 parent scheduler prefix。
 
-### Auto-fix recovery 與寫入邊界
+### Workflow repair 復原與寫入邊界
 
-`[auto_fix.review]` 是可選的 policy override；沒有 table 時，`run --auto-fix` 用第一個
-effective worker adapter 的 `prime`/`heavy` 解析 reviewer，不需重跑 `assent init`。只有
-`run --auto-fix` invocation 才會啟動 completed-folder final review，或有 durable blocker
-證據的 quiescent blocked-adjudication review，並授權 repair；review 仍是唯讀。沒有 flag 的
-普通 `run` 不會 review，也不會 repair。FAIL review 以帶理由的 automatic rework 重開既有
-scope 內 task；不會建立 task、還原 source、刪 source 或 accept。reviewer 可核准一個精確
-scope addition，但只有 scheduler 能寫 task file；worker 與 reviewer 都禁止 task-file edit。
-每個 repair round 都在第一個 write-capable session 開始前把 fixer-profile assignments 寫入
-`_auto_fix.toml`，因此 process failure 不會讓 consumed profile 悄悄恢復可用，也不會因先跑
-一個 task 就讓同 round sibling 提前 escalation。
-Finding ledger、consumed profiles、WIP checkpoint 與編輯會在中斷、quota、adapter failure
-及 focused gate 失敗後保留。
+設定好的 workflow 在 `run` 中一律啟用，沒有另一個 repair flag。Action 通過時會略過 reviewer/fixer；失敗時會先持久化證據，再開始可寫入的 repair，因此中斷後可從 durable boundary 恢復，不會還原已產生的修改。
 
-之後的 `run --auto-fix` 只有在目前 resolved reviewer identity 相同時，才會讀取既有 FAIL
-state、跳過已消耗 profile 並恢復 WIP；policy 漂移會拒絕 repair 與 closeout。Profile 用盡是
-有限的 human handoff，不是持續重試或撤銷程式碼的指令；loop 內沒有 runtime human
-adjudication gate。Report 只以 derived runtime 資訊顯示 `NOT RUN`、`PASSED`、`FAILED` 或
-`STALE`，並附 phase、blocker、findings、scope decision、acknowledgement、profiles 與
-terminal reason；不改 task status 或 acceptance。完整 verification 依成功 run 的 receipt
-policy 或明示 `--verify` 另行執行，缺 receipt 或未跑 full suite 絕不是 reviewer failure。
-Report 的 scope-amendment transaction 與 repair-round assignment 是 zero-token evidence；
-scheduler 的 status-only lifecycle transition 也不會單獨讓 evidence stale。
-Reviewer 的 prompt-plus-detection 寫入拒絕是在 `danger-full-access` 預設下的 cooperative
-rule，不是 security sandbox 或預防性的 OS permission boundary。
+Reviewer/fixer 只能寫入 finding 所屬既有 task scope；唯一例外是 reviewer 可提出一個精確 scope addition，由 scheduler 驗證。Management plane、Git state、所有權不明或 out-of-scope 寫入都 fail closed，並保留給人類復原。有限陣列耗盡成為 `REVIEW UNRESOLVED, HUMAN DECISION`；基礎設施與安全失敗仍為非零。
 
 ### 臨時 integration candidate
 

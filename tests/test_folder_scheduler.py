@@ -149,14 +149,13 @@ class TestRunAll(FolderSchedulerTestCase):
             self.assertIs(options["start_new_session"], True)
             self.assertNotIn("creationflags", options)
 
-    def test_child_argv_includes_auto_fix_when_requested(self):
+    def test_child_argv_has_no_obsolete_auto_fix_flag(self):
         with patch("assent.folder_scheduler.subprocess.Popen",
                    return_value=object()) as popen:
-            _start_folder(str(self.config), "work", auto_fix=True)
+            _start_folder(str(self.config), "work")
 
         command = popen.call_args.args[0]
-        self.assertIn("--auto-fix", command)
-        self.assertLess(command.index("--auto-fix"), command.index("--config"))
+        self.assertNotIn("--auto-fix", command)
 
     def test_child_runs_from_package_root_with_absolute_config(self):
         package_root = Path(assent.__file__).resolve().parent.parent
@@ -250,26 +249,25 @@ class TestRunAll(FolderSchedulerTestCase):
             ["[alpha] 甲一", "[alpha] 甲二", "[beta] 乙一", "[beta] 乙二"],
         )
 
-    def test_parallel_children_receive_the_auto_fix_policy(self):
+    def test_parallel_children_need_no_repair_policy_flag(self):
         tasks = {
             "alpha": self.make_folder("alpha"),
             "beta": self.make_folder("beta"),
         }
-        policies: dict[str, bool] = {}
+        started = []
 
-        def fake_start(_config, folder, *, auto_fix=False):
-            policies[folder] = auto_fix
+        def fake_start(_config, folder):
+            started.append(folder)
             return FinishedProcess(tasks[folder])
 
         with patch("assent.folder_scheduler._start_folder",
                    side_effect=fake_start):
-            code = run_all(str(self.config), self.assent_dir,
-                           jobs=2, auto_fix=True)
+            code = run_all(str(self.config), self.assent_dir, jobs=2)
 
         self.assertEqual(code, 0)
-        self.assertEqual(policies, {"alpha": True, "beta": True})
+        self.assertCountEqual(started, ["alpha", "beta"])
 
-    def test_parallel_auto_fix_children_receive_one_flag_each(self):
+    def test_parallel_children_receive_no_obsolete_auto_fix_flag(self):
         tasks = {
             "alpha": self.make_folder("alpha"),
             "beta": self.make_folder("beta"),
@@ -285,17 +283,14 @@ class TestRunAll(FolderSchedulerTestCase):
 
         with patch("assent.folder_scheduler.subprocess.Popen",
                    side_effect=fake_popen):
-            code = run_all(str(self.config), self.assent_dir,
-                           jobs=2, auto_fix=True)
+            code = run_all(str(self.config), self.assent_dir, jobs=2)
 
         self.assertEqual(code, 0)
         self.assertEqual({command[4] for command in commands},
                          {"alpha", "beta"})
         self.assertEqual(len(commands), 2)
         for command in commands:
-            self.assertEqual(command.count("--auto-fix"), 1)
-            self.assertLess(command.index("--auto-fix"),
-                            command.index("--config"))
+            self.assertNotIn("--auto-fix", command)
 
     def test_merged_stderr_bad_utf8_and_unterminated_line_are_forwarded(self):
         task = self.make_folder("encoded")

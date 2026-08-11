@@ -29,7 +29,7 @@ from typing import Callable
 
 from assent import AssentError, auto_fix, contracts, gitops, usage
 from assent.adapters import Adapter, get_adapter
-from assent.config import PROJECT_LAYER, Config
+from assent.config import PROJECT_LAYER, Config, WorkflowPlanStep
 from assent.folderdeps import parse_folder_dependencies
 from assent.folder_verification import receipt_report_lines
 from assent.plan import Plan, Task, read_entries
@@ -195,7 +195,9 @@ def _auto_fix_binding_reasons(
     except AssentError as e:
         reasons.append(f"task contracts unavailable: {e}")
 
-    steps = cfg.auto_fix_review
+    steps = tuple(
+        step for step in cfg.workflow_plan
+        if isinstance(step, WorkflowPlanStep))
     position = state.reviewer_step_index
     stored_reviewer = (
         state.reviewer_role, state.reviewer_adapter,
@@ -373,7 +375,7 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
 
     lines.append(
         f"  Workflow step cursor: {state.workflow_step_index}"
-        f" (configured steps: {len(cfg.auto_fix_review)})")
+        f" (configured steps: {len(cfg.workflow_plan)})")
 
     lines.append("  Scope amendment transactions:")
     if not state.scope_amendments:
@@ -843,7 +845,9 @@ def _review_effort_source_key(cfg: Config, review) -> str:
 
 def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
     """Show the configured workflow roles and fully resolved session identities."""
-    steps = cfg.auto_fix_review
+    steps = tuple(
+        step for step in cfg.workflow_plan
+        if isinstance(step, WorkflowPlanStep))
     if not steps:
         return ["Auto-fix workflow: no plan review step configured"]
     lines = [

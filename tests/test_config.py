@@ -102,8 +102,7 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.claude_tier_efforts, {})
         self.assertEqual(cfg.codex_efforts, {})
         self.assertEqual(cfg.codex_tier_efforts, {})
-        self.assertEqual(cfg.receipt_refresh, "manual")
-        self.assertEqual(cfg.workflow_selection, ())
+        self.assertEqual(cfg.workflow_integration, ())
 
     def test_scalar_and_singleton_adapter_name_are_equivalent(self):
         scalar = load_config(self.write('[adapter]\nname = "claude"\n'), "plan01")
@@ -253,23 +252,21 @@ class TestLoadConfig(ConfigTestCase):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
             '[workflow]\n'
-            'task = [{ role = "fixer" }, { action = "focused_test" }, '
-            '{ action = "full_test" }]\n'
-            'plan = [{ action = "full_test" }]\n'
-            'selection = [{ action = "full_verify" }]\n'), "plan01")
+            'task = [{ role = "fixer" }, { action = "focused_test" }]\n'
+            'plan = [{ action = "focused_sweep" }]\n'
+            'integration = [{ action = "full_verify" }]\n'), "plan01")
 
         self.assertEqual(cfg.workflow_task[0].role, "fixer")
         self.assertEqual(cfg.workflow_task[1], WorkflowActionStep("focused_test"))
-        self.assertEqual(cfg.workflow_task[2], WorkflowActionStep("full_test"))
-        self.assertEqual(cfg.workflow_plan, (WorkflowActionStep("full_test"),))
+        self.assertEqual(cfg.workflow_plan, (WorkflowActionStep("focused_sweep"),))
         self.assertEqual(
-            cfg.workflow_selection, (WorkflowActionStep("full_verify"),))
+            cfg.workflow_integration, (WorkflowActionStep("full_verify"),))
 
     def test_workflow_actions_reject_mixed_wrong_level_and_action_only_task(self):
         cases = (
-            ('[workflow]\nplan = [{ role = "x", action = "full_test" }]\n',
+            ('[workflow]\nplan = [{ role = "x", action = "focused_sweep" }]\n',
              "exactly one"),
-            ('[workflow]\nplan = [{ action = "full_test", adapter = "codex" }]\n',
+            ('[workflow]\nplan = [{ action = "focused_sweep", adapter = "codex" }]\n',
              "unknown keys"),
             ('[workflow]\ntask = [{ action = "full_verify" }]\n',
              r"not valid.*task"),
@@ -277,46 +274,49 @@ class TestLoadConfig(ConfigTestCase):
              r"not valid.*plan"),
             ('[workflow]\nplan = [{ action = "focused_test" }]\n',
              r"not valid.*plan"),
-            ('[workflow]\nselection = [{ action = "full_test" }]\n',
-             r"not valid.*selection"),
-            ('[workflow]\nselection = [{ action = "deploy" }]\n',
+            ('[workflow]\nintegration = [{ action = "focused_sweep" }]\n',
+             r"not valid.*integration"),
+            ('[workflow]\nintegration = [{ action = "deploy" }]\n',
              "unknown action"),
             ('[workflow]\ntask = [{ action = "full_test" }]\n',
-             "at least one role"),
+             "unknown action"),
         )
         for text, message in cases:
             with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):
                 load_config(self.write(text), "plan01")
 
-    def test_workflow_selection_role_uses_plan_role_resolution(self):
+    def test_workflow_integration_role_uses_plan_role_resolution(self):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
-            '[workflow]\nselection = ['
+            '[workflow]\nintegration = ['
             '{ action = "full_verify" }, '
             '{ role = "reviewer", adapter = "codex" }, '
             '{ role = "fixer", adapter = "claude" }, '
             '{ action = "full_verify" }]\n'), "plan01")
 
-        step = cfg.workflow_selection[1]
+        step = cfg.workflow_integration[1]
         self.assertEqual(step.role, "reviewer")
         self.assertEqual(step.adapter, "codex")
         self.assertEqual(step.requested_model, "gpt-5.6-sol")
         self.assertEqual(step.requested_effort, "high")
-        self.assertEqual(cfg.workflow_selection[2].role, "fixer")
-        self.assertEqual(cfg.workflow_selection[2].adapter, "claude")
+        self.assertEqual(cfg.workflow_integration[2].role, "fixer")
+        self.assertEqual(cfg.workflow_integration[2].adapter, "claude")
 
     def test_plan_is_the_only_per_plan_review_source(self):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
-            '[workflow]\nplan = ['
+            '[workflow]\nplan = [{ action = "focused_sweep" }, '
             '{ role = "reviewer", adapter = "codex" }, '
-            '{ role = "reviewer", adapter = "codex" }]\n'
-            'selection = [{ action = "full_verify" }]\n'), "plan01")
+            '{ action = "focused_sweep" }, '
+            '{ role = "reviewer", adapter = "codex" }, '
+            '{ action = "focused_sweep" }]\n'
+            'integration = [{ action = "full_verify" }]\n'), "plan01")
 
-        self.assertEqual([step.role for step in cfg.auto_fix_review],
+        self.assertEqual([step.role for step in cfg.workflow_plan
+                          if not isinstance(step, WorkflowActionStep)],
                          ["reviewer", "reviewer"])
 
-    def test_selection_full_verify_repair_positions_are_validated(self):
+    def test_integration_full_verify_repair_positions_are_validated(self):
         cases = (
             ('{ role = "reviewer", adapter = "codex" }, '
              '{ action = "full_verify" }',
@@ -338,12 +338,12 @@ class TestLoadConfig(ConfigTestCase):
              '{ role = "reviewer", adapter = "codex" }',
              "must end with full_verify"),
         )
-        for selection, message in cases:
-            with self.subTest(selection=selection), self.assertRaisesRegex(
+        for integration, message in cases:
+            with self.subTest(integration=integration), self.assertRaisesRegex(
                     AssentError, message):
                 load_config(self.write(
-                    _WORKFLOW_ROLES + '[workflow]\nselection = ['
-                    + selection + ']\n'), "plan01")
+                    _WORKFLOW_ROLES + '[workflow]\nintegration = ['
+                    + integration + ']\n'), "plan01")
 
     def test_workflow_verdict_step_reuses_adapter_mappings(self):
         cfg = load_config(self.write(
@@ -354,8 +354,10 @@ class TestLoadConfig(ConfigTestCase):
             '[adapter.codex.efforts.core]\nslight = "review-effort"\n'
             '[roles.reviewer_core]\nability = ["review"]\nmodel = "core"\n'
             'effort = "slight"\n'
-            '[workflow]\nplan = [{ role = "reviewer_core", adapter = "codex" }]\n'), "plan01")
-        review = cfg.workflow_plan[0]
+            '[workflow]\nplan = [{ action = "focused_sweep" }, '
+            '{ role = "reviewer_core", adapter = "codex" }, '
+            '{ action = "focused_sweep" }]\n'), "plan01")
+        review = cfg.workflow_plan[1]
         self.assertEqual(review.adapter, "codex")
         self.assertNotIn(review.adapter, cfg.adapter_names)
         self.assertEqual(review.command, "codex-review.cmd")
@@ -364,15 +366,15 @@ class TestLoadConfig(ConfigTestCase):
 
     def test_workflow_rejects_invalid_shapes_and_values(self):
         cases = (
-            ('auto_fix = true\n', r"\[auto_fix\].*table"),
-            ('[auto_fix]\nextra = true\n', "unknown keys"),
+            ('auto_fix = true\n', "unknown top-level keys"),
+            ('[auto_fix]\nextra = true\n', "unknown top-level keys"),
             ('workflow = true\n', r"\[workflow\].*table"),
             ('[workflow]\nextra = true\n', "unknown keys"),
             ('[workflow]\nplan = true\n', "wrong type"),
             (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "reviewer", adapter = "unknown" }]\n',
              "not a registered adapter"),
             (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "observer" }]\n',
-             "cannot open any session"),
+             "must start with focused_sweep"),
         )
         for text, message in cases:
             with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):
@@ -381,24 +383,28 @@ class TestLoadConfig(ConfigTestCase):
     def test_workflow_plan_roles_use_explicit_or_primary_adapter(self):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
-            '[workflow]\nplan = ['
+            '[workflow]\nplan = [{ action = "focused_sweep" }, '
             '{ role = "reviewer", adapter = "claude" }, '
-            '{ role = "fixer" }, '
-            '{ role = "reviewer", adapter = "codex" }]\n'), "plan01")
-        self.assertEqual([step.role for step in cfg.workflow_plan],
+            '{ role = "fixer" }, { action = "focused_sweep" }, '
+            '{ role = "reviewer", adapter = "codex" }, '
+            '{ action = "focused_sweep" }]\n'), "plan01")
+        roles = [step for step in cfg.workflow_plan
+                 if not isinstance(step, WorkflowActionStep)]
+        self.assertEqual([step.role for step in roles],
                          ["reviewer", "fixer", "reviewer"])
-        self.assertEqual([step.adapter for step in cfg.workflow_plan],
+        self.assertEqual([step.adapter for step in roles],
                          ["claude", "claude", "codex"])
 
     def test_verdict_and_fixer_roles_may_omit_or_override_adapter(self):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
             '[adapter]\nname = ["claude", "codex"]\n'
-            '[workflow]\nplan = ['
+            '[workflow]\nplan = [{ action = "focused_sweep" }, '
             '{ role = "reviewer" }, '
-            '{ role = "fixer", adapter = "codex" }]\n'), "plan01")
+            '{ role = "fixer", adapter = "codex" }, '
+            '{ action = "focused_sweep" }]\n'), "plan01")
 
-        reviewer, fixer = cfg.workflow_plan
+        reviewer, fixer = cfg.workflow_plan[1:3]
         self.assertEqual(reviewer.adapter, "claude")
         self.assertEqual(reviewer.requested_model, "fable")
         self.assertEqual(reviewer.requested_effort, "high")
@@ -406,8 +412,7 @@ class TestLoadConfig(ConfigTestCase):
 
     def test_removed_auto_fix_review_names_table_and_layer_file(self):
         path = self.write('[auto_fix.review]\nadapter = "codex"\n')
-        with self.assertRaisesRegex(
-                AssentError, rf"\[auto_fix\.review\].*{re.escape(str(path.resolve()))}"):
+        with self.assertRaisesRegex(AssentError, "unknown top-level keys"):
             load_config(path, "plan01")
 
     def test_missing_file_raises(self):
@@ -519,23 +524,13 @@ class TestLoadConfig(ConfigTestCase):
                     AssentError, message):
                 load_config(self.write(text), "plan01")
 
-    def test_receipt_refresh_domain_default_and_fail_closed(self):
-        # An absent section, an absent key, and each stated mode; anything else is
-        # refused at load time rather than silently treated as one of the two.
-        self.assertEqual(
-            load_config(self.write("[verification]\n"), "plan01").receipt_refresh,
-            "manual")
-        for mode in ("manual", "auto"):
-            with self.subTest(mode=mode):
-                cfg = load_config(self.write(
-                    f'[verification]\nreceipt_refresh = "{mode}"\n'), "plan01")
-                self.assertEqual(cfg.receipt_refresh, mode)
-        with self.assertRaisesRegex(AssentError, "receipt_refresh"):
-            load_config(self.write(
-                '[verification]\nreceipt_refresh = "always"\n'), "plan01")
-        with self.assertRaisesRegex(AssentError, "wrong type"):
-            load_config(self.write(
-                "[verification]\nreceipt_refresh = true\n"), "plan01")
+    def test_removed_workflow_settings_are_rejected(self):
+        for text in (
+                '[verification]\nreceipt_refresh = "manual"\n',
+                '[workflow]\nselection = [{ action = "full_verify" }]\n',
+                '[workflow]\nplan = [{ action = "full_test" }]\n'):
+            with self.subTest(text=text), self.assertRaises(AssentError):
+                load_config(self.write(text), "plan01")
 
 
 class TestUserHomePath(unittest.TestCase):
@@ -767,20 +762,18 @@ class TestLayeredConfig(ConfigTestCase):
         self.assertIn("adapter", adapter)
         cfg = load_config(self.project_config, "plan01")
         self.assertEqual(cfg.adapter_names, ("claude", "codex"))
-        self.assertEqual(cfg.receipt_refresh, "manual")
         self.assertEqual(
             [step.action if isinstance(step, WorkflowActionStep) else step.role
              for step in cfg.workflow_task],
             ["implementer", "focused_test"])
-        self.assertEqual([step.role for step in cfg.workflow_plan],
-                         ["reviewer_fixer", "reviewer_fixer"])
-        self.assertEqual([step.role for step in cfg.auto_fix_review],
-                         ["reviewer_fixer", "reviewer_fixer"])
-        self.assertTrue(cfg.auto_fix_review[0].writes)
-        self.assertTrue(cfg.auto_fix_review[0].produces_verdict)
         self.assertEqual(
             [step.action if isinstance(step, WorkflowActionStep) else step.role
-             for step in cfg.workflow_selection],
+             for step in cfg.workflow_plan],
+            ["focused_sweep", "reviewer_fixer", "focused_sweep",
+             "reviewer_fixer", "focused_sweep"])
+        self.assertEqual(
+            [step.action if isinstance(step, WorkflowActionStep) else step.role
+             for step in cfg.workflow_integration],
             ["full_verify", "reviewer_fixer", "full_verify"])
 
     def test_init_preserves_existing_inline_adapter_layout(self):
@@ -893,7 +886,7 @@ class TestBlankOverrideSemantics(ConfigTestCase):
 
     def test_enumerated_settings_keep_their_own_domain_refusal(self):
         # Blank handling must not displace the existing domain checks.
-        with self.assertRaisesRegex(AssentError, "receipt_refresh"):
+        with self.assertRaisesRegex(AssentError, "unknown top-level keys"):
             load_config(self.write(
                 '[verification]\nreceipt_refresh = ""\n'), "plan01")
         with self.assertRaisesRegex(AssentError, "is not a valid effort"):
@@ -908,7 +901,7 @@ class TestBlankOverrideSemantics(ConfigTestCase):
         cfg = load_config(self.write(
             "[adapter]\n[adapter.claude]\n[adapter.claude.models]\n"
             "[adapter.claude.efforts]\n[adapter.claude.efforts.lite]\n"
-            "[run]\n[watchdog]\n[verification]\n"), "plan01")
+            "[run]\n[watchdog]\n[workflow]\n"), "plan01")
         # the user's stated models table still replaces the built-in one whole,
         # exactly as it does without the project file
         self.assertEqual(cfg.claude_models,
@@ -919,7 +912,6 @@ class TestBlankOverrideSemantics(ConfigTestCase):
         self.assertEqual(cfg.source_of("adapter.claude.models.core"), USER_LAYER)
         self.assertEqual(cfg.source_of("adapter.claude.efforts.lite.heavy"),
                          USER_LAYER)
-        self.assertEqual(cfg.receipt_refresh, "manual")
 
 
 class TestAdapterSettings(ConfigTestCase):

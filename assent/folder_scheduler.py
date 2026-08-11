@@ -59,7 +59,7 @@ def _package_search_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _start_folder(config_path: str, folder: str, *, auto_fix: bool = False) -> subprocess.Popen:
+def _start_folder(config_path: str, folder: str) -> subprocess.Popen:
     """Start an isolated child process equivalent to ``assent run <folder>``.
 
     stdin is a pipe rather than DEVNULL so the parent has a signal-independent
@@ -71,8 +71,6 @@ def _start_folder(config_path: str, folder: str, *, auto_fix: bool = False) -> s
     the absolute ``--config`` path is what still locates the project.
     """
     command = [sys.executable, "-m", "assent", "run", folder]
-    if auto_fix:
-        command.append("--auto-fix")
     command.extend(("--config", str(Path(config_path).resolve())))
     child_env = dict(os.environ)
     child_env["ASSENT_STDIN_STOP"] = "1"
@@ -438,8 +436,7 @@ def _interrupt_and_wait(
         active.clear()
 
 
-def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1, *,
-            auto_fix: bool = False) -> int:
+def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
     """Run every unfinished work folder in folder-dependency order."""
     assent_dir = Path(assent_dir)
     if not (assent_dir.parent / ".git").exists():
@@ -496,11 +493,7 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1, *,
                         break
                     print(decision)
                 try:
-                    if auto_fix:
-                        process = _start_folder(
-                            config_path, folder, auto_fix=True)
-                    else:
-                        process = _start_folder(config_path, folder)
+                    process = _start_folder(config_path, folder)
                     active[folder] = process
                     reader = _start_output_reader(folder, process, output)
                     if reader is not None:

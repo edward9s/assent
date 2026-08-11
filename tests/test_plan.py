@@ -76,7 +76,7 @@ class TestParseTaskFile(PlanTestCase):
     def test_workflow_state_round_trips_started_boundary(self):
         state = WorkflowState(
             "task", "t001", 2, False, "abc123", ("PASS: focused",),
-            "full_test", "PASSED", "tree123", 0, ("tests passed",))
+            "focused_test", "PASSED", "tree123", 0, ("tests passed",))
         write_workflow_state(self.dir, state)
 
         self.assertEqual(read_workflow_state(self.dir), state)
@@ -97,7 +97,7 @@ class TestParseTaskFile(PlanTestCase):
 
     def test_workflow_cursors_reject_invalid_status_and_phase(self):
         folder = WorkflowState(
-            "task", "t001", 0, True, "base", (), "full_test", "PASSED",
+            "task", "t001", 0, True, "base", (), "focused_test", "PASSED",
             "tree", 0, ())
         write_workflow_state(self.dir, folder)
         path = workflow_state_path(self.dir)
@@ -186,15 +186,7 @@ class TestParseTaskFile(PlanTestCase):
         self.assertEqual(stated.workflow, ("prepare", "implement"))
         self.assertEqual(empty.workflow, ())
 
-    def test_task_workflow_accepts_full_test_beside_a_role(self):
-        task = parse_task_file(self.write(
-            "t001_action.e.toml", task_text(
-                extra_line=('workflow = [{ role = "implement" }, '
-                            '{ action = "full_test" }]'))))
-
-        self.assertEqual(
-            task.workflow, ("implement", TaskWorkflowAction("full_test")))
-
+    def test_task_workflow_accepts_focused_test_beside_a_role(self):
         focused = parse_task_file(self.write(
             "t002_focused.e.toml", task_text(
                 extra_line=('workflow = [{ role = "implement" }, '
@@ -205,13 +197,13 @@ class TestParseTaskFile(PlanTestCase):
 
     def test_task_workflow_rejects_action_only_mixed_and_wrong_action(self):
         cases = (
-            ('[{ action = "full_test" }]', "at least one role"),
-            ('[{ role = "implement", action = "full_test" }]', "exactly one"),
+            ('[{ action = "focused_test" }]', "at least one role"),
+            ('[{ role = "implement", action = "focused_test" }]', "exactly one"),
             ('[{ role = "implement" }, { action = "full_verify" }]',
-             "not valid"),
+             "unknown action"),
             ('[{ role = "implement" }, { action = "deploy" }]',
              "unknown action"),
-            ('[{ role = "implement" }, { action = "full_test", adapter = "codex" }]',
+            ('[{ role = "implement" }, { action = "focused_test", adapter = "codex" }]',
              "undefined fields"),
         )
         for value, message in cases:

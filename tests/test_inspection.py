@@ -25,7 +25,7 @@ from tests.test_contracts import GlobalContractsMixin
 
 def _workflow_config(model="core", adapters=("claude",), writes=True):
     ability = "review_fix" if writes else "review"
-    steps = ", ".join(
+    steps = ', { action = "focused_sweep" }, '.join(
         f'{{ role = "folder_reviewer", adapter = "{adapter}" }}'
         for adapter in adapters)
     return (
@@ -38,7 +38,8 @@ def _workflow_config(model="core", adapters=("claude",), writes=True):
         f'model = "{model}"\n'
         'effort = "slight"\n'
         '[workflow]\n'
-        f'plan = [{steps}]\n')
+        'plan = [{ action = "focused_sweep" }, '
+        f'{steps}, {{ action = "focused_sweep" }}]\n')
 
 
 class TestQueries(GlobalContractsMixin, EngineTestCase):
@@ -294,8 +295,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             auto_fix.ReviewFinding(
                 "t001", "src/main.py", "Blocking implementation issue",
                 "The implementation does not satisfy the task contract."),)
-        review = next(step for step in cfg.workflow_plan
-                      if step.produces_verdict)
+        review = next(
+            step for step in cfg.workflow_plan
+            if getattr(step, "produces_verdict", False))
         state = auto_fix.state_for_review(
             auto_fix.ReviewRecord(verdict, findings),
             source_tree=source_tree,
@@ -349,7 +351,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             model="prime", adapters=("claude", "codex")))
         self.commit_all()
         plan = Plan.parse(cfg.tasks_dir)
-        review = cfg.workflow_plan[1]
+        review = cfg.workflow_plan[3]
         state = auto_fix.state_for_review(
             auto_fix.ReviewRecord("FIXED", (auto_fix.ReviewFinding(
                 "t001", "src/main.py", "Blocking implementation issue",
@@ -387,7 +389,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             model="prime", adapters=("claude", "codex")))
         self.commit_all()
         plan = Plan.parse(cfg.tasks_dir)
-        review = cfg.workflow_plan[1]
+        review = cfg.workflow_plan[3]
         finding = auto_fix.ReviewFinding(
             "t001", "src/main.py", "Blocking implementation issue",
             "No configured round repaired the declared behavior.")
@@ -479,10 +481,10 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                     task_plan_sha256=auto_fix.sha256_files(
                         task.path for task in plan.tasks),
                     review_prompt_sha256="5" * 64,
-                    reviewer_role=cfg.workflow_plan[0].role,
-                    reviewer_adapter=cfg.auto_fix_review[0].adapter,
-                    reviewer_model=cfg.auto_fix_review[0].requested_model,
-                    reviewer_effort=cfg.auto_fix_review[0].requested_effort,
+                    reviewer_role=cfg.workflow_plan[1].role,
+                    reviewer_adapter=cfg.workflow_plan[1].adapter,
+                    reviewer_model=cfg.workflow_plan[1].requested_model,
+                    reviewer_effort=cfg.workflow_plan[1].requested_effort,
                     review_context=context, failure_trigger=trigger)
                 auto_fix.write_auto_fix_state(
                     auto_fix.auto_fix_state_path(cfg), state)
@@ -517,10 +519,10 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             source_tree=source_tree,
             task_plan_sha256=task_digest,
             review_prompt_sha256="4" * 64,
-            reviewer_role=cfg.workflow_plan[0].role,
-            reviewer_adapter=cfg.auto_fix_review[0].adapter,
-            reviewer_model=cfg.auto_fix_review[0].requested_model,
-            reviewer_effort=cfg.auto_fix_review[0].requested_effort)
+            reviewer_role=cfg.workflow_plan[1].role,
+            reviewer_adapter=cfg.workflow_plan[1].adapter,
+            reviewer_model=cfg.workflow_plan[1].requested_model,
+            reviewer_effort=cfg.workflow_plan[1].requested_effort)
         fingerprint = state.current_finding_fingerprints[0]
         state = auto_fix.with_worker_dispositions(
             state, (auto_fix.WorkerDisposition(
@@ -550,7 +552,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertIn("Approved scope additions:", report)
         self.assertIn("Repair acknowledgements:", report)
         self.assertIn("fixed; Focused regression passes.", report)
-        self.assertIn("Workflow step cursor: 1 (configured steps: 1)", report)
+        self.assertIn("Workflow step cursor: 1 (configured steps: 3)", report)
         self.assertIn("Scope amendment transactions:", report)
         self.assertIn("tests/test_inspection.py (existing_file)", report)
         self.assertIn("TECHNICAL DEBT REVIEW REQUIRED", report)
@@ -563,9 +565,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             source_tree=source_tree,
             task_plan_sha256=task_digest,
             review_prompt_sha256="4" * 64,
-            reviewer_adapter=cfg.auto_fix_review[0].adapter,
-            reviewer_model=cfg.auto_fix_review[0].requested_model,
-            reviewer_effort=cfg.auto_fix_review[0].requested_effort,
+            reviewer_adapter=cfg.workflow_plan[1].adapter,
+            reviewer_model=cfg.workflow_plan[1].requested_model,
+            reviewer_effort=cfg.workflow_plan[1].requested_effort,
             previous=state, review_stage="recheck")
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg), passed)
@@ -586,9 +588,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 source_tree=source_tree,
                 task_plan_sha256=task_digest,
                 review_prompt_sha256="4" * 64,
-                reviewer_adapter=cfg.auto_fix_review[0].adapter,
-                reviewer_model=cfg.auto_fix_review[0].requested_model,
-                reviewer_effort=cfg.auto_fix_review[0].requested_effort,
+                reviewer_adapter=cfg.workflow_plan[1].adapter,
+                reviewer_model=cfg.workflow_plan[1].requested_model,
+                reviewer_effort=cfg.workflow_plan[1].requested_effort,
                 review_context="blocked_adjudication",
                 failure_trigger="worker_blocked")
 
@@ -603,9 +605,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 source_tree=source_tree,
                 task_plan_sha256=task_digest,
                 review_prompt_sha256="4" * 64,
-                reviewer_adapter=cfg.auto_fix_review[0].adapter,
-                reviewer_model=cfg.auto_fix_review[0].requested_model,
-                reviewer_effort=cfg.auto_fix_review[0].requested_effort,
+                reviewer_adapter=cfg.workflow_plan[1].adapter,
+                reviewer_model=cfg.workflow_plan[1].requested_model,
+                reviewer_effort=cfg.workflow_plan[1].requested_effort,
                 previous=passed, review_stage="recheck")
 
     def test_report_isolates_namespaced_checkpoints(self):

@@ -259,7 +259,7 @@ Rules:
   `title / deps / model / status / scope / verify / goal / acceptance` are
   required.
 - `workflow` is optional. Each entry contains exactly one of `{ role = "..." }`
-  or `{ action = "focused_test" }` / `{ action = "full_test" }`. Role names
+  or `{ action = "focused_test" }`. Role names
   come from the effective `[roles]` settings. When omitted, the task
   inherits `[workflow].task`; when neither is stated, the scheduler opens one
   implicit session using the task's own `model` and `effort`. An explicit
@@ -489,19 +489,18 @@ detail = '''The exact final control record was received; no quota wait, adapter 
 
 `[workflow].task` roles own one task's implementation and may write only that
 task's scope. `[workflow].plan` roles own the plan accountability unit and may
-write only the union of its task scopes. `[workflow].selection` owns the exact
+write only the union of its task scopes. `[workflow].integration` owns the exact
 one-or-more-plan source selection after every plan boundary is complete; its
 roles make failure-only decisions or repair assignments. They never acquire
 task-file, receipt, acceptance, target-ref, or Git ownership. An omitted
-`adapter` on any plan or selection role resolves to the first name under
+`adapter` on any plan or integration role resolves to the first name under
 `[adapter].name`; an explicit adapter selects that registered provider. The
-scheduler alone owns the `focused_test` action available at
-task positions, the `full_test` action available at task/plan positions, and
-the `full_verify` action available at selection positions. No AI role may invoke
+scheduler alone owns `focused_test` at task positions, `focused_sweep` at plan
+positions, and `full_verify` at integration positions. No AI role may invoke
 these actions, the complete suite, Git, or Assent directly when its scheduler
 prompt forbids them.
 
-A selection repair unit is expressed only by explicit ordered positions. The
+A repair unit is expressed only by explicit ordered positions. The
 compact form is `full_verify`, one writable verdict-producing reviewer-fixer,
 then another `full_verify`; it reviews and repairs in one AI session. The split
 form uses a read-only verdict role followed by a writable non-verdict fixer.
@@ -515,7 +514,7 @@ pointer, silently shrinks the selection, or treats a receipt as source truth.
 
 The exact `run`/`verify`/`accept`/`clean`/`archive`/`reject`/`rework` command
 and flag semantics — folder selection, the `...` remainder token, `--verify`,
-`--auto-fix` selection interaction, `--focus`/`--batch`/exact-selection
+`--focus`/`--batch`/exact-selection
 verify modes, `clean`/`archive` eligibility proofs, and `reject`/`rework`
 mechanics — are specified normatively in `~/.assent/workflow.md`'s "CLI and
 task-selection rules" section, not here. What the Planning AI needs from this
@@ -538,15 +537,15 @@ command syntax, the batch/`--all` receipt-replay modes, and the integration
 lock are specified in `~/.assent/workflow.md`'s "Review, acceptance, and
 cleanup lifecycle" section, not here.
 
-### Opt-in folder review and bounded repair
+### Automatic folder review and bounded repair
 
-When `run --auto-fix` is passed, Assent considers its bounded review-and-repair
-workflow when no task can make further progress: either the folder is complete,
-or it is quiescent-blocked. The complete path first requires the final focused
-checks to pass; the blocked path uses durable worker or focused-gate evidence
-for read-only adjudication. Repair reopens only implicated existing tasks and
-never widens scope or task requirements on its own. Without the flag, this
-workflow never runs. It is not a second task status, not implicit acceptance,
+Assent always follows the configured bounded review-and-repair workflow when
+no task can make further progress: either the folder is complete, or it is
+quiescent-blocked. A passing scheduler action skips the following repair roles.
+A failing action advances to the next configured reviewer/fixer, which may
+return exact scope additions for scheduler validation before rework. The finite
+array is the only automation budget; exhaustion preserves evidence and edits as
+`REVIEW UNRESOLVED, HUMAN DECISION`. It is not a second task status, not implicit acceptance,
 and not a substitute for complete verification — `_report.md`'s auto-fix line
 only ever means one of:
 
@@ -558,7 +557,7 @@ only ever means one of:
 
 The exact reviewer-selection rules, the folder-level review/repair step
 order, the full `_auto_fix.toml` schema, and the finding-repair-escalation
-mechanics are specified in `~/.assent/workflow.md`'s "Opt-in folder review
+mechanics are specified in `~/.assent/workflow.md`'s "Automatic folder review
 and bounded repair" section, not here. What a Review AI needs at an
 accept/rework meeting is the eligible-technical-debt concept: a finding may
 be recorded as durable technical debt only when it is first introduced by a
@@ -590,9 +589,8 @@ verification. The second stage builds one temporary integration candidate
 outside any AI session and runs the complete `.assent/verify.py` once, after
 a folder finishes; its result is a derived `_verification.toml` receipt, and
 `_report.md` shows whether it is `PASSED` or `FAILED`, `fresh` or `stale`. A
-`DONE` task has only passed the first stage — the second stage may not have
-run yet (the default `"manual"` receipt-refresh policy defers it to an
-explicit `assent verify`; `"auto"` runs it at folder closeout) — so `DONE`
+`DONE` task has only passed the first stage — the integration workflow may not
+have completed yet — so `DONE`
 alone is never proof of complete verification, and a missing receipt reports
 `NOT RUN`. The exact candidate construction, its worktree/ignored-directory
 mirroring mechanics, the shared-paths manifest that provisions those

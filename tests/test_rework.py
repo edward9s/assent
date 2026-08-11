@@ -126,7 +126,8 @@ class TestRework(unittest.TestCase):
         self.assertEqual(self._status(second), "TODO")
         entry = read_entries(first.with_name("t001_task.r.toml"))[-1]
         self.assertIn("Automatic repair rework", entry["summary"])
-        self.assertIn("authorization: run --auto-fix", entry["detail"])
+        self.assertIn("authorization: configured workflow repair",
+                      entry["detail"])
 
     def test_all_non_todo_target_statuses_can_reopen(self) -> None:
         task = self._write_task(1, "DONE")

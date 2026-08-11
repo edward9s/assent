@@ -117,10 +117,11 @@ ability = ["review"]
             [step.action if hasattr(step, "action") else step.role
              for step in cfg.workflow_task],
             ["implementer", "focused_test"])
-        self.assertEqual([step.role for step in cfg.workflow_plan],
-                         ["reviewer_fixer", "reviewer_fixer"])
-        self.assertEqual([step.role for step in cfg.auto_fix_review],
-                         ["reviewer_fixer", "reviewer_fixer"])
+        self.assertEqual(
+            [step.action if hasattr(step, "action") else step.role
+             for step in cfg.workflow_plan],
+            ["focused_sweep", "reviewer_fixer", "focused_sweep",
+             "reviewer_fixer", "focused_sweep"])
         self.assertEqual(
             cfg.roles["implementer"].ability,
             ("write_tests", "implement_source"))
@@ -131,7 +132,7 @@ ability = ["review"]
                          ("review", "fix"))
         self.assertEqual(
             [step.action if hasattr(step, "action") else step.role
-             for step in cfg.workflow_selection],
+             for step in cfg.workflow_integration],
             ["full_verify", "reviewer_fixer", "full_verify"])
 
 

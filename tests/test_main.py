@@ -242,7 +242,9 @@ class TestDispatch(MainTestCase):
         config = self.write_config()
         self.write_task("work")
         with patch("assent.__main__.engine.run", return_value=0), patch(
-                "assent.__main__.run_all", return_value=0) as mocked:
+                "assent.__main__.run_all", return_value=0) as mocked, patch(
+                "assent.__main__.verify_batch",
+                return_value=0):
             code, _ = self.run_main(
                 ["run", "work", "--all", "--config", str(config)])
         self.assertEqual(code, 0)
@@ -258,104 +260,19 @@ class TestDispatch(MainTestCase):
 
     def test_run_all_dispatches_with_default_jobs(self):
         config = self.write_config()
-        with patch("assent.__main__.run_all", return_value=0) as mocked:
+        with patch("assent.__main__.run_all", return_value=0) as mocked, \
+                patch("assent.__main__.verify_batch", return_value=0):
             code, _ = self.run_main(["run", "--all", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[2], 1)
 
-    def test_run_auto_fix_reaches_the_explicit_engine_policy(self):
+    def test_removed_auto_fix_option_is_a_usage_error(self):
         config = self.write_config()
         self.write_task("work")
-        with patch("assent.__main__.engine.run", return_value=0) as mocked:
-            code, _ = self.run_main(
-                ["run", "work", "--auto-fix", "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertTrue(mocked.call_args.kwargs["auto_fix"])
-
-    def test_run_auto_fix_reaches_the_automatic_engine_policy(self):
-        config = self.write_config()
-        self.write_task("work")
-        with patch("assent.__main__.engine.run", return_value=0) as mocked:
-            code, _ = self.run_main(
-                ["run", "--auto-fix", "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertTrue(mocked.call_args.kwargs["auto_fix"])
-
-    def test_run_auto_fix_reaches_remainder_and_all_scheduler_policies(self):
-        config = self.write_config()
-        self.write_task("first")
-        self.write_task("second")
-        with patch("assent.__main__.engine.run", return_value=0) as run_mock:
-            code, _ = self.run_main(
-                ["run", "first", "...", "--auto-fix",
-                 "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(
-            [call.kwargs["auto_fix"] for call in run_mock.call_args_list],
-            [True, True])
-
-        with patch("assent.__main__.run_all", return_value=0) as all_mock:
-            code, _ = self.run_main(
-                ["run", "--all", "--jobs", "2", "--auto-fix",
-                 "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertTrue(all_mock.call_args.kwargs["auto_fix"])
-
-    def test_run_auto_fix_reaches_each_legal_limited_selector(self):
-        config = self.write_config()
-        self.write_task("alpha")
-        self.write_task("beta", "DONE")
-        self.write_task("gamma", "DONE")
-
-        cases = (
-            (["run", "alpha", "beta", "--auto-fix"],
-             ["alpha", "beta"], False, None),
-            (["run", "alpha", "...", "--auto-fix"],
-             ["alpha", "beta", "gamma"], False, None),
-            (["run", "...", "--auto-fix"],
-             ["alpha", "beta", "gamma"], False, None),
-            (["run", "--once", "--auto-fix"],
-             ["alpha"], True, None),
-            (["run", "alpha", "--once", "--auto-fix"],
-             ["alpha"], True, None),
-            (["run", "--task", "t001", "--auto-fix"],
-             ["alpha"], False, "t001"),
-            (["run", "alpha", "--task", "t001", "--auto-fix"],
-             ["alpha"], False, "t001"),
-        )
-        for argv, expected_folders, expected_once, expected_task in cases:
-            with self.subTest(argv=argv), patch(
-                    "assent.__main__.engine.run", return_value=0) as run_mock:
-                code, _ = self.run_main(
-                    [*argv, "--config", str(config)])
-
-            self.assertEqual(code, 0, argv)
-            self.assertEqual(
-                [call.args[0].tasks_name for call in run_mock.call_args_list],
-                expected_folders)
-            self.assertTrue(run_mock.call_args_list)
-            for call in run_mock.call_args_list:
-                self.assertTrue(call.kwargs["auto_fix"])
-                self.assertEqual(call.kwargs["once"], expected_once)
-                self.assertEqual(call.kwargs["task_id"], expected_task)
-
-    def test_run_auto_fix_with_all_and_a_prefix_forwards_one_policy(self):
-        config = self.write_config()
-        self.write_task("alpha")
-        self.write_task("beta")
-        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
-                patch("assent.__main__.run_all", return_value=0) as all_mock:
-            code, _ = self.run_main([
-                "run", "alpha", "--all", "--jobs", "2", "--auto-fix",
-                "--config", str(config)])
-
-        self.assertEqual(code, 0)
-        self.assertEqual(
-            [call.args[0].tasks_name for call in run_mock.call_args_list],
-            ["alpha"])
-        self.assertTrue(run_mock.call_args.kwargs["auto_fix"])
-        all_mock.assert_called_once_with(
-            str(config), config.parent.resolve(), 2, auto_fix=True)
+        with self.assertRaises(SystemExit) as ctx, \
+                contextlib.redirect_stderr(io.StringIO()):
+            main(["run", "work", "--auto-fix", "--config", str(config)])
+        self.assertEqual(ctx.exception.code, 2)
 
     def test_run_named_folders_dispatch_in_given_order(self):
         config = self.write_config()
@@ -386,7 +303,9 @@ class TestDispatch(MainTestCase):
         self.write_task("first")
         self.write_task("second")
         with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
-                patch("assent.__main__.run_all", return_value=0) as all_mock:
+                patch("assent.__main__.run_all", return_value=0) as all_mock, \
+                patch("assent.__main__.verify_batch",
+                      return_value=0):
             code, _ = self.run_main([
                 "run", "first", "second", "--all", "--jobs", "3",
                 "--config", str(config)])
@@ -497,86 +416,46 @@ class TestDispatch(MainTestCase):
                 main(argv)
             self.assertEqual(ctx.exception.code, 2)
 
-    def test_verify_dispatches_explicit_folder_and_preserves_exit_code(self):
+    def test_verify_dispatches_exact_selection_workflow(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
-        with patch("assent.__main__.verify_folder", side_effect=[0, 1]) as mocked, \
-                patch("assent.__main__.inspection.try_write_report") as report:
+        with patch("assent.__main__.engine.run_selection_workflow",
+                   side_effect=[0, 1]) as workflow:
             codes = [self.run_main(
                 ["verify", "reviewed", "--config", str(config)])[0]
                      for _ in range(2)]
         self.assertEqual(codes, [0, 1])
-        self.assertEqual(mocked.call_count, 2)
-        self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
-        report.assert_not_called()
+        self.assertEqual(workflow.call_count, 2)
+        workflow.assert_called_with(
+            str(config), config.parent.resolve(), ["reviewed"])
 
-    def test_single_folder_verify_does_not_add_a_cli_report_refresh(self):
-        config = self.write_config()
-        self.write_task("reviewed", "DONE")
-        report_path = self.root / ".assent" / "reviewed" / "_report.md"
-
-        for result in (0, 1):
-            with self.subTest(result=result):
-                report_path.write_text("stale report\n", encoding="utf-8")
-                events = []
-
-                def verify(cfg, result=result):
-                    events.append(("verify", report_path.read_text(
-                        encoding="utf-8")))
-                    report_path.write_text(
-                        f"receipt result {result}\n", encoding="utf-8")
-                    return result
-
-                def refresh(cfg, result=result):
-                    events.append(("report", report_path.read_text(
-                        encoding="utf-8")))
-                    report_path.write_text(
-                        f"report result {result}\n", encoding="utf-8")
-
-                with patch("assent.__main__.verify_folder",
-                           side_effect=verify), \
-                        patch("assent.__main__.inspection.try_write_report",
-                              side_effect=refresh) as report:
-                    code, _ = self.run_main(
-                        ["verify", "reviewed", "--config", str(config)])
-
-                self.assertEqual(code, result)
-                self.assertEqual(events, [("verify", "stale report\n")])
-                report.assert_not_called()
-                self.assertEqual(
-                    report_path.read_text(encoding="utf-8"),
-                    f"receipt result {result}\n")
-
-    def test_verify_dispatches_exact_selected_batch_and_focus(self):
+    def test_verify_dispatches_selected_and_focused_forms(self):
         config = self.write_config()
         self.write_task("later", "DONE")
         self.write_task("earlier", "DONE")
-        with patch("assent.__main__.verify_selected_batch", return_value=0) as batch:
+        with patch("assent.__main__.engine.run_selection_workflow",
+                   return_value=0) as workflow:
             code, _ = self.run_main([
-                "verify", "later", "earlier", "--no-bisect",
-                "--config", str(config)])
+                "verify", "later", "earlier", "--config", str(config)])
         self.assertEqual(code, 0)
-        self.assertEqual(batch.call_args.args[:2],
-                         (str(config), config.parent.resolve()))
-        self.assertEqual(batch.call_args.args[2], ["later", "earlier"])
-        self.assertFalse(batch.call_args.args[3])
+        workflow.assert_called_once_with(
+            str(config), config.parent.resolve(), ["later", "earlier"])
 
-        self.write_task("reviewed", "DONE")
-        with patch("assent.__main__.engine.verify_focused", return_value=0) as focus:
+        with patch("assent.__main__.engine.verify_focused",
+                   return_value=0) as focus:
             code, _ = self.run_main([
-                "verify", "reviewed", "--focus", "--config", str(config)])
+                "verify", "later", "--focus", "--config", str(config)])
         self.assertEqual(code, 0)
-        self.assertEqual(focus.call_args.args[0].tasks_name, "reviewed")
+        self.assertEqual(focus.call_args.args[0].tasks_name, "later")
 
-    def test_verify_batch_dispatches_bisect_and_keeps_the_default_prompt(self):
+    def test_verify_batch_dispatches_dynamic_integration(self):
         config = self.write_config()
-        with patch("assent.__main__.verify_batch", return_value=0) as mocked:
-            code, _ = self.run_main(["verify", "--batch", "--config", str(config)])
+        with patch("assent.__main__.engine.run_dynamic_selection_workflow",
+                   return_value=0) as workflow:
+            code, _ = self.run_main([
+                "verify", "--batch", "--config", str(config)])
         self.assertEqual(code, 0)
-        self.assertEqual(mocked.call_args.args[2], True)
-        # No confirmation callback is injected, so the CLI keeps the terminal
-        # `input` default that asks about skipping a conflicting source.
-        self.assertEqual(mocked.call_args.kwargs, {})
+        workflow.assert_called_once_with(str(config), config.parent.resolve())
 
     def test_verify_batch_help_states_the_conflict_skip_confirmation(self):
         output = io.StringIO()
@@ -593,7 +472,8 @@ class TestDispatch(MainTestCase):
     def test_verify_interrupt_returns_130(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
-        with patch("assent.__main__.verify_folder", side_effect=KeyboardInterrupt), \
+        with patch("assent.__main__.engine.run_selection_workflow",
+                   side_effect=KeyboardInterrupt), \
                 patch("assent.__main__.inspection.try_write_report") as report:
             code, out = self.run_main(
                 ["verify", "reviewed", "--config", str(config)])
@@ -843,7 +723,7 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main(["check", "--config", str(config)])
 
         self.assertEqual(code, 1)
-        self.assertIn("selection must start with full_verify", out)
+        self.assertIn("unknown keys: selection", out)
         mocked.assert_not_called()
 
     def test_check_without_folder_rejects_bad_folder_graph(self):
@@ -870,450 +750,68 @@ class TestDispatch(MainTestCase):
                 self.assertIn("Folder dependency graph: FAIL", out)
 
 
-class TestRunVerifyChaining(MainTestCase):
-    """`run --verify` chains the complete verification that matches the run.
-
-    Each case patches the verification entry point the CLI is expected to
-    choose and makes the other ones fail loudly, so the tests prove the
-    selection-to-verification mapping rather than re-testing verification.
-
-    A single folder has two of those entry points: a complete folder goes to
-    the conditional ``verify_folder_if_needed``, which reports a receipt the
-    run's own closeout already produced instead of repeating the identical full
-    suite, while an incomplete one goes to ``verify_folder`` for its refusing
-    pre-candidate gate.
-    """
+class TestAutomaticIntegrationChaining(MainTestCase):
+    """A successful run automatically enters its matching integration workflow."""
 
     def setUp(self):
         super().setUp()
-        self.config = self.write_config()
+        self.config = self.write_config(
+            '[workflow]\nintegration = [{ action = "full_verify" }]\n')
         self.assent_dir = self.config.parent.resolve()
 
-    @contextlib.contextmanager
-    def only(self, name, result=0):
-        """Allow exactly one of the four verification entry points."""
-        entries = {"verify_folder", "verify_folder_if_needed",
-                   "verify_selected_batch", "verify_batch"}
-        with contextlib.ExitStack() as stack:
-            for other in entries - {name}:
-                stack.enter_context(patch(
-                    f"assent.__main__.{other}",
-                    side_effect=AssertionError(f"used {other}")))
-            yield stack.enter_context(patch(
-                f"assent.__main__.{name}", return_value=result))
-
-    def test_automatically_selected_folder_verifies_that_one_folder(self):
-        # The patched run leaves the automatically selected folder ongoing, so
-        # this is the incomplete single folder that keeps the refusing gate.
-        self.write_task("active", "TODO")
+    def test_one_completed_folder_runs_exact_integration(self):
+        self.write_task("alpha", "DONE")
         with patch("assent.__main__.engine.run", return_value=0), \
-                self.only("verify_folder") as folder:
-            code, out = self.run_main(
-                ["run", "--verify", "--auto-fix", "--config",
-                 str(self.config)])
+                patch("assent.__main__.engine.run_selection_workflow",
+                      return_value=0) as integration:
+            code, _ = self.run_main([
+                "run", "alpha", "--config", str(self.config)])
         self.assertEqual(code, 0)
-        self.assertIn("selected automatically", out)
-        self.assertEqual(folder.call_args.args[0].tasks_name, "active")
+        integration.assert_called_once_with(
+            str(self.config), self.assent_dir, ["alpha"])
 
-    def test_one_explicit_folder_verifies_that_folder(self):
-        self.write_task("alpha", "DONE")
-        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
-                self.only("verify_folder_if_needed") as folder:
-            code, _ = self.run_main(
-                ["run", "alpha", "--verify", "--auto-fix", "--config",
-                 str(self.config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(folder.call_args.args[0].tasks_name, "alpha")
-        self.assertTrue(run_mock.call_args.kwargs["auto_fix"])
-        self.assertTrue(run_mock.call_args.kwargs["run_level_verify"])
-
-    def test_exact_multiple_folders_verify_as_that_selected_batch(self):
+    def test_exact_selection_runs_one_integration_workflow(self):
         self.write_task("alpha", "DONE")
         self.write_task("beta", "DONE")
-        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
-                self.only("verify_selected_batch") as batch:
-            code, _ = self.run_main(
-                ["run", "alpha", "beta", "--verify", "--auto-fix",
-                 "--config", str(self.config)])
+        with patch("assent.__main__.engine.run", return_value=0), \
+                patch("assent.__main__.engine.run_selection_workflow",
+                      return_value=0) as integration:
+            code, _ = self.run_main([
+                "run", "alpha", "beta", "--config", str(self.config)])
         self.assertEqual(code, 0)
-        self.assertEqual(batch.call_args.args,
-                         (str(self.config), self.assent_dir, ["alpha", "beta"]))
-        self.assertEqual(
-            [call.kwargs["run_level_verify"] for call in run_mock.call_args_list],
-            [True, True])
-        self.assertEqual(
-            [call.kwargs["auto_fix"] for call in run_mock.call_args_list],
-            [True, True])
+        integration.assert_called_once_with(
+            str(self.config), self.assent_dir, ["alpha", "beta"])
 
-    def test_exact_run_verify_manual_closeout_hands_off_to_selected_verification(self):
+    def test_all_runs_dynamic_integration_after_success(self):
         self.write_task("alpha", "DONE")
-        self.write_task("beta", "DONE")
-        (self.root / ".git").mkdir()
-        with patch("assent.engine._run_locked", return_value=0), \
-                patch("assent.engine.try_write_report"), \
-                patch("assent.__main__.verify_selected_batch", return_value=0) as batch:
-            code, out = self.run_main(
-                ["run", "alpha", "beta", "--verify", "--config",
-                 str(self.config)])
-
+        with patch("assent.__main__.run_all", return_value=0), \
+                patch("assent.__main__.engine.run_dynamic_selection_workflow",
+                      return_value=0) as integration:
+            code, _ = self.run_main([
+                "run", "--all", "--config", str(self.config)])
         self.assertEqual(code, 0)
-        self.assertEqual(out.count("per-folder receipt"), 2)
-        self.assertEqual(out.count("invocation selection full_verify"), 2)
-        self.assertNotIn("assent verify [--batch]", out)
-        self.assertEqual(batch.call_args.args[2], ["alpha", "beta"])
+        integration.assert_called_once_with(str(self.config), self.assent_dir)
 
-    def test_remainder_verifies_the_pre_expanded_set_once(self):
-        for folder in ("alpha", "beta", "gamma"):
-            self.write_task(folder)
-        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
-                self.only("verify_selected_batch") as batch:
-            code, _ = self.run_main(
-                ["run", "gamma", "...", "--verify", "--auto-fix",
-                 "--config", str(self.config)])
-        self.assertEqual(code, 0)
-        batch.assert_called_once()
-        self.assertEqual(batch.call_args.args[2], ["gamma", "alpha", "beta"])
-        self.assertEqual(
-            [call.args[0].tasks_name for call in run_mock.call_args_list],
-            ["gamma", "alpha", "beta"])
-        self.assertEqual(
-            [call.kwargs["auto_fix"] for call in run_mock.call_args_list],
-            [True, True, True])
-
-    def test_bare_remainder_is_a_whole_project_batch(self):
+    def test_failed_run_starts_no_integration(self):
         self.write_task("alpha")
-        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
-                self.only("verify_batch") as batch:
-            code, _ = self.run_main(
-                ["run", "...", "--verify", "--auto-fix", "--config",
-                 str(self.config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(batch.call_args.args[:2],
-                         (str(self.config), self.assent_dir))
-        self.assertEqual(len(run_mock.call_args_list), 1)
-        self.assertTrue(run_mock.call_args.kwargs["auto_fix"])
+        with patch("assent.__main__.engine.run", return_value=3), \
+                patch("assent.__main__.engine.run_selection_workflow") as exact, \
+                patch("assent.__main__.engine.run_dynamic_selection_workflow") as dynamic:
+            code, _ = self.run_main([
+                "run", "alpha", "--config", str(self.config)])
+        self.assertEqual(code, 3)
+        exact.assert_not_called()
+        dynamic.assert_not_called()
 
-    def test_all_and_an_explicit_prefix_with_all_use_the_whole_project_batch(self):
+    def test_limited_incomplete_run_defers_integration(self):
         self.write_task("alpha", "TODO")
-        for argv in (["run", "--all", "--verify"],
-                     ["run", "alpha", "--all", "--verify"]):
-            with self.subTest(argv=argv):
-                with patch("assent.__main__.run_all", return_value=0) as all_mock, \
-                        patch("assent.__main__.engine.run", return_value=0), \
-                        self.only("verify_batch") as batch:
-                    code, _ = self.run_main(
-                        [*argv, "--auto-fix", "--config", str(self.config)])
-                self.assertEqual(code, 0)
-                self.assertEqual(batch.call_args.args[:2],
-                                 (str(self.config), self.assent_dir))
-                self.assertTrue(all_mock.call_args.kwargs["auto_fix"])
-
-    def test_a_failing_run_is_preserved_and_verifies_nothing(self):
-        self.write_task("alpha")
-        self.write_task("beta", "DONE")
-        cases = (["run", "alpha", "--verify", "--auto-fix"],
-                 ["run", "alpha", "beta", "--verify", "--auto-fix"],
-                 ["run", "...", "--verify", "--auto-fix"],
-                 ["run", "--verify", "--auto-fix"],
-                 ["run", "alpha", "--once", "--verify", "--auto-fix"],
-                 ["run", "alpha", "--task", "t001", "--verify", "--auto-fix"],
-                 ["run", "--once", "--verify", "--auto-fix"],
-                 ["run", "--task", "t001", "--verify", "--auto-fix"])
-        for argv in cases:
-            with self.subTest(argv=argv):
-                with patch("assent.__main__.engine.run", return_value=3), \
-                        patch("assent.__main__.verify_folder",
-                              side_effect=AssertionError("verified a failed run")), \
-                        patch("assent.__main__.verify_folder_if_needed",
-                              side_effect=AssertionError("verified a failed run")), \
-                        patch("assent.__main__.verify_batch",
-                              side_effect=AssertionError("verified a failed run")), \
-                        patch("assent.__main__.verify_selected_batch",
-                              side_effect=AssertionError("verified a failed run")):
-                    code, _ = self.run_main(
-                        [*argv, "--config", str(self.config)])
-                self.assertEqual(code, 3)
-
-        with patch("assent.__main__.run_all", return_value=1), \
-                patch("assent.__main__.verify_batch",
-                      side_effect=AssertionError("verified a failed run")):
-            code, _ = self.run_main(
-                ["run", "--all", "--verify", "--auto-fix", "--config",
-                 str(self.config)])
-        self.assertEqual(code, 1)
-
-    def test_verification_failure_becomes_the_exit_code_of_a_successful_run(self):
-        self.write_task("alpha", "DONE")
         with patch("assent.__main__.engine.run", return_value=0), \
-                self.only("verify_folder_if_needed", result=1):
-            code, _ = self.run_main(
-                ["run", "alpha", "--verify", "--auto-fix", "--config",
-                 str(self.config)])
-        self.assertEqual(code, 1)
-
-    def test_single_folder_run_verify_does_not_add_a_cli_report_refresh(self):
-        self.write_task("alpha", "DONE")
-        report_path = self.root / ".assent" / "alpha" / "_report.md"
-
-        for result in (0, 1):
-            with self.subTest(result=result):
-                report_path.write_text("stale report\n", encoding="utf-8")
-                events = []
-
-                def verify(cfg, result=result):
-                    events.append(("verify", report_path.read_text(
-                        encoding="utf-8")))
-                    report_path.write_text(
-                        f"receipt result {result}\n", encoding="utf-8")
-                    return result
-
-                def refresh(cfg, result=result):
-                    events.append(("report", report_path.read_text(
-                        encoding="utf-8")))
-                    report_path.write_text(
-                        f"report result {result}\n", encoding="utf-8")
-
-                with patch("assent.__main__.engine.run", return_value=0), \
-                        patch("assent.__main__.verify_folder_if_needed",
-                              side_effect=verify), \
-                        patch("assent.__main__.inspection.try_write_report",
-                              side_effect=refresh) as report:
-                    code, _ = self.run_main(
-                        ["run", "alpha", "--verify",
-                         "--config", str(self.config)])
-
-                self.assertEqual(code, result)
-                self.assertEqual(events, [("verify", "stale report\n")])
-                report.assert_not_called()
-                self.assertEqual(
-                    report_path.read_text(encoding="utf-8"),
-                    f"receipt result {result}\n")
-
-    def test_a_run_without_verify_never_verifies(self):
-        self.write_task("alpha")
-        with patch("assent.__main__.engine.run", return_value=0), \
-                patch("assent.__main__.verify_folder",
-                      side_effect=AssertionError("verified without --verify")), \
-                patch("assent.__main__.verify_folder_if_needed",
-                      side_effect=AssertionError("verified without --verify")):
-            code, _ = self.run_main(
-                ["run", "alpha", "--config", str(self.config)])
+                patch("assent.__main__.engine.run_selection_workflow") as integration:
+            code, out = self.run_main([
+                "run", "alpha", "--once", "--config", str(self.config)])
         self.assertEqual(code, 0)
-
-    def write_second_task(self, folder: str, status: str) -> Path:
-        """Add a t002 beside write_task's t001, so a folder can be part-done."""
-        path = self.root / ".assent" / folder / "t002_task.e.toml"
-        path.write_text(
-            'title = "Second task"\n'
-            'deps = []\n'
-            'model = "lite"\n'
-            f'status = "{status}"\n'
-            'scope = ["assent/"]\n'
-            'verify = "python -m unittest"\n'
-            'goal = "finish the folder"\n'
-            'acceptance = "verified"\n',
-            encoding="utf-8")
-        return path
-
-    def test_once_and_task_verify_the_single_selected_folder(self):
-        """A limited run selects one folder, so it earns a folder receipt.
-
-        The completed folder takes the conditional entry point and the ongoing
-        one the gate-bearing entry point; both verify the selected folder.
-        """
-        self.write_task("alpha", "DONE")
-        self.write_task("active", "TODO")
-        cases = ((["run", "alpha", "--once", "--verify", "--auto-fix"],
-                   "alpha", "verify_folder_if_needed"),
-                 (["run", "alpha", "--task", "t001", "--verify",
-                   "--auto-fix"], "alpha", "verify_folder_if_needed"),
-                 (["run", "--once", "--verify", "--auto-fix"], "active",
-                  "verify_folder"),
-                 (["run", "--task", "t001", "--verify", "--auto-fix"],
-                  "active", "verify_folder"))
-        for argv, expected, entry in cases:
-            with self.subTest(argv=argv):
-                with patch("assent.__main__.engine.run", return_value=0), \
-                        self.only(entry) as folder:
-                    code, _ = self.run_main(
-                        [*argv, "--config", str(self.config)])
-                self.assertEqual(code, 0)
-                self.assertEqual(folder.call_args.args[0].tasks_name, expected)
-
-    def test_a_last_task_completion_verifies_the_finished_plan(self):
-        """The verification reads the plan the limited run just completed."""
-        self.write_task("alpha", "DONE")
-        self.write_second_task("alpha", "TODO")
-        task = self.root / ".assent" / "alpha" / "t002_task.e.toml"
-
-        def finish_the_folder(cfg, **kwargs):
-            task.write_text(
-                task.read_text(encoding="utf-8").replace(
-                    'status = "TODO"', 'status = "DONE"'),
-                encoding="utf-8")
-            return 0
-
-        observed = []
-        with patch("assent.__main__.engine.run", side_effect=finish_the_folder), \
-                self.only("verify_folder_if_needed") as folder:
-            folder.side_effect = lambda cfg: observed.append(
-                [task.status for task in Plan.parse(cfg.tasks_dir).tasks]) or 0
-            code, _ = self.run_main(
-                ["run", "alpha", "--task", "t002", "--verify",
-                 "--config", str(self.config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(observed, [["DONE", "DONE"]])
-
-    def test_an_incomplete_folder_refuses_before_candidate_or_receipt(self):
-        """The real folder-verification gate refuses; the CLI adds no predicate."""
-        subprocess.run(["git", "init"], cwd=self.root, check=True,
-                       capture_output=True)
-        self.write_task("alpha", "DONE")
-        self.write_second_task("alpha", "WIP")
-        for argv in (["run", "alpha", "--once", "--verify"],
-                     ["run", "alpha", "--task", "t002", "--verify"],
-                     ["run", "--once", "--verify"]):
-            with self.subTest(argv=argv):
-                with patch("assent.__main__.engine.run", return_value=0), \
-                        patch("assent.folder_verification.gitops."
-                              "temporary_integration_worktree",
-                              side_effect=AssertionError("created a candidate")), \
-                        patch("assent.folder_verification.run_full_verifier",
-                              side_effect=AssertionError("ran the verifier")):
-                    code, out = self.run_main(
-                        [*argv, "--config", str(self.config)])
-                self.assertEqual(code, 1)
-                self.assertIn("folder is not complete", out)
-                self.assertIn("t002=WIP", out)
-                self.assertFalse(
-                    (self.assent_dir / "alpha" / "_verification.toml").exists())
-
-    def test_verification_failure_of_a_limited_run_becomes_the_exit_code(self):
-        self.write_task("alpha", "TODO")
-        for argv in (["run", "alpha", "--once", "--verify"],
-                     ["run", "alpha", "--task", "t001", "--verify"]):
-            with self.subTest(argv=argv):
-                with patch("assent.__main__.engine.run", return_value=0), \
-                        self.only("verify_folder", result=1):
-                    code, _ = self.run_main(
-                        [*argv, "--config", str(self.config)])
-                self.assertEqual(code, 1)
-
-    def test_once_and_task_stay_incompatible_with_wider_selections(self):
-        """Only the --verify prohibition was lifted, not the selector rules."""
-        for argv in (["run", "--all", "--once", "--verify"],
-                     ["run", "--all", "--task", "t001", "--verify"],
-                     ["run", "alpha", "...", "--once", "--verify"],
-                     ["run", "alpha", "beta", "--once", "--verify"],
-                     ["run", "alpha", "beta", "--task", "t001", "--verify"]):
-            with self.subTest(argv=argv):
-                errors = io.StringIO()
-                with self.assertRaises(SystemExit) as ctx, \
-                        contextlib.redirect_stderr(errors), \
-                        contextlib.redirect_stdout(io.StringIO()):
-                    main(argv)
-                self.assertEqual(ctx.exception.code, 2)
-                self.assertIn("--once", " ".join(errors.getvalue().split()))
-
-
-class TestRunVerifyFullSuiteCount(MainTestCase):
-    """`run FOLDER --verify` starts the real full verifier once, not twice.
-
-    Nothing about verification is patched here: a real repository, a real
-    complete folder, and a stand-in full verifier that counts its own
-    subprocess starts, so the assertions are on how many times the complete
-    suite actually ran for one invocation.
-    """
-
-    FOLDER = "finished"
-
-    def setUp(self):
-        super().setUp()
-        self.counter = Path(tempfile.mkdtemp()) / "verifier runs.txt"
-        self.addCleanup(shutil.rmtree, self.counter.parent, ignore_errors=True)
-        self.assent_dir = self.root / ".assent"
-        self.tasks_dir = self.assent_dir / self.FOLDER
-        self.tasks_dir.mkdir(parents=True)
-        self.config = self.assent_dir / "assent.toml"
-        # `.assent` stays out of Git, and the verifier only counts, so the
-        # candidate's result never depends on this machine's real test suite.
-        (self.assent_dir / "verify.py").write_text(
-            "from pathlib import Path\n"
-            f"counter = Path({str(self.counter)!r})\n"
-            "previous = int(counter.read_text() or '0') if counter.exists() else 0\n"
-            "counter.write_text(str(previous + 1), encoding='utf-8')\n",
-            encoding="utf-8")
-        (self.tasks_dir / "t001_done.e.toml").write_text(
-            'title = "Finished"\n'
-            'deps = []\nmodel = "lite"\nstatus = "DONE"\n'
-            'scope = ["result.txt"]\nverify = "python --version"\n'
-            'goal = "done"\nacceptance = "verified"\n',
-            encoding="utf-8")
-        self.git("init")
-        self.git("config", "user.name", "Assent Test")
-        self.git("config", "user.email", "assent@example.invalid")
-        self.git("checkout", "-b", "trunk")
-        (self.root / ".gitignore").write_text(".assent/\n", encoding="utf-8")
-        (self.root / "result.txt").write_text("initial\n", encoding="utf-8")
-        self.git("add", "-A")
-        self.git("commit", "-m", "initial")
-        # The finished folder's own source branch, one commit ahead of the
-        # target, is what an executed task would have left behind; the
-        # candidate needs it to be a real merge rather than a fast-forward.
-        self.worktree = self.root.parent / f"{self.root.name}.worktrees"
-        self.addCleanup(self.remove_worktrees)
-        self.addCleanup(shutil.rmtree, self.worktree, ignore_errors=True)
-        self.worktree = self.worktree / self.FOLDER
-        self.git("branch", f"{self.FOLDER}/run", "trunk")
-        self.git("worktree", "add", str(self.worktree), f"{self.FOLDER}/run")
-        (self.worktree / "result.txt").write_text(
-            "task result\n", encoding="utf-8")
-        subprocess.run(["git", "commit", "-am", "task result"],
-                       cwd=self.worktree, check=True, capture_output=True)
-        settle_shared_paths(self.root, self.worktree)
-
-    def git(self, *args) -> None:
-        subprocess.run(["git", *args], cwd=self.root, check=True,
-                       capture_output=True)
-
-    def remove_worktrees(self) -> None:
-        listing = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"], cwd=self.root,
-            capture_output=True, encoding="utf-8", errors="replace")
-        for line in listing.stdout.splitlines():
-            if line.startswith("worktree "):
-                path = Path(line.removeprefix("worktree "))
-                if path.resolve() != self.root.resolve():
-                    subprocess.run(
-                        ["git", "worktree", "remove", "--force", str(path)],
-                        cwd=self.root, capture_output=True)
-
-    def verifier_runs(self) -> int:
-        return (int(self.counter.read_text(encoding="utf-8") or "0")
-                if self.counter.exists() else 0)
-
-    def run_verify(self, receipt_refresh: str) -> tuple[int, str]:
-        self.config.write_text(
-            f'[verification]\nreceipt_refresh = "{receipt_refresh}"\n',
-            encoding="utf-8")
-        return self.run_main(
-            ["run", self.FOLDER, "--verify", "--config", str(self.config)])
-
-    def test_auto_closeout_defers_the_only_full_run_to_the_selection(self):
-        code, out = self.run_verify("auto")
-        self.assertEqual(code, 0)
-        self.assertEqual(self.verifier_runs(), 1)
-        self.assertIn("invocation selection full_verify", out)
-        self.assertNotIn("full suite skipped", out)
-        self.assertTrue((self.tasks_dir / "_verification.toml").exists())
-
-    def test_manual_closeout_still_produces_one_fresh_receipt(self):
-        code, out = self.run_verify("manual")
-        self.assertEqual(code, 0)
-        self.assertEqual(self.verifier_runs(), 1)
-        self.assertIn(f"verify {self.FOLDER}: passed", out)
-        self.assertTrue((self.tasks_dir / "_verification.toml").exists())
-
+        self.assertIn("Integration workflow deferred", out)
+        integration.assert_not_called()
 
 class TestCommandElapsed(MainTestCase):
     """`run` and `verify` report their end-to-end wall-clock duration.
@@ -1359,7 +857,9 @@ class TestCommandElapsed(MainTestCase):
                          f"exit code {result}"])
 
         with self.injected_clock(), patch("assent.__main__.run_all",
-                                          return_value=0):
+                                          return_value=0), patch(
+                "assent.__main__.verify_batch",
+                return_value=0):
             code, out = self.run_main(["run", "--all", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(
@@ -1389,12 +889,14 @@ class TestCommandElapsed(MainTestCase):
             return 0
 
         cases = {
-            "folder": (["verify", "earlier"], "assent.__main__.verify_folder"),
+            "folder": (["verify", "earlier"],
+                       "assent.__main__.engine.run_selection_workflow"),
             "selected": (["verify", "earlier", "later"],
-                         "assent.__main__.verify_selected_batch"),
-            "batch": (["verify", "--batch"], "assent.__main__.verify_batch"),
+                         "assent.__main__.engine.run_selection_workflow"),
+            "batch": (["verify", "--batch"],
+                      "assent.__main__.engine.run_dynamic_selection_workflow"),
             "focused": (["verify", "earlier", "--focus"],
-                        "assent.__main__.engine.verify_focused"),
+                         "assent.__main__.engine.verify_focused"),
         }
         for name, (argv, target) in cases.items():
             with self.subTest(case=name):
@@ -1440,8 +942,9 @@ class TestCommandElapsed(MainTestCase):
             ["Command `assent verify` finished: elapsed 2.5s, exit code 1"])
 
         # A handled Ctrl+C keeps its own diagnostic and its 130.
-        with self.injected_clock(), patch("assent.__main__.verify_folder",
-                                          side_effect=KeyboardInterrupt):
+        with self.injected_clock(), patch(
+                "assent.__main__.engine.run_selection_workflow",
+                side_effect=KeyboardInterrupt):
             code, out = self.run_main(
                 ["verify", "reviewed", "--config", str(config)])
         self.assertEqual(code, 130)
@@ -1466,8 +969,9 @@ class TestCommandElapsed(MainTestCase):
     def test_the_total_is_retained_by_the_ordinary_terminal_log(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
-        with self.injected_clock(), patch("assent.__main__.verify_folder",
-                                          return_value=0):
+        with self.injected_clock(), patch(
+                "assent.__main__.engine.run_selection_workflow",
+                return_value=0):
             code, _ = self.run_main(
                 ["verify", "reviewed", "--config", str(config)])
         self.assertEqual(code, 0)
@@ -1620,9 +1124,11 @@ class TestRemainderSelection(MainTestCase):
             with self.subTest(argv=argv), \
                     patch("assent.__main__.load_config", side_effect=record), \
                     patch("assent.__main__.engine.run", return_value=0), \
+                    patch("assent.__main__.engine.run_selection_workflow",
+                          return_value=0), \
+                    patch("assent.__main__.verify_batch", return_value=0), \
                     patch("assent.__main__.clean_folders", return_value=0), \
                     patch("assent.__main__.archive_folder", return_value=0), \
-                    patch("assent.__main__.verify_folder", return_value=0), \
                     patch("assent.__main__.accept_folder", return_value=0):
                 code, _ = self.run_main([*argv, "--config", str(config)])
                 self.assertEqual(code, 0)
@@ -1686,7 +1192,7 @@ class TestRemainderSelection(MainTestCase):
         self.write_task("alpha", "DONE")
         self.write_task("beta", "DONE")
         self.write_task("ongoing", "TODO")
-        with patch("assent.__main__.verify_selected_batch",
+        with patch("assent.__main__.engine.run_selection_workflow",
                    return_value=0) as batch:
             code, out = self.run_main(
                 ["verify", "beta", "...", "--config", str(config)])
@@ -1698,12 +1204,11 @@ class TestRemainderSelection(MainTestCase):
         config = self.write_config()
         self.write_task("alpha", "DONE")
         self.write_task("ongoing", "TODO")
-        with patch("assent.__main__.verify_folder", return_value=0) as folder, \
-                patch("assent.__main__.verify_selected_batch",
-                      side_effect=AssertionError("used the batch path")):
+        with patch("assent.__main__.engine.run_selection_workflow",
+                   return_value=0) as folder:
             code, _ = self.run_main(["verify", "...", "--config", str(config)])
         self.assertEqual(code, 0)
-        self.assertEqual(folder.call_args.args[0].tasks_name, "alpha")
+        self.assertEqual(folder.call_args.args[2], ["alpha"])
 
         # A one-folder expansion is not a batch, so --no-bisect is a usage error
         # exactly as it is for a single named folder.
@@ -2041,9 +1546,9 @@ class TestInit(MainTestCase):
         self.assertEqual(
             config["workflow"]["task"],
             [{"role": "implementer"}, {"action": "focused_test"}])
-        self.assertEqual(config["workflow"]["selection"][0],
+        self.assertEqual(config["workflow"]["integration"][0],
                          {"action": "full_verify"})
-        self.assertEqual(config["workflow"]["selection"][-1],
+        self.assertEqual(config["workflow"]["integration"][-1],
                          {"action": "full_verify"})
         config_after_first_upgrade = user_config.read_bytes()
         with contextlib.redirect_stdout(io.StringIO()):

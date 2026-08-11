@@ -15,18 +15,9 @@ retry_per_task = 1                # number of retries after a verification failu
 quota_poll_minutes = 30           # polling interval when the quota reset time cannot be parsed
 rotation_poll_minutes = 1         # polling interval after every adapter in the rotation is quota-exhausted
 
-[verification]
-# Who refreshes a plan's verification receipt.
-# "manual" (default): run closeout does not build a candidate or run the full
-# suite; it prints the next step and the receipt comes only from an explicit
-# `assent verify [--batch]`. Best for selection workflows, where one selection
-# verification replaces N individual plan verification runs.
-# "auto": run closeout refreshes a stale receipt itself, so a run ends knowing
-# whether the integration candidate is green.
-receipt_refresh = "manual"
-
-# The default workflow is active. `run --auto-fix` remains the invocation-level
-# opt-in for plan review and bounded repair.
+# The workflow is always active. A passing action completes its layer; a
+# failing action advances to the next configured reviewer/fixer, and the next
+# action rechecks the repair. The finite array is the automation bound.
 # Ability and role names are user-defined. Abilities are atomic and reusable;
 # roles compose them for each workflow step.
 # prompt: instructions added to a session that uses this ability.
@@ -65,18 +56,17 @@ effort = "heavy"
 ability = ["review", "fix"]
 model = "prime"
 effort = "heavy"
-# Actions are scheduler-owned objective gates, not agent abilities.
+# Actions are scheduler-owned mechanical verification points.
 # focused_test is legal only in workflow.task. It runs the current task's
 # focused verify command outside the AI session and binds the result to source.
-# full_test is legal only in workflow.task and workflow.plan. It runs the full
-# suite against the current source worktree without an integration candidate or
-# verification receipt.
-# full_verify is legal only in workflow.selection. It verifies the reconstructed
+# focused_sweep is legal only in workflow.plan. It runs the distinct focused
+# commands of that plan against its source worktree and writes no receipt.
+# full_verify is legal only in workflow.integration. It verifies the reconstructed
 # integration candidate and writes the matching plan or exact-selection receipt.
 # An action accepts only its action name: no role, adapter, model, or effort.
-# role: a name defined under [roles]. plan/selection roles may name an adapter;
+# role: a name defined under [roles]. plan/integration roles may name an adapter;
 # when omitted, adapter uses the first name in the adapter configuration.
-# A non-empty selection starts and ends with full_verify. Between actions use
+# A non-empty plan/integration workflow starts and ends with its action. Between actions use
 # one writable verdict role, or a read-only verdict role plus an optional fixer.
 [workflow]
 # The active task workflow uses one combined AI session to minimize tokens.
@@ -91,15 +81,17 @@ task = [
 #   { action = "focused_test" },
 # ]
 plan = [
+  { action = "focused_sweep" },
   { role = "reviewer_fixer", adapter = "codex" },
+  { action = "focused_sweep" },
   { role = "reviewer_fixer", adapter = "codex" },
+  { action = "focused_sweep" },
 ]
-selection = [
+integration = [
   { action = "full_verify" },
   { role = "reviewer_fixer", adapter = "codex" },
   { action = "full_verify" },
 ]
-# Plan roles own bounded per-plan review. Selection roles repair only durable
-# full_verify failure evidence. The writable reviewer_fixer reviews and repairs
-# in one session. A clean first plan review skips the second reviewer_fixer, and
-# a passing full_verify skips all later roles.
+# Plan roles handle only focused_sweep failure evidence. Integration roles
+# handle only durable full_verify failure evidence. A passing action skips all
+# later roles in that layer.

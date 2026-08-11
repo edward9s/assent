@@ -159,11 +159,11 @@ class TestContractContent(unittest.TestCase):
         for phrase in (
                 "`task` selects task-scoped context",
                 "`plan` selects plan-scoped context",
-                "[workflow].selection",
+                "[workflow].integration",
                 "exactly three keys",
                 "tagged union",
-                "`full_test` is legal at task or plan positions",
-                "`full_verify` is legal only at selection positions",
+                "`focused_sweep` is legal only at plan positions",
+                "`full_verify` is legal only at integration positions",
                 "not permission",
                 "The selected role's `[abilities]` carry what that session does",
                 "The only special behavior the engine infers from a role",
@@ -173,7 +173,7 @@ class TestContractContent(unittest.TestCase):
                 "according to the plan's focused gate",
                 "when no task can make further progress",
                 "quiescent-blocked",
-                "A non-empty `selection` must start and end with `full_verify`",
+                "non-empty `integration` must start and end with `full_verify`",
                 "A writable verdict role reviews and repairs either failure in one session",
                 "the first role after `full_verify` must produce a verdict",
                 "Neither form repeats a successful complete verification"):
@@ -194,8 +194,8 @@ class TestContractContent(unittest.TestCase):
                        "[abilities.review]", "[abilities.fix]",
                        "[roles.implementer]", "[roles.test_writer]",
                        "[roles.source_implementer]", "[roles.reviewer_fixer]",
-                       "[workflow]", "task =", "plan =", "selection =",
-                       'receipt_refresh = "manual"',
+                       "[workflow]", "task =", "plan =", "integration =",
+                       "# focused_sweep is legal only in workflow.plan",
                        "# focused_test is legal only in workflow.task"):
             with self.subTest(template_phrase=phrase):
                 self.assertIn(phrase, configuration)
@@ -215,14 +215,17 @@ class TestContractContent(unittest.TestCase):
             for ability in parsed_configuration["abilities"].values()))
         self.assertEqual(
             parsed_configuration["workflow"]["plan"],
-            [{"role": "reviewer_fixer", "adapter": "codex"},
-             {"role": "reviewer_fixer", "adapter": "codex"}])
-        self.assertEqual(parsed_configuration["workflow"]["selection"][0],
+            [{"action": "focused_sweep"},
+             {"role": "reviewer_fixer", "adapter": "codex"},
+             {"action": "focused_sweep"},
+             {"role": "reviewer_fixer", "adapter": "codex"},
+             {"action": "focused_sweep"}])
+        self.assertEqual(parsed_configuration["workflow"]["integration"][0],
                          {"action": "full_verify"})
-        self.assertEqual(parsed_configuration["workflow"]["selection"][-1],
+        self.assertEqual(parsed_configuration["workflow"]["integration"][-1],
                          {"action": "full_verify"})
         self.assertEqual(
-            parsed_configuration["workflow"]["selection"][1],
+            parsed_configuration["workflow"]["integration"][1],
             {"role": "reviewer_fixer", "adapter": "codex"})
         prompts = re.findall(r'^prompt = "([^"]+)"$', configuration, re.MULTILINE)
         self.assertEqual(len(prompts), 4)
@@ -703,8 +706,8 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(document="workflow.md", phrase=phrase):
                 self.assertIn(phrase, workflow)
 
-    def test_limited_run_verification_is_conditional_in_every_document(self):
-        """`--verify` with `--once`/`--task` is gated, never blanket-refused."""
+    def test_limited_run_defers_automatic_integration(self):
+        """`--once` and `--task` do not integrate an incomplete folder."""
         install_global_contracts(self)
         english = {
             "AGENTS.md": (_PROJECT_ROOT / "AGENTS.md").read_text(
@@ -714,64 +717,16 @@ class TestContractContent(unittest.TestCase):
                 + contracts.installed_contract_text("workflow.md")),
             "instructions.md": contracts.installed_contract_text(
                 "instructions.md"),
-            "docs/CONSENSUS.md": (
-                _PROJECT_ROOT / "docs/CONSENSUS.md").read_text(
-                    encoding="utf-8"),
-            "docs/COMMANDS.md": (
-                _PROJECT_ROOT / "docs/COMMANDS.md").read_text(
-                    encoding="utf-8"),
         }
-        required = (
-            "verifies only when that limited run left the single selected "
-            "folder complete",
-            "an incomplete folder fails the request without writing a receipt",
-        )
-        # The old blanket refusal must not come back anywhere; `...` staying
-        # incompatible with the two selectors is a separate, still-true rule.
-        forbidden = (
-            "`--verify` cannot be combined with `--once`",
-            "`--verify` is refused with `--once`",
-            "refuse the flag",
-            "incompatible with `--once`",
-        )
         for name, text in english.items():
             compact = " ".join(text.split())
-            phrases = (required if name != "docs/COMMANDS.md" else (
-                "only if the limited run left every task complete",
-                "an incomplete folder fails the request",
-                "before any candidate or full verifier exists and writes no "
-                "receipt"))
-            for phrase in phrases:
-                with self.subTest(document=name, phrase=phrase):
-                    self.assertIn(phrase, compact)
-            for phrase in forbidden:
-                with self.subTest(document=name, forbidden=phrase):
-                    self.assertNotIn(phrase, compact)
-
-        chinese = {
-            "docs/zh-TW/CONSENSUS.md": (
-                _PROJECT_ROOT / "docs/zh-TW/CONSENSUS.md").read_text(
-                    encoding="utf-8"),
-            "docs/zh-TW/COMMANDS.md": (
-                _PROJECT_ROOT / "docs/zh-TW/COMMANDS.md").read_text(
-                    encoding="utf-8"),
-        }
-        for name, text in chinese.items():
-            compact = "".join(text.split())
-            phrases = (("只有在該次受限執行讓所選資料夾變成完成時才驗證",
-                        "資料夾未完成則此請求失敗且不寫下receipt")
-                       if name != "docs/zh-TW/COMMANDS.md" else
-                       ("只有A的所有task完成時才驗證",
-                        "未完成folder時，會在candidate/verifier建立前拒絕且不寫receipt"))
-            for phrase in phrases:
-                with self.subTest(document=name, phrase=phrase):
-                    self.assertIn(phrase, compact)
-            with self.subTest(document=name, forbidden="blanket refusal"):
-                self.assertNotIn("不可與`--once`、`--task`併用", compact)
+            with self.subTest(document=name):
+                self.assertIn("defer", compact.lower())
+                self.assertIn("incomplete", compact.lower())
                 self.assertNotIn("不能與刻意在資料夾收尾前停止的", compact)
 
-    def test_auto_fix_lifecycle_and_derived_state_are_documented(self):
-        """The auto-fix contract must remain discoverable in every owning surface."""
+    def test_workflow_repair_lifecycle_and_derived_state_are_documented(self):
+        """The automatic bounded workflow remains discoverable in owning surfaces."""
         install_global_contracts(self)
         root = _PROJECT_ROOT
         english = {
@@ -790,23 +745,14 @@ class TestContractContent(unittest.TestCase):
             "CONSENSUS.md": (root / "docs/CONSENSUS.md").read_text(
                 encoding="utf-8"),
         }
-        required = (
-            "run --auto-fix",
-            "read-only",
-            "pre-existing technical debt",
-            "directly interacting code",
-            "finite",
-            "never creates tasks",
-            "never accepts",
-            "_auto_fix.toml",
-        )
+        required = ("focused_test", "focused_sweep", "full_verify",
+                    "finite", "never creates tasks", "never accepts",
+                    "_auto_fix.toml")
         for name, text in english.items():
             compact = " ".join(text.split())
             with self.subTest(document=name):
-                self.assertIn("run --auto-fix", compact)
-                self.assertIn("read-only", compact)
-                self.assertIn("without", compact)
-                self.assertIn("repair", compact)
+                self.assertNotIn("--auto-fix", compact)
+                self.assertNotIn("receipt_refresh", compact)
         english_contract = " ".join(" ".join(text.split())
                                     for text in english.values())
         for phrase in required:
@@ -826,7 +772,7 @@ class TestContractContent(unittest.TestCase):
                 "malformed state refuses closed",
                 "PASSED (fresh)", "FAILED (fresh)",
                 "Automatic repair of durable folder-review findings",
-                "authorization: run --auto-fix",
+                "authorization: configured workflow repair",
                 "prompt-plus-detection",
                 "source deletion",
                 "focused sweep"):
@@ -838,7 +784,7 @@ class TestContractContent(unittest.TestCase):
         self.assertIn("[workflow]", configuration)
         self.assertIn('role = "reviewer_fixer"', configuration)
         self.assertNotIn("folder_reviewer", configuration)
-        self.assertIn("plan review", configuration)
+        self.assertIn("Plan roles handle only focused_sweep", configuration)
         self.assertIn("plan = [", configuration)
 
         chinese = {
@@ -855,15 +801,11 @@ class TestContractContent(unittest.TestCase):
             "CONSENSUS.zh-TW.md": (
                 root / "docs/zh-TW/CONSENSUS.md").read_text(encoding="utf-8"),
         }
-        translated_required = (
-            "`run --auto-fix`", "唯讀", "既有 technical debt", "直接互動程式碼",
-            "不會自動建立 task", "絕不自動接受 folder", "`_auto_fix.toml`",
-        )
         chinese_contract = "".join("".join(text.split())
                                    for text in chinese.values())
-        for phrase in translated_required:
-            with self.subTest(chinese_contract=phrase):
-                self.assertIn("".join(phrase.split()), chinese_contract)
+        self.assertNotIn("--auto-fix", chinese_contract)
+        self.assertNotIn("receipt_refresh", chinese_contract)
+        self.assertIn("_auto_fix.toml", chinese_contract)
 
     def test_selection_conflict_repair_is_owned_by_packaged_contracts(self):
         install_global_contracts(self)
@@ -876,8 +818,8 @@ class TestContractContent(unittest.TestCase):
             encoding="utf-8")
 
         for phrase in (
-                "[workflow].task", "[workflow].plan", "[workflow].selection",
-                "full_test", "full_verify", "content-identical"):
+                "[workflow].task", "[workflow].plan", "[workflow].integration",
+                "focused_sweep", "full_verify", "content-identical"):
             with self.subTest(format_phrase=phrase):
                 self.assertIn(phrase, format_text)
         for phrase in (
@@ -886,11 +828,11 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(workflow_phrase=phrase):
                 self.assertIn(phrase, workflow_text)
         for phrase in (
-                "run --verify --auto-fix", "Neither form may run Git", "full suite",
+                "configured integration workflow", "Neither form may run Git", "full suite",
                 "review-and-repair action"):
             with self.subTest(instructions_phrase=phrase):
                 self.assertIn(phrase, instructions_text)
-        self.assertIn("selection = [", configuration)
+        self.assertIn("integration = [", configuration)
         self.assertIn("[roles.fixer]", configuration)
         self.assertIn('ability = ["review", "fix"]', configuration)
 

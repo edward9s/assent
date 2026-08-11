@@ -216,7 +216,9 @@ Review all of the following before deciding:
 Report only blocking correctness, safety, unmet-requirement, or focused-test-gap
 findings allowed by the context and stage policies. A focused-test-gap finding
 must identify one concrete task requirement that lacks a local, reliably
-runnable focused regression test. Speculation, uncertainty without evidence,
+runnable focused regression test. Every finding must cite an existing task
+requirement or concrete repair regression; never invent a new acceptance
+criterion. Speculation, uncertainty without evidence,
 idealized design, style, preference, optional improvement, and unrelated scope
 expansion cannot block PASS.
 
@@ -307,8 +309,9 @@ reported blocker uses: what was wrong in summary and evidence, and what you
 changed in recommendation. Return "PASS" only when nothing blocking remains
 and you wrote nothing at all."""
 
-_AUTO_FIX_ROUND_POLICY = """This is workflow plan step {position} of {total}.
-Workflow steps remaining after this one: {remaining}."""
+_AUTO_FIX_ROUND_POLICY = """This is review round {position} of {total}.
+Review rounds remaining after this one: {remaining}. Converge within the
+configured finite rounds."""
 
 # Blocked adjudication is a separate read-only entry point, not one of the
 # merged reviewer-fixer rounds, so it must never receive the round sequence's
@@ -318,11 +321,11 @@ _AUTO_FIX_BLOCKED_ROUND_POLICY = """This adjudication is a single read-only
 decision gate, not one of the merged reviewer-fixer rounds. Report what you
 find; repairing it yourself is not available in this context."""
 
-_AUTO_FIX_FINAL_ROUND_POLICY = """This is the FINAL workflow plan step.
-No further review will occur after this one. Anything you leave merely
-reported will never be repaired, rechecked, or confirmed by another round.
-Decide now -- either PASS, or fix the blocker inside the naming task's declared
-scope and return FIXED. Do not leave a concern unresolved."""
+_AUTO_FIX_FINAL_ROUND_POLICY = """This is the FINAL review round.
+No further automated review will occur after this one. Return PASS only when
+the existing requirements pass, FIXED only when you actually repaired the
+blocker, or FAIL with the concrete unresolved evidence. Never invent an
+acceptance criterion and never pretend a blocker was fixed."""
 
 _AUTO_FIX_COMPLETED_POLICY = """This COMPLETED_FOLDER review examines the
 bounded cumulative implementation. Only COMPLETED_FOLDER + INITIAL may report
@@ -715,7 +718,7 @@ def _shared_paths_contract(cfg: Config) -> "shared_paths.Contract":
     return contract
 
 
-_PLAN_FULL_TEST_PREFIX = "FULL TEST ACTION STATE: "
+_PLAN_FOCUSED_SWEEP_PREFIX = "FOCUSED SWEEP ACTION STATE: "
 _TASK_FOCUSED_TEST_PREFIX = "FOCUSED TEST ACTION STATE: "
 
 
@@ -728,31 +731,23 @@ class _TestActionEvidence:
     summary: str
 
 
-def _full_test_script(cfg: Config) -> Path:
-    script = (cfg.assent_dir / "verify.py").resolve()
-    if not script.is_file():
-        raise AssentError(f"Verification script not found: {script}")
-    return script
-
-
-def _full_test_identity(cfg: Config) -> str:
-    """Bind source-worktree evidence to the checked-out tree and main verifier."""
+def _focused_sweep_identity(cfg: Config, plan: Plan) -> str:
+    """Bind a plan sweep to the source tree and its distinct commands."""
     if not gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
-        raise AssentError("source worktree is dirty at the full_test boundary")
-    return f"{gitops.tree_of(cfg.root, 'HEAD')}:{verification.verifier_digest(cfg)}"
+        raise AssentError("source worktree is dirty at the focused_sweep boundary")
+    commands = _plan_verify_commands(plan)
+    command_sha256 = hashlib.sha256(
+        json.dumps(commands, ensure_ascii=False, separators=(",", ":"))
+        .encode("utf-8")).hexdigest()
+    return f"{gitops.tree_of(cfg.root, 'HEAD')}:{command_sha256}"
 
 
-def _full_test_record(state: WorkflowState) -> _TestActionEvidence | None:
-    if state.unit == "task" and state.action == "full_test":
-        command, summary = (state.action_evidence + ("", ""))[:2]
-        return _TestActionEvidence(
-            state.action_status, state.action_source_tree,
-            state.action_exit_code, command, summary)
+def _focused_sweep_record(state: WorkflowState) -> _TestActionEvidence | None:
     if state.unit != "plan":
         return None
-    encoded = next((item[len(_PLAN_FULL_TEST_PREFIX):]
+    encoded = next((item[len(_PLAN_FOCUSED_SWEEP_PREFIX):]
                     for item in reversed(state.focused_evidence)
-                    if item.startswith(_PLAN_FULL_TEST_PREFIX)), None)
+                    if item.startswith(_PLAN_FOCUSED_SWEEP_PREFIX)), None)
     if encoded is None:
         return None
     try:
@@ -761,23 +756,17 @@ def _full_test_record(state: WorkflowState) -> _TestActionEvidence | None:
             data["status"], data["identity"], data["exit_code"],
             data["command"], data["summary"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise AssentError("Plan full_test action evidence is unreadable") from error
+        raise AssentError("Plan focused_sweep action evidence is unreadable") from error
     if (record.status not in {"PASSED", "FAILED", "STALE"}
             or not record.identity or not isinstance(record.exit_code, int)
             or not isinstance(record.command, str)
             or not isinstance(record.summary, str)):
-        raise AssentError("Plan full_test action evidence has invalid values")
+        raise AssentError("Plan focused_sweep action evidence has invalid values")
     return record
 
 
-def _with_full_test_record(
+def _with_focused_sweep_record(
         state: WorkflowState, record: _TestActionEvidence) -> WorkflowState:
-    if state.unit == "task":
-        return replace(
-            state, action="full_test", action_status=record.status,
-            action_source_tree=record.identity,
-            action_exit_code=record.exit_code,
-            action_evidence=(record.command, record.summary))
     data = json.dumps({
         "status": record.status,
         "identity": record.identity,
@@ -787,112 +776,106 @@ def _with_full_test_record(
     }, ensure_ascii=False, separators=(",", ":"))
     ordinary = tuple(
         item for item in state.focused_evidence
-        if not item.startswith(_PLAN_FULL_TEST_PREFIX))
+        if not item.startswith(_PLAN_FOCUSED_SWEEP_PREFIX))
     return replace(
-        state, focused_evidence=ordinary + (_PLAN_FULL_TEST_PREFIX + data,))
+        state, focused_evidence=ordinary + (_PLAN_FOCUSED_SWEEP_PREFIX + data,))
 
 
-def _refresh_full_test_evidence(
-        cfg: Config, state: WorkflowState) -> WorkflowState:
-    """Turn prior evidence STALE as soon as source or verifier identity moves."""
-    record = _full_test_record(state)
+def _refresh_focused_sweep_evidence(
+        cfg: Config, plan: Plan, state: WorkflowState) -> WorkflowState:
+    """Turn prior evidence STALE when the source or command union moves."""
+    record = _focused_sweep_record(state)
     if record is None or record.status == "STALE":
         return state
     try:
-        current = _full_test_identity(cfg)
+        current = _focused_sweep_identity(cfg, plan)
     except AssentError:
         current = ""
     if current == record.identity:
         return state
-    return _with_full_test_record(
+    return _with_focused_sweep_record(
         state, replace(record, status="STALE",
-                       summary="Source or verification script changed after full_test."))
+                       summary="Source or focused commands changed after focused_sweep."))
 
 
-def _emit_full_test_output(result: subprocess.CompletedProcess[str]) -> None:
-    """Feed complete child output to the terminal tee; durable state stays bounded."""
-    if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-    if result.stderr:
-        print(result.stderr, end="" if result.stderr.endswith("\n") else "\n",
-              file=sys.stderr)
-
-
-def _run_full_test_action(
-        cfg: Config, state: WorkflowState) -> tuple[WorkflowState, _TestActionEvidence, bool]:
-    """Run or reuse one source-bound full_test action without creating a receipt."""
-    identity = _full_test_identity(cfg)
-    existing = _full_test_record(state)
+def _run_focused_sweep_action(
+        cfg: Config, plan: Plan,
+        state: WorkflowState) -> tuple[WorkflowState, _TestActionEvidence, bool]:
+    """Run or reuse the plan's distinct focused commands."""
+    identity = _focused_sweep_identity(cfg, plan)
+    existing = _focused_sweep_record(state)
     if (existing is not None and existing.identity == identity
             and existing.status in {"PASSED", "FAILED"}):
-        print(f"  full_test {existing.status.lower()} evidence reused "
+        print(f"  focused_sweep {existing.status.lower()} evidence reused "
               f"(exit {existing.exit_code})")
         return state, existing, True
 
-    script = _full_test_script(cfg)
-    command = subprocess.list2cmdline([sys.executable, str(script)])
+    commands = _plan_verify_commands(plan)
+    command = "\n".join(commands)
     armed = _TestActionEvidence(
         "STALE", identity, 0, command,
-        "Full verifier has not completed for this source identity.")
-    state = _with_full_test_record(state, armed)
+        "Focused sweep has not completed for this source identity.")
+    state = _with_focused_sweep_record(state, armed)
     write_workflow_state(cfg.tasks_dir, state)
+    evidence: list[str] = []
+    exit_code = 0
+    merged = _merged_unittest_passes(cfg, commands)
+    for focused_command in commands:
+        result = merged.get(focused_command)
+        if result is None:
+            result = _verify_subprocess(cfg, focused_command)
+        _show_verify_result(focused_command, result)
+        evidence.append(
+            f"{'PASS' if result.returncode == 0 else 'FAIL'}: "
+            f"exit {result.returncode}: {focused_command}")
+        if result.returncode != 0 and exit_code == 0:
+            exit_code = result.returncode
+    record = replace(
+        armed, status="PASSED" if exit_code == 0 else "FAILED",
+        exit_code=exit_code, summary="\n".join(evidence))
     try:
-        result = verification.run_full_verifier(script, cfg.root)
-    except OSError as error:
+        unchanged = _focused_sweep_identity(cfg, plan) == identity
+    except AssentError:
+        unchanged = False
+    if not unchanged:
         record = replace(
-            armed, status="FAILED", exit_code=1,
-            summary=verification_summary(f"Unable to start full verifier: {error}"))
-    else:
-        _emit_full_test_output(result)
-        fallback = ("Full verifier passed." if result.returncode == 0 else
-                    f"Full verifier failed (exit code {result.returncode}).")
-        record = replace(
-            armed, status="PASSED" if result.returncode == 0 else "FAILED",
-            exit_code=result.returncode,
-            summary=verification_summary(result.stdout, result.stderr, fallback))
-        try:
-            unchanged = _full_test_identity(cfg) == identity
-        except AssentError:
-            unchanged = False
-        if not unchanged:
-            record = replace(
-                record, status="STALE",
-                summary=verification_summary(
-                    record.summary,
-                    "Source or verification script changed during full_test."))
-    state = _with_full_test_record(state, record)
+            record, status="STALE",
+            summary=verification_summary(
+                record.summary,
+                "Source or focused commands changed during focused_sweep."))
+    state = _with_focused_sweep_record(state, record)
     write_workflow_state(cfg.tasks_dir, state)
-    print(f"  full_test evidence: {record.status} (exit {record.exit_code})")
+    print(f"  focused_sweep evidence: {record.status} (exit {record.exit_code})")
     return state, record, False
 
 
-def _full_test_prompt(state: WorkflowState) -> str:
-    record = _full_test_record(state)
+def _focused_sweep_prompt(state: WorkflowState) -> str:
+    record = _focused_sweep_record(state)
     if record is None:
         return ""
     return (
-        "\nFULL TEST EVIDENCE\n"
+        "\nFOCUSED SWEEP EVIDENCE\n"
         f"Status: {record.status}\n"
-        f"Source/script identity: {record.identity}\n"
+        f"Source/command identity: {record.identity}\n"
         f"Command: {record.command}\n"
         f"Exit code: {record.exit_code}\n"
         f"Summary:\n{record.summary}\n"
-        "This is source-worktree test evidence only. It creates no verification "
+        "This is plan-focused evidence only. It creates no verification "
         "receipt and cannot authorize accept.\n")
 
 
-def _full_test_completion_refusal(
-        cfg: Config, state: WorkflowState) -> str | None:
-    record = _full_test_record(state)
+def _focused_sweep_completion_refusal(
+        cfg: Config, plan: Plan, state: WorkflowState) -> str | None:
+    record = _focused_sweep_record(state)
     if record is None:
         return None
-    refreshed = _refresh_full_test_evidence(cfg, state)
-    current = _full_test_record(refreshed)
+    refreshed = _refresh_focused_sweep_evidence(cfg, plan, state)
+    current = _focused_sweep_record(refreshed)
     assert current is not None
     if current.status == "PASSED":
         return None
-    return (f"full_test action evidence is {current.status} "
-            f"(exit {current.exit_code}); a later explicit full_test must pass")
+    return (f"focused_sweep action evidence is {current.status} "
+            f"(exit {current.exit_code}); a later focused_sweep must pass")
 
 
 def _focused_test_identity(cfg: Config, task: Task) -> str:
@@ -960,8 +943,7 @@ def _refresh_focused_test_evidence(
 def _refresh_task_action_evidence(
         cfg: Config, task: Task, state: WorkflowState) -> WorkflowState:
     """Refresh every source-bound action result retained by a task workflow."""
-    return _refresh_focused_test_evidence(
-        cfg, task, _refresh_full_test_evidence(cfg, state))
+    return _refresh_focused_test_evidence(cfg, task, state)
 
 
 def _run_focused_test_action(
@@ -1100,19 +1082,6 @@ def _effective_task_workflow(
     return tuple(steps)
 
 
-def _plan_uses_full_test(cfg: Config, plan: Plan) -> bool:
-    if any(isinstance(step, WorkflowActionStep)
-           for step in cfg.workflow_plan) and any(
-               task.workflow == ()
-               or (task.workflow is None and cfg.workflow_task == ())
-               for task in plan.tasks):
-        return True
-    return any(
-        any(isinstance(step, WorkflowActionStep)
-            for step in (_effective_task_workflow(cfg, task) or ()))
-        for task in plan.tasks)
-
-
 def _workflow_task_capability_errors(
         cfg: Config, adapter: Adapter, plan: Plan, adapter_name: str,
         task_id: str | None) -> list[str]:
@@ -1230,8 +1199,7 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
                   workflow_index: int = 0,
                   workflow_total: int = 0,
                   action_evidence: str = "",
-                  focused_test_action_present: bool = False,
-                  full_test_action_present: bool = False) -> str:
+                  focused_test_action_present: bool = False) -> str:
     focused_test_policy = (
         "Do not run the task's focused command in this AI session. The "
         "scheduler-owned focused_test action runs it at its explicit workflow "
@@ -1277,9 +1245,6 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
     if workflow_step is not None:
         text += _task_workflow_suffix(
             workflow_step, workflow_index, workflow_total)
-    if full_test_action_present:
-        text += ("\nDo not run the full project verifier in this AI session. "
-                 "Only the scheduler-owned full_test action may run it.\n")
     text += action_evidence
     return text
 
@@ -2251,6 +2216,17 @@ def _checkpoint_selection_merged_writes(
             cfg.git_excludes)
 
 
+_INTEGRATION_UNRESOLVED = 2
+
+
+def _integration_unresolved(reason: str, *, nested: bool = False) -> int:
+    """End finite integration automation without misreporting it as a crash."""
+    print("Integration workflow: REVIEW UNRESOLVED, HUMAN DECISION; " + reason
+          + ". Evidence and edits were preserved. `assent accept` remains "
+            "blocked until full_verify passes.")
+    return _INTEGRATION_UNRESOLVED if nested else 0
+
+
 def _selection_reconcile_path_state(
         root: Path, paths: tuple[str, ...]) -> tuple[tuple[str, str, str], ...]:
     """Bind whether the merged session actually edited conflict-path content."""
@@ -2276,12 +2252,12 @@ def _run_selection_merged_repairs(
         now: Callable[[], datetime]) -> tuple[int, SelectionWorkflowState]:
     """Let one writable verdict session review and repair a failed selection."""
     next_action_index = state.step_index + 1
-    steps = configs[0].workflow_selection
+    steps = configs[0].workflow_integration
     if (next_action_index >= len(steps)
             or not isinstance(steps[next_action_index], WorkflowActionStep)):
-        print("Selection auto-fix exhausted: a merged reviewer-fixer must be "
-              "followed by an explicit full_verify action.")
-        return 1, state
+        return _integration_unresolved(
+            "the configured steps ended without a final full_verify",
+            nested=True), state
 
     work_configs = _selection_worktree_configs(configs)
     conflicts = _selection_conflicts(state)
@@ -2378,9 +2354,9 @@ def _run_selection_merged_repairs(
                         "a repair workspace")
                 _persist_selection_findings(
                     work_configs, state, step, record, prompt_digest)
-                print("Selection reviewer-fixer returned FAIL without edits; "
-                      "the final full_verify was not repeated.")
-                return 1, state
+                return _integration_unresolved(
+                    "the final reviewer-fixer reported unresolved findings "
+                    "without a repair", nested=True), state
             if not changed:
                 raise AssentError(
                     "selection reviewer-fixer returned FIXED without changing "
@@ -2476,35 +2452,35 @@ def _run_selection_repairs(
     fixer_step: WorkflowPlanStep | None = None
     next_action_index = state.step_index + 1
     if conflicts:
-        if (next_action_index < len(configs[0].workflow_selection)
+        if (next_action_index < len(configs[0].workflow_integration)
                 and isinstance(
-                    configs[0].workflow_selection[next_action_index],
+                    configs[0].workflow_integration[next_action_index],
                     WorkflowPlanStep)):
-            candidate = configs[0].workflow_selection[next_action_index]
+            candidate = configs[0].workflow_integration[next_action_index]
             if candidate.writes and not candidate.produces_verdict:
                 fixer_step = candidate
                 next_action_index += 1
         if fixer_step is None:
-            print("Selection auto-fix exhausted: a reviewed candidate-conflict "
-                  "wave requires an explicit write-capable fixer role.")
-            return 1, state
+            return _integration_unresolved(
+                "a reviewed candidate conflict has no configured writable "
+                "fixer step", nested=True), state
     elif (state.action_evidence
           and state.action_evidence[0] == "VERIFIER_FAILED"
-          and next_action_index < len(configs[0].workflow_selection)):
-        candidate = configs[0].workflow_selection[next_action_index]
+          and next_action_index < len(configs[0].workflow_integration)):
+        candidate = configs[0].workflow_integration[next_action_index]
         if (isinstance(candidate, WorkflowPlanStep)
                 and candidate.writes and not candidate.produces_verdict):
             # This role exists for candidate conflicts.  A verifier failure is
             # repaired through the implicated tasks' own profiles, so the same
             # configured workflow proceeds directly to its objective gate.
             next_action_index += 1
-    if (next_action_index >= len(configs[0].workflow_selection)
+    if (next_action_index >= len(configs[0].workflow_integration)
             or not isinstance(
-                configs[0].workflow_selection[next_action_index],
+                configs[0].workflow_integration[next_action_index],
                 WorkflowActionStep)):
-        print("Selection auto-fix exhausted: a selection repair wave must be "
-              "followed by an explicit full_verify action.")
-        return 1, state
+        return _integration_unresolved(
+            "the configured repair wave has no following full_verify",
+            nested=True), state
     if state.repair_phase == "NONE":
         if not _selection_findings_already_persisted(work_configs, state):
             record, prompt_digest = _run_selection_reviewer(
@@ -2701,8 +2677,7 @@ def _run_selection_repairs(
 
 
 def run_selection_workflow(config_path: str, assent_dir, folders,
-                           *, auto_fix: bool = False,
-                           sleep: Callable[[float], None] | None = None,
+                           *, sleep: Callable[[float], None] | None = None,
                            now: Callable[[], datetime] | None = None) -> int:
     """Walk and recover the exact selection verification/repair workflow."""
     sleep = sleep or interruptible_sleep
@@ -2720,7 +2695,7 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
         print(f"Selection full_verify: failed ({error})")
         return 1
 
-    steps = configs[0].workflow_selection
+    steps = configs[0].workflow_integration
     if not any(isinstance(step, WorkflowActionStep) for step in steps):
         steps = steps + (WorkflowActionStep("full_verify"),)
     identity = (ordered, target_ref, target_commit, source_commits)
@@ -2742,15 +2717,18 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
         write_selection_workflow_state(configs[0].assent_dir, state)
     elif state.step_index >= len(steps):
         if state.action_status == "PASSED":
-            try:
-                _mark_selection_reviews_passed(
-                    _selection_worktree_configs(configs),
-                    state.action_candidate_tree, state.step_index)
-            except (AssentError, OSError) as error:
-                print(f"Selection repair closeout failed: {error}")
-                return 1
-            return 0
-        return 1
+            # A workflow cursor is not verification evidence.  Re-enter the
+            # objective action on every new invocation so the receipt layer can
+            # cheaply reuse fresh evidence or reject verifier, stack, shared
+            # input, source, or target drift.  This does not rerun a fresh full
+            # verifier; verify_*_action owns that receipt decision.
+            state = SelectionWorkflowState(
+                ordered, target_ref, target_commit, source_commits, 0)
+            write_selection_workflow_state(configs[0].assent_dir, state)
+        else:
+            return _integration_unresolved(
+                "the configured integration steps were exhausted while "
+                "full_verify was still failing")
 
     while state.step_index < len(steps):
         step = steps[state.step_index]
@@ -2759,29 +2737,26 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
                 state = replace(state, step_index=state.step_index + 1)
                 write_selection_workflow_state(configs[0].assent_dir, state)
                 continue
-            if not auto_fix:
-                print("Selection full_verify: failure-only selection roles require "
-                      "run --auto-fix")
-            else:
-                print("Selection full_verify: repairing durable verifier "
-                      f"evidence with configured role {step.role!r}")
-                try:
-                    repair_runner = (_run_selection_merged_repairs
-                                     if step.writes and step.produces_verdict
-                                     else _run_selection_repairs)
-                    code, state = repair_runner(
-                        configs, state, step, sleep=sleep, now=now)
-                except KeyboardInterrupt:
-                    print("Selection repair interrupted; durable evidence and "
-                          "edits were preserved for resume.")
-                    return 130
-                except (AssentError, OSError) as error:
-                    print(f"Selection repair stopped: {error}")
-                    return 1
-                if code == 0:
-                    continue
-                return code
-            return 1
+            print("Integration full_verify: repairing durable verifier "
+                  f"evidence with configured role {step.role!r}")
+            try:
+                repair_runner = (_run_selection_merged_repairs
+                                 if step.writes and step.produces_verdict
+                                 else _run_selection_repairs)
+                code, state = repair_runner(
+                    configs, state, step, sleep=sleep, now=now)
+            except KeyboardInterrupt:
+                print("Integration repair interrupted; durable evidence and "
+                      "edits were preserved for resume.")
+                return 130
+            except (AssentError, OSError) as error:
+                print(f"Integration repair stopped: {error}")
+                return 1
+            if code == 0:
+                continue
+            if code == _INTEGRATION_UNRESOLVED:
+                return 0
+            return code
 
         assert step.action == "full_verify"
         print(f"Selection workflow step {state.step_index + 1}/{len(steps)}: "
@@ -2854,13 +2829,20 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
         except (AssentError, lockfile.LockBusy) as error:
             print(f"Selection full_verify: failed ({error})")
             return 1
+        if result.passed:
+            print("Integration full_verify: PASS; no reviewer session started.")
+            return 0
         if not result.passed and state.step_index >= len(steps):
-            return 1
-    return 0 if state.action_status == "PASSED" else 1
+            return _integration_unresolved(
+                "the configured integration steps were exhausted while "
+                "full_verify was still failing")
+    return (0 if state.action_status == "PASSED" else
+            _integration_unresolved(
+                "the configured integration steps ended without a passing "
+                "full_verify"))
 
 
-def run_dynamic_selection_workflow(config_path: str, assent_dir, *,
-                                   auto_fix: bool = False) -> int:
+def run_dynamic_selection_workflow(config_path: str, assent_dir) -> int:
     """Snapshot a whole-project run's current verification selection once."""
     try:
         assent_dir = os.fspath(assent_dir)
@@ -2878,14 +2860,12 @@ def run_dynamic_selection_workflow(config_path: str, assent_dir, *,
     if not selection.folders:
         print("Selection full_verify: no folder has anything left to verify")
         return 0
-    return run_selection_workflow(
-        config_path, assent_dir, selection.folders, auto_fix=auto_fix)
+    return run_selection_workflow(config_path, assent_dir, selection.folders)
 
 
 def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         adapter: Adapter | None = None,
         auto_fix_adapter: Adapter | None = None,
-        auto_fix: bool = False,
         sleep: Callable[[float], None] | None = None,
         now: Callable[[], datetime] | None = None,
         run_level_verify: bool = False) -> int:
@@ -2934,8 +2914,7 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     try:
         with lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name):
             result = _run_locked(
-                cfg, once, task_id, adapter, auto_fix_adapter, auto_fix,
-                sleep, now)
+                cfg, once, task_id, adapter, auto_fix_adapter, sleep, now)
     except lockfile.LockBusy as e:
         print(str(e))
         return 1
@@ -2951,42 +2930,15 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         print(f"Failed to parse task folder after run: {e}")
         return 1
     if all(task.status in ("DONE", "SKIP") for task in plan.tasks):
-        source_full_test = _plan_uses_full_test(cfg, plan)
-        selection_verify = (run_level_verify
-                            or os.environ.get(
-                                "ASSENT_SELECTION_FULL_VERIFY") == "1")
-        if (cfg.receipt_refresh == "auto" and not source_full_test
-                and not selection_verify):
-            result = verification.verify_folder_if_needed(cfg)
-        else:
-            # Manual policy deliberately defers this per-folder receipt.  When
-            # the invoking CLI already requested run-level verification, its
-            # selected or dynamic candidate follows immediately after this
-            # closeout and is the next step the user should see.
-            if selection_verify:
-                print(f"verify {cfg.tasks_name}: per-folder receipt refresh "
-                      "deferred to the invocation selection full_verify")
-            elif source_full_test:
-                print(f"verify {cfg.tasks_name}: source-workflow full_test "
-                      "creates no acceptance receipt; selection full_verify "
-                      "remains explicit")
-            elif run_level_verify:
-                print(f"verify {cfg.tasks_name}: receipt refresh deferred "
-                      "(default) for the per-folder receipt under manual "
-                      "policy; run-level verification follows this invocation")
-            else:
-                print(f"verify {cfg.tasks_name}: receipt refresh deferred "
-                      "(default) for the per-folder receipt under manual "
-                      "policy; run "
-                      "`assent verify [--batch]` before accepting")
-            try_write_report(cfg)
+        print(f"integration {cfg.tasks_name}: folder execution complete; "
+              "the invocation integration workflow follows")
+        try_write_report(cfg)
     return result
 
 
 def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 adapter: Adapter | None,
                 auto_fix_adapter: Adapter | None,
-                auto_fix_enabled: bool,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
     """The actual run body, after the task folder lock is held."""
@@ -3060,10 +3012,9 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 print(f"  - {message}")
         return 1
 
-    review_rounds = cfg.auto_fix_review
-    if (auto_fix_enabled
-            and any(isinstance(step, WorkflowPlanStep) and step.produces_verdict
-                    for step in review_rounds)):
+    review_rounds = cfg.workflow_plan
+    if any(isinstance(step, WorkflowPlanStep) and step.produces_verdict
+           for step in review_rounds):
         first_review = next(
             step for step in review_rounds
             if isinstance(step, WorkflowPlanStep) and step.produces_verdict)
@@ -3142,7 +3093,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             and existing_auto_fix.unresolved_review is not None)
         quiescent_unresolved = settled_unresolved and not any(
             task.status in ("TODO", "WIP") for task in plan.tasks)
-        if auto_fix_enabled and (settled_self_fixed or quiescent_unresolved):
+        if settled_self_fixed or quiescent_unresolved:
             assert existing_auto_fix is not None
             if settled_self_fixed:
                 outcome = existing_auto_fix.self_fixed_unreviewed
@@ -3156,8 +3107,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             try_write_report(cfg)
             return 0
         resuming_auto_fix = bool(
-            auto_fix_enabled
-            and existing_auto_fix is not None
+            existing_auto_fix is not None
             and existing_auto_fix.verdict != "PASS"
             and not settled_self_fixed
             and not settled_unresolved)
@@ -3168,10 +3118,9 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             if recovery_error is not None:
                 print(f"Auto-fix recovery refused: {recovery_error}.")
                 return 1
-        review_enabled = auto_fix_enabled and bool(review_rounds)
-        if auto_fix_enabled and not review_rounds:
-            print("Auto-fix had no effect because no plan review step is "
-                  "configured; continuing as an ordinary run.")
+        review_enabled = any(
+            isinstance(step, WorkflowPlanStep) and step.produces_verdict
+            for step in review_rounds)
         while not resuming_auto_fix:
             current_plan = Plan.parse(cfg.tasks_dir)
             plan = (_authoritative_status_plan(trusted_plan, current_plan)
@@ -3228,7 +3177,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 trusted_plan=trusted_plan,
                 trusted_contracts=trusted_contracts)
 
-        if auto_fix_enabled and review_rounds:
+        if review_enabled:
             review_outcome = _run_auto_fix_review_once(
                 cfg, once=once, task_id=task_id,
                 injected_adapter=auto_fix_adapter, sleep=sleep, now=now,
@@ -3242,7 +3191,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                     return _auto_fix_finish_rounds_exhausted(
                         cfg, review_outcome.state, now,
                         gate_passes=gate_passes)
-                if (auto_fix_enabled and review_outcome.state is not None
+                if (review_outcome.state is not None
                         and review_outcome.human_reason is None
                         and not (once or task_id is not None)):
                     return _run_auto_fix_repairs(
@@ -3333,7 +3282,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         return 1
 
     final_plan = Plan.parse(cfg.tasks_dir)
-    if not auto_fix_enabled and any(
+    if not review_rounds and any(
             task.status not in ("DONE", "SKIP") for task in final_plan.tasks):
         _print_summary(final_plan)
         try_write_report(cfg)
@@ -3351,7 +3300,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             and pending.unresolved_review is None):
         print("Auto-fix closeout refused: the folder has a pending "
               f"{pending.verdict} state; "
-              "rerun with --auto-fix and its current plan review policy.")
+              "rerun with its current plan workflow policy.")
         _print_summary(final_plan)
         try_write_report(cfg)
         return 1
@@ -3588,7 +3537,9 @@ def _auto_fix_review_identity(
             task.id: task.path.read_text(encoding="utf-8")
             for task in plan.tasks
         }
-    rounds = cfg.auto_fix_review
+    rounds = tuple(
+        step for step in cfg.workflow_plan
+        if isinstance(step, WorkflowPlanStep))
     reviewed_material = dict(
         folder=cfg.tasks_name,
         base_ref=base_ref,
@@ -3654,7 +3605,9 @@ def _auto_fix_existing_state(cfg: Config) -> auto_fix.AutoFixState | None:
 def _auto_fix_recovery_config_error(
         cfg: Config, state: auto_fix.AutoFixState) -> str | None:
     """Refuse stale unfinished recovery unless its reviewer is still configured."""
-    rounds = cfg.auto_fix_review
+    rounds = tuple(
+        step for step in cfg.workflow_plan
+        if isinstance(step, WorkflowPlanStep))
     if not rounds:
         return ("the pending FAIL state requires a configured plan review "
                 "sequence before repair or closeout can resume")
@@ -3831,7 +3784,9 @@ def _run_auto_fix_review_once(
         gate_passes: _FocusedGateLedger | None = None,
         ) -> _AutoFixReviewOutcome:
     """Run one merged reviewer-fixer round or quiescent blocked adjudication."""
-    rounds = cfg.auto_fix_review
+    rounds = tuple(
+        step for step in cfg.workflow_plan
+        if isinstance(step, WorkflowPlanStep))
     if not rounds:
         return _AutoFixReviewOutcome(0)
     # The folder walks the configured reviewer list position by position, and
@@ -3840,13 +3795,9 @@ def _run_auto_fix_review_once(
     round_index = existing.workflow_step_index if existing is not None else 0
     while round_index < len(rounds) and not rounds[round_index].produces_verdict:
         round_index += 1
-    if round_index >= len(rounds):
-        print(f"Auto-fix folder review: all {len(rounds)} configured workflow "
-              "steps have been used; no further verdict step starts.")
-        return _AutoFixReviewOutcome(
-            1, existing, human_reason="configured workflow steps are exhausted",
-            rounds_exhausted=True)
-    review = rounds[round_index]
+    rounds_exhausted = round_index >= len(rounds)
+    review_index = min(round_index, len(rounds) - 1)
+    review = rounds[review_index]
     assert review.adapter is not None
     assert review.model is not None and review.effort is not None
     assert review.requested_model is not None
@@ -3895,7 +3846,27 @@ def _run_auto_fix_review_once(
     # so reuse never changes the reviewer's freshness or convergence boundary.
     identity_lines: list[str] = []
     seen: set[str] = set()
-    if review_context == "completed_folder":
+    current_fingerprints = (
+        set(existing.current_finding_fingerprints)
+        if existing is not None else set())
+    pending_focused_failure = bool(
+        existing is not None
+        and existing.verdict == "FAIL"
+        and existing.review_context == "completed_folder"
+        and existing.source_tree == gitops.tree_of(cfg.root, "HEAD")
+        and any(
+            finding.fingerprint in current_fingerprints
+            and finding.summary == "Final focused verification failed"
+            for finding in existing.findings))
+    if review_context == "completed_folder" and pending_focused_failure:
+        print("Plan focused_sweep: reusing durable failure evidence for review.")
+        for finding in existing.findings:
+            if finding.fingerprint not in current_fingerprints:
+                continue
+            line = f"- FAIL: {finding.evidence}"
+            focused_lines.append(line)
+            identity_lines.append(line)
+    elif review_context == "completed_folder":
         print("Auto-fix folder review: running final distinct focused checks.")
     else:
         print("Auto-fix blocked adjudication: using durable task failure evidence; "
@@ -3904,7 +3875,8 @@ def _run_auto_fix_review_once(
             f"- {item.task.id}: {item.focused_evidence}" for item in blockers)
         identity_lines.extend(focused_lines)
     distinct: list[str] = []
-    for task in done if review_context == "completed_folder" else ():
+    for task in (done if review_context == "completed_folder"
+                 and not pending_focused_failure else ()):
         if task.verify in seen:
             continue
         seen.add(task.verify)
@@ -3948,7 +3920,7 @@ def _run_auto_fix_review_once(
                     cfg, plan, "\n".join(focused_lines),
                     focused_identity="\n".join(identity_lines),
                     contracts_by_id=contracts_by_id,
-                    round_index=round_index))
+                    round_index=review_index))
             # The scheduler authored this failure; no reviewer round ran, so
             # the folder's round position stays exactly where it was.
             state = auto_fix.state_for_review(
@@ -3958,7 +3930,7 @@ def _run_auto_fix_review_once(
                 review_prompt_sha256=prompt_digest,
                 reviewer_adapter=review.adapter,
                 reviewer_role=review.role,
-                reviewer_step_index=round_index,
+                reviewer_step_index=review_index,
                 reviewer_model=review.requested_model,
                 reviewer_effort=review.requested_effort)
             state = _auto_fix_attach_repair_briefs(
@@ -3993,6 +3965,45 @@ def _run_auto_fix_review_once(
                   f"contract restoration failed: {e}")
             return _AutoFixReviewOutcome(1, outcome.state, str(e))
         return outcome
+
+    # A passing scheduler action completes the plan layer.  Review roles are
+    # failure handlers, so no AI session is opened merely to confirm a
+    # mechanically passing focused_sweep.
+    if review_context == "completed_folder" and not pending_focused_failure:
+        if existing is None or existing.verdict == "PASS":
+            print("Plan focused_sweep: PASS; no reviewer session started.")
+            return finish(_AutoFixReviewOutcome(0, existing))
+        pass_context = existing.review_context
+        source_tree, plan_digest, _prompt, prompt_digest = (
+            _auto_fix_review_identity(
+                cfg, plan, "\n".join(focused_lines),
+                focused_identity="\n".join(identity_lines),
+                contracts_by_id=contracts_by_id,
+                review_context=pass_context, review_stage="recheck",
+                round_index=review_index, previous=existing))
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("PASS", ()), previous=existing,
+            review_stage="recheck", source_tree=source_tree,
+            task_plan_sha256=plan_digest,
+            review_prompt_sha256=prompt_digest,
+            reviewer_adapter=review.adapter,
+            reviewer_role=review.role,
+            reviewer_step_index=review_index,
+            reviewer_model=review.requested_model,
+            reviewer_effort=review.requested_effort,
+            review_context=pass_context,
+            failure_trigger=existing.failure_trigger,
+            workflow_step_index=round_index)
+        auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
+        print("Plan focused_sweep: PASS after repair; no reviewer session started.")
+        return finish(_AutoFixReviewOutcome(0, state))
+
+    if rounds_exhausted:
+        print(f"Auto-fix folder review: all {len(rounds)} configured workflow "
+              "steps have been used; no further verdict step starts.")
+        return finish(_AutoFixReviewOutcome(
+            1, existing, human_reason="configured workflow steps are exhausted",
+            rounds_exhausted=True))
 
     if existing is not None and existing.verdict == "PASS":
         # A settled PASS keeps the lineage it was decided under.  Deriving a
@@ -4101,9 +4112,7 @@ def _run_auto_fix_review_once(
                 cfg, reviewer, session.agent, attempt_prompt,
                 session.requested_model, session.requested_effort, cfg.root,
                 context_kind="plan",
-                context_id=(
-                    f"workflow.{'plan' if cfg.workflow_plan else 'selection'}"
-                    f"[{round_index}]"), structured=True)
+                context_id=f"workflow.plan[{round_index}]", structured=True)
         except KeyboardInterrupt:
             changed = _auto_fix_surface_change(
                 baseline, cfg, baseline_head, baseline_status,
@@ -4181,6 +4190,10 @@ def _run_auto_fix_review_once(
                     and record.verdict == "PASS" and blocked):
                 raise AssentError(
                     "A blocked adjudication cannot PASS while a task remains BLOCKED")
+            if pending_focused_failure and record.verdict == "PASS":
+                raise AssentError(
+                    "A focused_sweep failure cannot PASS until a later "
+                    "focused_sweep succeeds")
         except AssentError as e:
             diagnostic = _bounded_adapter_diagnostic(review_output)
             if invalid_attempts < cfg.retry_per_task:
@@ -4618,7 +4631,7 @@ def _scope_amendment_detail(
         f"task contract after sha256: {task_after}\n"
         f"task plan before sha256: {plan_before}\n"
         f"task plan after sha256: {plan_after}\n"
-        "authorization: run --auto-fix reviewer decision"
+        "authorization: configured workflow reviewer decision"
     )
 
 
@@ -5212,7 +5225,9 @@ def _run_auto_fix_repairs(
         trusted_contracts: dict[str, str] | None = None) -> int:
     """Walk the finite review-round sequence until a round passes or it runs out."""
     state_path = auto_fix.auto_fix_state_path(cfg)
-    rounds = cfg.auto_fix_review
+    rounds = tuple(
+        step for step in cfg.workflow_plan
+        if isinstance(step, WorkflowPlanStep))
     recovery_error = _auto_fix_recovery_config_error(cfg, state)
     if recovery_error is not None:
         print(f"Auto-fix recovery refused: {recovery_error}.")
@@ -5232,14 +5247,22 @@ def _run_auto_fix_repairs(
     round_passes = _FocusedGateLedger()
     while True:
         repair_step = None
-        if state.workflow_step_index:
+        if (state.phase == "REPAIRING"
+                and state.workflow_step_index
+                and state.reviewer_step_index < state.workflow_step_index):
             previous_step = rounds[state.workflow_step_index - 1]
-            if (isinstance(previous_step, WorkflowPlanStep)
-                    and previous_step.writes
-                    and not previous_step.produces_verdict):
+            if previous_step.writes:
                 repair_step = previous_step
         if state.phase == "NEEDS_REPAIR":
-            repair_authorized = repair_step is not None
+            # A write-capable verdict role authorizes the ordinary task repair
+            # its FAIL requested.  The separate blocked adjudication remains
+            # read-only, but its durable decision must not consume the next
+            # review round before the scheduler dispatches that repair.
+            repair_authorized = (
+                repair_step is not None
+                or (state.workflow_step_index < len(rounds)
+                    and state.reviewer_step_index < state.workflow_step_index
+                    and rounds[state.reviewer_step_index].writes))
             while (not repair_authorized
                    and state.workflow_step_index < len(rounds)):
                 step = rounds[state.workflow_step_index]
@@ -5932,13 +5955,13 @@ def _plan_worker_prompt(
     if state.step_index > 0:
         focused = tuple(
             item for item in state.focused_evidence
-            if not item.startswith(_PLAN_FULL_TEST_PREFIX))
+            if not item.startswith(_PLAN_FOCUSED_SWEEP_PREFIX))
         completed = (
             "\nCumulative checkpoint diff and working changes:\n"
             f"{_plan_cumulative_diff(cfg, state.base_ref)}\n\n"
             "Focused evidence from completed plan steps:\n"
             + "\n".join(focused) + "\n"
-            + _full_test_prompt(state))
+            + _focused_sweep_prompt(state))
     prompt = _PLAN_WORKER_PROMPT.format(
         agents_md_path=_agents_md_path_for_prompt(cfg),
         instructions_path=contracts.instructions_path(),
@@ -6009,7 +6032,7 @@ def _finish_plan_unit(
                     f"{workflow_source}; completed by plan step {step_name!r}; "
                     + ("focused plan gate passed."
                        if isinstance(step, WorkflowPlanStep)
-                       else "scheduler-owned full_test action passed.")),
+                       else "scheduler-owned focused_sweep action passed.")),
                 time_str=now().isoformat(timespec="seconds"))
     workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
     subject = f"auto({cfg.tasks_name}): workflow plan step {step_name}"
@@ -6058,7 +6081,7 @@ def _process_plan_workflow(
     attempts = 0
     failure_reason: str | None = None
     while True:
-        refreshed = _refresh_full_test_evidence(cfg, state)
+        refreshed = _refresh_focused_sweep_evidence(cfg, plan, state)
         if refreshed != state:
             state = refreshed
             write_workflow_state(cfg.tasks_dir, state)
@@ -6070,7 +6093,8 @@ def _process_plan_workflow(
                 cfg.root,
                 f"wip({cfg.tasks_name}): plan workflow before {step.action}",
                 cfg.git_excludes)
-            state, record, _reused = _run_full_test_action(cfg, state)
+            state, record, _reused = _run_focused_sweep_action(
+                cfg, plan, state)
             final = state.step_index == len(cfg.workflow_plan) - 1
             later_role = (not final and isinstance(
                 cfg.workflow_plan[state.step_index + 1], WorkflowPlanStep))
@@ -6079,9 +6103,13 @@ def _process_plan_workflow(
                 _print_summary(Plan.parse(cfg.tasks_dir))
                 return 0
             if record.status != "PASSED" and not later_role:
-                reason = (f"full_test action evidence is {record.status} "
+                reason = (f"focused_sweep action evidence is {record.status} "
                           f"(exit {record.exit_code})")
                 _block_plan_unit(cfg, plan, step, reason, now)
+                print("Plan workflow: REVIEW UNRESOLVED, HUMAN DECISION; "
+                      "the configured steps were exhausted while "
+                      "focused_sweep was still failing. Evidence and edits "
+                      "were preserved.")
                 _print_summary(Plan.parse(cfg.tasks_dir))
                 return 0
             state = replace(
@@ -6138,14 +6166,15 @@ def _process_plan_workflow(
         else:
             passed, reason, evidence = _evaluate_plan_step(
                 cfg, plan, state.base_ref, trusted_contracts)
-            refreshed = _refresh_full_test_evidence(cfg, state)
+            refreshed = _refresh_focused_sweep_evidence(cfg, plan, state)
             if refreshed != state:
                 state = refreshed
                 write_workflow_state(cfg.tasks_dir, state)
             if passed and state.step_index == len(cfg.workflow_plan) - 1:
-                full_test_refusal = _full_test_completion_refusal(cfg, state)
-                if full_test_refusal is not None:
-                    passed, reason = False, full_test_refusal
+                focused_sweep_refusal = _focused_sweep_completion_refusal(
+                    cfg, plan, state)
+                if focused_sweep_refusal is not None:
+                    passed, reason = False, focused_sweep_refusal
         if passed:
             combined = state.focused_evidence + evidence
             if state.step_index == len(cfg.workflow_plan) - 1:
@@ -6167,6 +6196,9 @@ def _process_plan_workflow(
             failure_reason = reason
             continue
         _block_plan_unit(cfg, plan, step, reason, now)
+        print("Plan workflow: REVIEW UNRESOLVED, HUMAN DECISION; the "
+              "configured steps were exhausted without a passing "
+              "focused_sweep. Evidence and edits were preserved.")
         final = Plan.parse(cfg.tasks_dir)
         _print_summary(final)
         try_write_report(cfg)
@@ -6244,13 +6276,9 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 _checkpoint_subject(
                     cfg, "wip", task, f"before {workflow_step.action}"),
                 cfg.git_excludes)
-            if workflow_step.action == "focused_test":
-                workflow_state, record, _reused = _run_focused_test_action(
-                    cfg, task, workflow_state)
-            else:
-                assert workflow_step.action == "full_test"
-                workflow_state, record, _reused = _run_full_test_action(
-                    cfg, workflow_state)
+            assert workflow_step.action == "focused_test"
+            workflow_state, record, _reused = _run_focused_test_action(
+                cfg, task, workflow_state)
             final = workflow_state.step_index == len(workflow) - 1
             later_role = (not final and isinstance(
                 workflow[workflow_state.step_index + 1], WorkflowTaskStep))
@@ -6266,12 +6294,6 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                            and item.action == "focused_test"
                            for item in workflow):
                         reason = _focused_test_completion_refusal(workflow_state)
-                    if (reason is None
-                            and any(isinstance(item, WorkflowActionStep)
-                                    and item.action == "full_test"
-                                    for item in workflow)):
-                        reason = _full_test_completion_refusal(
-                            cfg, workflow_state)
                     if reason is None:
                         _fresh, reason = _inspect_task_safety(
                             cfg, task, start_ref)
@@ -6335,15 +6357,11 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                             if workflow_state is not None else 0),
             workflow_total=len(workflow),
             action_evidence=(
-                (_full_test_prompt(workflow_state)
-                 + _focused_test_prompt(workflow_state))
+                _focused_test_prompt(workflow_state)
                 if workflow_state is not None else ""),
             focused_test_action_present=any(
                 isinstance(item, WorkflowActionStep)
-                and item.action == "focused_test" for item in workflow),
-            full_test_action_present=any(
-                isinstance(item, WorkflowActionStep)
-                and item.action == "full_test" for item in workflow))
+                and item.action == "focused_test" for item in workflow))
         if auto_fix_context:
             prompt += auto_fix_context
         print(_session_line(
@@ -6516,12 +6534,6 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             if refreshed != workflow_state:
                 workflow_state = refreshed
                 write_workflow_state(cfg.tasks_dir, workflow_state)
-            if outcome == "done":
-                full_test_refusal = _full_test_completion_refusal(
-                    cfg, workflow_state)
-                if full_test_refusal is not None:
-                    outcome = "fail"
-                    reason = full_test_refusal
         if outcome == "step_done":
             assert workflow_state is not None and workflow_step is not None
             set_status(task.path, "WIP")

@@ -279,9 +279,11 @@ effort = "heavy"
         session, errors = self.review_errors(
             self.ROLES +
             '[adapter]\nname = "claude"\n'
-            '[workflow]\nplan = ['
+            '[workflow]\nplan = [{ action = "focused_sweep" }, '
             '{ role = "prime_review", adapter = "claude" }, '
-            '{ role = "prime_review", adapter = "antigravity" }]\n'
+            '{ action = "focused_sweep" }, '
+            '{ role = "prime_review", adapter = "antigravity" }, '
+            '{ action = "focused_sweep" }]\n'
             + self.BAD_PRIME_HEAVY, "claude")
         self.assertEqual(session.agent, "claude")   # round 1 still drives the call
         self.assertTrue(errors)
@@ -294,7 +296,9 @@ effort = "heavy"
     def test_one_round_keeps_todays_unprefixed_diagnostics(self):
         session, errors = self.review_errors(
             self.ROLES + '[adapter]\nname = "antigravity"\n'
-            '[workflow]\nplan = [{ role = "prime_review", adapter = "antigravity" }]\n'
+            '[workflow]\nplan = [{ action = "focused_sweep" }, '
+            '{ role = "prime_review", adapter = "antigravity" }, '
+            '{ action = "focused_sweep" }]\n'
             + self.BAD_PRIME_HEAVY,
             "antigravity")
         self.assertEqual(session.agent, "antigravity")
@@ -306,10 +310,13 @@ effort = "heavy"
         session, errors = self.review_errors(
             self.ROLES +
             '[adapter]\nname = "claude"\n'
-            '[workflow]\nplan = ['
+            '[workflow]\nplan = [{ action = "focused_sweep" }, '
             '{ role = "prime_review", adapter = "antigravity" }, '
+            '{ action = "focused_sweep" }, '
             '{ role = "core_review", adapter = "antigravity" }, '
-            '{ role = "prime_review", adapter = "antigravity" }]\n'
+            '{ action = "focused_sweep" }, '
+            '{ role = "prime_review", adapter = "antigravity" }, '
+            '{ action = "focused_sweep" }]\n'
             + self.BAD_PRIME_HEAVY, "antigravity")
         self.assertEqual(session.agent, "antigravity")
         self.assertTrue(errors)

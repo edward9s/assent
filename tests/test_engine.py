@@ -1018,12 +1018,9 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         # The merged reviewer-fixer loop walks this list position by position,
         # so a case needing more than one reviewer session configures more than
         # one round.
-        steps = ", ".join(
-            item
-            for _ in range(rounds)
-            for item in (
-                '{ role = "bounded_fixer" }',
-                '{ role = "reviewer_fixer", adapter = "codex" }'))
+        steps = ', { action = "focused_sweep" }, '.join(
+            '{ role = "reviewer_fixer", adapter = "codex" }'
+            for _ in range(rounds))
         return self.build(
             retry=retry,
             extra_config=(
@@ -1041,13 +1038,16 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 '[roles.bounded_fixer]\n'
                 'ability = ["fix"]\n'
                 '[workflow]\n'
-                f'plan = [{steps}]\n'))
+                'plan = [{ action = "focused_sweep" }, '
+                f'{steps}, {{ action = "focused_sweep" }}]\n'))
 
     def write_pending_fail(self, cfg, verdict="FAIL"):
         task = parse_task_file(self.plan_dir / "t001_task.e.toml")
-        rounds = cfg.auto_fix_review
+        rounds = cfg.workflow_plan
         self.assertTrue(rounds)
-        review = next(step for step in rounds if step.produces_verdict)
+        review = next(
+            step for step in rounds
+            if getattr(step, "produces_verdict", False))
         # A PASS carries no findings; every other verdict must carry at least
         # one, so the fixture follows the verdict rather than the caller.
         findings = () if verdict == "PASS" else (auto_fix.ReviewFinding(
@@ -1059,11 +1059,11 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
             task_plan_sha256=auto_fix.sha256_files((task.path,)),
             review_prompt_sha256="a" * 64,
             reviewer_role=review.role,
-            reviewer_step_index=1,
+            reviewer_step_index=0,
             reviewer_adapter=review.adapter,
             reviewer_model=review.requested_model,
             reviewer_effort=review.requested_effort,
-            workflow_step_index=2)
+            workflow_step_index=1)
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
         return state
 
@@ -1080,31 +1080,6 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with mock.patch.object(engine, "_verify_subprocess", fake):
             yield calls
 
-    def test_unchanged_authoritative_pass_reaches_the_final_gate_unrun(self):
-        task = self.write_task(1, verify=_OK)
-        cfg = self.build_review()
-        self.commit_all()
-        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
-
-        def review(prompt):
-            self.assertIn(f"- PASS (reused authoritative PASS): {_OK}", prompt)
-            return TaskResult(0, terminal, False, None)
-
-        reviewer = ScriptedAdapter([review])
-        out = io.StringIO()
-        with self.counted_verify() as calls, contextlib.redirect_stdout(out):
-            self.assertEqual(engine.run(
-                cfg, adapter=ScriptedAdapter(
-                    [self.ai_done(task, {"src/one.txt": "one\n"})]),
-                auto_fix_adapter=reviewer, auto_fix=True), 0)
-
-        # One authoritative scheduler execution at task closeout; the final gate
-        # reuses it instead of launching the same command against the same tree.
-        self.assertEqual(calls, [_OK])
-        self.assertIn("reused authoritative PASS", out.getvalue())
-        self.assertEqual(len(reviewer.calls), 1)
-        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.verdict, "PASS")
 
     def test_shared_command_reuses_once_and_a_later_write_reruns_the_other(self):
         first = self.write_task(1, verify=_OK)
@@ -1125,7 +1100,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with self.counted_verify() as calls, contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, adapter=worker, auto_fix_adapter=reviewer,
-                auto_fix=True), 0)
+                ), 0)
 
         # Three closeout gates, then one final-gate execution: the shared command
         # last passed two checkpoints ago and is rerun exactly once for both of
@@ -1155,7 +1130,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with self.counted_verify() as calls, contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, adapter=worker, auto_fix_adapter=reviewer,
-                auto_fix=True), 0)
+                ), 0)
 
         # Three closeout gates, then one merged final run: t003's command is
         # still proven against this exact tree, so it is reused rather than
@@ -1190,49 +1165,6 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertFalse(ledger.reusable(cfg, _OK))
         self.assertFalse(engine._FocusedGateLedger().reusable(cfg, _OK))
 
-    def test_complete_folder_sweeps_distinct_checks_then_reuses_exact_pass(self):
-        command = _OK
-        self.write_task(1, status="DONE", verify=command)
-        self.write_task(2, status="DONE", verify=command)
-        cfg = self.build_review()
-        self.commit_all()
-
-        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
-
-        def review(prompt):
-            self.assertIn("Review context: COMPLETED_FOLDER", prompt)
-            self.assertIn("Review stage: INITIAL", prompt)
-            self.assertIn("cumulative checkpoint diff", prompt)
-            self.assertIn("t001 task contract", prompt)
-            self.assertIn(f"PASS: {command}", prompt)
-            self.assertIn("directly necessary", prompt)
-            self.assertIn("eligible technical debt", prompt)
-            self.assertIn("task's declared scope", prompt)
-            self.assertIn("repository-wide\ndebt search", prompt)
-            self.assertIn("Complete verification has deliberately not run", prompt)
-            return TaskResult(0, terminal, False, None)
-
-        reviewer = ScriptedAdapter([review])
-        reviewer.preflight = mock.Mock(return_value=[])
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(engine.run(
-                cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=reviewer, auto_fix=True), 0)
-        self.assertEqual(len(reviewer.calls), 1)
-        reviewer.preflight.assert_called_once()
-        self.assertEqual(out.getvalue().count(f"  verify: {command}"), 1)
-        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.verdict, "PASS")
-
-        cached = ScriptedAdapter([])
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(engine.run(
-                cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=cached, auto_fix=True), 0)
-        self.assertEqual(cached.calls, [])
-        self.assertIn("reusing exact fresh PASS", out.getvalue())
 
     def test_unittest_shape_is_recognized_exactly_and_nothing_else(self):
         self.assertEqual(
@@ -1270,7 +1202,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with self.counted_verify() as calls, contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=reviewer, auto_fix=True), 0)
+                auto_fix_adapter=reviewer), 0)
 
         # One merged unittest run proves both overlapping commands; the
         # non-unittest command still runs exactly as it did before.
@@ -1294,7 +1226,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with self.counted_verify(codes) as calls, contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
-                auto_fix=True, once=True), 1)
+                once=True), 1)
 
         self.assertEqual(calls, [merged, first, second])
         self.assertEqual(reviewer.calls, [])
@@ -1307,165 +1239,76 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertEqual([finding.task_id for finding in state.findings],
                          ["t002"])
 
-    def test_structured_final_response_wins_over_codex_jsonl_stream(self):
-        self.write_task(1, status="DONE")
-        cfg = self.build_review(retry=0)
-        self.commit_all()
-        final = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
-        raw_stream = (json.dumps({"type": "item.completed", "item": {
-            "type": "agent_message", "text": final}})
-                      + "\n" + json.dumps({"type": "turn.completed"}) + "\n")
-        reviewer = ScriptedAdapter([TaskResult(
-            0, raw_stream, False, None, structured_output=final)])
 
-        self.assertEqual(self.run_quiet(
-            cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
-            auto_fix=True), 0)
-        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.verdict, "PASS")
 
-    def test_structured_empty_response_never_falls_back_to_raw_stream(self):
-        self.write_task(1, status="DONE")
-        cfg = self.build_review(retry=0)
-        self.commit_all()
-        final = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
-        raw_stream = (json.dumps({"type": "item.completed", "item": {
-            "type": "agent_message", "text": final}})
-                      + "\n" + json.dumps({"type": "turn.completed"}) + "\n")
-        reviewer = ScriptedAdapter([TaskResult(
-            0, raw_stream, False, None, structured_output="")])
-
-        self.assertEqual(self.run_quiet(
-            cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
-            auto_fix=True), 1)
-        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
-
-    def test_focused_failure_starts_no_reviewer(self):
+    def test_focused_failure_is_reviewed_then_repaired(self):
         task = self.write_task(1, status="DONE", verify=_NEEDS_OK_TXT)
         cfg = self.build_review()
         self.commit_all()
-        reviewer = ScriptedAdapter([TaskResult(
-            0, auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ())),
-            False, None)])
 
-        def repair(prompt):
-            self.assertEqual(reviewer.calls, [])
-            pending = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-            fingerprint = pending.current_finding_fingerprints[0]
+        def review(_prompt):
+            pending = auto_fix.read_auto_fix_state(
+                auto_fix.auto_fix_state_path(cfg))
+            finding = auto_fix.current_review_record(pending).findings[0]
+            fingerprint = auto_fix.finding_fingerprint(finding)
             ready = self.execution_root() / "src" / "ok.txt"
             ready.parent.mkdir(parents=True, exist_ok=True)
             ready.write_text("ready\n", encoding="utf-8")
-            set_status(task, "DONE")
-            append_entry(
-                journal_path_for(task), by="claude", event="done",
-                summary="Repaired the focused failure.",
-                detail=(
-                    'ASSENT_REPAIR_DISPOSITION {"fingerprint":"'
-                    f'{fingerprint}","disposition":"fixed","detail":'
-                    '"The focused command now passes."}'))
-            return ok_result()
+            continued = auto_fix.ReviewFinding(
+                finding.task_id, finding.path, finding.summary,
+                finding.evidence, kind=finding.kind,
+                recommendation=finding.recommendation,
+                scope_addition=finding.scope_addition,
+                transition="still_present", prior_fingerprint=fingerprint,
+                transition_evidence=finding.evidence)
+            return TaskResult(
+                0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("FIXED", (continued,))), False, None)
+
+        reviewer = ScriptedAdapter([review])
 
         self.assertEqual(self.run_quiet(
-            cfg, adapter=ScriptedAdapter([repair]),
-            auto_fix_adapter=reviewer, auto_fix=True), 0)
+            cfg, adapter=ScriptedAdapter([]),
+            auto_fix_adapter=reviewer), 0)
         self.assertEqual(len(reviewer.calls), 1)
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertEqual(state.verdict, "PASS")
         self.assertEqual(state.phase, "COMPLETE")
         self.assertTrue(any(
             finding.summary == "Final focused verification failed"
             for finding in state.findings))
 
-    def test_limited_self_blocked_attempt_is_adjudicated_without_a_fixer(self):
-        task = self.write_task(1)
-        cfg = self.build_review(retry=0, rounds=3)
+    def test_failed_trailing_sweep_exhausts_roles_without_reusing_one(self):
+        self.write_task(1, status="DONE", verify=_FAILV)
+        cfg = self.build_review()
         self.commit_all()
-        finding = auto_fix.ReviewFinding(
-            "t001", "src/blocker.py", "Worker blocker needs repair",
-            "The task journal records the self-marked blocker.")
-        failed = auto_fix.review_record_json(
-            auto_fix.ReviewRecord("FAIL", (finding,)))
 
-        def self_blocked(_prompt):
-            set_status(task, "BLOCKED")
-            append_entry(
-                journal_path_for(task), by="claude", event="blocked",
-                summary="Cannot satisfy the required invariant.")
-            return ok_result()
-
-        reviewer = ScriptedAdapter([TaskResult(0, failed, False, None)])
-        self.assertEqual(self.run_quiet(
-            cfg, once=True, adapter=ScriptedAdapter([self_blocked]),
-            auto_fix_adapter=reviewer, auto_fix=True), 1)
-
-        self.assertEqual(len(reviewer.calls), 1)
-        prompt = reviewer.calls[0][0]
-        self.assertIn("Review context: BLOCKED_ADJUDICATION", prompt)
-        self.assertIn("Review stage: INITIAL", prompt)
-        self.assertIn("Execution AI self-marked BLOCKED", prompt)
-        self.assertIn(
-            "worker journal summary (verbatim): Cannot satisfy the required invariant.",
-            prompt)
-        self.assertIn("legitimately skips the focused gate", prompt)
-        self.assertIn("integration candidate", prompt)
-        # A read-only adjudication must never also be told to repair the
-        # blocker itself: the merged write policy and the round sequence's
-        # final-round instruction would contradict its own write policy.
-        self.assertIn("never an\nimplementation session", prompt)
-        self.assertIn("single read-only\ndecision gate", prompt)
-        self.assertNotIn("you may repair it directly", prompt)
-        self.assertNotIn("This is the FINAL workflow plan step.", prompt)
-        self.assertNotIn("This is workflow plan step", prompt)
-        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.phase, "NEEDS_REPAIR")
-        self.assertEqual(state.failure_trigger, "worker_blocked")
-        self.assertEqual(parse_task_file(task).status, "BLOCKED")
-
-        fingerprint = auto_fix.finding_fingerprint(finding)
-
-        def repair(_prompt):
-            repaired = self.execution_root() / "src" / "blocker.py"
-            repaired.parent.mkdir(parents=True, exist_ok=True)
-            repaired.write_text("repaired\n", encoding="utf-8")
-            set_status(task, "DONE")
-            append_entry(
-                journal_path_for(task), by="claude", event="done",
-                summary="Repaired the blocker.",
-                detail=(
-                    'ASSENT_REPAIR_DISPOSITION {"fingerprint":"'
-                    f'{fingerprint}","disposition":"fixed","detail":'
-                    '"The required invariant now holds."}'))
-            return ok_result()
-
-        still_present = auto_fix.review_record_json(auto_fix.ReviewRecord(
-            "FAIL", (auto_fix.ReviewFinding(
+        def review_and_try_fix(_prompt):
+            pending = auto_fix.read_auto_fix_state(
+                auto_fix.auto_fix_state_path(cfg))
+            finding = auto_fix.current_review_record(pending).findings[0]
+            fingerprint = auto_fix.finding_fingerprint(finding)
+            touched = self.execution_root() / "src" / "attempt.py"
+            touched.parent.mkdir(parents=True, exist_ok=True)
+            touched.write_text("attempted\n", encoding="utf-8")
+            continued = auto_fix.ReviewFinding(
                 finding.task_id, finding.path, finding.summary,
                 finding.evidence, kind=finding.kind,
                 recommendation=finding.recommendation,
+                scope_addition=finding.scope_addition,
                 transition="still_present", prior_fingerprint=fingerprint,
-                transition_evidence="The first repair still reproduces the blocker."),)))
-        passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
-        repairer = ScriptedAdapter([repair, repair])
-        rechecker = ScriptedAdapter([
-            TaskResult(0, still_present, False, None),
-            TaskResult(0, passed, False, None),
-        ])
+                transition_evidence="The configured role attempted the repair.")
+            return TaskResult(
+                0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("FIXED", (continued,))), False, None)
+
+        reviewer = ScriptedAdapter([review_and_try_fix])
         self.assertEqual(self.run_quiet(
-            cfg, adapter=repairer, auto_fix_adapter=rechecker,
-            auto_fix=True), 0)
-        self.assertEqual(len(repairer.calls), 2)
-        second_repair_prompt = repairer.calls[1][0]
-        self.assertIn("Cannot satisfy the required invariant.",
-                      second_repair_prompt)
-        self.assertIn("legitimately skips the focused gate",
-                      second_repair_prompt)
-        self.assertNotIn("(none; this is a completed-folder review)",
-                         second_repair_prompt)
-        self.assertIn("Review context: BLOCKED_ADJUDICATION",
-                      rechecker.calls[0][0])
-        self.assertIn("Review stage: RECHECK", rechecker.calls[0][0])
-        completed = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(completed.phase, "COMPLETE")
-        self.assertEqual(parse_task_file(task).status, "DONE")
+            cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer), 0)
+        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
+        self.assertIsNotNone(state.unresolved_review)
+        self.assertEqual(len(reviewer.calls), 1)
+
 
     def test_limited_focused_failure_supplies_exact_command_evidence(self):
         task = self.write_task(1, verify=_FAILV)
@@ -1481,7 +1324,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(self.run_quiet(
             cfg, once=True,
             adapter=ScriptedAdapter([self.ai_done(task)]),
-            auto_fix_adapter=reviewer, auto_fix=True), 1)
+            auto_fix_adapter=reviewer), 1)
 
         prompt = reviewer.calls[0][0]
         self.assertIn("focused_gate_failure", prompt)
@@ -1489,73 +1332,6 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.failure_trigger, "focused_gate_failure")
         self.assertEqual(parse_task_file(task).status, "BLOCKED")
-
-    def test_blocked_recheck_keeps_the_original_focused_gate_trigger(self):
-        task = self.write_task(1, verify=_NEEDS_OK_TXT)
-        cfg = self.build_review(retry=0, rounds=3)
-        self.commit_all()
-        finding = auto_fix.ReviewFinding(
-            "t001", "src/gate.py", "The focused gate must pass",
-            "The scheduler supplied the failing focused command.")
-        failed = auto_fix.review_record_json(
-            auto_fix.ReviewRecord("FAIL", (finding,)))
-        reviewer = ScriptedAdapter([TaskResult(0, failed, False, None)])
-        self.assertEqual(self.run_quiet(
-            cfg, once=True, adapter=ScriptedAdapter([self.ai_done(task)]),
-            auto_fix_adapter=reviewer, auto_fix=True), 1)
-        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.failure_trigger, "focused_gate_failure")
-
-        fingerprint = auto_fix.finding_fingerprint(finding)
-
-        def repair(_prompt):
-            ready = self.execution_root() / "src" / "ok.txt"
-            ready.parent.mkdir(parents=True, exist_ok=True)
-            ready.write_text("ready\n", encoding="utf-8")
-            set_status(task, "DONE")
-            append_entry(
-                journal_path_for(task), by="claude", event="done",
-                summary="Repaired the focused gate.",
-                detail=(
-                    'ASSENT_REPAIR_DISPOSITION {"fingerprint":"'
-                    f'{fingerprint}","disposition":"fixed","detail":'
-                    '"The focused command now passes."}'))
-            return ok_result()
-
-        # The repaired folder is complete, so the recheck collects no blocker at
-        # all; the original focused-gate classification must survive both the
-        # still-present round and the final PASS.
-        still_present = auto_fix.review_record_json(auto_fix.ReviewRecord(
-            "FAIL", (auto_fix.ReviewFinding(
-                finding.task_id, finding.path, finding.summary,
-                finding.evidence, kind=finding.kind,
-                recommendation=finding.recommendation,
-                transition="still_present", prior_fingerprint=fingerprint,
-                transition_evidence="The repaired gate still fails locally."),)))
-        passed = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
-        rechecker = ScriptedAdapter([
-            TaskResult(0, still_present, False, None),
-            TaskResult(0, passed, False, None),
-        ])
-        seen: list[str] = []
-
-        def repair_round(prompt):
-            seen.append(auto_fix.read_auto_fix_state(
-                auto_fix.auto_fix_state_path(cfg)).failure_trigger)
-            return repair(prompt)
-
-        self.assertEqual(self.run_quiet(
-            cfg, adapter=ScriptedAdapter([repair_round, repair_round]),
-            auto_fix_adapter=rechecker, auto_fix=True), 0)
-        self.assertIn("Review stage: RECHECK", rechecker.calls[0][0])
-        self.assertEqual(seen, ["focused_gate_failure", "focused_gate_failure"])
-        completed = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(completed.review_context, "blocked_adjudication")
-        self.assertEqual(completed.failure_trigger, "focused_gate_failure")
-        report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
-        self.assertIn(
-            "Original blocker: focused task gate failure durable evidence",
-            report)
 
     def test_blocked_adjudication_uses_trusted_contract_and_labels_tampering(self):
         task = self.write_task(1, scope=("src/",))
@@ -1578,7 +1354,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         reviewer = ScriptedAdapter([TaskResult(0, failed, False, None)])
         self.assertEqual(self.run_quiet(
             cfg, once=True, adapter=ScriptedAdapter([tamper]),
-            auto_fix_adapter=reviewer, auto_fix=True), 1)
+            auto_fix_adapter=reviewer), 1)
         prompt = reviewer.calls[0][0]
         self.assertIn("task contract (trusted checkpoint; AUTHORITATIVE)", prompt)
         self.assertIn('scope = ["src/"]', prompt)
@@ -1603,7 +1379,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, once=True, adapter=ScriptedAdapter([self_blocked]),
-                auto_fix_adapter=reviewer, auto_fix=True), 1)
+                auto_fix_adapter=reviewer), 1)
         self.assertIn("cannot PASS while a task remains BLOCKED", out.getvalue())
         self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
         self.assertEqual(parse_task_file(task).status, "BLOCKED")
@@ -1622,7 +1398,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         reviewer = ScriptedAdapter([ok_result()])
         self.assertEqual(self.run_quiet(
             cfg, once=True, adapter=ScriptedAdapter([tamper]),
-            auto_fix_adapter=reviewer, auto_fix=True), 1)
+            auto_fix_adapter=reviewer), 1)
 
         self.assertEqual(parse_task_file(task).scope, ["src/"])
         self.assertEqual(parse_task_file(task).status, "BLOCKED")
@@ -1652,7 +1428,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         reviewer = ScriptedAdapter([review])
         self.assertEqual(self.run_quiet(
             cfg, adapter=worker, auto_fix_adapter=reviewer,
-            auto_fix=True), 1)
+            ), 1)
         self.assertEqual(len(worker.calls), 2)
         self.assertEqual(len(reviewer.calls), 1)
 
@@ -1674,7 +1450,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
-            auto_fix=True), 1)
+            ), 1)
         prompt = reviewer.calls[0][0]
         self.assertIn("[focused_gate_failure]", prompt)
         self.assertIn("Verify command exit code is non-zero", prompt)
@@ -1688,7 +1464,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
-            auto_fix=True), 1)
+            ), 1)
         self.assertEqual(reviewer.calls, [])
 
     def test_full_run_adjudicates_prior_and_new_blockers_together(self):
@@ -1716,106 +1492,16 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
             TaskResult(0, invalid_scope, False, None)])
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([self_blocked]),
-            auto_fix_adapter=reviewer, auto_fix=True), 1)
+            auto_fix_adapter=reviewer), 1)
 
         prompt = reviewer.calls[0][0]
         self.assertIn("t001 [worker_blocked]: Scheduler marked BLOCKED: prior structural failure", prompt)
         self.assertIn("t002 [worker_blocked]: Execution AI self-marked BLOCKED", prompt)
         self.assertIn("worker journal summary (verbatim): New worker-authored blocker.", prompt)
 
-    def test_detectable_reviewer_write_is_preserved_and_cannot_pass(self):
-        self.write_task(1, status="DONE")
-        cfg = self.build_review()
-        self.commit_all()
-        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
 
-        def mutating_review(_prompt):
-            (self.execution_root() / "reviewer-write.txt").write_text(
-                "evidence\n", encoding="utf-8")
-            return TaskResult(0, terminal, False, None)
 
-        self.assertEqual(self.run_quiet(
-            cfg, adapter=ScriptedAdapter([]),
-            auto_fix_adapter=ScriptedAdapter([mutating_review]),
-            auto_fix=True), 1)
-        self.assertEqual(
-            (self.execution_root() / "reviewer-write.txt").read_text(encoding="utf-8"),
-            "evidence\n")
-        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
 
-    def test_runtime_log_and_unrelated_folder_progress_do_not_false_refuse(self):
-        self.write_task(1, status="DONE")
-        cfg = self.build_review()
-        unrelated = cfg.assent_dir / "other"
-        unrelated.mkdir()
-        self.commit_all()
-        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
-
-        def concurrent_runtime_writes(_prompt):
-            (cfg.tasks_dir / "_assent.log").write_text(
-                "current run output\n", encoding="utf-8")
-            (unrelated / "t001_task.r.toml").write_text(
-                "parallel folder progress\n", encoding="utf-8")
-            return TaskResult(0, terminal, False, None)
-
-        self.assertEqual(self.run_quiet(
-            cfg, adapter=ScriptedAdapter([]),
-            auto_fix_adapter=ScriptedAdapter([concurrent_runtime_writes]),
-            auto_fix=True), 0)
-        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.verdict, "PASS")
-
-    def test_current_folder_and_stable_root_management_writes_fail_closed(self):
-        task = self.write_task(1, status="DONE")
-        cfg = self.build_review()
-        verifier = cfg.assent_dir / "verify.py"
-        verifier.write_text("before\n", encoding="utf-8")
-        self.commit_all()
-        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
-
-        def mutating_management(_prompt):
-            journal_path_for(task).write_text(
-                "reviewer interval evidence\n", encoding="utf-8")
-            verifier.write_text("after\n", encoding="utf-8")
-            return TaskResult(0, terminal, False, None)
-
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(engine.run(
-                cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=ScriptedAdapter([mutating_management]),
-                auto_fix=True), 1)
-        self.assertIn("writes were detected during the reviewer interval", out.getvalue())
-        self.assertIn("management:verify.py", out.getvalue())
-        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
-
-    def test_root_security_state_writes_fail_closed(self):
-        self.write_task(1, status="DONE")
-        cfg = self.build_review()
-        self.commit_all()
-        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
-
-        def mutating_management(_prompt):
-            for name in ("manifest.toml", "_batch_verification.toml",
-                         "_archived.toml"):
-                (cfg.assent_dir / name).write_text(
-                    "reviewer interval evidence\n", encoding="utf-8")
-            archive = cfg.assent_dir / "_archive"
-            archive.mkdir()
-            (archive / "plan00.zip").write_bytes(b"reviewer archive mutation")
-            return TaskResult(0, terminal, False, None)
-
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(engine.run(
-                cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=ScriptedAdapter([mutating_management]),
-                auto_fix=True), 1)
-        for name in ("manifest.toml", "_batch_verification.toml",
-                     "_archived.toml"):
-            self.assertIn(f"management:{name}", out.getvalue())
-        self.assertIn("management:_archive", out.getvalue())
-        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
 
     def test_pending_fail_refuses_recovery_after_builtin_identity_replaces_override(self):
         self.write_task(1, status="DONE")
@@ -1828,7 +1514,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
-                drifted, adapter=worker, auto_fix=True), 1)
+                drifted, adapter=worker), 1)
 
         self.assertEqual(worker.calls, [])
         self.assertIn("requires a configured plan review sequence", out.getvalue())
@@ -1849,7 +1535,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 drifted, adapter=worker, auto_fix_adapter=reviewer,
-                auto_fix=True), 1)
+                ), 1)
 
         self.assertEqual(worker.calls, [])
         self.assertEqual(reviewer.calls, [])
@@ -1876,65 +1562,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
             auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(ordinary)),
             before)
 
-    def test_pending_fixed_cannot_close_an_ordinary_run_either(self):
-        """An unconfirmed self-repair is pending review exactly as a FAIL is."""
-        self.write_task(1, status="DONE")
-        cfg = self.build_review()
-        self.commit_all()
-        before = self.write_pending_fail(cfg, verdict="FIXED")
-        # A durable FIXED is always an unreviewed pending state: the phase map
-        # sends it to AWAITING_REVIEW and no non-PASS state may be COMPLETE.
-        self.assertEqual(before.phase, "AWAITING_REVIEW")
-        self.assertIsNone(before.self_fixed_unreviewed)
-        ordinary = self.build()
-        worker = ScriptedAdapter([])
-        out = io.StringIO()
 
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(engine.run(ordinary, adapter=worker), 1)
-
-        self.assertEqual(worker.calls, [])
-        self.assertIn("pending FIXED state", out.getvalue())
-        self.assertEqual(
-            auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(ordinary)),
-            before)
-
-    def test_every_review_verdict_states_its_ordinary_closeout(self):
-        """A new review verdict must not inherit an unstated closeout answer.
-
-        While only PASS and FAIL existed, each gate could name FAIL directly
-        and still be exhaustive.  Adding FIXED silently made those gates
-        under-specified: the resume guard was generalized to non-PASS and the
-        closeout guard was not, so a durable FIXED reported success.  This
-        walks REVIEW_VERDICTS itself rather than a hand-written list, so the
-        next verdict cannot be added without deciding this question here.
-        """
-        closeout_exit_code = {"PASS": 0, "FIXED": 1, "FAIL": 1}
-        self.assertEqual(
-            set(closeout_exit_code), set(auto_fix.REVIEW_VERDICTS),
-            "a review verdict was added or removed without stating what an"
-            " ordinary run's closeout does with a folder durably holding it")
-
-        self.write_task(1, status="DONE")
-        cfg = self.build_review()
-        self.commit_all()
-        ordinary = self.build()
-        for verdict, code in closeout_exit_code.items():
-            with self.subTest(verdict=verdict):
-                stored = self.write_pending_fail(cfg, verdict=verdict)
-                worker = ScriptedAdapter([])
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    self.assertEqual(engine.run(ordinary, adapter=worker), code)
-                # Refusal and exit code are one decision, not two: a gate that
-                # returns nonzero must say why, and a gate that closes out must
-                # not print a refusal it did not act on.
-                self.assertEqual("closeout refused" in out.getvalue(), code != 0)
-                self.assertEqual(worker.calls, [])
-                self.assertEqual(
-                    auto_fix.read_auto_fix_state(
-                        auto_fix.auto_fix_state_path(ordinary)),
-                    stored)
 
     def test_every_review_prompt_combination_keeps_its_write_policy_coherent(self):
         """No context/stage/round cell may tell a reviewer two opposite things.
@@ -1970,14 +1598,13 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         for context in contexts:
             for stage in stages:
                 for review_number in range(total):
-                    index = review_number * 2 + 1
                     with self.subTest(context=context, stage=stage,
-                                      workflow_step_index=index):
+                                      review_round=review_number + 1):
                         _tree, _digest, prompt, _prompt_digest = (
                             engine._auto_fix_review_identity(
                                 cfg, plan, "focused evidence",
                                 review_context=context, review_stage=stage,
-                                round_index=index))
+                                round_index=review_number))
                         if context == "blocked_adjudication":
                             self.assertIn("never an\nimplementation session",
                                           prompt)
@@ -1985,60 +1612,22 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                                 self.assertNotIn(phrase, prompt)
                             # It is outside the sequence, so it must not claim
                             # a position in it either.
-                            self.assertNotIn("This is workflow plan step", prompt)
+                            self.assertNotIn("This is review round", prompt)
                             continue
                         self.assertIn("you may repair it directly", prompt)
                         self.assertIn(
-                            f"This is workflow plan step {index + 1} of {len(cfg.workflow_plan)}.",
+                            f"This is review round {review_number + 1} of {total}.",
                             prompt)
                         self.assertIn(
-                            "Workflow steps remaining after this one: "
-                            f"{len(cfg.workflow_plan) - index - 1}.", prompt)
+                            "Review rounds remaining after this one: "
+                            f"{total - review_number - 1}.", prompt)
                         # Only the last position may claim finality, and it
                         # always must.
                         self.assertEqual(
-                            "This is the FINAL workflow plan step." in prompt,
-                            index == len(cfg.workflow_plan) - 1)
+                            "This is the FINAL review round." in prompt,
+                            review_number == total - 1)
 
-    def test_invalid_response_retries_then_persists_valid_fail(self):
-        self.write_task(1, status="DONE")
-        cfg = self.build_review(retry=1)
-        self.commit_all()
-        finding = auto_fix.ReviewFinding(
-            "t001", "docs/missing.md", "Required test is missing",
-            "The acceptance case has no regression test.")
-        failed = auto_fix.review_record_json(
-            auto_fix.ReviewRecord("FAIL", (finding,)))
-        reviewer = ScriptedAdapter([
-            TaskResult(0, "not a review record", False, None),
-            TaskResult(0, failed, False, None),
-        ])
-        self.assertEqual(self.run_quiet(
-            cfg, adapter=ScriptedAdapter([]),
-            auto_fix_adapter=reviewer, auto_fix=True), 1)
-        self.assertEqual(len(reviewer.calls), 2)
-        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.verdict, "FAIL")
-        self.assertEqual(state.findings[0].evidence, finding.evidence)
 
-    def test_checkpoint_resume_and_quota_continue_without_consuming_invalid_retry(self):
-        self.write_task(1, status="DONE")
-        cfg = self.build_review(retry=0)
-        self.commit_all()
-        terminal = auto_fix.review_record_json(auto_fix.ReviewRecord("PASS", ()))
-        reviewer = ScriptedAdapter([
-            TaskResult(1, '{"type":"assent.checkpoint_resume"}', False,
-                       None, checkpoint_resume=True),
-            TaskResult(1, "quota", True, None),
-            TaskResult(0, terminal, False, None),
-        ])
-        sleeps = []
-        self.assertEqual(self.run_quiet(
-            cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
-            auto_fix=True, sleep=sleeps.append), 0)
-        self.assertEqual(len(reviewer.calls), 3)
-        self.assertEqual(sum(sleeps), cfg.quota_poll_minutes * 60)
-        self.assertLessEqual(max(sleeps), 60)
 
     def test_incomplete_limited_and_all_skip_folders_spend_no_review_tokens(self):
         first = self.write_task(1)
@@ -2050,7 +1639,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, once=True, adapter=ScriptedAdapter([self.ai_done(first)]),
-                auto_fix_adapter=reviewer, auto_fix=True), 0)
+                auto_fix_adapter=reviewer), 0)
         self.assertEqual(reviewer.calls, [])
         self.assertIn("review deferred after the limited run", out.getvalue())
 
@@ -2060,28 +1649,11 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=reviewer, auto_fix=True), 0)
+                auto_fix_adapter=reviewer), 0)
         self.assertEqual(reviewer.calls, [])
         self.assertIn("all tasks are SKIP", out.getvalue())
 
-    def test_configured_review_without_auto_fix_flag_is_inert(self):
-        self.write_task(1, status="DONE", verify=_FAILV)
-        cfg = self.build_review()
-        self.commit_all()
-        reviewer = ScriptedAdapter([])
-        out = io.StringIO()
-
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(engine.run(
-                cfg, adapter=ScriptedAdapter([]),
-                auto_fix_adapter=reviewer), 0)
-
-        self.assertEqual(reviewer.calls, [])
-        self.assertNotIn("Auto-fix folder review", out.getvalue())
-        self.assertNotIn(f"verify: {_FAILV}", out.getvalue())
-        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
-
-    def test_auto_fix_without_workflow_plan_reports_no_effect_and_runs_normally(self):
+    def test_run_without_workflow_plan_runs_normally(self):
         task = self.write_task(1)
         cfg = self.build()
         self.commit_all()
@@ -2089,13 +1661,11 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
         with contextlib.redirect_stdout(out):
             code = engine.run(
-                cfg, adapter=ScriptedAdapter([self.ai_done(task)]),
-                auto_fix=True)
+                cfg, adapter=ScriptedAdapter([self.ai_done(task)]))
 
         self.assertEqual(code, 0)
         self.assertEqual(parse_task_file(task).status, "DONE")
-        self.assertIn("had no effect", out.getvalue())
-        self.assertIn("no plan review step is configured", out.getvalue())
+        self.assertNotIn("Auto-fix folder review", out.getvalue())
 
 
 class TestReworkPromptFallbacks(GlobalContractsMixin, EngineTestCase):
@@ -2183,94 +1753,6 @@ class TestGlobalContractGate(GlobalContractsMixin, EngineTestCase):
         (self.user_home / "instructions.md").unlink()
         text = self.refuse()
         self.assertNotIn(str(self.project_instructions), text)
-
-
-class TestSelfFixedUnreviewedSelection(GlobalContractsMixin, EngineTestCase):
-    """An exhausted round list ends one folder, never the whole selection.
-
-    The whole invocation runs through the real ``assent run --auto-fix`` CLI
-    path: only the adapter processes are scripted.
-    """
-
-    def test_self_fixed_folder_exits_zero_and_the_next_folder_still_runs(self):
-        self.write_task(1, status="DONE", scope=("src/",))
-        source = self.root / "src" / "value.txt"
-        source.parent.mkdir()
-        source.write_text("old\n", encoding="utf-8")
-        second_dir = self.root / ".assent" / "plan02"
-        second_dir.mkdir()
-        second_task = second_dir / "t001_task.e.toml"
-        second_task.write_text(task_text(scope=("other/",)),
-                               encoding="utf-8", newline="\n")
-        config_path = self.root / ".assent" / "assent.toml"
-        self.build(extra_config=(
-            '[abilities.review_fix]\nprompt = "Review and repair."\n'
-            'writes = true\nproduces_verdict = true\n'
-            '[roles.folder_reviewer]\nability = ["review_fix"]\n'
-            'model = "prime"\neffort = "heavy"\n'
-            '[workflow]\nplan = ['
-            '{ role = "folder_reviewer", adapter = "claude" }, '
-            '{ role = "folder_reviewer", adapter = "claude" }]\n'))
-        self.commit_all()
-
-        finding = auto_fix.ReviewFinding(
-            "t001", "src/value.txt", "value is stale",
-            "The focused behavior still reads the stale value.")
-        repaired = auto_fix.ReviewFinding(
-            finding.task_id, finding.path, finding.summary, finding.evidence,
-            transition="still_present",
-            prior_fingerprint=auto_fix.finding_fingerprint(finding),
-            transition_evidence="The same blocker was repaired again in place.")
-
-        def fix(position):
-            def step(_prompt):
-                (gitops.worktree_path(self.root, "plan01") / "src"
-                 / "value.txt").write_text(f"repair {position}\n",
-                                           encoding="utf-8")
-                return TaskResult(0, auto_fix.review_record_json(
-                    auto_fix.ReviewRecord(
-                        "FIXED", (finding if position == 1 else repaired,))),
-                    False, None)
-            return step
-
-        def second_done(_prompt):
-            worktree = gitops.worktree_path(self.root, "plan02")
-            (worktree / "other").mkdir(parents=True, exist_ok=True)
-            (worktree / "other" / "value.txt").write_text(
-                "done\n", encoding="utf-8")
-            set_status(second_task, "DONE")
-            append_entry(journal_path_for(second_task), by="claude",
-                         requested_model="lite", event="done", summary="完成")
-            return ok_result()
-
-        adapters = {
-            "plan01": ScriptedAdapter([fix(1), fix(2)]),
-            "plan02": ScriptedAdapter([
-                second_done,
-                TaskResult(0, auto_fix.review_record_json(
-                    auto_fix.ReviewRecord("PASS", ())), False, None)]),
-        }
-        out = io.StringIO()
-        with mock.patch.object(
-                engine, "get_adapter",
-                side_effect=lambda _name, cfg: adapters[cfg.tasks_name]), \
-                contextlib.redirect_stdout(out):
-            self.assertEqual(_dispatch([
-                "run", "plan01", "plan02", "--auto-fix",
-                "--config", str(config_path)]), 0)
-
-        # plan01 settles as SELF-FIXED, UNREVIEWED with a zero exit code, so
-        # the independent plan02 still runs to completion in the same call.
-        text = out.getvalue()
-        self.assertIn("SELF-FIXED, UNREVIEWED", text)
-        first = auto_fix.read_auto_fix_state(
-            auto_fix.auto_fix_state_path(load_config(config_path, "plan01")))
-        self.assertIsNotNone(first.self_fixed_unreviewed)
-        self.assertEqual(parse_task_file(second_task).status, "DONE")
-        second = auto_fix.read_auto_fix_state(
-            auto_fix.auto_fix_state_path(load_config(config_path, "plan02")))
-        self.assertEqual(second.verdict, "PASS")
-        self.assertEqual(len(adapters["plan02"].calls), 2)
 
 
 if __name__ == "__main__":

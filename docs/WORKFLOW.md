@@ -61,119 +61,18 @@ rewrites it. See
 [Configuration](CONFIGURATION.md) for adapter behavior.
 
 The session's focused verification is not the scheduler's full candidate
-verification. Folder receipts are controlled by `[verification]
-receipt_refresh`: the default `"manual"` waits for an explicit
-`assent verify`, while `"auto"` refreshes a complete folder receipt at folder
-closeout. `assent run --verify` is an invocation-level request and chains the
-matching complete verification only after a successful run. The candidate,
-receipt, and report rules are in [Verification](VERIFICATION.md).
+verification. A configured `[workflow].integration` `full_verify` action owns
+candidate construction and receipt creation after the preceding layers
+succeed. The candidate, receipt, and report rules are in
+[Verification](VERIFICATION.md).
 
-#### Optional bounded auto-fix
+#### Automatic bounded repair
 
-If the invocation states `--auto-fix`, the completed folder enters a bounded
-folder-level review-and-repair loop. An optional `[auto_fix.review]` table
-overrides the reviewer; when absent, the first effective worker adapter at
-`prime`/`heavy` is resolved automatically. Its `adapter` may be a single name or
-an ordered list, where each entry -- repeats included -- is one review round
-sharing the table's single `model` and `effort`; the length of that list is the
-finite bound on the loop. The final gate order is ordinary
-task-focused verification, one final run of each distinct `DONE`-task `verify`
-command, then the reviewer round; an incomplete `--once`/`--task` run
-defers this completed-folder loop and spends no review token. A quiescent
-blocked dependency with durable worker `BLOCKED` or focused-gate evidence uses
-the separate blocked-adjudication entry point. A focused failure prevents the
-completed-folder reviewer from starting. An ordinary `run` without
-`--auto-fix` stops after its ordinary task execution and does not run this
-final sweep, review, or repair.
+After task execution, `run` continues through the configured plan and integration actions. `focused_test`, `focused_sweep`, and `full_verify` are mechanical decision points. Passing one completes that layer; it does not spend reviewer tokens. Failure advances to the next configured reviewer/fixer, whose repair is checked by the next action.
 
-`assent run --auto-fix` is an invocation-level authorization for the repair
-half of either entry point. It is orthogonal to selection and works with the
-implicit folder, explicit folders, `...`, `--all`, `--once`, `--task`, and
-`--verify` forms. With `--all`, every launched folder receives the same policy.
-With `--verify`, complete verification still happens only after the run and
-bounded loop succeed; auto-fix itself never verifies a full candidate or
-accepts.
+Each review prompt names the current round, total rounds, and rounds remaining. Findings must cite an existing task requirement or a concrete repair regression; the reviewer may not invent an acceptance criterion. A mechanically valid exact scope omission can be proposed by AI, validated and applied by the scheduler, then reworked and rechecked.
 
-A completed-folder round is a merged reviewer-fixer session rather than a
-strictly read-only gate: it may repair a genuine blocker directly, writing only
-inside the declared scope of the one existing task its finding names, and
-reports that with the verdict `FIXED`. Any other write -- a management-plane or
-task file, another task's scope, a commit, or a write in the primary worktree --
-makes the verdict unusable while preserving the exact edits. `PASS` means
-nothing blocking remains and the round wrote nothing; `FAIL` remains for a
-blocker the round may not repair itself, such as an exact scope omission, and
-for blocked adjudication, which stays read-only.
-
-A `FAIL` review is written to the folder's derived `_auto_fix.toml` state and
-report. With `--auto-fix`, only findings resolved to existing tasks and their
-declared scopes may trigger automatic, code-preserving rework. The scheduler
-records the reason `Automatic repair of durable folder-review findings` and
-`authorization: run --auto-fix`. Each reopened task is repaired under its own
-ordinary task profile: there is no escalation ladder and no consumed-profile
-ledger, so an interrupted round resumes on exactly the same identity and
-multi-task findings and dependency cascades never escalate one task at a time.
-A pre-existing technical-debt
-finding is eligible only when it is introduced by `COMPLETED_FOLDER + INITIAL`,
-encountered in changed or directly interacting code, local to an existing task
-scope, and reliably testable; the review is not a repository-wide debt audit.
-Blocked adjudication and `RECHECK` may retain or resolve such a ledger entry
-but cannot add one. Unknown, ambiguous, or out-of-scope findings stop for a
-scheduler-owned decision. A reviewer may approve one exact scope addition, but
-only the scheduler edits the task contract; worker and reviewer task-file edits
-remain forbidden. No automatic task creation, source reversion, source
-deletion, or acceptance occurs. Round exhaustion, interruption, quota, and
-failed repair gates preserve state and edits for a later opted-in recovery or
-human review; no runtime human gate is inserted into the loop. Recovery refuses
-repair and closeout when the identity that decided a pending state is no longer
-one of the configured rounds.
-
-Each round advances the durable `review_round_index` by exactly one, and
-reaching the end of the configured list ends automation finitely. Running out
-on a `FIXED` round does not settle immediately: the scheduler first re-runs
-the implicated task's own focused gate against the repaired source, reusing
-the same de-duplicating ledger that skips a command already proven earlier in
-the invocation, so the settled claim -- that every task passed its own
-focused gate -- is proven of the final repair and not only of the state that
-preceded it. When that gate passes, the folder settles as SELF-FIXED,
-UNREVIEWED and exits zero: nothing is reverted, reopened, or re-marked, so a
-repaired task keeps the `DONE` its own focused gate proved rather than being
-turned `BLOCKED`. That outcome is terminal rather than a resumable phase -- a
-later `run --auto-fix` reports it again and starts no further round, and only
-a human `rework` reopens the folder. The one thing missing is independent
-review confirmation, which only the human `accept` decision supplies.
-
-When that settling gate fails instead, this is its own distinct outcome,
-separate from both SELF-FIXED, UNREVIEWED and an ordinary `BLOCKED` task: the
-folder does not settle, no task is marked `BLOCKED`, and the repair, findings,
-and every edit are preserved -- and the run ends nonzero.
-
-Running out on an unrepaired blocker no longer exits nonzero: it settles as
-the equally distinct REVIEW UNRESOLVED, HUMAN DECISION outcome, preserving
-every finding, edit, and journal, leaving every task at the status its own
-closeout gave it, and exiting zero. This is deliberate: because the folder
-scheduler's `--all` launch loop only keeps starting folders while none has
-failed, a nonzero exit here used to silently cancel every unrelated folder
-still queued behind it in the same invocation. An unresolved review finding is
-a question the scheduler cannot decide, not an infrastructure failure, so it
-is routed to the human acceptance meeting instead of stopping the queue.
-
-An unclean exit that interrupts a round after it has already written a repair,
-but before its verdict advances the round index, preserves the edit and
-leaves the round index unmoved. The next run's startup recovery attributes
-that dirt to the task the durable state's current findings implicate, using
-the same scope-containment proof its other recovery owners use, and gathers
-it into a `wip` checkpoint with no AI session opened; when ownership cannot be
-proven this way, recovery still refuses fail-closed rather than guessing.
-
-Re-review follows soft convergence: prior current findings are considered first,
-a still-present blocker keeps its fingerprint, and a new blocker needs evidence
-of a repair regression or a newly exposed existing requirement. Clearing the
-prior set requires `PASS`; optional improvements, speculation, and repeated debt
-discovery never keep the loop open. Complete verification remains a separate
-stage after a successful run under the receipt policy or explicit `--verify`.
-Missing receipts, an unrun full suite, or absent complete verification are never
-reviewer failures; only a concrete local focused-test gap tied to a task
-requirement qualifies.
+The configured arrays are the only convergence limit. On exhaustion, all edits and evidence remain and the folder reports `REVIEW UNRESOLVED, HUMAN DECISION` with exit zero; a failed integration action still blocks acceptance. Infrastructure and safety failures remain failures. Nothing in this loop accepts the folder.
 
 ### Act 3: human review and decision
 
@@ -283,7 +182,7 @@ cross-review, but do not require or encode a second model or automatic gate.
 This ordinary acceptance review remains human-driven: do not accept or rework
 as part of the review. Wait for the human decision; only after the human agrees
 should you write any Assent-format rework tasks or explain the acceptance
-action. An explicit `run --auto-fix` is a separate bounded repair authorization
+action. An explicit `run` is a separate bounded repair authorization
 and still never accepts a folder.
 ```
 

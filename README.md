@@ -12,7 +12,7 @@ The management plane is `.assent/`; the source project remains ordinary Git.
 | Stage | What happens | Main commands |
 | --- | --- | --- |
 | Plan | Discuss the goal, write Assent-format task files, and validate the plan. | `assent check` |
-| Execute | Run focused task checks, keep WIP/checkpoint evidence, and optionally authorize a bounded folder review-and-repair loop. | `assent run`, `assent run --auto-fix` |
+| Execute | Run task, plan, and integration workflows through focused checks, bounded repair, and complete verification. | `assent run` |
 | Review | Read `_report.md`, inspect the diff and verification evidence, then decide whether to accept, rework, or reject. | `assent report`, `assent verify`, `assent accept` |
 
 `DONE` is an executing AI's completion claim, not human approval. A complete
@@ -60,9 +60,6 @@ assent check
 assent run --once
 assent run
 
-# Refresh complete verification evidence without an AI session.
-assent verify <FOLDER>
-
 # Read the report and inspect the checkpoint diff before this human decision.
 assent report <FOLDER>
 assent accept <FOLDER>
@@ -88,60 +85,23 @@ readiness; only an explicit `base` makes a downstream worktree start from an
 upstream commit. See [Workflow](docs/WORKFLOW.md) and
 [Operations](docs/OPERATIONS.md).
 
-## Optional bounded auto-fix
+## Automatic bounded workflow repair
 
-Configure `[auto_fix.review]` when a project wants to override a final,
-folder-level AI review-and-repair loop. With no table, `assent run --auto-fix`
-resolves the first effective worker adapter at `prime`/`heavy`; no `assent init`
-rerun or `~/.assent/assent.toml` edit is needed. Only an explicit
-`assent run --auto-fix` starts the completed-folder review after all
-task-focused checks and the final distinct focused sweep, or enters the
-quiescent read-only blocked-adjudication path with durable blocker evidence, and
-authorizes bounded repair for that invocation. An ordinary `assent run` without
-the flag starts neither review nor repair. The flag is compatible with the
-normal run selectors, including explicit folders, `...`, `--all`, `--once`,
-`--task`, and `--verify`. A limited run that leaves work incomplete defers the
-completed-folder loop.
+`[workflow]` configures three always-active layers. `task` runs each task's
+`focused_test`; `plan` runs the distinct union of task commands as
+`focused_sweep`; `integration` reconstructs the candidate and runs
+`full_verify`, producing the receipt required by `accept`. A passing action
+skips the following repair roles. A failing action advances to the next
+configured reviewer/fixer, and exact scope omissions may be validated and
+applied by the scheduler before code-preserving rework.
 
-The reviewer may identify a regression, an unmet requirement, or eligible
-pre-existing technical debt encountered in the changed and directly
-interacting code. Debt may be introduced only by `COMPLETED_FOLDER + INITIAL`,
-when repair stays inside an existing task's scope and its focused tests can
-verify the result; blocked adjudication and `RECHECK` may retain or resolve it
-but cannot add another. This is not an unbounded repository-wide debt audit. A
-failed review automatically reopens only implicated existing tasks and records a
-reason-bearing rework. A completed-folder round is a merged reviewer-fixer
-session: it may repair a genuine blocker directly, writing only inside the
-declared scope of the one existing task its finding names, and reports that as
-`FIXED`; `PASS` means nothing blocking remains and the round wrote nothing at
-all. `[auto_fix.review].adapter` accepts one adapter or an ordered list of
-them, and that list length is the finite round bound: each round advances a
-durable round index by exactly one. Each reopened task is repaired under its
-own ordinary task profile, with no escalation ladder and nothing consumed, so
-an interrupted round resumes on exactly the same identity and a multi-task
-finding or dependency cascade never escalates sibling tasks one at a time. A
-reviewer may approve one exact scope addition, but only the scheduler edits the
-task file; worker and reviewer task-file edits remain forbidden. It keeps code
-by default and never creates tasks, reverts source, deletes source, or accepts
-a folder. Re-review keeps still-present fingerprints, admits new findings only
-for evidenced repair regression or newly exposed existing requirements, and
-must PASS once the prior set clears. Optional improvements and speculation do
-not keep the loop open. A round list that ends on a repair nothing confirmed
-settles as `SELF-FIXED, UNREVIEWED`: every task keeps the status its own
-focused gate proved, the run still succeeds, and `assent accept` asks for one
-explicit human confirmation before publishing. A list that ends on an
-unrepaired blocker preserves the findings and edits for
-later human review; no runtime human adjudication step is inserted. A later
-opted-in recovery requires that the identity which decided the pending state is
-still one of the configured rounds. `_auto_fix.toml`
-is derived runtime memory, not a task status or acceptance evidence; complete
-verification remains a separate successful-run/receipt-policy or explicit
-`--verify` stage, and its absence is never a reviewer failure. Report generation
-also shows exact scope-amendment transactions and the durable review round
-index. Scheduler-owned status-only transitions during rework, interruption,
-repair closeout, or exhaustion do not by themselves make that evidence stale;
-structural task-contract edits do. See the [Workflow](docs/WORKFLOW.md) and
-[Verification](docs/VERIFICATION.md) guides.
+The finite arrays are the complete automation budget. Review prompts state the
+current and total positions and prohibit findings that do not cite an existing
+task requirement or concrete repair regression. Assent does not use diff
+oscillation or subjective no-progress detection. If the configured positions
+run out, it preserves all findings and edits as `REVIEW UNRESOLVED, HUMAN
+DECISION` and exits zero; `assent accept` remains blocked until the required
+mechanical verification passes. No workflow step accepts a folder.
 
 ## Planning-meeting prompt
 
@@ -185,14 +145,13 @@ cross-review, but do not require or encode a second model or automatic gate.
 This ordinary acceptance review remains human-driven: do not accept or rework
 as part of the review. Wait for the human decision; only after the human agrees
 should you write any Assent-format rework tasks or explain the acceptance
-action. An explicit `run --auto-fix` is the separate, bounded review-and-repair
-authorization; it still never accepts a folder.
+action. The configured workflow repair loop is bounded and still never accepts
+a folder.
 ```
 
-The ordinary reviewer does not mutate the worktree while forming findings. The
-configured auto-fix reviewer is also read-only, runs only for an explicit
-`run --auto-fix`, and uses prompt-plus-detection write refusal before any repair
-session. Human acceptance remains
+The ordinary reviewer does not mutate the worktree while forming findings. A
+configured read-only workflow reviewer uses prompt-plus-detection write refusal
+before any repair session. Human acceptance remains
 `assent accept <FOLDER>` (or an explicitly selected batch), and human rework
 remains `assent rework <FOLDER> <TASK>`.
 
@@ -230,11 +189,9 @@ translations and identify English as the source of truth. The specialized
 - A worktree is an isolation and audit boundary, not a security sandbox:
   unattended AI still has the OS identity's access to credentials, network,
   external Git writers, and files outside the worktree.
-- `[auto_fix.review]` supplies the bounded folder-review policy; only an
-  explicit `run --auto-fix` starts its read-only review and finite,
-  code-preserving repair loop. An ordinary `run` without the flag does neither.
-  Its derived `_auto_fix.toml` state is never acceptance, and `accept` remains a
-  human action.
+- The workflow arrays supply the bounded review policy and code-preserving
+  repair opportunities. Their derived `_auto_fix.toml` state is never
+  acceptance, and `accept` remains a human action.
 
 For exact selection rules, receipt freshness, shared ignored-input review,
 adapter mappings, recovery, and all command options, use the topic guides above.

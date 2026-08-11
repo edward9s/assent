@@ -30,8 +30,7 @@ from assent.shared_paths import MANIFEST_LOCK_NAME, MANIFEST_NAME
 from assent.user_home import user_config_path
 
 _TOP_LEVEL_KEYS = {
-    "watchdog", "run", "adapter", "verification", "auto_fix", "abilities",
-    "roles", "workflow",
+    "watchdog", "run", "adapter", "abilities", "roles", "workflow",
 }
 
 # The ordered settings layers, lowest priority first.  The built-in layer contributes no
@@ -49,12 +48,6 @@ _ADAPTER_NAMES = {"claude", "codex", "antigravity"}
 # resolve through this settings-layer baseline rather than passing the abstract value through;
 # this table is not vendor knowledge embedded in adapter code.
 _EFFORT_BASELINE = {"heavy": "high", "normal": "medium", "slight": "low"}
-
-# Who refreshes the folder verification receipt.  "manual" (the default) leaves it
-# to an explicit `assent verify [--batch]`, so a batch workflow verifies once
-# instead of once per folder at every run closeout; "auto" keeps run closeout
-# refreshing a stale receipt itself.
-_RECEIPT_REFRESH_MODES = {"manual", "auto"}
 
 # A task folder name becomes the first component of every Assent branch name.
 # Keep this contract local and explicit instead of relying on a later Git command:
@@ -260,11 +253,10 @@ class Config:
     # Print mode has its own upstream wait limit, far shorter than a task session; the
     # adapter always states one instead of inheriting the CLI default.
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
-    receipt_refresh: str = "manual"  # "manual" = explicit verify only, "auto" = also at run closeout
     workflow_plan: tuple[WorkflowPlanStep | WorkflowActionStep, ...] = ()
     # None means today's implicit task session; an explicit empty tuple is distinct.
     workflow_task: tuple[WorkflowTaskStep | WorkflowActionStep, ...] | None = None
-    workflow_selection: tuple[WorkflowPlanStep | WorkflowActionStep, ...] = ()
+    workflow_integration: tuple[WorkflowPlanStep | WorkflowActionStep, ...] = ()
     abilities: dict[str, Ability] = field(default_factory=dict)
     roles: dict[str, Role] = field(default_factory=dict)
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
@@ -294,11 +286,6 @@ class Config:
     def resolve_role(self, name: str) -> ResolvedRole:
         """Return one role with its ordered ability definitions and derived flags."""
         return resolve_role(name, self.roles, self.abilities)
-
-    @property
-    def auto_fix_review(self) -> tuple[WorkflowPlanStep, ...]:
-        """Return the configured per-plan review sequence."""
-        return self.workflow_plan
 
     @property
     def branch_prefix(self) -> str:
@@ -589,10 +576,10 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
             action = guard.text(
                 _typed(value, f"[{owner}]", "action", str, None),
                 f"workflow.{key}.{index}.action")
-            allowed_actions = {"task": {"focused_test", "full_test"},
-                               "plan": {"full_test"},
-                               "selection": {"full_verify"}}[key]
-            if action not in {"focused_test", "full_test", "full_verify"}:
+            allowed_actions = {"task": {"focused_test"},
+                               "plan": {"focused_sweep"},
+                               "integration": {"full_verify"}}[key]
+            if action not in {"focused_test", "focused_sweep", "full_verify"}:
                 raise AssentError(f"Config {owner} has unknown action {action!r}")
             if action not in allowed_actions:
                 valid = "/".join(sorted(allowed_actions))
@@ -601,7 +588,7 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
                     f" [workflow].{key} (valid action: {valid})")
             entries.append(WorkflowActionStep(action))
             continue
-        allowed = {"role", "adapter"} if key in {"plan", "selection"} else {"role"}
+        allowed = {"role", "adapter"} if key in {"plan", "integration"} else {"role"}
         _known_keys(value, owner, allowed)
         role = guard.text(_typed(value, f"[{owner}]", "role", str, None),
                           f"workflow.{key}.{index}.role")
@@ -633,7 +620,7 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
 def _resolve_accountability_steps(
         cfg: Config, raw_steps, owner: str
 ) -> tuple[WorkflowPlanStep | WorkflowActionStep, ...]:
-    """Resolve plan/selection roles while preserving built-in action positions."""
+    """Resolve plan/integration roles while preserving action positions."""
     steps: list[WorkflowPlanStep | WorkflowActionStep] = []
     for raw in raw_steps or ():
         if isinstance(raw, WorkflowActionStep):
@@ -660,17 +647,20 @@ def _resolve_accountability_steps(
     return tuple(steps)
 
 
-def _validate_selection_repair_steps(
+def _validate_repair_steps(
+        owner: str, action: str,
         steps: tuple[WorkflowPlanStep | WorkflowActionStep, ...]) -> None:
-    """Reject only role arrangements the built-in full_verify protocol cannot run."""
+    """Validate one action/failure-repair/action workflow."""
     if not steps:
         return
-    if not isinstance(steps[0], WorkflowActionStep):
+    if (not isinstance(steps[0], WorkflowActionStep)
+            or steps[0].action != action):
         raise AssentError(
-            "Config [workflow].selection must start with full_verify")
-    if not isinstance(steps[-1], WorkflowActionStep):
+            f"Config [workflow].{owner} must start with {action}")
+    if (not isinstance(steps[-1], WorkflowActionStep)
+            or steps[-1].action != action):
         raise AssentError(
-            "Config [workflow].selection must end with full_verify")
+            f"Config [workflow].{owner} must end with {action}")
     actions = [index for index, step in enumerate(steps)
                if isinstance(step, WorkflowActionStep)]
     for left, right in zip(actions, actions[1:]):
@@ -681,23 +671,23 @@ def _validate_selection_repair_steps(
         assert isinstance(reviewer, WorkflowPlanStep)
         if not reviewer.produces_verdict:
             raise AssentError(
-                f"Config [workflow].selection[{left + 1}] is the first role "
-                "after full_verify and must produce a verdict")
+                f"Config [workflow].{owner}[{left + 1}] is the first role "
+                f"after {action} and must produce a verdict")
         if len(roles) > 2:
             raise AssentError(
-                "Config [workflow].selection may place only one verdict role "
-                "and one optional fixer between full_verify actions")
+                f"Config [workflow].{owner} may place only one verdict role "
+                f"and one optional fixer between {action} actions")
         if len(roles) == 2:
             if reviewer.writes:
                 raise AssentError(
-                    f"Config [workflow].selection[{left + 1}] is a writable "
+                    f"Config [workflow].{owner}[{left + 1}] is a writable "
                     "verdict role and must be the only role between "
-                    "full_verify actions")
+                    f"{action} actions")
             fixer = roles[1]
             assert isinstance(fixer, WorkflowPlanStep)
             if not fixer.writes or fixer.produces_verdict:
                 raise AssentError(
-                    f"Config [workflow].selection[{left + 2}] is the optional "
+                    f"Config [workflow].{owner}[{left + 2}] is the optional "
                     "fixer after a verdict role and must write without producing "
                     "a verdict")
 
@@ -996,21 +986,18 @@ def load_config(path: str | Path, folder: str) -> Config:
     codex = _section(adapter, "codex") if "codex" in adapter else {}
     antigravity = (_section(adapter, "antigravity")
                    if "antigravity" in adapter else {})
-    verification_section = _section(data, "verification")
     abilities = _parse_abilities(_section(data, "abilities"))
     roles = _parse_roles(_section(data, "roles"), abilities)
-    auto_fix = _section(data, "auto_fix")
-    _known_keys(auto_fix, "auto_fix", set())
     workflow = _section(data, "workflow")
-    _known_keys(workflow, "workflow", {"plan", "selection", "task"})
+    _known_keys(workflow, "workflow", {"plan", "integration", "task"})
     guard = _BlankGuard(provenance, sources)
     adapter_names = _parse_adapter_names(adapter, guard)
     raw_workflow_plan = _parse_workflow_entries(
         workflow, "plan", guard, roles, abilities)
     raw_workflow_task = _parse_workflow_entries(
         workflow, "task", guard, roles, abilities)
-    raw_workflow_selection = _parse_workflow_entries(
-        workflow, "selection", guard, roles, abilities)
+    raw_workflow_integration = _parse_workflow_entries(
+        workflow, "integration", guard, roles, abilities)
     claude_efforts, claude_tier_efforts = _effort_maps(
         claude, "adapter.claude", guard)
     codex_efforts, codex_tier_efforts = _effort_maps(
@@ -1071,8 +1058,6 @@ def load_config(path: str | Path, folder: str) -> Config:
         antigravity_print_timeout_minutes=_typed(
             antigravity, "[adapter.antigravity]", "print_timeout_minutes", int,
             _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES),
-        receipt_refresh=_typed(verification_section, "[verification]",
-                               "receipt_refresh", str, "manual"),
         abilities=abilities,
         roles=roles,
         sources=sources,
@@ -1087,17 +1072,15 @@ def load_config(path: str | Path, folder: str) -> Config:
         raise AssentError("[run] quota_poll_minutes must be at least 1")
     if cfg.rotation_poll_minutes < 1:
         raise AssentError("[run] rotation_poll_minutes must be at least 1")
-    if cfg.receipt_refresh not in _RECEIPT_REFRESH_MODES:
-        raise AssentError(
-            f"[verification] receipt_refresh = {cfg.receipt_refresh!r} is not valid"
-            f" ({'/'.join(sorted(_RECEIPT_REFRESH_MODES))})")
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
     plan_steps = _resolve_accountability_steps(cfg, raw_workflow_plan, "plan")
-    selection_steps = _resolve_accountability_steps(
-        cfg, raw_workflow_selection, "selection")
-    _validate_selection_repair_steps(selection_steps)
+    integration_steps = _resolve_accountability_steps(
+        cfg, raw_workflow_integration, "integration")
+    if raw_workflow_task != []:
+        _validate_repair_steps("plan", "focused_sweep", plan_steps)
+    _validate_repair_steps("integration", "full_verify", integration_steps)
     plan_roles = [step for step in plan_steps
                   if isinstance(step, WorkflowPlanStep)]
     plan_has_action = len(plan_roles) != len(plan_steps)
@@ -1106,16 +1089,8 @@ def load_config(path: str | Path, folder: str) -> Config:
             and raw_workflow_task != []):
         raise AssentError(
             "Config [workflow].plan cannot open any session: no step's role produces a verdict")
-    selection_roles = [step for step in selection_steps
-                       if isinstance(step, WorkflowPlanStep)]
-    selection_has_action = len(selection_roles) != len(selection_steps)
-    if (selection_roles and not selection_has_action
-            and not any(step.produces_verdict for step in selection_roles)):
-        raise AssentError(
-            "Config [workflow].selection cannot open any session:"
-            " no step's role produces a verdict")
     cfg.workflow_plan = plan_steps
     cfg.workflow_task = (None if raw_workflow_task is None
                          else tuple(raw_workflow_task))
-    cfg.workflow_selection = selection_steps
+    cfg.workflow_integration = integration_steps
     return cfg

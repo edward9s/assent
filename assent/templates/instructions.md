@@ -186,10 +186,9 @@ create base ambiguity or a refusal. If an upstream advances, preserve the
 downstream result but treat its stack as stale and use rework/reject or a new
 folder. Verify the combined candidate before accepting upstream then
 dependent; matching receipts can be reused, and accept does not rerun the
-complete suite. Conflicts are human decisions unless the same invocation
-explicitly combines `run --verify --auto-fix` with a configured selection
-review-and-repair action sequence; that bounded exception still leaves final
-approval to `accept`. Cleanup is upstream-first and
+complete suite. Conflicts enter the configured integration review-and-repair
+action sequence; bounded exhaustion retains them for human adjudication, and
+final approval still belongs only to `accept`. Cleanup is upstream-first and
 must retain source evidence until direct dependents are accepted and proven
 integrated.
 
@@ -209,11 +208,10 @@ every remaining folder a folder-taking command would discover. It is a
 remainder operator, not an alias for `--all`, and cannot be combined with it;
 a `...`-expanded selection is an ordinary exact selection, so
 `assent accept A ...` still requires evidence for exactly the expanded set and
-still starts no verification. `assent run --verify` chains complete
-verification onto a run that exited zero, matching that same selection; a
-failing run verifies nothing. With `--once` or `--task` it verifies only when
-that limited run left the single selected folder complete, and an incomplete
-folder fails the request without writing a receipt.
+still starts no verification. A successful `assent run` automatically follows
+the configured integration workflow for the same selection. With `--once` or
+`--task`, integration is deferred when the limited run leaves the selected
+folder incomplete.
 
 The worktree is a change-isolation, conflict-management, audit, and recovery
 boundary, not a security sandbox. With `danger-full-access` or
@@ -222,20 +220,13 @@ identity, including external Git writers, network services, credentials, and
 files outside the worktree. Use unattended execution only in trusted projects
 and account environments; Assent does not create a container or VM sandbox.
 
-## Opt-in folder review and bounded repair
+## Automatic folder review and bounded repair
 
 The ordered per-plan review-and-repair policy comes from
-`[workflow].plan`. The
-entire loop is invocation-level opt-in: only `run --auto-fix` starts its
-folder-level review after the final focused checks and authorizes repair. An
-ordinary `run` without the flag starts neither review nor repair. Each role's
+`[workflow].plan` and runs automatically after task execution. Each role's
 agent resolves its adapter, abstract model, and effort through the configured
-adapter mappings. An omitted or empty plan configures no review and
-`run --auto-fix` reports that the flag had no effect.
-The flag is orthogonal to
-selection and may accompany an implicit folder, explicit folders, `...`,
-`--all`, `--once`, `--task`, or `--verify`; the ordinary selection and
-verification rules still apply.
+adapter mappings. An omitted or empty plan configures no plan review. Folder
+selection, `...`, `--all`, `--once`, and `--task` retain their ordinary rules.
 
 The workflow is considered when no task can make further progress: the folder
 is complete, or it is quiescent-blocked. On the complete path, each distinct
@@ -303,7 +294,7 @@ keeps that task's already-proven status. Ambiguous, out-of-scope, protected, or
 uncheckpointable writes are retained for explicit human recovery and are never
 attributed by guesswork.
 
-A `FAIL` record may be repaired only when `--auto-fix` was stated. Every
+A `FAIL` record may be repaired only by a later configured workflow position. Every
 finding must resolve to one existing task and that task's declared scope;
 unknown or ambiguous findings stop for a human. The reviewer may return one
 exact mechanically valid scope addition, but only the scheduler may append it
@@ -311,7 +302,7 @@ to a task contract; worker and reviewer task-file edits remain forbidden.
 Automatic repair invokes the normal task session with the durable finding
 ledger and repair brief, reopens only the implicated existing tasks, and
 records the reason-bearing rework reason `Automatic repair of durable
-folder-review findings` plus `authorization: run --auto-fix`. It keeps code by
+folder-review findings` plus `authorization: configured workflow repair`. It keeps code by
 default and never creates a task, changes task requirements, reverts source,
 accepts work, deletes source, or performs an unbounded repository-wide debt
 audit. A pre-existing technical-debt finding is eligible only when it is first
@@ -388,26 +379,25 @@ a human gate. The scheduler owns task status, the one reviewed exact-scope
 amendment, and all Git state.
 
 Interruption, quota exhaustion, adapter failure, and a failed repair gate keep
-all edits and state. A later `run --auto-fix` reads the existing pending state,
+all edits and state. A later `run` reads the existing pending state,
 resumes WIP work, and continues from the durable workflow position, but only
 while the current configured per-plan review sequence still contains the exact
 role and identity
 that decided that state. Removing or changing that policy refuses
 repair and closeout; a settled `SELF-FIXED, UNREVIEWED` or `REVIEW UNRESOLVED,
-HUMAN DECISION` folder is terminal and resumes nothing. Running
-without the flag continues ordinary task execution only; it neither starts this
-review nor authorizes repair. A human may inspect the report and use explicit
+HUMAN DECISION` folder is terminal and resumes nothing. An omitted or empty
+workflow layer starts no role from that layer. A human may inspect the report and use explicit
 `rework`, `reject`, `verify`, or `accept` actions; a review `PASS`, an auto-fix
 state, or a full verification receipt never accepts a folder.
 
-Complete verification still follows a successful run under the configured
-receipt policy or an explicit `--verify`. Its absence, a missing receipt, or an
+Complete verification follows the configured integration `full_verify` action
+after a successful run. Its absence, a missing receipt, or an
 unrun full suite is never a reviewer failure; only a concrete local focused-test
 gap tied to an existing task requirement may be considered by review.
 
 For an exact selection, `full_verify` owns candidate construction and complete
-verification; task and plan sessions never run either. Under the combined
-`run --verify --auto-fix` authorization only, a candidate conflict is collected
+verification; task and plan sessions never run either. In the configured
+integration workflow, a candidate conflict is collected
 as one complete typed wave before any full verifier. A writable verdict role
 may assign every conflict path and repair it in the same session, using only
 Assent's listed source or managed reconcile worktrees. A read-only verdict role

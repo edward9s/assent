@@ -94,42 +94,11 @@ events plus bounded summaries and adapter classifications, not the full raw
 adapter stream. The per-folder `_assent.log` carries the rendered terminal
 session output, without a parent scheduler prefix.
 
-### Auto-fix recovery and write boundary
+### Workflow repair recovery and write boundary
 
-The optional `[auto_fix.review]` table overrides the policy; without it,
-`run --auto-fix` resolves the first effective worker adapter at `prime`/`heavy`.
-Only an invocation of `run --auto-fix` starts the final completed-folder review
-or the separate quiescent blocked-adjudication review and authorizes repair.
-The review is read-only; an ordinary `run` without the flag starts neither
-review nor repair. A failed review in an authorized run may reopen existing
-in-scope tasks with the reason-bearing automatic rework; it does not create
-tasks, revert source, delete source, or accept a folder. A reviewer may approve
-one exact scope addition, but only the scheduler appends it to the task file;
-worker and reviewer edits remain forbidden. The fixer-profile assignments for a
-repair round are written to `_auto_fix.toml` before that round's first
-write-capable session, so a process failure cannot silently make a consumed
-profile available again and a sibling task cannot escalate merely because an
-earlier task ran.
-The finding ledger, consumed profiles, WIP checkpoints, and edits survive
-interruption, quota, adapter failure, and failed focused gates.
+The configured workflow is always active during `run`; it has no separate repair flag. A passing action skips its reviewer/fixer positions. A failed action persists its evidence before a write-capable repair starts, so interruption resumes at the durable boundary without reverting token-produced edits.
 
-A later `run --auto-fix` resumes the existing `FAIL` state and skips consumed
-profiles only when the current reviewer identity matches the state. Removing or
-changing that policy refuses repair and closeout. Profile exhaustion is a
-deliberate finite handoff with durable findings and edits for later human
-review, not an instruction to keep retrying or undo code; no runtime human
-adjudication prompt is inserted. The report shows `NOT RUN`, `PASSED`, `FAILED`,
-or `STALE` auto-fix evidence plus its phase, blocker, findings, scope decisions,
-acknowledgements, profiles, and terminal reason as derived runtime information;
-none of these values changes task status or acceptance. Complete verification
-remains separate after a successful run under receipt policy or explicit
-`--verify`; a missing receipt or unrun full suite is never a reviewer failure.
-The report's scope-amendment transactions and repair-round assignments remain
-zero-token evidence, and scheduler-owned status-only lifecycle transitions do
-not by themselves make that evidence stale.
-The reviewer's prompt-plus-detection refusal for project writes is cooperative
-and runs with the documented `danger-full-access` default; it is not a security
-sandbox or a preventive OS permission boundary.
+Reviewer/fixer writes remain limited to the implicated existing task scope, except that a reviewer may propose one exact scope addition for scheduler validation. Management-plane, Git-state, ambiguous-ownership, and out-of-scope writes fail closed and remain available for human recovery. Finite array exhaustion becomes `REVIEW UNRESOLVED, HUMAN DECISION`; infrastructure and safety failures remain nonzero.
 
 ### Temporary integration candidates
 

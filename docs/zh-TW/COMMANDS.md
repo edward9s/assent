@@ -80,64 +80,15 @@ snapshot，不是 `--all` 的別名。和 `--all` 合用、重複、或不在最
 
 `--once` 或 `--task` 留下未完成 folder 時，會在 candidate/verifier 建立前拒絕且不
 寫 receipt；錯誤會列出 incomplete task ID 與 status。這是 invocation-level request，
-不受 `receipt_refresh` 設定影響。
+不受 `integration full_verify` 設定影響。
 
-## `run --auto-fix`
+## `run`
 
-`--auto-fix` 是唯一的 invocation-level、與選取正交的 review/repair 授權。它可和所有 `run` 選取
-形式合用：自動選取、明示一個或多個 folder、prefix 加 `...`、`--all`、`--once`、
-`--task` 與 `--verify`。它不代表 `--all`、不改變 cardinality 或 remainder 規則，會
-依 command 原本順序傳給每個選取 folder；`--all` 的每個 child folder 都收到同一 policy。
+`assent run` 一律依設定好的 `[workflow]` 陣列執行。`task` 負責 task session 與 `focused_test`，`plan` 負責 `focused_sweep`，`integration` 負責 `full_verify` 與 receipt。機械 action 通過就完成該層，不會再啟動 reviewer；失敗才前進到下一個 reviewer/fixer，修復後由下一個 action 重驗。
 
-`[auto_fix.review]` 是可選的 policy override；沒有 table 時，會用第一個 effective worker
-adapter 的 `prime`/`heavy` 自動解析 reviewer，不需重跑 `assent init` 或編輯
-`~/.assent/assent.toml`。整個 loop 是 invocation-level opt-in，只有明示 `--auto-fix` 的
-run 才會在所有 task-focused gate 與最後 distinct focused sweep 通過後做 completed-folder
-review。`adapter` 接受單一名稱或有序 list，list 長度即 loop 的上界；completed-folder round
-可以在 finding 指名 task 自己的 declared scope 內修好 blocker 並回報 `FIXED`。有 durable
-worker `BLOCKED` 或 focused-gate 證據的 quiescent blocked dependency
-則走唯讀的 blocked-adjudication entry point；同一次 invocation 的 FAIL 才能進入 automatic repair。
-沒有 `--auto-fix` 的普通 run 不會做 final sweep、review 或 repair；`--once`/`--task` 受限執行
-不完整會延後 completed-folder loop，focused failure 不會開 completed-folder reviewer。
+三個陣列就是自動化的有限上限。若耗盡時機械驗證仍失敗，Assent 保留修改與證據，回報 `REVIEW UNRESOLVED, HUMAN DECISION`，並以 exit 0 讓無關 queue 繼續。失敗的完整驗證仍阻擋 `accept`；基礎設施與安全失敗維持非零退出。`accept` 永遠是明確的人類動作。
 
-自動修正只重開 finding 所有權明確且位於 declared scope 的既有 task，記錄帶理由且
-保留程式碼的 rework；每個 round 讓 durable review round index 剛好前進一格，每個 reopen
-的 task 都以它自己原本的 task profile 修復：沒有 escalation ladder，也不消耗任何東西，
-所以中斷的 round 會以相同 identity 恢復，多 task finding 與 dependency
-cascade 不會逐 task escalation。一個已經寫入修復的 round 若在其 verdict 記錄前被中斷，
-保留該編輯；下一次 run 的 startup recovery 在 durable state 的 current finding 能證明
-ownership 時，會把這份 dirt 歸屬給 implicated task，收進 `wip` checkpoint，否則 fail-closed
-拒絕。
-
-round list 若結束在 `FIXED` round，會先在修復後的 source 上重跑 implicated task 自己的
-focused gate 一次 —— 沿用同一份會跳過本次 invocation 已證明過 command 的 de-duplicating
-ledger —— 通過後才沉澱為 `SELF-FIXED, UNREVIEWED`：保留每個 task 自己的狀態、exit code
-為 0，並讓 `accept` 要求一次明確確認。若這道 settling gate 失敗，則是另一個獨立結果，
-與 `SELF-FIXED, UNREVIEWED` 及一般 `BLOCKED` task 都不同：folder 不會沉澱、沒有 task 被標成
-`BLOCKED`、每一項編輯與 finding 都保留，run 以非零 exit code 結束。round list 若結束在
-未修好的 blocker，則沉澱為同樣獨立的 `REVIEW UNRESOLVED, HUMAN DECISION` 結果：每個 task
-保留它自己 closeout 給的狀態、沒有 task 被標成 `BLOCKED`，exit code 為 0 —— 這是刻意取代
-先前的非零 exit，讓同一次 `--all` invocation 中排在後面的 folder 仍能繼續啟動；未解決的
-review finding 是留給人類 acceptance meeting 決定的問題，不是 infrastructure failure。在
-`accept` 時，這個結果會要求同樣一次明確的 `[y/N]` 確認，指出未解決 finding 的 task、path
-與 summary；同時帶有兩種結果的 folder 只會被問一次，並同時指出兩個原因。既有 technical
-debt 只有 `COMPLETED_FOLDER + INITIAL`
-引入、局部且 focused test 可可靠驗證時才合格；blocked adjudication 與 `RECHECK` 可以保留
-或解決，但不能新增。review 不做全 repository debt audit。reviewer 可核准一個精確 scope
-addition，但只有 scheduler 修改 task file；worker 與 reviewer 都禁止 task-file edits。
-不會自動建立 task、還原 source、刪 source、做完整 candidate acceptance 或 publish Git。
-recheck 會保留仍存在 finding 的 fingerprint，新的 finding 只接受有證據的 repair regression
-或 newly exposed existing requirement；原集合清空後必須 PASS，optional improvement 與
-speculation 不會讓 loop 繼續。round 用盡、中斷或 gate 失敗會保留 evidence，loop 內沒有
-runtime human adjudication gate。`_auto_fix.toml` 與 report 都是 derived evidence；`accept`
-仍是人類明示動作。Pending state 的 recovery 若決定它的 reviewer identity 已不在 configured
-rounds 之中，repair 與 closeout 會拒絕。完整 verification 仍依成功 run 的 receipt policy 或明示 `--verify`，缺
-receipt 或未跑 full suite 絕不是 reviewer failure。
-
-Review 或 acceptance meeting 先讀 `_report.md`。若有 `TECHNICAL DEBT REVIEW REQUIRED`，
-必須讀 `_technical_debt.md`，在建議 accept 前主動告訴人類並列舉每一項，逐項取得完成
-local repair 足夠、追加/rework task，或提升成 `AGENTS.md` durable project rule 的明確
-disposition；默讀檔案不算完成，也不是新增的 approval state。
+`--once` 與 `--task` 仍是受限 run；若留下 incomplete folder，就延後 integration。選取、`...` 與 `--all` 不改變 workflow 授權，因為已沒有另一個 repair flag。
 
 ## 指令速查
 
@@ -147,7 +98,7 @@ disposition；默讀檔案不算完成，也不是新增的 approval state。
 | `assent run A B` | 依寫出順序跑 A、B，第一個失敗即停止；不暗中驗證或接受。 | 只有 AI session |
 | `assent run A B --all` | 先跑明示前綴，再依 dependency order 跑剩餘 incomplete folder。 | 只有 AI session |
 | `assent run --all [--jobs N]` | 用 dependency scheduler 跑所有 incomplete folder，`--jobs` 限制並行數。 | 只有 AI session |
-| `assent run [selection] --auto-fix` | 在 completed folder 的最後 focused sweep 後，或有 quiescent blocked-review evidence 時，授權設定好的有界 review-and-repair loop；與 run selectors 相容，絕不 accept。 | AI session 加設定好的 review/repair |
+| `assent run [selection]` | 執行設定好的 task、plan、integration workflow；機械失敗時自動做有界 repair，絕不 accept。 | AI session 加設定好的 verification/repair |
 | `assent status [FOLDER]` | 顯示進度、下一個 task、branch 與最後 checkpoint。 | 零 |
 | `assent check [FOLDER]` | 檢查 task format、dependency cycle、設定與環境；是規劃散會 gate。 | 零 |
 | `assent report [FOLDER]` | 產生並顯示 `_report.md`。 | 零 |

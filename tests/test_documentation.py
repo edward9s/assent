@@ -152,7 +152,7 @@ class DocumentationTests(unittest.TestCase):
             "focused and full verification evidence",
             "evidence-based findings first",
             "This ordinary acceptance review remains human-driven",
-            "explicit `run --auto-fix`",
+            "configured workflow repair loop",
             "still never accepts a folder",
             "Wait for the human decision",
             "different vendor",
@@ -166,31 +166,25 @@ class DocumentationTests(unittest.TestCase):
         for phrase in (
                 "不要用子代理",
                 "這個一般驗收審查由人類主導",
-                "`run --auto-fix`",
+                "自動有界 workflow",
                 "絕不自動接受 folder",
                 "等待人類決定"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, chinese_review)
 
-    def test_auto_fix_is_explicit_bounded_and_never_acceptance(self):
+    def test_workflow_repair_is_automatic_bounded_and_never_acceptance(self):
         english = "\n".join(
             _read(path) for path in (Path("README.md"), Path("docs/WORKFLOW.md"),
                                      Path("docs/COMMANDS.md"),
                                      Path("docs/VERIFICATION.md")))
         for phrase in (
-                "`run --auto-fix`",
-                "selection-orthogonal",
-            "SELF-FIXED, UNREVIEWED",
-            "never creates tasks",
-            "never accepts",
-            "pre-existing technical debt",
-            "directly interacting code",
-            "repository-wide debt audit",
-                "_auto_fix.toml",
-                "read-only"):
+                "[workflow]", "focused_test", "focused_sweep", "full_verify",
+                "passing", "without opening a reviewer", "finite",
+                "REVIEW UNRESOLVED, HUMAN DECISION", "never accepts"):
             with self.subTest(language="English", phrase=phrase):
                 self.assertIn(phrase, english)
-        self.assertNotIn("Never accept or rework automatically", english)
+        self.assertNotIn("--auto-fix", english)
+        self.assertNotIn("receipt_refresh", english)
 
         chinese = "\n".join(
             _read(path) for path in (Path("README.zh-TW.md"),
@@ -198,21 +192,13 @@ class DocumentationTests(unittest.TestCase):
                                      Path("docs/zh-TW/COMMANDS.md"),
                                      Path("docs/zh-TW/VERIFICATION.md")))
         for phrase in (
-                "`run --auto-fix`",
-                "與選取正交",
-                "SELF-FIXED, UNREVIEWED",
-            "不會自動建立 task",
-            "絕不自動接受 folder",
-                "既有 technical debt",
-                "直接互動程式碼",
-                "全 repository debt audit",
-                "`_auto_fix.toml`",
-                "唯讀"):
+                "[workflow]", "focused_test", "focused_sweep", "full_verify",
+                "機械", "不會再啟動 reviewer", "有限",
+                "REVIEW UNRESOLVED, HUMAN DECISION", "人類動作"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(phrase, chinese)
 
-    def test_auto_fix_round_budget_and_recovery_identity_stay_in_parity(self):
-        """Reader surfaces must describe round-scoped budgets and fail-closed recovery."""
+    def test_workflow_round_budget_stays_in_parity(self):
         english_paths = [
             Path("AGENTS.md"), Path("README.md"),
             Path("assent/templates/assent.toml"),
@@ -224,12 +210,11 @@ class DocumentationTests(unittest.TestCase):
         ]
         english = "\n".join(_read(path) for path in english_paths)
         for phrase in (
-                "repair round", "multi-task", "dependency cascade",
-                "first write-capable session", "refuses repair and closeout",
-                "resolved reviewer identity", "phase"):
+                "finite", "current", "total", "existing task requirement",
+                "concrete repair regression", "REVIEW UNRESOLVED"):
             with self.subTest(language="English", phrase=phrase):
                 self.assertIn(phrase, english)
-        self.assertNotIn("before each write-capable session", english)
+        self.assertNotIn("--auto-fix", english)
 
         chinese_paths = [
             Path("README.zh-TW.md"),
@@ -242,12 +227,11 @@ class DocumentationTests(unittest.TestCase):
         ]
         chinese = "\n".join(_read(path) for path in chinese_paths)
         for phrase in (
-                "repair round", "多 task", "dependency cascade",
-                "第一個 write-capable session", "拒絕 repair 與 closeout",
-                "resolved reviewer identity", "Version 5"):
+                "有限", "目前", "總輪數", "既有", "repair regression",
+                "REVIEW UNRESOLVED"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(phrase, chinese)
-        self.assertNotIn("每個 write-capable session 前", chinese)
+        self.assertNotIn("--auto-fix", chinese)
 
     def test_review_unresolved_outcome_and_settling_gate_stay_in_parity(self):
         """The gated settle, its failing-gate outcome, and REVIEW UNRESOLVED,
@@ -261,10 +245,7 @@ class DocumentationTests(unittest.TestCase):
         english = "\n".join(_read(path) for path in english_paths)
         for phrase in (
                 "REVIEW UNRESOLVED, HUMAN DECISION",
-                "settling gate",
-                "distinct outcome",
-                "exits zero",
-                "queued behind it"):
+                "exits zero", "evidence", "accept"):
             with self.subTest(language="English", phrase=phrase):
                 self.assertIn(phrase, english)
         for path in english_paths:
@@ -285,51 +266,24 @@ class DocumentationTests(unittest.TestCase):
         chinese = "\n".join(_read(path) for path in chinese_paths)
         for phrase in (
                 "REVIEW UNRESOLVED, HUMAN DECISION",
-                "settling gate",
-                "獨立結果",
-                "exit code 為零"):
+                "exit 0", "證據", "accept"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(phrase, chinese)
 
-    def test_readme_auto_fix_contracts_stay_in_parity(self):
-        """The two onboarding pages must expose the same opt-in boundaries."""
+    def test_readme_workflow_contracts_stay_in_parity(self):
         readmes = {
             "README.md": _read(Path("README.md")),
             "README.zh-TW.md": _read(Path("README.zh-TW.md")),
         }
         required = {
             "README.md": (
-                "## Optional bounded auto-fix",
-                "`[auto_fix.review]`",
-                "`assent run --auto-fix`",
-                "An ordinary `assent run` without the flag starts neither review nor repair.",
-                "read-only",
-                "pre-existing technical debt",
-                "directly interacting code",
-                "unbounded repository-wide debt audit",
-                "finite round bound",
-                "never creates tasks",
-                "reverts source",
-                "deletes source",
-                "accepts a folder",
-                "`_auto_fix.toml`",
-            ),
+                "## Automatic bounded workflow repair", "`[workflow]`",
+                "`focused_test`", "`focused_sweep`", "`full_verify`",
+                "REVIEW UNRESOLVED, HUMAN DECISION", "human action"),
             "README.zh-TW.md": (
-                "## 可選的有界 auto-fix",
-                "`[auto_fix.review]`",
-                "`assent run --auto-fix`",
-                "沒有 flag 的普通 `assent run` 不會啟動 review，也不會 repair。",
-                "唯讀",
-                "既有 technical debt",
-                "直接互動的程式碼",
-                "全 repository debt audit",
-                "round 的有限上界",
-                "不會自動建立 task",
-                "還原 source",
-                "刪 source",
-                "絕不自動接受 folder",
-                "`_auto_fix.toml`",
-            ),
+                "## 自動有界 workflow", "`[workflow]`", "`focused_test`",
+                "`focused_sweep`", "`full_verify`",
+                "REVIEW UNRESOLVED, HUMAN DECISION", "人類動作"),
         }
         for name, text in readmes.items():
             compact = " ".join(text.split())
@@ -337,8 +291,8 @@ class DocumentationTests(unittest.TestCase):
                 with self.subTest(readme=name, phrase=phrase):
                     self.assertIn(phrase, compact)
 
-        self.assertNotIn("Never accept or rework automatically", readmes["README.md"])
-        self.assertNotIn("絕不要自動 accept 或 rework", readmes["README.zh-TW.md"])
+        self.assertNotIn("--auto-fix", readmes["README.md"])
+        self.assertNotIn("--auto-fix", readmes["README.zh-TW.md"])
 
     def test_orphaned_temporary_branch_sweep_stays_in_parity(self):
         """The English and zh-TW COMMANDS/OPERATIONS pages must match on the sweep."""

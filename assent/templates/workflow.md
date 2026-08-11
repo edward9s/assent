@@ -160,36 +160,12 @@ as is combining it with `--all`, `verify --batch`, `verify --focus`,
 `run --once`, `run --task`, or the one-folder `archive --restore`. An expansion
 that selects no folder is refused rather than treated as a no-op.
 
-`assent run --verify` runs one complete verification after the run, and only
-when the run exited zero: a failing run is returned as it is, because there is
-no finished plan to certify. The verification matches the selection -- one
-folder (named or auto-selected) as a folder receipt, an exact multi-folder
-selection, including a `...`-expanded one, as that selected batch, and `--all`
-or a bare `...` as the whole-project dynamic batch, which is why a bare `...`
-happens to verify like `--all` while an explicit prefix plus `...` certifies
-exactly the folders it ran. The verification's exit code becomes the command's
-exit code. `--verify` may also be combined with `--once` or `--task`: those
-selectors stop after a single task, so the request verifies only when that
-limited run left the single selected folder complete, and an incomplete folder
-fails the request without writing a receipt. The refusal names the incomplete
-task ids and statuses and happens before any integration candidate is created
-or any full verifier starts; it is a failure, not a silent skip. As an
-invocation-level request `--verify` verifies regardless of the configured
-`receipt_refresh` policy.
-
-Under the default manual receipt-refresh policy, successful run closeout defers
-the per-folder receipt. If `--verify` was requested, that closeout identifies
-the run-level verification that follows in the same invocation instead of
-telling the user to start that verification command again.
-
-`run --auto-fix` does not select folders, reorder them, widen scope, or change
-the meaning of `--once`, `--task`, `--all`, `...`, or `--verify`. It is passed to
-every explicitly selected folder and every folder launched by `--all`; with
-`--once` or `--task` the review/repair gate runs only if that limited invocation
-leaves the folder complete. A successful bounded loop then lets `--verify`
-continue to its separately requested complete verification. A nonzero run or
-auto-fix loop does not start that full verification, and no form of auto-fix
-publishes a Git ref.
+After task execution succeeds, `assent run` automatically follows the plan and
+integration arrays for the exact selected folders. A passing action skips later
+repair roles in that segment; a failing action advances to the next configured
+reviewer/fixer and then rechecks. `--once` and `--task` defer integration when
+they leave the selected folder incomplete. No workflow step publishes a Git
+ref; only the later human `assent accept` action does.
 
 Every production folder-level complete verification operation uses the same
 closeout boundary: after `verify_folder(cfg)` or
@@ -222,8 +198,7 @@ still returns failure and cannot authorize the original selection. Verification
 changes no target ref and performs no acceptance. `assent verify A ...` is the
 same selected batch, expanded over the finished folders; cardinality still
 chooses the path, so an expansion down to one folder is the single-folder
-receipt refresh and rejects `--no-bisect` exactly as `assent verify FOLDER`
-does.
+receipt refresh.
 
 The exact selected path is labeled `verify selected`, not `verify --batch`;
 `verify --batch` is reserved for dynamic discovery and its interactive
@@ -238,8 +213,8 @@ conflicting folder against the advanced target; `assent rework <FOLDER> <TASK>`
 and `assent reject <FOLDER>` remain explicit alternatives. The exact request
 never asks to skip or silently shrinks its set.
 
-The only automatic exception is the combined `assent run ... --verify
---auto-fix` `[workflow].selection` sequence. Its `full_verify` action first performs a
+The automatic integration path is the configured `[workflow].integration`
+sequence. Its `full_verify` action first performs a
 candidate-only scan and starts zero full-test runs when conflicts exist. One
 typed conflict wave records every independently discoverable conflicting
 folder and path, target/source/compatible-prefix identities, excluded selected
@@ -247,7 +222,7 @@ dependents, and `target_alone` versus `peer_only`. The next writable verdict
 role may assign and repair the whole wave in one session; the split alternative
 uses a read-only verdict role followed by a write-capable fixer. A later
 `full_verify` action is the only way to rebuild and run the real full verifier.
-The selection remains exact throughout: Assent never
+The folder selection remains exact throughout: Assent never
 accepts a prefix, asks to skip, changes the target, or publishes anything.
 
 A target-alone assignment reuses the source-first `assent-reconcile/<folder>`
@@ -515,18 +490,18 @@ branch list inside the same lock immediately before deleting so an answer of
 and the confirmation; doctor's offer is the recovery path, while `clean --all`
 and `archive --all` are the routine, unattended one.
 
-## Opt-in folder review and bounded repair
+## Automatic bounded workflow repair
 
 The `[workflow]` table has exactly three keys. `task` selects task-scoped
 context and task-by-task accountability; `plan` selects plan-scoped context
-and plan accountability; `selection` owns the exact invocation selection after
+and plan accountability; `integration` owns the reconstructed candidate after
 every contributing plan boundary is complete. A key selects the
 scheduler-supplied execution layer and its granularity, not permission. Every
 entry is a tagged union containing exactly one of `role` or `action`. The
 selected role's `[abilities]` carry what that session does (`prompt`, `writes`,
 and optionally `produces_verdict`), and `[roles]` only compose those abilities
 with optional model and effort choices. Ability prompts therefore do not decide whether their
-context is a task, plan, or selection. The only special behavior the engine
+context is a task, plan, or integration. The only special behavior the engine
 infers from a role is an ability's `produces_verdict`; it activates the
 provider-neutral review verdict protocol.
 
@@ -536,21 +511,19 @@ the source tree and command: unchanged evidence is reused, while a later source
 write makes it STALE and requires another explicit `focused_test`. When no
 `focused_test` is configured, the final task closeout retains the legacy
 focused check. When it is configured, task roles leave that command to the
-scheduler action instead of running it inside the AI session. `full_test` is
-legal at task or plan positions and runs the
-primary worktree's `.assent/verify.py` against the current source worktree
-without constructing an integration candidate or writing a receipt.
-`full_verify` is legal only at selection positions and owns the existing plan
+scheduler action instead of running it inside the AI session. `focused_sweep`
+is legal only at plan positions and runs each distinct task `verify` command in
+plan order without writing a receipt. `full_verify` is legal only at integration positions and owns the existing plan
 or exact-batch candidate transaction and its receipt. An action accepts no
 adapter, role, model, effort, prompt, ability, or arbitrary command string. AI
 roles remain forbidden from running these actions or the complete suite
 themselves.
 
-With ordinary task execution, only `run --auto-fix` walks the bounded per-plan
-review sequence configured by `plan`:
+Every successful `run` walks the configured plan and integration arrays until
+the source is mechanically ready for the human `accept` action:
 
 ```text
-assent run FOLDER --auto-fix
+assent run FOLDER
 ```
 
 ```toml
@@ -560,10 +533,13 @@ task = [
   { action = "focused_test" },
 ]
 plan = [
+  { action = "focused_sweep" },
   { role = "reviewer_fixer", adapter = "codex" },
+  { action = "focused_sweep" },
   { role = "reviewer_fixer", adapter = "codex" },
+  { action = "focused_sweep" },
 ]
-selection = [
+integration = [
   { action = "full_verify" },
   { role = "reviewer_fixer", adapter = "codex" },
   { action = "full_verify" },
@@ -571,7 +547,7 @@ selection = [
 ```
 
 All three keys are ordered arrays of tagged role/action steps. Every `plan` or
-`selection` role may state a registered `adapter`; an omitted adapter resolves
+`integration` role may state a registered `adapter`; an omitted adapter resolves
 to the first name under `[adapter].name`. In the
 per-plan review layer, a writable non-verdict step authorizes the bounded
 repair described below using that resolved adapter, while a verdict-and-write role is a merged
@@ -582,21 +558,20 @@ same adapter with different models are both proven.
 
 All omitted and empty boundaries are explicit. An absent `[workflow]` table is
 identical to all three keys being omitted. An omitted `plan` and `plan = []`
-configure no per-plan review, so `run --auto-fix` reports that the flag had no
-effect and continues as an ordinary run. An omitted `task` keeps one
+configure no per-plan review. An omitted `task` keeps one
 implicit session per task using that task's own model and effort. A non-empty
 `task` runs its stated roles and actions for each task with task-scoped context
 and keeps each task as its own accountability unit. `task = []` is intentionally
 different: it disables per-task sessions and makes the whole plan one unit,
 executed by the `plan` steps with plan-wide context and the union of task scope
 and focused gates. In that plan-execution mode, every `plan` role step is an
-ordinary worker session and a `full_test` action is an objective
-source-worktree gate. A non-verdict role succeeds or retries according to the
+ordinary worker session and a `focused_sweep` action is an objective
+plan-focused verification point. A non-verdict role succeeds or retries according to the
 plan's focused gate, not a reviewer verdict. An empty `plan` then leaves
-nothing able to execute and is refused. An omitted or empty `selection`
+nothing able to execute and is refused. An omitted or empty `integration`
 preserves direct invocation-level verification; automatic verifier-failure and
 conflict repair requires explicit role/action positions. A
-non-empty `selection` must start and end with `full_verify`; one `full_verify`
+non-empty `integration` must start and end with `full_verify`; one `full_verify`
 alone is valid. A writable verdict role reviews and repairs either failure in
 one session, returns `FIXED`, and is followed by focused closeout and the final
 `full_verify`. With a read-only verdict role, a following writable non-verdict
@@ -612,45 +587,42 @@ settings-layer file that must be edited.
 
 The folder-level workflow is considered when no task can make further progress:
 the folder is complete, or it is quiescent-blocked with durable worker or
-focused-gate evidence. The flag is selection-orthogonal: it is forwarded for automatic, explicit
-single/multi-folder, prefix-plus-`...`, and `--all` selections and is compatible
-with `--once`, `--task`, and `--verify`, whose own ordering and scope rules do
-not change. A limited run defers the completed-folder loop when it leaves work
+focused verification evidence. A limited run defers the completed-folder loop when it leaves work
 incomplete; a quiescent blocked dependency with durable worker or focused-gate
 evidence may enter the separate blocked-adjudication review. Neither path
-spends a workflow step before its own evidence gate. Without the flag,
-configured review roles are inert. Complete verification requested by
-`--verify` follows only a successful task and plan workflow. When
-`[workflow].selection` is configured, its `full_verify` action owns that
-verification and `--auto-fix` authorizes only its explicitly positioned repair
-roles; otherwise the ordinary direct verification path remains. Neither path
+spends a workflow step before its own evidence point. When
+`[workflow].integration` is configured, its `full_verify` action owns complete
+verification and the following explicitly positioned roles own bounded repair. Neither path
 accepts. A missing receipt, an unrun full suite, or the absence of complete
 verification is never a folder-review failure.
 
 The folder-level order is:
 
 1. Run each selected task session and its ordinary focused gate.
-2. Once every task is `DONE` or `SKIP`, run each distinct `DONE`-task `verify`
-   command once as a final focused sweep. A folder with only `SKIP` tasks has
-   no implementation review to run.
-3. If every final focused command passes and the source remains clean, start
-   the configured reviewer with the cumulative checkpoint diff, all task
-   contracts and journals, directly interacting code, and the focused evidence.
-4. For a quiescent blocked folder, use the durable BLOCKED worker or
+2. Once every task is `DONE` or `SKIP`, a configured `focused_sweep` runs each
+   distinct `DONE`-task `verify` command once. A passing action completes the
+   plan layer immediately; no reviewer is opened merely to confirm it.
+3. A failing action advances to the next configured reviewer/fixer role. Its
+   prompt states the current round, the total finite rounds, and the number
+   remaining. It may report only blockers tied to an existing requirement or
+   a concrete repair regression; it must not invent acceptance criteria.
+4. For a quiescent blocked folder, use the durable `BLOCKED` worker or
    task-focused-gate evidence as the blocker input; this blocked-adjudication
    entry point does not run a new focused command merely to manufacture one.
-5. Accept exactly one provider-neutral `PASS`, `FIXED`, or `FAIL`: PASS ends
-   the loop; FIXED and FAIL are persisted and only this invocation's flag
-   authorizes further repair.
+5. After a repair, the next configured action rechecks mechanically. A passing
+   action completes its layer without another reviewer; a failure may advance
+   only through the remaining configured positions.
 6. Resolve every finding to one existing task and its declared scope. The
    reviewer may approve one exact mechanically valid scope addition, but the
    scheduler alone performs that one transaction; the worker and reviewer
-   never edit task files. Reopen only existing implicated tasks, repair, then
-   repeat the task gate, final sweep when applicable, and review.
-7. Stop on PASS, adapter/infrastructure failure, an unresolved ownership or
-   scope decision, or the end of the configured plan, always retaining
-   edits and evidence. No runtime human adjudication step is inserted into
-   the loop.
+   never edit task files. Reopen only existing implicated tasks and preserve
+   every repair.
+7. The finite arrays are the only convergence bound. There is no diff-
+   oscillation or subjective no-progress stopping heuristic. If the arrays end
+   while a mechanical action still fails, retain all edits and evidence,
+   settle as `REVIEW UNRESOLVED, HUMAN DECISION`, and exit zero so unrelated
+   queued folders continue. The failed `full_verify` evidence still blocks
+   `accept`. Infrastructure or safety failures remain nonzero.
 
 A completed-folder round is a merged reviewer-fixer session, not a strictly
 read-only gate. When it finds a genuine blocking problem it may repair it
@@ -685,7 +657,7 @@ finding fingerprints nothing confirmed, and the run exits zero. Nothing is
 reverted, reopened, or re-marked, so a repaired task keeps the `DONE` its own
 focused gate proved rather than being turned `BLOCKED`. The scheduler writes
 one journal entry per implicated task and refreshes the report. That outcome is
-terminal rather than a resumable phase: a later `run --auto-fix` reports it
+terminal rather than a resumable phase: a later `run` reports it
 again and starts no further round, and only a human `rework` reopens the
 folder. The one thing missing is independent review confirmation, which only
 the human `accept` decision can supply.
@@ -924,7 +896,7 @@ keep the loop open.
 
 Automatic repair invokes ordinary code-preserving rework with reason
 `Automatic repair of durable folder-review findings` and journal marker
-`authorization: run --auto-fix`. It reopens only implicated existing tasks and
+`authorization: configured workflow repair`. It reopens only implicated existing tasks and
 never creates tasks, edits requirements or scope, sweeps repository-wide debt,
 reverts or deletes source, accepts, or creates a second task status. Only a
 later explicit human `rework --revert-code` may remove the preserved code.
@@ -957,16 +929,15 @@ settles nothing and ends the run nonzero. There is no runtime human
 adjudication prompt inside the loop.
 
 Interruption, quota wait, adapter/focused failure retains edits and state. A
-later `run --auto-fix` resumes the pending ledger, WIP, and workflow cursor only
+later `run` resumes the pending ledger, WIP, and workflow cursor only
 when the configured per-plan review sequence still has the exact role,
 resolved identity, and step
 position that decided the stored state; missing or drifted policy refuses repair and
 closeout. A settled SELF-FIXED, UNREVIEWED or REVIEW UNRESOLVED, HUMAN
 DECISION folder is terminal: it is reported again and no further round starts.
-A run without the flag
-may continue ordinary tasks but starts no review or repair. Successful flow
-remains focused task gates, optional auto-fix review/repair/final focused sweep,
-optional complete verification after a successful run or explicit `--verify`,
+A configured empty layer starts no role from that layer. Successful flow
+remains focused task actions, bounded review/repair/focused sweep,
+integration verification after a successful run,
 human review, accept, then clean. A reviewer never treats the missing receipt
 or an unrun full suite as its own failure.
 
@@ -1103,14 +1074,10 @@ primary target; a manual undeclared link refuses verification and invalidates
 folder/batch receipts and report freshness. Ignored leaf files remain separately
 auto-mirrored and never become manifest paths.
 
-`[verification].receipt_refresh` selects the second-stage starter. Default
-`"manual"` closeout defers to explicit `assent verify [--batch]`, allowing one
-batch run; `run --verify` instead proceeds directly to its requested run-level
-verification without repeating that advice. `"auto"` refreshes after every task
-completes. Focused task verification is unconditional. Direct/selected accept
-never verifies and needs fresh matching PASS; only `accept --all`'s documented
-sequential fallback may call `verify_folder_if_needed`. Missing receipt reports
-`NOT RUN`.
+The integration `full_verify` action is the sole unattended receipt producer at
+run closeout. Direct and selected accept never verify and require fresh matching
+PASS evidence; only `accept --all`'s documented sequential fallback may call
+`verify_folder_if_needed`. Missing receipt reports `NOT RUN`.
 
 `assent verify <FOLDER>` is a zero-token, unattended receipt refresh: no AI or
 target change. Its boundary refreshes `_report.md` after the receipt operation
@@ -1165,12 +1132,11 @@ conflicts or file content. Verify then accept still require a fresh reproducible
 PASS. For peer conflict, verify/accept compatible predecessors before reconcile;
 rework/reject remain alternatives.
 
-On verifier failure, dynamic batch defaults to at most `ceil(log2(N))` extra
-runs locating the first red merge. The proven prefix retains a PASSED receipt,
-but the requested batch still exits nonzero. Localization never changes the
-guilty folder's status/tasks; only rework/reject reopen it. `--no-bisect` records
-the whole-chain failure without localization. Rework/reject invalidate the batch
-receipt, rebuilt by the next `verify --batch`.
+On verifier failure, dynamic batch may localize the first red merge. The proven
+prefix retains a PASSED receipt, but the requested batch still exits nonzero.
+Localization never changes the guilty folder's status/tasks; only
+rework/reject reopen it. Rework/reject invalidate the batch receipt, rebuilt by
+the next verification.
 
 When execution is isolated, the scheduler also detects writes that landed in
 the main tree instead of the worktree: it diffs a main-tree dirty-path

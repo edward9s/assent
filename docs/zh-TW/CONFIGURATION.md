@@ -210,48 +210,13 @@ Session: codex | core->gpt-5.6-terra | heavy->high
 
 左邊是 task 的抽象值，右邊是實際傳給 CLI 的 argument。
 
-## 可選的 folder review 與 auto-fix
+## Workflow role、action 與有限修復
 
-可選的 `[auto_fix.review]` table override folder-level reviewer。沒有 table 時，會用第一個
-effective worker adapter 的 `prime`/`heavy` 自動解析；不需重跑 `assent init` 或編輯
-`~/.assent/assent.toml`。`adapter` 必須是已註冊
-的 adapter；`model` 只能用抽象 `prime`/`core`/`lite`，`effort` 只能用抽象
-`heavy`/`normal`/`slight`。Reviewer 會重用該 adapter 自己的 model/effort mapping，
-因此明示的 reviewer 可以選 worker rotation 以外的 vendor：
+`[workflow]` 只接受 `task`、`plan`、`integration`。每個值都是有序陣列，每個 entry 恰好含一個 `role` 或 `action`。scheduler action 分別是 task 層的 `focused_test`、plan 層的 `focused_sweep`、integration 層的 `full_verify`。已移除的 workflow 與 verification 設定會直接拒絕，不做 migration。
 
-```toml
-[adapter]
-name = ["claude", "codex"]
+Action 通過就完成該層，不啟動 AI review；失敗才走後續 reviewer/fixer，並由後面的 action 重驗。Reviewer prompt 會明示目前輪次與總輪數，並禁止憑空新增驗收條件。陣列耗盡是唯一的收斂上限，不使用 no-progress 或 diff 震盪猜測。
 
-[auto_fix.review]
-adapter = ["antigravity"]     # 每個 entry 一輪 review；不在 worker rotation
-model = "prime"               # 抽象 tier
-effort = "heavy"              # 抽象 effort
-```
-
-設定 table 或 built-in fallback 只提供 bounded read-only review-and-repair loop 的 policy；只有明示
-`assent run --auto-fix` 才啟動該次 invocation 的 review 並授權 repair。沒有 flag 的普通
-run 不會 review，也不會 repair。這個 flag 與 folder selection 正交，可和明示、remainder、
-`--all`、`--once`、`--task`、`--verify` 的 run 形式合用。`_auto_fix.toml` 保存的是
-resolved adapter 與實際 CLI model/effort，加上 finding ledger 與 consumed profile，不
-接受 reviewer 自己聲稱的 identity。`assent check` 會顯示 resolved reviewer adapter、抽象
-model/effort、實際 CLI 值，以及每個設定與 mapping 來自 built-in fallback 或 user/project
-settings layer。唯讀 review 的 prompt-plus-detection write refusal 仍不是 security sandbox。
-
-Repair 使用 worker rotation 的有限 abstract profile；每個 repair round 在第一個
-write-capable session 前先依 round 開始時的 consumed history 記錄整輪 assignments，所以
-多 task finding 或 dependency cascade 不會逐 task 消耗 normal profile。它只會以理由
-`Automatic repair of durable folder-review findings` 重開既有 scope 內的 task。變更或直接
-互動程式碼遇到的既有 technical debt，只有 `COMPLETED_FOLDER + INITIAL` 引入、局部且
-focused tests 能可靠驗證時才可修正；blocked adjudication 與 `RECHECK` 可以保留或解決，
-但不能新增，也不是全 repository debt audit。reviewer 可核准一個精確 scope addition，
-但只有 scheduler 能修改 task file。recheck 保留仍存在 finding 的 fingerprint，只有有證據
-的 repair regression 或 newly exposed existing requirement 才能新增；原集合清空後必須 PASS，
-optional improvement 與 speculation 不會讓 loop 繼續。它不會自動建立 task、還原 source、
-刪 source 或 accept。profile 用盡、中斷或 gate 失敗會保留 state 與編輯供 recovery；loop 內
-沒有 runtime human adjudication gate。pending `FAIL` 只有在目前 resolved reviewer identity
-相同時才能恢復，policy 漂移會拒絕 repair 與 closeout。完整 verification 依成功 run 的
-receipt policy 或明示 `--verify` 另行執行；缺 receipt 或未跑 full suite 絕不是 reviewer failure。
+耗盡仍未解決時保留全部證據與修改，狀態為 `REVIEW UNRESOLVED, HUMAN DECISION` 且 exit 0；失敗的 `full_verify` 仍禁止 accept。Adapter、model、effort 仍依前述 role 與 adapter 設定解析。
 
 ## Antigravity timeout 與排錯
 
@@ -297,6 +262,5 @@ TaskResult` 接收已翻譯值。`TaskResult` 有 `exit_code`、`output`、`quot
 
 ## 相關設定
 
-`[verification] receipt_refresh` 控制 folder-level complete evidence 是在 closeout
-自動刷新（`"auto"`），還是等顯式 `assent verify`（預設 `"manual"`）。它不改變
-`run --verify` 的 invocation request 或 acceptance 規則；詳見[驗證](VERIFICATION.md)。
+`[workflow].integration` 中 `full_verify` 的位置控制自動完整驗證與 receipt 建立；
+詳見[驗證](VERIFICATION.md)。

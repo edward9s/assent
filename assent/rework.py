@@ -1,7 +1,7 @@
 """Non-destructively reopen tasks through one guarded rework transaction.
 
 The public command acquires the lock for a human request; the execution engine
-may reuse the same transaction under its already-held lock when ``--auto-fix``
+may reuse the same transaction under its already-held lock when workflow repair
 has authorized a bounded, reason-bearing repair.
 """
 from __future__ import annotations
@@ -193,7 +193,7 @@ def _entry_values(task: Task, target: Task, head: str,
         f"reason: {reason}"
     )
     if automatic:
-        detail += "\nauthorization: run --auto-fix"
+        detail += "\nauthorization: configured workflow repair"
     if reverted is not None and revert_checkpoint is not None:
         reversed_scope = (", ".join(revert_scope or [])
                           if cascade else "disabled")

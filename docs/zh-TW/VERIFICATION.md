@@ -18,102 +18,11 @@
 不建立 integration candidate 或 receipt，通過也不能授權 accept。focused verification
 仍會在 check 開始前分類 shared ignored input 並同步 reviewed link。
 
-### Folder auto-fix review gate
+### 機械驗證周圍的自動修復
 
-`[auto_fix.review]` 是可選的 reviewer override；若沒有 table，會用第一個 effective worker
-adapter 的 `prime`/`heavy` 自動解析。它的 `adapter` 可以是單一名稱，也可以是有序的名稱
-list，每個項目就是一個 review round；重複的名稱是有意義的，代表再跑一個相同 identity 的
-round。單一的 `model` 與 `effort` 套用到每個項目，因此 list 會依序解析成每 round 一組
-adapter/model/effort identity，設定的項目數就是這個 loop 的有限上限。
-Invocation 明示 `run --auto-fix` 時，completed folder
-才會在最後 focused gate 後做 folder-level review。Scheduler 先再跑每個 distinct `DONE`
-task 的 `verify` 一次；任何 failure 都只寫 focused finding evidence，不啟動 completed-folder
-reviewer。`--once` 或 `--task` 若留下 incomplete folder，會延後這個 loop 且不消耗 token；有
-durable worker `BLOCKED` 或 focused-gate 證據的 quiescent blocked dependency 走另一個
-blocked-adjudication entry point；只有 `SKIP` 的 folder 不需要 implementation review。沒有
-`--auto-fix` 的普通 run 不會做這次 final sweep/review，也不會 repair，即使已有 policy。
+`focused_test` 驗證單一 task；`focused_sweep` 執行 plan 內不同的 task commands，但不寫 receipt；`full_verify` 建立 integration candidate 並記錄完整驗證證據。證據通過就完成該層，不需 reviewer。失敗才依該層設定的後續 reviewer/fixer positions 前進。
 
-`run --auto-fix` 是該次 invocation 修正 FAIL review 的授權，與 run selection 正交，可和
-明示 folder、`...`、`--all`、`--once`、`--task`、`--verify` 合用。它不跑 full candidate、
-不 publish ref。沒有 flag 時 FAIL 是人類裁決 evidence；有 flag 時每個 finding 都必須對應
-一個既有 task 與 declared scope，才會記錄 code-preserving reason-bearing rework。每個被
-reopen 的 task 都以它自己原本的 task profile 修復：沒有 escalation ladder，也不會消耗任何
-profile，所以中斷的 round 會以完全相同的 identity 恢復，多 task finding 與 dependency
-cascade 也不會逐 task 提前 escalation。
-
-completed-folder round 是 reviewer 與 fixer 合併的 session，不是嚴格唯讀的 gate：發現真正
-的 blocking problem 時，它可以直接修，但只能寫入 finding 指名的那一個既有 task 的 declared
-scope，並以 verdict `FIXED` 回報。其他任何寫入 —— management-plane 檔案、task 檔案、別的
-task 的 scope、commit，或任何寫入 primary worktree —— 都會被普通 worker session 面對的同一
-道結構性安全 gate 擋下，使該 verdict 不可用，同時保留原編輯。只有在沒有任何 blocking 問題
-殘留、且該 round 完全沒有寫入時才回 `PASS`；`FAIL` 仍代表該 round 自己不能修的 blocker
-（例如精確的 scope omission），以及維持唯讀的 blocked adjudication。
-
-Loop 依設定的 round list 終止：每個 round 讓 durable round index 剛好前進一，走到 list
-結尾就有限地結束自動化。在 `FIXED` round 上用完，不會馬上結算：scheduler 會先在修復後的
-source 上重跑 implicated task 自己的 focused gate 一次——沿用同一份會跳過本次 invocation
-已證明過 command 的 de-duplicating ledger——只有在通過後才結算為下述獨立的
-SELF-FIXED, UNREVIEWED 結果，exit code 為零。若這道 gate 失敗，則是另一個獨立結果，
-與 SELF-FIXED, UNREVIEWED 及一般 `BLOCKED` task 都不同：不寫結算 record、run 以非零
-exit code 結束、沒有 task 被標成 `BLOCKED`，修復、finding 與每一筆編輯都保留。在未修好的
-blocker 上用完 round，則會保留每一項 finding、編輯與 journal，不再開新 round，並結算為
-下述同樣獨立的 REVIEW UNRESOLVED, HUMAN DECISION 結果，exit code 為零而非非零——這是
-刻意設計，讓同一次 `--all` invocation 中排在後面的 folder 仍能繼續啟動，因為未解決的
-review finding 是留給人類 acceptance meeting 決定的問題，不是 infrastructure failure。
-
-Review 依循 changed 與 directly interacting code；既有 technical debt 只有在
-`COMPLETED_FOLDER + INITIAL` 引入、修正局部於既有 scope 且 focused gate 能可靠測試時才
-合格，不做全 repository audit。blocked adjudication 與 `RECHECK` 可以保留或解決 debt，
-但不能新增。未知、含糊或越界 finding 交 scheduler 作決定。reviewer 可核准一個精確 scope
-addition，但只有 scheduler 修改 task file；worker 與 reviewer 都禁止 task-file edits。
-不會自動建立 task、改 task requirement、還原 source、刪 source、accept，也不把
-`_auto_fix.toml` 當 task status。任何 round 都不得寫 management-plane 檔案；Assent 以
-before/after surface snapshot 偵測並拒絕這類寫入、保留原編輯，唯讀的 blocked adjudication
-則完全不得寫入。這是在 `danger-full-access` 預設
-下的 cooperative rule，不是 security sandbox，loop 內沒有 runtime human adjudication gate。
-
-Round list 在 `FIXED` round 上結束的 folder，只有在 implicated task 自己的 focused gate 於
-修復後的 source 上重新證明通過，才會屬於 SELF-FIXED, UNREVIEWED：durable state 記下
-結算結果 —— round 位置、用掉的 round 總數、該 round 的 adapter/model/effort、證明這次修復的
-settling-gate evidence，以及沒有人確認過的 finding fingerprint —— run 以零 exit code 結束。
-不還原、不 reopen、不重新標記：每個 task 保留它自己 focused gate 證明的 status，被修好的
-task 維持 `DONE` 而不會被改成 `BLOCKED`。Scheduler 為每個 implicated task 寫一筆 journal
-entry 並刷新 report。這個結果是終局，不是可續跑的 phase，之後的 `run --auto-fix` 只會再次
-回報它、不再開新 round，只有人類 `rework` 能重新開啟該 folder。唯一缺的是獨立的 review
-確認，而那只有人類的 `accept` 決定能提供。
-
-若這道 settling gate 失敗，folder 不會結算：這是另一個獨立結果，與 SELF-FIXED, UNREVIEWED
-及一般 `BLOCKED` task 都不同。不會寫入 `self_fixed_unreviewed` record、run 以非零 exit code
-結束、沒有 task 被標成 `BLOCKED`，修復、finding 與每一筆編輯都原封不動地保留在 disk 上，
-就跟該 round 留下的狀態一樣。
-
-Round list 若改為在未修好的 blocker 上用完，則會結算為同樣獨立的
-REVIEW UNRESOLVED, HUMAN DECISION 結果：durable state 記下 round 位置、用掉的 round 總數、
-該 round 的 adapter/model/effort，以及沒有任何 round 解決的 finding，run 以零 exit code
-結束，而非非零。每個 task 都保留它自己 closeout 給的 status；不還原、不 reopen、不標記
-`BLOCKED`。這是刻意取代先前的非零 exit：因為 folder scheduler 的 `--all` launch loop 只在
-沒有 folder 失敗時才持續啟動下一個，這裡的非零 exit 過去會靜默取消同一次 invocation 中排在
-後面的所有無關 folder。未解決的 review finding 是 scheduler 無法決定的問題，不是
-infrastructure failure，因此改由人類 acceptance meeting 決定。`assent accept <FOLDER>` 對
-它的 gate 方式與 SELF-FIXED, UNREVIEWED 相同：在所有 receipt-based check 都已通過後，會
-指出產生這些未解決 finding 的 round 位置與 identity，以及每個 finding 的 task、path 與
-summary，再詢問一次明確的 `[y/N]` 確認才 publish；同時帶有兩種結果的 folder 只會被問一次，
-並同時指出兩個原因。
-
-一個已經寫入修復的 round 若在其 verdict 記錄前被中斷 —— 即在 `REPAIRING` 或
-`AWAITING_REVIEW` 期間發生的 unclean exit —— 會保留該編輯，且不會前進 round index。下一次
-run 的 startup recovery 會利用 durable state 的 current finding 所指名的 task 來歸屬這份
-dirt，證明方式與其他 recovery owner 相同的 scope-containment 判斷，並將其收進 `wip`
-checkpoint，不開任何 AI session。若無法以此方式證明 ownership —— dirt 超出該 task 宣告的
-scope、有一個以上可能的 owner、state 檔無法讀取，或根本沒有記錄中的 in-flight round ——
-recovery 仍會 fail-closed 拒絕，不會用猜的。
-
-Review context 是 `COMPLETED_FOLDER` 或 `BLOCKED_ADJUDICATION`，stage 是 `INITIAL` 或
-`RECHECK`。Recheck 先處理 prior current findings；仍存在 blocker 保留 fingerprint，新
-blocker 只能有 repair regression 或 newly exposed existing requirement 的證據；prior set
-清空後必須 PASS。Optional improvement、speculation 與重複 debt discovery 不會讓 loop 繼續。
-與 task requirement 直接相關的具體 local focused-test gap 才能是 review evidence；缺完整
-verification、缺 receipt 或未跑 full suite 都不是 reviewer failure。
+Reviewer 會收到精確失敗證據及有限輪次位置，只能回報既有 requirement 或具體 repair regression，也可提出一個由 scheduler 驗證的精確 scope omission。修復後由下一個 action 重驗。陣列耗盡會保留修改與證據為 `REVIEW UNRESOLVED, HUMAN DECISION`；完整驗證失敗仍是客觀的 `accept` gate。
 
 ### 完整 candidate verification
 
@@ -180,9 +89,8 @@ status-only transition 是正常 lifecycle evidence，不會單獨讓 auto-fix r
 真正改動 task requirement、scope、verification 或其他 contract structure 才會讓 binding
 stale；兩者都只是 zero-token report evidence。
 
-`[verification] receipt_refresh = "manual"`（預設）讓普通 run closeout 延後 folder
-receipt；`"auto"` 在 folder 所有 task 完成時刷新。`assent run --verify` 不受這個設定
-影響，只在 run 成功後按選取範圍驗證；run 失敗不驗證。
+`[workflow].integration` 陣列決定 `full_verify` 在何處建立 candidate 與 receipt；
+只有前面的 workflow layer 成功才會執行，run 失敗不驗證。
 
 ## Batch conflict 與 reconcile
 

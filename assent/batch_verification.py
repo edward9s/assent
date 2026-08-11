@@ -795,8 +795,8 @@ def _report_selected_conflict(chain: BatchCandidate, main: Path,
                               sources: Sequence[tuple[str, str]]) -> None:
     """Report an exact conflict and give recovery that preserves its set."""
     folder = chain.conflict_folder
-    print("verify selected: candidate construction encountered a merge "
-          "conflict; the full verifier did not run.")
+    print("verify selected: candidate construction encountered merge "
+          "conflicts; the full verifier did not run.")
     print(f"verify selected: the exact selected set conflicts while merging "
           f"{folder} into the candidate. Conflicting file(s):")
     for conflict in chain.conflicts:
@@ -833,6 +833,8 @@ def _report_selected_conflict(chain: BatchCandidate, main: Path,
               f"`assent reject {folder}`.")
     print(f"verify selected: `assent rework <FOLDER> <TASK>` and `assent reject "
           f"{folder}` remain explicit alternatives.")
+    print("verify selected: the complete exact selection remains required; "
+          "no prefix was accepted and no full verifier ran.")
 
 
 def _report_selection_conflict_wave(
