@@ -291,6 +291,13 @@ while operating an assent-managed session live in
   no account, pool, quota-capacity, or reset semantics, requires no configuration
   or capability probe, and ordinary vendor quota output keeps the existing
   wait/adapter-rotation behavior.
+- An adapter authentication failure is candidate-local availability evidence,
+  never a task failure: preserve progress, skip that adapter for the current
+  workflow step, and try the next declared candidate without consuming a task
+  retry. If every candidate requires authentication, stop with nonzero
+  `AUTHENTICATION REQUIRED`, keep the task resumable rather than `BLOCKED`, and
+  do not wait; when authentication and quota failures are mixed, wait only for
+  a quota-exhausted candidate that can recover.
 - Effort selection is deterministic: task explicit value, then the configured
   per-tier `default_effort` override, then the built-in per-tier default. A
   stated `default_effort` table overrides per tier rather than replacing the

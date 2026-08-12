@@ -489,6 +489,20 @@ class TestRunTask(unittest.TestCase):
         self.assertEqual(result.failure_kind, "billing")
         self.assertIsNone(result.reset_at)
 
+    def test_authentication_output_sets_failure_kind_not_quota(self):
+        output = json.dumps({
+            "type": "result", "subtype": "error", "is_error": True,
+            "api_error_status": 401,
+            "result": "Request rejected",
+        })
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+
+        result = ClaudeAdapter(make_cfg()).run_task(
+            "p", "fable", "medium", Path("."))
+
+        self.assertEqual(result.failure_kind, "authentication")
+        self.assertFalse(result.quota_exhausted)
+
     def test_billing_text_on_a_successful_exit_is_not_flagged(self):
         # billing is a failure classification: an exit-0 session whose prose mentions a
         # credit balance must never be classified as a billing failure

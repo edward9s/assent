@@ -249,6 +249,19 @@ class TestRunTask(unittest.TestCase):
         self.assertTrue(stalled.stalled)
         self.assertIsNone(stalled.failure_kind)
 
+    def test_authentication_output_sets_failure_kind_not_quota(self):
+        output = json.dumps({
+            "type": "turn.failed",
+            "error": {"message": "Not logged in. Please run codex login."},
+        })
+        self.patch_run(lambda *args, **kwargs: (1, output, False))
+
+        result = CodexAdapter(make_cfg()).run_task(
+            "p", "gpt-5.6-sol", "medium", Path("."))
+
+        self.assertEqual(result.failure_kind, "authentication")
+        self.assertFalse(result.quota_exhausted)
+
     def test_checkpoint_resume_record_sets_distinct_result_and_keeps_raw_output(self):
         output = "partial\n" + CHECKPOINT_RESUME_RECORD + "\n"
         self.patch_run(lambda *args, **kwargs: (1, output, False))

@@ -693,6 +693,7 @@ class _AdapterRotation:
     adapters: tuple[Adapter, ...]
     index: int = 0
     exhausted: set[str] = field(default_factory=set)
+    auth_failed: set[str] = field(default_factory=set)
     pool: dict[str, Adapter] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -714,13 +715,21 @@ class _AdapterRotation:
     def advance_after_quota(self, failed: set[str] | None = None) -> bool:
         """Move to the next adapter; return whether this exhausted one complete cycle."""
         self.exhausted.add(self.name)
-        unavailable = self.exhausted | (failed or set())
-        cycle_exhausted = len(unavailable) == len(self.names)
+        unavailable = self.exhausted | self.auth_failed | (failed or set())
+        recoverable = [index for index, name in enumerate(self.names)
+                       if name not in self.auth_failed]
+        if not recoverable:
+            raise AssentError("Adapter rotation has no authenticated candidate")
+        cycle_exhausted = all(
+            self.names[index] in unavailable for index in recoverable)
         if cycle_exhausted:
+            preferred = next(
+                (index for index in recoverable
+                 if self.names[index] in self.exhausted), recoverable[0])
             self.exhausted.clear()
             if failed is not None:
                 failed.clear()
-            self.index = 0
+            self.index = preferred
             return True
         for offset in range(1, len(self.names) + 1):
             index = (self.index + offset) % len(self.names)
@@ -741,16 +750,39 @@ class _AdapterRotation:
     def advance_after_failure(self, failed: set[str]) -> bool:
         """Try the next not-yet-failed candidate in this step-local cursor."""
         failed.add(self.name)
-        unavailable = failed | self.exhausted
+        unavailable = failed | self.exhausted | self.auth_failed
         for offset in range(1, len(self.names)):
             index = (self.index + offset) % len(self.names)
             if self.names[index] not in unavailable:
                 self.index = index
                 return True
+        recoverable = [index for index, name in enumerate(self.names)
+                       if name not in self.auth_failed]
         failed.clear()
         self.exhausted.clear()
-        self.index = 0
+        self.index = recoverable[0]
         return False
+
+    def advance_after_authentication(self, failed: set[str]) -> str:
+        """Skip one unauthenticated candidate; switch, wait, or require login."""
+        self.auth_failed.add(self.name)
+        unavailable = self.auth_failed | self.exhausted | failed
+        for offset in range(1, len(self.names)):
+            index = (self.index + offset) % len(self.names)
+            if self.names[index] not in unavailable:
+                self.index = index
+                return "switch"
+        recoverable = [index for index, name in enumerate(self.names)
+                       if name not in self.auth_failed]
+        if not recoverable:
+            return "required"
+        preferred = next(
+            (index for index in recoverable
+             if self.names[index] in self.exhausted), recoverable[0])
+        failed.clear()
+        self.exhausted.clear()
+        self.index = preferred
+        return "wait"
 
 
 class _BillingAbort(Exception):
@@ -763,6 +795,26 @@ class _BillingAbort(Exception):
     dispatched purely on ``TaskResult.failure_kind == "billing"`` -- never on an adapter name --
     so a future adapter gets the behaviour for free by setting the same string.
     """
+
+
+class _AuthenticationRequired(AssentError):
+    """Every declared adapter for one workflow step requires human login."""
+
+
+def _authentication_required_message(rotation: _AdapterRotation,
+                                     reason: str) -> str:
+    names = ", ".join(rotation.names)
+    return ("AUTHENTICATION REQUIRED: every declared adapter requires login "
+            f"({names}). Sign in, then rerun to resume. Last failure: {reason}")
+
+
+def _authentication_failover_action(rotation: _AdapterRotation,
+                                    failed: set[str], reason: str) -> str:
+    action = rotation.advance_after_authentication(failed)
+    if action == "required":
+        raise _AuthenticationRequired(
+            _authentication_required_message(rotation, reason))
+    return action
 
 
 def _workflow_step_rotation(
@@ -779,7 +831,8 @@ def _adapter_availability_failed(result: TaskResult) -> bool:
     """Return whether a failed provider session may use a declared fallback."""
     return ((result.exit_code != 0 or result.stalled)
             and result.failure_kind not in {
-                "billing", "interrupt", "permission", "unsupported_model"})
+                "authentication", "billing", "interrupt", "permission",
+                "unsupported_model"})
 
 
 # --------------------------------------------------------------------------- #
@@ -2066,6 +2119,21 @@ def _run_selection_reviewer(
             elif rotation.advance_after_quota(failed_adapters):
                 _wait_for_rotation(work_configs[0], sleep)
             continue
+        if result.failure_kind == "authentication":
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output,
+                result.failure_kind)
+            _checkpoint_selection_merged_writes(work_configs)
+            action = _authentication_failover_action(
+                rotation, failed_adapters, reason)
+            if action == "switch":
+                print("Selection reviewer authentication failure; switching "
+                      f"{adapter_name} -> {rotation.name}.")
+            else:
+                print("Selection reviewer authentication failure; waiting only "
+                      f"for recoverable adapter {rotation.name}.")
+                _wait_for_rotation(work_configs[0], sleep)
+            continue
         if result.exit_code != 0 or result.stalled:
             if _adapter_availability_failed(result):
                 switched = rotation.advance_after_failure(failed_adapters)
@@ -2486,6 +2554,21 @@ def _run_selection_target_reconciles(
                     if len(rotation.names) == 1:
                         _wait_for_quota(cfg, result.reset_at, sleep, now)
                     elif rotation.advance_after_quota(failed_adapters):
+                        _wait_for_rotation(cfg, sleep)
+                    continue
+                if result.failure_kind == "authentication":
+                    reason = _adapter_failure_reason(
+                        result.exit_code, result.stalled, result.output,
+                        result.failure_kind)
+                    action = _authentication_failover_action(
+                        rotation, failed_adapters, reason)
+                    if action == "switch":
+                        print("Selection reconcile authentication failure; "
+                              f"switching {adapter_name} -> {rotation.name}.")
+                    else:
+                        print("Selection reconcile authentication failure; "
+                              "waiting only for recoverable adapter "
+                              f"{rotation.name}.")
                         _wait_for_rotation(cfg, sleep)
                     continue
                 if result.exit_code != 0 or result.stalled:
@@ -3662,6 +3745,10 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 raise
         print("Interrupted.")
         return 130
+    except _AuthenticationRequired as e:
+        print(f"Run stopped: {e}")
+        try_write_report(cfg)
+        return 1
     except _BillingAbort as e:
         # Distinct from an acceptance failure and from the infrastructure abort below: the
         # account's prepaid balance is exhausted, which no retry or next task can resolve.
@@ -4625,7 +4712,12 @@ def _run_auto_fix_review_once(
                 print("Auto-fix reviewer quota exhausted; waiting before resuming the same review.")
                 _wait_for_quota(cfg, result.reset_at, sleep, now)
             elif review_rotation.advance_after_quota(failed_adapters):
-                print("Every declared review adapter is quota-exhausted; waiting before continuing.")
+                if review_rotation.auth_failed:
+                    print("Every recoverable review adapter is quota-exhausted; "
+                          "authentication-failed candidates remain skipped while waiting.")
+                else:
+                    print("Every declared review adapter is quota-exhausted; "
+                          "waiting before continuing.")
                 _wait_for_rotation(cfg, sleep)
             else:
                 print(f"Auto-fix reviewer quota exhausted; switching to "
@@ -4636,6 +4728,25 @@ def _run_auto_fix_review_once(
                 result.exit_code, result.stalled, result.output, result.failure_kind)
             print(f"Auto-fix reviewer billing/balance failure: {reason}")
             return finish(_AutoFixReviewOutcome(1, human_reason=reason))
+        if result.failure_kind == "authentication":
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output,
+                result.failure_kind)
+            if review.writes:
+                gitops.commit_if_dirty(
+                    cfg.root,
+                    f"wip({cfg.tasks_name}): plan reviewer authentication failover",
+                    cfg.git_excludes)
+            action = _authentication_failover_action(
+                review_rotation, failed_adapters, reason)
+            if action == "switch":
+                print("Auto-fix reviewer authentication failure; switching to "
+                      f"declared adapter {review_rotation.name}.")
+            else:
+                print("Auto-fix reviewer authentication failure; waiting only "
+                      f"for recoverable adapter {review_rotation.name}.")
+                _wait_for_rotation(cfg, sleep)
+            continue
         if result.exit_code != 0 or result.stalled:
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output, result.failure_kind)
@@ -6739,6 +6850,26 @@ def _process_plan_workflow(
                 _wait_for_rotation(cfg, sleep)
             failure_reason = None
             continue
+        elif result.failure_kind == "authentication":
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output,
+                result.failure_kind)
+            gitops.commit_if_dirty(
+                cfg.root,
+                f"wip({cfg.tasks_name}): plan workflow authentication failover",
+                cfg.git_excludes)
+            action = _authentication_failover_action(
+                step_rotation, failed_step_adapters, reason)
+            if action == "switch":
+                print(f"Plan workflow authentication failure: {reason}; "
+                      f"switching {adapter_name} -> {step_rotation.name} "
+                      "without consuming a retry.")
+            else:
+                print(f"Plan workflow authentication failure: {reason}; waiting "
+                      f"only for recoverable adapter {step_rotation.name}.")
+                _wait_for_rotation(cfg, sleep)
+            failure_reason = None
+            continue
         elif _adapter_availability_failed(result):
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output,
@@ -7020,6 +7151,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 raise _AdapterProcessCreationError(str(e)) from e
             raise
         if (not result.quota_exhausted
+                and result.failure_kind != "authentication"
                 and not (_adapter_availability_failed(result)
                          and workflow_step is not None)):
             active_rotation.session_opened()
@@ -7068,14 +7200,26 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 cycle_exhausted = active_rotation.advance_after_quota(
                     failed_step_adapters if workflow_step is not None else None)
                 if cycle_exhausted:
-                    quota_summary = (
-                        "Quota exhausted; progress kept, every adapter in the "
-                        "rotation is quota-exhausted; waiting for rotation poll "
-                        f"before continuing with {active_rotation.name}")
-                    quota_action = (
-                        "  Every adapter in the rotation is quota-exhausted; "
-                        f"waiting {cfg.rotation_poll_minutes} minute(s) before "
-                        f"continuing with {active_rotation.name}.")
+                    if active_rotation.auth_failed:
+                        quota_summary = (
+                            "Quota exhausted; progress kept, every recoverable "
+                            "adapter is quota-exhausted; authentication-failed "
+                            "candidates remain skipped while waiting for rotation "
+                            f"poll before continuing with {active_rotation.name}")
+                        quota_action = (
+                            "  Every recoverable adapter is quota-exhausted; "
+                            "authentication-failed candidates remain skipped. "
+                            f"Waiting {cfg.rotation_poll_minutes} minute(s) before "
+                            f"continuing with {active_rotation.name}.")
+                    else:
+                        quota_summary = (
+                            "Quota exhausted; progress kept, every adapter in the "
+                            "rotation is quota-exhausted; waiting for rotation poll "
+                            f"before continuing with {active_rotation.name}")
+                        quota_action = (
+                            "  Every adapter in the rotation is quota-exhausted; "
+                            f"waiting {cfg.rotation_poll_minutes} minute(s) before "
+                            f"continuing with {active_rotation.name}.")
                     wait_kind = "rotation"
                 else:
                     quota_summary = (
@@ -7113,6 +7257,42 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             outcome = "fail"
             focused_evidence = (
                 "NOT RUN: the worker adapter failed before focused closeout.")
+        elif result.failure_kind == "authentication":
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output,
+                result.failure_kind)
+            action = active_rotation.advance_after_authentication(
+                failed_step_adapters)
+            if action == "switch":
+                summary = ("Authentication failure; progress kept, switching "
+                           f"{adapter_name} -> {active_rotation.name}")
+                terminal = (f"  Switching adapter {adapter_name} -> "
+                            f"{active_rotation.name} without consuming a retry.")
+            elif action == "wait":
+                summary = ("Authentication failure; progress kept, waiting only "
+                           f"for recoverable adapter {active_rotation.name}")
+                terminal = ("  Waiting only for recoverable adapter "
+                            f"{active_rotation.name}; authentication failures "
+                            "will not be retried.")
+            else:
+                summary = ("Authentication required for every declared adapter; "
+                           "progress kept for an explicit rerun after login")
+                terminal = "  Every declared adapter requires authentication."
+            _preserve_interrupted_progress(
+                cfg, task, session, event="authentication",
+                summary=summary,
+                detail=(f"{reason}\nDeclared adapter candidates: "
+                        + ", ".join(active_rotation.names)),
+                checkpoint_reason="authentication failure, progress kept", now=now)
+            print(f"  Adapter failure: {reason}")
+            print(terminal)
+            if action == "required":
+                raise _AuthenticationRequired(
+                    _authentication_required_message(active_rotation, reason))
+            if action == "wait":
+                _wait_for_rotation(cfg, sleep)
+            resumed = True
+            continue
         elif (_adapter_availability_failed(result)
               and workflow_step is not None):
             reason = _adapter_failure_reason(

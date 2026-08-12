@@ -279,6 +279,11 @@ failure preserves progress and advances without consuming a task retry, and
 Assent waits after the whole list is unavailable or quota-exhausted. Test failure, `BLOCKED`,
 and an invalid verdict advance through the workflow or retry policy instead of
 changing adapters. Each workflow step starts from the first declared adapter.
+Authentication failure likewise preserves progress and skips that candidate
+without consuming a task retry. If every candidate requires authentication,
+Assent stops nonzero with `AUTHENTICATION REQUIRED`; it neither waits nor marks
+the task `BLOCKED`. With mixed authentication and quota failures, Assent waits
+only for a quota-exhausted candidate that can recover.
 
 ## Initialization and troubleshooting
 

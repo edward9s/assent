@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from assent import AssentError, auto_fix
 from assent.adapters import (Adapter, TaskResult, TokenUsage,
+                             is_authentication_failure_text,
                              is_checkpoint_resume_line, normalize_token_usage,
                              parse_checkpoint_resume_output)
 from assent.adapters.process import run_subprocess
@@ -196,6 +197,32 @@ def parse_output_for_billing(output: str) -> bool:
     return False
 
 
+def parse_output_for_authentication(output: str) -> bool:
+    """Detect missing or invalid Codex credentials in error/failure events."""
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            if is_authentication_failure_text(line):
+                return True
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if kind in ("error", "turn.failed"):
+            error = event.get("error") or {}
+            status = error.get("status") if isinstance(error, dict) else None
+            if status == 401:
+                return True
+            if any(is_authentication_failure_text(text)
+                   for text in _strings(event)):
+                return True
+    return False
+
+
 def parse_output_for_usage(output: str) -> tuple[TokenUsage, ...] | None:
     """Read the last completed Codex turn without coercing missing counters."""
     provider_model: str | None = None
@@ -363,19 +390,24 @@ class CodexAdapter(Adapter):
             not stalled and returncode != 0 and parse_output_for_quota(output))
         billing = (not stalled and not exhausted and returncode != 0
                    and parse_output_for_billing(output))
+        authentication = (not stalled and not exhausted and not billing
+                          and returncode != 0
+                          and parse_output_for_authentication(output))
         response = structured_output or _extract_last_agent_message(output)
         terminal_record = (
             parse_checkpoint_resume_output(output, returncode, stalled)
             or (response is not None and parse_checkpoint_resume_output(
                 response, returncode, stalled)))
         # Quota evidence wins; otherwise the exact final control record wins over
-        # unrelated billing-like prose that appeared earlier in the transcript.
+        # unrelated billing/authentication prose that appeared earlier in the transcript.
         checkpoint_resume = terminal_record and not exhausted
         if checkpoint_resume:
             billing = False
-        # Billing is a failure classification, so it is only meaningful for a failed session
-        # that is neither a stall nor quota exhaustion.
-        failure_kind = "billing" if billing else None
+            authentication = False
+        # These classifications are meaningful only for a failed session that is neither a
+        # stall nor quota exhaustion.
+        failure_kind = ("billing" if billing else
+                        "authentication" if authentication else None)
         return TaskResult(exit_code=returncode, output=output,
                           quota_exhausted=exhausted, reset_at=None,
                           stalled=stalled, checkpoint_resume=checkpoint_resume,

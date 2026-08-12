@@ -266,6 +266,10 @@ quota 或 adapter availability failure 會先保留進度，再切換且不消�
 整份清單都 unavailable 或 quota-exhausted 後才等待。測試失敗、`BLOCKED` 與無效 verdict 會照
 workflow 或 retry policy 處理，不會因此更換 adapter。每個 workflow step 都從
 自己清單的第一個 adapter 開始。
+Authentication failure 同樣會保留進度、略過該候選，且不消耗 task retry。若
+所有候選都需要登入，Assent 會以非零的 `AUTHENTICATION REQUIRED` 停止；不會
+等待，也不會把 task 標成 `BLOCKED`。Authentication 與 quota failure 混合時，
+只等待仍可由 quota reset 恢復的候選。
 
 ## 初始化與排錯
 

@@ -6,6 +6,7 @@ recognized here so every adapter applies the same exact-match rule.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -19,6 +20,30 @@ if TYPE_CHECKING:
 
 
 CHECKPOINT_RESUME_RECORD = '{"type":"assent.checkpoint_resume"}'
+_AUTHENTICATION_FAILURE_RE = re.compile(
+    r"\b(?:unauthorized|unauthenticated)\b"
+    r"|authentication\s+(?:failed|required)"
+    r"|no\s+authentication\s+methods?\s+available"
+    r"|not\s+(?:logged|signed)\s+in(?:to)?"
+    r"|(?:please\s+)?(?:log|sign)\s*in(?:\s+(?:required|to\s+continue))?"
+    r"|(?:please\s+)?(?:re-)?run\s+(?:[^\s]+\s+){0,2}(?:/login|login|auth)\b"
+    r"|(?:login|session)\s+(?:(?:is|has)\s+)?expired"
+    r"|no\s+(?:\w+\s+){0,2}credentials?\s+(?:were\s+)?found"
+    r"|credentials?\s+(?:(?:is|are)\s+)?incomplete"
+    r"|no\s+(?:oauth\s+|access\s+|auth(?:entication)?\s+)?token\s+in\s+\w+"
+    r"|(?:oauth\s+|access\s+|auth(?:entication)?\s+)?token\s+"
+    r"(?:is\s+)?no\s+longer\s+valid"
+    r"|(?:invalid|expired|missing)\s+(?:api\s+key|auth(?:entication)?\s+token"
+    r"|oauth\s+token|access\s+token|credentials?)"
+    r"|(?:api\s+key|auth(?:entication)?\s+token|oauth\s+token|access\s+token"
+    r"|credentials?)\s+(?:(?:is|are|has|have)\s+)?(?:invalid|expired|missing)",
+    re.IGNORECASE,
+)
+
+
+def is_authentication_failure_text(text: str) -> bool:
+    """Return whether provider output says credentials or login are missing or invalid."""
+    return _AUTHENTICATION_FAILURE_RE.search(text) is not None
 
 
 def is_checkpoint_resume_line(raw_line: str) -> bool:

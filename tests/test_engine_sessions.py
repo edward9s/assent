@@ -224,7 +224,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
         reviewer_and_fixer = ScriptedAdapter([review_and_fix])
         unavailable = ScriptedAdapter([TaskResult(
-            1, "provider unavailable", False, None)])
+            1, "Not logged in", False, None,
+            failure_kind="authentication")])
         calls = 0
         rechecks = []
 
@@ -963,6 +964,76 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(failover["agent"], "codex")
         self.assertIn("codex -> claude", failover["summary"])
 
+    def test_task_role_authentication_failure_fails_over_without_retry(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ role = "worker", '
+              'adapter = ["codex", "claude"] }]\n'))
+        self.commit_all()
+        codex = ScriptedAdapter([TaskResult(
+            1, "Not logged in", False, None,
+            failure_kind="authentication")])
+        claude = ScriptedAdapter([self.ai_done(path)])
+
+        with mock.patch.object(engine, "get_adapter", return_value=codex):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=claude), 0)
+
+        self.assertEqual(len(codex.calls), 1)
+        self.assertEqual(len(claude.calls), 1)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+    def test_task_role_all_authentication_failures_stop_resumable(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ role = "worker", '
+              'adapter = ["codex", "claude"] }]\n'))
+        self.commit_all()
+        authentication = TaskResult(
+            1, "Not logged in", False, None,
+            failure_kind="authentication")
+        codex = ScriptedAdapter([authentication])
+        claude = ScriptedAdapter([authentication])
+        sleeps: list[float] = []
+
+        with mock.patch.object(engine, "get_adapter", return_value=codex):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(engine.run(
+                    cfg, once=True, adapter=claude, sleep=sleeps.append), 1)
+
+        self.assertEqual(len(codex.calls), 1)
+        self.assertEqual(len(claude.calls), 1)
+        self.assertEqual(sleeps, [])
+        self.assertEqual(parse_task_file(path).status, "WIP")
+        self.assertIn("AUTHENTICATION REQUIRED", output.getvalue())
+
+    def test_task_role_authentication_then_quota_waits_only_for_quota(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ role = "worker", '
+              'adapter = ["codex", "claude"] }]\n'))
+        cfg.rotation_poll_minutes = 2
+        self.commit_all()
+        codex = ScriptedAdapter([TaskResult(
+            1, "Not logged in", False, None,
+            failure_kind="authentication")])
+        claude = ScriptedAdapter([
+            TaskResult(1, "quota", True, None), self.ai_done(path)])
+        sleeps: list[float] = []
+
+        with mock.patch.object(engine, "get_adapter", return_value=codex):
+            self.assertEqual(engine.run(
+                cfg, once=True, adapter=claude, sleep=sleeps.append), 0)
+
+        self.assertEqual(len(codex.calls), 1)
+        self.assertEqual(len(claude.calls), 2)
+        self.assertEqual(sum(sleeps), 120)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
     def test_task_role_waits_after_every_declared_adapter_is_unavailable(self):
         path = self.write_task(1)
         cfg = self.build(retry=0, extra_config=(
@@ -1155,7 +1226,7 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
             "auto(plan01): workflow plan step plan_worker"))
         self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
 
-    def test_plan_role_adapter_list_fails_over_in_declared_order(self):
+    def test_plan_role_authentication_failure_fails_over_in_declared_order(self):
         task = self.write_task(1)
         cfg = self.build(retry=0, extra_config=(
             self.PLAN_ROLE.replace(
@@ -1163,7 +1234,8 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
                 '{ role = "plan_worker", adapter = ["codex", "claude"] }')))
         self.commit_all()
         codex = ScriptedAdapter([TaskResult(
-            1, "provider unavailable", False, None)])
+            1, "Not logged in", False, None,
+            failure_kind="authentication")])
         claude = ScriptedAdapter([ok_result()])
 
         with mock.patch.object(engine, "get_adapter", return_value=codex):

@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from assent.adapters import (Adapter, TaskResult, TokenUsage,
+                             is_authentication_failure_text,
                              is_checkpoint_resume_line, normalize_token_usage,
                              parse_checkpoint_resume_output)
 # The subprocess runner is shared adapter infrastructure, not claude knowledge; it is
@@ -258,6 +259,31 @@ def parse_output_for_billing(output: str) -> bool:
     return any(_BILLING_TEXT_RE.search(text) for text in human_texts)
 
 
+def parse_output_for_authentication(output: str) -> bool:
+    """Detect missing or invalid Claude credentials in human-readable output."""
+    human_texts: list[str] = []
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        event = None
+        if line.startswith("{"):
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                event = None
+        if isinstance(event, dict):
+            if event.get("type") == "result":
+                if event.get("api_error_status") == 401:
+                    return True
+                human_texts.extend(
+                    text for text in (event.get("result"), event.get("error"))
+                    if isinstance(text, str))
+        else:
+            human_texts.append(line)
+    return any(is_authentication_failure_text(text) for text in human_texts)
+
+
 def parse_output_for_usage(output: str) -> tuple[TokenUsage, ...] | None:
     """Read the terminal result's aggregate or per-model Claude counters."""
     provider_model: str | None = None
@@ -356,19 +382,23 @@ class ClaudeAdapter(Adapter):
             parse_output_for_quota(output) if returncode != 0 else (False, None))
         billing = (returncode != 0 and parse_output_for_billing(output)
                    if not exhausted else False)
+        authentication = (returncode != 0 and not exhausted and not billing
+                          and parse_output_for_authentication(output))
         response, _response_error = _extract_result_text(output)
         terminal_record = (
             parse_checkpoint_resume_output(output, returncode, stalled)
             or (response is not None and parse_checkpoint_resume_output(
                 response, returncode, stalled)))
         # Quota evidence wins; otherwise the exact final control record wins over
-        # unrelated billing-like prose that appeared earlier in the transcript.
+        # unrelated billing/authentication prose that appeared earlier in the transcript.
         checkpoint_resume = terminal_record and not exhausted
         if checkpoint_resume:
             billing = False
-        # Billing is a failure classification, so it is only meaningful for a failed session;
-        # a successful run whose prose merely mentions "credit balance" must never be flagged.
-        failure_kind = "billing" if billing else None
+            authentication = False
+        # These classifications are meaningful only for a failed session; successful prose
+        # that merely mentions billing or authentication must never be flagged.
+        failure_kind = ("billing" if billing else
+                        "authentication" if authentication else None)
         return TaskResult(exit_code=returncode, output=output,
                           quota_exhausted=exhausted, reset_at=reset_at,
                           stalled=False, checkpoint_resume=checkpoint_resume,

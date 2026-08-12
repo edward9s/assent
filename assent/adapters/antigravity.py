@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Sequence
 
 from assent import AssentError
 from assent.adapters import (Adapter, InvocationRequest, TaskResult, TokenUsage,
+                             is_authentication_failure_text,
                              is_checkpoint_resume_line, normalize_token_usage,
                              parse_checkpoint_resume_output)
 from assent.adapters.process import run_subprocess
@@ -105,8 +106,7 @@ _BILLING_TEXT_RE = re.compile(
     re.IGNORECASE)
 _PERMISSION_TEXT_RE = re.compile(
     r"permission\s+denied|permission\s+request|soft-denied|not\s+authorized"
-    r"|unauthorized|unauthenticated|forbidden|sign\s*in|log\s*in\s+required"
-    r"|api\s+has\s+not\s+been\s+used|is\s+disabled|eligibilit|allow-rule",
+    r"|forbidden|api\s+has\s+not\s+been\s+used|is\s+disabled|eligibilit|allow-rule",
     re.IGNORECASE)
 _TIMEOUT_TEXT_RE = re.compile(
     r"print[-\s]?timeout|timed\s+out|timeout\s+waiting|deadline\s+exceeded",
@@ -407,6 +407,8 @@ def classify_output(exit_code: int, stalled: bool, output: str) -> str | None:
         return "quota"
     if _BILLING_TEXT_RE.search(output):
         return "billing"
+    if is_authentication_failure_text(output):
+        return "authentication"
     if _PERMISSION_TEXT_RE.search(output):
         return "permission"
     if _TIMEOUT_TEXT_RE.search(output):

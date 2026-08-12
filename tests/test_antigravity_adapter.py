@@ -514,6 +514,7 @@ class TestCheckpointResume(unittest.TestCase):
             "Error: quota exceeded for this project": "quota",
             "Error: your credit balance is too low": "billing",
             "Error: insufficient funds on the account": "billing",
+            "Error: You are not logged into Antigravity.": "authentication",
             "Error: permission denied for tool write_to_file": "permission",
             "Error: Agent Platform API has not been used in project": "permission",
             "Error: timed out waiting for the response": "timeout",
