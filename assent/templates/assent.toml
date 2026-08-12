@@ -55,20 +55,22 @@ ability = ["integration_review", "integration_fix"]
 model = "prime"
 effort = "heavy"
 
-# A passing scheduler action ends its layer. Failure advances to the next
-# configured repair role, then the next action rechecks the result.
+# A role may omit adapter for the global rotation, name one fixed adapter, or
+# name an ordered adapter list for availability fallback. A passing scheduler
+# action ends its layer. Failure advances to the next configured repair role,
+# then the next action rechecks the result.
 [workflow]
 task = [
-  { role = "implementer" },
+  { role = "implementer", adapter = "codex" },
   { action = "focused_test" },
-  { role = "task_reviewer_fixer" },
+  { role = "task_reviewer_fixer", adapter = "claude" },
   { action = "focused_test" },
 ]
 plan = [
   { action = "focused_sweep" },
-  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer_fixer", adapter = ["codex", "claude"] },
   { action = "focused_sweep" },
-  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer_fixer", adapter = ["claude", "codex"] },
   { action = "focused_sweep" },
 ]
 integration = [

@@ -157,7 +157,7 @@ class WorkflowPlanStep:
     """One resolved post-completion workflow step."""
 
     role: str
-    adapter: str
+    adapters: tuple[str, ...]
     resolved_role: ResolvedRole
     command: str | None = None
     extra_args: tuple[str, ...] = ()
@@ -185,6 +185,11 @@ class WorkflowPlanStep:
         """Compatibility with call sites that name adapter selections explicitly."""
         return self.adapter
 
+    @property
+    def adapter(self) -> str:
+        """Return the first configured candidate for legacy identity surfaces."""
+        return self.adapters[0]
+
 
 @dataclass(frozen=True)
 class WorkflowTaskStep:
@@ -192,6 +197,7 @@ class WorkflowTaskStep:
 
     role: str
     resolved_role: ResolvedRole
+    adapters: tuple[str, ...] | None = None
 
     @property
     def writes(self) -> bool:
@@ -563,6 +569,37 @@ class _BlankGuard:
         return mapping
 
 
+def _workflow_adapter_candidates(value: dict, owner: str, guard: "_BlankGuard"
+                                 ) -> tuple[str, ...] | None:
+    """Normalize an optional workflow adapter string/list without choosing defaults."""
+    configured = value.get("adapter")
+    if configured is None:
+        return None
+    if isinstance(configured, str):
+        adapters = (guard.text(configured, f"{owner}.adapter"),)
+    elif isinstance(configured, list):
+        if not configured:
+            raise AssentError(
+                f"Config {owner}.adapter must be a non-empty string or list")
+        if any(not isinstance(name, str) for name in configured):
+            raise AssentError(
+                f"Config {owner}.adapter list entries must be strings")
+        adapters = tuple(
+            guard.text(name, f"{owner}.adapter") for name in configured)
+        if len(set(adapters)) != len(adapters):
+            raise AssentError(
+                f"Config {owner}.adapter list must not contain duplicates")
+    else:
+        raise AssentError(
+            f"Config {owner}.adapter must be a string or non-empty list")
+    unknown = [name for name in adapters if name not in _ADAPTER_NAMES]
+    if unknown:
+        raise AssentError(
+            f"Config {owner}.adapter contains {unknown[0]!r}, which is not a "
+            f"registered adapter ({'/'.join(sorted(_ADAPTER_NAMES))})")
+    return adapters
+
+
 def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
                             roles: dict[str, Role], abilities: dict[str, Ability]):
     """Parse one workflow array without inventing defaults for an omitted key."""
@@ -596,28 +633,20 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
                     f" [workflow].{key} (valid action: {valid})")
             entries.append(WorkflowActionStep(action))
             continue
-        allowed = {"role", "adapter"} if key in {"plan", "integration"} else {"role"}
+        allowed = {"role", "adapter"}
         _known_keys(value, owner, allowed)
         role = guard.text(_typed(value, f"[{owner}]", "role", str, None),
                           f"workflow.{key}.{index}.role")
         resolved = resolve_role(role, roles, abilities)
+        adapters = _workflow_adapter_candidates(value, owner, guard)
         if key == "task":
-            entries.append(WorkflowTaskStep(role, resolved))
+            entries.append(WorkflowTaskStep(role, resolved, adapters))
             continue
-        adapter = value.get("adapter")
-        if adapter is not None:
-            adapter = guard.text(
-                _typed(value, f"[{owner}]", "adapter", str, None),
-                f"workflow.{key}.{index}.adapter")
-            if adapter not in _ADAPTER_NAMES:
-                raise AssentError(
-                    f"Config {owner}.adapter = {adapter!r} is not a registered adapter"
-                    f" ({'/'.join(sorted(_ADAPTER_NAMES))})")
         if resolved.produces_verdict:
             if resolved.model is None or resolved.effort is None:
                 raise AssentError(
                     f"Config {owner} verdict-producing role {role!r} must state model and effort")
-        entries.append((role, adapter, resolved))
+        entries.append((role, adapters, resolved))
     if key == "task" and entries and not any(
             isinstance(entry, WorkflowTaskStep) for entry in entries):
         raise AssentError(
@@ -634,12 +663,13 @@ def _resolve_accountability_steps(
         if isinstance(raw, WorkflowActionStep):
             steps.append(raw)
             continue
-        role, configured_name, resolved = raw
-        name = configured_name or cfg.adapter_names[0]
+        role, configured_names, resolved = raw
+        names = configured_names or cfg.adapter_names
+        name = names[0]
         adapter_settings = cfg.adapter_settings(name)
         if resolved.model is None or resolved.effort is None:
             steps.append(WorkflowPlanStep(
-                role, name, resolved, adapter_settings.command,
+                role, names, resolved, adapter_settings.command,
                 adapter_settings.extra_args))
             continue
         requested_effort = adapter_settings.resolve_requested_effort(
@@ -649,7 +679,7 @@ def _resolve_accountability_steps(
                 f"[workflow].{owner} role {role!r} effort did not resolve"
                 " to a requested value")
         steps.append(WorkflowPlanStep(
-            role, name, resolved, adapter_settings.command,
+            role, names, resolved, adapter_settings.command,
             adapter_settings.extra_args,
             adapter_settings.resolve_model(resolved.model), requested_effort))
     return tuple(steps)

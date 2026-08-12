@@ -718,9 +718,9 @@ def _report_batch_conflicts(chain: FilteredBatchChain, main: Path,
                   "`assent reconcile` handles one folder against the target "
                   "and never merges speculative peers, so it cannot resolve "
                   "this; verify and accept compatible work ahead first, then "
-                  "run `assent reconcile <FOLDER>` against the advanced target, "
+                  "run `assent reconcile <PLAN>` against the advanced target, "
                   "or "
-                  "reopen the folder with `assent rework <FOLDER> <TASK>` or "
+                  "reopen the plan with `assent rework <PLAN> <TASK>` or "
                   f"drop it with `assent reject {conflict.folder}`.")
     for folder, cause in chain.skipped_after:
         print(f"verify --batch: {folder} is queued after {cause}, so it is "
@@ -829,9 +829,9 @@ def _report_selected_conflict(chain: BatchCandidate, main: Path,
     else:
         print(f"verify selected: {folder} is not independently conflicting "
               "with the integration target, but no compatible selected prefix "
-              "was available; choose `assent rework <FOLDER> <TASK>` or "
+              "was available; choose `assent rework <PLAN> <TASK>` or "
               f"`assent reject {folder}`.")
-    print(f"verify selected: `assent rework <FOLDER> <TASK>` and `assent reject "
+    print(f"verify selected: `assent rework <PLAN> <TASK>` and `assent reject "
           f"{folder}` remain explicit alternatives.")
     print("verify selected: the complete exact selection remains required; "
           "no prefix was accepted and no full verifier ran.")

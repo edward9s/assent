@@ -2,9 +2,10 @@
 
 *[Traditional Chinese](README.zh-TW.md)*
 
-Assent turns an agreed AI plan into isolated, repeatable work. You discuss the
-design with an AI, store it as task files, let `assent run` execute and verify
-the work, then review the evidence before explicitly accepting it.
+Assent turns an agreed AI plan into isolated, repeatable work. You first confirm
+requirements with an AI, then ask it to turn the agreed consensus into an
+Assent-format plan. Let `assent run` execute and verify the work, then review the
+evidence before explicitly accepting it.
 
 The source remains ordinary Git. Assent keeps its plans and runtime evidence in
 the project's ignored `.assent/` directory.
@@ -13,7 +14,7 @@ the project's ignored `.assent/` directory.
 
 | Stage | What you do | Main command |
 | --- | --- | --- |
-| Plan | Agree on requirements and write `.e.toml` tasks. | `assent check` |
+| Plan | Agree on requirements with an AI, then explicitly ask: “Turn the consensus above into an Assent-format plan under `.assent/<PLAN>/`.” | `assent check` |
 | Run | Let task, plan, and integration workflows implement, test, and repair within finite limits. | `assent run` |
 | Review | Read the report and diff, then accept, rework, or reject. | `assent report`, `assent accept` |
 
@@ -47,7 +48,8 @@ Run these commands from an existing Git project:
 ```text
 assent init --test unittest
 
-# Hold a planning meeting with an AI and write .assent/<PLAN>/*.e.toml.
+# First confirm requirements with the AI. After agreement, ask it to turn the
+# consensus into an Assent-format plan under .assent/<PLAN>/.
 assent check
 
 # Try one task, then finish the plan unattended.

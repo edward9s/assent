@@ -262,6 +262,50 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(
             cfg.workflow_integration, (WorkflowActionStep("full_verify"),))
 
+    def test_task_workflow_adapter_may_be_fixed_rotated_or_inherited(self):
+        cfg = load_config(self.write(
+            _WORKFLOW_ROLES +
+            '[adapter]\nname = ["claude", "codex"]\n'
+            '[workflow]\ntask = ['
+            '{ role = "fixer", adapter = "claude" }, '
+            '{ role = "fixer", adapter = ["codex", "claude"] }, '
+            '{ role = "fixer" }]\n'), "plan01")
+
+        self.assertEqual(cfg.workflow_task[0].adapters, ("claude",))
+        self.assertEqual(cfg.workflow_task[1].adapters, ("codex", "claude"))
+        self.assertIsNone(cfg.workflow_task[2].adapters)
+
+    def test_plan_and_integration_roles_accept_ordered_adapter_lists(self):
+        cfg = load_config(self.write(
+            _WORKFLOW_ROLES +
+            '[workflow]\n'
+            'plan = [{ action = "focused_sweep" }, '
+            '{ role = "reviewer", adapter = ["codex", "claude"] }, '
+            '{ action = "focused_sweep" }]\n'
+            'integration = [{ action = "full_verify" }, '
+            '{ role = "reviewer", adapter = ["claude", "codex"] }, '
+            '{ action = "full_verify" }]\n'), "plan01")
+
+        self.assertEqual(cfg.workflow_plan[1].adapters,
+                         ("codex", "claude"))
+        self.assertEqual(cfg.workflow_integration[1].adapters,
+                         ("claude", "codex"))
+
+    def test_task_workflow_adapter_rejects_invalid_values(self):
+        cases = (
+            ('[]', "non-empty string or list"),
+            ('["claude", "claude"]', "must not contain duplicates"),
+            ('["claude", 1]', "entries must be strings"),
+            ('"unknown"', "not a registered adapter"),
+            ('true', "must be a string or non-empty list"),
+        )
+        for adapter, message in cases:
+            with self.subTest(adapter=adapter), self.assertRaisesRegex(
+                    AssentError, message):
+                load_config(self.write(
+                    _WORKFLOW_ROLES + '[workflow]\ntask = ['
+                    f'{{ role = "fixer", adapter = {adapter} }}]\n'), "plan01")
+
     def test_workflow_actions_reject_mixed_wrong_level_and_action_only_task(self):
         cases = (
             ('[workflow]\nplan = [{ role = "x", action = "focused_sweep" }]\n',

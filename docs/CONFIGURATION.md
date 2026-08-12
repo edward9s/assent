@@ -265,15 +265,20 @@ separate `heavy`, `normal`, or `slight` choice. Resolution is explicit task or
 role effort, then the configured default for that model tier, then the built-in
 tier default. Every invocation receives a concrete translated effort.
 
-Plan and integration workflow entries may select an adapter:
+Every workflow role entry may select one adapter or an ordered fallback list:
 
 ```toml
-{ role = "plan_reviewer_fixer", adapter = "codex" }
+{ role = "implementer", adapter = "codex" }
+{ role = "task_reviewer_fixer", adapter = ["claude", "codex"] }
 ```
 
-When omitted, Assent uses the first configured adapter. Task workflow entries
-do not take an `adapter` field; they follow normal task adapter selection and
-rotation.
+When omitted, the role follows the global `[adapter].name` rotation. A string
+fixes that role to one adapter; quota exhaustion waits for that adapter. A list
+tries only its declared adapters in order: quota or adapter availability
+failure preserves progress and advances without consuming a task retry, and
+Assent waits after the whole list is unavailable or quota-exhausted. Test failure, `BLOCKED`,
+and an invalid verdict advance through the workflow or retry policy instead of
+changing adapters. Each workflow step starts from the first declared adapter.
 
 ## Initialization and troubleshooting
 

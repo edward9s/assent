@@ -90,6 +90,13 @@ class DocumentationTests(unittest.TestCase):
                     self.assertIn(_flat(term), lower)
                 self.assertRegex(text, r"(?:does not delete|不會刪除)")
 
+        self.assertIn(
+            "Turn the consensus above into an Assent-format plan under "
+            "`.assent/<PLAN>/`.", _read(Path("README.md")))
+        self.assertIn(
+            "將上述討論的共識，建立成 `.assent/<PLAN>/` 下的 Assent 格式計畫。",
+            _read(Path("README.zh-TW.md")))
+
     def test_reader_guides_explain_the_three_stage_workflow(self):
         english = _read(Path("README.md")) + _read(Path("docs/WORKFLOW.md"))
         for phrase in (
@@ -132,7 +139,9 @@ class DocumentationTests(unittest.TestCase):
         english = _flat(_read(Path("docs/WORKFLOW.md")))
         for phrase in (
                 "Do not overengineer", "After explicit human agreement",
-                "write Assent-format task files", "independent acceptance reviewer",
+                "create no files before I explicitly agree",
+                "turn the consensus above into an Assent-format plan",
+                "independent acceptance reviewer",
                 "Report evidence-based bugs", "do not accept, rework, or edit anything",
                 "Wait for the human decision"):
             with self.subTest(language="English", phrase=phrase):
@@ -140,7 +149,8 @@ class DocumentationTests(unittest.TestCase):
 
         chinese = _flat(_read(Path("docs/zh-TW/WORKFLOW.md")))
         for phrase in (
-                "不要過度設計", "人類明確同意", "Assent task",
+                "不要過度設計", "人類明確同意", "在我明確同意前不要建立檔案",
+                "將上述討論的共識", "Assent 格式計畫",
                 "獨立驗收者", "不要自行 accept、rework 或修改檔案",
                 "等待人類決定"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
@@ -151,7 +161,7 @@ class DocumentationTests(unittest.TestCase):
                    + _read(Path("docs/VERIFICATION.md")))
         for phrase in (
                 "final `...`", "not an alias for `--all`",
-                "One selected folder", "one exact batch",
+                "One selected plan", "one exact batch",
                 "assent verify <PLAN> --focus", "Direct and selected acceptance",
                 "assent shared-paths status",
                 "Running `review` in the primary worktree",
@@ -162,7 +172,7 @@ class DocumentationTests(unittest.TestCase):
         chinese = _flat(_read(Path("docs/zh-TW/COMMANDS.md"))
                         + _read(Path("docs/zh-TW/VERIFICATION.md")))
         for phrase in (
-                "最後一個 `...`", "不是 `--all`", "一個 folder",
+                "最後一個 `...`", "不是 `--all`", "一個 plan",
                 "精確 batch", "assent verify <PLAN> --focus",
                 "assent shared-paths status",
                 "在主要 worktree 執行 `review`",

@@ -182,7 +182,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             '[roles.reviewer_fixer]\nability = ["review_fix"]\n'
             'model = "prime"\neffort = "heavy"\n'
             '[workflow]\nintegration = [{ action = "full_verify" }, '
-            '{ role = "reviewer_fixer", adapter = "claude" }, '
+            '{ role = "reviewer_fixer", adapter = ["codex", "claude"] }, '
             '{ action = "full_verify" }]\n')
         cfg = self.build(extra_config=extra)
         (self.root / ".assent" / "verify.py").write_text(
@@ -223,6 +223,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                                   input_tokens=10, output_tokens=2),))
 
         reviewer_and_fixer = ScriptedAdapter([review_and_fix])
+        unavailable = ScriptedAdapter([TaskResult(
+            1, "provider unavailable", False, None)])
         calls = 0
         rechecks = []
 
@@ -240,8 +242,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 1 if calls == 1 else 0,
                 ("src/value.txt failed",) if calls == 1 else (), False)
 
-        with mock.patch("assent.engine.get_adapter",
-                        return_value=reviewer_and_fixer), \
+        with mock.patch(
+                "assent.engine.get_adapter",
+                side_effect=lambda name, _cfg: (
+                    unavailable if name == "codex" else reviewer_and_fixer)), \
                 mock.patch("assent.engine.verify_folder_action",
                            side_effect=verify_action):
             self.assertEqual(engine.run_selection_workflow(
@@ -249,6 +253,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 self.root / ".assent", ["plan01"]), 0)
 
         self.assertEqual(calls, 2)
+        self.assertEqual(len(unavailable.calls), 1)
+        self.assertEqual(len(reviewer_and_fixer.calls), 1)
         self.assertEqual(rechecks, [False, True])
         self.assertEqual(parse_task_file(task_path).status, "DONE")
         self.assertEqual(
@@ -264,7 +270,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         selection = [record for record in records
                      if record["context"]["kind"] == "selection"]
         self.assertEqual(invalid, 0)
-        self.assertEqual(len(selection), 1)
+        self.assertEqual(len(selection), 2)
         self.assertTrue(all(record["folders"] == ["plan01"]
                             for record in selection))
         reviewed = next(record for record in selection if record["models"])
@@ -917,6 +923,93 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
             if item.get("by") != "scheduler"]), 2)
         self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
 
+    def test_task_role_string_uses_only_its_fixed_adapter(self):
+        path = self.write_task(1)
+        cfg = self.build(extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ role = "worker", adapter = "codex" }]\n'))
+        self.commit_all()
+        claude = ScriptedAdapter([])
+        codex = ScriptedAdapter([
+            self.ai_done(path, by="codex", requested_model="codex-lite")],
+            resolved_model="codex-lite")
+
+        with mock.patch.object(engine, "get_adapter", return_value=codex):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=claude), 0)
+
+        self.assertEqual(len(claude.calls), 0)
+        self.assertEqual(len(codex.calls), 1)
+
+    def test_task_role_adapter_list_fails_over_without_task_retry(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ role = "worker", '
+              'adapter = ["codex", "claude"] }]\n'))
+        self.commit_all()
+        codex = ScriptedAdapter([TaskResult(
+            1, "provider unavailable", False, None)])
+        claude = ScriptedAdapter([self.ai_done(path)])
+
+        with mock.patch.object(engine, "get_adapter", return_value=codex):
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=claude), 0)
+
+        self.assertEqual(len(codex.calls), 1)
+        self.assertEqual(len(claude.calls), 1)
+        failover = next(entry for entry in read_entries(
+            journal_path_for(path)) if entry.get("event") == "adapter_failover")
+        self.assertEqual(failover["agent"], "codex")
+        self.assertIn("codex -> claude", failover["summary"])
+
+    def test_task_role_waits_after_every_declared_adapter_is_unavailable(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ role = "worker", '
+              'adapter = ["codex", "claude"] }]\n'))
+        cfg.rotation_poll_minutes = 2
+        self.commit_all()
+        unavailable = TaskResult(1, "provider unavailable", False, None)
+        codex = ScriptedAdapter([unavailable, self.ai_done(
+            path, by="codex", requested_model="codex-lite")],
+            resolved_model="codex-lite")
+        claude = ScriptedAdapter([unavailable])
+        sleeps: list[float] = []
+
+        with mock.patch.object(engine, "get_adapter", return_value=codex):
+            self.assertEqual(engine.run(
+                cfg, once=True, adapter=claude, sleep=sleeps.append), 0)
+
+        self.assertEqual(sum(sleeps), 120)
+        self.assertEqual(len(codex.calls), 2)
+        self.assertEqual(len(claude.calls), 1)
+
+    def test_task_role_combines_quota_and_unavailable_before_waiting(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT
+            + '[workflow]\ntask = [{ role = "worker", '
+              'adapter = ["codex", "claude"] }]\n'))
+        cfg.rotation_poll_minutes = 2
+        self.commit_all()
+        codex = ScriptedAdapter([
+            TaskResult(1, "", True, None),
+            self.ai_done(path, by="codex", requested_model="codex-lite")],
+            resolved_model="codex-lite")
+        claude = ScriptedAdapter([
+            TaskResult(1, "provider unavailable", False, None)])
+        sleeps: list[float] = []
+
+        with mock.patch.object(engine, "get_adapter", return_value=codex):
+            self.assertEqual(engine.run(
+                cfg, once=True, adapter=claude, sleep=sleeps.append), 0)
+
+        self.assertEqual(sum(sleeps), 120)
+        self.assertEqual(len(codex.calls), 2)
+        self.assertEqual(len(claude.calls), 1)
+
     def test_task_workflow_overrides_project_task_roles(self):
         path = self.write_task(1)
         self.set_task_workflow(path, ("implementer",))
@@ -1061,6 +1154,24 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         self.assertTrue(self.subjects()[0].startswith(
             "auto(plan01): workflow plan step plan_worker"))
         self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
+    def test_plan_role_adapter_list_fails_over_in_declared_order(self):
+        task = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.PLAN_ROLE.replace(
+                '{ role = "plan_worker" }',
+                '{ role = "plan_worker", adapter = ["codex", "claude"] }')))
+        self.commit_all()
+        codex = ScriptedAdapter([TaskResult(
+            1, "provider unavailable", False, None)])
+        claude = ScriptedAdapter([ok_result()])
+
+        with mock.patch.object(engine, "get_adapter", return_value=codex):
+            self.assertEqual(self.run_quiet(cfg, adapter=claude), 0)
+
+        self.assertEqual(len(codex.calls), 1)
+        self.assertEqual(len(claude.calls), 1)
+        self.assertEqual(parse_task_file(task).status, "DONE")
 
     def test_non_verdict_plan_unit_tolerates_auto_fix_flag(self):
         task = self.write_task(1)

@@ -4,9 +4,9 @@
 
 > 本文是英文版的正體中文翻譯；若內容不同，以英文版為準。
 
-Assent 把人類與 AI 談妥的設計，轉成可以隔離執行、重複驗證的工作。你先和
-AI 討論需求並寫成任務檔，再讓 `assent run` 實作與測試，最後閱讀證據，親自
-決定是否接受。
+Assent 把人類與 AI 談妥的設計，轉成可以隔離執行、重複驗證的工作。你先與
+AI 確認需求，再請 AI 將討論共識建立成 Assent 格式計畫。接著讓 `assent run`
+實作與測試，最後閱讀證據，親自決定是否接受。
 
 原始碼仍是一般 Git 專案；Assent 的計畫與執行紀錄放在專案內被忽略的
 `.assent/` 目錄。
@@ -15,7 +15,7 @@ AI 討論需求並寫成任務檔，再讓 `assent run` 實作與測試，最後
 
 | 階段 | 人類要做的事 | 主要指令 |
 | --- | --- | --- |
-| 規劃 | 與 AI 確認需求，寫成 `.e.toml` 任務。 | `assent check` |
+| 規劃 | 與 AI 確認需求後，明確要求：「將上述討論的共識，建立成 `.assent/<PLAN>/` 下的 Assent 格式計畫。」 | `assent check` |
 | 執行 | 讓 task、plan、integration 三層流程在有限次數內實作、測試與修復。 | `assent run` |
 | 驗收 | 閱讀報告與 diff，再接受、重做或駁回。 | `assent report`、`assent accept` |
 
@@ -47,7 +47,8 @@ worktree、archive 或 Git branch。清理資料必須由人明確執行。
 ```text
 assent init --test unittest
 
-# 與 AI 開規劃會議，建立 .assent/<PLAN>/*.e.toml。
+# 先與 AI 確認需求；取得共識後，再請 AI 將討論共識建立成
+# .assent/<PLAN>/ 下的 Assent 格式計畫。
 assent check
 
 # 先試跑一個任務，再自動完成整個計畫。

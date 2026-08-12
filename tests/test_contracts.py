@@ -175,8 +175,9 @@ class TestContractContent(unittest.TestCase):
                 encoding="utf-8"))
         self.assertEqual(
             configuration["workflow"]["task"],
-            [{"role": "implementer"}, {"action": "focused_test"},
-             {"role": "task_reviewer_fixer"},
+            [{"role": "implementer", "adapter": "codex"},
+             {"action": "focused_test"},
+             {"role": "task_reviewer_fixer", "adapter": "claude"},
              {"action": "focused_test"}])
         self.assertEqual(configuration["workflow"]["plan"][0],
                          {"action": "focused_sweep"})
@@ -212,8 +213,16 @@ class TestContractContent(unittest.TestCase):
     def test_verification_and_acceptance_boundaries_are_explicit(self):
         instructions = self._compact("instructions.md")
         workflow = self._compact("workflow.md")
-        self.assertIn("Never run the full suite or `.assent/verify.py`",
-                      instructions)
+        common_instructions = instructions.split(
+            "## Scheduled-session rules", 1)[0]
+        self.assertIn(
+            "An AI session never initiates the full suite or "
+            "`.assent/verify.py`",
+            common_instructions)
+        self.assertIn(
+            "the scheduler owns any workflow `full_verify` action and runs it "
+            "outside the AI session",
+            common_instructions)
         for phrase in (
                 "Only the explicit human `assent accept` command publishes work",
                 "Focused verification runs task commands in source worktrees, writes no receipt",

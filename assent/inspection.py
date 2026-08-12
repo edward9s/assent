@@ -854,13 +854,14 @@ def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
         "Auto-fix workflow plan (configured order; source: "
         f"{_setting_source_label(cfg, 'workflow.plan')}):"]
     for index, step in enumerate(steps):
+        adapters = " -> ".join(step.adapters)
         if not step.produces_verdict:
-            action = (f"bounded repair via {step.adapter}"
+            action = (f"bounded repair via {adapters}"
                       if step.writes else "no review session")
             lines.append(f"  step {index}: role={step.role}; {action}")
             continue
         lines.append(
-            f"  step {index}: role={step.role}; {step.adapter} / "
+            f"  step {index}: role={step.role}; {adapters} / "
             f"{step.model}->{step.requested_model} / "
             f"{step.effort}->{step.requested_effort}")
     return lines

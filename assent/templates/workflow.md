@@ -84,6 +84,13 @@ name. Task, plan, and integration reviewers should use different ability
 prompts: they resolve one task's failure, cumulative plan conformance, and an
 exact reconstructed selection respectively.
 
+A role may omit `adapter` to use the global rotation, state one adapter to stay
+fixed to it, or state an ordered adapter list for availability fallback. Every
+step starts at its first candidate. Quota or adapter availability failure keeps
+progress and advances within that list without consuming a task retry; an
+unavailable or quota-exhausted list waits. Test failure, `BLOCKED`, and invalid
+verdict output do not select a different adapter.
+
 Actions are scheduler-owned and accept no role, adapter, model, effort, ability,
 prompt, or arbitrary command. `focused_test` is legal only at task positions;
 `focused_sweep` is legal only at plan positions; `full_verify` is legal only at

@@ -43,6 +43,16 @@ Use scheduler-provided absolute paths. A worktree has no `.assent/`; task and
 journal files live in the main tree, while contracts live under `~/.assent`.
 Do not read old folders, journals, or `_assent.log` unless debugging or asked.
 
+## Verification boundary
+
+An AI session never initiates the full suite or `.assent/verify.py`. An
+interactive session may run complete verification only when the human
+explicitly requests it. A scheduled task or review/repair session runs only the
+smallest relevant check and its scheduler-provided focused command; the
+scheduler owns any workflow `full_verify` action and runs it outside the AI
+session. After manual `assent reconcile --continue`, leave that full
+verification for the human.
+
 ## Scheduled-session rules
 
 - Edit source only below the session cwd (the isolated worktree) and only
@@ -53,11 +63,6 @@ Do not read old folders, journals, or `_assent.log` unless debugging or asked.
   abstraction, configuration, or scaffolding.
 - Keep conjecture, changes, verified facts, and unverified facts distinct.
 - Code, Git facts, and test results are authoritative.
-- Never run the full suite or `.assent/verify.py`. Run only the smallest
-  relevant check and the scheduler-provided focused command. Complete
-  verification runs outside every AI session through the scheduler or a human
-  `assent verify`. After manual `assent reconcile --continue`, leave that full
-  verification for the human.
 - Do not run `git commit`; Assent owns checkpoints and Git transitions.
 - Do not kill a process the session did not start. On timeout, extend or batch
   the command; do not launch a possibly still-running command again in

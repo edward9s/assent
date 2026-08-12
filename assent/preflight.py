@@ -130,13 +130,17 @@ def capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
     return adapter.preflight(requests)
 
 
-def _review_round_session(review) -> SessionIdentity:
-    """Restate one already-resolved reviewer round as a session identity."""
+def _review_round_session(cfg: Config, review, adapter: Adapter,
+                          adapter_name: str) -> SessionIdentity:
+    """Resolve one reviewer candidate through its adapter-specific mappings."""
+    settings = cfg.adapter_settings(adapter_name)
+    effort = settings.resolve_effort(review.effort, review.model)
     return SessionIdentity(
-        agent=review.adapter,
-        requested_model=review.requested_model,
-        effort=review.effort,
-        requested_effort=review.requested_effort,
+        agent=adapter_name,
+        requested_model=adapter.resolve_model(review.model),
+        effort=effort,
+        requested_effort=settings.resolve_requested_effort(
+            review.model, effort),
     )
 
 
@@ -147,7 +151,7 @@ def resolve_auto_fix_review_session(cfg: Config,
              if isinstance(step, WorkflowPlanStep) and step.produces_verdict]
     if not steps:
         raise AssentError("Auto-fix folder review is not configured")
-    return _review_round_session(steps[0])
+    return _review_round_session(cfg, steps[0], adapter, steps[0].adapter)
 
 
 def auto_fix_review_capability_errors(
@@ -161,21 +165,23 @@ def auto_fix_review_capability_errors(
               if isinstance(step, WorkflowPlanStep) and step.produces_verdict]
     if not rounds:
         return None, []
-    by_identity: dict[tuple[str, str, str], object] = {}
-    for review in rounds:
-        assert review.adapter is not None
-        assert review.requested_model is not None
-        assert review.requested_effort is not None
-        by_identity.setdefault(
-            (review.adapter, review.requested_model, review.requested_effort),
-            review)
-    errors: list[str] = []
     try:
+        by_identity: dict[tuple[str, str, str], tuple[object, Adapter]] = {}
+        for review in rounds:
+            for name in review.adapters:
+                round_adapter = (adapter if name == rounds[0].adapter
+                                 else get_adapter(name, cfg))
+                identity = _review_round_session(
+                    cfg, review, round_adapter, name)
+                by_identity.setdefault(
+                    (name, identity.requested_model,
+                     identity.requested_effort or ""),
+                    (review, round_adapter))
+        errors: list[str] = []
         session = resolve_auto_fix_review_session(cfg, adapter)
-        for (name, _model, _effort), review in by_identity.items():
-            round_adapter = (adapter if name == rounds[0].adapter
-                             else get_adapter(name, cfg))
-            identity = _review_round_session(review)
+        for (name, _model, _effort), (review, round_adapter) in by_identity.items():
+            identity = _review_round_session(
+                cfg, review, round_adapter, name)
             request = InvocationRequest(
                 task_id=f"{cfg.tasks_name}/folder-review",
                 model=review.model,

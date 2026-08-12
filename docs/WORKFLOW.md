@@ -18,9 +18,11 @@ It reads `~/.assent/workflow.md` only when the meeting changes workflow roles or
 needs exact scheduler behavior. Source and tests are inspected as needed to
 find real ownership and write a complete scope.
 
-Discuss requirements before creating files. As decisions settle, write them as
-`.assent/<PLAN>/tNNN_name.e.toml` tasks. Each task should tell a fresh AI what
-to change, what it may write, and how focused verification decides completion.
+First confirm the requirements with the AI; create no files during that
+discussion. After explicit human agreement, ask the AI: “Turn the consensus
+above into an Assent-format plan under `.assent/<PLAN>/`.” The plan consists of
+`tNNN_name.e.toml` tasks. Each task should tell a fresh AI what to change, what
+it may write, and how focused verification decides completion.
 
 Finish with:
 
@@ -36,9 +38,10 @@ The plan is ready only when this passes.
 Let's plan this change together. Read AGENTS.md,
 ~/.assent/instructions.md, and ~/.assent/format.md. Answer concisely and do
 not use subagents. Inspect relevant source and tests, and report any source bug,
-bad structure, or documentation/runtime mismatch. Do not overengineer. Discuss
-the design with me first. After explicit human agreement, write Assent-format
-task files under .assent/<PLAN>/ and run assent check.
+bad structure, or documentation/runtime mismatch. Do not overengineer. Confirm
+the requirements with me first; create no files before I explicitly agree.
+After I agree, turn the consensus above into an Assent-format plan under
+.assent/<PLAN>/ and run assent check.
 ```
 
 ## 2. Unattended execution

@@ -567,9 +567,13 @@ class _FixerProfile:
     round sequence, so this identity is derived per round and never persisted.
     """
 
-    adapter: str
+    adapters: tuple[str, ...]
     model: str
-    effort: str
+    effort: str | None
+
+    @property
+    def adapter(self) -> str:
+        return self.adapters[0]
 
 
 @dataclass(frozen=True)
@@ -689,6 +693,11 @@ class _AdapterRotation:
     adapters: tuple[Adapter, ...]
     index: int = 0
     exhausted: set[str] = field(default_factory=set)
+    pool: dict[str, Adapter] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.pool:
+            self.pool = dict(zip(self.names, self.adapters))
 
     @property
     def name(self) -> str:
@@ -702,14 +711,46 @@ class _AdapterRotation:
         """A non-quota result proves the rotation is no longer fully exhausted."""
         self.exhausted.clear()
 
-    def advance_after_quota(self) -> bool:
+    def advance_after_quota(self, failed: set[str] | None = None) -> bool:
         """Move to the next adapter; return whether this exhausted one complete cycle."""
         self.exhausted.add(self.name)
-        self.index = (self.index + 1) % len(self.names)
-        cycle_exhausted = len(self.exhausted) == len(self.names)
+        unavailable = self.exhausted | (failed or set())
+        cycle_exhausted = len(unavailable) == len(self.names)
         if cycle_exhausted:
             self.exhausted.clear()
+            if failed is not None:
+                failed.clear()
+            self.index = 0
+            return True
+        for offset in range(1, len(self.names) + 1):
+            index = (self.index + offset) % len(self.names)
+            if self.names[index] not in unavailable:
+                self.index = index
+                break
         return cycle_exhausted
+
+    def subset(self, names: tuple[str, ...]) -> "_AdapterRotation":
+        """Return a fresh step-local cursor backed by the preflighted adapters."""
+        try:
+            adapters = tuple(self.pool[name] for name in names)
+        except KeyError as error:
+            raise AssentError(
+                f"Task workflow adapter {error.args[0]!r} was not preflighted") from error
+        return _AdapterRotation(names, adapters, pool=self.pool)
+
+    def advance_after_failure(self, failed: set[str]) -> bool:
+        """Try the next not-yet-failed candidate in this step-local cursor."""
+        failed.add(self.name)
+        unavailable = failed | self.exhausted
+        for offset in range(1, len(self.names)):
+            index = (self.index + offset) % len(self.names)
+            if self.names[index] not in unavailable:
+                self.index = index
+                return True
+        failed.clear()
+        self.exhausted.clear()
+        self.index = 0
+        return False
 
 
 class _BillingAbort(Exception):
@@ -722,6 +763,23 @@ class _BillingAbort(Exception):
     dispatched purely on ``TaskResult.failure_kind == "billing"`` -- never on an adapter name --
     so a future adapter gets the behaviour for free by setting the same string.
     """
+
+
+def _workflow_step_rotation(
+        cfg: Config, step: WorkflowPlanStep,
+        injected: Adapter | None = None) -> _AdapterRotation:
+    """Resolve one plan/integration role's ordered adapter candidates."""
+    adapters = tuple(
+        injected if index == 0 and injected is not None else get_adapter(name, cfg)
+        for index, name in enumerate(step.adapters))
+    return _AdapterRotation(step.adapters, adapters)
+
+
+def _adapter_availability_failed(result: TaskResult) -> bool:
+    """Return whether a failed provider session may use a declared fallback."""
+    return ((result.exit_code != 0 or result.stalled)
+            and result.failure_kind not in {
+                "billing", "interrupt", "permission", "unsupported_model"})
 
 
 # --------------------------------------------------------------------------- #
@@ -1338,7 +1396,7 @@ def _workflow_task_capability_errors(
                 for index, step in enumerate(cfg.workflow_plan):
                     if isinstance(step, WorkflowActionStep):
                         continue
-                    if step.adapter is not None and step.adapter != adapter_name:
+                    if adapter_name not in step.adapters:
                         continue
                     session = _plan_step_session(
                         cfg, adapter, task_plan, step, adapter_name)
@@ -1351,6 +1409,9 @@ def _workflow_task_capability_errors(
                 continue
             for index, step in enumerate(workflow):
                 if isinstance(step, WorkflowActionStep):
+                    continue
+                if (step.adapters is not None
+                        and adapter_name not in step.adapters):
                     continue
                 session = _workflow_task_session(
                     cfg, adapter, task, step, adapter_name)
@@ -1369,7 +1430,8 @@ def _plan_step_session(
         cfg: Config, adapter: Adapter, plan: Plan, step: WorkflowPlanStep,
         adapter_name: str) -> SessionIdentity:
     """Resolve a whole-plan worker step through its role or the first task profile."""
-    if step.requested_model is not None:
+    if (step.requested_model is not None
+            and adapter_name == step.adapter):
         return SessionIdentity(
             agent=step.adapter or adapter_name,
             requested_model=step.requested_model,
@@ -1395,7 +1457,7 @@ def _plan_workflow_capability_errors(
         for index, step in enumerate(cfg.workflow_plan):
             if isinstance(step, WorkflowActionStep):
                 continue
-            if step.adapter is not None and step.adapter != adapter_name:
+            if adapter_name not in step.adapters:
                 continue
             session = _plan_step_session(
                 cfg, adapter, plan, step, adapter_name)
@@ -1933,7 +1995,7 @@ def _run_selection_reviewer(
         work_configs: tuple[Config, ...], state: SelectionWorkflowState,
         step: WorkflowPlanStep, *, sleep: Callable[[float], None],
         now: Callable[[], datetime], repair_workspaces: str = ""
-        ) -> tuple[auto_fix.ReviewRecord, str]:
+        ) -> tuple[auto_fix.ReviewRecord, str, SessionIdentity]:
     """Run one selection verdict role against settled verifier evidence."""
     if (not state.action_evidence
             or state.action_evidence[0] not in {
@@ -1944,30 +2006,38 @@ def _run_selection_reviewer(
     if not step.produces_verdict:
         raise AssentError(
             f"selection role {step.role!r} cannot produce the required verdict")
-    assert step.requested_model is not None
-    assert step.requested_effort is not None
-    reviewer = get_adapter(step.adapter, work_configs[0])
-    request = InvocationRequest(
-        task_id="selection-verification-review", model=step.model,
-        effort=step.effort, requested_model=step.requested_model,
-        requested_effort=step.requested_effort)
-    errors = reviewer.preflight([request])
-    if errors:
-        raise AssentError("selection reviewer capability unavailable: "
-                          + "; ".join(errors))
+    rotation = _workflow_step_rotation(work_configs[0], step)
+    sessions: dict[str, SessionIdentity] = {}
+    for adapter_name, reviewer in zip(rotation.names, rotation.adapters):
+        session = _plan_step_session(
+            work_configs[0], reviewer,
+            Plan.parse(work_configs[0].tasks_dir), step, adapter_name)
+        errors = reviewer.preflight([InvocationRequest(
+            task_id="selection-verification-review", model=step.model,
+            effort=session.effort, requested_model=session.requested_model,
+            requested_effort=session.requested_effort)])
+        if errors:
+            raise AssentError(
+                f"selection reviewer capability unavailable for {adapter_name}: "
+                + "; ".join(errors))
+        sessions[adapter_name] = session
     prompt, prompt_digest = _selection_review_material(
         work_configs, state, step, repair_workspaces=repair_workspaces)
     baselines = tuple(
         _selection_surface_baseline(cfg) for cfg in work_configs)
     invalid_attempts = 0
     attempt_prompt = prompt
+    failed_adapters: set[str] = set()
     while True:
-        print(f"Selection review session: {step.adapter} | "
-              f"{step.model}->{step.requested_model} | "
-              f"{step.effort}->{step.requested_effort}")
+        adapter_name = rotation.name
+        reviewer = rotation.adapter
+        session = sessions[adapter_name]
+        print(f"Selection review session: {adapter_name} | "
+              f"{step.model}->{session.requested_model} | "
+              f"{step.effort}->{session.requested_effort}")
         result = _invoke_adapter(
-            work_configs[0], reviewer, step.adapter, attempt_prompt,
-            step.requested_model, step.requested_effort,
+            work_configs[0], reviewer, adapter_name, attempt_prompt,
+            session.requested_model, session.requested_effort,
             work_configs[0].root, context_kind="selection",
             context_id=f"workflow.selection[{state.step_index}].review",
             folders=state.folders, structured=True)
@@ -1991,9 +2061,24 @@ def _run_selection_reviewer(
                 and not result.stalled and result.exit_code != 0):
             continue
         if result.quota_exhausted:
-            _wait_for_quota(work_configs[0], result.reset_at, sleep, now)
+            if len(rotation.names) == 1:
+                _wait_for_quota(work_configs[0], result.reset_at, sleep, now)
+            elif rotation.advance_after_quota(failed_adapters):
+                _wait_for_rotation(work_configs[0], sleep)
             continue
         if result.exit_code != 0 or result.stalled:
+            if _adapter_availability_failed(result):
+                switched = rotation.advance_after_failure(failed_adapters)
+                _checkpoint_selection_merged_writes(work_configs)
+                if switched:
+                    print(f"Selection reviewer adapter failure; switching "
+                          f"{adapter_name} -> {rotation.name}.")
+                else:
+                    print("Selection reviewer adapters unavailable; waiting "
+                          f"{work_configs[0].rotation_poll_minutes} minute(s) "
+                          f"before restarting with {rotation.name}.")
+                    _wait_for_rotation(work_configs[0], sleep)
+                continue
             raise AssentError("selection reviewer adapter failure: "
                               + _adapter_failure_reason(
                                   result.exit_code, result.stalled,
@@ -2009,7 +2094,7 @@ def _run_selection_reviewer(
                 raise AssentError(
                     "a failed selection verifier requires an allowed non-PASS "
                     "verdict with at least one finding")
-            return record, prompt_digest
+            return record, prompt_digest, session
         except AssentError as error:
             if invalid_attempts >= work_configs[0].retry_per_task:
                 raise
@@ -2140,7 +2225,8 @@ def _selection_peer_context(
 
 def _persist_selection_findings(
         work_configs: tuple[Config, ...], selection: SelectionWorkflowState,
-        step: WorkflowPlanStep, record: auto_fix.ReviewRecord,
+        step: WorkflowPlanStep, session: SessionIdentity,
+        record: auto_fix.ReviewRecord,
         prompt_digest: str) -> dict[str, auto_fix.AutoFixState]:
     """Persist every plan assignment before selection repair can begin."""
     grouped = _selection_owned_findings(record, work_configs)
@@ -2173,9 +2259,9 @@ def _persist_selection_findings(
             task_plan_sha256=_contracts_digest(plan, contracts_by_id),
             review_prompt_sha256=prompt_digest,
             reviewer_role=step.role, reviewer_step_index=selection.step_index,
-            reviewer_adapter=step.adapter,
-            reviewer_model=step.requested_model or "",
-            reviewer_effort=step.requested_effort or "",
+            reviewer_adapter=session.agent,
+            reviewer_model=session.requested_model,
+            reviewer_effort=session.requested_effort or "",
             previous=previous, review_context="selection_verification",
             review_stage=stage, workflow_step_index=selection.step_index + 1,
             enforce_transitions=False)
@@ -2272,37 +2358,33 @@ def _mark_selection_reviews_passed(
         auto_fix.write_auto_fix_state(path, passed)
 
 
-def _selection_fixer_session(
+def _selection_fixer_sessions(
         cfg: Config, task: Task, step: WorkflowPlanStep
-        ) -> tuple[str, Adapter, SessionIdentity]:
-    """Resolve one explicit selection fixer role through its configured adapter."""
-    adapter_name = step.adapter
-    adapter = get_adapter(adapter_name, cfg)
+        ) -> tuple[_AdapterRotation, dict[str, SessionIdentity]]:
+    """Resolve every declared adapter candidate for a selection fixer role."""
+    rotation = _workflow_step_rotation(cfg, step)
     plan = Plan.parse(cfg.tasks_dir)
-    session = _plan_step_session(cfg, adapter, plan, step, adapter_name)
-    errors = adapter.preflight([InvocationRequest(
-        task_id=f"{cfg.tasks_name} selection conflict fixer",
-        model=step.model or task.model, effort=session.effort,
-        requested_model=session.requested_model,
-        requested_effort=session.requested_effort)])
-    if errors:
-        raise AssentError(
-            f"selection conflict fixer capability unavailable for "
-            f"{cfg.tasks_name}: " + "; ".join(errors))
-    return adapter_name, adapter, session
+    sessions: dict[str, SessionIdentity] = {}
+    for adapter_name, adapter in zip(rotation.names, rotation.adapters):
+        session = _plan_step_session(cfg, adapter, plan, step, adapter_name)
+        errors = adapter.preflight([InvocationRequest(
+            task_id=f"{cfg.tasks_name} selection conflict fixer",
+            model=step.model or task.model, effort=session.effort,
+            requested_model=session.requested_model,
+            requested_effort=session.requested_effort)])
+        if errors:
+            raise AssentError(
+                f"selection conflict fixer capability unavailable for "
+                f"{cfg.tasks_name}/{adapter_name}: " + "; ".join(errors))
+        sessions[adapter_name] = session
+    return rotation, sessions
 
 
 def _workflow_fixer_profile(
         cfg: Config, task: Task, step: WorkflowPlanStep) -> _FixerProfile:
-    adapter_name = step.adapter
     model = step.model or task.model
-    stated_effort = step.effort if step.effort is not None else task.effort
-    settings = cfg.adapter_settings(adapter_name)
-    effort = settings.resolve_effort(stated_effort, model)
-    if effort is None:
-        raise AssentError(
-            f"selection fixer role has no concrete effort for {task.id}")
-    return _FixerProfile(adapter_name, model, effort)
+    effort = step.effort if step.effort is not None else task.effort
+    return _FixerProfile(step.adapters, model, effort)
 
 
 def _selection_reconcile_prompt(
@@ -2365,7 +2447,7 @@ def _run_selection_target_reconciles(
         if owner is None:
             raise AssentError(
                 f"target conflict in {cfg.tasks_name} has no reviewed task owner")
-        adapter_name, adapter, session = _selection_fixer_session(
+        rotation, sessions = _selection_fixer_sessions(
             cfg, owner, fixer_step)
         context = reconcile.automatic_reconcile_prepare_locked(
             cfg, conflict.target_tip, conflict.source_tip, conflict.paths)
@@ -2375,7 +2457,11 @@ def _run_selection_target_reconciles(
                 cfg, conflict, fixer_step, context.worktree)
             baselines = tuple(
                 _selection_surface_baseline(item) for item in work_configs)
+            failed_adapters: set[str] = set()
             while True:
+                adapter_name = rotation.name
+                adapter = rotation.adapter
+                session = sessions[adapter_name]
                 print(f"Selection reconcile session: {adapter_name} | "
                       f"{fixer_step.model or owner.model}->"
                       f"{session.requested_model} | "
@@ -2397,9 +2483,24 @@ def _run_selection_target_reconciles(
                         and not result.stalled and result.exit_code != 0):
                     continue
                 if result.quota_exhausted:
-                    _wait_for_quota(cfg, result.reset_at, sleep, now)
+                    if len(rotation.names) == 1:
+                        _wait_for_quota(cfg, result.reset_at, sleep, now)
+                    elif rotation.advance_after_quota(failed_adapters):
+                        _wait_for_rotation(cfg, sleep)
                     continue
                 if result.exit_code != 0 or result.stalled:
+                    if _adapter_availability_failed(result):
+                        switched = rotation.advance_after_failure(
+                            failed_adapters)
+                        if switched:
+                            print("Selection reconcile adapter failure; switching "
+                                  f"{adapter_name} -> {rotation.name}.")
+                        else:
+                            print("Selection reconcile adapters unavailable; "
+                                  f"waiting {cfg.rotation_poll_minutes} minute(s) "
+                                  f"before restarting with {rotation.name}.")
+                            _wait_for_rotation(cfg, sleep)
+                        continue
                     raise AssentError(
                         "selection reconcile fixer adapter failure: "
                         + _adapter_failure_reason(
@@ -2567,7 +2668,7 @@ def _run_selection_merged_repairs(
         workspaces = _selection_merged_workspace_text(
             work_configs, conflicts, contexts)
         try:
-            record, prompt_digest = _run_selection_reviewer(
+            record, prompt_digest, review_session = _run_selection_reviewer(
                 work_configs, state, step, sleep=sleep, now=now,
                 repair_workspaces=workspaces)
             grouped = _selection_owned_findings(record, work_configs)
@@ -2662,7 +2763,8 @@ def _run_selection_merged_repairs(
                         "a writable selection role returned FAIL after changing "
                         "a repair workspace")
                 _persist_selection_findings(
-                    work_configs, state, step, record, prompt_digest)
+                    work_configs, state, step, review_session, record,
+                    prompt_digest)
                 return _integration_unresolved(
                     "the final reviewer-fixer reported unresolved findings "
                     "without a repair", nested=True), state
@@ -2671,11 +2773,7 @@ def _run_selection_merged_repairs(
                     "selection reviewer-fixer returned FIXED without changing "
                     "any repair workspace")
 
-            session = SessionIdentity(
-                agent=step.adapter,
-                requested_model=step.requested_model or "",
-                effort=step.effort,
-                requested_effort=step.requested_effort)
+            session = review_session
             for conflict in conflicts:
                 if conflict.kind != "target_alone":
                     continue
@@ -2720,7 +2818,8 @@ def _run_selection_merged_repairs(
                     cfg.git_excludes)
 
             repair_states = _persist_selection_findings(
-                work_configs, state, step, record, prompt_digest)
+                work_configs, state, step, review_session, record,
+                prompt_digest)
             for cfg in work_configs:
                 review_state = repair_states.get(cfg.tasks_name)
                 if (review_state is None
@@ -2805,10 +2904,11 @@ def _run_selection_repairs(
             nested=True), state
     if state.repair_phase == "NONE":
         if not _selection_findings_already_persisted(work_configs, state):
-            record, prompt_digest = _run_selection_reviewer(
+            record, prompt_digest, review_session = _run_selection_reviewer(
                 work_configs, state, step, sleep=sleep, now=now)
             _persist_selection_findings(
-                work_configs, state, step, record, prompt_digest)
+                work_configs, state, step, review_session, record,
+                prompt_digest)
         state = replace(state, repair_phase="NEEDS_REPAIR")
         write_selection_workflow_state(configs[0].assent_dir, state)
 
@@ -2817,8 +2917,8 @@ def _run_selection_repairs(
         conflict.folder for conflict in conflicts
         if conflict.kind == "peer_only"
     }
-    assignments: list[tuple[Config, Task, _FixerProfile, Adapter,
-                            SessionIdentity]] = []
+    assignments: list[tuple[Config, Task, _FixerProfile, _AdapterRotation,
+                            dict[str, SessionIdentity]]] = []
     for cfg in work_configs:
         review_state = repair_states.get(cfg.tasks_name)
         if review_state is None:
@@ -2834,16 +2934,16 @@ def _run_selection_repairs(
             profile = (_workflow_fixer_profile(cfg, task, fixer_step)
                        if fixer_step is not None
                        else _auto_fix_profile_for_task(cfg, task))
-            fixer = get_adapter(profile.adapter, cfg)
-            session, errors = auto_fix_fixer_capability_errors(
-                cfg, fixer, profile.adapter, profile.model, profile.effort)
-            if errors or session is None:
+            fixer_rotation, sessions, errors = _fixer_rotation_and_sessions(
+                cfg, profile)
+            if errors:
                 raise AssentError(
                     f"selection fixer capability unavailable for "
                     f"{cfg.tasks_name}/{task.id}: " + "; ".join(errors))
-            assignments.append((cfg, task, profile, fixer, session))
+            assignments.append((cfg, task, profile, fixer_rotation, sessions))
 
-    for cfg, task, profile, _fixer, session in assignments:
+    for cfg, task, profile, _fixer_rotation, sessions in assignments:
+        session = sessions[profile.adapter]
         review_state = repair_states[cfg.tasks_name]
         detail = _selection_assignment_detail(state, task, review_state)
         if not _selection_assignment_recorded(task, detail):
@@ -2920,7 +3020,7 @@ def _run_selection_repairs(
             dispositions[cfg.tasks_name] = list(
                 review_state.worker_dispositions)
 
-        for cfg, assigned, profile, fixer, session in assignments:
+        for cfg, assigned, profile, fixer_rotation, sessions in assignments:
             task = Plan.parse(cfg.tasks_dir).get(assigned.id)
             if task is None or task.status in ("DONE", "SKIP"):
                 continue
@@ -2934,9 +3034,9 @@ def _run_selection_repairs(
             active.task = task
             active.session = session_state
             failure = _process_task(
-                cfg, task, _AdapterRotation((profile.adapter,), (fixer,)),
+                cfg, task, fixer_rotation,
                 sleep, now, session_state, resumed=task.status == "WIP",
-                session_override=session, profile_model=profile.model,
+                session_overrides=sessions, profile_model=profile.model,
                 auto_fix_context=(
                     _auto_fix_repair_context(task, review_state)
                     + _selection_peer_context(cfg, conflicts)),
@@ -3278,28 +3378,46 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
     # so rotating later can never discover a configuration the vendor would refuse after a
     # session, status write, or Git change.  The injected adapter is the first slot's test seam;
     # production runs resolve every slot through get_adapter().
-    adapters: list[Adapter] = []
+    adapter_names = list(cfg.adapter_names)
+    for workflow in (cfg.workflow_task or (), cfg.workflow_plan,
+                     cfg.workflow_integration):
+        for step in workflow:
+            names = (step.adapters if isinstance(
+                step, (WorkflowTaskStep, WorkflowPlanStep)) else None)
+            for name in names or ():
+                if name not in adapter_names:
+                    adapter_names.append(name)
+    adapters: dict[str, Adapter] = {}
     try:
-        for index, name in enumerate(cfg.adapter_names):
-            adapters.append(
-                adapter if index == 0 and adapter is not None
+        for name in adapter_names:
+            adapters[name] = (
+                adapter if name == cfg.adapter_names[0] and adapter is not None
                 else get_adapter(name, cfg))
     except AssentError as e:
         print(str(e))
         return 1
 
-    rotation = _AdapterRotation(cfg.adapter_names, tuple(adapters))
+    rotation = _AdapterRotation(
+        cfg.adapter_names, tuple(adapters[name] for name in cfg.adapter_names),
+        pool=adapters)
     preflight_failures: list[tuple[str, list[str]]] = []
     whole_plan_workflow = (
         cfg.workflow_task == ()
         and all(task.workflow is None for task in plan.tasks))
-    selected_plan_unit = whole_plan_workflow or any(
-        task.status in ("TODO", "WIP")
-        and (task_id is None or task.id == task_id)
-        and (task.workflow == ()
-             or (task.workflow is None and cfg.workflow_task == ()))
-        for task in plan.tasks)
-    for name, current_adapter in zip(rotation.names, rotation.adapters):
+    task_adapter_names = list(cfg.adapter_names)
+    for step in cfg.workflow_task or ():
+        if isinstance(step, WorkflowTaskStep):
+            for name in step.adapters or ():
+                if name not in task_adapter_names:
+                    task_adapter_names.append(name)
+    plan_adapter_names = list(dict.fromkeys(
+        name for step in cfg.workflow_plan
+        if isinstance(step, WorkflowPlanStep)
+        for name in step.adapters))
+    preflight_names = (plan_adapter_names if whole_plan_workflow
+                       else task_adapter_names)
+    for name in preflight_names:
+        current_adapter = adapters[name]
         if whole_plan_workflow:
             errors = _plan_workflow_capability_errors(
                 cfg, current_adapter, plan, name)
@@ -3308,24 +3426,6 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 cfg, current_adapter, plan, name, task_id)
         if errors:
             preflight_failures.append((name, errors))
-    if selected_plan_unit:
-        # Verdict roles carry an explicit adapter even though plan-unit mode
-        # executes every step as an ordinary worker session.  Prove adapters
-        # outside the worker rotation before opening any session too.
-        external_names = dict.fromkeys(
-            step.adapter for step in cfg.workflow_plan
-            if isinstance(step, WorkflowPlanStep)
-            and step.adapter is not None and step.adapter not in rotation.names)
-        try:
-            for name in external_names:
-                current_adapter = get_adapter(name, cfg)
-                errors = _plan_workflow_capability_errors(
-                    cfg, current_adapter, plan, name)
-                if errors:
-                    preflight_failures.append((name, errors))
-        except AssentError as e:
-            print(str(e))
-            return 1
     if preflight_failures:
         for name, errors in preflight_failures:
             print(f"{name} capability preflight: FAIL "
@@ -4336,11 +4436,11 @@ def _run_auto_fix_review_once(
             review_stage="recheck", source_tree=source_tree,
             task_plan_sha256=plan_digest,
             review_prompt_sha256=prompt_digest,
-            reviewer_adapter=review.adapter,
-            reviewer_role=review.role,
+            reviewer_adapter=existing.reviewer_adapter,
+            reviewer_role=existing.reviewer_role,
             reviewer_step_index=review_index,
-            reviewer_model=review.requested_model,
-            reviewer_effort=review.requested_effort,
+            reviewer_model=existing.reviewer_model,
+            reviewer_effort=existing.reviewer_effort,
             review_context=pass_context,
             failure_trigger=existing.failure_trigger,
             workflow_step_index=round_index)
@@ -4371,17 +4471,18 @@ def _run_auto_fix_review_once(
                 review_stage=existing.review_stage,
                 round_index=round_index,
                 blockers=blockers))
-        if auto_fix.auto_fix_state_is_fresh(
+        if (existing.reviewer_adapter in review.adapters
+                and auto_fix.auto_fix_state_is_fresh(
                 existing,
                 source_tree=reuse_tree,
                 task_plan_sha256=reuse_plan_digest,
                 review_prompt_sha256=reuse_digest,
-                reviewer_adapter=review.adapter,
+                reviewer_adapter=existing.reviewer_adapter,
                 reviewer_role=review.role,
-                reviewer_model=review.requested_model,
-                reviewer_effort=review.requested_effort,
+                reviewer_model=existing.reviewer_model,
+                reviewer_effort=existing.reviewer_effort,
                 review_context=existing.review_context,
-                failure_trigger=existing.failure_trigger):
+                failure_trigger=existing.failure_trigger)):
             print("Auto-fix folder review: reusing exact fresh PASS; no reviewer session started.")
             return finish(_AutoFixReviewOutcome(0, existing))
 
@@ -4433,15 +4534,19 @@ def _run_auto_fix_review_once(
         failure_trigger=failure_trigger,
     )
     try:
-        reviewer = injected_adapter or get_adapter(review.adapter, cfg)
+        review_rotation = _workflow_step_rotation(
+            cfg, review, injected_adapter)
+        review_sessions = {
+            name: _plan_step_session(
+                cfg, candidate, plan, review, name)
+            for name, candidate in zip(
+                review_rotation.names, review_rotation.adapters)
+        }
     except AssentError as e:
         print(f"Auto-fix reviewer resolution failed: {e}")
         return finish(_AutoFixReviewOutcome(1, human_reason=str(e)))
     # The top-level run gate preflighted every distinct configured identity
     # before any task or reviewer session started.
-    session = SessionIdentity(
-        agent=review.adapter, requested_model=review.requested_model,
-        effort=review.effort, requested_effort=review.requested_effort)
 
     baseline = _auto_fix_surface_snapshot(cfg)
     baseline_head = gitops.commit_of(cfg.root, "HEAD")
@@ -4453,7 +4558,10 @@ def _run_auto_fix_review_once(
         if cfg.source_root is not None else None)
     invalid_attempts = 0
     attempt_prompt = prompt
+    failed_adapters: set[str] = set()
     while True:
+        reviewer = review_rotation.adapter
+        session = review_sessions[review_rotation.name]
         print(f"Auto-fix review session: {session.agent} | "
               f"{review.model}->{session.requested_model} | "
               f"{review.effort}->{session.requested_effort}")
@@ -4513,8 +4621,15 @@ def _run_auto_fix_review_once(
             print("Auto-fix reviewer requested immediate checkpoint-resume continuation.")
             continue
         if result.quota_exhausted:
-            print("Auto-fix reviewer quota exhausted; waiting before resuming the same review.")
-            _wait_for_quota(cfg, result.reset_at, sleep, now)
+            if len(review_rotation.names) == 1:
+                print("Auto-fix reviewer quota exhausted; waiting before resuming the same review.")
+                _wait_for_quota(cfg, result.reset_at, sleep, now)
+            elif review_rotation.advance_after_quota(failed_adapters):
+                print("Every declared review adapter is quota-exhausted; waiting before continuing.")
+                _wait_for_rotation(cfg, sleep)
+            else:
+                print(f"Auto-fix reviewer quota exhausted; switching to "
+                      f"{review_rotation.name}.")
             continue
         if result.failure_kind == "billing":
             reason = _adapter_failure_reason(
@@ -4527,6 +4642,22 @@ def _run_auto_fix_review_once(
             print(f"Auto-fix reviewer adapter failure: {reason}")
             if result.exit_code == 130 or result.failure_kind == "interrupt":
                 return finish(_AutoFixReviewOutcome(130, human_reason=reason))
+            if _adapter_availability_failed(result):
+                switched = review_rotation.advance_after_failure(
+                    failed_adapters)
+                if review.writes:
+                    gitops.commit_if_dirty(
+                        cfg.root,
+                        f"wip({cfg.tasks_name}): plan reviewer adapter failover",
+                        cfg.git_excludes)
+                if switched:
+                    print(f"Switching to declared adapter {review_rotation.name}.")
+                else:
+                    print("Every declared review adapter is unavailable; waiting "
+                          f"{cfg.rotation_poll_minutes} minute(s) before "
+                          f"restarting with {review_rotation.name}.")
+                    _wait_for_rotation(cfg, sleep)
+                continue
             return finish(_AutoFixReviewOutcome(1, human_reason=reason))
 
         review_output = (result.structured_output
@@ -4609,6 +4740,10 @@ def _run_auto_fix_review_once(
             if resolved_record.verdict == "FIXED" and not changed:
                 raise AssentError(
                     "A write-capable verdict role returned FIXED without changing source")
+            freshness.update(
+                reviewer_adapter=session.agent,
+                reviewer_model=session.requested_model,
+                reviewer_effort=session.requested_effort or "")
             state = auto_fix.state_for_review(
                 resolved_record, previous=ledger_previous,
                 review_stage=review_stage,
@@ -4797,12 +4932,7 @@ def _recover_invalid_reviewer_writes(
 
 def _auto_fix_profile_for_task(cfg: Config, task: Task) -> _FixerProfile:
     """The primary worker's ordinary identity for one reopened task."""
-    settings = cfg.adapter_settings(cfg.adapter_names[0])
-    effort = settings.resolve_effort(task.effort, task.model)
-    if effort is None:
-        raise AssentError(
-            f"Auto-fix task profile has no concrete effort: {task.id}")
-    return _FixerProfile(cfg.adapter_names[0], task.model, effort)
+    return _FixerProfile(cfg.adapter_names, task.model, task.effort)
 
 
 def _auto_fix_adapter(
@@ -4814,6 +4944,35 @@ def _auto_fix_adapter(
         raise AssentError(
             f"Auto-fix profile names an adapter outside the worker rotation: "
             f"{adapter_name}") from e
+
+
+def _fixer_rotation_and_sessions(
+        cfg: Config, profile: _FixerProfile,
+        worker_rotation: _AdapterRotation | None = None
+        ) -> tuple[_AdapterRotation, dict[str, SessionIdentity], list[str]]:
+    """Resolve and preflight every declared fallback for one fixer profile."""
+    adapters: list[Adapter] = []
+    names: list[str] = []
+    sessions: dict[str, SessionIdentity] = {}
+    errors: list[str] = []
+    for name in profile.adapters:
+        adapter = (_auto_fix_adapter(worker_rotation, name)
+                   if worker_rotation is not None
+                   and name in worker_rotation.names
+                   else get_adapter(name, cfg))
+        effort = cfg.adapter_settings(name).resolve_effort(
+            profile.effort, profile.model)
+        if effort is None:
+            errors.append(f"{name}: no concrete effort")
+            continue
+        session, candidate_errors = auto_fix_fixer_capability_errors(
+            cfg, adapter, name, profile.model, effort)
+        if session is not None:
+            sessions[name] = session
+        errors.extend(f"{name}: {message}" for message in candidate_errors)
+        names.append(name)
+        adapters.append(adapter)
+    return _AdapterRotation(tuple(names), tuple(adapters)), sessions, errors
 
 
 def _auto_fix_task_diff(cfg: Config, task: Task) -> str:
@@ -5709,7 +5868,7 @@ def _run_auto_fix_repairs(
                     repair_step = step
                     print(f"Auto-fix workflow step {state.workflow_step_index}: "
                           f"role {step.role!r} authorizes bounded repair with "
-                          f"adapter {step.adapter}.")
+                          f"adapter candidates {' -> '.join(step.adapters)}.")
                     break
             if state.phase != "NEEDS_REPAIR":
                 continue
@@ -5819,16 +5978,13 @@ def _run_auto_fix_repairs(
                 profile = (_workflow_fixer_profile(cfg, task, repair_step)
                            if repair_step is not None
                            else _auto_fix_profile_for_task(cfg, task))
-                fixer = (_auto_fix_adapter(rotation, profile.adapter)
-                         if profile.adapter in rotation.names
-                         else get_adapter(profile.adapter, cfg))
-                session, errors = auto_fix_fixer_capability_errors(
-                    cfg, fixer, profile.adapter, profile.model, profile.effort)
+                task_rotation, sessions, errors = _fixer_rotation_and_sessions(
+                    cfg, profile, rotation)
                 if errors:
                     failures.append((task, "Fixer capability unavailable: "
                                      + "; ".join(errors)))
                     continue
-                assert session is not None
+                session = sessions[profile.adapter]
                 append_entry(
                     task.journal_path, by="scheduler", event="auto_fix_attempt",
                     summary=("Bounded automatic repair session: "
@@ -5840,15 +5996,13 @@ def _run_auto_fix_repairs(
                     requested_model=session.requested_model,
                     requested_effort=session.requested_effort,
                     time_str=now().isoformat(timespec="seconds"))
-                task_rotation = _AdapterRotation(
-                    (profile.adapter,), (fixer,))
                 session_state = _SessionState()
                 active.task = task
                 active.session = session_state
                 failure = _process_task(
                     cfg, task, task_rotation, sleep, now, session_state,
                     resumed=task.status == "WIP",
-                    session_override=session,
+                    session_overrides=sessions,
                     profile_model=profile.model,
                     auto_fix_context=_auto_fix_repair_context(task, state),
                     retry_limit=0, billing_is_failure=True,
@@ -6499,6 +6653,9 @@ def _process_plan_workflow(
         raise AssentError("Workflow cursor does not match the configured plan unit")
     attempts = 0
     failure_reason: str | None = None
+    step_rotation: _AdapterRotation | None = None
+    step_rotation_index: int | None = None
+    failed_step_adapters: set[str] = set()
     while True:
         refreshed = _refresh_focused_sweep_evidence(cfg, plan, state)
         if refreshed != state:
@@ -6538,11 +6695,13 @@ def _process_plan_workflow(
             failure_reason = None
             continue
 
-        adapter = rotation.adapter
-        adapter_name = rotation.name
-        if step.adapter is not None and step.adapter != adapter_name:
-            adapter_name = step.adapter
-            adapter = get_adapter(adapter_name, cfg)
+        if step_rotation_index != state.step_index:
+            step_rotation = rotation.subset(step.adapters)
+            step_rotation_index = state.step_index
+            failed_step_adapters.clear()
+        assert step_rotation is not None
+        adapter = step_rotation.adapter
+        adapter_name = step_rotation.name
         session = _plan_step_session(cfg, adapter, plan, step, adapter_name)
         prompt = _plan_worker_prompt(
             cfg, plan, step, state, trusted_contracts, failure_reason)
@@ -6574,7 +6733,30 @@ def _process_plan_workflow(
             gitops.commit_if_dirty(
                 cfg.root, f"wip({cfg.tasks_name}): plan workflow quota interrupt",
                 cfg.git_excludes)
-            _wait_for_quota(cfg, result.reset_at, sleep, now)
+            if len(step_rotation.names) == 1:
+                _wait_for_quota(cfg, result.reset_at, sleep, now)
+            elif step_rotation.advance_after_quota(failed_step_adapters):
+                _wait_for_rotation(cfg, sleep)
+            failure_reason = None
+            continue
+        elif _adapter_availability_failed(result):
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output,
+                result.failure_kind)
+            switched = step_rotation.advance_after_failure(
+                failed_step_adapters)
+            gitops.commit_if_dirty(
+                cfg.root, f"wip({cfg.tasks_name}): plan workflow adapter failover",
+                cfg.git_excludes)
+            if switched:
+                print(f"Plan workflow adapter failure: {reason}; switching "
+                      f"{adapter_name} -> {step_rotation.name} without consuming "
+                      "a retry.")
+            else:
+                print(f"Plan workflow adapters unavailable: {reason}; waiting "
+                      f"{cfg.rotation_poll_minutes} minute(s) before restarting "
+                      f"with {step_rotation.name}.")
+                _wait_for_rotation(cfg, sleep)
             failure_reason = None
             continue
         elif result.exit_code != 0 or result.stalled:
@@ -6628,7 +6810,8 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   sleep: Callable[[float], None],
                   now: Callable[[], datetime], session_state: _SessionState,
                   resumed: bool = False, *,
-                  session_override: SessionIdentity | None = None,
+                   session_override: SessionIdentity | None = None,
+                   session_overrides: dict[str, SessionIdentity] | None = None,
                   profile_model: str | None = None,
                   auto_fix_context: str = "",
                   retry_limit: int | None = None,
@@ -6676,6 +6859,9 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
     attempts_used = 0
     failure_reason: str | None = None
     attempted_failures: list[tuple[str, str]] = []
+    step_rotation: _AdapterRotation | None = None
+    step_rotation_index: int | None = None
+    failed_step_adapters: set[str] = set()
     # Repair disposition validation needs a precise journal boundary. Ordinary
     # sessions retain the historical behavior in which a malformed pre-existing
     # journal does not prevent the worker prompt or task execution from running.
@@ -6763,10 +6949,27 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             resumed = False
             continue
 
-        adapter = rotation.adapter
-        adapter_name = rotation.name
         assert workflow_step is None or isinstance(workflow_step, WorkflowTaskStep)
-        session = (session_override or
+        if (workflow_step is not None and session_override is None
+                and session_overrides is None):
+            assert workflow_state is not None
+            if step_rotation_index != workflow_state.step_index:
+                step_rotation = rotation.subset(
+                    workflow_step.adapters or rotation.names)
+                step_rotation_index = workflow_state.step_index
+                failed_step_adapters.clear()
+            active_rotation = step_rotation
+        else:
+            active_rotation = rotation
+            step_rotation = None
+            step_rotation_index = None
+            if session_overrides is None:
+                failed_step_adapters.clear()
+        assert active_rotation is not None
+        adapter = active_rotation.adapter
+        adapter_name = active_rotation.name
+        session = ((session_overrides or {}).get(adapter_name)
+                   or session_override or
                    (_workflow_task_session(
                        cfg, adapter, task, workflow_step, adapter_name)
                     if workflow_step is not None else
@@ -6816,8 +7019,10 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             if _adapter_process_creation_failed(e):
                 raise _AdapterProcessCreationError(str(e)) from e
             raise
-        if not result.quota_exhausted:
-            rotation.session_opened()
+        if (not result.quota_exhausted
+                and not (_adapter_availability_failed(result)
+                         and workflow_step is not None)):
+            active_rotation.session_opened()
         escape_reason = (
             _handle_main_tree_escape(cfg, task, main_tree_baseline, now)
             if main_tree_baseline is not None else None)
@@ -6845,7 +7050,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
         elif result.quota_exhausted:  # quota exhaustion does not count as a failure
             print("  Quota exhausted -> keep progress (wip checkpoint).")
             wait_kind: str | None = None
-            if len(rotation.names) == 1:
+            if len(active_rotation.names) == 1:
                 if result.reset_at is None:
                     quota_summary = (
                         "Quota exhausted; progress kept, waiting for quota poll "
@@ -6860,23 +7065,24 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                     quota_action = "  Waiting for quota reset before resuming..."
                 wait_kind = "quota"
             else:
-                cycle_exhausted = rotation.advance_after_quota()
+                cycle_exhausted = active_rotation.advance_after_quota(
+                    failed_step_adapters if workflow_step is not None else None)
                 if cycle_exhausted:
                     quota_summary = (
                         "Quota exhausted; progress kept, every adapter in the "
                         "rotation is quota-exhausted; waiting for rotation poll "
-                        f"before continuing with {rotation.name}")
+                        f"before continuing with {active_rotation.name}")
                     quota_action = (
                         "  Every adapter in the rotation is quota-exhausted; "
                         f"waiting {cfg.rotation_poll_minutes} minute(s) before "
-                        f"continuing with {rotation.name}.")
+                        f"continuing with {active_rotation.name}.")
                     wait_kind = "rotation"
                 else:
                     quota_summary = (
                         "Quota exhausted; progress kept, switching immediately "
-                        f"to adapter {rotation.name}")
+                        f"to adapter {active_rotation.name}")
                     quota_action = (
-                        f"  Switching adapter {adapter_name} -> {rotation.name} "
+                        f"  Switching adapter {adapter_name} -> {active_rotation.name} "
                         "immediately; resuming the same task without "
                         "consuming a retry.")
             _preserve_interrupted_progress(
@@ -6907,6 +7113,32 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             outcome = "fail"
             focused_evidence = (
                 "NOT RUN: the worker adapter failed before focused closeout.")
+        elif (_adapter_availability_failed(result)
+              and workflow_step is not None):
+            reason = _adapter_failure_reason(
+                result.exit_code, result.stalled, result.output,
+                result.failure_kind)
+            switched = active_rotation.advance_after_failure(
+                failed_step_adapters)
+            next_adapter = active_rotation.name
+            _preserve_interrupted_progress(
+                cfg, task, session, event="adapter_failover",
+                summary=(f"Adapter failure; progress kept, switching "
+                         f"{adapter_name} -> {next_adapter}"),
+                detail=(f"{reason}\nDeclared adapter candidates: "
+                        + ", ".join(active_rotation.names)),
+                checkpoint_reason="adapter failure, progress kept", now=now)
+            print(f"  Adapter failure: {reason}")
+            if switched:
+                print(f"  Switching adapter {adapter_name} -> {next_adapter} "
+                      "without consuming a retry.")
+            else:
+                print("  Every declared adapter is unavailable; waiting "
+                      f"{cfg.rotation_poll_minutes} minute(s) before restarting "
+                      f"with {next_adapter}.")
+                _wait_for_rotation(cfg, sleep)
+            resumed = True
+            continue
         elif result.exit_code != 0 or result.stalled:
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output,

@@ -74,7 +74,10 @@ _monotonic = time.monotonic
 # while `--all` keeps its own dynamic whole-project scheduling.
 _REMAINDER = "..."
 _REMAINDER_HELP = ("; the literal token `...` as the last argument adds every "
-                   "remaining discovered work folder")
+                   "remaining discovered plan")
+_PLAN_NAME_HELP = (" Each PLAN names a directory directly under the project's "
+                   "`.assent/` (for example, `demo` means `.assent/demo/`); "
+                   "pass the name, not a path.")
 
 
 class _HelpFormatter(argparse.HelpFormatter):
@@ -119,7 +122,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="assent",
         description="An AI plan format plus an automatic scheduler: reads "
-                    ".assent work folders, opens an AI session per task, "
+                    "plans from the project's .assent directory, opens an AI "
+                    "session per task, "
                     "checks acceptance objectively, and auto-checkpoints git.",
         formatter_class=_HelpFormatter,
     )
@@ -139,58 +143,58 @@ def _build_parser() -> argparse.ArgumentParser:
                  "rework,archive,init,doctor,shared-paths}"))
 
     run_p = sub.add_parser(
-        "run", help="Run one or more folders in order until all are "
+        "run", help="Run one or more plans in order until all tasks are "
                     "DONE/BLOCKED/SKIP")
     run_p.add_argument(
-        "folders", nargs="*", metavar="FOLDER",
-        help="Work folders to run in the stated order; omit to select one "
-             "automatically" + _REMAINDER_HELP)
+        "folders", nargs="*", metavar="PLAN",
+        help="Plans to run in the stated order; omit to select one "
+             "automatically" + _REMAINDER_HELP + "." + _PLAN_NAME_HELP)
     run_p.add_argument("--once", action="store_true",
                        help="Run only the next task, then stop")
     run_p.add_argument("--task", metavar="ID",
                        help="Run one specific task (prerequisites still checked)")
     run_p.add_argument("--all", action="store_true", dest="all_folders",
-                       help="Run all unfinished work folders in folder-dependency order")
+                       help="Run all unfinished plans in dependency order")
     run_p.add_argument("--jobs", type=_positive_int, metavar="N",
-                       help="Max folders to run concurrently with --all (default: 1)")
+                       help="Max plans to run concurrently with --all (default: 1)")
     run_p.add_argument(
         "--verify", action="store_true",
         help="After the whole run exits zero, run the complete verification "
-             "that matches the selection: one folder as a folder receipt, an "
-             "exact multi-folder selection as that selected batch, and --all or "
+             "that matches the selection: one plan with a per-plan receipt, an "
+             "exact multi-plan selection as that selected batch, and --all or "
              "a bare `...` as the whole-project batch. A failing run is "
              "returned as-is and verifies nothing. With --once or --task it "
              "verifies only when that limited run left the single selected "
-             "folder complete, and an incomplete folder fails the request "
+             "plan complete, and an incomplete plan fails the request "
              "without writing a receipt")
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
-                       "[FOLDER] (zero tokens)")
+                       "[PLAN] (zero tokens)")
     check_p = sub.add_parser(
-        "check", help="Validate the given [FOLDER]'s task-file format, config, "
+        "check", help="Validate the given [PLAN]'s task-file format, config, "
                       "and environment (zero tokens; the meeting's exit gate)")
     report_p = sub.add_parser(
         "report", help="Generate the human-readable run report _report.md "
                        "(zero tokens)")
     verify_p = sub.add_parser(
-        "verify", help="Refresh full integration verification for one folder, "
-                       "an exact selected batch, or every queued folder with "
+        "verify", help="Refresh full integration verification for one plan, "
+                       "an exact selected batch, or every queued plan with "
                        "--batch")
     verify_p.add_argument(
-        "folder", nargs="*", metavar="FOLDER",
-        help="One completed folder, or two or more exact folders to verify "
+        "folder", nargs="*", metavar="PLAN",
+        help="One completed plan, or two or more exact plans to verify "
              "as one dependency-ordered candidate (omit with --batch)"
-             + _REMAINDER_HELP + " that is finished")
+             + _REMAINDER_HELP + " that is finished." + _PLAN_NAME_HELP)
     verify_p.add_argument(
         "--batch", action="store_true",
-        help="Merge every finished, not-yet-integrated folder in folder-"
+        help="Merge every finished, not-yet-integrated plan in "
              "dependency order into one candidate and verify it once; a "
              "conflicting source is reported and, after one confirmation, "
-             "skipped together with the folders queued after it")
+             "skipped together with the plans queued after it")
     verify_p.add_argument(
         "--focus", action="store_true",
-        help="With exactly one FOLDER, rerun its distinct DONE-task focused "
+        help="With exactly one PLAN, rerun its distinct DONE-task focused "
              "verify commands in the source worktree; this cannot authorize "
              "accept and creates no receipt")
     verify_p.add_argument(
@@ -199,67 +203,67 @@ def _build_parser() -> argparse.ArgumentParser:
     clean_p = sub.add_parser(
         "clean", help="Remove worktrees and merged branches that are provably redundant")
     clean_p.add_argument(
-        "folder", nargs="*", metavar="FOLDER",
-        help="The work folders to clean upstream-first; omit to act on all "
-             "folders" + _REMAINDER_HELP)
+        "folder", nargs="*", metavar="PLAN",
+        help="The plans to clean upstream-first; omit to act on all plans"
+             + _REMAINDER_HELP + "." + _PLAN_NAME_HELP)
     clean_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                          help=_CONFIG_HELP)
 
     archive_p = sub.add_parser(
-        "archive", help="Retire a finished folder: clean it, then compress its plan "
+        "archive", help="Retire a finished plan: clean it, then compress its records "
                         "into _archive/ and register it in the roster; --restore "
                         "reverses one archive")
     archive_p.add_argument(
-        "folder", nargs="*", metavar="FOLDER",
-        help="The finished work folders to archive, or the one folder to "
-             "restore (omit only with --all)" + _REMAINDER_HELP)
+        "folder", nargs="*", metavar="PLAN",
+        help="The finished plans to archive, or the one plan to restore "
+             "(omit only with --all)" + _REMAINDER_HELP + "." + _PLAN_NAME_HELP)
     archive_p.add_argument(
         "--all", action="store_true", dest="all_folders",
-        help="Archive every eligible finished folder in lexicographic order; "
-             "ineligible folders are skipped, not failed")
+        help="Archive every eligible finished plan in lexicographic order; "
+             "ineligible plans are skipped, not failed")
     archive_p.add_argument(
         "--restore", action="store_true",
-        help="Reverse one archive: extract the zip back to the live folder, "
+        help="Reverse one archive: extract the zip back to the live plan, "
              "deregister it, and delete the zip (cannot be combined with --all)")
     archive_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
         help=_CONFIG_HELP)
 
     accept_p = sub.add_parser(
-        "accept", help="Transactionally integrate one reviewed, finished folder "
+        "accept", help="Transactionally integrate one reviewed, finished plan "
                        "into the main worktree's current branch, an exact "
-                       "selected batch, or every finished folder with --all")
+                       "selected batch, or every finished plan with --all")
     accept_p.add_argument(
-        "folder", nargs="*", metavar="FOLDER",
-        help="One reviewed work folder, or two or more exact folders to accept "
+        "folder", nargs="*", metavar="PLAN",
+        help="One reviewed plan, or two or more exact plans to accept "
              "as a verified batch (omit only with --all)" + _REMAINDER_HELP
-             + " that is finished")
+             + " that is finished." + _PLAN_NAME_HELP)
     accept_p.add_argument(
         "--all", action="store_true", dest="all_folders",
-        help="Accept every finished work folder in folder-dependency order: a "
+        help="Accept every finished plan in dependency order: a "
              "fresh PASSED batch receipt is replayed and released atomically "
              "without new verification, while absent or expired batch evidence "
-             "verifies each not-yet-integrated folder in turn, stops at the "
-             "first failure, and keeps the folders already published")
+             "verifies each not-yet-integrated plan in turn, stops at the "
+             "first failure, and keeps the plans already published")
     accept_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
         help=_CONFIG_HELP)
 
     reconcile_p = sub.add_parser(
-        "reconcile", help="Resolve one folder's source-versus-target conflict "
+        "reconcile", help="Resolve one plan's source-versus-target conflict "
                           "by hand in an isolated worktree; runs no "
                           "verification and integrates nothing",
         description=(
             "Prepares the conflict in a dedicated worktree, and with "
             "--continue turns the human's resolution into a merge commit the "
-            "folder's own source branch is fast-forwarded onto. It never "
+            "plan's own source branch is fast-forwarded onto. It never "
             "touches the integration target, never runs the focused or the "
-            "complete verification, and never accepts: `assent verify FOLDER` "
-            "and then `assent accept FOLDER` stay separate, explicit steps."))
+            "complete verification, and never accepts: `assent verify PLAN` "
+            "and then `assent accept PLAN` stay separate, explicit steps."))
     reconcile_p.add_argument(
-        "folder", metavar="FOLDER",
-        help="The finished work folder to reconcile (required; one folder "
-             "only, never a speculative set of peers)")
+        "folder", metavar="PLAN",
+        help="The finished plan to reconcile (required; one plan only, never "
+             "a speculative set of peers)." + _PLAN_NAME_HELP)
     reconcile_action = reconcile_p.add_mutually_exclusive_group()
     reconcile_action.add_argument(
         "--continue", action="store_true", dest="continue_reconcile",
@@ -273,12 +277,12 @@ def _build_parser() -> argparse.ArgumentParser:
                              help=_CONFIG_HELP)
 
     reject_p = sub.add_parser(
-        "reject", help="Human ruling: reject a folder by archiving it, force-"
+        "reject", help="Human ruling: reject a plan by archiving it, force-"
                        "removing its worktree and branch, and resetting its "
                        "tasks to TODO")
-    reject_p.add_argument("folder", metavar="FOLDER",
-                          help="The work folder to reject (required; cannot "
-                               "target all folders)")
+    reject_p.add_argument("folder", metavar="PLAN",
+                          help="The plan to reject (required; cannot target all "
+                               "plans)." + _PLAN_NAME_HELP)
     reject_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                           help=_CONFIG_HELP)
 
@@ -291,8 +295,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "reverts code with a new commit, but only when the checkpoints "
             "form a contiguous branch tail. The command only updates status "
             "and reports; it does not auto-run."))
-    rework_p.add_argument("folder", metavar="FOLDER",
-                          help="The work folder containing the target task (required)")
+    rework_p.add_argument("folder", metavar="PLAN",
+                          help="The plan containing the target task (required)."
+                               + _PLAN_NAME_HELP)
     rework_p.add_argument("task", metavar="TASK",
                           help="The exact task id to reopen, e.g. t003 (required)")
     rework_p.add_argument(
@@ -333,8 +338,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     for p in (status_p, check_p, report_p):
         p.add_argument(
-            "folder", nargs="?", metavar="FOLDER",
-            help="The work folder; omit to act on all folders")
+            "folder", nargs="?", metavar="PLAN",
+            help="The plan; omit to act on all plans." + _PLAN_NAME_HELP)
         p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                        help=_CONFIG_HELP)
     # ``run`` has its own ordered positional list and still accepts the same
@@ -613,7 +618,7 @@ def _dispatch(argv: list[str]) -> int:
 
     if args.command == "run":
         if len(args.folders) != len(set(args.folders)):
-            parser.error("run does not allow duplicate FOLDER names")
+            parser.error("run does not allow duplicate PLAN names")
         if args.all_folders and (args.once or args.task is not None):
             parser.error("run's --all cannot be used with --once or --task")
         if remainder and args.all_folders:
@@ -621,7 +626,7 @@ def _dispatch(argv: list[str]) -> int:
         if remainder and (args.once or args.task is not None):
             parser.error("run's --once and --task cannot be used with `...`")
         if len(args.folders) > 1 and (args.once or args.task is not None):
-            parser.error("run's --once and --task each require at most one FOLDER")
+            parser.error("run's --once and --task each require at most one PLAN")
         if not args.all_folders and args.jobs is not None:
             parser.error("run's --jobs can only be used with --all")
         # --once and --task stay legal with --verify: they select exactly one
@@ -632,11 +637,11 @@ def _dispatch(argv: list[str]) -> int:
         if remainder and args.all_folders:
             parser.error("accept's `...` and --all cannot be used together")
         if args.all_folders and args.folder:
-            parser.error("accept's --all and FOLDER cannot be used together")
+            parser.error("accept's --all and PLAN cannot be used together")
         if not args.all_folders and not args.folder and not remainder:
-            parser.error("accept requires FOLDER or --all")
+            parser.error("accept requires PLAN or --all")
         if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
-            parser.error("accept does not allow duplicate FOLDER names")
+            parser.error("accept does not allow duplicate PLAN names")
 
     if args.command == "verify":
         if remainder and args.batch:
@@ -644,39 +649,39 @@ def _dispatch(argv: list[str]) -> int:
         if remainder and args.focus:
             parser.error("verify's `...` and --focus cannot be used together")
         if args.batch and args.folder:
-            parser.error("verify's --batch and FOLDER cannot be used together")
+            parser.error("verify's --batch and PLAN cannot be used together")
         if args.focus:
             if args.batch:
                 parser.error("verify's --focus and --batch cannot be used together")
             if len(args.folder) != 1:
-                parser.error("verify's --focus requires exactly one FOLDER")
+                parser.error("verify's --focus requires exactly one PLAN")
         elif not args.batch:
             if not args.folder and not remainder:
-                parser.error("verify requires FOLDER, a selected batch, or --batch")
+                parser.error("verify requires PLAN, a selected batch, or --batch")
             if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
-                parser.error("verify does not allow duplicate FOLDER names")
+                parser.error("verify does not allow duplicate PLAN names")
 
     if args.command == "clean":
         if len(args.folder) != len(set(args.folder)):
-            parser.error("clean does not allow duplicate FOLDER names")
+            parser.error("clean does not allow duplicate PLAN names")
 
     if args.command == "archive":
         if len(args.folder) != len(set(args.folder)):
-            parser.error("archive does not allow duplicate FOLDER names")
+            parser.error("archive does not allow duplicate PLAN names")
         if args.restore:
             if args.all_folders:
                 parser.error("archive's --restore and --all cannot be used together")
             if remainder:
                 parser.error("archive's --restore and `...` cannot be used "
-                             "together; restore takes exactly one FOLDER")
+                             "together; restore takes exactly one PLAN")
             if not args.folder:
-                parser.error("archive --restore requires FOLDER")
+                parser.error("archive --restore requires PLAN")
             if len(args.folder) > 1:
-                parser.error("archive --restore takes exactly one FOLDER")
+                parser.error("archive --restore takes exactly one PLAN")
         elif args.all_folders and (args.folder or remainder):
-            parser.error("archive's --all and FOLDER cannot be used together")
+            parser.error("archive's --all and PLAN cannot be used together")
         elif not args.all_folders and not args.folder and not remainder:
-            parser.error("archive requires FOLDER or --all")
+            parser.error("archive requires PLAN or --all")
 
     if args.command == "init":
         return run_init(args.path, args.test)

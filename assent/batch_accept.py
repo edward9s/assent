@@ -608,7 +608,7 @@ def _release_batch_locked(config_path: str, assent_dir: Path,
                       "a no-op for the folders it published.")
         print("  source branch/worktree kept for every published folder; retain "
               "each while a dependent may still need its source evidence. "
-              "`assent clean FOLDER` makes the final safety decision.")
+              "`assent clean PLAN` makes the final safety decision.")
         print("  The integration lock coordinates Assent commands only; do not "
               "run concurrent external Git writes during acceptance.")
         return 0

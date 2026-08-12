@@ -481,9 +481,9 @@ class TestDispatch(MainTestCase):
         self.assertEqual(ctx.exception.code, 0)
         text = " ".join(output.getvalue().split())
         self.assertIn("a conflicting source is reported and, after one "
-                      "confirmation, skipped together with the folders queued "
+                      "confirmation, skipped together with the plans queued "
                       "after it", text)
-        self.assertNotIn("accept the folders ahead", text)
+        self.assertNotIn("accept the plans ahead", text)
 
     def test_verify_interrupt_returns_130(self):
         config = self.write_config()
@@ -550,15 +550,15 @@ class TestDispatch(MainTestCase):
             main(["reconcile", "-h"])
         self.assertEqual(ctx.exception.code, 0)
         text = output.getvalue()
-        self.assertIn("FOLDER", text)
+        self.assertIn("PLAN", text)
         for option in ("--continue", "--abort", "--config"):
             self.assertIn(option, text)
         # argparse wraps the description, so compare without its line breaks.
         unwrapped = " ".join(text.split())
         self.assertIn("never runs the focused or the complete verification",
                       unwrapped)
-        self.assertIn("assent verify FOLDER", unwrapped)
-        self.assertIn("assent accept FOLDER", unwrapped)
+        self.assertIn("assent verify PLAN", unwrapped)
+        self.assertIn("assent accept PLAN", unwrapped)
 
     def test_reconcile_configuration_error_returns_one_without_dispatch(self):
         config = self.write_config()
@@ -576,7 +576,7 @@ class TestDispatch(MainTestCase):
         self.assertEqual(ctx.exception.code, 0)
         text = output.getvalue()
         self.assertIn("assent rework", text)
-        self.assertIn("FOLDER TASK", text)
+        self.assertIn("PLAN TASK", text)
         for option in ("--cascade", "--revert-code", "--reason", "--config"):
             self.assertIn(option, text)
         for forbidden in ("--all", "--once"):
@@ -1064,15 +1064,30 @@ class TestHelpPalette(MainTestCase):
                     self.assertNotIn(
                         "\x1b[", self.help_output(argv, environment))
 
+    def test_plan_arguments_name_the_domain_concept_and_explain_storage(self):
+        for command in ("run", "status", "check", "report", "verify", "clean",
+                        "archive", "accept", "reconcile", "reject", "rework"):
+            with self.subTest(command=command):
+                help_text = " ".join(
+                    self.help_output([command], {}).split())
+                self.assertIn("PLAN", help_text)
+                self.assertNotIn("FOLDER", help_text)
+                self.assertIn("Each PLAN names a directory directly under the "
+                              "project's `.assent/`", help_text)
+                self.assertIn("pass the name, not a path", help_text)
+
     def test_help_states_the_remainder_syntax_and_the_two_receipt_paths(self):
         run_help = " ".join(self.help_output(["run"], {}).split())
         self.assertIn("the literal token `...` as the last argument adds every "
-                      "remaining discovered work folder", run_help)
+                      "remaining discovered plan", run_help)
+        self.assertIn("Each PLAN names a directory directly under the project's "
+                      "`.assent/`", run_help)
+        self.assertIn("pass the name, not a path", run_help)
         self.assertIn("After the whole run exits zero, run the complete "
                       "verification that matches the selection", run_help)
         self.assertIn("With --once or --task it verifies only when that limited "
-                      "run left the single selected folder complete, and an "
-                      "incomplete folder fails the request without writing a "
+                      "run left the single selected plan complete, and an "
+                      "incomplete plan fails the request without writing a "
                       "receipt", run_help)
         self.assertNotIn("cannot be used with --once or --task", run_help)
 
@@ -1080,7 +1095,7 @@ class TestHelpPalette(MainTestCase):
         self.assertIn("a fresh PASSED batch receipt is replayed and released "
                       "atomically without new verification", accept_help)
         self.assertIn("absent or expired batch evidence verifies each "
-                      "not-yet-integrated folder in turn", accept_help)
+                      "not-yet-integrated plan in turn", accept_help)
         self.assertNotIn("(sequential only)", accept_help)
 
 
@@ -1453,6 +1468,8 @@ class TestInit(MainTestCase):
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertEqual(agents_md.count("<!-- assent-instructions -->"), 1)
         self.assertIn("`~/.assent/instructions.md`", agents_md)
+        self.assertIn("An AI session never initiates the full suite", agents_md)
+        self.assertIn("the scheduler owns workflow `full_verify`", agents_md)
         config = (self.user_home / "assent.toml").read_text(encoding="utf-8")
         self.assertNotIn("[git]", config)
         self.assertNotIn("[plan]", config)
@@ -1561,8 +1578,9 @@ class TestInit(MainTestCase):
         self.assertIn("watchdog", config)
         self.assertEqual(
             config["workflow"]["task"],
-            [{"role": "implementer"}, {"action": "focused_test"},
-             {"role": "task_reviewer_fixer"},
+            [{"role": "implementer", "adapter": "codex"},
+             {"action": "focused_test"},
+             {"role": "task_reviewer_fixer", "adapter": "claude"},
              {"action": "focused_test"}])
         self.assertEqual(config["workflow"]["integration"][0],
                          {"action": "full_verify"})
@@ -1713,6 +1731,7 @@ class TestInit(MainTestCase):
         self.assertIn("- 也保留這行", text)
         self.assertIn("`~/.assent/instructions.md`", text)
         self.assertNotIn("`.assent/instructions.md`", text)
+        self.assertIn("An AI session never initiates the full suite", text)
 
     def test_adds_one_bridge_line_to_existing_agents_md(self):
         (self.root / "AGENTS.md").write_text(
@@ -1722,6 +1741,15 @@ class TestInit(MainTestCase):
         self.assertTrue(text.startswith("# 我的專案"))
         self.assertIn("既有規則。", text)
         self.assertEqual(text.count("<!-- assent-instructions -->"), 1)
+
+    def test_new_agents_md_combines_template_with_managed_bridge(self):
+        run_init(self.root, test="unittest")
+        text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        template = (_PROJECT_ROOT / "assent/templates/AGENTS.md").read_text(
+            encoding="utf-8")
+        self.assertIn(template.rstrip(), text)
+        self.assertEqual(text.count("<!-- assent-instructions -->"), 1)
+        self.assertNotIn("<!-- assent-instructions -->", template)
 
     def test_preserves_existing_ignore_lines_and_agents_md_ignore_choice(self):
         (self.root / ".gitignore").write_text(

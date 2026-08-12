@@ -19,9 +19,10 @@ Assent 的核心流程只有三個階段：談妥計畫、讓它自動執行、�
 `~/.assent/workflow.md`。AI 可按需要查看原始碼與測試，確認真正的檔案責任與
 完整 scope。
 
-先討論需求，再建立檔案。每項決定一旦確定，就寫進
-`.assent/<PLAN>/tNNN_name.e.toml`。一份好的 task 應讓全新的 AI 清楚知道要完成
-什麼、可以改哪些路徑，以及 focused verification 如何判定完成。
+先與 AI 確認需求；討論期間不要建立檔案。取得人類明確同意後，再請 AI：
+「將上述討論的共識，建立成 `.assent/<PLAN>/` 下的 Assent 格式計畫。」計畫由
+`tNNN_name.e.toml` task 組成；每份 task 應讓全新的 AI 清楚知道要完成什麼、
+可以改哪些路徑，以及 focused verification 如何判定完成。
 
 會議最後執行：
 
@@ -37,8 +38,8 @@ assent check
 請和我一起規劃這項變更。先讀 AGENTS.md、~/.assent/instructions.md 與
 ~/.assent/format.md。請簡潔回答，不要使用子代理。按需要檢查相關原始碼與
 測試；若發現原始碼錯誤、結構問題或文件與實作不符，請直接指出。不要過度
-設計。先和我討論，取得人類明確同意後，再把計畫寫成
-.assent/<PLAN>/ 下的 Assent task，最後執行 assent check。
+設計。先和我確認需求；在我明確同意前不要建立檔案。我同意後，將上述討論的
+共識建立成 .assent/<PLAN>/ 下的 Assent 格式計畫，最後執行 assent check。
 ```
 
 ## 2. 自動執行

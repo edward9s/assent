@@ -5,25 +5,25 @@
 > 本文是 [英文版](../COMMANDS.md) 的正體中文翻譯；若內容不同，以英文版為準。
 
 完整 option 請直接執行 `assent <command> --help`。本文只說明如何選指令，以及
-folder selection 的重要規則。
+plan selection 的重要規則。
 
-## Folder selection
+## Plan selection
 
-明確指定的 folder 必須存在於 `.assent/`，而且至少包含一份正式 `.e.toml`
-task。Assent 會在任何動作開始前檢查所有名稱；若有錯，會一次列出完整清單，
-不會執行其中一部分。
+`PLAN` 是專案 `.assent/` 直下的目錄名稱，不是路徑；例如 `demo` 代表
+`.assent/demo/`。其中必須至少包含一份正式 `.e.toml` task。Assent 會在任何動作
+開始前檢查所有 plan 名稱；若有錯，會一次列出完整清單，不會執行其中一部分。
 
-多數接受 folder 的指令也支援最後一個 `...`：
+多數接受 plan 的指令也支援最後一個 `...`：
 
 ```text
 assent run urgent01 ...
 ```
 
-意思是「先處理 `urgent01`，再加上這個指令原本會找到的其餘 folder」。它不是
+意思是「先處理 `urgent01`，再加上這個指令原本會找到的其餘 plan」。它不是
 `--all` 的別名。Assent 會在修改任何東西之前固定這份清單。`run` 保留明示前綴
 順序；`verify` 與 `accept` 會依相依順序整理整份清單；`clean` 從上游開始。
 
-選到一個 folder 就走單一 folder 流程；兩個以上就是一組精確 batch。即使清單
+選到一個 plan 就走單一 plan 流程；兩個以上就是一組精確 batch。即使清單
 來自 `...` 也不例外：accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 
 `run`、`status`、`check`、`report`、`verify`、`clean`、`archive`、`accept`、

@@ -253,14 +253,19 @@ Plan 使用可攜的 `prime`、`core`、`lite` model tier；effort 是另一個�
 `heavy`、`normal`、`slight`。解析順序為 task 或 role 明示值、該 model tier 的
 設定預設值、內建 tier 預設值。每次 invocation 都會取得轉換後的具體 effort。
 
-Plan 與 integration workflow entry 可以指定 adapter：
+每一層 workflow 的 role entry 都可以指定一個 adapter，或依序 fallback 的清單：
 
 ```toml
-{ role = "plan_reviewer_fixer", adapter = "codex" }
+{ role = "implementer", adapter = "codex" }
+{ role = "task_reviewer_fixer", adapter = ["claude", "codex"] }
 ```
 
-省略時使用設定清單中的第一個 adapter。Task workflow entry 不接受 `adapter`
-欄位，而是沿用一般 task 的 adapter 選擇與輪替方式。
+省略時，該 role 沿用全域 `[adapter].name` rotation。字串會把該 role 固定在
+一個 adapter；quota 用完便等待它。清單只會依宣告順序使用其中的 adapter：
+quota 或 adapter availability failure 會先保留進度，再切換且不消耗 task retry；
+整份清單都 unavailable 或 quota-exhausted 後才等待。測試失敗、`BLOCKED` 與無效 verdict 會照
+workflow 或 retry policy 處理，不會因此更換 adapter。每個 workflow step 都從
+自己清單的第一個 adapter 開始。
 
 ## 初始化與排錯
 

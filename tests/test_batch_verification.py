@@ -444,7 +444,7 @@ class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
         self.assertIn("assent verify aa", output)
         self.assertIn("assent accept aa", output)
         self.assertIn("assent reconcile bb", output)
-        self.assertIn("assent rework <FOLDER> <TASK>", output)
+        self.assertIn("assent rework <PLAN> <TASK>", output)
         self.assertIn("assent reject bb", output)
         ask.assert_not_called()
         verifier.assert_not_called()
@@ -715,7 +715,7 @@ class TestBatchConflictSkip(BatchVerifyRepositoryCase):
         # Single-folder reconciliation cannot resolve a peer conflict, so it is
         # not offered, and the invalid one-argument rework is not either.
         self.assertNotIn("assent reconcile bb", output)
-        self.assertIn("assent rework <FOLDER> <TASK>", output)
+        self.assertIn("assent rework <PLAN> <TASK>", output)
         self.assertIn("assent reject bb", output)
 
     def test_a_conflict_with_the_target_itself_points_at_reconcile(self) -> None:

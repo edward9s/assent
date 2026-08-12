@@ -31,7 +31,11 @@ _BRIDGE_MARKER = "<!-- assent-instructions -->"
 _BRIDGE_LINE = (
     "- When using assent, first read `~/.assent/instructions.md`, the global "
     "working instructions shared by every project; a scheduled worktree "
-    f"session uses the absolute path the scheduler provides. {_BRIDGE_MARKER}"
+    "session uses the absolute path the scheduler provides. An AI session "
+    "never initiates the full suite or `.assent/verify.py`; the scheduler owns "
+    "workflow `full_verify`, and an interactive session runs complete "
+    "verification only when the human explicitly requests it. "
+    f"{_BRIDGE_MARKER}"
 )
 _GITIGNORE_LINES = [".assent/"]
 _DIRECT_API_DEFAULT = object()
@@ -499,7 +503,8 @@ def _agents_plan(root: Path) -> tuple[str, tuple[str, str]]:
     """Return the AGENTS.md content and outcome, bridge line included once."""
     target = root / "AGENTS.md"
     if not target.exists():
-        return _template("AGENTS.md"), ("created", str(target))
+        content = _template("AGENTS.md").rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
+        return content, ("created", str(target))
     existing = _read_file(target, "AGENTS.md")
     if _BRIDGE_MARKER in existing:
         # An older init wrote a bridge pointing at the project copy of the

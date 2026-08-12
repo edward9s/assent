@@ -3,26 +3,27 @@
 *[README](../README.md) · [Traditional Chinese](zh-TW/COMMANDS.md)*
 
 Use `assent <command> --help` for every option. This page explains which command
-to choose and how folder selection behaves.
+to choose and how plan selection behaves.
 
-## Folder selection
+## Plan selection
 
-An explicitly named folder must exist under `.assent/` and contain at least one
-formal `.e.toml` task. Assent checks every stated name before starting any
-selected operation and reports the whole unresolved set at once.
+`PLAN` is a directory name directly under the project's `.assent/`, not a path:
+for example, `demo` means `.assent/demo/`. It must contain at least one formal
+`.e.toml` task. Assent checks every stated plan name before starting any selected
+operation and reports the whole unresolved set at once.
 
-Most folder-taking commands also accept a final `...`:
+Most plan-taking commands also accept a final `...`:
 
 ```text
 assent run urgent01 ...
 ```
 
-This means “`urgent01`, then every remaining folder this command would normally
+This means “`urgent01`, then every remaining plan this command would normally
 discover.” It is not an alias for `--all`. Expansion is snapshotted before any
 change begins. `run` keeps the explicit prefix order; `verify` and `accept`
 dependency-order the complete selection; `clean` works upstream-first.
 
-One selected folder uses the single-folder path. Two or more form one exact
+One selected plan uses the single-plan path. Two or more form one exact
 batch. `...` does not weaken that rule: an expanded acceptance still needs
 evidence for exactly the expanded set and never starts verification.
 
@@ -105,7 +106,7 @@ assent reject <PLAN>
 
 Direct and selected `accept` never verify. `accept --all` may either replay one
 fresh batch receipt or, without usable batch evidence, verify and accept
-eligible folders sequentially until the first failure.
+eligible plans sequentially until the first failure.
 
 Clean or archive only when wanted:
 
