@@ -175,19 +175,27 @@ class TestContractContent(unittest.TestCase):
                 encoding="utf-8"))
         self.assertEqual(
             configuration["workflow"]["task"],
-            [{"role": "implementer", "adapter": "codex"},
-             {"action": "focused_test"},
-             {"role": "task_reviewer_fixer", "adapter": "claude"},
+            [{"role": "implementer"}, {"action": "focused_test"},
+             {"role": "task_reviewer_fixer"},
              {"action": "focused_test"}])
-        self.assertEqual(configuration["workflow"]["plan"][0],
-                         {"action": "focused_sweep"})
-        self.assertEqual(configuration["workflow"]["integration"][0],
-                         {"action": "full_verify"})
-        self.assertEqual(configuration["workflow"]["integration"][1],
-                         {"role": "integration_reviewer_fixer",
-                          "adapter": "codex"})
-        self.assertEqual(configuration["workflow"]["integration"][-1],
-                         {"action": "full_verify"})
+        plan_shape = [
+            {key: value for key, value in step.items() if key != "adapter"}
+            for step in configuration["workflow"]["plan"]]
+        self.assertEqual(
+            plan_shape,
+            [{"action": "focused_sweep"},
+             {"role": "plan_reviewer_fixer"},
+             {"action": "focused_sweep"},
+             {"role": "plan_reviewer_fixer"},
+             {"action": "focused_sweep"}])
+        integration_shape = [
+            {key: value for key, value in step.items() if key != "adapter"}
+            for step in configuration["workflow"]["integration"]]
+        self.assertEqual(
+            integration_shape,
+            [{"action": "full_verify"},
+             {"role": "integration_reviewer_fixer"},
+             {"action": "full_verify"}])
         self.assertIn("current task",
                       configuration["abilities"]["task_review"]["prompt"])
         self.assertIn("cumulative worktree",

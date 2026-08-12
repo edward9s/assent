@@ -232,7 +232,9 @@ rounds, not instructions to run unconditionally.
 - Omitted or empty `workflow.integration` disables automatic integration
   repair.
 
-A task file may override only its task sequence:
+A task file may override only its task sequence. To split one task between a
+test writer and a source implementer, first define both roles in an effective
+settings file such as `~/.assent/assent.toml`:
 
 ```toml
 [roles.test_writer]
@@ -240,13 +242,20 @@ ability = ["write_tests"]
 
 [roles.source_implementer]
 ability = ["implement_source"]
+```
 
+Then put only the sequence override in that task's `.e.toml` file:
+
+```toml
 workflow = [
   { role = "test_writer" },
   { role = "source_implementer" },
   { action = "focused_test" },
 ]
 ```
+
+This opens two separate AI sessions and then runs the task's `verify` command
+as `focused_test`.
 
 Omission inherits `[workflow].task`. `workflow = []` assigns that task to
 plan-wide execution. Override roles still come from the effective `[roles]`
@@ -279,11 +288,9 @@ failure preserves progress and advances without consuming a task retry, and
 Assent waits after the whole list is unavailable or quota-exhausted. Test failure, `BLOCKED`,
 and an invalid verdict advance through the workflow or retry policy instead of
 changing adapters. Each workflow step starts from the first declared adapter.
-Authentication failure likewise preserves progress and skips that candidate
-without consuming a task retry. If every candidate requires authentication,
-Assent stops nonzero with `AUTHENTICATION REQUIRED`; it neither waits nor marks
-the task `BLOCKED`. With mixed authentication and quota failures, Assent waits
-only for a quota-exhausted candidate that can recover.
+Authentication failure preserves progress and skips that candidate. If every
+candidate requires login, Assent stops with `AUTHENTICATION REQUIRED`; log in
+and run the command again.
 
 ## Initialization and troubleshooting
 

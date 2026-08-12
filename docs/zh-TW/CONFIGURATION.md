@@ -223,7 +223,8 @@ integration = [
 - 省略或設空 `workflow.plan`，表示不執行 plan review。
 - 省略或設空 `workflow.integration`，表示停用自動 integration repair。
 
-Task 檔可以只覆寫自己的 task sequence：
+Task 檔只能覆寫自己的 task sequence。若要把一個 task 拆給 test writer 與 source
+implementer，先在有效的設定檔（例如 `~/.assent/assent.toml`）定義兩個 role：
 
 ```toml
 [roles.test_writer]
@@ -231,13 +232,20 @@ ability = ["write_tests"]
 
 [roles.source_implementer]
 ability = ["implement_source"]
+```
 
+再把 sequence override 單獨放進該 task 的 `.e.toml` 檔：
+
+```toml
 workflow = [
   { role = "test_writer" },
   { role = "source_implementer" },
   { action = "focused_test" },
 ]
 ```
+
+這會依序開啟兩個獨立的 AI session，最後以 `focused_test` 執行該 task 的
+`verify` 指令。
 
 省略時繼承 `[workflow].task`；`workflow = []` 則把這個 task 交給 plan-wide
 execution。Override 使用的 role 仍須定義在有效的 `[roles]` 設定中。
@@ -266,10 +274,8 @@ quota 或 adapter availability failure 會先保留進度，再切換且不消�
 整份清單都 unavailable 或 quota-exhausted 後才等待。測試失敗、`BLOCKED` 與無效 verdict 會照
 workflow 或 retry policy 處理，不會因此更換 adapter。每個 workflow step 都從
 自己清單的第一個 adapter 開始。
-Authentication failure 同樣會保留進度、略過該候選，且不消耗 task retry。若
-所有候選都需要登入，Assent 會以非零的 `AUTHENTICATION REQUIRED` 停止；不會
-等待，也不會把 task 標成 `BLOCKED`。Authentication 與 quota failure 混合時，
-只等待仍可由 quota reset 恢復的候選。
+Authentication failure 會保留進度並略過該候選。若所有候選都需要登入，Assent
+會以 `AUTHENTICATION REQUIRED` 停止；登入後重新執行指令即可。
 
 ## 初始化與排錯
 

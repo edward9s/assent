@@ -91,11 +91,9 @@ progress and advances within that list without consuming a task retry; an
 unavailable or quota-exhausted list waits. Test failure, `BLOCKED`, and invalid
 verdict output do not select a different adapter.
 
-Authentication failure also preserves progress and skips that candidate
-without consuming a task retry. If every candidate requires authentication,
-Assent stops nonzero as `AUTHENTICATION REQUIRED`; it does not wait or mark the
-task `BLOCKED`. A mixed authentication/quota result waits only for a
-quota-exhausted candidate that can recover.
+Authentication failure preserves progress and skips that candidate. If every
+candidate requires login, Assent stops as `AUTHENTICATION REQUIRED`; log in and
+run the command again.
 
 Actions are scheduler-owned and accept no role, adapter, model, effort, ability,
 prompt, or arbitrary command. `focused_test` is legal only at task positions;

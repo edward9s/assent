@@ -61,16 +61,16 @@ effort = "heavy"
 # then the next action rechecks the result.
 [workflow]
 task = [
-  { role = "implementer", adapter = "codex" },
+  { role = "implementer"},
   { action = "focused_test" },
-  { role = "task_reviewer_fixer", adapter = "claude" },
+  { role = "task_reviewer_fixer"},
   { action = "focused_test" },
 ]
 plan = [
   { action = "focused_sweep" },
-  { role = "plan_reviewer_fixer", adapter = ["codex", "claude"] },
+  { role = "plan_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
-  { role = "plan_reviewer_fixer", adapter = ["claude", "codex"] },
+  { role = "plan_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
 ]
 integration = [
