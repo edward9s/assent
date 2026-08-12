@@ -173,7 +173,7 @@ def _check_orphaned_branches(cfg: Config,
     Their existence is untidy, not broken: this check is never a failure and
     never contributes to doctor's exit code, whether orphans are found, the
     human declines, or a removal is refused.  It is also the recovery path, not
-    the routine one -- ``clean --all`` sweeps the same refs without asking,
+    the routine one -- ``clean`` with no folder sweeps the same refs without asking,
     because that matches clean's prove-or-retain contract -- so this is the only
     place the question is put to a human.
 

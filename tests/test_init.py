@@ -36,9 +36,11 @@ class TestInitContractRefresh(unittest.TestCase):
         self.assertEqual((self.user_home / "format.md").read_bytes(), expected)
         workflow_expected = (
             _PROJECT_ROOT / "assent/templates/workflow.md").read_bytes()
+        workflow_text = " ".join(
+            workflow_expected.decode("utf-8").split())
         self.assertIn(
-            "refreshes `_report.md` after",
-            workflow_expected.decode("utf-8"))
+            "Complete folder verification refreshes that folder's `_report.md`",
+            workflow_text)
         self.assertIn(
             "descriptive `name` segment has no canonical-language requirement",
             " ".join(expected.decode("utf-8").split()))

@@ -1,314 +1,294 @@
 # Configuration
 
-*[README](../README.md) · [Traditional Chinese reader guide](zh-TW/CONFIGURATION.md)*
+*[README](../README.md) · [Traditional Chinese](zh-TW/CONFIGURATION.md)*
 
-This is the English canonical guide to initialization, settings precedence,
-adapters, model tiers, effort, and adapter troubleshooting. See the
-[Traditional Chinese translation](zh-TW/CONFIGURATION.md),
-[COMMANDS](COMMANDS.md) for command syntax, [VERIFICATION](VERIFICATION.md) for
-receipt settings, and [OPERATIONS](OPERATIONS.md) for runtime boundaries.
+Assent requires Python 3.11+, Git, and at least one installed and authenticated
+AI CLI. The Python package has no third-party runtime dependencies.
 
-## Requirements and file locations
+## Files and precedence
 
-Assent supports Python 3.11+ and requires Git. It is standard-library-only.
-The configured AI adapter must have its CLI installed and authenticated before
-an unattended run. The published installation is:
+Shared files live under `~/.assent/`:
 
 ```text
-python -m pip install assent
+assent.toml       scheduler settings
+adapter.toml      AI CLI commands and model mappings
+instructions.md  AI session rules
+format.md         plan-file contract
+workflow.md       scheduler and acceptance contract
 ```
 
-For a source checkout, the editable development installation is:
+The project owns `AGENTS.md`, `.assent/verify.py`, its plans, and an optional
+`.assent/assent.toml` override.
+
+Settings resolve from built-in defaults, user configuration, project override,
+and finally any supported command-line override. Tables merge by key; scalars
+and arrays replace the lower value. Omit a value to inherit it. An empty array
+is an intentional empty value.
+
+`assent init` adds newly packaged settings but preserves existing values and
+comments. It does not silently replace an existing workflow with a newer
+default; adopt such changes deliberately after reading this guide.
+
+## Think in workflows
+
+The central configuration chain is:
 
 ```text
-python -m pip install -e .
+ability: prompt + authority
+        ↓
+role: one or more abilities + model/effort
+        ↓
+workflow: ordered roles and scheduler actions
 ```
 
-Uninstalling the distribution removes the Python package and the `assent` CLI
-entry point, but never deletes `~/.assent`, project `.assent/` directories,
-worktrees, archives, or Git branches. Human-selected data cleanup remains
-separate.
+An ability says what an AI session is responsible for. A role composes those
+abilities. A workflow decides when that role runs and which mechanical result
+opens the next repair attempt. Names such as `reviewer` or `fixer` are only
+labels for people; the engine never infers authority from a name.
 
-Assent's own shared files live once per machine:
+### Abilities
 
-```text
-~/.assent/
-├── assent.toml       # shared settings
-├── instructions.md   # session rules contract
-├── format.md         # task-format contract
-└── workflow.md       # CLI, report, and receipt contract
-
-<project>/
-├── AGENTS.md         # project rules and the Assent bridge line
-└── .assent/          # ignored, main worktree only
-    ├── verify.py
-    ├── assent.toml   # optional project override
-    └── <work folder>/
+```toml
+[abilities.task_review]
+prompt = "Review only the current task's failure evidence."
+writes = false
+produces_verdict = true
 ```
 
-The project does not receive copies of `instructions.md`, `format.md`, or
-`workflow.md`. `assent init` installs and refreshes them in the user home. The project keeps
-its own `AGENTS.md`, verifier, task folders, reports, logs, receipts, archive,
-and optional project override.
+- `prompt` is appended to the session instructions. Keep it specific to that
+  workflow layer; the scheduler supplies the detailed protocol and evidence.
+- `writes` states whether the role may edit source in its scheduler-authorized
+  scope. It is the capability distinction that makes a reviewer read-only.
+- `produces_verdict = true` makes the role return the structured review result.
+  It defaults to `false`.
 
-## Settings precedence
+The prompt does not grant extra scope, Git authority, or permission to run
+verification. Scheduler rules remain authoritative.
 
-Lowest priority first:
+### Roles
 
-1. Assent built-in defaults.
-2. User settings in `~/.assent/assent.toml`.
-3. Optional project override in `.assent/assent.toml`.
-4. An explicit CLI selection where supported, such as `--config PATH`,
-   `--jobs`, or another command-specific option.
+```toml
+[roles.task_reviewer_fixer]
+ability = ["task_review", "task_fix"]
+model = "prime"
+effort = "heavy"
+```
 
-Tables merge by key; scalars and arrays replace as a whole. A project override
-shadows shared settings only for keys it states, is never migrated into the
-user home, and is preserved byte-for-byte. `--config PATH` chooses which
-project-level file plays the override role and locates the project from its
-`.assent` parent; it is not a current-folder pointer.
+`ability` is a nonempty ordered list. The role writes if any included ability
+writes, and produces a verdict if any included ability does so. `model` and
+`effort` are optional for ordinary task roles, which otherwise inherit the
+task's profile. Verdict roles in `workflow.plan` and `workflow.integration`
+must state both values so their accountability is reproducible.
 
-Omitting a key is the only way to inherit:
+### Scheduler actions
 
-- `key =` is invalid TOML, not an empty value.
-- An empty table contributes no leaf overrides.
-- An empty array is an explicit replacement where the field allows it.
-- An empty or whitespace-only string is refused for settings that need useful
-  text, such as a command, adapter name, or effort value.
+Actions are run by Assent outside AI sessions:
 
-Invalid TOML and invalid values fail before managed files are written.
+| Workflow | Action | Checks |
+| --- | --- | --- |
+| `task` | `focused_test` | the current task's `verify` command |
+| `plan` | `focused_sweep` | the distinct union of focused commands in one completed plan |
+| `integration` | `full_verify` | the reconstructed candidate for the exact selected plan set |
 
-## Initialization
+An action is legal only in its matching array. AI roles do not run these
+actions or `.assent/verify.py` themselves.
 
-From a Git project root, a fresh initialization installs the user-home
-contracts and settings, creates `.assent/verify.py`, keeps `.assent/` ignored,
-and refreshes the `AGENTS.md` bridge line. It asks for exactly one real project
-verification choice: parallel unittest, pytest, npm test, Flutter test, dotnet
-test, Maven test, Gradle test, CMake/CTest, Make test, or a custom argv
-command. Scripts can supply it directly, for example:
+## How an array runs
+
+A passing action completes its layer immediately and skips everything after
+it. A failing action advances to the next configured repair role; the next
+action rechecks the resulting source. The array is therefore both the order of
+work and the finite repair budget. Exhaustion preserves the evidence and edits
+as `REVIEW UNRESOLVED, HUMAN DECISION`; it does not discard work.
+
+Between two actions, use one of these shapes:
+
+```toml
+# One session reviews and repairs.
+{ action = "focused_sweep" },
+{ role = "plan_reviewer_fixer" }, # writes + produces_verdict
+{ action = "focused_sweep" },
+
+# Separate read-only review and write-capable repair sessions.
+{ action = "focused_sweep" },
+{ role = "plan_reviewer" },       # produces_verdict, no writes
+{ role = "plan_fixer" },          # writes, no verdict
+{ action = "focused_sweep" },
+```
+
+A writable verdict role must be the only role between the actions: it owns the
+diagnosis and repair in the same session. A read-only verdict role may instead
+be followed by exactly one write-capable, non-verdict fixer. These rules come
+from the capability flags and position, never the role names.
+
+## Three different repair responsibilities
+
+Use different abilities and prompts because each layer answers a different
+question:
+
+| Layer | Repair scope |
+| --- | --- |
+| `workflow.task` | The current task's `BLOCKED` or `focused_test` evidence. It may settle a small planning omission, such as one exact missing scope path, and repair it in the same writable verdict session. It does not spend the plan repair budget. |
+| `workflow.plan` | Whether the cumulative worktree from all completed tasks conforms to the existing plan. It handles `focused_sweep` failures and cross-task regressions through implicated existing tasks. |
+| `workflow.integration` | Whether the same exact selected plan set can be reconstructed and pass `full_verify`. It handles candidate conflicts and complete-verifier failures without dropping a folder or accepting only a prefix. |
+
+The integration workflow verifies and repairs; it never performs human
+acceptance. Publication remains the later explicit `assent accept` decision.
+
+### Default workflow
+
+The packaged configuration uses one implementation session per task and a
+dedicated reviewer/fixer responsibility at each repair layer:
+
+```toml
+[abilities.write_tests]
+prompt = "Write or update tests that prove the supplied requirements."
+writes = true
+
+[abilities.implement_source]
+prompt = "Implement the supplied requirements and satisfy the supplied focused checks."
+writes = true
+
+[abilities.task_review]
+prompt = "Resolve only the current task's BLOCKED or focused_test evidence. Diagnose a task-local planning omission; when one exact scope path was omitted, identify it without inventing requirements."
+writes = false
+produces_verdict = true
+
+[abilities.task_fix]
+prompt = "In the same session, repair every authorized task-local finding, including an exact omitted scope path. Do not create tasks or requirements."
+writes = true
+
+[abilities.plan_review]
+prompt = "Review only focused_sweep failure evidence to decide whether the cumulative worktree conforms to the existing plan, including cross-task interactions and concrete regressions."
+writes = false
+produces_verdict = true
+
+[abilities.plan_fix]
+prompt = "Repair every authorized plan-level finding through its implicated existing tasks. Do not create tasks or requirements."
+writes = true
+
+[abilities.integration_review]
+prompt = "Review only the exact selection's candidate-conflict or full_verify failure evidence. Identify every integration blocker without shrinking the selection, accepting a prefix, or inventing requirements."
+writes = false
+produces_verdict = true
+
+[abilities.integration_fix]
+prompt = "Repair every authorized integration finding in the scheduler-provided workspaces while preserving the exact selection. Do not run Git, Assent, focused tests, full verification, or accept."
+writes = true
+
+[roles.implementer]
+ability = ["write_tests", "implement_source"]
+
+[roles.task_reviewer_fixer]
+ability = ["task_review", "task_fix"]
+model = "prime"
+effort = "heavy"
+
+[roles.plan_reviewer_fixer]
+ability = ["plan_review", "plan_fix"]
+model = "prime"
+effort = "heavy"
+
+[roles.integration_reviewer_fixer]
+ability = ["integration_review", "integration_fix"]
+model = "prime"
+effort = "heavy"
+
+[workflow]
+task = [
+  { role = "implementer" },
+  { action = "focused_test" },
+  { role = "task_reviewer_fixer" },
+  { action = "focused_test" },
+]
+plan = [
+  { action = "focused_sweep" },
+  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { action = "focused_sweep" },
+  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { action = "focused_sweep" },
+]
+integration = [
+  { action = "full_verify" },
+  { role = "integration_reviewer_fixer", adapter = "codex" },
+  { action = "full_verify" },
+]
+```
+
+The first passing `focused_test`, `focused_sweep`, or `full_verify` skips the
+rest of its own array. Repeated plan review positions are separate repair
+rounds, not instructions to run unconditionally.
+
+## Omissions and task overrides
+
+- Omitted `workflow.task` gives each task one implicit session using its own
+  model and effort.
+- A nonempty task workflow may put worker roles before `focused_test`. If it
+  contains that action, it must end with it. A worker that returns `BLOCKED`
+  advances directly to the next verdict role, using the existing evidence.
+- `workflow.task = []` disables per-task sessions and makes the plan workflow
+  execute the plan as one unit. The plan workflow must then be nonempty.
+- Omitted or empty `workflow.plan` means no plan review.
+- Omitted or empty `workflow.integration` disables automatic integration
+  repair.
+
+A task file may override only its task sequence:
+
+```toml
+[roles.test_writer]
+ability = ["write_tests"]
+
+[roles.source_implementer]
+ability = ["implement_source"]
+
+workflow = [
+  { role = "test_writer" },
+  { role = "source_implementer" },
+  { action = "focused_test" },
+]
+```
+
+Omission inherits `[workflow].task`. `workflow = []` assigns that task to
+plan-wide execution. Override roles still come from the effective `[roles]`
+configuration.
+
+## Adapters, models, and effort
+
+`[adapter].name` selects one adapter or an ordered rotation. Built-in adapters
+are Claude, Codex, and Antigravity. Their commands, arguments, portable model
+mappings, default efforts, and vendor effort translations live in
+`adapter.toml`. Authenticate each CLI before unattended use; Assent uses its
+existing credentials and does not manage secrets.
+
+Plans use portable `prime`, `core`, and `lite` model tiers. Effort is the
+separate `heavy`, `normal`, or `slight` choice. Resolution is explicit task or
+role effort, then the configured default for that model tier, then the built-in
+tier default. Every invocation receives a concrete translated effort.
+
+Plan and integration workflow entries may select an adapter:
+
+```toml
+{ role = "plan_reviewer_fixer", adapter = "codex" }
+```
+
+When omitted, Assent uses the first configured adapter. Task workflow entries
+do not take an `adapter` field; they follow normal task adapter selection and
+rotation.
+
+## Initialization and troubleshooting
+
+Initialize a project with its real complete verifier, then review the generated
+script:
 
 ```text
 assent init --test unittest
-assent init --test "custom:python -m unittest"
+assent doctor
 ```
 
-The generated verifier activates the selected command rather than leaving an
-empty skeleton that could report success without testing the project.
+Task files should use narrower focused commands. If configuration fails, the
+diagnostic names the invalid key and source file. Also confirm that Git is
+available, the selected AI CLI is logged in, and its model mappings name models
+that CLI accepts.
 
-On repeat init, Assent preserves an existing project verifier and refuses a new
-`--test` choice, refreshes `~/.assent/instructions.md`,
-`~/.assent/format.md`, and `~/.assent/workflow.md` from the packaged text, and
-adds only missing active settings keys. An existing `.assent/assent.toml` remains a reported override.
-Reads, parses, and merges finish before the first write, so an invalid request
-does not leave a partial upgrade. A project copy of a shared contract is
-removed only when it exactly matches the packaged text; a differing copy is
-kept and reported for human migration.
-
-Before any AI session, Assent fails closed unless both user-home contracts are
-present, readable, and byte-identical to the packaged contracts. It names a
-missing or stale path and points to `assent init`; it never silently patches a
-contract mid-run. Universal-newline comparison allows an editor's CRLF rewrite.
-
-## Adapter selection
-
-Adapters translate portable task settings into vendor CLI arguments. A task
-uses the abstract model tier `prime`, `core`, or `lite`, and may state the
-abstract effort `heavy`, `normal`, or `slight`. Adapter mappings, not adapter
-code, own vendor-specific model names and effort values. An explicit effort is
-never silently ignored or shifted.
-
-### Claude
-
-```toml
-[adapter]
-name = "claude"
-
-[adapter.claude]
-command = "claude"
-extra_args = ["--permission-mode", "bypassPermissions"]
-
-[adapter.claude.models]
-prime = "fable"
-core = "opus"
-lite = "sonnet"
-```
-
-### Codex
-
-```toml
-[adapter]
-name = "codex"
-
-[adapter.codex]
-command = "codex"
-extra_args = ["--sandbox", "danger-full-access"]
-
-[adapter.codex.models]
-prime = "gpt-5.6-sol"
-core = "gpt-5.6-terra"
-lite = "gpt-5.6-luna"
-```
-
-### Antigravity
-
-The Antigravity adapter uses the locally installed `agy` CLI and Gemini. It
-requires one interactive login per machine, then uses print mode headlessly.
-It validates model/effort combinations before opening a session.
-
-```toml
-[adapter]
-name = "antigravity"
-
-[adapter.antigravity]
-command = "agy"
-extra_args = ["--dangerously-skip-permissions"]
-
-[adapter.antigravity.models]
-prime = "gemini-3.1-pro"
-core = "gemini-3.6-flash"
-lite = "gemini-3.5-flash"
-
-[adapter.antigravity.default_effort]
-prime = "heavy"
-core = "heavy"
-lite = "heavy"
-
-[adapter.antigravity.efforts.prime]
-normal = "high"
-
-[adapter.antigravity.efforts.lite]
-heavy = "medium"
-```
-
-First-time Antigravity setup:
-
-1. Install `agy` using [Google's official CLI installation and authentication
-   documentation](https://antigravity.google/docs/cli/install).
-2. Start the interactive CLI with `agy` and complete browser sign-in. If it
-   prints an authorization URL, open it and finish that flow.
-3. Confirm `agy --version` is at least 1.1.5 and inspect `agy models` before an
-   unattended run.
-
-Assent uses credentials already held by AGY. It does not open a login browser,
-read or modify credentials, switch accounts, or change workspace trust. To
-sign out, start interactive `agy` and enter `/logout`; it is not a shell
-subcommand.
-
-## Model and effort resolution
-
-Model and effort are orthogonal. Effort is selected deterministically:
-
-1. The task file's explicit `effort`.
-2. A configured per-tier `default_effort` override.
-3. The built-in per-tier default.
-
-A partial `default_effort` table overrides only the tiers it states; absent,
-empty, or omitted tiers retain built-in values. Every supported invocation
-passes a concrete requested effort to the adapter.
-
-Effort translation resolves each abstract key from:
-
-1. `[adapter.<name>.efforts.<tier>]`;
-2. `[adapter.<name>.efforts]`; then
-3. the built-in baseline: `heavy -> high`, `normal -> medium`, `slight -> low`.
-
-Each key falls back independently. Abstract values are not sent to a vendor
-CLI when a translation is required. For example, if a newer Gemini model
-supports `medium`, a project may override the quality-first mapping:
-
-```toml
-[adapter.antigravity.efforts.prime]
-normal = "medium"
-```
-
-The effective matrix is:
-
-| Effort | Claude prime/core/lite | Codex prime/core/lite | Antigravity prime/core/lite |
-| --- | --- | --- | --- |
-| slight | `low` / `low` / `low` | `low` / `low` / `low` | `low` / `low` / `low` |
-| normal | `medium` / `medium` / `medium` | `medium` / `medium` / `medium` | `high` / `medium` / `medium` |
-| heavy | `high` / `high` / `high` | `high` / `high` / `high` | `high` / `high` / `medium` |
-
-Antigravity's prime Gemini 3.1 Pro lacks `medium`, so normal maps visibly to
-`high`. Lite Gemini 3.5 Flash lacks `high`, so heavy maps to `medium`, its
-family ceiling. Antigravity 1.1.5+ is required for `--effort`, stable model
-slugs, and unattended fixes; earlier versions fail preflight.
-
-The session line records all four audit facts in one line:
-
-```text
-Session: codex | core->gpt-5.6-terra | heavy->high
-```
-
-The left side is the task's portable value and the right side is the actual
-CLI argument.
-
-## Workflow roles, actions, and finite repair
-
-`[workflow]` accepts exactly `task`, `plan`, and `integration`. Each value is an ordered array whose entry contains exactly one `role` or `action`. The scheduler-owned actions are `focused_test` at task scope, `focused_sweep` at plan scope, and `full_verify` at integration scope. Removed workflow and verification settings are rejected rather than migrated.
-
-When a non-empty task workflow contains `focused_test`, that action must be its final step. A passing `focused_test` completes the task layer immediately and skips all later failure handlers. Between two task actions, the first role must produce a verdict; it is either writable and repairs in that one session, or read-only with one separately configured writable non-verdict fixer. An earlier task role that self-marks `BLOCKED` skips the pending action and advances to that task-local verdict role. Task-review and plan-review abilities should use distinct prompts; the scheduler still derives behavior only from workflow position, `writes`, and `produces_verdict`, never names.
-
-A passing action completes its layer without AI review. A failure advances through later configured reviewer/fixer positions, and a later action rechecks the repair. The reviewer prompt states its current round and total finite rounds and forbids invented acceptance criteria. Array exhaustion is the only convergence bound; Assent does not guess from no-progress or diff-oscillation heuristics.
-
-An unresolved exhausted workflow retains all evidence and edits as `REVIEW UNRESOLVED, HUMAN DECISION` and exits zero. A failed `full_verify` still prevents acceptance. Adapter, model, and effort resolution continues to come from the role and adapter settings described above.
-
-## Antigravity timeout and troubleshooting
-
-`print_timeout_minutes` limits one AGY print invocation; the Assent watchdog
-limits silence from the session. They are independent:
-
-```toml
-[adapter.antigravity]
-print_timeout_minutes = 120
-```
-
-The value must be positive and should exceed the longest expected task.
-
-For `preflight failed: invalid model selection`, inspect `agy models`, test the
-model/effort combination with `agy --print --model <MODEL> ...`, and correct
-the model table or tier-specific effort mapping. For authentication errors,
-run interactive `agy` and finish sign-in before unattended work. For
-`command not found: agy`, install it and verify `agy --version`.
-
-Quota exhaustion records a WIP checkpoint. With one adapter, the scheduler
-waits for an exact reset time when available or the configured quota poll; with
-an adapter list, it rotates immediately to the next configured adapter and
-waits only after all are exhausted. Resume with `assent run <FOLDER>`.
-
-An adapter can request immediate continuation only by ending a finished,
-non-stalled, nonzero session with the exact non-empty line:
-
-```text
-{"type":"assent.checkpoint_resume"}
-```
-
-Assent hides that terminal control line from live human output, preserves raw
-diagnostics, creates WIP, and reruns the same adapter with a continue prompt.
-The record has no account, quota, reset, or capability-probe meaning.
-A wrapper may replace a provider quota result with it only after arranging an
-immediate continuation; if it forwards provider quota, Assent performs the
-normal wait or rotation. When quota evidence and this record are both present,
-the ordinary quota path wins.
-
-## Media and custom adapters
-
-Images, PDFs, audio, and other media are ordinary project context. The task
-schema does not gain `inputs`, image, audio, video, or attachment fields. Name
-an existing media file and its purpose in `behavior` or `notes`; list media in
-`scope` only when the task may create or modify it. Keep reproducible media in
-the worktree, not generated `.assent/`, and leave perceptual judgment to the
-human `accept` decision. `verify` remains machine-checkable.
-
-To add an AI CLI, subclass `Adapter` and implement its existing two-step
-interface: `resolve_model(model: str) -> str` maps the abstract tier to the
-actual `requested_model`, and `run_task(prompt, requested_model,
-requested_effort, cwd) -> TaskResult` receives the already translated values.
-`TaskResult` carries `exit_code`, `output`, `quota_exhausted`, `reset_at`, and
-the distinct checkpoint-resume outcome. Vendor detection stays inside the
-adapter; the scheduler does not acquire vendor-specific semantics.
-
-## Related settings
-
-The position of `full_verify` in `[workflow].integration` controls automatic
-complete verification and receipt creation. See
-[Verification](VERIFICATION.md) for the evidence contract.
+See [Workflow](WORKFLOW.md) for the human process, [Commands](COMMANDS.md) for
+CLI use, and [Operations](OPERATIONS.md) for runtime recovery.

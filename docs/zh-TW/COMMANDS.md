@@ -1,165 +1,118 @@
 # 指令
 
-*[English version](../COMMANDS.md) · [README](../../README.zh-TW.md)*
+*[English](../COMMANDS.md) · [README](../../README.zh-TW.md)*
 
-> 本檔是 [../COMMANDS.md](../COMMANDS.md) 的正體中文(台灣用語)翻譯；內容如與
-> 英文版不同，以英文版為準。涵蓋 CLI syntax、選取與 acceptance 邊界。
+> 本文是 [英文版](../COMMANDS.md) 的正體中文翻譯；若內容不同，以英文版為準。
 
-## 一般 syntax
+完整 option 請直接執行 `assent <command> --help`。本文只說明如何選指令，以及
+folder selection 的重要規則。
+
+## Folder selection
+
+明確指定的 folder 必須存在於 `.assent/`，而且至少包含一份正式 `.e.toml`
+task。Assent 會在任何動作開始前檢查所有名稱；若有錯，會一次列出完整清單，
+不會執行其中一部分。
+
+多數接受 folder 的指令也支援最後一個 `...`：
 
 ```text
-assent <command> [options] [FOLDER ...]
+assent run urgent01 ...
 ```
+
+意思是「先處理 `urgent01`，再加上這個指令原本會找到的其餘 folder」。它不是
+`--all` 的別名。Assent 會在修改任何東西之前固定這份清單。`run` 保留明示前綴
+順序；`verify` 與 `accept` 會依相依順序整理整份清單；`clean` 從上游開始。
+
+選到一個 folder 就走單一 folder 流程；兩個以上就是一組精確 batch。即使清單
+來自 `...` 也不例外：accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 
 `run`、`status`、`check`、`report`、`verify`、`clean`、`archive`、`accept`、
-`reconcile`、`reject`、`rework` 支援 `--config PATH`。它指定 optional project-level
-config（預設 `.assent/assent.toml`），也從該 path 找到 project；這是每個
-subcommand 自己的 option，不是 top-level global option。`--config` 與 folder
-argument 正交。`init`、`doctor`、`shared-paths` 各有自己的 project-location
-contract。
+`reconcile`、`reject`、`rework` 支援各自的 `--config PATH` option。它會選擇專案
+設定並定位專案，不是 top-level global option。`init`、`doctor` 與 `shared-paths`
+各有自己的專案位置規則。
 
-不寫 folder 時，`run` 從 task state 與 `_folder.toml` 的 `after` prerequisite
-推導唯一可執行資料夾；有 ambiguity 就拒絕。`status`、`check`、`report` 不寫 folder
-時處理所有資料夾。其他指令依自己的 discovery contract 處理。
+## 指令用途
 
-資料夾名稱必須是可攜的 Windows/Git-ref 名稱：不可空白、含 path separator、控制
-字元、Git-ref 禁用字元（`~`、`^`、`:`、`?`、`*`、`[`）或 Windows 禁用字元
-（`<`、`>`、`"`、`|`）。不可用 `-` 或 `.` 開頭、含 `..` 或 `@{`、以 `.` 或
-`.lock` 結尾，也不可為 Windows reserved device name。這些檢查在建立 worktree
-或 branch 前完成。
+| 指令 | 用途 |
+| --- | --- |
+| `init` | 安裝共用契約與設定，建立專案骨架。 |
+| `check` | 不開 AI，檢查計畫、設定與相依關係。 |
+| `run` | 執行 task、plan 與 integration workflow。 |
+| `status` | 查看一個或全部計畫的簡要狀態。 |
+| `report` | 重新產生人類驗收用的報告。 |
+| `verify` | 執行 focused 或完整驗證，不接受成果。 |
+| `accept` | 人類依相符證據發布成果。 |
+| `reconcile` | 準備並完成由人編輯的 Git 衝突修復。 |
+| `rework` | 保留程式碼，重新開啟既有 task。 |
+| `reject` | 記錄可復原的 Git 證據後，經人確認執行破壞性重設。 |
+| `clean` | 只移除已證明多餘的 worktree/branch。 |
+| `archive` | 安全清理後封存完成的管理紀錄。 |
+| `doctor` | 診斷安裝並復原孤兒暫存 branch。 |
+| `shared-paths review` | 記錄測試需要的 ignored directory。 |
 
-## 選取稽核與 `...`
+## 常見用法
 
-所有明示的 live folder 都在 dispatch 前完整稽核。包括 `...` 前綴的每個名字，都
-必須對應現有 `.assent/` 目錄，且至少有一個正式的 `tNNN_name.e.toml`。任何
-unresolved 都會完整列出，並在 run、verify、publish、clean 或 archive 前阻止所有
-選取操作；不會建立遺失的 folder、lock 或 log。這項 identity check 不取代 readiness、
-receipt 與 Git eligibility gate。
-
-ASCII token `...` 必須只出現一次、且是最後的位置參數；它共用於 `run`、`verify`、
-`accept`、`clean`、`archive`：
+執行唯一可判定的 ready plan：
 
 ```text
-assent run A B ...
-assent verify A ...
-assent accept A ...
-assent clean A ...
-assent archive A ...
+assent run
 ```
 
-意思是「附加這個 command 自己會找到的所有剩餘 folder」。它在 mutation 前一次
-snapshot，不是 `--all` 的別名。和 `--all` 合用、重複、或不在最後都算 usage error。
-`verify`/`accept` 只找已完成 folder；`run`/`clean`/`archive` 考慮所有 work folder，
-再套用各自 eligibility。前綴順序保留；`run` 對 remainder 做 dependency order，
-`verify`/`accept` 對全選取做 dependency order，`clean` 用 upstream-first。
+執行指定 plan、只跑一個 task，或平行處理所有未完成 plan：
 
-選取結果會在開始前印出；沒有 folder 就拒絕。`...` 不會切換 mode，因此裸的
-`assent run ...` 仍是 exact selection path，不是 `--all` scheduler；`--jobs` 仍是
-`--all` option。cardinality 決定 path：一個 folder 是 folder receipt、direct accept
-或單一 archive；兩個以上是 exact selected batch。`assent verify A ...` 只寫恰好
-展開集合的 receipt，`assent accept A ...` 需要同一集合的 fresh evidence，且不會驗證。
+```text
+assent run <PLAN>
+assent run <PLAN> --once
+assent run --all --jobs 2
+```
 
-`...` 不可與 `verify --batch`、`verify --focus`、`run --once`、`run --task`、
-`archive --restore` 合用。
+若 `--once` 或 `--task` 執行後 plan 尚未完成，就會延後 integration。一般 `run`
+成功後會繼續 plan 與 integration 驗證，但仍不會 accept。
 
-## `run --verify`
+更新單一 receipt 或驗證明確選取：
 
-`--verify` 只在 run exit code 為零後接完整 verification；run 失敗時原樣回傳且不
-驗證。verification 的 exit code 成為整道 command 的 exit code。
+```text
+assent verify <PLAN>
+assent verify A B
+```
 
-| 呼叫 | 完整驗證範圍 |
-| --- | --- |
-| `assent run --verify` | 自動選出的 folder receipt。 |
-| `assent run A --verify` | A 的 folder receipt。 |
-| `assent run A B --verify` | A、B 作為一個 exact selected batch。 |
-| `assent run A ... --verify` | 明示前綴加 remainder 的 exact selection。 |
-| `assent run --all --verify` | 全專案 dynamic batch。 |
-| `assent run ... --verify` | 全專案 dynamic batch。 |
-| `assent run A --once --verify` | 只有 A 的所有 task 完成時才驗證。 |
-| `assent run A --task t003 --verify` | 同一個 single-folder 完成條件。 |
+只跑 focused checks，不寫 receipt：
 
-`--once` 或 `--task` 留下未完成 folder 時，會在 candidate/verifier 建立前拒絕且不
-寫 receipt；錯誤會列出 incomplete task ID 與 status。這是 invocation-level request，
-不受 `integration full_verify` 設定影響。
+```text
+assent verify <PLAN> --focus
+```
 
-## `run`
+動態驗證目前所有符合條件的計畫：
 
-`assent run` 一律依設定好的 `[workflow]` 陣列執行。`task` 負責 task session 與 `focused_test`，`plan` 負責 `focused_sweep`，`integration` 負責 `full_verify` 與 receipt。機械 action 通過就完成該層，不會再啟動 reviewer；失敗才前進到下一個 reviewer/fixer，修復後由下一個 action 重驗。
+```text
+assent verify --batch
+```
 
-三個陣列就是自動化的有限上限。若耗盡時機械驗證仍失敗，Assent 保留修改與證據，回報 `REVIEW UNRESOLVED, HUMAN DECISION`，並以 exit 0 讓無關 queue 繼續。失敗的完整驗證仍阻擋 `accept`；基礎設施與安全失敗維持非零退出。`accept` 永遠是明確的人類動作。
+明確選取必須整組成功，遇到衝突就拒絕。動態 batch 回報衝突後，可以詢問是否只
+驗證其餘互不衝突的計畫。
 
-`--once` 與 `--task` 仍是受限 run；若留下 incomplete folder，就延後 integration。選取、`...` 與 `--all` 不改變 workflow 授權，因為已沒有另一個 repair flag。
+驗收與後續決定：
 
-## 指令速查
+```text
+assent report <PLAN>
+assent accept <PLAN>
+assent rework <PLAN> <TASK>
+assent reject <PLAN>
+```
 
-| 指令 | 效果與邊界 | token cost |
-| --- | --- | --- |
-| `assent run [FOLDER]` | 跑到 task 為 `DONE`、`BLOCKED` 或 `SKIP`；`--once` 停在下一個 task，`--task ID` 只跑一個但仍檢查 upstream。 | 只有 AI session |
-| `assent run A B` | 依寫出順序跑 A、B，第一個失敗即停止；不暗中驗證或接受。 | 只有 AI session |
-| `assent run A B --all` | 先跑明示前綴，再依 dependency order 跑剩餘 incomplete folder。 | 只有 AI session |
-| `assent run --all [--jobs N]` | 用 dependency scheduler 跑所有 incomplete folder，`--jobs` 限制並行數。 | 只有 AI session |
-| `assent run [selection]` | 執行設定好的 task、plan、integration workflow；機械失敗時自動做有界 repair，絕不 accept。 | AI session 加設定好的 verification/repair |
-| `assent status [FOLDER]` | 顯示進度、下一個 task、branch 與最後 checkpoint。 | 零 |
-| `assent check [FOLDER]` | 檢查 task format、dependency cycle、設定與環境；是規劃散會 gate。 | 零 |
-| `assent report [FOLDER]` | 產生並顯示 `_report.md`。 | 零 |
-| `assent verify <FOLDER>` | 建立臨時 integration candidate，跑一次完整 verifier，刷新 folder receipt；不改 target、不開 AI。 | 零 |
-| `assent verify A B` | 對 exact A、B 做 dependency-order selected batch；candidate conflict 直接拒絕。 | 零 |
-| `assent verify --batch` | Dynamic 驗證已完成、尚未整合的 folder；conflict 可有一次互動式 skip decision。 | 零 |
-| `assent verify <FOLDER> --focus` | 在 source worktree 重跑不同的 `DONE` task verify；不寫 receipt，不能授權 accept。 | 零 |
-| `assent accept <FOLDER>` | 明示人類批准；不跑完整 verifier，除 ancestry no-op 外需 fresh matching `PASSED` evidence。 | 零 |
-| `assent accept A B` | 只重播恰好 A、B 的 fresh batch receipt，不驗證，all-or-none publish。 | 零 |
-| `assent accept --all` | Fresh `PASSED` batch 做 atomic replay；缺少或過期時逐 folder verify-then-accept；malformed 拒絕。 | 零加 sequential verifier |
-| `assent reconcile <FOLDER>` | 為一個 source-versus-target conflict 準備人類編輯的 managed worktree；不改 target/status、不寫 receipt。 | 零 |
-| `assent reconcile --continue <FOLDER>` | 驗證 staged resolution、commit merge、前進 source branch、移除已證明的 managed resource；不驗證。 | 零 |
-| `assent reconcile --abort <FOLDER>` | 只移除已證明的 managed reconcile worktree 與 branch；有未提交編輯會拒絕。 | 零 |
-| `assent clean [FOLDER ...]` | 只移除 fully merged 且 clean 的 worktree/branch；不碰 `.assent/`。無 folder 時處理所有，選取多個時 upstream-first。裸的 `assent clean --all` 還會每次呼叫掃一次 orphaned Assent-owned 暫存 branch；明示單一 `assent clean FOLDER` 刻意不掃。 | 零 |
-| `assent archive <FOLDER ...>` | 先走 clean，再把合格計畫壓入 archive；明示但不合格者令 request 失敗。 | 零 |
-| `assent archive --all` | 封存獨立合格的 folder；dynamic 模式略過不合格者而不使整體失敗；它繼承 `clean --all` 同一次每次呼叫的暫存 branch 清理。 | 零 |
-| `assent archive --restore FOLDER` | 只還原一個 archive，不接受 `--all` 或 `...`。 | 零 |
-| `assent reject <FOLDER>` | 人類駁回：保存 tips/WIP、link-safe 移除 worktree、刪 branch、將 `DONE`/`WIP`/`BLOCKED` 重設 `TODO`。 | 零 |
-| `assent rework <FOLDER> <TASK>` | 非破壞性重開 task，預設保留程式碼；`--cascade`、`--reason`、`--revert-code` 都是明示選項。 | 零 |
-| `assent shared-paths review ...` | 唯一可寫 primary worktree shared ignored-directory manifest 的操作；詳見[驗證](VERIFICATION.md)。 | 零 |
-| `assent init [--test CHOICE]` | 安裝 user-home 契約/設定、project verifier、AGENTS bridge 與 ignore；fresh init 選一個真正 verifier。 | 零 |
-| `assent doctor` | 診斷 Python、Git、adapter CLI 與 temporary directory，不需現有 project。 | 零 |
-| `assent --version` | 顯示安裝的 distribution version，不需 project 或 subcommand。 | 零 |
+直接或明確選取的 `accept` 不會執行驗證。`accept --all` 可以重播一份新鮮 batch
+receipt；若沒有可用 batch 證據，則逐一驗證並接受，遇到第一個失敗就停止。
 
-每個 subcommand 的 `-h`/`--help` 才是實際 syntax。Assent 不會在 acceptance 中
-連線 remote、pull、rebase、force-push、刪 source 或自動解衝突。
+需要時才清理或封存：
 
-## 孤兒暫存 branch 清理
+```text
+assent clean <PLAN>
+assent archive <PLAN>
+assent archive --all
+```
 
-`assent-integration/<folder>/<suffix>` 與 `assent-reconcile/<folder>` 是
-Assent 自有的暫存 branch，人類不可直接使用：兩者各自由建立它的 transaction
-在完成後移除，唯有該 transaction 在完成前就中斷，殘留的 branch 才算 orphan。
-repository-wide integration lock 在該 branch 仍存在時被持有，才是它是 orphan
-的完整證明，而不是它的內容，也不是它的 tree 是 published 還是 superseded
-——那只是回報資訊。`assent clean --all` 每次呼叫掃一次所有這類 orphan，
-`assent archive --all` 繼承同一次掃描而非重新實作；明示單一 `assent clean
-FOLDER` 刻意不掃。`assent doctor` 的 `[y/N]` 復原提案見[作業](OPERATIONS.md)。
+明確指定的 archive 若不符合條件會回報錯誤；`--all` 則略過不符合者。兩者都沒有
+強制刪除模式。
 
-## Acceptance 模式
-
-直接 `accept <FOLDER>` 與 selected `accept A B` 絕不啟動完整 verifier。已被 target
-包含的 direct folder 是 ancestry-proven idempotent no-op；其他 direct 形式需要
-source tip、重建 integration tree、verifier digest 都相符的 fresh receipt。selected
-形式需要恰好 dependency-ordered set 的 fresh `PASSED` batch receipt；缺少、malformed、
-stale 或 drifted evidence 都拒絕。
-
-`accept --all` 有刻意的兩種 mode：fresh `PASSED` batch 只 atomic replay 自己記錄的
-folder；沒有或過期 evidence 時，依序對每個尚未整合 folder 執行
-`verify_folder_if_needed` 再 accept，遇到第一個真正失敗就停止並保留之前 publication。
-malformed batch receipt 不會 fallback；已整合 folder 是 ancestry no-op，source 已在
-證明整合後清理的 folder 才可略過。
-
-## 有色 help
-
-Python 3.14+ 且標準 argparse 啟用 color 時，Assent 只重新設計 `usage:` 前綴與
-section heading。`NO_COLOR`、`FORCE_COLOR`、`PYTHON_COLORS`、redirect 與不支援的
-stream 仍決定是否輸出 escape；Python 3.11–3.13 是純文字。Assent 不保證有色 help。
-
-## 相關指南
-
-- [工作流程](WORKFLOW.md)：規劃、執行、審查、重做與駁回。
-- [設定](CONFIGURATION.md)：init、設定優先序、adapter、模型與 effort。
-- [驗證](VERIFICATION.md)：candidate、receipt、ignored input、reconcile、accept 證據。
-- [作業](OPERATIONS.md)：worktree、lock、並行、復原、清理與封存。
+完整流程請看[工作流程](WORKFLOW.md)，receipt 與衝突請看[驗證](VERIFICATION.md)，
+復原與清理安全請看[作業](OPERATIONS.md)。

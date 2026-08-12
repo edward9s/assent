@@ -1,4 +1,4 @@
-"""Regression checks for the split reader documentation."""
+"""Regression checks for concise reader documentation."""
 from __future__ import annotations
 
 import re
@@ -8,28 +8,20 @@ from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TOPICS = (
-    "WORKFLOW",
-    "COMMANDS",
-    "CONFIGURATION",
-    "VERIFICATION",
-    "OPERATIONS",
-)
+TOPICS = ("WORKFLOW", "COMMANDS", "CONFIGURATION", "VERIFICATION",
+          "OPERATIONS")
 LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)\s]+)(?:\s+[^)]*)?\)")
-CHINESE_PLANNING_PROMPT = (
-    "請簡潔回答，不要用子代理。如果你看到源碼有任何bug、壞結構，或說明文件與程式行為不符合，就回報我。"
-    "以下是本專案需要討論的問題，不要過度設計，先徵得人類的同意，依照 assent 格式產生相關的計畫書：\n"
-    "1. 需求描述。\n"
-    "2. 需求描述。\n"
-    "3. 需求描述。"
-)
 
 
 def _read(relative: Path) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def _maintained_surfaces() -> list[Path]:
+def _flat(text: str) -> str:
+    return "".join(text.split())
+
+
+def _reader_surfaces() -> list[Path]:
     paths = [Path("README.md"), Path("README.zh-TW.md")]
     paths.extend(path.relative_to(ROOT) for path in (ROOT / "docs").rglob("*.md"))
     return paths
@@ -39,12 +31,8 @@ def _relative_markdown_targets(text: str) -> list[str]:
     targets = []
     for match in LINK_RE.finditer(text):
         target = unquote(match.group(1)).split("#", 1)[0]
-        if (
-            not target
-            or target.startswith(("#", "<", "~", "/"))
-            or "://" in target
-            or target.startswith("mailto:")
-        ):
+        if (not target or target.startswith(("#", "<", "~", "/"))
+                or "://" in target or target.startswith("mailto:")):
             continue
         targets.append(target)
     return targets
@@ -60,46 +48,25 @@ def _case_sensitive_file(relative: Path) -> bool:
             continue
         if not current.is_dir():
             return False
-        names = {child.name for child in current.iterdir()}
-        if part not in names:
+        if part not in {child.name for child in current.iterdir()}:
             return False
         current /= part
     return current.is_file()
 
 
 class DocumentationTests(unittest.TestCase):
-    def test_readmes_stay_within_onboarding_line_budget(self):
-        for relative in (Path("README.md"), Path("README.zh-TW.md")):
-            with self.subTest(path=relative):
-                self.assertLessEqual(len(_read(relative).splitlines()), 450)
-
-    def test_all_five_guides_have_english_and_translation_files(self):
+    def test_guides_have_reciprocal_english_and_chinese_links(self):
         for topic in TOPICS:
             english = Path("docs") / f"{topic}.md"
             translated = Path("docs/zh-TW") / f"{topic}.md"
             with self.subTest(topic=topic):
                 self.assertTrue((ROOT / english).is_file())
                 self.assertTrue((ROOT / translated).is_file())
-                self.assertIn("../README.md", _read(english))
-                self.assertIn("zh-TW/" + f"{topic}.md", _read(english))
-                self.assertIn("../../README.zh-TW.md", _read(translated))
-                self.assertIn("../" + f"{topic}.md", _read(translated))
+                self.assertIn(f"zh-TW/{topic}.md", _read(english))
+                self.assertIn(f"../{topic}.md", _read(translated))
 
-    def test_chinese_readme_topic_columns_point_to_the_named_languages(self):
-        text = _read(Path("README.zh-TW.md"))
-        for topic in TOPICS:
-            with self.subTest(topic=topic):
-                row = next(
-                    line for line in text.splitlines()
-                    if line.startswith("|") and f"[{topic}]" in line
-                )
-                cells = [cell.strip() for cell in row.strip("|").split("|")]
-                self.assertEqual(len(cells), 3)
-                self.assertIn(f"(docs/{topic}.md)", cells[1])
-                self.assertIn(f"(docs/zh-TW/{topic}.md)", cells[2])
-
-    def test_maintained_markdown_file_links_resolve_case_sensitively(self):
-        for relative in _maintained_surfaces():
+    def test_all_relative_markdown_links_resolve_case_sensitively(self):
+        for relative in _reader_surfaces():
             source = ROOT / relative
             for target in _relative_markdown_targets(_read(relative)):
                 resolved = (source.parent / target).resolve()
@@ -108,249 +75,122 @@ class DocumentationTests(unittest.TestCase):
                 except ValueError:
                     relative_target = Path("__outside_repository__")
                 with self.subTest(source=relative, target=target):
-                    self.assertTrue(
-                        _case_sensitive_file(relative_target),
-                        f"broken link: {target}",
-                    )
+                    self.assertTrue(_case_sensitive_file(relative_target),
+                                    f"broken link: {target}")
 
-    def test_readmes_show_pypi_install_uninstall_and_retention_boundary(self):
-        required_commands = (
-            "python -m pip install assent",
-            "python -m pip uninstall assent",
-        )
-        required_terms = (
-            "~/.assent",
-            ".assent/",
-            "worktree",
-            "archive",
-            "git branch",
-        )
+    def test_readmes_cover_installation_retention_and_human_acceptance(self):
         for relative in (Path("README.md"), Path("README.zh-TW.md")):
-            text = _read(relative).lower()
+            text = _read(relative)
+            lower = _flat(text.lower())
             with self.subTest(path=relative):
-                for command in required_commands:
-                    self.assertIn(command, text)
-                for term in required_terms:
-                    self.assertIn(term.lower(), text)
+                self.assertIn(_flat("python -m pip install assent"), lower)
+                self.assertIn(_flat("python -m pip uninstall assent"), lower)
+                for term in ("~/.assent", ".assent/", "worktree", "archive",
+                             "git branch", "assent accept"):
+                    self.assertIn(_flat(term), lower)
                 self.assertRegex(text, r"(?:does not delete|不會刪除)")
 
-    def test_prompts_keep_planning_and_independent_review_safeguards(self):
+    def test_reader_guides_explain_the_three_stage_workflow(self):
         english = _read(Path("README.md")) + _read(Path("docs/WORKFLOW.md"))
         for phrase in (
-            "Answer concisely",
-            "do not use subagents",
-            "source bug",
-            "bad structure",
-            "documentation/runtime mismatch",
-            "Do not overengineer",
-            "explicit human agreement",
-            "Assent-format task files",
-            "Requirement description",
-            "_report.md",
-            "task and journal files",
-            "checkpoint commit and diff",
-            "focused and full verification evidence",
-            "evidence-based findings first",
-            "This ordinary acceptance review remains human-driven",
-            "configured workflow repair loop",
-            "still never accepts a folder",
-            "Wait for the human decision",
-            "different vendor",
-        ):
-            with self.subTest(phrase=phrase):
+                "Planning meeting", "Unattended execution",
+                "Acceptance review", "focused_test", "focused_sweep",
+                "full_verify", "REVIEW UNRESOLVED, HUMAN DECISION",
+                "No workflow step accepts a plan"):
+            with self.subTest(language="English", phrase=phrase):
                 self.assertIn(phrase, english)
-        self.assertIn(CHINESE_PLANNING_PROMPT, _read(Path("README.zh-TW.md")))
-        chinese_review = _read(Path("README.zh-TW.md")) + _read(
-            Path("docs/zh-TW/WORKFLOW.md")
-        )
+
+        chinese = (_read(Path("README.zh-TW.md"))
+                   + _read(Path("docs/zh-TW/WORKFLOW.md")))
         for phrase in (
-                "不要用子代理",
-                "這個一般驗收審查由人類主導",
-                "自動有界 workflow",
-                "絕不自動接受 folder",
+                "規劃會議", "自動執行", "驗收", "focused_test",
+                "focused_sweep", "full_verify",
+                "REVIEW UNRESOLVED, HUMAN DECISION"):
+            with self.subTest(language="Traditional Chinese", phrase=phrase):
+                self.assertIn(phrase, chinese)
+
+    def test_configuration_guides_are_workflow_first_references(self):
+        english = _read(Path("docs/CONFIGURATION.md"))
+        for phrase in (
+                "ability: prompt + authority", "Names such as `reviewer`",
+                "A passing action completes its layer immediately",
+                "writable verdict role", "Three different repair responsibilities",
+                "integration_reviewer_fixer", "Omissions and task overrides"):
+            with self.subTest(language="English", phrase=phrase):
+                self.assertIn(phrase, english)
+
+        chinese = _read(Path("docs/zh-TW/CONFIGURATION.md"))
+        for phrase in (
+                "從 workflow 理解設定", "engine 不會從名稱推斷權限",
+                "Action 一旦通過", "可寫入的 verdict role",
+                "三層修復責任不同", "integration_reviewer_fixer",
+                "省略設定與 task override"):
+            with self.subTest(language="Traditional Chinese", phrase=phrase):
+                self.assertIn(phrase, chinese)
+
+    def test_planning_and_acceptance_prompts_keep_human_boundaries(self):
+        english = _flat(_read(Path("docs/WORKFLOW.md")))
+        for phrase in (
+                "Do not overengineer", "After explicit human agreement",
+                "write Assent-format task files", "independent acceptance reviewer",
+                "Report evidence-based bugs", "do not accept, rework, or edit anything",
+                "Wait for the human decision"):
+            with self.subTest(language="English", phrase=phrase):
+                self.assertIn(_flat(phrase), english)
+
+        chinese = _flat(_read(Path("docs/zh-TW/WORKFLOW.md")))
+        for phrase in (
+                "不要過度設計", "人類明確同意", "Assent task",
+                "獨立驗收者", "不要自行 accept、rework 或修改檔案",
                 "等待人類決定"):
+            with self.subTest(language="Traditional Chinese", phrase=phrase):
+                self.assertIn(_flat(phrase), chinese)
+
+    def test_selection_and_verification_choices_are_discoverable(self):
+        english = (_read(Path("docs/COMMANDS.md"))
+                   + _read(Path("docs/VERIFICATION.md")))
+        for phrase in (
+                "final `...`", "not an alias for `--all`",
+                "One selected folder", "one exact batch",
+                "assent verify <PLAN> --focus", "Direct and selected acceptance"):
+            with self.subTest(language="English", phrase=phrase):
+                self.assertIn(phrase, english)
+
+        chinese = _flat(_read(Path("docs/zh-TW/COMMANDS.md"))
+                        + _read(Path("docs/zh-TW/VERIFICATION.md")))
+        for phrase in (
+                "最後一個 `...`", "不是 `--all`", "一個 folder",
+                "精確 batch", "assent verify <PLAN> --focus"):
+            with self.subTest(language="Traditional Chinese", phrase=phrase):
+                self.assertIn(_flat(phrase), chinese)
+
+    def test_human_guides_omit_internal_and_cosmetic_chapters(self):
+        combined = "\n".join(_read(path) for path in _reader_surfaces())
+        for phrase in (
+                "## Colored help", "## Help colors", "help color",
+                "argparse color", "version = 7", "_STATE_KEYS",
+                "workflow_step_index", "reviewer_step_index",
+                "_auto_fix.toml", "receipt_refresh", "--auto-fix"):
             with self.subTest(phrase=phrase):
-                self.assertIn(phrase, chinese_review)
+                self.assertNotIn(phrase, combined)
+        self.assertNotIn("assent clean --all", combined)
 
-    def test_workflow_repair_is_automatic_bounded_and_never_acceptance(self):
-        english = "\n".join(
-            _read(path) for path in (Path("README.md"), Path("docs/WORKFLOW.md"),
-                                     Path("docs/COMMANDS.md"),
-                                     Path("docs/VERIFICATION.md")))
-        for phrase in (
-                "[workflow]", "focused_test", "focused_sweep", "full_verify",
-                "passing", "without opening a reviewer", "finite",
-                "REVIEW UNRESOLVED, HUMAN DECISION", "never accepts"):
-            with self.subTest(language="English", phrase=phrase):
-                self.assertIn(phrase, english)
-        self.assertNotIn("--auto-fix", english)
-        self.assertNotIn("receipt_refresh", english)
+    def test_reader_guides_distinguish_rework_from_destructive_reject(self):
+        english = _flat(_read(Path("docs/WORKFLOW.md")))
+        chinese = _flat(_read(Path("docs/zh-TW/WORKFLOW.md")))
+        for phrase in ("reopens an existing task while preserving code",
+                       "confirmed destructive reset", "resets started tasks to `TODO`"):
+            self.assertIn(_flat(phrase), english)
+        for phrase in ("保留程式碼並重開既有 task", "破壞性重設",
+                       "已開始的 task 重設為 `TODO`"):
+            self.assertIn(_flat(phrase), chinese)
 
-        chinese = "\n".join(
-            _read(path) for path in (Path("README.zh-TW.md"),
-                                     Path("docs/zh-TW/WORKFLOW.md"),
-                                     Path("docs/zh-TW/COMMANDS.md"),
-                                     Path("docs/zh-TW/VERIFICATION.md")))
-        for phrase in (
-                "[workflow]", "focused_test", "focused_sweep", "full_verify",
-                "機械", "不會再啟動 reviewer", "有限",
-                "REVIEW UNRESOLVED, HUMAN DECISION", "人類動作"):
-            with self.subTest(language="Traditional Chinese", phrase=phrase):
-                self.assertIn(phrase, chinese)
-
-    def test_workflow_round_budget_stays_in_parity(self):
-        english_paths = [
-            Path("AGENTS.md"), Path("README.md"),
-            Path("assent/templates/assent.toml"),
-            Path("assent/templates/instructions.md"),
-            Path("assent/templates/format.md"),
-            Path("docs/WORKFLOW.md"), Path("docs/COMMANDS.md"),
-            Path("docs/CONFIGURATION.md"), Path("docs/VERIFICATION.md"),
-            Path("docs/OPERATIONS.md"), Path("docs/CONSENSUS.md"),
-        ]
-        english = "\n".join(_read(path) for path in english_paths)
-        for phrase in (
-                "finite", "current", "total", "existing task requirement",
-                "concrete repair regression", "REVIEW UNRESOLVED"):
-            with self.subTest(language="English", phrase=phrase):
-                self.assertIn(phrase, english)
-        self.assertNotIn("--auto-fix", english)
-
-        chinese_paths = [
-            Path("README.zh-TW.md"),
-            Path("docs/zh-TW/WORKFLOW.md"),
-            Path("docs/zh-TW/COMMANDS.md"),
-            Path("docs/zh-TW/CONFIGURATION.md"),
-            Path("docs/zh-TW/VERIFICATION.md"),
-            Path("docs/zh-TW/OPERATIONS.md"),
-            Path("docs/zh-TW/CONSENSUS.md"),
-        ]
-        chinese = "\n".join(_read(path) for path in chinese_paths)
-        for phrase in (
-                "有限", "目前", "總輪數", "既有", "repair regression",
-                "REVIEW UNRESOLVED"):
-            with self.subTest(language="Traditional Chinese", phrase=phrase):
-                self.assertIn(phrase, chinese)
-        self.assertNotIn("--auto-fix", chinese)
-
-    def test_review_unresolved_outcome_and_settling_gate_stay_in_parity(self):
-        """The gated settle, its failing-gate outcome, and REVIEW UNRESOLVED,
-        HUMAN DECISION must reach every reader doc surface in both languages,
-        distinct from SELF-FIXED, UNREVIEWED and from BLOCKED.
-        """
-        english_paths = [
-            Path("docs/WORKFLOW.md"), Path("docs/COMMANDS.md"),
-            Path("docs/VERIFICATION.md"),
-        ]
-        english = "\n".join(_read(path) for path in english_paths)
-        for phrase in (
-                "REVIEW UNRESOLVED, HUMAN DECISION",
-                "exits zero", "evidence", "accept"):
-            with self.subTest(language="English", phrase=phrase):
-                self.assertIn(phrase, english)
-        for path in english_paths:
-            text = _read(path)
-            with self.subTest(document=str(path)):
-                self.assertNotIn(
-                    "an unrepaired blocker preserves every finding, edit, "
-                    "and journal without another round and exits\nnonzero",
-                    text)
-                self.assertNotIn(
-                    "unrepaired blocker preserves every finding, edit, and "
-                    "journal and exits\nnonzero", text)
-
-        chinese_paths = [
-            Path("docs/zh-TW/WORKFLOW.md"), Path("docs/zh-TW/COMMANDS.md"),
-            Path("docs/zh-TW/VERIFICATION.md"),
-        ]
-        chinese = "\n".join(_read(path) for path in chinese_paths)
-        for phrase in (
-                "REVIEW UNRESOLVED, HUMAN DECISION",
-                "exit 0", "證據", "accept"):
-            with self.subTest(language="Traditional Chinese", phrase=phrase):
-                self.assertIn(phrase, chinese)
-
-    def test_readme_workflow_contracts_stay_in_parity(self):
-        readmes = {
-            "README.md": _read(Path("README.md")),
-            "README.zh-TW.md": _read(Path("README.zh-TW.md")),
-        }
-        required = {
-            "README.md": (
-                "## Automatic bounded workflow repair", "`[workflow]`",
-                "`focused_test`", "`focused_sweep`", "`full_verify`",
-                "REVIEW UNRESOLVED, HUMAN DECISION", "human action"),
-            "README.zh-TW.md": (
-                "## 自動有界 workflow", "`[workflow]`", "`focused_test`",
-                "`focused_sweep`", "`full_verify`",
-                "REVIEW UNRESOLVED, HUMAN DECISION", "人類動作"),
-        }
-        for name, text in readmes.items():
-            compact = " ".join(text.split())
-            for phrase in required[name]:
-                with self.subTest(readme=name, phrase=phrase):
-                    self.assertIn(phrase, compact)
-
-        self.assertNotIn("--auto-fix", readmes["README.md"])
-        self.assertNotIn("--auto-fix", readmes["README.zh-TW.md"])
-
-    def test_orphaned_temporary_branch_sweep_stays_in_parity(self):
-        """The English and zh-TW COMMANDS/OPERATIONS pages must match on the sweep."""
-        english = {
-            "docs/COMMANDS.md": _read(Path("docs/COMMANDS.md")),
-            "docs/OPERATIONS.md": _read(Path("docs/OPERATIONS.md")),
-        }
-        required_english = {
-            "docs/COMMANDS.md": (
-                "## Orphaned temporary branch sweep",
-                "assent-integration/<folder>/<suffix>",
-                "assent-reconcile/<folder>",
-                "reporting only",
-                "once per invocation",
-                "deliberately does not sweep",
-            ),
-            "docs/OPERATIONS.md": (
-                "## `doctor`",
-                "assent-integration/<folder>/<suffix>",
-                "assent-reconcile/<folder>",
-                "reporting information only",
-                "once per invocation",
-                "deliberately does not sweep",
-                "`[y/N]`",
-            ),
-        }
-        for name, text in english.items():
-            compact = " ".join(text.split())
-            for phrase in required_english[name]:
-                with self.subTest(document=name, phrase=phrase):
-                    self.assertIn(phrase, compact)
-
-        chinese = {
-            "docs/zh-TW/COMMANDS.md": _read(Path("docs/zh-TW/COMMANDS.md")),
-            "docs/zh-TW/OPERATIONS.md": _read(Path("docs/zh-TW/OPERATIONS.md")),
-        }
-        required_chinese = {
-            "docs/zh-TW/COMMANDS.md": (
-                "## 孤兒暫存 branch 清理",
-                "assent-integration/<folder>/<suffix>",
-                "assent-reconcile/<folder>",
-                "只是回報資訊",
-                "刻意不掃",
-            ),
-            "docs/zh-TW/OPERATIONS.md": (
-                "## `doctor`",
-                "assent-integration/<folder>/<suffix>",
-                "assent-reconcile/<folder>",
-                "那只是回報資訊",
-                "刻意不掃",
-                "`[y/N]`",
-            ),
-        }
-        for name, text in chinese.items():
-            compact = " ".join(text.split())
-            for phrase in required_chinese[name]:
-                with self.subTest(document=name, phrase=phrase):
-                    self.assertIn(phrase, compact)
+    def test_translation_guide_does_not_require_manual_version_bookkeeping(self):
+        text = _read(Path("docs/TRANSLATING.md"))
+        self.assertIn("natural Traditional Chinese used in Taiwan", text)
+        self.assertIn("Git already records that history", " ".join(text.split()))
+        self.assertNotIn("translated commit", text.lower())
+        self.assertNotIn("short hash", text.lower())
 
 
 if __name__ == "__main__":

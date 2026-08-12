@@ -1,75 +1,47 @@
-# assent scheduler configuration. `assent init` installs this file once as
-# ~/.assent/assent.toml, where it applies to every project on this machine, and
-# later inits only add settings a new version brings; your own values and
-# comments are never rewritten. A project may still keep its own
-# .assent/assent.toml, which overrides this file for that project alone.
-# The plan is stated explicitly on the command line or derived from
-# current task-file state.
-# All relative paths are based on the project root (= the parent of .assent).
+# Shared Assent settings. A project's .assent/assent.toml may override them.
+# The Configuration guide documents workflow structure and alternatives.
 
 [watchdog]
-stall_minutes = 0                 # minutes of no session output before it is judged stalled; 0 = off
+stall_minutes = 0                 # 0 disables the session-output watchdog
 
 [run]
 retry_per_task = 1                # number of retries after a verification failure
 quota_poll_minutes = 30           # polling interval when the quota reset time cannot be parsed
 rotation_poll_minutes = 1         # polling interval after every adapter in the rotation is quota-exhausted
 
-# The workflow is always active. A passing action completes its layer; a
-# failing action advances to the next configured reviewer/fixer, and the next
-# action rechecks the repair. The finite array is the automation bound.
-# Ability and role names are user-defined. Abilities are atomic and reusable;
-# roles compose them for each workflow step.
-# prompt: instructions added to a session that uses this ability.
-# writes: whether that session may edit source inside its scheduler-owned scope.
-# produces_verdict: use the scheduler's structured review-verdict protocol.
+# Abilities define session responsibility and authority. Names have no engine
+# meaning; writes and produces_verdict do.
 [abilities.write_tests]
 prompt = "Write or update tests that prove the supplied requirements."
 writes = true
 [abilities.implement_source]
 prompt = "Implement the supplied requirements and satisfy the supplied focused checks."
 writes = true
-[abilities.review]
-prompt = "Review the supplied change and evidence and return the required verdict."
-writes = false
-produces_verdict = true
-[abilities.fix]
-prompt = "Repair authorized blocking findings within the assigned scope."
-writes = true
 [abilities.task_review]
-prompt = "Review only the current task's BLOCKED or focused-test failure evidence. Identify task-local planning omissions such as one exact missing scope path."
+prompt = "Resolve only the current task's BLOCKED or focused_test evidence. Diagnose a task-local planning omission; when one exact scope path was omitted, identify it without inventing requirements."
 writes = false
 produces_verdict = true
 [abilities.task_fix]
-prompt = "Repair the current task's authorized finding in this session, including an exact omitted scope path."
+prompt = "In the same session, repair every authorized task-local finding, including an exact omitted scope path. Do not create tasks or requirements."
 writes = true
 [abilities.plan_review]
-prompt = "Review whether the cumulative worktree produced by all completed tasks conforms to the plan, including cross-task interactions."
+prompt = "Review only focused_sweep failure evidence to decide whether the cumulative worktree conforms to the existing plan, including cross-task interactions and concrete regressions."
 writes = false
 produces_verdict = true
 [abilities.plan_fix]
-prompt = "Repair validated plan-level findings within their implicated existing tasks."
+prompt = "Repair every authorized plan-level finding through its implicated existing tasks. Do not create tasks or requirements."
 writes = true
-# ability: ordered ability names composed into this role.
-# model/effort: optional abstract execution tiers for this role.
+[abilities.integration_review]
+prompt = "Review only the exact selection's candidate-conflict or full_verify failure evidence. Identify every integration blocker without shrinking the selection, accepting a prefix, or inventing requirements."
+writes = false
+produces_verdict = true
+[abilities.integration_fix]
+prompt = "Repair every authorized integration finding in the scheduler-provided workspaces while preserving the exact selection. Do not run Git, Assent, focused tests, full verification, or accept."
+writes = true
+
+# Roles compose abilities and may select abstract model/effort tiers.
 [roles.implementer]
 ability = ["write_tests", "implement_source"]
-[roles.test_writer]
-ability = ["write_tests"]
-[roles.source_implementer]
-ability = ["implement_source"]
-[roles.reviewer]
-ability = ["review"]
-model = "prime"
-effort = "heavy"
-[roles.fixer]
-ability = ["fix"]
-model = "prime"
-effort = "heavy"
-[roles.reviewer_fixer]
-ability = ["review", "fix"]
-model = "prime"
-effort = "heavy"
 [roles.task_reviewer_fixer]
 ability = ["task_review", "task_fix"]
 model = "prime"
@@ -78,34 +50,20 @@ effort = "heavy"
 ability = ["plan_review", "plan_fix"]
 model = "prime"
 effort = "heavy"
-# Actions are scheduler-owned mechanical verification points.
-# focused_test is legal only in workflow.task. It runs the current task's
-# focused verify command outside the AI session and binds the result to source.
-# focused_sweep is legal only in workflow.plan. It runs the distinct focused
-# commands of that plan against its source worktree and writes no receipt.
-# full_verify is legal only in workflow.integration. It verifies the reconstructed
-# integration candidate and writes the matching plan or exact-selection receipt.
-# An action accepts only its action name: no role, adapter, model, or effort.
-# role: a name defined under [roles]. plan/integration roles may name an adapter;
-# when omitted, adapter uses the first name in the adapter configuration.
-# A non-empty plan/integration workflow starts and ends with its action. Between actions use
-# one writable verdict role, or a read-only verdict role plus an optional fixer.
+[roles.integration_reviewer_fixer]
+ability = ["integration_review", "integration_fix"]
+model = "prime"
+effort = "heavy"
+
+# A passing scheduler action ends its layer. Failure advances to the next
+# configured repair role, then the next action rechecks the result.
 [workflow]
-# A passing focused_test completes the task layer immediately. Its repair role
-# opens after a worker BLOCKED result or focused-test failure and must finish
-# review and repair in that one session.
 task = [
   { role = "implementer" },
   { action = "focused_test" },
   { role = "task_reviewer_fixer" },
   { action = "focused_test" },
 ]
-# Split alternative: two AI sessions and one final test, with no duplicate gate:
-# task = [
-#   { role = "test_writer" },
-#   { role = "source_implementer" },
-#   { action = "focused_test" },
-# ]
 plan = [
   { action = "focused_sweep" },
   { role = "plan_reviewer_fixer", adapter = "codex" },
@@ -115,9 +73,6 @@ plan = [
 ]
 integration = [
   { action = "full_verify" },
-  { role = "reviewer_fixer", adapter = "codex" },
+  { role = "integration_reviewer_fixer", adapter = "codex" },
   { action = "full_verify" },
 ]
-# Plan roles handle only focused_sweep failure evidence. Integration roles
-# handle only durable full_verify failure evidence. A passing action skips all
-# later roles in that layer.

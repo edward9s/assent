@@ -210,6 +210,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 "src/value.txt", "existing_file"))
         def review_and_fix(prompt):
             self.assertIn("write-capable merged review-and-repair", prompt)
+            self.assertIn(str((self.execution_root() / "AGENTS.md").resolve()),
+                          prompt)
+            self.assertIn(str(engine.contracts.instructions_path()), prompt)
             self.assertIn(str(self.execution_root()), prompt)
             (self.execution_root() / "src" / "value.txt").write_text(
                 "fixed\n", encoding="utf-8")
@@ -305,6 +308,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         def resolve(prompt):
             self.assertIn("write-capable merged review-and-repair", prompt)
             managed = gitops.reconcile_worktree_path(self.root, "plan01")
+            self.assertIn(str((self.execution_root() / "AGENTS.md").resolve()),
+                          prompt)
+            self.assertIn(str(engine.contracts.instructions_path()), prompt)
             self.assertIn(str(managed), prompt)
             (managed / "src" / "value.txt").write_text(
                 "resolved automatically\n", encoding="utf-8")

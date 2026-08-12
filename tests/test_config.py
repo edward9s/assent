@@ -775,7 +775,7 @@ class TestLayeredConfig(ConfigTestCase):
         self.assertEqual(
             [step.action if isinstance(step, WorkflowActionStep) else step.role
              for step in cfg.workflow_integration],
-            ["full_verify", "reviewer_fixer", "full_verify"])
+            ["full_verify", "integration_reviewer_fixer", "full_verify"])
 
     def test_init_preserves_existing_inline_adapter_layout(self):
         templates = Path(__file__).resolve().parents[1] / "assent" / "templates"

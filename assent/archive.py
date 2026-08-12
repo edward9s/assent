@@ -446,7 +446,7 @@ def archive_all(config_path: str, assent_dir: Path) -> int:
             errored.append(folder)
 
     # ``archive --all`` is a whole-project invocation, so it owns the
-    # repository-global temporary namespace exactly as ``clean --all`` does.  It
+    # repository-global temporary namespace exactly as folderless ``clean`` does.  It
     # delegates to clean's single implementation rather than growing a copy, and
     # calls it here -- after the per-folder loop -- because every ``_archive_one``
     # holds the integration lock the sweep must take for itself, and because a

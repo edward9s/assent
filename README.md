@@ -1,202 +1,123 @@
-# assent — an AI plan format + an automatic scheduler
+# assent — plan with AI, run unattended, approve as a human
 
-*[Traditional Chinese reader edition](README.zh-TW.md)*
+*[Traditional Chinese](README.zh-TW.md)*
 
-Assent is a file-based planning format and scheduler for long-running
-projects. A human and an AI agree on a plan, the scheduler runs its task files
-in isolated Git worktrees, and a human reviews the evidence before acceptance.
-The management plane is `.assent/`; the source project remains ordinary Git.
+Assent turns an agreed AI plan into isolated, repeatable work. You discuss the
+design with an AI, store it as task files, let `assent run` execute and verify
+the work, then review the evidence before explicitly accepting it.
 
-## The shortest useful tour
+The source remains ordinary Git. Assent keeps its plans and runtime evidence in
+the project's ignored `.assent/` directory.
 
-| Stage | What happens | Main commands |
+## The workflow
+
+| Stage | What you do | Main command |
 | --- | --- | --- |
-| Plan | Discuss the goal, write Assent-format task files, and validate the plan. | `assent check` |
-| Execute | Run task, plan, and integration workflows through focused checks, bounded repair, and complete verification. | `assent run` |
-| Review | Read `_report.md`, inspect the diff and verification evidence, then decide whether to accept, rework, or reject. | `assent report`, `assent verify`, `assent accept` |
+| Plan | Agree on requirements and write `.e.toml` tasks. | `assent check` |
+| Run | Let task, plan, and integration workflows implement, test, and repair within finite limits. | `assent run` |
+| Review | Read the report and diff, then accept, rework, or reject. | `assent report`, `assent accept` |
 
-`DONE` is an executing AI's completion claim, not human approval. A complete
-verification receipt is evidence; `accept` is the explicit human decision.
-Assent never discards token-burned work: handled interruptions become WIP
-checkpoints, and failed attempts remain available for retry or adjudication.
+`DONE` means the execution AI believes a task is finished. A passing receipt
+means the reconstructed result passed complete verification. Neither is human
+approval: only `assent accept` publishes the work.
 
-## Prerequisites and installation
+## Install
 
-You need Python 3.11+, Git, and a logged-in supported AI CLI such as `claude`
-or `codex`. Assent uses only the Python standard library.
-
-Install the published distribution:
+Assent requires Python 3.11+, Git, and an installed and authenticated supported
+AI CLI such as Claude or Codex. It uses only the Python standard library.
 
 ```text
 python -m pip install assent
 ```
 
-Remove the published distribution when you choose:
+To uninstall:
 
 ```text
 python -m pip uninstall assent
 ```
 
-Uninstalling removes the Python package and the `assent` CLI entry point only.
-It does not delete `~/.assent`, any project's `.assent/`, worktrees, archives,
-or Git branches; data cleanup remains an explicit human choice. For an editable
-source checkout, see [Configuration](docs/CONFIGURATION.md).
-
-Check the installation with `assent --version` or `assent doctor`.
+Uninstalling removes the package and CLI only. It does not delete
+`~/.assent`, project `.assent/` directories, worktrees, archives, or Git
+branches. Cleanup remains an explicit choice.
 
 ## Quick start
 
-From the root of an existing Git project:
+Run these commands from an existing Git project:
 
 ```text
-# Install the per-user contracts/settings and the project's .assent skeleton.
 assent init --test unittest
 
-# Review ~/.assent/assent.toml, AGENTS.md, and .assent/verify.py.
-# Hold a planning meeting and write tasks under .assent/<folder>/.
+# Hold a planning meeting with an AI and write .assent/<PLAN>/*.e.toml.
 assent check
 
-# Try one task, then run the remaining work unattended.
+# Try one task, then finish the plan unattended.
 assent run --once
 assent run
 
-# Read the report and inspect the checkpoint diff before this human decision.
-assent report <FOLDER>
-assent accept <FOLDER>
+# Review before making the human decision.
+assent report <PLAN>
+assent accept <PLAN>
 
-# Cleanup and retirement are separate explicit choices.
-assent clean <FOLDER>
+# Remove redundant worktrees or retire completed plan records when wanted.
+assent clean <PLAN>
 assent archive --all
 ```
 
-`assent init` asks for the real project verifier on a fresh project. It can
-activate parallel unittest, pytest, npm test, Flutter test, dotnet test,
-Maven test, Gradle test, CMake/CTest, Make test, or a custom argv command.
-A repeat init preserves an existing verifier, refreshes the three
-user-home contracts, and adds only missing settings keys. The user-home
-contracts are `~/.assent/instructions.md`, `~/.assent/format.md`, and
-`~/.assent/workflow.md`; a project does not receive copies. See
-[Configuration](docs/CONFIGURATION.md).
+`assent init` installs shared settings and three AI contracts under
+`~/.assent/`, creates the project skeleton, and asks which full verifier the
+project uses. Review `~/.assent/assent.toml`, `AGENTS.md`, and
+`.assent/verify.py` before the first run.
 
-For a second terminal, use `assent status`, `assent report`, or `git log` and
-`git diff` on the worktree branch. `assent run --all --jobs 2` schedules
-independent folders in dependency order. A folder's `after` entries control
-readiness; only an explicit `base` makes a downstream worktree start from an
-upstream commit. See [Workflow](docs/WORKFLOW.md) and
-[Operations](docs/OPERATIONS.md).
+## What happens during `run`
 
-## Automatic bounded workflow repair
+The configured `[workflow]` has three layers:
 
-`[workflow]` configures three always-active layers. `task` runs each task's
-`focused_test`; `plan` runs the distinct union of task commands as
-`focused_sweep`; `integration` reconstructs the candidate and runs
-`full_verify`, producing the receipt required by `accept`. A passing action
-skips the following repair roles. A failing action advances to the next
-configured reviewer/fixer. A writable verdict role repairs an exact scope
-omission in that same session; the scheduler validates the complete write set
-and alone appends the exact task scope at closeout. Task and plan review use
-separate configured abilities and prompts: task review handles one task's
-BLOCKED or focused-test evidence, while plan review checks the completed
-cumulative worktree against the plan. A task BLOCKED result stays in
-`workflow.task` and never consumes `workflow.plan`.
+- `task` works on one task and uses `focused_test` as its mechanical gate;
+- `plan` runs a `focused_sweep` over the completed plan and reviews cumulative
+  behavior only after all tasks are done or skipped; and
+- `integration` reconstructs the exact selected result and runs `full_verify`.
 
-The finite arrays are the complete automation budget. Review prompts state the
-current and total positions and prohibit findings that do not cite an existing
-task requirement or concrete repair regression. Assent does not use diff
-oscillation or subjective no-progress detection. If the configured positions
-run out, it preserves all findings and edits as `REVIEW UNRESOLVED, HUMAN
-DECISION` and exits zero; `assent accept` remains blocked until the required
-mechanical verification passes. No workflow step accepts a folder.
+A passing action completes its layer immediately. A failure may open the next
+configured reviewer/fixer, whose repair is checked by the following action.
+The arrays are the complete repair budget: Assent never invents extra rounds.
+If automation cannot decide safely, it preserves all work and reports `REVIEW
+UNRESOLVED, HUMAN DECISION` for the acceptance meeting.
 
-## Planning-meeting prompt
+A task that reports `BLOCKED` remains in the task layer. Its task reviewer may
+repair a small planning omission, such as one missing scope path, in the same
+session. It does not spend the plan review budget. Plan review has a different
+job: checking whether the cumulative implementation matches the agreed plan.
 
-Use this prompt as a starting point. It keeps the discussion human-led and
-leaves the task schema to the installed format contract:
+Integration keeps the exact selected plans. On a Git conflict it repairs the
+conflict through a managed reconcile worktree, then rebuilds and verifies the
+same selection. It never quietly drops a plan, accepts a passing prefix, or
+calls `accept`.
 
-```text
-Let's plan this project together. Please read AGENTS.md,
-~/.assent/instructions.md, and ~/.assent/format.md first. Answer concisely and
-do not use subagents. Discuss the goal with me before creating any plan files.
-Report every source bug, bad structure, and documentation/runtime mismatch you
-find. Do not overengineer. Wait for my explicit human agreement, then write
-Assent-format task files under .assent/<work folder>/. Use these numbered
-requirement placeholders during the discussion:
-1. Requirement description.
-2. Requirement description.
-3. Requirement description.
-Before we adjourn, run assent check.
-```
+## Documentation
 
-Every agreed requirement should be fixed into task files as it is settled;
-`assent check` passing is what allows the meeting to adjourn. The canonical
-schema is the user-home `~/.assent/format.md`, not a copied project document.
+- [Workflow](docs/WORKFLOW.md): planning, unattended execution, and acceptance
+  review.
+- [Commands](docs/COMMANDS.md): selection rules and command guide.
+- [Configuration](docs/CONFIGURATION.md): initialization, adapters, models, and
+  workflow settings.
+- [Verification](docs/VERIFICATION.md): focused/full checks, receipts,
+  conflicts, and shared ignored inputs.
+- [Operations](docs/OPERATIONS.md): worktrees, recovery, cleanup, and archive.
 
-## Independent acceptance-review prompt
+English documentation is canonical. Matching
+[Traditional Chinese guides](docs/zh-TW/WORKFLOW.md) are provided for readers.
+The installed AI contracts are deliberately separate from these human guides:
+`instructions.md` gives session rules, `format.md` defines plan files, and
+`workflow.md` defines scheduler and acceptance behavior.
 
-Use this after execution when a second opinion is useful:
+## Safety boundaries
 
-```text
-Act as an independent acceptance reviewer. Answer concisely and do not use
-subagents. Before changing anything, inspect the work folder's _report.md. If
-it says TECHNICAL DEBT REVIEW REQUIRED, read _technical_debt.md, tell the human
-about the flag before recommending accept, and enumerate every debt item with
-an explicit sufficient-repair, follow-up-task/rework, or durable AGENTS.md-rule
-disposition. Then inspect the relevant task and journal files, the checkpoint
-commit and diff, the implementation, and the focused and full verification evidence. Report
-evidence-based findings first: bugs, structural problems, overengineering,
-missing tests, and documentation/runtime drift. Recommend a high-capability
-model from a different vendor than the implementer for an independent
-cross-review, but do not require or encode a second model or automatic gate.
-This ordinary acceptance review remains human-driven: do not accept or rework
-as part of the review. Wait for the human decision; only after the human agrees
-should you write any Assent-format rework tasks or explain the acceptance
-action. The configured workflow repair loop is bounded and still never accepts
-a folder.
-```
-
-The ordinary reviewer does not mutate the worktree while forming findings. A
-configured read-only workflow reviewer uses prompt-plus-detection write refusal
-before any repair session. Human acceptance remains
-`assent accept <FOLDER>` (or an explicitly selected batch), and human rework
-remains `assent rework <FOLDER> <TASK>`.
-
-## Topic map
-
-The README is an entry point. Durable detail lives in five paired guides:
-
-| Topic | English canonical guide | Traditional Chinese reader guide |
-| --- | --- | --- |
-| Planning, execution, review, prompts, rework | [WORKFLOW](docs/WORKFLOW.md) | [WORKFLOW — Traditional Chinese](docs/zh-TW/WORKFLOW.md) |
-| Selection and CLI reference | [COMMANDS](docs/COMMANDS.md) | [COMMANDS — Traditional Chinese](docs/zh-TW/COMMANDS.md) |
-| Init, settings, adapters, models, effort | [CONFIGURATION](docs/CONFIGURATION.md) | [CONFIGURATION — Traditional Chinese](docs/zh-TW/CONFIGURATION.md) |
-| Focused/full verification, receipts, reconcile, acceptance evidence | [VERIFICATION](docs/VERIFICATION.md) | [VERIFICATION — Traditional Chinese](docs/zh-TW/VERIFICATION.md) |
-| Worktrees, locks, concurrency, recovery, cleanup, archive | [OPERATIONS](docs/OPERATIONS.md) | [OPERATIONS — Traditional Chinese](docs/zh-TW/OPERATIONS.md) |
-
-The English pages are canonical. The Traditional Chinese pages are reader
-translations and identify English as the source of truth. The specialized
-[design consensus](docs/CONSENSUS.md) and
-[translation process](docs/TRANSLATING.md) keep their existing roles.
-
-## Safety boundaries worth remembering
-
-- Git is always required; there is no Git-less mode and no hand-maintained
-  current-folder pointer. State the folder explicitly or let task facts derive
-  an unambiguous selection.
-- Direct and selected `accept` never start complete verification. They require
-  fresh matching evidence, except for an ancestry-proven no-op. `accept --all`
-  has its documented fresh-batch replay and sequential fallback modes.
-- Complete verification uses a temporary integration candidate and disposable
-  receipts. It mirrors tracked content plus only reviewed ignored directory
-  links and ordinary ignored leaf files inside tracked directories; it never
-  copies ignored trees.
-- Cleanup detaches directory links before recursive removal and never traverses
-  their external targets. Do not manually remove a managed worktree or branch.
-- A worktree is an isolation and audit boundary, not a security sandbox:
-  unattended AI still has the OS identity's access to credentials, network,
-  external Git writers, and files outside the worktree.
-- The workflow arrays supply the bounded review policy and code-preserving
-  repair opportunities. Their derived `_auto_fix.toml` state is never
-  acceptance, and `accept` remains a human action.
-
-For exact selection rules, receipt freshness, shared ignored-input review,
-adapter mappings, recovery, and all command options, use the topic guides above.
+- Assent preserves failed and interrupted work instead of reverting it.
+- Scope and ownership checks fail closed.
+- Complete verification uses a temporary integration candidate and changes no
+  target ref.
+- Cleanup never traverses a junction or directory symlink target.
+- A worktree isolates and records changes; it is not a security sandbox.
+- `reject` is destructive and asks for confirmation; use `rework` when code
+  should remain in place.
+- Verification never implies acceptance. The final decision remains human.

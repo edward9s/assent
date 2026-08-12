@@ -1,190 +1,92 @@
-# 作業
+# 作業與復原
 
-*[English version](../OPERATIONS.md) · [README](../../README.zh-TW.md)*
+*[English](../OPERATIONS.md) · [README](../../README.zh-TW.md)*
 
-> 本檔是 [../OPERATIONS.md](../OPERATIONS.md) 的正體中文(台灣用語)翻譯；內容如與
-> 英文版不同，以英文版為準。涵蓋 worktree、lock、並行、復原、清理、封存與安全。
+> 本文是 [英文版](../OPERATIONS.md) 的正體中文翻譯；若內容不同，以英文版為準。
 
-## Worktree 與 branch
+Assent 使用 Git worktree 隔離修改，也讓失敗成果能被檢查與恢復。Worktree 是稽核
+與復原邊界，不是安全 sandbox。
 
-Git 永遠必須啟用，每個 work folder 都有自己的 worktree：
+## Worktree 與 lock
 
-```text
-<project name>.worktrees/<FOLDER>/
-```
-
-它是 change isolation、衝突管理、稽核與復原邊界。人類 acceptance 與 integration
-被證明完成前，source branch 與 task files 都保留供審查。整個 `.assent/` management
-plane 被 ignore，只在 primary worktree；進入 Git 時 scheduler 會 fail closed，避免
-worktree 產生第二份 source of truth。
-
-Scheduler 提供 task/journal 與 verifier 的 main-tree absolute path。tracked 的
-`AGENTS.md` 使用 branch 版本；untracked 時使用 prompt 提供的 main-tree path。verifier
-從 main tree 載入，但 cwd 仍是 candidate 或 worktree。共用契約永遠是 user-home 的
-`~/.assent/instructions.md` 與 `~/.assent/format.md`。
-
-AI meeting 在 primary worktree。可用 `git worktree list`、`git log <branch>`、
-`git diff main...<branch>` 從外部審查，不必進入每個 worktree。
-
-## 平行執行
-
-不同 terminal 可跑不同資料夾：
+每個 plan 使用自己的 worktree：
 
 ```text
-assent run parallel01
-assent run parallel02
+<project>.worktrees/<PLAN>/
 ```
 
-也可用 `assent run --all --jobs N` 讓 scheduler 安排。parent process 保持 foreground，
-即時 child output 以 `[work-folder] message` 加前綴。root `.assent/_assent.log` 只留
-startup 與 per-folder scheduling summary；各 folder 的 `_assent.log` 會附加自己的
-rendered terminal session output，不含 parent scheduler 的 `[work-folder]` prefix。
+專案內被忽略的 `.assent/` 留在主要 worktree。若 branch 內有 tracked
+`AGENTS.md` 就使用該版本，否則 scheduler 提供主要檔案的絕對路徑。
 
-並行會共享 adapter quota，branch 整合回 main line 是人類責任。speculative content
-由明示 `base` 決定，不由 `after` 推導；詳見[工作流程](WORKFLOW.md)。
+同一時間只有一個 `run` 可以擁有某個 plan。持續存在的 `assent.lock` 只是診斷檔；
+真正的 ownership 來自 OS lock，不能因為檔案存在就判定卡死，也不要刪檔「解鎖」。
+相依條件允許時，不同 plan 可以平行執行。
 
-## Lock 是診斷資料
-
-每個 work folder 有 `assent.lock`。檔案只記錄上次 run 的 PID、開始時間與 folder；它的
-存在不代表現在仍有 run。真正的 ownership 是 open handle 上的 OS exclusive lock：Windows
-用 `msvcrt`，POSIX 用 `fcntl`。正常結束、Ctrl+C、crash 與 force termination 都會在 handle
-關閉時釋放。
-
-- 不要把檔案存在當成「正在執行」；每次 run 後它仍會留著。
-- 不要刪它來復原；刪除會引入 race，下一次 run 會重用，archive 也能建立遺失的檔案。
-- folder 真忙時，下一次 run 取不到真正 lock 會拒絕；那才是訊號。
-
-`run --all` 在所有 exit path（含 refusal 與 scheduling error）都會等待並 reap 自己
-擁有的 child。記錄的 PID 若仍活著，可能是真正運行中的 process。這個 lock 保證主要
-針對 local filesystem；某些 network filesystem 的 `flock`/`msvcrt.locking` 不可靠。
+`accept` 執行期間，不要讓其他 Git 程式修改主要 worktree。Assent 的 integration
+lock 只能序列化自己的發布動作，無法阻止外部 writer。
 
 ## 中斷與復原
 
-Assent 有處理的中斷會寫 `WIP` checkpoint，`assent run` 以 continue prompt 恢復。在
-run startup，如果每個未提交變更都能證明屬於要恢復的 task（或一個尚未被 checkpoint
-的 `DONE` task），Assent 會將 task 標成 `WIP`、記錄 scope-verified recovery、把編輯
-收進 `WIP` checkpoint，並在不開 AI session 的情況下繼續 recovery path。若 ownership
-有 ambiguity，或任何 dirt 超出 task scope，Assent 會保留 dirty worktree 供人類檢查，
-fail closed 而不猜；重新執行前請先檢查並建立 checkpoint。`assent.lock` 不是復原狀態，
-不要處理它。
+重試失敗、quota 中斷、Ctrl+C 或 crash 後，Assent 都會保留成果。若每個未提交修改
+都能證明屬於同一個可恢復 task，且全部位於 scope 內，下次 run 會在不開 AI session
+的情況下收進 `WIP` checkpoint。若 ownership 不明或超出 scope，dirty worktree 會
+保留供人類檢查，run 則拒絕繼續。
 
-Scheduler 不會在失敗時 revert workspace。失敗 review 的程式碼保留並在其上重試；重試
-用盡後成果進入 `BLOCKED` checkpoint 供人類裁決。journal 保存 structured events、
-有界的 summary 與 adapter classification，不保存完整 raw adapter stream；各 folder 的
-`_assent.log` 保存 rendered terminal session output，且沒有 parent scheduler prefix。
+若 AI 誤寫主要 worktree，只有在每個路徑都符合 scope、而且轉移不會產生歧義時，
+Assent 才會搬回工作 worktree；否則保留兩邊現況，交給人類處理。
 
-### Workflow repair 復原與寫入邊界
+Journal 保存 structured event 與有界摘要，不保存完整 raw adapter stream。Terminal
+log 保存畫面上的 session output，也不會在每行再重複 scheduler prefix。
 
-設定好的 workflow 在 `run` 中一律啟用，沒有另一個 repair flag。Action 通過時會略過 reviewer/fixer；失敗時會先持久化證據，再開始可寫入的 repair，因此中斷後可從 durable boundary 恢復，不會還原已產生的修改。
-
-Reviewer/fixer 只能寫入 finding 所屬既有 task scope，以及同一個 writable verdict session 回傳的一個精確 scope addition。Scheduler 會依 session 開始前的 tree 驗證該路徑，並在 closeout 時更新 task contract；唯讀 verdict role 只能把 addition 留給另外設定的 fixer。Blocked adjudication 只會開啟設定中真正唯讀的 verdict role，不會暗中降低 writable role 的權限。Management plane、Git state、所有權不明或其他 out-of-scope 寫入都 fail closed，並保留給人類復原。有限陣列耗盡成為 `REVIEW UNRESOLVED, HUMAN DECISION`；基礎設施與安全失敗仍為非零。
-
-### 臨時 integration candidate
-
-完整 verification 會建立 sibling candidate，例如：
-
-```text
-<project>.integration/target-<uuid>
-branch assent-integration/<folder>/<uuid>
-```
-
-它在 verifier 全程存在，成功、Python exception 與 Ctrl-C 都由 `finally` 清理。要觀察
-時以 candidate 作 cwd，執行 main-tree verifier；不要把 source worktree 當 candidate。
-
-只有 `taskkill /F` 等 hard kill 或斷電可能留下 residue。不要對 residue 使用 raw Git
-worktree remove 或 recursive deletion；保留 exact path/branch，使用 Assent 所有者的
-recovery/retry path。它會 inventory directory link/reparse point、先 detach link object、
-再重驗 ownership 後刪 managed resource。證明不完整時，path、branch 與外部 target 都保留。
+不要終止不屬於自己的 process，也不要手動刪除受管理的 worktree 或暫存 branch。
+保留完整路徑與診斷，重跑原本的 Assent 指令，或執行 `assent doctor`。
 
 ## Link-safe cleanup
 
-`clean`、`archive`、`reject`、reconcile、setup failure 與 temporary candidate 都遵守同一
-規則：directory junction、directory symlink 或其他 directory reparse point 會先以 link
-object 脫離，再做 recursive Git/filesystem removal；絕不穿越 resolved target。外部 target
-在成功、拒絕、失敗、中斷與重試後都保留。
+在任何 recursive Git 或 filesystem removal 之前，Assent 會盤點 directory junction、
+directory symlink 與其他 directory reparse point，再先脫離 link object 本身。Remover
+絕不穿越 resolved target；外部 target 在成功、拒絕、失敗、中斷與重試後都會保留。
 
-如果無法證明 inventory、ownership 或 detachment，cleanup 會拒絕並保留 managed path，
-等待 Assent 自己 retry。不要把含 directory link 的 tree 傳給 Git 或 recursive remover，
-也不要手動刪 source worktree/branch。
+若無法證明 inventory、ownership 或安全脫離，清理會停止並保留 managed path。
 
-## `clean`
+## Clean
 
-`assent clean` 只刪除 fully merged 且 clean 的 worktree 與同 folder-prefix branch；不碰
-`.assent/`、沒有 force option，也和 `git clean` 無關。
+```text
+assent clean <PLAN>
+assent clean              # 所有 plan
+```
 
-清理是 upstream-first 且依 evidence。direct dependent 尚未完成、未接受、dirty、遺失或
-無法證明整合時，source evidence 必須保留；`assent clean A` 會拒絕並說明原因。所有
-dependent 已接受、可證明整合且 clean 後，才先 clean upstream，再 clean dependent。
+`clean` 只移除已證明乾淨、ownership 正確且已整合的 worktree/branch。只要 direct
+dependent 尚未完成、未接受、dirty、遺失或缺乏證明，上游就會保留。多個 folder
+依 upstream-first 順序處理。沒有 force-delete，`.assent/<PLAN>/` 也不會被刪除。
 
-`assent clean A B` 與 `assent clean A ...` 會在一次 upstream-first pass 中處理選取；裸的
-`assent clean` 仍 discovery 全部。`...` 規則見[指令](COMMANDS.md)。
+## Archive
 
-`assent-integration/<folder>/<suffix>` 與 `assent-reconcile/<folder>` 是兩個 Assent 自有的
-暫存 branch namespace，人類不可 checkout 或在其上建置。兩者各自由建立它的 transaction
-在完成後移除，殘留下來的只因為那個 transaction 在完成前就中斷，才算 orphan。
-`assent clean --all` 在每次 per-folder cleanup 之後、每次呼叫掃一次所有這類 orphan，因為
-repository-wide integration lock 在該 branch 仍存在時被持有，才是它是 orphan 的完整
-證明——不是 branch 的內容，也不是它的 tree 是 published 還是 superseded，那只是回報資訊。
-明示單一 `assent clean FOLDER` 刻意不掃，讓指名部分 folder 時不會意外刪掉
-repository-global 的 ref。
+```text
+assent archive <PLAN>
+assent archive --all
+assent archive <PLAN> --restore
+```
 
-## `archive`
+Archive 先要求同一套安全 cleanup 證明，再把管理資料存到 `.assent/_archive/`、更新
+roster，並移除 live folder。明示的 plan 不符合條件時會回報錯誤；`--all` 會略過。
+Restore 一次只處理一個 plan，先驗證 archive，也不會覆蓋現有 live folder。
 
-Archive 是 retirement，不是普通 cleanup。它先遵守 clean contract，再把合格 work folder
-壓到 `.assent/_archive/`，並更新 `.assent/_archived.toml`（或目前 roster）。明示多個
-folder 時採 single-folder contract：逐一嘗試，不合格者令 command nonzero；`archive --all`
-則跳過不合格者而不使 dynamic request 失敗。
+## 暫存 branch 與 doctor
 
-`archive --restore FOLDER` 只還原一個 archive，不接受 `--all` 或 `...`。Archive recovery
-可能暫時沒有 live directory；已辨識的 restore 狀態不會被一般 explicit-selection audit
-錯報成遺失 folder。
+`assent-integration/<folder>/<suffix>` 和 `assent-reconcile/<folder>` 屬於建立它們的
+transaction。只有 repository-wide integration lock 證明沒有 transaction 持有時，
+殘留 branch 才算 orphan。它的 tree 是已發布或已被取代，只是回報資訊，不是刪除條件。
 
-`archive --all` 繼承 `clean --all` 每次呼叫一次的暫存 branch 清理，做法是委派同一個
-實作在自己的 per-folder loop 之後執行，而非重新實作：每個 per-folder archive 步驟本身
-已持有清理所需的 integration lock。
+未指定 folder 的 `clean` 每次會掃描這兩種 namespace 一次；`archive --all` 使用相同流程。
+明示的 `clean <PLAN>` 刻意不動 repository-wide 暫存 branch。`assent doctor` 會回報
+殘留項目，重新確認 ownership 後才提供 `[y/N]` 移除。
 
-## `doctor`
+## 安全邊界
 
-`assent doctor` 診斷 Python、Git、adapter CLI 與 temporary directory 是否可寫，不需要
-現有 project，另外也會用和 `clean --all` 相同的 lock-based 證明，回報找到的 orphaned
-Assent-owned 暫存 branch。找到 orphan、人類拒絕移除、或移除被拒絕，都不會讓 `doctor`
-失敗或影響它的 exit code——這只是不整潔，不是壞掉。
+Adapter 若使用廣泛權限，AI 就能接觸 OS identity 可使用的 credential、網路服務、
+外部 Git writer 與 worktree 外檔案。Assent 只能事後檢查專案修改，不提供 container
+或 VM。無人值守執行只適合可信任的 repository、instructions、adapter 與帳號。
 
-跟不問人的自動 sweep 不同，`doctor` 會提出確認式的 `[y/N]` 移除：先列出找到的項目，
-詢問是否移除，並在真正刪除前於同一次 integration lock 內重新讀取 branch 清單，讓
-「回報之後、確認之前」剛好不再是 orphan 的 branch 被保留而不是被刪。`doctor` 的提案是
-復原路徑；`clean --all` 與 `archive --all` 仍是例行、不問人的路徑，且 `doctor` 本身不跑
-任何 folder 操作，也不碰任何 work folder、task file 或 receipt。
-
-## `reject`
-
-Reject 是明示丟棄 folder 實作的人類決定，不是 cleanup shortcut。它要求指定 folder，run
-中會拒絕。刪 branch 前先記錄每個完整 tip hash、以 WIP commit 保存未提交變更，經 link-safe
-boundary 移除 folder worktree，再強制刪同 prefix branch；`DONE`、`WIP`、`BLOCKED` 重設
-`TODO`，`SKIP` 保留，journal 附加 `rejected` 與完整 Git evidence。hash 只在 Git 一般
-garbage-collection grace period 內可復原。
-
-## Acceptance 與外部 writer
-
-Acceptance 是人類明示動作。它使用 integration lock，但 lock 不能阻止外部 Git writer；
-acceptance 期間不要在同一 primary worktree 執行寫入型 Git command。Assent 不會在 acceptance
-中連線 remote、pull、rebase、force-push、push、自動解衝突或刪 source。local decision 與
-證據完成後，才由人類自行選擇普通 Git 同步。
-
-direct/selected accept 不會驗證；`accept --all` 的例外與 receipt freshness 規則在
-[驗證](VERIFICATION.md)。dependent 尚未接受與 clean proof 尚未完成前，保留 accepted
-source evidence。
-
-## 作業安全邊界
-
-Worktree 不是 security sandbox。`danger-full-access` 與 `bypassPermissions` 仍讓 AI 取得
-其 OS identity 可用的 credentials、network、外部 Git writer 與 worktree 外檔案。只在信任
-的 project 與 account 使用 unattended execution；Assent 不建立 container/VM，也不攔截
-外部效果。
-
-## 相關指南
-
-- [工作流程](WORKFLOW.md)：規劃、執行、審查與裁決。
-- [指令](COMMANDS.md)：選取、`...` 與 command syntax。
-- [設定](CONFIGURATION.md)：init 與 adapter 設定。
-- [驗證](VERIFICATION.md)：candidate、receipt、ignored input、reconcile、accept evidence。
+Candidate link 與 receipt 請看[驗證](VERIFICATION.md)，accept 與 rework 決定請看
+[工作流程](WORKFLOW.md)。

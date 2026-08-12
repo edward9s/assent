@@ -1,268 +1,279 @@
 # 設定
 
-*[English version](../CONFIGURATION.md) · [README](../../README.zh-TW.md)*
+*[English](../CONFIGURATION.md) · [README](../../README.zh-TW.md)*
 
-> 本檔是 [../CONFIGURATION.md](../CONFIGURATION.md) 的正體中文(台灣用語)翻譯；
-> 內容如與英文版不同，以英文版為準。涵蓋 init、設定、adapter、model tier、
-> effort 與故障排除。
+> 本文是[英文版](../CONFIGURATION.md)的正體中文翻譯；若內容不同，以英文版為準。
 
-## 需求與檔案位置
+Assent 需要 Python 3.11+、Git，以及至少一套已安裝並登入的 AI CLI。Python 套件
+本身不使用第三方 runtime dependency。
 
-Assent 支援 Python 3.11+，需要 Git，且只用標準函式庫。設定的 AI adapter 必須
-先安裝並登入 CLI，才能無人值守執行。
+## 檔案與優先順序
 
-```text
-python -m pip install assent
-python -m pip install -e .
-```
-
-第一行是已發布套件；第二行是 source checkout 的 editable 安裝。解除安裝只移除
-Python 套件與 `assent` CLI entry point，不會刪除 `~/.assent`、專案 `.assent/`、
-worktree、archive 或 Git branch；資料清理是另外的人類選擇。
-
-每台機器只有一份 Assent 共用檔：
+共用檔案放在 `~/.assent/`：
 
 ```text
-~/.assent/
-├── assent.toml       # 共用設定
-├── instructions.md   # session rules 契約
-└── format.md         # task-format 契約
-
-<project>/
-├── AGENTS.md         # 專案規則與 Assent bridge line
-└── .assent/          # ignored，只在 main worktree
-    ├── verify.py
-    ├── assent.toml   # optional project override
-    └── <work folder>/
+assent.toml       scheduler 設定
+adapter.toml      AI CLI 指令與 model 對應
+instructions.md  AI session 規則
+format.md         計畫檔契約
+workflow.md       scheduler 與驗收契約
 ```
 
-專案不會收到 `instructions.md` 或 `format.md` 副本；`assent init` 只在 user home
-安裝/刷新它們。專案自己保有 `AGENTS.md`、verifier、task folder、report、log、
-receipt、archive 與 optional project override。
+專案自己保有 `AGENTS.md`、`.assent/verify.py`、各份計畫，以及可選的
+`.assent/assent.toml` override。
 
-## 設定優先序
+設定優先順序依次是內建預設、使用者設定、專案 override，以及該指令支援的命令列
+override。Table 依 key 合併；scalar 與 array 整個取代較低層的值。省略才會繼承，
+空 array 則是明確的空值。
 
-由低到高：
+`assent init` 會補入新版新增的設定，但保留現有值與註解。它不會擅自用新版預設
+取代既有 workflow；請讀完本指南後自行決定是否採用。
 
-1. Assent 內建預設值。
-2. `~/.assent/assent.toml` 的 user settings。
-3. `.assent/assent.toml` 的 optional project override。
-4. 支援時的明示 CLI 選擇，例如 `--config PATH`、`--jobs`。
+## 從 workflow 理解設定
 
-Table 依 key merge；scalar 與 array 整體取代。project override 只 shadow 它明示的
-key，不會搬進 user home，也會 byte-for-byte 保留。`--config PATH` 選 project-level
-override 並從 `.assent` parent 定位 project，不是 current-folder pointer。
+設定的核心關係是：
 
-省略 key 才會繼承：
+```text
+ability：prompt + 權限
+        ↓
+role：一個或多個 ability + model/effort
+        ↓
+workflow：依序排列 role 與 scheduler action
+```
 
-- `key =` 是無效 TOML，不是空值。
-- 空 table 不提供 leaf override。
-- 允許該欄位時，空 array 是明確取代。
-- 需要有意義文字的設定（command、adapter name、effort）若為空或全空白會拒絕。
+Ability 說明一個 AI session 負責什麼；role 組合一個或多個 ability；workflow
+決定 role 何時執行，以及哪個機械式結果會啟動下一次修復。`reviewer`、`fixer`
+之類的名稱只是方便人類閱讀，engine 不會從名稱推斷權限。
 
-無效 TOML 或值會在 managed files 寫入前拒絕。
+### Ability
 
-## 初始化
+```toml
+[abilities.task_review]
+prompt = "Review only the current task's failure evidence."
+writes = false
+produces_verdict = true
+```
 
-在 Git project root 執行 fresh init，會安裝 user-home 契約與設定、建立
-`.assent/verify.py`、保留 `.assent/` ignored，並刷新 `AGENTS.md` bridge line。它會
-要求選一個真正的 project verifier：parallel unittest、pytest、npm test、Flutter
-test、dotnet test、Maven test、Gradle test、CMake/CTest、Make test 或 custom
-argv：
+- `prompt` 會附加到 session 指示中。它應明確限定這一層的責任；詳細協定與失敗
+  證據由 scheduler 提供。
+- `writes` 表示 role 能否在 scheduler 授權的範圍內修改 source。Reviewer 之所以
+  唯讀，是因為這個能力值，而不是它的名稱。
+- `produces_verdict = true` 表示 role 必須回傳結構化審查結果；預設為 `false`。
+
+Prompt 不會擴張 scope、Git 權限或執行驗證的權限；scheduler 規則仍優先適用。
+
+### Role
+
+```toml
+[roles.task_reviewer_fixer]
+ability = ["task_review", "task_fix"]
+model = "prime"
+effort = "heavy"
+```
+
+`ability` 是不可為空的有序清單。只要其中一個 ability 可以寫入，role 就可以寫入；
+只要其中一個會產生 verdict，role 就必須產生 verdict。一般 task role 的 `model`
+與 `effort` 可以省略，屆時沿用 task 的設定。`workflow.plan` 與
+`workflow.integration` 的 verdict role 必須明示兩者，讓審查責任可以重現。
+
+### Scheduler action
+
+Action 由 Assent 在 AI session 外執行：
+
+| Workflow | Action | 檢查內容 |
+| --- | --- | --- |
+| `task` | `focused_test` | 目前 task 的 `verify` 指令 |
+| `plan` | `focused_sweep` | 一份已完成 plan 中不重複的 focused command 聯集 |
+| `integration` | `full_verify` | 依精確 plan 選集重建的整合候選版本 |
+
+每種 action 只能放在對應的 array。AI role 不會自行執行這些 action，也不會執行
+`.assent/verify.py`。
+
+## Array 如何執行
+
+Action 一旦通過，該層立刻完成，後面的項目全部略過。Action 失敗才會前進到下一個
+修復 role，再由下一個 action 檢查修復結果。因此 array 同時代表執行順序與有限的
+修復次數。用完仍無法解決時，Assent 會保留證據與修改，標記為
+`REVIEW UNRESOLVED, HUMAN DECISION`，不會丟棄工作成果。
+
+兩個 action 之間只能使用以下兩種形式：
+
+```toml
+# 同一個 session 完成審查與修復。
+{ action = "focused_sweep" },
+{ role = "plan_reviewer_fixer" }, # writes + produces_verdict
+{ action = "focused_sweep" },
+
+# 唯讀審查與可寫入修復分成兩個 session。
+{ action = "focused_sweep" },
+{ role = "plan_reviewer" },       # produces_verdict，不可寫入
+{ role = "plan_fixer" },          # 可寫入，不產生 verdict
+{ action = "focused_sweep" },
+```
+
+可寫入的 verdict role 必須是兩個 action 之間唯一的 role，由同一個 session 完成
+診斷與修復。唯讀 verdict role 則可接一個可寫入、但不產生 verdict 的 fixer。
+這些規則只看能力值與排列位置，不看 role 名稱。
+
+## 三層修復責任不同
+
+三層回答的是不同問題，因此應使用不同的 ability 與 prompt：
+
+| 階段 | 修復範圍 |
+| --- | --- |
+| `workflow.task` | 處理目前 task 的 `BLOCKED` 或 `focused_test` 證據。它可以補救規劃時的小疏漏，例如漏列一條精確 scope path，並在同一個可寫入 verdict session 內完成修復；不會消耗 plan 的修復次數。 |
+| `workflow.plan` | 檢查所有已完成 task 累積出的 worktree 是否符合既有 plan。它處理 `focused_sweep` 失敗與跨 task regression，並透過受影響的既有 task 修復。 |
+| `workflow.integration` | 檢查同一份精確 plan 選集能否重建並通過 `full_verify`。它處理候選版本衝突與完整驗證失敗，不可刪掉某個 folder，也不可只接受能成功的前綴。 |
+
+Integration workflow 只負責驗證與修復，不負責人類驗收。發布仍須稍後明確執行
+`assent accept`。
+
+### 預設 workflow
+
+內建設定讓每個 task 先由一個實作 session 處理，三個修復層級各自使用專責的
+reviewer/fixer：
+
+```toml
+[abilities.write_tests]
+prompt = "Write or update tests that prove the supplied requirements."
+writes = true
+
+[abilities.implement_source]
+prompt = "Implement the supplied requirements and satisfy the supplied focused checks."
+writes = true
+
+[abilities.task_review]
+prompt = "Resolve only the current task's BLOCKED or focused_test evidence. Diagnose a task-local planning omission; when one exact scope path was omitted, identify it without inventing requirements."
+writes = false
+produces_verdict = true
+
+[abilities.task_fix]
+prompt = "In the same session, repair every authorized task-local finding, including an exact omitted scope path. Do not create tasks or requirements."
+writes = true
+
+[abilities.plan_review]
+prompt = "Review only focused_sweep failure evidence to decide whether the cumulative worktree conforms to the existing plan, including cross-task interactions and concrete regressions."
+writes = false
+produces_verdict = true
+
+[abilities.plan_fix]
+prompt = "Repair every authorized plan-level finding through its implicated existing tasks. Do not create tasks or requirements."
+writes = true
+
+[abilities.integration_review]
+prompt = "Review only the exact selection's candidate-conflict or full_verify failure evidence. Identify every integration blocker without shrinking the selection, accepting a prefix, or inventing requirements."
+writes = false
+produces_verdict = true
+
+[abilities.integration_fix]
+prompt = "Repair every authorized integration finding in the scheduler-provided workspaces while preserving the exact selection. Do not run Git, Assent, focused tests, full verification, or accept."
+writes = true
+
+[roles.implementer]
+ability = ["write_tests", "implement_source"]
+
+[roles.task_reviewer_fixer]
+ability = ["task_review", "task_fix"]
+model = "prime"
+effort = "heavy"
+
+[roles.plan_reviewer_fixer]
+ability = ["plan_review", "plan_fix"]
+model = "prime"
+effort = "heavy"
+
+[roles.integration_reviewer_fixer]
+ability = ["integration_review", "integration_fix"]
+model = "prime"
+effort = "heavy"
+
+[workflow]
+task = [
+  { role = "implementer" },
+  { action = "focused_test" },
+  { role = "task_reviewer_fixer" },
+  { action = "focused_test" },
+]
+plan = [
+  { action = "focused_sweep" },
+  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { action = "focused_sweep" },
+  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { action = "focused_sweep" },
+]
+integration = [
+  { action = "full_verify" },
+  { role = "integration_reviewer_fixer", adapter = "codex" },
+  { action = "full_verify" },
+]
+```
+
+第一個通過的 `focused_test`、`focused_sweep` 或 `full_verify` 會略過自己 array
+中的後續項目。重複列出的 plan review 是不同修復回合，不代表每次都必須執行。
+
+## 省略設定與 task override
+
+- 省略 `workflow.task` 時，每個 task 會依自己的 model 與 effort 執行一個隱含
+  session。
+- 非空的 task workflow 可以先排列 worker role，再執行 `focused_test`；只要包含
+  這個 action，最後一項就必須是它。Worker 回傳 `BLOCKED` 時，會帶著既有證據
+  直接前進到下一個 verdict role。
+- `workflow.task = []` 會停用逐 task session，改由 plan workflow 把整份 plan
+  當成一個單位執行；此時 plan workflow 不可為空。
+- 省略或設空 `workflow.plan`，表示不執行 plan review。
+- 省略或設空 `workflow.integration`，表示停用自動 integration repair。
+
+Task 檔可以只覆寫自己的 task sequence：
+
+```toml
+[roles.test_writer]
+ability = ["write_tests"]
+
+[roles.source_implementer]
+ability = ["implement_source"]
+
+workflow = [
+  { role = "test_writer" },
+  { role = "source_implementer" },
+  { action = "focused_test" },
+]
+```
+
+省略時繼承 `[workflow].task`；`workflow = []` 則把這個 task 交給 plan-wide
+execution。Override 使用的 role 仍須定義在有效的 `[roles]` 設定中。
+
+## Adapter、model 與 effort
+
+`[adapter].name` 可指定一個 adapter，或指定依序輪替的清單。內建支援 Claude、
+Codex 與 Antigravity；各自的指令、參數、可攜 model 對應、預設 effort，以及
+vendor effort 轉換都放在 `adapter.toml`。無人值守執行前要先登入各 CLI；Assent
+只使用既有認證，不管理 secrets。
+
+Plan 使用可攜的 `prime`、`core`、`lite` model tier；effort 是另一個獨立選擇：
+`heavy`、`normal`、`slight`。解析順序為 task 或 role 明示值、該 model tier 的
+設定預設值、內建 tier 預設值。每次 invocation 都會取得轉換後的具體 effort。
+
+Plan 與 integration workflow entry 可以指定 adapter：
+
+```toml
+{ role = "plan_reviewer_fixer", adapter = "codex" }
+```
+
+省略時使用設定清單中的第一個 adapter。Task workflow entry 不接受 `adapter`
+欄位，而是沿用一般 task 的 adapter 選擇與輪替方式。
+
+## 初始化與排錯
+
+初始化專案時要選真正的完整 verifier，然後檢查產生的 script：
 
 ```text
 assent init --test unittest
-assent init --test "custom:python -m unittest"
+assent doctor
 ```
 
-產生的 verifier 會啟用所選 command，不會留下沒有測試卻回報成功的空骨架。
+Task 檔應使用範圍較小的 focused command。設定有誤時，diagnostic 會指出錯誤的
+key 與來源檔。也請確認 Git 可用、選定的 AI CLI 已登入，而且 model mapping
+使用該 CLI 接受的名稱。
 
-重跑 init 時保留既有 verifier，既有 verifier 存在就拒絕新的 `--test`；刷新
-`~/.assent/instructions.md`、`~/.assent/format.md`，只補入遺漏的 active settings key。
-現有 `.assent/assent.toml` 會保留並標示為 override。所有讀取、解析與 merge 在第一次
-寫入前完成，失敗不會留下半套升級。專案內的 shared contract 副本只有在和 packaged
-text 完全相同時才移除，不同內容會保留並提醒人類搬遷。
-
-任何 AI session 開始前，兩份 user-home 契約都必須存在、可讀，且和 packaged text
-byte-identical；缺少或過期會指出路徑並建議 `assent init`，不會在 run 中偷偷修補。
-Universal-newline 比對讓 editor 改成 CRLF 仍算相同契約。
-
-## Adapter
-
-Adapter 把 task 的 portable 設定翻成 vendor CLI argument。task 使用抽象 model tier
-`prime`、`core`、`lite`，可寫抽象 effort `heavy`、`normal`、`slight`。Vendor model
-名稱與 effort value 屬於設定表，不可硬寫在 adapter code；task 明示的 effort 絕不能
-被靜默忽略或升降級。
-
-### Claude
-
-```toml
-[adapter]
-name = "claude"
-
-[adapter.claude]
-command = "claude"
-extra_args = ["--permission-mode", "bypassPermissions"]
-
-[adapter.claude.models]
-prime = "fable"
-core = "opus"
-lite = "sonnet"
-```
-
-### Codex
-
-```toml
-[adapter]
-name = "codex"
-
-[adapter.codex]
-command = "codex"
-extra_args = ["--sandbox", "danger-full-access"]
-
-[adapter.codex.models]
-prime = "gpt-5.6-sol"
-core = "gpt-5.6-terra"
-lite = "gpt-5.6-luna"
-```
-
-### Antigravity
-
-Antigravity 使用本機 `agy` CLI 執行 Gemini。每台機器第一次需互動登入，之後以
-print mode headless 執行；開 session 前會先驗證 model/effort 組合。
-
-```toml
-[adapter]
-name = "antigravity"
-
-[adapter.antigravity]
-command = "agy"
-extra_args = ["--dangerously-skip-permissions"]
-
-[adapter.antigravity.models]
-prime = "gemini-3.1-pro"
-core = "gemini-3.6-flash"
-lite = "gemini-3.5-flash"
-
-[adapter.antigravity.default_effort]
-prime = "heavy"
-core = "heavy"
-lite = "heavy"
-
-[adapter.antigravity.efforts.prime]
-normal = "high"
-
-[adapter.antigravity.efforts.lite]
-heavy = "medium"
-```
-
-第一次設定：
-
-1. 依[Google 官方 CLI 安裝與驗證文件](https://antigravity.google/docs/cli/install)安裝 `agy`。
-2. 執行互動式 `agy`，完成 browser sign-in；若輸出 authorization URL，開啟它完成流程。
-3. 確認 `agy --version` 至少為 1.1.5，並用 `agy models` 查看模型。
-
-Assent 只使用 AGY 已持有的 credentials，不會開 login browser、讀寫 credentials、
-切換 Google account 或改 workspace trust。登出請在互動式 `agy` prompt 輸入 `/logout`；
-它不是 shell subcommand。
-
-## Model 與 effort 解析
-
-model 與 effort 正交。effort 固定依序解析：
-
-1. task file 明示的 `effort`；
-2. 該 tier 的設定 `default_effort` override；
-3. 該 tier 的 built-in default。
-
-partial `default_effort` 只取代它寫出的 tier，其他 tier 保留內建值；每次受支援的
-呼叫都傳入 concrete effort。
-
-effort 翻譯依序查：
-
-1. `[adapter.<name>.efforts.<tier>]`；
-2. `[adapter.<name>.efforts]`；
-3. 內建 `heavy -> high`、`normal -> medium`、`slight -> low`。
-
-每個 key 各自 fallback。若新版 Gemini 支援 `medium`，可這樣覆寫：
-
-```toml
-[adapter.antigravity.efforts.prime]
-normal = "medium"
-```
-
-有效矩陣的 effort 值如下：
-
-| effort | Claude prime/core/lite | Codex prime/core/lite | Antigravity prime/core/lite |
-| --- | --- | --- | --- |
-| slight | `low` / `low` / `low` | `low` / `low` / `low` | `low` / `low` / `low` |
-| normal | `medium` / `medium` / `medium` | `medium` / `medium` / `medium` | `high` / `medium` / `medium` |
-| heavy | `high` / `high` / `high` | `high` / `high` / `high` | `high` / `high` / `medium` |
-
-Antigravity prime 的 Gemini 3.1 Pro 沒有 `medium`，所以 normal 可見地映射到
-`high`；lite 的 Gemini 3.5 Flash 沒有 `high`，所以 heavy 映射到 family ceiling
-`medium`。1.1.5+ 才支援 `--effort`、穩定 model slug 與 unattended 修正。
-
-Session 行會一次顯示四個稽核事實：
-
-```text
-Session: codex | core->gpt-5.6-terra | heavy->high
-```
-
-左邊是 task 的抽象值，右邊是實際傳給 CLI 的 argument。
-
-## Workflow role、action 與有限修復
-
-`[workflow]` 只接受 `task`、`plan`、`integration`。每個值都是有序陣列，每個 entry 恰好含一個 `role` 或 `action`。scheduler action 分別是 task 層的 `focused_test`、plan 層的 `focused_sweep`、integration 層的 `full_verify`。已移除的 workflow 與 verification 設定會直接拒絕，不做 migration。
-
-非空的 task workflow 若含 `focused_test`，最後一步必須也是 `focused_test`。任一 `focused_test` 通過都會立即完成 task 層並跳過後續 failure handler。兩個 task action 之間的第一個 role 必須產生 verdict：若具備寫入能力，就在該 session 完成修復；若為唯讀，後面最多接一個另外設定、可寫但不產生 verdict 的 fixer。較早的 task role 若自行標記 `BLOCKED`，會跳過尚未執行的 action，前進到該 task 的 verdict role。Task-review 與 plan-review ability 應使用不同 prompt；scheduler 仍只依 workflow 位置、`writes`、`produces_verdict` 判斷，不依名稱。
-
-Action 通過就完成該層，不啟動 AI review；失敗才走後續 reviewer/fixer，並由後面的 action 重驗。Reviewer prompt 會明示目前輪次與總輪數，並禁止憑空新增驗收條件。陣列耗盡是唯一的收斂上限，不使用 no-progress 或 diff 震盪猜測。
-
-耗盡仍未解決時保留全部證據與修改，狀態為 `REVIEW UNRESOLVED, HUMAN DECISION` 且 exit 0；失敗的 `full_verify` 仍禁止 accept。Adapter、model、effort 仍依前述 role 與 adapter 設定解析。
-
-## Antigravity timeout 與排錯
-
-`print_timeout_minutes` 限制一次 AGY print；Assent watchdog 限制 session 沒有輸出的
-時間，兩者獨立：
-
-```toml
-[adapter.antigravity]
-print_timeout_minutes = 120
-```
-
-值必須為正，且不應短於最長 task。`preflight failed: invalid model selection` 時，
-檢查 `agy models`，用 `agy --print --model <MODEL> ...` 測試，修正 model table 或
-tier-specific effort。authentication error 時互動執行 `agy` 完成登入；`command
-not found: agy` 則安裝 CLI 並檢查 `agy --version`。
-
-quota 中斷會記錄 WIP。單一 adapter 有 reset 時間就等到該時間，否則等 quota poll；
-adapter list 會立即切到下一個，全部用盡才等待。用 `assent run <FOLDER>` 恢復。
-
-Adapter 若要立即續跑，只能用這個 exact final non-empty line：
-
-```text
-{"type":"assent.checkpoint_resume"}
-```
-
-Assent 隱藏 live output 的控制列、保留 raw diagnostics、建立 WIP，再用 continue
-prompt 重開同一 adapter。它沒有 account/quota/reset/capability-probe 語意。
-Wrapper 只有先安排立即續跑，才可把 provider quota result 換成這個 record；若轉送
-provider quota，Assent 仍負責普通 wait 或 rotation。若 quota evidence 與這個 record
-同時存在，普通 quota path 優先。
-
-## Media 與 custom adapter
-
-圖片、PDF、audio 等是一般 project context。task schema 不加 `inputs`、image、audio、
-video 或 attachment 欄位。既有 media 的 project-relative path 與用途寫在 `behavior`
-或 `notes`；只有 task 可能建立或修改的 media 才放入 `scope`。可重現 media 放在
-worktree，不放 generated `.assent/`；感知判斷留給人類 `accept`，`verify` 保持機器可檢查。
-
-要加入其他 AI CLI，subclass `Adapter`：`resolve_model(model: str) -> str` 將抽象 tier
-映射成 `requested_model`，`run_task(prompt, requested_model, requested_effort, cwd) ->
-TaskResult` 接收已翻譯值。`TaskResult` 有 `exit_code`、`output`、`quota_exhausted`、
-`reset_at` 與獨立 checkpoint-resume outcome；vendor detection 留在 adapter。
-
-## 相關設定
-
-`[workflow].integration` 中 `full_verify` 的位置控制自動完整驗證與 receipt 建立；
-詳見[驗證](VERIFICATION.md)。
+人類流程請看[工作流程](WORKFLOW.md)，CLI 用法請看[指令](COMMANDS.md)，執行期間
+復原請看[作業](OPERATIONS.md)。

@@ -524,7 +524,7 @@ class TestArchive(unittest.TestCase):
                       for branch in gitops.branches_with_prefix(self.root, prefix))
 
     def test_archive_all_sweeps_orphaned_temporary_branches(self) -> None:
-        """``archive --all`` owns the global namespace exactly as ``clean --all``
+        """``archive --all`` owns the global namespace exactly as folderless ``clean``
         does, and inherits the sweep instead of reimplementing it."""
         published, superseded = self._orphaned_temporary_branches()
 

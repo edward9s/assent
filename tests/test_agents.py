@@ -109,12 +109,13 @@ ability = ["review"]
                     / "assent" / "templates" / "assent.toml")
         cfg = self.load(template.read_text(encoding="utf-8"))
         self.assertEqual(set(cfg.abilities),
-                         {"write_tests", "implement_source", "review", "fix",
-                          "task_review", "task_fix", "plan_review", "plan_fix"})
+                         {"write_tests", "implement_source", "task_review",
+                          "task_fix", "plan_review", "plan_fix",
+                          "integration_review", "integration_fix"})
         self.assertEqual(set(cfg.roles),
-                         {"implementer", "test_writer", "source_implementer",
-                          "reviewer", "fixer", "reviewer_fixer",
-                          "task_reviewer_fixer", "plan_reviewer_fixer"})
+                         {"implementer", "task_reviewer_fixer",
+                          "plan_reviewer_fixer",
+                          "integration_reviewer_fixer"})
         self.assertEqual(
             [step.action if hasattr(step, "action") else step.role
              for step in cfg.workflow_task],
@@ -128,19 +129,16 @@ ability = ["review"]
         self.assertEqual(
             cfg.roles["implementer"].ability,
             ("write_tests", "implement_source"))
-        self.assertEqual(cfg.roles["test_writer"].ability, ("write_tests",))
-        self.assertEqual(cfg.roles["source_implementer"].ability,
-                         ("implement_source",))
-        self.assertEqual(cfg.roles["reviewer_fixer"].ability,
-                         ("review", "fix"))
         self.assertEqual(cfg.roles["task_reviewer_fixer"].ability,
                          ("task_review", "task_fix"))
         self.assertEqual(cfg.roles["plan_reviewer_fixer"].ability,
                          ("plan_review", "plan_fix"))
+        self.assertEqual(cfg.roles["integration_reviewer_fixer"].ability,
+                         ("integration_review", "integration_fix"))
         self.assertEqual(
             [step.action if hasattr(step, "action") else step.role
              for step in cfg.workflow_integration],
-            ["full_verify", "reviewer_fixer", "full_verify"])
+            ["full_verify", "integration_reviewer_fixer", "full_verify"])
 
 
 if __name__ == "__main__":

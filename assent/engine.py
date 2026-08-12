@@ -202,6 +202,10 @@ _CLOSEOUT_RETRY_SUFFIX = (
 
 _AUTO_FIX_REVIEW_PROMPT = """You are the Assent folder reviewer.
 
+Before inspecting source, read the project rules {agents_md_path} and the Assent
+session rules {instructions_path}. Read other project files only as needed for
+this bounded review.
+
 Review context: {review_context}
 Review stage: {review_stage}
 
@@ -420,6 +424,11 @@ do not replace any structural, scope, focused, or independent-review gate.
 
 _SELECTION_VERIFICATION_REVIEW_PROMPT = """You are the Assent selection verifier reviewer.
 
+Before inspecting source, read the applicable project rules:
+{agents_md_paths}
+Then read the Assent session rules {instructions_path}. Read other project
+files only as needed for this bounded review.
+
 Review context: SELECTION_VERIFICATION
 Scheduled workflow role: {workflow_role}
 Role abilities:
@@ -470,6 +479,10 @@ Authoritative task contracts and journals:
 """
 
 _SELECTION_RECONCILE_PROMPT = """You are the Assent selection conflict fixer.
+
+Before editing, read the project rules {agents_md_path} and the Assent session
+rules {instructions_path}. Read other project files only as needed to resolve
+the listed conflicts.
 
 Scheduled workflow role: {workflow_role}
 Role abilities:
@@ -1621,6 +1634,18 @@ def _agents_md_path_for_prompt(cfg: Config) -> str:
     return "AGENTS.md (if present; skip if absent)"
 
 
+def _agents_md_absolute_path_for_prompt(cfg: Config) -> str:
+    """Return an unambiguous rules path for a session spanning worktrees."""
+    candidate = cfg.root / "AGENTS.md"
+    if candidate.is_file():
+        return str(candidate.resolve())
+    if cfg.source_root is not None:
+        source = cfg.source_root / "AGENTS.md"
+        if source.is_file():
+            return str(source.resolve())
+    return "AGENTS.md (if present; skip if absent)"
+
+
 def _require_stack_ancestry(cfg: Config, state: StackState,
                             downstream_tip: str) -> None:
     """Require the downstream tip to contain the current declared base, if any."""
@@ -1843,6 +1868,10 @@ def _selection_review_material(
         *(f"- {item}" for item in state.action_evidence),
     ))
     prompt = _SELECTION_VERIFICATION_REVIEW_PROMPT.format(
+        agents_md_paths="\n".join(
+            f"- {_agents_md_absolute_path_for_prompt(cfg)}"
+            for cfg in work_configs),
+        instructions_path=contracts.instructions_path(),
         workflow_role=step.role,
         role_policy="\n".join(
             ability.prompt for ability in step.resolved_role.abilities),
@@ -2289,6 +2318,8 @@ def _selection_reconcile_prompt(
                 f"unable to read reconcile contract {task.id}: {error}") from error
         contracts.append(f"--- {task.id}: {task.path} ---\n{text.rstrip()}")
     return _SELECTION_RECONCILE_PROMPT.format(
+        agents_md_path=_agents_md_absolute_path_for_prompt(cfg),
+        instructions_path=contracts.instructions_path(),
         workflow_role=step.role,
         role_policy="\n\n".join(
             ability.prompt for ability in step.resolved_role.abilities),
@@ -3836,6 +3867,8 @@ def _auto_fix_review_identity(
         and round_index < len(rounds)
         and rounds[round_index].writes)
     reviewed_material = dict(
+        agents_md_path=_agents_md_absolute_path_for_prompt(cfg),
+        instructions_path=contracts.instructions_path(),
         folder=cfg.tasks_name,
         base_ref=base_ref,
         source_tree=source_tree,

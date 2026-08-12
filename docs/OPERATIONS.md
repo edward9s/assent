@@ -1,245 +1,107 @@
 # Operations
 
-*[README](../README.md) · [Traditional Chinese reader guide](zh-TW/OPERATIONS.md)*
+*[README](../README.md) · [Traditional Chinese](zh-TW/OPERATIONS.md)*
 
-This English canonical guide covers worktrees, locks, concurrency, recovery,
-cleanup, archive, and operational safety. The
-[Traditional Chinese translation](zh-TW/OPERATIONS.md) follows the same
-boundaries. See [WORKFLOW](WORKFLOW.md) for planning and review,
-[COMMANDS](COMMANDS.md) for syntax, and [VERIFICATION](VERIFICATION.md) for
-candidate and receipt details.
+Assent uses Git worktrees to isolate changes and keep failed work reviewable.
+The worktree is an audit and recovery boundary, not a security sandbox.
 
-## Worktrees and branches
+## Worktrees and locks
 
-Git is always required and every work folder gets its own worktree at:
+Each plan uses a worktree at:
 
 ```text
-<project name>.worktrees/<FOLDER>/
+<project>.worktrees/<PLAN>/
 ```
 
-This is the isolation, conflict-management, audit, and recovery boundary. A
-folder's source branch and task files remain available for review until human
-acceptance and proven integration. The whole `.assent/` management plane is
-ignored and stays in the primary worktree; it is never treated as a second
-source of truth in a worktree. Assent refuses before a session if a management
-file has entered Git.
+The project's ignored `.assent/` directory stays in the primary worktree. A
+tracked branch version of `AGENTS.md` applies when present; otherwise the
+scheduler supplies the primary file's absolute path.
 
-The scheduler supplies the main-tree absolute paths for task/journal files and
-the verifier. It reads a tracked `AGENTS.md` from the branch, or the supplied
-main-tree path when that file is untracked. The verifier is loaded from the
-main tree but executed with the candidate or worktree as its current directory.
-The shared contracts are always the absolute user-home paths
-`~/.assent/instructions.md`, `~/.assent/format.md`, and `~/.assent/workflow.md`.
+Only one `run` may own a plan at a time. The persistent `assent.lock` is a
+diagnostic file; the live OS lock, not file existence, proves ownership. Do not
+delete the file to “unlock” a plan. Different plans may run concurrently when
+their dependencies allow it.
 
-AI meetings occur in the primary worktree. Review every worktree without
-entering it using `git worktree list`, `git log <branch>`, and
-`git diff main...<branch>` (replace `main` with the actual target branch).
+Do not write the primary Git worktree while `accept` is running. Assent's
+integration lock serializes its own publication operations but cannot stop an
+external Git process.
 
-## Parallel execution
+## Interruption and recovery
 
-Separate terminals may run separate folders, for example:
+Assent preserves work after retryable failure, quota interruption, Ctrl+C, or a
+crash. When every uncommitted change is provably attributable to one resumable
+task and lies in its scope, the next run gathers it into a `WIP` checkpoint
+without opening an AI session. If ownership is ambiguous or out of scope, the
+dirty worktree remains for human inspection and the run refuses.
 
-```text
-assent run parallel01
-assent run parallel02
-```
+If an AI writes into the primary worktree by mistake, Assent ports the edits
+back only when every path is in scope and the transfer is unambiguous. Otherwise
+it preserves both trees and asks for human recovery.
 
-Or let `assent run --all --jobs N` schedule independent folders. The parent
-process stays in the foreground and prefixes live child output as
-`[work-folder] message`. The root `.assent/_assent.log` keeps only startup and
-per-folder scheduling summaries; each folder's `_assent.log` appends the rendered
-terminal session output without the parent scheduler's `[work-folder]` prefix.
+Journals retain structured events and bounded summaries, not the full raw
+adapter stream. The terminal log keeps rendered session output without adding a
+second scheduler prefix to every line.
 
-Parallelism shares adapter quota, and integrating branches back to the main
-line remains a human decision. A declared `base`, not `after`, determines
-speculative content; see [Workflow](WORKFLOW.md).
-
-## Locks and live diagnostics
-
-Each work folder has an `assent.lock`. The file is a diagnostic record containing
-the last run's PID, start time, and folder name; its existence never means a
-run is currently active. The real ownership is an OS-level exclusive lock on
-the open handle: `msvcrt` on Windows and `fcntl` on POSIX. Normal exit,
-Ctrl+C, crashes, and forced termination release it when the handle closes.
-
-- Do not infer activity from the file's presence; it remains after runs.
-- Do not delete it to recover. Deletion creates a race and fixes nothing;
-  Assent reuses it, and archive can recreate a missing diagnostic file.
-- If a folder is busy, the next run refuses when it cannot acquire the real
-  lock. That refusal is the signal.
-
-`run --all` waits for and reaps every child it owns on every exit path,
-including refusal and scheduling errors. A recorded PID that is still alive
-can therefore identify a genuinely running process. The lock guarantee is
-intended for local filesystems; `flock` and `msvcrt.locking` are unreliable on
-some network filesystems.
-
-## Interrupted execution and recovery
-
-If the scheduler handled an interruption, it records a `WIP` checkpoint and
-`assent run` resumes the task with a continue prompt. At run startup, if every
-uncommitted change is provably attributable to the task that will resume (or to
-one uncheckpointed `DONE` task), Assent marks that task `WIP`, records the
-scope-verified recovery, gathers the edits into a `WIP` checkpoint, and
-continues the recovery path without opening an AI session. If ownership is
-ambiguous or any dirt is outside the task's scope, Assent keeps the dirty
-worktree for human inspection and refuses to guess; inspect and checkpoint the
-edits before rerunning. The lock file is not part of this recovery and should
-be left alone.
-
-The scheduler never reverts the workspace on failure. A failed review keeps
-the code and retries on top of it; exhausted results are committed into a
-`BLOCKED` checkpoint for human adjudication. A task's journal carries structured
-events plus bounded summaries and adapter classifications, not the full raw
-adapter stream. The per-folder `_assent.log` carries the rendered terminal
-session output, without a parent scheduler prefix.
-
-### Workflow repair recovery and write boundary
-
-The configured workflow is always active during `run`; it has no separate repair flag. A passing action skips its reviewer/fixer positions. A failed action persists its evidence before a write-capable repair starts, so interruption resumes at the durable boundary without reverting token-produced edits.
-
-Reviewer/fixer writes remain limited to the implicated existing task scope plus one exact scope addition returned by the same writable verdict session. The scheduler validates that path against the pre-session tree and persists the task-contract amendment at closeout. A read-only verdict role may return the addition only for its separately configured fixer. Management-plane, Git-state, ambiguous-ownership, and other out-of-scope writes fail closed and remain available for human recovery. Blocked adjudication opens only a configured read-only verdict role; it never silently downgrades a writable role. Finite array exhaustion becomes `REVIEW UNRESOLVED, HUMAN DECISION`; infrastructure and safety failures remain nonzero.
-
-### Temporary integration candidates
-
-Complete verification creates a sibling candidate such as:
-
-```text
-<project>.integration/target-<uuid>
-branch assent-integration/<folder>/<uuid>
-```
-
-The candidate exists for the entire verifier run and is cleaned in a `finally`
-path after success, Python exceptions, and Ctrl+C. To inspect it while it
-exists, run the main-tree verifier with that candidate as cwd; do not run the
-verifier from a source worktree and call it the integration candidate.
-
-Only a hard kill such as `taskkill /F` or power loss can leave candidate
-residue. Do not use raw Git worktree removal or recursive deletion on residue.
-Preserve the exact path and branch and use Assent's owning recovery/retry path,
-which inventories directory links and other directory reparse points, detaches
-each managed link object, re-proves ownership, and only then removes the
-managed resources. If proof fails, keep the path, branch, and external targets.
+Never kill a process you do not own and never manually remove a managed
+worktree or temporary branch. Retain the exact paths and diagnostics, then use
+the owning Assent command again or run `assent doctor`.
 
 ## Link-safe cleanup
 
-Assent cleanup applies to `clean`, `archive`, `reject`, reconciliation, setup
-failure, and temporary candidates. A directory junction, directory symlink, or
-other directory reparse point is detached as a link object before any
-recursive Git or filesystem removal. The remover never traverses the link's
-resolved target. External targets survive success, refusal, failure,
-interruption, and retry.
+Before recursive Git or filesystem removal, Assent inventories each directory
+junction, directory symlink, and other directory reparse point, then detaches
+the link object itself. The remover never traverses the link's resolved target.
+External targets survive success, refusal, failure, interruption, and retry.
 
-If inventory, ownership, or detachment cannot be proven, cleanup refuses and
-retains the managed path for an Assent-owned retry. Never pass a tree that
-contains a directory link to Git or to a recursive remover, and never hand
-delete a source worktree or branch.
+If inventory, ownership, or detachment cannot be proven, cleanup stops and
+retains the managed path.
 
-## `clean`
+## Clean
 
-`assent clean` removes only worktrees and same-folder-prefix branches that are
-fully merged and clean. It never touches `.assent/`, has no force option, and
-is unrelated to `git clean`.
+```text
+assent clean <PLAN>
+assent clean              # all plans
+```
 
-Cleanup is upstream-first and evidence-based. Source evidence is retained
-while a direct dependent is unfinished, unaccepted, dirty, missing, or not
-provably integrated. `assent clean A` refuses and explains why when the proof
-is insufficient. After every dependent is accepted, provably integrated, and
-clean, clean upstream and then dependent with Assent.
+`clean` removes only worktrees and branches proven clean, owned, and integrated.
+It keeps an upstream while a direct dependent remains unfinished, unaccepted,
+dirty, missing, or unproven. Multiple folders are handled upstream-first. There
+is no force-delete option, and `.assent/<PLAN>/` is not removed.
 
-`assent clean A B` and `assent clean A ...` process a selected set in one
-upstream-first pass; bare `assent clean` keeps its all-folder discovery. The
-literal remainder selection is defined in [Commands](COMMANDS.md).
+## Archive
 
-`assent-integration/<folder>/<suffix>` and `assent-reconcile/<folder>` are the
-two Assent-owned temporary branch namespaces; a human must not check one out
-or build on it. Each is removed by the transaction that created it once that
-transaction completes, so one that survives is orphaned only because its
-transaction died first. `assent clean --all` sweeps every such orphan once per
-invocation, after its per-folder cleanup, because the repository-wide
-integration lock being held while the branch still exists is the entire proof
-that it is an orphan -- never the branch's content, and never whether its tree
-is published or superseded, which is reporting information only. A single
-named `assent clean FOLDER` deliberately does not sweep, so naming a subset of
-folders never deletes repository-global refs as a side effect.
+```text
+assent archive <PLAN>
+assent archive --all
+assent archive <PLAN> --restore
+```
 
-## `archive`
+Archive first requires the same safe-cleanup proof, then stores the management
+folder in `.assent/_archive/`, records it in the archive roster, and removes the
+live folder. A named ineligible plan is an error; `--all` skips ineligible plans.
+Restore takes one plan, validates the archive, and never overwrites an existing
+live folder.
 
-Archive is a retirement action, not ordinary cleanup. It contains the clean
-contract, compresses an eligible work folder into `.assent/_archive/`, and
-registers it in `.assent/_archived.toml` (or the current roster name). A named
-multi-folder archive uses the single-folder contract: every named folder is
-attempted, an ineligible one causes a nonzero result, and a summary reports
-what succeeded. `archive --all` skips an ineligible folder without failing the
-dynamic request.
+## Temporary branches and doctor
 
-`archive --restore FOLDER` restores exactly one archived folder and accepts
-neither `--all` nor `...`. Archive recovery may intentionally begin without a
-live directory; the normal explicit-selection audit does not turn that
-recognized restore state into a false missing-folder error.
+`assent-integration/<folder>/<suffix>` and `assent-reconcile/<folder>` belong to
+the transaction that created them. A surviving branch is considered orphaned
+only after the repository-wide integration lock proves no transaction owns it.
+Whether its tree is already published or superseded is just reporting
+information.
 
-`archive --all` inherits `clean --all`'s once-per-invocation orphaned
-temporary-branch sweep by delegating to the same implementation after its own
-per-folder loop, rather than reimplementing it: every per-folder archive step
-already holds the integration lock the sweep must take for itself.
+`clean` with no folder sweeps these orphaned namespaces once per invocation;
+`archive --all` uses the same sweep. A named `clean <PLAN>` deliberately does
+not touch repository-wide temporary branches. `assent doctor` reports them and
+offers a confirmed `[y/N]` removal after checking ownership again.
 
-## `doctor`
+## Security boundary
 
-`assent doctor` diagnoses Python, Git, adapter CLIs, and temporary-directory
-writability without needing an existing project, and additionally reports any
-orphaned Assent-owned temporary branch it finds using the same lock-based
-proof as `clean --all`. Finding orphans, a human declining to remove them, or
-a refused removal never fails `doctor` or contributes to its exit code -- the
-check is untidiness, not breakage.
+With broad adapter permissions, an AI may reach anything available to its OS
+identity: credentials, network services, external Git writers, and files beyond
+the worktree. Assent detects project writes after the fact; it does not provide
+a container or VM. Use unattended execution only with trusted repositories,
+instructions, adapters, and accounts.
 
-Unlike the unattended sweep, `doctor` offers a confirmed `[y/N]` removal: it
-lists what it found, asks whether to remove the offered branches, and
-re-reads the branch list inside the same integration-lock hold immediately
-before deleting, so a branch that stopped being an orphan between the report
-and the confirmation is retained rather than removed. `doctor`'s offer is the
-recovery path; `clean --all` and `archive --all` remain the routine,
-unattended one, and `doctor` itself runs no folder operation and touches no
-work folder, task file, or receipt.
-
-## `reject`
-
-Rejection is the explicit human decision to discard a folder's implementation,
-not a cleanup shortcut. It requires a named folder and refuses while a run is
-in progress. Before deleting branches it records each full tip hash as
-recoverable Git evidence, archives uncommitted changes as a WIP commit, and
-then removes the folder worktree through the link-safe boundary. It force-
-deletes same-prefix branches, resets `DONE`, `WIP`, and `BLOCKED` task statuses
-to `TODO`, preserves `SKIP`, and appends a `rejected` record to the journal.
-The hash is recoverable only while Git retains it through its normal garbage
-collection grace period.
-
-## Acceptance and external writers
-
-Acceptance is an explicit human action. It uses the integration lock, but that
-lock cannot stop unrelated Git writers. Do not run writing Git commands in the
-same primary worktree during acceptance. Assent does not connect to remote
-hosting, pull, rebase, force-push, push, auto-resolve conflicts, or delete
-source as an acceptance side effect. Use ordinary Git synchronization only
-after the local decision and evidence are complete.
-
-Direct and selected acceptance do not verify; the `accept --all` exception and
-receipt freshness rules are in [Verification](VERIFICATION.md). Keep accepted
-source evidence until dependent folders are also accepted and clean proof is
-available.
-
-## Operational security boundary
-
-A worktree is not a security sandbox. `danger-full-access` and
-`bypassPermissions` still allow an AI to reach resources available to its OS
-identity, including credentials, network services, external Git writers, and
-files outside the worktree. Use unattended execution only in trusted projects
-and account environments. Assent does not create a container or virtual
-machine, or intercept external effects.
-
-## Related guides
-
-- [Workflow](WORKFLOW.md) — planning, execution, review, and decisions.
-- [Commands](COMMANDS.md) — selection, `...`, and command syntax.
-- [Configuration](CONFIGURATION.md) — initialization and adapter settings.
-- [Verification](VERIFICATION.md) — candidates, receipts, ignored inputs,
-  reconcile, and acceptance evidence.
+See [Verification](VERIFICATION.md) for candidate links and receipts, and
+[Workflow](WORKFLOW.md) for acceptance and rework decisions.

@@ -1259,7 +1259,10 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         cfg = self.build_review()
         self.commit_all()
 
-        def review(_prompt):
+        def review(prompt):
+            self.assertIn(str((self.execution_root() / "AGENTS.md").resolve()),
+                          prompt)
+            self.assertIn(str(engine.contracts.instructions_path()), prompt)
             pending = auto_fix.read_auto_fix_state(
                 auto_fix.auto_fix_state_path(cfg))
             finding = auto_fix.current_review_record(pending).findings[0]
