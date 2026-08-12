@@ -152,7 +152,10 @@ class DocumentationTests(unittest.TestCase):
         for phrase in (
                 "final `...`", "not an alias for `--all`",
                 "One selected folder", "one exact batch",
-                "assent verify <PLAN> --focus", "Direct and selected acceptance"):
+                "assent verify <PLAN> --focus", "Direct and selected acceptance",
+                "assent shared-paths status",
+                "Running `review` in the primary worktree",
+                "cannot safely link everything ignored by Git"):
             with self.subTest(language="English", phrase=phrase):
                 self.assertIn(phrase, english)
 
@@ -160,7 +163,10 @@ class DocumentationTests(unittest.TestCase):
                         + _read(Path("docs/zh-TW/VERIFICATION.md")))
         for phrase in (
                 "最後一個 `...`", "不是 `--all`", "一個 folder",
-                "精確 batch", "assent verify <PLAN> --focus"):
+                "精確 batch", "assent verify <PLAN> --focus",
+                "assent shared-paths status",
+                "在主要 worktree 執行 `review`",
+                "不能把所有 ignored directory 都建立成鏈結"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(_flat(phrase), chinese)
 

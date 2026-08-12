@@ -103,22 +103,47 @@ path.
 
 ## Shared ignored inputs
 
-A fresh Git candidate has no ignored files. Assent exposes only two reviewed
-forms needed by verification:
+A fresh Git worktree has no ignored directories, but a project may need a large
+local directory such as `assets/` or `pkg/` to compile or test. Assent exposes
+only reviewed directories instead of copying every ignored tree. Ordinary
+ignored leaf files beside tracked source are handled automatically.
 
-- an ignored directory recorded through `assent shared-paths review`, mirrored
-  as a junction or directory symlink to the same primary-worktree target; and
-- an ordinary ignored leaf file beside tracked source, mirrored automatically.
+The locations have separate responsibilities:
 
-Assent never copies a whole ignored tree. Caches, build output, credentials,
-editor state, `.git`, `.assent`, and everything inside a linked target remain
-outside discovery.
+- The primary worktree contains the real directories and the untracked
+  `.assent/manifest.toml` review cache.
+- A managed source worktree receives same-relative Windows junctions or POSIX
+  directory symlinks to those primary targets.
+- `shared-paths review` uses the worktree where it is run as the source snapshot
+  being reviewed and as the destination whose links are reconciled.
 
-When a task really needs an ignored directory, record it with its exact tracked
-dependency or build inputs:
+Normally this is automatic. If a matching reviewed profile exists, `run`
+creates the links before starting the AI session. For an `UNKNOWN` or `STALE`
+decision, the session runs `review` inside its managed source worktree. That one
+operation records the profile in the primary manifest and creates the links in
+the source worktree, so its focused test can continue.
+Running `review` in the primary worktree is also valid, but only caches a
+profile for that primary snapshot; it creates no link to itself.
+Verification and reconcile apply the same profile to their managed workspaces;
+they never depend on a link left behind by an earlier `run`.
+
+Inspect either worktree without changing it:
 
 ```text
-assent shared-paths review --path vendor/private --watch package.lock
+assent shared-paths status
+```
+
+The output identifies both worktrees, the manifest, state, matching profile,
+paths, watch files, and link agreement. In the primary worktree, links are
+reported as not applicable because its ordinary directories are the targets.
+It never repairs anything; an unreadable contract or a broken settled link
+returns a nonzero status.
+
+When review is required, run it in the managed source worktree and name the
+tracked dependency or build files whose changes should invalidate the decision:
+
+```text
+assent shared-paths review --path assets --path pkg --watch package.lock
 ```
 
 Use `--none` when review concludes that no ignored directory is required. The
@@ -128,10 +153,13 @@ successful query that finds no candidate directory is reported as
 `NO-IGNORED-DIRECTORY-CANDIDATE`; that describes current filesystem evidence,
 not a semantic promise that the project will never need shared input.
 
-Never create a source-worktree link by hand or copy the directory into the
-worktree. An undeclared link is unreviewed evidence and invalidates verification,
-report freshness, reconcile, and acceptance. Assent detaches every provisioned
-directory-link object before recursive cleanup and never traverses its target.
+Assent cannot safely link everything ignored by Git: ignore rules also cover
+writable build output, caches, virtual environments, editor state, and
+credentials. Linking them all would share mutable state, expose unrelated local
+data, and make verification depend on stale artifacts. Never create a
+source-worktree link by hand or copy an ignored directory into it. An undeclared
+link invalidates verification, reporting, reconcile, and acceptance. Cleanup
+detaches each provisioned link object without traversing or deleting its target.
 
 If verifier output names a missing path inside an existing ignored directory,
 Assent appends an `Ignored input diagnosis:` note pointing to the

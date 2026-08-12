@@ -30,7 +30,8 @@ from assent.folderdeps import (find_unfinished_prerequisites,
                                parse_folder_dependency_graph)
 from assent.folder_scheduler import run_all
 from assent.init import init as run_init
-from assent.main import add_shared_paths_command, shared_paths_review
+from assent.main import (add_shared_paths_command, shared_paths_review,
+                         shared_paths_status)
 from assent.plan import Plan
 from assent.reconcile import (reconcile_abort, reconcile_continue,
                               reconcile_start)
@@ -134,7 +135,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="command", required=True,
         parser_class=functools.partial(argparse.ArgumentParser,
                                        formatter_class=_HelpFormatter),
-        metavar="{run,status,check,report,verify,clean,accept,reconcile,reject,rework,archive,init,doctor}")
+        metavar=("{run,status,check,report,verify,clean,accept,reconcile,reject,"
+                 "rework,archive,init,doctor,shared-paths}"))
 
     run_p = sub.add_parser(
         "run", help="Run one or more folders in order until all are "
@@ -687,9 +689,11 @@ def _dispatch(argv: list[str]) -> int:
     # project config gate below: a source worktree carries no .assent at all.
     if args.command == "shared-paths":
         try:
+            if args.operation == "status":
+                return shared_paths_status()
             return shared_paths_review(args.path, args.watch, args.none)
         except AssentError as e:
-            print(f"shared-paths review: failed ({e})")
+            print(f"shared-paths {args.operation}: failed ({e})")
             return 1
 
     try:

@@ -91,20 +91,43 @@ marker、whitespace error 或無關修改。它只推進 source，不改 target�
 
 ## 共用 ignored input
 
-新的 Git candidate 沒有 ignored file。Assent 只提供兩種經審查的輸入：
+新的 Git worktree 不會有 ignored directory，但專案可能需要大型本機目錄（例如
+`assets/` 或 `pkg/`）才能編譯或測試。Assent 不會複製所有 ignored tree，只提供
+經過審查的必要目錄。Tracked source 旁的一般 ignored leaf file 則會自動處理。
 
-- 透過 `assent shared-paths review` 記錄的 ignored directory，以 junction 或
-  directory symlink 指向主要 worktree 的相同 target；
-- 位於 tracked source 旁的一般 ignored leaf file，由 Assent 自動鏡像。
+各位置的責任不同：
 
-Assent 不會複製整棵 ignored tree。Cache、build output、credential、editor state、
-`.git`、`.assent` 與 link target 內部都不會被列舉。
+- 主要 worktree 保存真實目錄，以及未納入 Git 的審查快取
+  `.assent/manifest.toml`。
+- 受管理的 source worktree 在相同相對路徑建立 Windows junction 或 POSIX
+  directory symlink，指向主要 worktree 的真實目錄。
+- `shared-paths review` 把執行位置當成要審查的 source snapshot，也只同步該
+  worktree 的鏈結。
 
-Task 確實需要 ignored directory 時，請連同精確的 tracked dependency 或 build
-input 記錄：
+一般流程不需要人介入。`run` 找到匹配的審查結果時，會在 AI session 開始前自動
+建立鏈結。若狀態是 `UNKNOWN` 或 `STALE`，AI 會在自己的受管理 source worktree
+執行 `review`。這個操作會把 profile 寫入主要 worktree 的 manifest，同時在 source
+worktree 建立鏈結，讓同一個 session 可以繼續跑 focused test。在主要 worktree
+執行 `review` 也是合法的，但只會快取該主要 snapshot 的 profile，不會建立指向
+自己的鏈結。Verification 與 reconcile 也會把同一份 profile 套用到各自的受管理
+worktree，不會依賴先前 `run` 遺留下來的鏈結。
+
+可在任一 worktree 查看狀態，不做任何變更：
 
 ```text
-assent shared-paths review --path vendor/private --watch package.lock
+assent shared-paths status
+```
+
+輸出會列出目前與主要 worktree、manifest、狀態、匹配的 profile、paths、watch
+files，以及鏈結是否一致。在主要 worktree 中，鏈結會顯示為不適用，因為其中的一般
+目錄就是 target。這個指令不會修復任何東西；無法讀取契約或已確定 profile 的鏈結
+損壞時，會回傳非零狀態。
+
+需要 review 時，應在受管理的 source worktree 執行，並指定哪些 tracked dependency
+或 build file 改變後，原決定應該失效：
+
+```text
+assent shared-paths review --path assets --path pkg --watch package.lock
 ```
 
 若審查後不需要任何 ignored directory，使用 `--none`。決定會快取在主要 worktree
@@ -112,9 +135,12 @@ assent shared-paths review --path vendor/private --watch package.lock
 沒有發現候選目錄，狀態是 `NO-IGNORED-DIRECTORY-CANDIDATE`；它只描述目前檔案系統，
 不是「專案永遠不需要 shared input」的語意保證。
 
-不要手動建立 source-worktree link，也不要把目錄複製進 worktree。未宣告的 link
-是未審閱證據，會讓 verification、report freshness、reconcile 與 acceptance 失效。
-清理時 Assent 會先脫離 directory-link object，絕不穿越其 target。
+不能把所有 ignored directory 都建立成鏈結。Ignore rule 還可能包含可寫入的 build
+output、cache、virtual environment、editor state 與 credential；全部連結會共用
+可變狀態、暴露無關的本機資料，也會讓驗證依賴過期產物。不要手動建立 source-
+worktree link，也不要把 ignored directory 複製進去。未宣告的 link 會讓
+verification、report、reconcile 與 acceptance 失效。清理時 Assent 只會移除鏈結
+本身，不會進入或刪除 target。
 
 若 verifier output 指向既有 ignored directory 內的遺漏路徑，Assent 會附加
 `Ignored input diagnosis:`，指出 `shared-paths review` 的處理方式，但保留原始 exit

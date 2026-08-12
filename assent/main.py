@@ -1,10 +1,14 @@
-"""The ``shared-paths`` command: the only sanctioned writer of the local manifest.
+"""Inspect or review the project's shared ignored directories.
 
 ``assent shared-paths review`` is a deliberately narrow operation.  It takes
 either repeated ``--path`` values or an explicit ``--none``, plus the exact
 ``--watch`` files that say when the decision must be reconsidered, validates
 every one of them against the primary worktree and the source snapshot, and only
 then records a reviewed profile and reconciles this worktree's links.
+
+``assent shared-paths status`` is the read-only companion.  It classifies the
+worktree the command runs in, reports the matching profile and link agreement,
+and never provisions a path or writes the primary worktree's local manifest.
 
 There is no arbitrary target, no copy fallback, no glob, no "link every ignored
 entry", no ``--force``, no secret-file mode and no Git staging or commit mode.
@@ -23,17 +27,39 @@ from pathlib import Path
 from assent import AssentError, gitops, shared_paths
 
 COMMAND = "shared-paths"
+_REVIEW_HELP = """\
+Normally the active Assent AI session runs this after the scheduler reports an
+UNKNOWN or STALE shared-path decision. Run it in the managed source worktree
+whose snapshot is being reviewed. Running it in the primary worktree records a
+profile for that primary snapshot but creates no links there.
+
+Examples:
+  assent shared-paths review --path assets --path pkg --watch package.lock
+  assent shared-paths review --none --watch package.lock
+
+--path is a repeatable project-relative ignored directory that compilation or
+testing requires. --watch is a repeatable, tracked dependency or build file;
+changing it makes the decision stale. State either one or more --path values or
+--none, and always state at least one --watch file.
+"""
 
 
 def add_shared_paths_command(sub: argparse._SubParsersAction) -> None:
-    """Attach ``shared-paths`` and its single ``review`` operation to a CLI."""
+    """Attach the read-only status and controlled review operations to a CLI."""
     parser = sub.add_parser(
         COMMAND,
-        help="review the shared ignored directories this project needs")
+        help="inspect or review the shared ignored directories this project needs")
     operations = parser.add_subparsers(dest="operation", required=True)
+    operations.add_parser(
+        "status",
+        help="show this worktree's shared-path decision and link state",
+        description="Inspect this worktree's shared-path state without changing it.")
     review = operations.add_parser(
         "review",
-        help="record the reviewed shared directories for this source snapshot")
+        help="record the reviewed shared directories for this source snapshot",
+        description="Validate and record one shared-directory decision.",
+        epilog=_REVIEW_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     review.add_argument(
         "--path", action="append", default=[], metavar="DIR",
         help="a project-relative ignored directory this project needs shared "
@@ -80,9 +106,52 @@ def shared_paths_review(paths: list[str], watch: list[str], none: bool,
     return 0
 
 
+def shared_paths_status(cwd: Path | None = None) -> int:
+    """Describe the current worktree's shared-path contract without changing it."""
+    here = (Path.cwd() if cwd is None else Path(cwd)).resolve()
+    main = _primary_worktree(here).resolve()
+    manifest = shared_paths.read_manifest(main)
+    contract = shared_paths.classify(main, here, manifest)
+
+    print(f"Current worktree: {here}")
+    print(f"Primary worktree: {main}")
+    presence = "present" if manifest.present else "absent"
+    print(f"Manifest: {shared_paths.manifest_path(main)} ({presence})")
+    print(f"State: {contract.state}")
+    if contract.profile is None:
+        print("Profile: none")
+    else:
+        print(f"Profile: {contract.profile.fingerprint}")
+        print("Shared paths: " + (", ".join(contract.profile.paths) or "none"))
+        print("Watch files: " + (", ".join(contract.profile.watch) or "none"))
+    if contract.prior_paths and contract.profile is None:
+        print("Previously reviewed paths: " + ", ".join(contract.prior_paths))
+    if contract.evidence:
+        print("Evidence:")
+        for item in contract.evidence:
+            print(f"  - {item}")
+
+    if here == main:
+        print("Links: not applicable (the primary worktree contains the targets)")
+        return 0
+    if not contract.settled:
+        print("Links: not evaluated until review settles this decision")
+        return 0
+    try:
+        shared_paths.require_directory_link_agreement(main, here, contract)
+    except AssentError as e:
+        print("Links: INVALID")
+        print(f"Problem: {e}")
+        return 1
+    print("Links: OK")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     try:
+        if args.operation == "status":
+            return shared_paths_status()
         return shared_paths_review(args.path, args.watch, args.none)
     except AssentError as e:
         print(f"Error: {e}", file=sys.stderr)

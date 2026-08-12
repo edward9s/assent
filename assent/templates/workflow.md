@@ -301,11 +301,15 @@ directory profiles keyed by watched Git-ignore and dependency/build inputs:
 - `NO-IGNORED-DIRECTORY-CANDIDATE`: a successful current Git query found no
   ordinary ignored directory. This is not a semantic claim that none is needed.
 
-Only `assent shared-paths review` writes the manifest. Every contributing source
-link must match its active profile and exact primary target; undeclared manual
-links refuse verification, reconcile, receipt freshness, reporting, and
-acceptance. Receipts bind `shared_inputs_sha256` before and after verification;
-acceptance rechecks it without provisioning or repair.
+`assent shared-paths status` classifies the worktree it runs in and reports the
+matching profile and link agreement without writing or provisioning anything.
+Only `assent shared-paths review` writes the manifest. It fingerprints and
+reconciles the worktree it runs in; in the primary worktree it caches that
+snapshot and creates no self-link. Every contributing source link must match its
+active profile and exact primary target; undeclared manual links refuse
+verification, reconcile, receipt freshness, reporting, and acceptance. Receipts
+bind `shared_inputs_sha256` before and after verification; acceptance rechecks
+it without provisioning or repair.
 
 All candidate cleanup detaches every junction, directory symlink, or directory
 reparse-point object before recursive Git or filesystem removal and never

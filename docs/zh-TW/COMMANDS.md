@@ -48,7 +48,8 @@ assent run urgent01 ...
 | `clean` | 只移除已證明多餘的 worktree/branch。 |
 | `archive` | 安全清理後封存完成的管理紀錄。 |
 | `doctor` | 診斷安裝並復原孤兒暫存 branch。 |
-| `shared-paths review` | 記錄測試需要的 ignored directory。 |
+| `shared-paths status` | 查看目前 worktree 的 shared-path 決定與鏈結，不做任何變更。 |
+| `shared-paths review` | 記錄目前 source snapshot 完整的 shared-directory 決定。 |
 
 ## 常見用法
 

@@ -86,10 +86,14 @@ before a session.
 
 - If the prompt says `UNKNOWN` or `STALE`, settle it before closeout with
   `assent shared-paths review --path DIR --watch FILE` (repeat either option as
-  needed), or `assent shared-paths review --none --watch FILE`. A watch path is
-  the exact tracked dependency or build file whose change should invalidate
-  the decision. Judge only from Git-ignore rules, those declarations, and this
-  task's evidence. This command is the manifest's only writer.
+  needed), or `assent shared-paths review --none --watch FILE`. Run it from the
+  session cwd: the managed source worktree whose snapshot is being reviewed and
+  whose links the command reconciles. The primary worktree supplies the targets
+  and holds the manifest; running the command there only caches that primary
+  snapshot and creates no link. A watch path is the exact tracked dependency or
+  build file whose change should invalidate the decision. Judge only from
+  Git-ignore rules, those declarations, and this task's evidence. This command
+  is the manifest's only writer.
 - If it says `NO-IGNORED-DIRECTORY-CANDIDATE`, a successful Git query found no
   ordinary ignored directory to declare. There is nothing to review; do not run
   the command just in case. This is not a semantic claim that shared input will

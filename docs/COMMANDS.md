@@ -49,7 +49,8 @@ project-location rules.
 | `clean` | Remove only worktrees/branches proven redundant. |
 | `archive` | Retire completed management records after safe cleanup. |
 | `doctor` | Diagnose installation and recover orphaned temporary branches. |
-| `shared-paths review` | Record reviewed ignored directories needed by tests. |
+| `shared-paths status` | Inspect the current worktree's shared-path decision and links without changing them. |
+| `shared-paths review` | Record the complete shared-directory decision for the current source snapshot. |
 
 ## Common choices
 

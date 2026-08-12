@@ -10,6 +10,8 @@ destroyed.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import subprocess
 import tomllib
@@ -18,6 +20,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 
 from assent import AssentError, gitops, shared_paths
+from assent.main import shared_paths_status
 from tests.link_support import make_directory_link, safe_rmtree
 
 import tempfile
@@ -613,6 +616,45 @@ class TestProvisioning(SharedPathsCase):
         # to itself.
         self.assertFalse(
             shared_paths.pathops.is_link(self.root / "pkg"))
+
+    def test_status_distinguishes_primary_targets_from_source_links(self):
+        self._review("pkg", "assets")
+        manifest = shared_paths.manifest_path(self.root)
+        before = manifest.read_bytes()
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = shared_paths_status(self.worktree)
+        self.assertEqual(code, 0)
+        text = output.getvalue()
+        self.assertIn(f"Current worktree: {self.worktree.resolve()}", text)
+        self.assertIn(f"Primary worktree: {self.root.resolve()}", text)
+        self.assertIn("State: REVIEWED-PATHS", text)
+        self.assertIn("Shared paths: assets, pkg", text)
+        self.assertIn("Watch files: pubspec.yaml", text)
+        self.assertIn("Links: OK", text)
+        self.assertEqual(manifest.read_bytes(), before)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = shared_paths_status(self.root)
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "Links: not applicable (the primary worktree contains the targets)",
+            output.getvalue())
+        self.assertEqual(manifest.read_bytes(), before)
+
+    def test_status_reports_broken_settled_links_without_repairing_them(self):
+        self._review("pkg")
+        shared_paths.release(self.root, self.worktree)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = shared_paths_status(self.worktree)
+        self.assertEqual(code, 1)
+        self.assertIn("Links: INVALID", output.getvalue())
+        self.assertFalse(os.path.lexists(self.worktree / "pkg"))
+        self.assertTrue((self.root / "pkg" / "vendored.txt").exists())
 
     def test_release_detaches_recorded_links_and_forgets_the_worktree(self):
         self._review("pkg", "assets")
