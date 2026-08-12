@@ -214,6 +214,8 @@ Session: codex | core->gpt-5.6-terra | heavy->high
 
 `[workflow]` 只接受 `task`、`plan`、`integration`。每個值都是有序陣列，每個 entry 恰好含一個 `role` 或 `action`。scheduler action 分別是 task 層的 `focused_test`、plan 層的 `focused_sweep`、integration 層的 `full_verify`。已移除的 workflow 與 verification 設定會直接拒絕，不做 migration。
 
+非空的 task workflow 若含 `focused_test`，最後一步必須也是 `focused_test`。任一 `focused_test` 通過都會立即完成 task 層並跳過後續 failure handler。兩個 task action 之間的第一個 role 必須產生 verdict：若具備寫入能力，就在該 session 完成修復；若為唯讀，後面最多接一個另外設定、可寫但不產生 verdict 的 fixer。較早的 task role 若自行標記 `BLOCKED`，會跳過尚未執行的 action，前進到該 task 的 verdict role。Task-review 與 plan-review ability 應使用不同 prompt；scheduler 仍只依 workflow 位置、`writes`、`produces_verdict` 判斷，不依名稱。
+
 Action 通過就完成該層，不啟動 AI review；失敗才走後續 reviewer/fixer，並由後面的 action 重驗。Reviewer prompt 會明示目前輪次與總輪數，並禁止憑空新增驗收條件。陣列耗盡是唯一的收斂上限，不使用 no-progress 或 diff 震盪猜測。
 
 耗盡仍未解決時保留全部證據與修改，狀態為 `REVIEW UNRESOLVED, HUMAN DECISION` 且 exit 0；失敗的 `full_verify` 仍禁止 accept。Adapter、model、effort 仍依前述 role 與 adapter 設定解析。

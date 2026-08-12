@@ -1041,6 +1041,19 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 'plan = [{ action = "focused_sweep" }, '
                 f'{steps}, {{ action = "focused_sweep" }}]\n'))
 
+    def build_readonly_review(self, retry=1, model="core"):
+        return self.build(
+            retry=retry,
+            extra_config=(
+                '[abilities.review]\n'
+                'prompt = "Adjudicate the durable blocked evidence."\n'
+                'writes = false\nproduces_verdict = true\n'
+                '[roles.adjudicator]\nability = ["review"]\n'
+                f'model = "{model}"\neffort = "heavy"\n'
+                '[workflow]\nplan = [{ action = "focused_sweep" }, '
+                '{ role = "adjudicator", adapter = "codex" }, '
+                '{ action = "focused_sweep" }]\n'))
+
     def write_pending_fail(self, cfg, verdict="FAIL"):
         task = parse_task_file(self.plan_dir / "t001_task.e.toml")
         rounds = cfg.workflow_plan
@@ -1324,25 +1337,16 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(self.run_quiet(
             cfg, once=True,
             adapter=ScriptedAdapter([self.ai_done(task)]),
-            auto_fix_adapter=reviewer), 1)
+            auto_fix_adapter=reviewer), 0)
 
-        prompt = reviewer.calls[0][0]
-        self.assertIn("focused_gate_failure", prompt)
-        self.assertIn(f"FAIL: exit 3: {_FAILV}", prompt)
-        state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
-        self.assertEqual(state.failure_trigger, "focused_gate_failure")
+        self.assertEqual(reviewer.calls, [])
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
         self.assertEqual(parse_task_file(task).status, "BLOCKED")
 
-    def test_blocked_adjudication_uses_trusted_contract_and_labels_tampering(self):
+    def test_task_failure_restores_trusted_contract_without_plan_review(self):
         task = self.write_task(1, scope=("src/",))
-        cfg = self.build_review(retry=0)
+        cfg = self.build_readonly_review(retry=0)
         self.commit_all()
-        finding = auto_fix.ReviewFinding(
-            "t001", "src/owned.py", "Scope escape must be repaired",
-            "The scheduler reported rogue.py outside the trusted src scope.")
-        failed = auto_fix.review_record_json(
-            auto_fix.ReviewRecord("FAIL", (finding,)))
-
         def tamper(_prompt):
             task.write_text(task_text(
                 status="BLOCKED", scope=("src/", "rogue.py")),
@@ -1351,22 +1355,17 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 "escaped\n", encoding="utf-8")
             return ok_result()
 
-        reviewer = ScriptedAdapter([TaskResult(0, failed, False, None)])
+        reviewer = ScriptedAdapter([])
         self.assertEqual(self.run_quiet(
             cfg, once=True, adapter=ScriptedAdapter([tamper]),
-            auto_fix_adapter=reviewer), 1)
-        prompt = reviewer.calls[0][0]
-        self.assertIn("task contract (trusted checkpoint; AUTHORITATIVE)", prompt)
-        self.assertIn('scope = ["src/"]', prompt)
-        self.assertIn("UNTRUSTED EVIDENCE", prompt)
-        self.assertIn('scope = ["src/", "rogue.py"]', prompt)
-        self.assertIn("Changes outside scope appeared: rogue.py", prompt)
+            auto_fix_adapter=reviewer), 0)
+        self.assertEqual(reviewer.calls, [])
         self.assertEqual(parse_task_file(task).scope, ["src/"])
         self.assertEqual(parse_task_file(task).status, "BLOCKED")
 
-    def test_reviewer_pass_is_invalid_while_task_remains_blocked(self):
+    def test_task_blocked_never_opens_plan_reviewer(self):
         task = self.write_task(1)
-        cfg = self.build_review(retry=0)
+        cfg = self.build_readonly_review(retry=0)
         self.commit_all()
 
         def self_blocked(_prompt):
@@ -1379,14 +1378,38 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 cfg, once=True, adapter=ScriptedAdapter([self_blocked]),
-                auto_fix_adapter=reviewer), 1)
-        self.assertIn("cannot PASS while a task remains BLOCKED", out.getvalue())
+                auto_fix_adapter=reviewer), 0)
+        self.assertEqual(reviewer.calls, [])
+        self.assertIn("workflow.task owns every incomplete task", out.getvalue())
         self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
         self.assertEqual(parse_task_file(task).status, "BLOCKED")
 
-    def test_invalid_reviewer_output_restores_untrusted_task_structure(self):
-        task = self.write_task(1, scope=("src/",))
+    def test_task_blocked_never_consumes_writable_plan_role(self):
+        task = self.write_task(1)
         cfg = self.build_review(retry=0)
+        self.commit_all()
+
+        def self_blocked(_prompt):
+            set_status(task, "BLOCKED")
+            append_entry(
+                journal_path_for(task), by="claude", event="blocked",
+                summary="Worker requires human adjudication")
+            return ok_result()
+
+        reviewer = ScriptedAdapter([])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(engine.run(
+                cfg, once=True, adapter=ScriptedAdapter([self_blocked]),
+                auto_fix_adapter=reviewer), 0)
+
+        self.assertEqual(reviewer.calls, [])
+        self.assertIn("workflow.task owns every incomplete task",
+                      output.getvalue())
+
+    def test_task_layer_restores_untrusted_structure_without_reviewer_output(self):
+        task = self.write_task(1, scope=("src/",))
+        cfg = self.build_readonly_review(retry=0)
         self.commit_all()
 
         def tamper(_prompt):
@@ -1395,42 +1418,33 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 encoding="utf-8")
             return ok_result()
 
-        reviewer = ScriptedAdapter([ok_result()])
+        reviewer = ScriptedAdapter([])
         self.assertEqual(self.run_quiet(
             cfg, once=True, adapter=ScriptedAdapter([tamper]),
-            auto_fix_adapter=reviewer), 1)
+            auto_fix_adapter=reviewer), 0)
 
+        self.assertEqual(reviewer.calls, [])
         self.assertEqual(parse_task_file(task).scope, ["src/"])
         self.assertEqual(parse_task_file(task).status, "BLOCKED")
         self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
 
-    def test_independent_runnable_work_finishes_before_one_adjudication(self):
+    def test_independent_runnable_work_finishes_without_plan_adjudication(self):
         first = self.write_task(1)
         second = self.write_task(2)
-        cfg = self.build_review(retry=0)
+        cfg = self.build_readonly_review(retry=0)
         self.commit_all()
 
         def self_blocked(_prompt):
             set_status(first, "BLOCKED")
             return ok_result()
 
-        invalid_scope = auto_fix.review_record_json(auto_fix.ReviewRecord(
-            "FAIL", (auto_fix.ReviewFinding(
-                "t001", "outside/task/scope.py", "Needs a human scope decision",
-                "The scheduler cannot assign this proposed repair."),)))
-
-        def review(prompt):
-            self.assertEqual(parse_task_file(second).status, "DONE")
-            self.assertEqual(prompt.count("Review context: BLOCKED_ADJUDICATION"), 1)
-            return TaskResult(0, invalid_scope, False, None)
-
         worker = ScriptedAdapter([self_blocked, self.ai_done(second)])
-        reviewer = ScriptedAdapter([review])
+        reviewer = ScriptedAdapter([])
         self.assertEqual(self.run_quiet(
             cfg, adapter=worker, auto_fix_adapter=reviewer,
-            ), 1)
+            ), 0)
         self.assertEqual(len(worker.calls), 2)
-        self.assertEqual(len(reviewer.calls), 1)
+        self.assertEqual(reviewer.calls, [])
 
     def test_full_run_recovers_prior_durable_blocker_from_journal(self):
         task = self.write_task(1, status="BLOCKED", verify=_FAILV)
@@ -1450,13 +1464,10 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
-            ), 1)
-        prompt = reviewer.calls[0][0]
-        self.assertIn("[focused_gate_failure]", prompt)
-        self.assertIn("Verify command exit code is non-zero", prompt)
-        self.assertIn(_FAILV, prompt)
+            ), 0)
+        self.assertEqual(reviewer.calls, [])
 
-    def test_full_run_refuses_blocked_task_without_durable_evidence(self):
+    def test_full_run_leaves_existing_blocked_task_to_human(self):
         self.write_task(1, status="BLOCKED")
         cfg = self.build_review(retry=0)
         self.commit_all()
@@ -1464,23 +1475,18 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([]), auto_fix_adapter=reviewer,
-            ), 1)
+            ), 0)
         self.assertEqual(reviewer.calls, [])
 
-    def test_full_run_adjudicates_prior_and_new_blockers_together(self):
+    def test_full_run_keeps_prior_and_new_task_blockers_out_of_plan_review(self):
         first = self.write_task(1, status="BLOCKED")
         second = self.write_task(2)
         append_entry(
             journal_path_for(first), by="scheduler", event="blocked",
             summary="Scheduler marked BLOCKED: prior structural failure",
             detail="Judged failed without any retry")
-        cfg = self.build_review(retry=0)
+        cfg = self.build_readonly_review(retry=0)
         self.commit_all()
-        invalid_scope = auto_fix.review_record_json(auto_fix.ReviewRecord(
-            "FAIL", (auto_fix.ReviewFinding(
-                "t002", "outside/task/scope.py", "Needs a human scope decision",
-                "The scheduler cannot assign this proposed repair."),)))
-
         def self_blocked(_prompt):
             set_status(second, "BLOCKED")
             append_entry(
@@ -1488,16 +1494,14 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
                 summary="New worker-authored blocker.")
             return ok_result()
 
-        reviewer = ScriptedAdapter([
-            TaskResult(0, invalid_scope, False, None)])
+        reviewer = ScriptedAdapter([])
         self.assertEqual(self.run_quiet(
             cfg, adapter=ScriptedAdapter([self_blocked]),
-            auto_fix_adapter=reviewer), 1)
-
-        prompt = reviewer.calls[0][0]
-        self.assertIn("t001 [worker_blocked]: Scheduler marked BLOCKED: prior structural failure", prompt)
-        self.assertIn("t002 [worker_blocked]: Execution AI self-marked BLOCKED", prompt)
-        self.assertIn("worker journal summary (verbatim): New worker-authored blocker.", prompt)
+            auto_fix_adapter=reviewer), 0)
+        self.assertEqual(reviewer.calls, [])
+        self.assertEqual(
+            [item.status for item in Plan.parse(cfg.tasks_dir).tasks],
+            ["BLOCKED", "BLOCKED"])
 
 
 

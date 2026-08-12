@@ -387,7 +387,7 @@ audio 或 video 欄位,不提供 adapter 附件協定,不推測模型的媒體�
 
 定案的 workflow 有 task、plan、integration 三個有序陣列，機械 actions 分別是 `focused_test`、`focused_sweep`、`full_verify`。通過就完成該層，不再確認；失敗才進入 reviewer/fixer，並由下一個 action 重驗。`run` 自動完成這些步驟，`accept` 保持明確的人類決策。
 
-若問題只是 scope omission，AI 可回傳一個精確路徑，由 scheduler 驗證並套用。Reviewer prompt 明示目前與總輪數、要求收斂，且禁止回報既有 requirement 或具體 repair regression 以外的驗收條件。
+若問題只是 scope omission，writable verdict role 必須在同一個 session 修復該精確路徑並回傳 amendment，再由 scheduler 驗證完整寫入集合並更新 task scope；唯讀 verdict role 則把修復留給另外設定的 fixer。Reviewer prompt 明示目前與總輪數、要求收斂，且禁止回報既有 requirement 或具體 repair regression 以外的驗收條件。
 
 三個陣列本身就是有限上限，不使用 no-progress 或 diff 震盪 heuristic。耗盡時保留每個修改與 finding，回報 `REVIEW UNRESOLVED, HUMAN DECISION` 並 exit 0，讓無關工作繼續；機械驗證證據仍決定能否 accept。
 

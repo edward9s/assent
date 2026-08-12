@@ -228,13 +228,15 @@ agent resolves its adapter, abstract model, and effort through the configured
 adapter mappings. An omitted or empty plan configures no plan review. Folder
 selection, `...`, `--all`, `--once`, and `--task` retain their ordinary rules.
 
-The workflow is considered when no task can make further progress: the folder
-is complete, or it is quiescent-blocked. On the complete path, each distinct
+The plan workflow is considered only after every task is `DONE` or `SKIP`. On
+that complete path, each distinct
 `DONE`-task `verify` command runs once more, and only passing checks plus clean
 source start the completed-folder reviewer. A limited `--once`/`--task` run that
-remains runnable defers review. On the quiescent-blocked path, durable worker
-`BLOCKED` or task-focused-gate evidence enters read-only blocked adjudication;
-it does not run a new focused command merely to create evidence. A folder
+remains runnable defers review. A task role that self-marks `BLOCKED` advances
+within `workflow.task` to its next verdict role; a writable verdict role may
+repair a task-local exact scope omission in that same session. A final task
+`focused_test` failure or exhausted task workflow leaves the task `BLOCKED`
+without consuming plan repair positions. A folder
 containing only `SKIP` tasks needs no implementation review. Focused failure
 writes the scheduler's finding evidence and starts no completed-folder reviewer.
 
@@ -244,12 +246,13 @@ omitted adapter resolves to the first configured adapter. Verdict-producing
 roles open that adapter session; a write-capable non-verdict role authorizes
 bounded repair with that adapter for the nearest earlier durable verdict.
 
-A completed-folder round is a merged reviewer-fixer session, not a strictly
-read-only gate: when it finds a genuine blocking problem it may repair it
-directly, writing only inside the declared scope of the one existing task its
-finding names, and reports that with the verdict `FIXED`. `PASS` means nothing
-blocking remains and the round wrote nothing at all. Blocked adjudication is a
-separate read-only decision gate that may not repair anything. Assent snapshots
+A completed-folder role with `writes = true` is a merged review-and-repair
+session, not a strictly read-only gate: when it finds a genuine blocking problem
+it repairs it directly inside the declared scope of the one existing task its
+finding names, or inside one exact scope addition returned with `FIXED`. The
+scheduler validates the pre-session path state and complete write set, then alone
+persists that task-contract addition at closeout. `PASS` means nothing
+blocking remains and the round wrote nothing at all. Assent snapshots
 the protected source and management surfaces before and after the reviewer
 interval; a write to a management-plane file, a task file, another task's
 scope, Git state, or the primary worktree makes the verdict unusable,
@@ -296,10 +299,10 @@ attributed by guesswork.
 
 A `FAIL` record may be repaired only by a later configured workflow position. Every
 finding must resolve to one existing task and that task's declared scope;
-unknown or ambiguous findings stop for a human. The reviewer may return one
-exact mechanically valid scope addition, but only the scheduler may append it
-to a task contract; worker and reviewer task-file edits remain forbidden.
-Automatic repair invokes the normal task session with the durable finding
+unknown or ambiguous findings stop for a human. A read-only verdict role may
+return one exact mechanically valid scope addition for its separately configured
+fixer, but only the scheduler may append it to a task contract; worker and
+reviewer task-file edits remain forbidden. Automatic repair invokes the normal task session with the durable finding
 ledger and repair brief, reopens only the implicated existing tasks, and
 records the reason-bearing rework reason `Automatic repair of durable
 folder-review findings` plus `authorization: configured workflow repair`. It keeps code by

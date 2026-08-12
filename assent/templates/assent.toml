@@ -36,6 +36,20 @@ produces_verdict = true
 [abilities.fix]
 prompt = "Repair authorized blocking findings within the assigned scope."
 writes = true
+[abilities.task_review]
+prompt = "Review only the current task's BLOCKED or focused-test failure evidence. Identify task-local planning omissions such as one exact missing scope path."
+writes = false
+produces_verdict = true
+[abilities.task_fix]
+prompt = "Repair the current task's authorized finding in this session, including an exact omitted scope path."
+writes = true
+[abilities.plan_review]
+prompt = "Review whether the cumulative worktree produced by all completed tasks conforms to the plan, including cross-task interactions."
+writes = false
+produces_verdict = true
+[abilities.plan_fix]
+prompt = "Repair validated plan-level findings within their implicated existing tasks."
+writes = true
 # ability: ordered ability names composed into this role.
 # model/effort: optional abstract execution tiers for this role.
 [roles.implementer]
@@ -56,6 +70,14 @@ effort = "heavy"
 ability = ["review", "fix"]
 model = "prime"
 effort = "heavy"
+[roles.task_reviewer_fixer]
+ability = ["task_review", "task_fix"]
+model = "prime"
+effort = "heavy"
+[roles.plan_reviewer_fixer]
+ability = ["plan_review", "plan_fix"]
+model = "prime"
+effort = "heavy"
 # Actions are scheduler-owned mechanical verification points.
 # focused_test is legal only in workflow.task. It runs the current task's
 # focused verify command outside the AI session and binds the result to source.
@@ -69,9 +91,13 @@ effort = "heavy"
 # A non-empty plan/integration workflow starts and ends with its action. Between actions use
 # one writable verdict role, or a read-only verdict role plus an optional fixer.
 [workflow]
-# The active task workflow uses one combined AI session to minimize tokens.
+# A passing focused_test completes the task layer immediately. Its repair role
+# opens after a worker BLOCKED result or focused-test failure and must finish
+# review and repair in that one session.
 task = [
   { role = "implementer" },
+  { action = "focused_test" },
+  { role = "task_reviewer_fixer" },
   { action = "focused_test" },
 ]
 # Split alternative: two AI sessions and one final test, with no duplicate gate:
@@ -82,9 +108,9 @@ task = [
 # ]
 plan = [
   { action = "focused_sweep" },
-  { role = "reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
-  { role = "reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
 ]
 integration = [

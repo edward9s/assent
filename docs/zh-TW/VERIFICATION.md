@@ -22,7 +22,7 @@
 
 `focused_test` 驗證單一 task；`focused_sweep` 執行 plan 內不同的 task commands，但不寫 receipt；`full_verify` 建立 integration candidate 並記錄完整驗證證據。證據通過就完成該層，不需 reviewer。失敗才依該層設定的後續 reviewer/fixer positions 前進。
 
-Reviewer 會收到精確失敗證據及有限輪次位置，只能回報既有 requirement 或具體 repair regression，也可提出一個由 scheduler 驗證的精確 scope omission。修復後由下一個 action 重驗。陣列耗盡會保留修改與證據為 `REVIEW UNRESOLVED, HUMAN DECISION`；完整驗證失敗仍是客觀的 `accept` gate。
+Reviewer 會收到精確失敗證據及有限輪次位置，只能回報既有 requirement 或具體 repair regression。具備寫入能力的 verdict role 必須在同一個 session 修復一個精確 scope omission，再交由 scheduler 驗證並更新 task contract；唯讀 verdict role 則把修復留給設定的 fixer。修復後由下一個 action 重驗。陣列耗盡會保留修改與證據為 `REVIEW UNRESOLVED, HUMAN DECISION`；完整驗證失敗仍是客觀的 `accept` gate。
 
 ### 完整 candidate verification
 
@@ -80,7 +80,7 @@ repair 與 closeout 會拒絕。
 若 eligible debt 曾由 `COMPLETED_FOLDER + INITIAL` 引入，report generation 會建立同層
 `_technical_debt.md`，並在 `_report.md` 標示 `TECHNICAL DEBT REVIEW REQUIRED`；它保留
 recheck 後已解決的 finding 及 task、path、evidence、recommendation、repair disposition、
-current/resolved outcome、scope decision。blocked adjudication 與 recheck 不能新增 entry。
+current/resolved outcome、scope decision。task BLOCKED handling 與 recheck 不能新增 entry。
 Acceptance 前 meeting 必須主動告訴人類、列舉每項，逐項取得完成 repair 足夠、follow-up
 task/rework，或 durable `AGENTS.md` rule 的 disposition；這不是第二個 approval state。
 

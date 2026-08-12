@@ -1545,7 +1545,9 @@ class TestInit(MainTestCase):
         self.assertIn("watchdog", config)
         self.assertEqual(
             config["workflow"]["task"],
-            [{"role": "implementer"}, {"action": "focused_test"}])
+            [{"role": "implementer"}, {"action": "focused_test"},
+             {"role": "task_reviewer_fixer"},
+             {"action": "focused_test"}])
         self.assertEqual(config["workflow"]["integration"][0],
                          {"action": "full_verify"})
         self.assertEqual(config["workflow"]["integration"][-1],

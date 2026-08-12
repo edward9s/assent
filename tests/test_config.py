@@ -765,12 +765,13 @@ class TestLayeredConfig(ConfigTestCase):
         self.assertEqual(
             [step.action if isinstance(step, WorkflowActionStep) else step.role
              for step in cfg.workflow_task],
-            ["implementer", "focused_test"])
+            ["implementer", "focused_test", "task_reviewer_fixer",
+             "focused_test"])
         self.assertEqual(
             [step.action if isinstance(step, WorkflowActionStep) else step.role
              for step in cfg.workflow_plan],
-            ["focused_sweep", "reviewer_fixer", "focused_sweep",
-             "reviewer_fixer", "focused_sweep"])
+            ["focused_sweep", "plan_reviewer_fixer", "focused_sweep",
+             "plan_reviewer_fixer", "focused_sweep"])
         self.assertEqual(
             [step.action if isinstance(step, WorkflowActionStep) else step.role
              for step in cfg.workflow_integration],

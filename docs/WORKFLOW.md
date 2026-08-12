@@ -70,7 +70,9 @@ succeed. The candidate, receipt, and report rules are in
 
 After task execution, `run` continues through the configured plan and integration actions. `focused_test`, `focused_sweep`, and `full_verify` are mechanical decision points. Passing one completes that layer; it does not spend reviewer tokens. Failure advances to the next configured reviewer/fixer, whose repair is checked by the next action.
 
-Each review prompt names the current round, total rounds, and rounds remaining. Findings must cite an existing task requirement or a concrete repair regression; the reviewer may not invent an acceptance criterion. A mechanically valid exact scope omission can be proposed by AI, validated and applied by the scheduler, then reworked and rechecked.
+Each review prompt names the current round, total rounds, and rounds remaining. Findings must cite an existing task requirement or a concrete repair regression; the reviewer may not invent an acceptance criterion. A writable verdict role repairs a mechanically valid exact scope omission in that same session and returns the amendment; the scheduler validates the pre-session path state and complete write set, appends the task scope, and then runs the next action. A read-only verdict role leaves repair to its separately configured fixer.
+
+Task and plan reviewers have distinct configured responsibilities. Task review handles one task's worker-BLOCKED or focused-test evidence and remains inside `workflow.task`; plan review begins only after every task is `DONE` or `SKIP` and checks whether the cumulative worktree conforms to the plan. Role names remain user-defined and have no engine semantics.
 
 The configured arrays are the only convergence limit. On exhaustion, all edits and evidence remain and the folder reports `REVIEW UNRESOLVED, HUMAN DECISION` with exit zero; a failed integration action still blocks acceptance. Infrastructure and safety failures remain failures. Nothing in this loop accepts the folder.
 

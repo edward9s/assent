@@ -47,7 +47,8 @@ from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess as _adapter_run_subprocess,
                                      stop_wake_requested)
 from assent.config import (Config, WorkflowActionStep, WorkflowPlanStep,
-                           WorkflowTaskStep, load_config)
+                           WorkflowTaskStep, load_config,
+                           validate_task_workflow_steps)
 from assent.batch_verification import (SelectionCandidateConflict,
                                        selection_conflict_line,
                                        selection_conflicts_from_evidence,
@@ -134,6 +135,23 @@ Role abilities:
 {role_policy}
 
 {closeout_policy}
+"""
+_TASK_VERDICT_POLICY = """
+
+This role produces the decision for the task-layer failure supplied below:
+either a failed focused_test or durable evidence that an earlier task role
+self-marked BLOCKED. Finish with exactly one assent.auto_fix_review JSON object
+on the last non-empty output line. A finding must use the existing review
+schema and name this task. PASS is invalid while a focused_test is failing;
+for a prior BLOCKED result, PASS is valid only when no repair is required.
+
+{write_policy}
+
+For an exact omitted task-scope file, use kind "scope_amendment", make path and
+scope_addition.path the same normalized project-relative path, and set
+scope_addition.path_state to "existing_file" or "new_file" according to the
+state at the start of this session. Never edit the task contract yourself; the
+scheduler validates and appends an accepted exact path at closeout.
 """
 _PLAN_WORKER_PROMPT = """You are the Assent plan execution worker.
 
@@ -236,8 +254,8 @@ scope_addition.path the same normalized exact project-relative file path.
 scope_addition.path_state must be "existing_file" for an existing ordinary
 file or "new_file" for an absent leaf below an existing ordinary directory.
 Never propose a glob, directory, control/management path, removal, verifier
-change, new task, or unrelated scope expansion. The scheduler validates and
-persists an accepted exact addition before any fixer session.
+change, new task, or unrelated scope expansion.
+{scope_policy}
 
 Folder: {folder}
 Source tree: {source_tree}
@@ -296,8 +314,10 @@ cannot intercept effects outside the project."""
 
 _AUTO_FIX_MERGED_WRITE_POLICY = """This is a merged reviewer-fixer round: when
 you find a genuine blocking problem you may repair it directly instead of only
-reporting it. You may write only inside the declared scope of the one existing
-task your finding names. Every other write is refused by the same structural
+reporting it. You may write inside the declared scope of the one existing task
+your finding names. If exactly one required file was omitted from that scope,
+repair it now and return the exact scope_amendment with verdict FIXED; the
+scheduler validates and appends that path at closeout. Every other write is refused by the same structural
 safety gate an ordinary worker session faces -- a management-plane file, a task
 file, another task's scope, a commit, or any write in the primary worktree
 makes your verdict unusable while preserving your exact edits. Assent alone
@@ -308,6 +328,14 @@ Report a repair with verdict "FIXED", carrying the same finding fields a
 reported blocker uses: what was wrong in summary and evidence, and what you
 changed in recommendation. Return "PASS" only when nothing blocking remains
 and you wrote nothing at all."""
+
+_AUTO_FIX_SCOPE_WRITE_POLICY = """Repair that exact omitted path in this same
+session and return FIXED. The scheduler validates the pre-session path state,
+the exact addition, and all session writes, then persists the task-contract
+amendment at closeout."""
+
+_AUTO_FIX_SCOPE_READ_ONLY_POLICY = """Return FAIL with the exact scope
+amendment. This read-only role cannot repair the omitted path."""
 
 _AUTO_FIX_ROUND_POLICY = """This is review round {position} of {total}.
 Review rounds remaining after this one: {remaining}. Converge within the
@@ -720,6 +748,9 @@ def _shared_paths_contract(cfg: Config) -> "shared_paths.Contract":
 
 _PLAN_FOCUSED_SWEEP_PREFIX = "FOCUSED SWEEP ACTION STATE: "
 _TASK_FOCUSED_TEST_PREFIX = "FOCUSED TEST ACTION STATE: "
+_TASK_REVIEW_PREFIX = "TASK VERDICT STATE: "
+_TASK_BLOCKER_PREFIX = "TASK BLOCKER STATE: "
+_TASK_SCOPE_AMENDMENT_PREFIX = "TASK SCOPE AMENDMENT: "
 
 
 @dataclass(frozen=True)
@@ -1007,6 +1038,194 @@ def _focused_test_prompt(state: WorkflowState) -> str:
         f"Summary:\n{record.summary}\n")
 
 
+def _task_review_record(state: WorkflowState) -> auto_fix.ReviewRecord | None:
+    encoded = next((item[len(_TASK_REVIEW_PREFIX):]
+                    for item in reversed(state.focused_evidence)
+                    if item.startswith(_TASK_REVIEW_PREFIX)), None)
+    return auto_fix.parse_review_output(encoded) if encoded is not None else None
+
+
+def _with_task_review_record(
+        state: WorkflowState,
+        record: auto_fix.ReviewRecord) -> WorkflowState:
+    ordinary = tuple(
+        item for item in state.focused_evidence
+        if not item.startswith(_TASK_REVIEW_PREFIX))
+    return replace(
+        state, focused_evidence=(ordinary + (
+            _TASK_REVIEW_PREFIX + auto_fix.review_record_json(record),)))
+
+
+def _task_review_prompt(state: WorkflowState) -> str:
+    record = _task_review_record(state)
+    if record is None:
+        return ""
+    return (
+        "\nPRIOR TASK VERDICT EVIDENCE\n"
+        + auto_fix.review_record_json(record) + "\n")
+
+
+def _task_blocker_evidence(state: WorkflowState) -> dict[str, str] | None:
+    encoded = next((item[len(_TASK_BLOCKER_PREFIX):]
+                    for item in reversed(state.focused_evidence)
+                    if item.startswith(_TASK_BLOCKER_PREFIX)), None)
+    if encoded is None:
+        return None
+    try:
+        data = json.loads(encoded)
+    except json.JSONDecodeError as error:
+        raise AssentError("Task BLOCKED evidence is unreadable") from error
+    if (not isinstance(data, dict)
+            or set(data) != {"role", "summary", "detail"}
+            or not all(isinstance(data.get(key), str)
+                       for key in ("role", "summary", "detail"))):
+        raise AssentError("Task BLOCKED evidence has invalid values")
+    return data
+
+
+def _with_task_blocker_evidence(
+        state: WorkflowState, role: str,
+        summary: str, detail: str) -> WorkflowState:
+    ordinary = tuple(
+        item for item in state.focused_evidence
+        if not item.startswith(_TASK_BLOCKER_PREFIX))
+    data = json.dumps(
+        {"role": role, "summary": summary, "detail": detail},
+        ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return replace(
+        state, focused_evidence=ordinary + (_TASK_BLOCKER_PREFIX + data,))
+
+
+def _task_blocker_prompt(state: WorkflowState) -> str:
+    evidence = _task_blocker_evidence(state)
+    if evidence is None:
+        return ""
+    return (
+        "\nPRIOR TASK ROLE BLOCKED EVIDENCE\n"
+        f"Role: {evidence['role']}\n"
+        f"Summary: {evidence['summary']}\n"
+        f"Detail:\n{evidence['detail']}\n")
+
+
+def _task_blocked_continuation(
+        workflow: tuple[WorkflowTaskStep | WorkflowActionStep, ...],
+        current: int) -> int | None:
+    """Return the next task-local role authorized to handle BLOCKED."""
+    step = workflow[current]
+    if isinstance(step, WorkflowTaskStep) and step.produces_verdict:
+        following = current + 1
+        if (following < len(workflow)
+                and isinstance(workflow[following], WorkflowTaskStep)
+                and workflow[following].writes
+                and not workflow[following].produces_verdict):
+            return following
+        return None
+    return next((
+        index for index in range(current + 1, len(workflow))
+        if isinstance(workflow[index], WorkflowTaskStep)
+        and workflow[index].produces_verdict), None)
+
+
+def _task_scope_transactions(state: WorkflowState) -> tuple[dict, ...]:
+    transactions: list[dict] = []
+    for item in state.focused_evidence:
+        if not item.startswith(_TASK_SCOPE_AMENDMENT_PREFIX):
+            continue
+        try:
+            data = json.loads(item[len(_TASK_SCOPE_AMENDMENT_PREFIX):])
+        except json.JSONDecodeError as error:
+            raise AssentError("Task scope-amendment state is unreadable") from error
+        expected = {"task_id", "paths", "path_states", "fingerprints",
+                    "before_sha256", "after_sha256"}
+        if (not isinstance(data, dict) or set(data) != expected
+                or data.get("task_id") != state.task_id
+                or not isinstance(data.get("paths"), list)
+                or not data["paths"]
+                or not all(isinstance(path, str) and path for path in data["paths"])
+                or len(data["paths"]) != len(set(data["paths"]))
+                or not isinstance(data.get("path_states"), list)
+                or len(data["path_states"]) != len(data["paths"])
+                or not all(value in auto_fix.SCOPE_PATH_STATES
+                           for value in data["path_states"])
+                or not isinstance(data.get("fingerprints"), list)
+                or len(data["fingerprints"]) != len(data["paths"])
+                or not all(re.fullmatch(r"[0-9a-f]{64}", value or "")
+                           for value in data["fingerprints"])
+                or not re.fullmatch(r"[0-9a-f]{64}",
+                                    data.get("before_sha256", ""))
+                or not re.fullmatch(r"[0-9a-f]{64}",
+                                    data.get("after_sha256", ""))):
+            raise AssentError("Task scope-amendment state has invalid values")
+        transactions.append(data)
+    return tuple(transactions)
+
+
+def _with_task_scope_transaction(
+        state: WorkflowState, task: Task,
+        additions: tuple[auto_fix.ApprovedScopeAddition, ...]) -> WorkflowState:
+    if not additions:
+        return state
+    text = task.path.read_text(encoding="utf-8")
+    paths = [item.path for item in additions]
+    after = scope_text_with_entries(text, paths)
+    data = {
+        "task_id": task.id,
+        "paths": paths,
+        "path_states": [item.path_state for item in additions],
+        "fingerprints": [item.fingerprint for item in additions],
+        "before_sha256": task_text_sha256(text),
+        "after_sha256": task_text_sha256(after),
+    }
+    encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"),
+                         sort_keys=True)
+    return replace(
+        state, focused_evidence=(state.focused_evidence
+                                 + (_TASK_SCOPE_AMENDMENT_PREFIX + encoded,)))
+
+
+def _recover_task_scope_amendments(
+        cfg: Config, state: WorkflowState,
+        now: Callable[[], datetime]) -> Task:
+    """Complete scheduler-owned task scope transactions recorded at role closeout."""
+    task = Plan.parse(cfg.tasks_dir).get(state.task_id)
+    if task is None:
+        raise AssentError(
+            f"Task scope-amendment owner disappeared: {state.task_id}")
+    for transaction in _task_scope_transactions(state):
+        text = task.path.read_text(encoding="utf-8")
+        digest = task_text_sha256(text)
+        paths = transaction["paths"]
+        if digest == transaction["before_sha256"]:
+            add_scope_entries(
+                task.path, paths,
+                expected_sha256=transaction["before_sha256"])
+            task = parse_task_file(task.path)
+        elif digest == transaction["after_sha256"]:
+            if task.scope[-len(paths):] != paths:
+                raise AssentError(
+                    "Applied task scope amendment is not the exact suffix")
+        else:
+            raise AssentError(
+                "Task contract drifted across its workflow scope amendment")
+
+        encoded = json.dumps(transaction, ensure_ascii=False,
+                             separators=(",", ":"), sort_keys=True)
+        transaction_id = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        marker = f"transaction_sha256: {transaction_id}"
+        if not any(entry.get("event") == _SCOPE_AMENDMENT_EVENT
+                   and marker in str(entry.get("detail", ""))
+                   for entry in read_entries(task.journal_path)):
+            append_entry(
+                task.journal_path, by="scheduler",
+                event=_SCOPE_AMENDMENT_EVENT,
+                summary=_SCOPE_AMENDMENT_SUMMARY,
+                detail=(marker + "\npaths: "
+                        + json.dumps(paths, ensure_ascii=False,
+                                     separators=(",", ":"))),
+                time_str=now().isoformat(timespec="seconds"))
+    return parse_task_file(task.path)
+
+
 def _focused_test_completion_refusal_for_record(
         record: _TestActionEvidence | None) -> str | None:
     if record is not None and record.status == "PASSED":
@@ -1079,7 +1298,9 @@ def _effective_task_workflow(
             raise AssentError(
                 f"Task {task.id} workflow[{index}] names missing agent role {entry!r}") from error
         steps.append(WorkflowTaskStep(entry, resolved))
-    return tuple(steps)
+    resolved_steps = tuple(steps)
+    validate_task_workflow_steps(resolved_steps)
+    return resolved_steps
 
 
 def _workflow_task_capability_errors(
@@ -1188,9 +1409,20 @@ def _task_workflow_suffix(
         "session's one journal entry before returning. The scheduler advances the "
         "derived workflow cursor."
     )
-    return _TASK_WORKFLOW_SUFFIX.format(
+    suffix = _TASK_WORKFLOW_SUFFIX.format(
         position=index + 1, total=total, role=step.role,
         role_policy=_role_policy(step), closeout_policy=closeout)
+    if step.produces_verdict:
+        write_policy = (
+            "This is a write-capable review-and-repair session. Diagnose and "
+            "repair every reported blocker now, then return FIXED. If the exact "
+            "repair cannot be completed, make no source write and return FAIL."
+            if step.writes else
+            "This is a read-only decision session. Make no source write, return "
+            "FAIL with the blocking findings, and leave repair to the separately "
+            "configured writable role.")
+        suffix += _TASK_VERDICT_POLICY.format(write_policy=write_policy)
+    return suffix
 
 
 def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
@@ -1618,8 +1850,11 @@ def _selection_review_material(
             "This is a write-capable merged review-and-repair transaction. "
             "Inspect and edit only ordinary source files in the scheduler-owned "
             "workspaces listed below. Do not edit task, journal, Git, receipt, "
-            "or management files and do not run tests or generators; the "
-            "scheduler owns every checkpoint and gate."
+            "or management files and do not run tests or generators. For an "
+            "exact omitted scope file, repair that path in this same session, "
+            "return FIXED with scope_amendment, and let the scheduler validate "
+            "and append the path at closeout. The scheduler owns every "
+            "checkpoint and gate."
             if step.writes else
             "This is a read-only decision gate. Do not edit source, task, "
             "journal, Git, receipt, or management files and do not run tests "
@@ -2306,6 +2541,46 @@ def _run_selection_merged_repairs(
                 repair_workspaces=workspaces)
             grouped = _selection_owned_findings(record, work_configs)
             _validate_selection_conflict_assignments(grouped, conflicts)
+            scope_additions: dict[
+                str, tuple[auto_fix.ApprovedScopeAddition, ...]] = {}
+            for cfg in work_configs:
+                subset = grouped.get(cfg.tasks_name)
+                if subset is None:
+                    continue
+                additions = tuple(
+                    auto_fix.ApprovedScopeAddition(
+                        auto_fix.finding_fingerprint(finding), finding.task_id,
+                        finding.scope_addition.path,
+                        finding.scope_addition.path_state)
+                    for finding in subset.findings
+                    if finding.task_id is not None
+                    and finding.scope_addition is not None)
+                if not additions:
+                    continue
+                if record.verdict != "FIXED":
+                    raise AssentError(
+                        "A writable integration verdict role must repair an "
+                        "approved scope omission in the same session and return FIXED")
+                if cfg.tasks_name in target_folders:
+                    raise AssentError(
+                        "A target-conflict reconciliation cannot also amend task "
+                        "scope in the same repair transaction")
+                plan = Plan.parse(cfg.tasks_dir)
+                auto_fix.validate_scope_additions(
+                    cfg.root, plan, additions,
+                    baseline_ref=original_sources[cfg.tasks_name],
+                    materialized_new_files=True)
+                changed_paths = {
+                    path.replace("\\", "/")
+                    for path in gitops.dirty_paths(cfg.root, cfg.git_excludes)
+                }
+                missing = [item.path for item in additions
+                           if item.path not in changed_paths]
+                if missing:
+                    raise AssentError(
+                        "A same-session integration scope amendment did not repair "
+                        "its exact path: " + ", ".join(missing))
+                scope_additions[cfg.tasks_name] = additions
 
             changed = False
             for cfg in work_configs:
@@ -2337,6 +2612,9 @@ def _run_selection_merged_repairs(
                         owner = plan.get(finding.task_id) if finding.task_id else None
                         if owner is not None:
                             scopes.extend(owner.scope)
+                scopes.extend(
+                    item.path for item in scope_additions.get(
+                        cfg.tasks_name, ()))
                 outside = gitops.changes_outside_scope(
                     cfg.root, list(dict.fromkeys(scopes)),
                     since_ref=old_source, excludes=cfg.git_excludes)
@@ -2412,6 +2690,19 @@ def _run_selection_merged_repairs(
 
             repair_states = _persist_selection_findings(
                 work_configs, state, step, record, prompt_digest)
+            for cfg in work_configs:
+                review_state = repair_states.get(cfg.tasks_name)
+                if (review_state is None
+                        or cfg.tasks_name not in scope_additions):
+                    continue
+                plan = Plan.parse(cfg.tasks_dir)
+                review_state, _plan, _contracts = (
+                    _apply_reviewed_scope_amendments(
+                        cfg, review_state, plan,
+                        _task_contract_snapshots(plan), now,
+                        baseline_ref=original_sources[cfg.tasks_name],
+                        materialized_new_files=True))
+                repair_states[cfg.tasks_name] = review_state
         except BaseException:
             _checkpoint_selection_merged_writes(work_configs)
             raise
@@ -3540,6 +3831,10 @@ def _auto_fix_review_identity(
     rounds = tuple(
         step for step in cfg.workflow_plan
         if isinstance(step, WorkflowPlanStep))
+    can_write = (
+        review_context != "blocked_adjudication"
+        and round_index < len(rounds)
+        and rounds[round_index].writes)
     reviewed_material = dict(
         folder=cfg.tasks_name,
         base_ref=base_ref,
@@ -3553,12 +3848,10 @@ def _auto_fix_review_identity(
             ability.prompt for ability in
             rounds[round_index].resolved_role.abilities)
             if round_index < len(rounds) else "- none"),
-        write_policy=(
-            _AUTO_FIX_READ_ONLY_POLICY
-            if (review_context == "blocked_adjudication"
-                or round_index >= len(rounds)
-                or not rounds[round_index].writes)
-            else _AUTO_FIX_MERGED_WRITE_POLICY),
+        write_policy=(_AUTO_FIX_MERGED_WRITE_POLICY
+                      if can_write else _AUTO_FIX_READ_ONLY_POLICY),
+        scope_policy=(_AUTO_FIX_SCOPE_WRITE_POLICY
+                      if can_write else _AUTO_FIX_SCOPE_READ_ONLY_POLICY),
         round_policy=(
             _AUTO_FIX_BLOCKED_ROUND_POLICY
             if review_context == "blocked_adjudication"
@@ -3795,13 +4088,6 @@ def _run_auto_fix_review_once(
     round_index = existing.workflow_step_index if existing is not None else 0
     while round_index < len(rounds) and not rounds[round_index].produces_verdict:
         round_index += 1
-    rounds_exhausted = round_index >= len(rounds)
-    review_index = min(round_index, len(rounds) - 1)
-    review = rounds[review_index]
-    assert review.adapter is not None
-    assert review.model is not None and review.effort is not None
-    assert review.requested_model is not None
-    assert review.requested_effort is not None
 
     plan = (_authoritative_status_plan(trusted_plan)
             if trusted_plan is not None else Plan.parse(cfg.tasks_dir))
@@ -3814,6 +4100,27 @@ def _run_auto_fix_review_once(
     runnable = plan.next_task()
     limited = once or task_id is not None
     review_context = "completed_folder"
+
+    if incomplete and existing is None:
+        shown = ", ".join(f"{task.id}={task.status}" for task in incomplete)
+        suffix = " after the limited run" if limited else ""
+        print(f"Plan workflow review deferred{suffix}; workflow.task owns "
+              f"every incomplete task ({shown}).")
+        return _AutoFixReviewOutcome(0)
+
+    def finish(outcome: _AutoFixReviewOutcome) -> _AutoFixReviewOutcome:
+        """Restore worker task-contract tampering after its evidence is captured."""
+        if review_context != "blocked_adjudication":
+            return outcome
+        try:
+            _restore_trusted_contracts_after_adjudication(
+                plan, contracts_by_id, now)
+        except AssentError as e:
+            print("Auto-fix adjudication evidence was preserved, but trusted "
+                  f"contract restoration failed: {e}")
+            return _AutoFixReviewOutcome(1, outcome.state, str(e))
+        return outcome
+
     if incomplete:
         selected_blocker = bool(blockers)
         if (not blocked or runnable is not None
@@ -3835,6 +4142,29 @@ def _run_auto_fix_review_once(
                   f"have no readable scheduler evidence{suffix}.")
             return _AutoFixReviewOutcome(
                 1, human_reason="blocked tasks have no durable scheduler evidence")
+
+        if any(item.trigger == "focused_gate_failure" for item in blockers):
+            print("Task focused_test repair budget was exhausted; the plan "
+                  "workflow is not used to repair a task-layer failure.")
+            return finish(_AutoFixReviewOutcome(0))
+
+        read_only_index = next((
+            index for index in range(round_index, len(rounds))
+            if rounds[index].produces_verdict and not rounds[index].writes), None)
+        if read_only_index is None:
+            print("Blocked adjudication requires a configured read-only verdict "
+                  "role; no writable role was opened with reduced permissions. "
+                  "The BLOCKED evidence remains for human decision.")
+            return finish(_AutoFixReviewOutcome(0))
+        round_index = read_only_index
+
+    rounds_exhausted = round_index >= len(rounds)
+    review_index = min(round_index, len(rounds) - 1)
+    review = rounds[review_index]
+    assert review.adapter is not None
+    assert review.model is not None and review.effort is not None
+    assert review.requested_model is not None
+    assert review.requested_effort is not None
 
     done = [task for task in plan.tasks if task.status == "DONE"]
     if review_context == "completed_folder" and not done:
@@ -3952,19 +4282,6 @@ def _run_auto_fix_review_once(
               "reviewer was not started and the exact changes are preserved.")
         return _AutoFixReviewOutcome(
             1, human_reason="focused verification changed the source worktree")
-
-    def finish(outcome: _AutoFixReviewOutcome) -> _AutoFixReviewOutcome:
-        """Restore worker task-contract tampering after its review evidence is captured."""
-        if review_context != "blocked_adjudication":
-            return outcome
-        try:
-            _restore_trusted_contracts_after_adjudication(
-                plan, contracts_by_id, now)
-        except AssentError as e:
-            print("Auto-fix adjudication evidence was preserved, but trusted "
-                  f"contract restoration failed: {e}")
-            return _AutoFixReviewOutcome(1, outcome.state, str(e))
-        return outcome
 
     # A passing scheduler action completes the plan layer.  Review roles are
     # failure handlers, so no AI session is opened merely to confirm a
@@ -4221,6 +4538,55 @@ def _run_auto_fix_review_once(
                     _auto_fix_changed_paths(cfg, review_previous.source_tree)
                     if review_stage == "recheck"
                     and review_previous is not None else None))
+            current_additions = tuple(
+                auto_fix.ApprovedScopeAddition(
+                    auto_fix.finding_fingerprint(finding), finding.task_id,
+                    finding.scope_addition.path,
+                    finding.scope_addition.path_state)
+                for finding in resolved_record.findings
+                if finding.task_id is not None
+                and finding.scope_addition is not None)
+            if not review.writes and resolved_record.verdict == "FIXED":
+                raise AssentError("A read-only verdict role cannot return FIXED")
+            if current_additions:
+                if review.writes and resolved_record.verdict != "FIXED":
+                    raise AssentError(
+                        "A write-capable verdict role must repair an approved "
+                        "scope omission in the same session and return FIXED")
+                auto_fix.validate_scope_additions(
+                    cfg.root, plan, current_additions,
+                    baseline_ref=(source_tree if review.writes else None),
+                    materialized_new_files=review.writes)
+                if review.writes:
+                    changed_paths = {
+                        path.replace("\\", "/")
+                        for path in gitops.dirty_paths(
+                            cfg.root, cfg.git_excludes)
+                    }
+                    missing_repairs = [
+                        item.path for item in current_additions
+                        if item.path not in changed_paths]
+                    if missing_repairs:
+                        raise AssentError(
+                            "A same-session scope amendment did not repair its "
+                            "exact path: " + ", ".join(missing_repairs))
+            if changed and resolved_record.verdict != "FIXED":
+                raise AssentError(
+                    "A write-capable verdict role that changed source must return FIXED")
+            if resolved_record.verdict == "FIXED" and not changed:
+                raise AssentError(
+                    "A write-capable verdict role returned FIXED without changing source")
+            state = auto_fix.state_for_review(
+                resolved_record, previous=ledger_previous,
+                review_stage=review_stage,
+                workflow_step_index=(
+                    round_index if resolved_record.verdict == "PASS"
+                    else round_index + 1),
+                **freshness)
+            state = _auto_fix_attach_repair_briefs(
+                cfg, plan, state,
+                blocker_evidence=_auto_fix_blocker_text(blockers),
+                focused_evidence="\n".join(focused_lines))
         except AssentError as e:
             # Preserve the reviewer's concrete output even though it cannot
             # authorize a write-capable task session.
@@ -4238,7 +4604,9 @@ def _run_auto_fix_review_once(
             return finish(_AutoFixReviewOutcome(1, state, str(e)))
 
         if changed:
-            outside = _auto_fix_out_of_scope_writes(cfg, plan, resolved_record)
+            outside = _auto_fix_out_of_scope_writes(
+                cfg, plan, resolved_record,
+                scope_additions=current_additions)
             if outside:
                 shown = ", ".join(outside[:8]) + (
                     " ..." if len(outside) > 8 else "")
@@ -4248,6 +4616,15 @@ def _run_auto_fix_review_once(
                       f"({shown}).")
                 return finish(_AutoFixReviewOutcome(
                     1, human_reason="review round wrote outside the named task scope"))
+            if current_additions:
+                # Persist the exact decision before the scheduler changes a task
+                # contract. Recovery can then finish the same transaction without
+                # opening a second fixer session.
+                auto_fix.write_auto_fix_state(
+                    auto_fix.auto_fix_state_path(cfg), state)
+                state, plan, contracts_by_id = _apply_reviewed_scope_amendments(
+                    cfg, state, plan, contracts_by_id, now,
+                    baseline_ref=source_tree, materialized_new_files=True)
             # Git state belongs to the scheduler alone, so the round's approved
             # in-scope repair is checkpointed here.  The next round then reviews
             # a clean worktree and can name the exact repaired paths.
@@ -4264,16 +4641,6 @@ def _run_auto_fix_review_once(
                         f"review round {round_index + 1} repaired its own finding"),
                     cfg.git_excludes)
 
-        state = auto_fix.state_for_review(
-            resolved_record, previous=ledger_previous, review_stage=review_stage,
-            workflow_step_index=(
-                round_index if resolved_record.verdict == "PASS"
-                else round_index + 1),
-            **freshness)
-        state = _auto_fix_attach_repair_briefs(
-            cfg, plan, state,
-            blocker_evidence=_auto_fix_blocker_text(blockers),
-            focused_evidence="\n".join(focused_lines))
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
         if resolved_record.verdict == "PASS":
             print("Auto-fix folder review: PASS.")
@@ -4303,7 +4670,9 @@ def _auto_fix_forbidden_writes(changed: tuple[str, ...]) -> list[str]:
 
 def _auto_fix_out_of_scope_writes(
         cfg: Config, plan: Plan,
-        record: auto_fix.ReviewRecord) -> list[str]:
+        record: auto_fix.ReviewRecord, *,
+        scope_additions: tuple[auto_fix.ApprovedScopeAddition, ...] = (),
+        since_ref: str | None = None) -> list[str]:
     """Uncommitted round writes outside the declared scope of the named tasks.
 
     Repair is authorized exactly as far as the one existing task a finding
@@ -4317,8 +4686,10 @@ def _auto_fix_out_of_scope_writes(
         task = plan.get(finding.task_id) if finding.task_id else None
         if task is not None:
             scope.extend(task.scope)
+    scope.extend(item.path for item in scope_additions)
     return gitops.changes_outside_scope(
-        cfg.root, list(dict.fromkeys(scope)), excludes=cfg.git_excludes)
+        cfg.root, list(dict.fromkeys(scope)), since_ref=since_ref,
+        excludes=cfg.git_excludes)
 
 
 def _recover_invalid_reviewer_writes(
@@ -4654,6 +5025,8 @@ def _apply_reviewed_scope_amendments(
         cfg: Config, state: auto_fix.AutoFixState,
         plan: Plan, contracts_by_id: dict[str, str],
         now: Callable[[], datetime],
+        *, baseline_ref: str | None = None,
+        materialized_new_files: bool | None = None,
         ) -> tuple[auto_fix.AutoFixState, Plan, dict[str, str]]:
     """Complete or resume the scheduler-owned amendment before ordinary rework."""
     if not state.approved_scope_additions:
@@ -4678,7 +5051,13 @@ def _apply_reviewed_scope_amendments(
         grouped: dict[str, list[auto_fix.ApprovedScopeAddition]] = {}
         for addition in unrecorded:
             grouped.setdefault(addition.task_id, []).append(addition)
-        auto_fix.validate_scope_additions(cfg.root, disk_plan, unrecorded)
+        materialized = (state.verdict == "FIXED" if materialized_new_files is None
+                        else materialized_new_files)
+        validation_ref = (state.source_tree if baseline_ref is None and materialized
+                          else baseline_ref)
+        auto_fix.validate_scope_additions(
+            cfg.root, disk_plan, unrecorded, baseline_ref=validation_ref,
+            materialized_new_files=materialized)
         affected = [disk_tasks[task_id] for task_id in grouped]
         _ensure_scope_amendment_writable(
             auto_fix.auto_fix_state_path(cfg), affected)
@@ -4789,7 +5168,13 @@ def _apply_reviewed_scope_amendments(
 
         pre_plan = Plan(pre_tasks, live_plan.dir)
         post_plan = Plan(post_tasks, live_plan.dir)
-        auto_fix.validate_scope_additions(cfg.root, pre_plan, all_additions)
+        materialized = (state.verdict == "FIXED" if materialized_new_files is None
+                        else materialized_new_files)
+        validation_ref = (state.source_tree if baseline_ref is None and materialized
+                          else baseline_ref)
+        auto_fix.validate_scope_additions(
+            cfg.root, pre_plan, all_additions, baseline_ref=validation_ref,
+            materialized_new_files=materialized)
         if _contracts_digest(pre_plan, pre_contracts) != plan_before:
             raise AssentError(
                 "Scope amendment pre-plan does not match its durable digest")
@@ -5305,7 +5690,8 @@ def _run_auto_fix_repairs(
         # omitted path, and its addition must be durable before that decision
         # reopens the task or dispatches the next fixer round.  Re-entering
         # with nothing new left to apply is a validated no-op.
-        if state.phase == "NEEDS_REPAIR" and state.approved_scope_additions:
+        if (state.phase in {"NEEDS_REPAIR", "AWAITING_REVIEW"}
+                and state.approved_scope_additions):
             authoritative_plan = (
                 _authoritative_status_plan(trusted_plan)
                 if trusted_plan is not None else Plan.parse(cfg.tasks_dir))
@@ -6098,7 +6484,7 @@ def _process_plan_workflow(
             final = state.step_index == len(cfg.workflow_plan) - 1
             later_role = (not final and isinstance(
                 cfg.workflow_plan[state.step_index + 1], WorkflowPlanStep))
-            if record.status == "PASSED" and final:
+            if record.status == "PASSED":
                 _finish_plan_unit(cfg, plan, step, now)
                 _print_summary(Plan.parse(cfg.tasks_dir))
                 return 0
@@ -6243,7 +6629,10 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 or workflow_state.step_index >= len(workflow)):
             raise AssentError(
                 "Workflow cursor does not match the selected task workflow")
+        if _task_scope_transactions(workflow_state):
+            task = _recover_task_scope_amendments(cfg, workflow_state, now)
         resumed = workflow_state.started
+    trusted_task_text = task.path.read_text(encoding="utf-8")
     if resumed:
         print("  (interrupted workflow step detected; resuming with a continue prompt)")
 
@@ -6282,7 +6671,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             final = workflow_state.step_index == len(workflow) - 1
             later_role = (not final and isinstance(
                 workflow[workflow_state.step_index + 1], WorkflowTaskStep))
-            if record.status == "PASSED" and final:
+            if record.status == "PASSED":
                 _fresh, reason = _inspect_task_safety(cfg, task, start_ref)
                 if reason is None:
                     refreshed = _refresh_task_action_evidence(
@@ -6357,7 +6746,9 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                             if workflow_state is not None else 0),
             workflow_total=len(workflow),
             action_evidence=(
-                _focused_test_prompt(workflow_state)
+                (_focused_test_prompt(workflow_state)
+                 + _task_blocker_prompt(workflow_state)
+                 + _task_review_prompt(workflow_state))
                 if workflow_state is not None else ""),
             focused_test_action_present=any(
                 isinstance(item, WorkflowActionStep)
@@ -6377,13 +6768,17 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             write_workflow_state(cfg.tasks_dir, workflow_state)
         main_tree_baseline = (gitops.dirty_paths(cfg.source_root, _task_excludes(cfg, task))
                               if cfg.source_root is not None else None)
+        role_session_ref = gitops.head_ref(cfg.root)
         try:
             result = _invoke_adapter(
                 cfg, adapter, adapter_name, prompt, session.requested_model,
                 session.requested_effort, cfg.root,
                 context_kind=usage_context_kind,
                 context_id=usage_context_id or task.id,
-                folders=usage_folders)
+                folders=usage_folders,
+                structured=bool(
+                    workflow_step is not None
+                    and workflow_step.produces_verdict))
         except OSError as e:
             if _adapter_process_creation_failed(e):
                 raise _AdapterProcessCreationError(str(e)) from e
@@ -6500,8 +6895,31 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 "NOT RUN: the worker adapter or structural safety gate failed first.")
         elif (workflow_step is not None and workflow_state is not None
               and workflow_state.step_index < len(workflow) - 1):
-            outcome, reason, focused_evidence = _evaluate_task_workflow_step(
-                cfg, task, workflow_step, workflow_journal_start, start_ref)
+            if workflow_step.produces_verdict:
+                review_output = (result.structured_output
+                                 if result.structured_output is not None
+                                 else result.output)
+                try:
+                    if result.structured_output_error is not None:
+                        raise AssentError(result.structured_output_error)
+                    task, workflow_state = _evaluate_task_verdict_role(
+                        cfg, task, workflow_step, workflow_state,
+                        review_output, role_session_ref, now)
+                    trusted_task_text = task.path.read_text(encoding="utf-8")
+                except AssentError as error:
+                    outcome = "fail"
+                    reason = f"Task verdict closeout failed: {error}"
+                    focused_evidence = (
+                        "NOT RUN: task verdict validation failed before the "
+                        "next focused_test action.")
+                else:
+                    outcome, reason, focused_evidence = _evaluate_task_workflow_step(
+                        cfg, task, workflow_step, workflow_journal_start,
+                        start_ref, role_session_ref)
+            else:
+                outcome, reason, focused_evidence = _evaluate_task_workflow_step(
+                    cfg, task, workflow_step, workflow_journal_start,
+                    start_ref, role_session_ref)
         else:
             focused_test_required = any(
                 isinstance(item, WorkflowActionStep)
@@ -6534,12 +6952,51 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             if refreshed != workflow_state:
                 workflow_state = refreshed
                 write_workflow_state(cfg.tasks_dir, workflow_state)
+        if (outcome == "self_blocked" and workflow_state is not None
+                and workflow_step is not None):
+            continuation = _task_blocked_continuation(
+                workflow, workflow_state.step_index)
+            if continuation is not None:
+                worker_entries = [
+                    item for item in read_entries(task.journal_path)[
+                        workflow_journal_start:]
+                    if item.get("by") != "scheduler"]
+                worker_entry = worker_entries[-1]
+                summary = str(
+                    worker_entry.get("summary")
+                    or "Task role self-marked BLOCKED")
+                detail = str(worker_entry.get("detail") or focused_evidence)
+                set_status(task.path, "WIP")
+                workflow_state = _with_task_blocker_evidence(
+                    workflow_state, workflow_step.role, summary, detail)
+                workflow_state = replace(
+                    workflow_state, step_index=continuation, started=False)
+                write_workflow_state(cfg.tasks_dir, workflow_state)
+                gitops.commit_if_dirty(
+                    cfg.root, _checkpoint_subject(
+                        cfg, "wip", task,
+                        f"{workflow_step.role} BLOCKED; task repair pending"),
+                    cfg.git_excludes)
+                print("  Task role self-marked BLOCKED; advancing within "
+                      "workflow.task to its configured verdict/repair role")
+                attempts_used = 0
+                failure_reason = None
+                resumed = False
+                continue
         if outcome == "step_done":
             assert workflow_state is not None and workflow_step is not None
             set_status(task.path, "WIP")
             completed_step = workflow_state.step_index
+            next_step = completed_step + 1
+            review_record = _task_review_record(workflow_state)
+            if (workflow_step.produces_verdict
+                    and review_record is not None
+                    and review_record.verdict == "PASS"):
+                while (next_step < len(workflow)
+                       and isinstance(workflow[next_step], WorkflowTaskStep)):
+                    next_step += 1
             workflow_state = replace(
-                workflow_state, step_index=completed_step + 1,
+                workflow_state, step_index=next_step,
                 started=False,
                 focused_evidence=(workflow_state.focused_evidence
                                   + (focused_evidence,)))
@@ -6634,6 +7091,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
             print(f"  Keeping existing work, retrying with the failure reason (attempt {attempts_used})...")
             continue
         print("  Retries exhausted -> scheduler marks BLOCKED (the not-yet-passing work is kept too)")
+        task.path.write_text(trusted_task_text, encoding="utf-8", newline="")
         _mark_blocked(cfg, task, session, reason or "acceptance failed", now,
                       attempts=attempts_used)
         if workflow_state is not None:
@@ -6692,11 +7150,102 @@ def _inspect_task_safety(cfg: Config, task: Task,
     return fresh, "; ".join(issues) if issues else None
 
 
+def _evaluate_task_verdict_role(
+        cfg: Config, task: Task, step: WorkflowTaskStep,
+        state: WorkflowState, output: str, session_ref: str,
+        now: Callable[[], datetime]) -> tuple[Task, WorkflowState]:
+    """Validate one task verdict role and finish any exact scope transaction."""
+    record = auto_fix.parse_review_output(output)
+    focused = _focused_test_record(state)
+    if (record.verdict == "PASS"
+            and (_task_blocker_evidence(state) is None
+                 or (focused is not None and focused.status != "PASSED"))):
+        raise AssentError(
+            "A task verdict role cannot PASS while the preceding focused_test failed")
+    if not step.writes and record.verdict == "FIXED":
+        raise AssentError("A read-only task verdict role cannot return FIXED")
+
+    plan = Plan.parse(cfg.tasks_dir)
+    record = auto_fix.validate_review_findings(record, plan)
+    wrong_owners = sorted({
+        finding.task_id for finding in record.findings
+        if finding.task_id != task.id})
+    if wrong_owners:
+        raise AssentError(
+            "A task verdict role may report only its current task: "
+            + ", ".join(str(owner) for owner in wrong_owners))
+
+    fresh = parse_task_file(task.path)
+    tampered = same_except_status(task, fresh)
+    if tampered:
+        raise AssentError(
+            "Task verdict role modified protected task fields: "
+            + ", ".join(tampered))
+
+    additions = tuple(
+        auto_fix.ApprovedScopeAddition(
+            auto_fix.finding_fingerprint(finding), task.id,
+            finding.scope_addition.path, finding.scope_addition.path_state)
+        for finding in record.findings
+        if finding.scope_addition is not None)
+    changed_paths = {
+        path.replace("\\", "/")
+        for path in gitops.dirty_paths(cfg.root, _task_excludes(cfg, task))
+    }
+    if changed_paths and (not step.writes or record.verdict != "FIXED"):
+        raise AssentError(
+            "A task verdict role changed source without writable FIXED authority")
+    if record.verdict == "FIXED" and not changed_paths:
+        raise AssentError(
+            "A task verdict role returned FIXED without changing source")
+    if additions:
+        if step.writes and record.verdict != "FIXED":
+            raise AssentError(
+                "A writable task verdict role must repair a scope omission in "
+                "the same session and return FIXED")
+        auto_fix.validate_scope_additions(
+            cfg.root, plan, additions,
+            baseline_ref=(session_ref if step.writes else None),
+            materialized_new_files=step.writes)
+        if step.writes:
+            missing = [item.path for item in additions
+                       if item.path not in changed_paths]
+            if missing:
+                raise AssentError(
+                    "A same-session task scope amendment did not repair its "
+                    "exact path: " + ", ".join(missing))
+
+    outside = _auto_fix_out_of_scope_writes(
+        cfg, plan, record, scope_additions=additions,
+        since_ref=session_ref)
+    if outside:
+        raise AssentError(
+            "Task verdict role wrote outside its declared or exactly amended "
+            "scope: " + ", ".join(outside[:8]))
+
+    state = _with_task_review_record(state, record)
+    if additions:
+        state = _with_task_scope_transaction(state, fresh, additions)
+        write_workflow_state(cfg.tasks_dir, state)
+        fresh = _recover_task_scope_amendments(cfg, state, now)
+    return fresh, state
+
+
 def _evaluate_task_workflow_step(
         cfg: Config, task: Task, step: WorkflowTaskStep,
         journal_start: int,
-        start_ref: str | None = None) -> tuple[str, str | None, str]:
+        start_ref: str | None = None,
+        session_ref: str | None = None) -> tuple[str, str | None, str]:
     """Accept one non-final role session without completing its task."""
+    if not step.writes:
+        changed = gitops.changes_outside_scope(
+            cfg.root, (), since_ref=session_ref, excludes=_task_excludes(cfg, task))
+        if changed:
+            return (
+                "fail",
+                "Read-only workflow role changed source: "
+                + ", ".join(changed[:5]),
+                "NOT RUN: the role's read-only ability boundary failed.")
     fresh, safety_reason = _inspect_task_safety(cfg, task, start_ref)
     if safety_reason:
         return ("fail", safety_reason,

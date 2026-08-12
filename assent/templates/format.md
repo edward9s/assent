@@ -488,8 +488,12 @@ detail = '''The exact final control record was received; no quota wait, adapter 
 ## Workflow ownership and scheduler actions
 
 `[workflow].task` roles own one task's implementation and may write only that
-task's scope. `[workflow].plan` roles own the plan accountability unit and may
-write only the union of its task scopes. `[workflow].integration` owns the exact
+task's scope. A task role that self-marks `BLOCKED` stays in this layer and may
+advance to its next verdict role; it never starts plan review. Task-review and
+plan-review abilities use distinct prompts because the former resolves one
+task's local failure while the latter checks the cumulative worktree against
+the plan. `[workflow].plan` roles own the plan accountability unit and may write
+only the union of its task scopes. `[workflow].integration` owns the exact
 one-or-more-plan source selection after every plan boundary is complete; its
 roles make failure-only decisions or repair assignments. They never acquire
 task-file, receipt, acceptance, target-ref, or Git ownership. An omitted
@@ -504,6 +508,9 @@ A repair unit is expressed only by explicit ordered positions. The
 compact form is `full_verify`, one writable verdict-producing reviewer-fixer,
 then another `full_verify`; it reviews and repairs in one AI session. The split
 form uses a read-only verdict role followed by a writable non-verdict fixer.
+The same ability-driven rule applies between task `focused_test` actions. A
+passing action completes its layer and skips the remaining failure handlers;
+when present, task `focused_test` must be the final task step.
 Repeating a unit is the finite repair budget; omission or exhaustion authorizes
 no implicit session. Candidate-conflict evidence and the selection cursor are
 derived runtime state. Resume reuses content-identical source, target, prefix,
@@ -539,11 +546,13 @@ cleanup lifecycle" section, not here.
 
 ### Automatic folder review and bounded repair
 
-Assent always follows the configured bounded review-and-repair workflow when
-no task can make further progress: either the folder is complete, or it is
-quiescent-blocked. A passing scheduler action skips the following repair roles.
-A failing action advances to the next configured reviewer/fixer, which may
-return exact scope additions for scheduler validation before rework. The finite
+Assent follows the configured plan review-and-repair workflow only after every
+task is `DONE` or `SKIP`. Task-local BLOCKED handling belongs to
+`[workflow].task`. A passing scheduler action skips the following repair roles.
+A failing action advances to the next configured reviewer/fixer. A writable
+verdict role repairs one exact omitted scope path in that same session and
+returns it for scheduler validation and task-contract persistence at closeout;
+a read-only verdict role leaves that repair to its configured fixer. The finite
 array is the only automation budget; exhaustion preserves evidence and edits as
 `REVIEW UNRESOLVED, HUMAN DECISION`. It is not a second task status, not implicit acceptance,
 and not a substitute for complete verification — `_report.md`'s auto-fix line
@@ -561,7 +570,7 @@ mechanics are specified in `~/.assent/workflow.md`'s "Automatic folder review
 and bounded repair" section, not here. What a Review AI needs at an
 accept/rework meeting is the eligible-technical-debt concept: a finding may
 be recorded as durable technical debt only when it is first introduced by a
-`COMPLETED_FOLDER + INITIAL` review — never by blocked adjudication or a
+`COMPLETED_FOLDER + INITIAL` review — never by task BLOCKED handling or a
 recheck — and `_report.md` surfaces this prominently as `TECHNICAL DEBT
 REVIEW REQUIRED`, driving the meeting procedure in [Meeting
 conventions](#meeting-conventions) below.

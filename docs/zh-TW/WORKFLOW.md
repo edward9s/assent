@@ -52,7 +52,9 @@ candidate 與 receipt。候選樹、receipt 與報告規則見[驗證指南](VER
 
 Task 執行後，`run` 會繼續完成設定好的 plan 與 integration actions。`focused_test`、`focused_sweep`、`full_verify` 是機械決策點；通過就完成該層，不花 reviewer token，失敗才進入後續 reviewer/fixer，再由下一個 action 驗證修復。
 
-每個 review prompt 都會說明目前第幾輪、總共幾輪及剩餘輪數。Finding 必須連結既有 task requirement 或具體 repair regression，不得憑空新增驗收條件。若只是精確 scope omission，AI 可提出路徑，由 scheduler 驗證、套用、rework、recheck。
+每個 review prompt 都會說明目前第幾輪、總共幾輪及剩餘輪數。Finding 必須連結既有 task requirement 或具體 repair regression，不得憑空新增驗收條件。具備寫入能力的 verdict role 必須在同一個 session 修復精確的 scope omission 並回傳 amendment；scheduler 驗證 session 開始前的路徑狀態與完整寫入集合後，才更新 task scope。唯讀 verdict role 則把修復留給另外設定的 fixer。
+
+Task reviewer 與 plan reviewer 有不同的設定責任。Task review 處理單一 task 的 worker-BLOCKED 或 focused-test evidence，並留在 `workflow.task`；plan review 只在所有 task 都是 `DONE` 或 `SKIP` 後啟動，檢查累積 worktree 是否符合 plan。Role 名稱仍由使用者自訂，engine 不賦予名稱任何語意。
 
 修復後的 focused recheck 會重用同一次 invocation 的 de-duplicating ledger。
 中斷會保留修改並從 durable boundary 恢復；無法證明 task ownership 或 scope 時仍

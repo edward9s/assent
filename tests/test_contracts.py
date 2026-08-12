@@ -166,15 +166,17 @@ class TestContractContent(unittest.TestCase):
                 "`full_verify` is legal only at integration positions",
                 "not permission",
                 "The selected role's `[abilities]` carry what that session does",
-                "The only special behavior the engine infers from a role",
+                "The engine never infers behavior from a role or ability name",
                 "`produces_verdict`",
                 "makes the whole plan one unit",
                 "every `plan` role step is an ordinary worker session",
                 "according to the plan's focused gate",
-                "when no task can make further progress",
-                "quiescent-blocked",
+                "The plan workflow is considered only after every task",
+                "never consumes a plan review position",
+                "self-marks `BLOCKED` advances to the next verdict role",
                 "non-empty `integration` must start and end with `full_verify`",
                 "A writable verdict role reviews and repairs either failure in one session",
+                "A writable verdict role that finds one exact mechanically valid scope omission repairs",
                 "the first role after `full_verify` must produce a verdict",
                 "Neither form repeats a successful complete verification"):
             with self.subTest(phrase=phrase):
@@ -192,8 +194,12 @@ class TestContractContent(unittest.TestCase):
         self.assertIn("[adapter]", adapter_configuration)
         for phrase in ("[abilities.write_tests]", "[abilities.implement_source]",
                        "[abilities.review]", "[abilities.fix]",
+                       "[abilities.task_review]", "[abilities.task_fix]",
+                       "[abilities.plan_review]", "[abilities.plan_fix]",
                        "[roles.implementer]", "[roles.test_writer]",
                        "[roles.source_implementer]", "[roles.reviewer_fixer]",
+                       "[roles.task_reviewer_fixer]",
+                       "[roles.plan_reviewer_fixer]",
                        "[workflow]", "task =", "plan =", "integration =",
                        "# focused_sweep is legal only in workflow.plan",
                        "# focused_test is legal only in workflow.task"):
@@ -204,6 +210,8 @@ class TestContractContent(unittest.TestCase):
         self.assertIn("roles", parsed_configuration)
         self.assertEqual(parsed_configuration["workflow"]["task"],
                          [{"role": "implementer"},
+                          {"action": "focused_test"},
+                          {"role": "task_reviewer_fixer"},
                           {"action": "focused_test"}])
         for split_step in (
                 '#   { role = "test_writer" },',
@@ -216,9 +224,9 @@ class TestContractContent(unittest.TestCase):
         self.assertEqual(
             parsed_configuration["workflow"]["plan"],
             [{"action": "focused_sweep"},
-             {"role": "reviewer_fixer", "adapter": "codex"},
+             {"role": "plan_reviewer_fixer", "adapter": "codex"},
              {"action": "focused_sweep"},
-             {"role": "reviewer_fixer", "adapter": "codex"},
+             {"role": "plan_reviewer_fixer", "adapter": "codex"},
              {"action": "focused_sweep"}])
         self.assertEqual(parsed_configuration["workflow"]["integration"][0],
                          {"action": "full_verify"})
@@ -228,11 +236,11 @@ class TestContractContent(unittest.TestCase):
             parsed_configuration["workflow"]["integration"][1],
             {"role": "reviewer_fixer", "adapter": "codex"})
         prompts = re.findall(r'^prompt = "([^"]+)"$', configuration, re.MULTILINE)
-        self.assertEqual(len(prompts), 4)
-        for prompt in prompts:
-            with self.subTest(prompt=prompt):
-                self.assertFalse(
-                    {"task", "plan", "folder"}.intersection(prompt.lower().split()))
+        self.assertEqual(len(prompts), 8)
+        self.assertIn("current task", parsed_configuration["abilities"]
+                      ["task_review"]["prompt"])
+        self.assertIn("cumulative worktree", parsed_configuration["abilities"]
+                      ["plan_review"]["prompt"])
 
         instructions = contracts.installed_contract_text("instructions.md")
         self.assertNotIn("[auto_fix.review]", instructions)

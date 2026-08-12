@@ -77,7 +77,7 @@ Scheduler 不會在失敗時 revert workspace。失敗 review 的程式碼保留
 
 設定好的 workflow 在 `run` 中一律啟用，沒有另一個 repair flag。Action 通過時會略過 reviewer/fixer；失敗時會先持久化證據，再開始可寫入的 repair，因此中斷後可從 durable boundary 恢復，不會還原已產生的修改。
 
-Reviewer/fixer 只能寫入 finding 所屬既有 task scope；唯一例外是 reviewer 可提出一個精確 scope addition，由 scheduler 驗證。Management plane、Git state、所有權不明或 out-of-scope 寫入都 fail closed，並保留給人類復原。有限陣列耗盡成為 `REVIEW UNRESOLVED, HUMAN DECISION`；基礎設施與安全失敗仍為非零。
+Reviewer/fixer 只能寫入 finding 所屬既有 task scope，以及同一個 writable verdict session 回傳的一個精確 scope addition。Scheduler 會依 session 開始前的 tree 驗證該路徑，並在 closeout 時更新 task contract；唯讀 verdict role 只能把 addition 留給另外設定的 fixer。Blocked adjudication 只會開啟設定中真正唯讀的 verdict role，不會暗中降低 writable role 的權限。Management plane、Git state、所有權不明或其他 out-of-scope 寫入都 fail closed，並保留給人類復原。有限陣列耗盡成為 `REVIEW UNRESOLVED, HUMAN DECISION`；基礎設施與安全失敗仍為非零。
 
 ### 臨時 integration candidate
 

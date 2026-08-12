@@ -98,7 +98,7 @@ session output, without a parent scheduler prefix.
 
 The configured workflow is always active during `run`; it has no separate repair flag. A passing action skips its reviewer/fixer positions. A failed action persists its evidence before a write-capable repair starts, so interruption resumes at the durable boundary without reverting token-produced edits.
 
-Reviewer/fixer writes remain limited to the implicated existing task scope, except that a reviewer may propose one exact scope addition for scheduler validation. Management-plane, Git-state, ambiguous-ownership, and out-of-scope writes fail closed and remain available for human recovery. Finite array exhaustion becomes `REVIEW UNRESOLVED, HUMAN DECISION`; infrastructure and safety failures remain nonzero.
+Reviewer/fixer writes remain limited to the implicated existing task scope plus one exact scope addition returned by the same writable verdict session. The scheduler validates that path against the pre-session tree and persists the task-contract amendment at closeout. A read-only verdict role may return the addition only for its separately configured fixer. Management-plane, Git-state, ambiguous-ownership, and other out-of-scope writes fail closed and remain available for human recovery. Blocked adjudication opens only a configured read-only verdict role; it never silently downgrades a writable role. Finite array exhaustion becomes `REVIEW UNRESOLVED, HUMAN DECISION`; infrastructure and safety failures remain nonzero.
 
 ### Temporary integration candidates
 

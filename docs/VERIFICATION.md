@@ -28,7 +28,7 @@ check starts.
 
 `focused_test` verifies one task, `focused_sweep` runs the distinct task commands for a plan without a receipt, and `full_verify` constructs the integration candidate and records complete-verification evidence. Passing evidence completes its layer without a reviewer. Failed evidence advances only through the later reviewer/fixer positions configured for that layer.
 
-Reviewers receive the exact failure evidence and their finite round position. They may report only an existing requirement or concrete repair regression and may propose one exact scope omission for scheduler validation. After repair, the next action rechecks. Array exhaustion preserves edits and evidence as `REVIEW UNRESOLVED, HUMAN DECISION`; failed complete-verification evidence remains an objective `accept` gate.
+Reviewers receive the exact failure evidence and their finite round position. They may report only an existing requirement or concrete repair regression. A writable verdict role repairs one exact scope omission in that same session and returns it for scheduler validation and task-contract persistence; a read-only verdict role leaves repair to its configured fixer. After repair, the next action rechecks. Array exhaustion preserves edits and evidence as `REVIEW UNRESOLVED, HUMAN DECISION`; failed complete-verification evidence remains an objective `accept` gate.
 
 ### Complete candidate verification
 

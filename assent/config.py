@@ -193,6 +193,14 @@ class WorkflowTaskStep:
     role: str
     resolved_role: ResolvedRole
 
+    @property
+    def writes(self) -> bool:
+        return self.resolved_role.writes
+
+    @property
+    def produces_verdict(self) -> bool:
+        return self.resolved_role.produces_verdict
+
 
 @dataclass(frozen=True)
 class WorkflowActionStep:
@@ -692,6 +700,65 @@ def _validate_repair_steps(
                     "a verdict")
 
 
+def validate_task_workflow_steps(
+        steps: (list[WorkflowTaskStep | WorkflowActionStep]
+                | tuple[WorkflowTaskStep | WorkflowActionStep, ...]
+                | None)) -> None:
+    """Validate the conditional failure handlers in an explicit task workflow."""
+    if not steps:
+        return
+    actions = [index for index, step in enumerate(steps)
+               if isinstance(step, WorkflowActionStep)]
+    if not actions:
+        verdicts = [index for index, step in enumerate(steps)
+                    if isinstance(step, WorkflowTaskStep)
+                    and step.produces_verdict]
+        if verdicts:
+            raise AssentError(
+                "Config [workflow].task verdict roles require a preceding "
+                "focused_test failure and a later focused_test")
+        return
+    if actions[-1] != len(steps) - 1:
+        raise AssentError(
+            "Config [workflow].task must end with focused_test when it contains "
+            "a focused_test action")
+    for left, right in zip(actions, actions[1:]):
+        roles = steps[left + 1:right]
+        if not roles:
+            raise AssentError(
+                "Config [workflow].task must place a verdict role between "
+                "focused_test actions")
+        reviewer = roles[0]
+        assert isinstance(reviewer, WorkflowTaskStep)
+        if not reviewer.produces_verdict:
+            raise AssentError(
+                f"Config [workflow].task[{left + 1}] is the first role after "
+                "focused_test and must produce a verdict")
+        if len(roles) > 2:
+            raise AssentError(
+                "Config [workflow].task may place only one verdict role and one "
+                "optional fixer between focused_test actions")
+        if len(roles) == 2:
+            if reviewer.writes:
+                raise AssentError(
+                    f"Config [workflow].task[{left + 1}] is a writable verdict "
+                    "role and must be the only role between focused_test actions")
+            fixer = roles[1]
+            assert isinstance(fixer, WorkflowTaskStep)
+            if not fixer.writes or fixer.produces_verdict:
+                raise AssentError(
+                    f"Config [workflow].task[{left + 2}] is the optional fixer "
+                    "after a verdict role and must write without producing a verdict")
+    allowed_verdicts = {left + 1 for left, _right in zip(actions, actions[1:])}
+    misplaced = [index for index, step in enumerate(steps)
+                 if isinstance(step, WorkflowTaskStep)
+                 and step.produces_verdict and index not in allowed_verdicts]
+    if misplaced:
+        raise AssentError(
+            f"Config [workflow].task[{misplaced[0]}] verdict role is not the "
+            "first failure handler between focused_test actions")
+
+
 def _parse_adapter_names(section: dict, guard: "_BlankGuard") -> tuple[str, ...]:
     """Parse the configured adapter name or ordered rotation list."""
     if "name" not in section:
@@ -1090,7 +1157,8 @@ def load_config(path: str | Path, folder: str) -> Config:
         raise AssentError(
             "Config [workflow].plan cannot open any session: no step's role produces a verdict")
     cfg.workflow_plan = plan_steps
+    validate_task_workflow_steps(raw_workflow_task)
     cfg.workflow_task = (None if raw_workflow_task is None
-                         else tuple(raw_workflow_task))
+                          else tuple(raw_workflow_task))
     cfg.workflow_integration = integration_steps
     return cfg

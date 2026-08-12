@@ -246,6 +246,8 @@ CLI argument.
 
 `[workflow]` accepts exactly `task`, `plan`, and `integration`. Each value is an ordered array whose entry contains exactly one `role` or `action`. The scheduler-owned actions are `focused_test` at task scope, `focused_sweep` at plan scope, and `full_verify` at integration scope. Removed workflow and verification settings are rejected rather than migrated.
 
+When a non-empty task workflow contains `focused_test`, that action must be its final step. A passing `focused_test` completes the task layer immediately and skips all later failure handlers. Between two task actions, the first role must produce a verdict; it is either writable and repairs in that one session, or read-only with one separately configured writable non-verdict fixer. An earlier task role that self-marks `BLOCKED` skips the pending action and advances to that task-local verdict role. Task-review and plan-review abilities should use distinct prompts; the scheduler still derives behavior only from workflow position, `writes`, and `produces_verdict`, never names.
+
 A passing action completes its layer without AI review. A failure advances through later configured reviewer/fixer positions, and a later action rechecks the repair. The reviewer prompt states its current round and total finite rounds and forbids invented acceptance criteria. Array exhaustion is the only convergence bound; Assent does not guess from no-progress or diff-oscillation heuristics.
 
 An unresolved exhausted workflow retains all evidence and edits as `REVIEW UNRESOLVED, HUMAN DECISION` and exits zero. A failed `full_verify` still prevents acceptance. Adapter, model, and effort resolution continues to come from the role and adapter settings described above.

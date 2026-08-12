@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Iterable
 
-from assent import AssentError, pathops
+from assent import AssentError, gitops, pathops
 from assent.config import Config
 from assent.verification_common import (DIGEST_RE, OID_RE, atomic_write_text,
                                         toml_string)
@@ -28,9 +28,10 @@ AUTO_FIX_STATE_NAME = "_auto_fix.toml"
 AUTO_FIX_STATE_VERSION = 7
 REVIEW_RECORD_TYPE = "assent.auto_fix_review"
 # FIXED is the merged reviewer-fixer verdict: the round found a genuine blocker
-# and repaired it inside the declared scope of the one task it named.  FAIL
-# remains valid for a round that reports a blocker it may not repair itself,
-# such as an exact scope omission, and for blocked adjudication.
+# and repaired it inside the declared scope of the one task it named, including
+# an exact scope omission validated and persisted by the scheduler at closeout.
+# FAIL remains valid for a blocker a read-only role or the blocked-adjudication
+# gate cannot repair itself.
 REVIEW_VERDICTS = frozenset({"PASS", "FIXED", "FAIL"})
 REVIEW_FINDING_KINDS = frozenset({
     "correctness", "safety", "unmet_requirement", "focused_test_gap",
@@ -965,6 +966,8 @@ def validate_review_findings(record: ReviewRecord, plan: "Plan") -> ReviewRecord
 def validate_scope_additions(
         root: Path, plan: "Plan",
         additions: Iterable[ApprovedScopeAddition],
+        *, baseline_ref: str | None = None,
+        materialized_new_files: bool = False,
         ) -> tuple[ApprovedScopeAddition, ...]:
     """Validate a complete reviewer scope decision without following links.
 
@@ -972,6 +975,9 @@ def validate_scope_additions(
     before this function returns, so its result is safe to hand to the atomic
     task-contract writer without permitting a partially validated batch.
     """
+    if materialized_new_files and baseline_ref is None:
+        raise AssentError(
+            "Materialized scope additions require a pre-session Git baseline")
     root = Path(root).absolute()
     try:
         root_info = os.lstat(root)
@@ -1039,6 +1045,21 @@ def validate_scope_additions(
                 f"Auto-fix scope path has ambiguous ownership with "
                 f"{', '.join(other_owners)}: {normalized}")
 
+        if baseline_ref is not None:
+            tracked = {
+                path.replace("\\", "/")
+                for path in gitops.tracked_paths(root, normalized, ref=baseline_ref)
+            }
+            existed_at_start = normalized in tracked
+            if item.path_state == "existing_file" and not existed_at_start:
+                raise AssentError(
+                    "Auto-fix scope path_state existing_file does not match the "
+                    f"pre-session tree: {normalized}")
+            if item.path_state == "new_file" and existed_at_start:
+                raise AssentError(
+                    "Auto-fix scope path_state new_file does not match the "
+                    f"pre-session tree: {normalized}")
+
         current = root
         for component_index, component in enumerate(parts):
             current = current / component
@@ -1053,6 +1074,10 @@ def validate_scope_additions(
                     raise AssentError(
                         f"Auto-fix scope path_state existing_file does not match "
                         f"the absent target: {normalized}")
+                if materialized_new_files:
+                    raise AssentError(
+                        f"Auto-fix new_file repair did not create its target: "
+                        f"{normalized}")
                 break
             except OSError as e:
                 raise AssentError(
@@ -1063,9 +1088,15 @@ def validate_scope_additions(
                     f"{normalized}")
             if final:
                 if item.path_state == "new_file":
-                    raise AssentError(
-                        f"Auto-fix scope path_state new_file does not match the "
-                        f"existing target: {normalized}")
+                    if not materialized_new_files:
+                        raise AssentError(
+                            f"Auto-fix scope path_state new_file does not match the "
+                            f"existing target: {normalized}")
+                    if not stat.S_ISREG(info.st_mode):
+                        raise AssentError(
+                            f"Auto-fix new_file target is not an ordinary file: "
+                            f"{normalized}")
+                    continue
                 if not stat.S_ISREG(info.st_mode):
                     raise AssentError(
                         f"Auto-fix existing_file target is not an ordinary file: "

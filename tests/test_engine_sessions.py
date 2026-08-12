@@ -173,7 +173,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(verify_calls, 1)
 
     def test_selection_verifier_failure_repairs_and_rechecks_in_one_call(self):
-        task_path = self.write_task(1, status="TODO", scope=("src/",))
+        task_path = self.write_task(
+            1, status="TODO", scope=("src/base.txt", "src/value.txt"))
         extra = (
             '\n[abilities.review_fix]\n'
             'prompt = "Diagnose and repair the failed selection verifier."\n'
@@ -186,14 +187,27 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         cfg = self.build(extra_config=extra)
         (self.root / ".assent" / "verify.py").write_text(
             "raise SystemExit(0)\n", encoding="utf-8")
+        source = self.root / "src"
+        source.mkdir()
+        (source / "base.txt").write_text("base\n", encoding="utf-8")
+        (source / "value.txt").write_text("initial\n", encoding="utf-8")
         self.commit_all()
         worker = ScriptedAdapter([
-            self.ai_done(task_path, {"src/value.txt": "broken\n"})])
+            self.ai_done(task_path, {
+                "src/value.txt": "broken\n",
+            })])
         self.assertEqual(self.run_quiet(cfg, adapter=worker), 0)
+        task_path.write_text(
+            task_text(status="DONE", scope=("src/base.txt",)),
+            encoding="utf-8", newline="\n")
 
         finding = auto_fix.ReviewFinding(
             "t001", "src/value.txt", "The selected candidate is broken",
-            "The complete verifier reported the wrong value.")
+            "The complete verifier reported the wrong value.",
+            kind="scope_amendment",
+            recommendation="Repair and append this exact existing source file.",
+            scope_addition=auto_fix.ScopeAddition(
+                "src/value.txt", "existing_file"))
         def review_and_fix(prompt):
             self.assertIn("write-capable merged review-and-repair", prompt)
             self.assertIn(str(self.execution_root()), prompt)
@@ -234,6 +248,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(calls, 2)
         self.assertEqual(rechecks, [False, True])
         self.assertEqual(parse_task_file(task_path).status, "DONE")
+        self.assertEqual(
+            parse_task_file(task_path).scope,
+            ["src/base.txt", "src/value.txt"])
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.review_context, "selection_verification")
         self.assertEqual(state.verdict, "PASS")
@@ -413,15 +430,15 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
 
 
-    def test_blocked_scope_omission_is_amended_before_fixer_without_handoff(self):
+    def test_plan_verdict_repairs_scope_omission_in_same_session(self):
         task_path = self.write_task(
-            1, scope=("src/base.py",), status="TODO")
+            1, scope=("src/base.py",), status="DONE")
         source = self.root / "src"
         source.mkdir()
         (source / "base.py").write_text("base = 1\n", encoding="utf-8")
         (source / "needed.py").write_text("value = 1\n", encoding="utf-8")
         self.commit_all()
-        cfg = self.build(extra_config=self.review_rounds(2))
+        cfg = self.build(extra_config=self.review_rounds(1))
 
         finding = auto_fix.ReviewFinding(
             "t001", "src/needed.py", "Required source file was omitted from scope",
@@ -429,28 +446,29 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             kind="scope_amendment",
             recommendation="Append the exact existing file to t001 scope.",
             scope_addition=auto_fix.ScopeAddition(
-                "src/needed.py", "existing_file"))
-        reviewer = ScriptedAdapter([
-            TaskResult(0, auto_fix.review_record_json(
-                auto_fix.ReviewRecord("FAIL", (finding,))), False, None),
-            TaskResult(0, auto_fix.review_record_json(
-                auto_fix.ReviewRecord("PASS", ())), False, None),
-        ])
+                "src/needed.py", "existing_file"),
+            transition="newly_exposed",
+            transition_evidence=(
+                "Task t001 acceptance requires the exact path exposed by the "
+                "scheduler-owned focused_sweep."))
 
-        def blocked(_prompt):
-            set_status(task_path, "BLOCKED")
-            append_entry(
-                journal_path_for(task_path), by="claude",
-                requested_model="lite", requested_effort="medium",
-                event="blocked", summary="Exact source path is outside scope")
-            return ok_result()
+        def repair(prompt):
+            self.assertIn("repair it now", prompt)
+            (self.execution_root() / "src" / "needed.py").write_text(
+                "value = 2\n", encoding="utf-8")
+            return TaskResult(0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FIXED", (finding,))), False, None)
 
-        worker = ScriptedAdapter([
-            blocked,
-            self.repair_done(task_path, {"src/needed.py": "value = 2\n"}),
-        ])
-        self.assertEqual(self.run_quiet(
-            cfg, adapter=worker, auto_fix_adapter=reviewer), 0)
+        reviewer = ScriptedAdapter([repair])
+        focused_results = [
+            subprocess.CompletedProcess([], 3, "focused failure\n", ""),
+            subprocess.CompletedProcess([], 0, "focused pass\n", ""),
+        ]
+        with mock.patch.object(
+                engine, "_verify_subprocess", side_effect=focused_results):
+            self.assertEqual(self.run_quiet(
+                cfg, adapter=ScriptedAdapter([]),
+                auto_fix_adapter=reviewer), 0)
 
         task = parse_task_file(task_path)
         self.assertEqual(task.status, "DONE")
@@ -461,23 +479,12 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             if item["event"] == "auto_fix_scope_amendment")
         self.assertIn("task contract before sha256", amendment["detail"])
         self.assertIn("task plan after sha256", amendment["detail"])
-        self.assertLess(
-            next(index for index, item in enumerate(entries)
-                 if item["event"] == "auto_fix_scope_amendment"),
-            next(index for index, item in enumerate(entries)
-                 if item["event"] == "rework_requested"))
         state = auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(cfg))
         self.assertEqual(state.verdict, "PASS")
         self.assertTrue(state.plan_digest_transitions)
-        self.assertEqual(len(worker.calls), 2)
-        repair_prompt = worker.calls[1][0]
-        self.assertIn(auto_fix.finding_fingerprint(finding), repair_prompt)
-        self.assertIn(finding.summary, repair_prompt)
-        self.assertIn(finding.evidence, repair_prompt)
-        self.assertIn(finding.recommendation, repair_prompt)
-        self.assertIn("Exact source path is outside scope", repair_prompt)
-        self.assertIn("NOT RUN: self-marked BLOCKED", repair_prompt)
-        self.assertIn("src/needed.py (existing_file)", repair_prompt)
+        self.assertEqual(len(reviewer.calls), 1)
+        self.assertFalse(any(
+            item.get("event") == "rework_requested" for item in entries))
 
 
     def test_scope_amendment_resumes_after_task_write_before_state_write(self):
@@ -862,6 +869,11 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         '\n[abilities.work]\nprompt = "Work from the supplied evidence."\n'
         'writes = true\n'
         '[roles.worker]\nability = ["work"]\n')
+    VERDICT_AGENT = (
+        '\n[abilities.review_fix]\n'
+        'prompt = "Review and repair the failed focused test."\n'
+        'writes = true\nproduces_verdict = true\n'
+        '[roles.task_repair]\nability = ["review_fix"]\n')
 
     @staticmethod
     def set_task_workflow(path, roles):
@@ -1153,8 +1165,9 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
     def test_focused_test_action_closes_task_without_duplicate_focused_run(self):
         path = self.write_task(1)
         cfg = self.build(retry=0, extra_config=(
-            self.ACTION_AGENT
+            self.ACTION_AGENT + self.VERDICT_AGENT
             + '[workflow]\ntask = [{ role = "worker" }, '
+              '{ action = "focused_test" }, { role = "task_repair" }, '
               '{ action = "focused_test" }]\n'))
         self.commit_all()
         passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
@@ -1164,30 +1177,142 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
             self.assertNotIn("To verify yourself", prompt)
             return self.ai_done(path)(prompt)
 
+        worker = ScriptedAdapter([finish])
         with mock.patch.object(
                 engine, "_verify_subprocess", return_value=passed) as focused:
             self.assertEqual(self.run_quiet(
                 cfg, once=True,
-                adapter=ScriptedAdapter([finish])), 0)
+                adapter=worker), 0)
 
         focused.assert_called_once()
+        self.assertEqual(len(worker.calls), 1)
         self.assertEqual(focused.call_args.args[1], parse_task_file(path).verify)
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
 
-    def test_failed_focused_test_reaches_role_and_reruns_after_source_change(self):
+    def test_worker_blocked_scope_omission_is_repaired_inside_task_workflow(self):
+        path = self.write_task(1, scope=("src/base.py",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "base.py").write_text("base = 1\n", encoding="utf-8")
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT + self.VERDICT_AGENT
+            + '[workflow]\ntask = [{ role = "worker" }, '
+              '{ action = "focused_test" }, { role = "task_repair" }, '
+              '{ action = "focused_test" }]\n'))
+        self.commit_all()
+
+        def blocked(_prompt):
+            set_status(path, "BLOCKED")
+            append_entry(
+                journal_path_for(path), by="claude", requested_model="lite",
+                requested_effort="medium", event="blocked",
+                summary="Task scope omitted src/needed.py",
+                detail="The required implementation cannot be written safely.")
+            return ok_result()
+
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/needed.py", "Required source path was omitted",
+            "The worker BLOCKED evidence names src/needed.py.",
+            kind="scope_amendment",
+            recommendation="Repair and append this exact source path.",
+            scope_addition=auto_fix.ScopeAddition(
+                "src/needed.py", "new_file"))
+
+        def repair(prompt):
+            self.assertIn("PRIOR TASK ROLE BLOCKED EVIDENCE", prompt)
+            self.assertIn("Task scope omitted src/needed.py", prompt)
+            self.assertNotIn("FOCUSED TEST EVIDENCE", prompt)
+            (self.execution_root() / "src" / "needed.py").write_text(
+                "value = 2\n", encoding="utf-8")
+            set_status(path, "WIP")
+            append_entry(
+                journal_path_for(path), by="claude", requested_model="lite",
+                requested_effort="medium", event="fixed",
+                summary="Repaired the omitted task scope path")
+            return TaskResult(
+                0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("FIXED", (finding,))), False, None)
+
+        adapter = ScriptedAdapter([blocked, repair])
+        passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
+        with mock.patch.object(
+                engine, "_verify_subprocess", return_value=passed) as focused:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=adapter), 0)
+
+        focused.assert_called_once()
+        self.assertEqual(len(adapter.calls), 2)
+        task = parse_task_file(path)
+        self.assertEqual(task.status, "DONE")
+        self.assertEqual(task.scope, ["src/base.py", "src/needed.py"])
+        self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
+    def test_read_only_task_verdict_pass_skips_its_optional_fixer(self):
         path = self.write_task(1)
         cfg = self.build(retry=0, extra_config=(
             self.ACTION_AGENT
+            + '[abilities.task_review]\n'
+              'prompt = "Review the task blocker."\n'
+              'writes = false\nproduces_verdict = true\n'
+              '[abilities.task_fix]\nprompt = "Fix the task blocker."\n'
+              'writes = true\n'
+              '[roles.task_reviewer]\nability = ["task_review"]\n'
+              '[roles.task_fixer]\nability = ["task_fix"]\n'
+              '[workflow]\ntask = [{ role = "worker" }, '
+              '{ action = "focused_test" }, { role = "task_reviewer" }, '
+              '{ role = "task_fixer" }, { action = "focused_test" }]\n'))
+        self.commit_all()
+
+        def blocked(_prompt):
+            set_status(path, "BLOCKED")
+            append_entry(
+                journal_path_for(path), by="claude", requested_model="lite",
+                requested_effort="medium", event="blocked",
+                summary="Worker reported a blocker")
+            return ok_result()
+
+        def review(prompt):
+            self.assertIn("PRIOR TASK ROLE BLOCKED EVIDENCE", prompt)
+            self.assertIn("This is a read-only decision session", prompt)
+            set_status(path, "WIP")
+            append_entry(
+                journal_path_for(path), by="claude", requested_model="lite",
+                requested_effort="medium", event="reviewed",
+                summary="No repair is required")
+            return TaskResult(
+                0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("PASS", ())), False, None)
+
+        adapter = ScriptedAdapter([blocked, review])
+        passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
+        with mock.patch.object(
+                engine, "_verify_subprocess", return_value=passed) as focused:
+            self.assertEqual(self.run_quiet(
+                cfg, once=True, adapter=adapter), 0)
+
+        focused.assert_called_once()
+        self.assertEqual(len(adapter.calls), 2)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+
+    def test_failed_focused_test_reaches_role_and_reruns_after_source_change(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT + self.VERDICT_AGENT
             + '[workflow]\ntask = [{ action = "focused_test" }, '
-              '{ role = "worker" }, { action = "focused_test" }]\n'))
+              '{ role = "task_repair" }, { action = "focused_test" }]\n'))
         self.commit_all()
 
         def repair(prompt):
             self.assertIn("FOCUSED TEST EVIDENCE", prompt)
             self.assertIn("Status: FAILED", prompt)
-            return self.ai_done(
-                path, files={"src/fixed.py": "fixed\n"})(prompt)
+            self.ai_done(path, files={"src/fixed.py": "fixed\n"})(prompt)
+            finding = auto_fix.ReviewFinding(
+                "t001", "src/fixed.py", "Focused regression failed",
+                "The failed command requires this source repair.")
+            return TaskResult(
+                0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("FIXED", (finding,))), False, None)
 
         results = [
             subprocess.CompletedProcess([], 3, "focused failure\n", ""),
@@ -1201,26 +1326,65 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(focused.call_count, 2)
         self.assertEqual(parse_task_file(path).status, "DONE")
 
-    def test_role_write_after_focused_test_requires_a_later_action(self):
+    def test_role_after_focused_test_requires_a_later_action(self):
         path = self.write_task(1)
+        with self.assertRaisesRegex(
+                AssentError, "must end with focused_test"):
+            self.build(retry=0, extra_config=(
+                self.ACTION_AGENT
+                + '[workflow]\ntask = [{ action = "focused_test" }, '
+                  '{ role = "worker" }]\n'))
+
+    def test_task_verdict_repairs_exact_scope_addition_in_same_session(self):
+        path = self.write_task(1, scope=("src/base.py",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "base.py").write_text("base = 1\n", encoding="utf-8")
         cfg = self.build(retry=0, extra_config=(
-            self.ACTION_AGENT
+            self.VERDICT_AGENT
             + '[workflow]\ntask = [{ action = "focused_test" }, '
-              '{ role = "worker" }]\n'))
+              '{ role = "task_repair" }, { action = "focused_test" }]\n'))
         self.commit_all()
-        passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
 
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/needed.py", "Required source path was omitted",
+            "The failed focused test requires an edit to src/needed.py.",
+            kind="scope_amendment",
+            recommendation="Repair and append this exact source path.",
+            scope_addition=auto_fix.ScopeAddition(
+                "src/needed.py", "new_file"))
+
+        def repair(prompt):
+            self.assertIn("repair every reported blocker now", prompt)
+            (self.execution_root() / "src" / "needed.py").write_text(
+                "value = 2\n", encoding="utf-8")
+            set_status(path, "WIP")
+            append_entry(
+                journal_path_for(path), by="claude", requested_model="lite",
+                requested_effort="medium", event="fixed",
+                summary="Repaired the omitted exact scope path")
+            return TaskResult(
+                0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("FIXED", (finding,))), False, None)
+
+        results = [
+            subprocess.CompletedProcess([], 3, "focused failure\n", ""),
+            subprocess.CompletedProcess([], 0, "focused pass\n", ""),
+        ]
+        adapter = ScriptedAdapter([repair])
         with mock.patch.object(
-                engine, "_verify_subprocess", return_value=passed) as focused:
+                engine, "_verify_subprocess", side_effect=results) as focused:
             self.assertEqual(self.run_quiet(
-                cfg, once=True, adapter=ScriptedAdapter([
-                    self.ai_done(
-                        path, files={"src/changed.py": "changed\n"})])), 0)
+                cfg, once=True, adapter=adapter), 0)
 
-        focused.assert_called_once()
-        self.assertEqual(parse_task_file(path).status, "BLOCKED")
-        self.assertIn(
-            "STALE", read_entries(journal_path_for(path))[-1]["summary"])
+        self.assertEqual(focused.call_count, 2)
+        self.assertEqual(len(adapter.calls), 1)
+        task = parse_task_file(path)
+        self.assertEqual(task.status, "DONE")
+        self.assertEqual(task.scope, ["src/base.py", "src/needed.py"])
+        self.assertEqual(
+            sum(entry.get("event") == "auto_fix_scope_amendment"
+                for entry in read_entries(journal_path_for(path))), 1)
 
     def test_plan_action_only_passes_and_failed_evidence_reaches_plan_role(self):
         action_only = self.write_task(1)

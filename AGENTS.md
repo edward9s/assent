@@ -89,12 +89,22 @@ while operating an assent-managed session live in
   distinct union of task verify commands without a receipt), and `full_verify`
   (the reconstructed candidate and receipt). A passing action completes that
   layer without an AI reviewer; a failing action advances to the next configured
-  reviewer/fixer and then rechecks. A reviewer may return an exact mechanically
-  valid scope omission; only the scheduler may mutate task state, task contracts,
-  or Git state. Repair may
-  reopen only existing implicated tasks. Eligible pre-existing technical debt may
+  reviewer/fixer and then rechecks. A writable verdict role completes review and
+  repair in its one session, including an exact mechanically valid scope omission:
+  it repairs that exact path and returns `FIXED` plus the amendment, then the
+  scheduler validates the pre-session path state and complete write set before
+  mutating the task contract at closeout. A read-only verdict role may instead
+  return the exact amendment for its separately configured fixer. Only the
+  scheduler may mutate task state, task contracts, or Git state. A task role
+  that self-marks `BLOCKED` stays within `workflow.task` and advances to its
+  configured verdict/repair role; an incomplete task never consumes
+  `workflow.plan`. Task-review abilities handle one task's local failure, while
+  plan-review abilities check the completed cumulative worktree against the
+  plan. The engine derives behavior from workflow position and abilities, never
+  from role or ability names. Repair may reopen only existing implicated tasks.
+  Eligible pre-existing technical debt may
   originate only in the initial completed-folder review, must stay visible for the
-  later human acceptance agenda, and may not be introduced by blocked adjudication
+  later human acceptance agenda, and may not be introduced by task BLOCKED handling
   or recheck. Each repair round carries its reason, selects its finite fixer-profile
   assignments against the pre-round history, and persists every assignment before
   its first write-capable session. The finite arrays are the only convergence

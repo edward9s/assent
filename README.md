@@ -92,8 +92,13 @@ upstream commit. See [Workflow](docs/WORKFLOW.md) and
 `focused_sweep`; `integration` reconstructs the candidate and runs
 `full_verify`, producing the receipt required by `accept`. A passing action
 skips the following repair roles. A failing action advances to the next
-configured reviewer/fixer, and exact scope omissions may be validated and
-applied by the scheduler before code-preserving rework.
+configured reviewer/fixer. A writable verdict role repairs an exact scope
+omission in that same session; the scheduler validates the complete write set
+and alone appends the exact task scope at closeout. Task and plan review use
+separate configured abilities and prompts: task review handles one task's
+BLOCKED or focused-test evidence, while plan review checks the completed
+cumulative worktree against the plan. A task BLOCKED result stays in
+`workflow.task` and never consumes `workflow.plan`.
 
 The finite arrays are the complete automation budget. Review prompts state the
 current and total positions and prohibit findings that do not cite an existing

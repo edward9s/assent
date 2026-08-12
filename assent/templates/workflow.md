@@ -500,10 +500,11 @@ scheduler-supplied execution layer and its granularity, not permission. Every
 entry is a tagged union containing exactly one of `role` or `action`. The
 selected role's `[abilities]` carry what that session does (`prompt`, `writes`,
 and optionally `produces_verdict`), and `[roles]` only compose those abilities
-with optional model and effort choices. Ability prompts therefore do not decide whether their
-context is a task, plan, or integration. The only special behavior the engine
-infers from a role is an ability's `produces_verdict`; it activates the
-provider-neutral review verdict protocol.
+with optional model and effort choices. Task-review and plan-review abilities
+use different prompts because their responsibilities differ; workflow position
+still supplies the structural context. The engine never infers behavior from a
+role or ability name. It uses only workflow position, `writes`, and
+`produces_verdict`.
 
 There are exactly three scheduler-owned actions. `focused_test` is legal only
 at task positions and runs that task's `verify` command. Its PASS is bound to
@@ -531,12 +532,14 @@ assent run FOLDER
 task = [
   { role = "implementer" },
   { action = "focused_test" },
+  { role = "task_reviewer_fixer" },
+  { action = "focused_test" },
 ]
 plan = [
   { action = "focused_sweep" },
-  { role = "reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
-  { role = "reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
 ]
 integration = [
@@ -561,7 +564,15 @@ identical to all three keys being omitted. An omitted `plan` and `plan = []`
 configure no per-plan review. An omitted `task` keeps one
 implicit session per task using that task's own model and effort. A non-empty
 `task` runs its stated roles and actions for each task with task-scoped context
-and keeps each task as its own accountability unit. `task = []` is intentionally
+and keeps each task as its own accountability unit. When it contains
+`focused_test`, it must end with that action. A passing action completes the task
+layer immediately and skips its remaining failure handlers; a failing non-final
+action advances to a verdict role, optionally followed by a separate fixer only
+when that verdict role is read-only. When an earlier task role self-marks
+`BLOCKED`, the scheduler preserves its evidence, skips the pending test action,
+and advances within the same task workflow to its next verdict role. A writable
+task verdict role may repair an exact scope omission in that session before the
+trailing `focused_test`. `task = []` is intentionally
 different: it disables per-task sessions and makes the whole plan one unit,
 executed by the `plan` steps with plan-wide context and the union of task scope
 and focused gates. In that plan-execution mode, every `plan` role step is an
@@ -585,12 +596,9 @@ The removed `[auto_fix.review]` table is never
 recognized alongside this one: config loading fails closed and names the exact
 settings-layer file that must be edited.
 
-The folder-level workflow is considered when no task can make further progress:
-the folder is complete, or it is quiescent-blocked with durable worker or
-focused verification evidence. A limited run defers the completed-folder loop when it leaves work
-incomplete; a quiescent blocked dependency with durable worker or focused-gate
-evidence may enter the separate blocked-adjudication review. Neither path
-spends a workflow step before its own evidence point. When
+The plan workflow is considered only after every task is `DONE` or `SKIP`.
+A task that remains incomplete or `BLOCKED` stays owned by `workflow.task` and
+never consumes a plan review position. When
 `[workflow].integration` is configured, its `full_verify` action owns complete
 verification and the following explicitly positioned roles own bounded repair. Neither path
 accepts. A missing receipt, an unrun full suite, or the absence of complete
@@ -606,17 +614,20 @@ The folder-level order is:
    prompt states the current round, the total finite rounds, and the number
    remaining. It may report only blockers tied to an existing requirement or
    a concrete repair regression; it must not invent acceptance criteria.
-4. For a quiescent blocked folder, use the durable `BLOCKED` worker or
-   task-focused-gate evidence as the blocker input; this blocked-adjudication
-   entry point does not run a new focused command merely to manufacture one.
+4. A task role that self-marks `BLOCKED` advances to the next verdict role in
+   that task workflow. A writable role repairs a task-local omission in the same
+   session. If the task workflow has no remaining handler, the task stays
+   `BLOCKED` for human decision and does not consume the plan workflow.
 5. After a repair, the next configured action rechecks mechanically. A passing
    action completes its layer without another reviewer; a failure may advance
    only through the remaining configured positions.
-6. Resolve every finding to one existing task and its declared scope. The
-   reviewer may approve one exact mechanically valid scope addition, but the
-   scheduler alone performs that one transaction; the worker and reviewer
-   never edit task files. Reopen only existing implicated tasks and preserve
-   every repair.
+6. Resolve every finding to one existing task and its declared scope. A writable
+   verdict role that finds one exact mechanically valid scope omission repairs
+   that path in the same session and returns `FIXED` with the amendment. The
+   scheduler validates its pre-session path state and the complete write set,
+   then alone appends the task scope at closeout. A read-only verdict role may
+   return the amendment for its separately configured fixer. Neither role edits
+   task files. Reopen only existing implicated tasks and preserve every repair.
 7. The finite arrays are the only convergence bound. There is no diff-
    oscillation or subjective no-progress stopping heuristic. If the arrays end
    while a mechanical action still fails, retain all edits and evidence,
@@ -624,19 +635,20 @@ The folder-level order is:
    queued folders continue. The failed `full_verify` evidence still blocks
    `accept`. Infrastructure or safety failures remain nonzero.
 
-A completed-folder round is a merged reviewer-fixer session, not a strictly
-read-only gate. When it finds a genuine blocking problem it may repair it
-directly, writing only inside the declared scope of the one existing task its
-finding names, and reports that with the verdict `FIXED`. Every other write --
+A completed-folder role with `writes = true` is a merged review-and-repair
+session, not a strictly read-only gate. When it finds a genuine blocking problem
+it repairs it directly, writing inside the declared scope of the one existing
+task its finding names or one exact scope addition it returns with `FIXED`.
+The scheduler validates and persists that addition at closeout. Every other write --
 a management-plane file, a task file, another task's scope, a commit, or any
 write in the primary worktree -- is refused by the same structural safety gate
 an ordinary worker session faces, which makes the verdict unusable while
 preserving the exact edits. Assent also captures the protected management
 surfaces before and after the round interval; any detected management write
 refuses the review. `PASS` is returned only when nothing blocking remains and
-the round wrote nothing at all. `FAIL` remains the verdict for a blocker the
-round may not repair itself, such as an exact scope omission, and for blocked
-adjudication, which stays read-only and must write nothing. The configured
+the round wrote nothing at all. `FAIL` remains available to a read-only verdict
+role.
+The configured
 `danger-full-access` or `bypassPermissions` execution default remains in
 force; this prompt-plus-detection rule is cooperative write detection, not a
 security sandbox or a preventive permission boundary.
@@ -808,10 +820,11 @@ The recovery phases have fixed meanings. `NEEDS_REPAIR` is a durable `FAIL`
 awaiting an authorized rework round; `REPAIRING` means the current bounded
 repair round is under way; `AWAITING_REVIEW` means that round's task work
 completed and the next configured round must run; and `COMPLETE` is valid only
-for a `PASS` with no current findings. `review_context` distinguishes a completed-folder review
-from blocked adjudication, and `review_stage` distinguishes the first review
-from a recheck. A restart resumes `REPAIRING` or `AWAITING_REVIEW` from the
-stored evidence, while a missing or drifted workflow configuration
+for a `PASS` with no current findings. `review_context` preserves whether an
+already-open plan repair is a completed-folder review or a repair-blocker
+adjudication; an ordinary task `BLOCKED` result never creates this state.
+`review_stage` distinguishes the first review from a recheck. A restart resumes `REPAIRING` or `AWAITING_REVIEW`
+from the stored evidence, while a missing or drifted workflow configuration
 refuses repair and closeout rather than treating the state as a cache miss.
 
 An unclean exit that interrupts a round after it has already written a repair
@@ -879,8 +892,8 @@ Findings may cover correctness, safety, unmet requirements, missing tests, or
 eligible technical debt in the cumulative diff and directly interacting code,
 never a repository-wide search. A concrete local focused-test gap tied to an
 existing task requirement is eligible; absent or unrun complete verification is
-not. The review has two dimensions: `COMPLETED_FOLDER` or
-`BLOCKED_ADJUDICATION` context, and `INITIAL` or `RECHECK` stage. Only
+not. An already-open plan repair retains two review-context values:
+`COMPLETED_FOLDER` or `BLOCKED_ADJUDICATION`, plus `INITIAL` or `RECHECK` stage. Only
 `COMPLETED_FOLDER + INITIAL` may introduce eligible technical debt. Blocked
 adjudication and recheck may retain and resolve a debt entry but may not add
 one. Unknown or ambiguous ownership, an out-of-scope path, or plan widening

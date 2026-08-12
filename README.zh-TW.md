@@ -91,8 +91,12 @@ Make test 或 custom argv。重跑 init 會保留現有 verifier、刷新兩份
 設定好的 reviewer/fixer，修復後由下一個 action 重新驗證。
 
 每次 reviewer prompt 都會明示目前是第幾輪、總共幾輪及剩餘輪數，並禁止新增既有
-task requirement 或具體 repair regression 以外的驗收條件。精確的 scope omission
-可由 reviewer 提出，經 scheduler 驗證後修改原 task，再 rework、recheck。
+task requirement 或具體 repair regression 以外的驗收條件。Writable verdict role
+必須在同一個 session 修復精確的 scope omission；scheduler 驗證完整寫入集合後才更新
+原 task scope。唯讀 verdict role 則把修復留給另外設定的 fixer。Task 與 plan review
+使用不同的 ability 與 prompt：前者處理單一 task 的 BLOCKED 或 focused-test evidence，
+後者檢查完成後的累積 worktree 是否符合 plan。Task BLOCKED 留在 `workflow.task`，不會
+消耗 `workflow.plan`。
 
 有限陣列是唯一的收斂上限，不使用「沒有進展」或 diff 震盪等不穩定判斷。若陣列耗盡
 仍未通過，Assent 保留所有修改與證據，回報 `REVIEW UNRESOLVED, HUMAN DECISION`
