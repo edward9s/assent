@@ -3,7 +3,7 @@
 Everything here answers a question that has to be settled *before* an AI session
 exists, and that `run` and the query commands must answer identically:
 
-- which abstract effort a task gets, and which concrete CLI value that becomes;
+- which selected effort a task gets, and which concrete CLI value that becomes;
 - the full session identity (adapter, requested model, effort pair) of one run;
 - whether the active adapter would accept every invocation the plan could still
   issue -- a zero-token gate `run` and `check` share verbatim;
@@ -25,9 +25,11 @@ from pathlib import Path
 
 from assent import AssentError, gitops
 from assent.adapters import Adapter, InvocationRequest, get_adapter
-from assent.config import Config, WorkflowPlanStep
+from assent.config import (Config, WorkflowActionStep, WorkflowPlanStep,
+                           WorkflowTaskStep)
 from assent.folderdeps import FolderBaseResolution, resolve_folder_base
-from assent.plan import Plan, Task
+from assent.modeling import effort_identity, has_literal, inherited_effort
+from assent.plan import Plan, Task, TaskWorkflowAction
 
 GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
 
@@ -38,7 +40,7 @@ _ASSIGNMENT_LINE_WIDTH = 78
 
 @dataclass(frozen=True)
 class SessionIdentity:
-    """The abstract choices and actual CLI identity shared by one task run."""
+    """The selected choices and actual CLI identity shared by one task run."""
 
     agent: str
     requested_model: str
@@ -51,8 +53,7 @@ class SessionIdentity:
 # --------------------------------------------------------------------------- #
 def resolve_effort(cfg: Config, task: Task,
                    adapter_name: str | None = None) -> str | None:
-    """Abstract effort for the current adapter: task-file annotation wins; otherwise the
-    adapter's tier default, which a loaded config states for every known tier.
+    """Selected effort: task annotation, portable-tier default, or vendor default.
 
     The current adapter's settings are looked up by name and fail closed for an unknown adapter,
     so a third adapter never inherits Claude's defaults."""
@@ -63,9 +64,11 @@ def resolve_effort(cfg: Config, task: Task,
 def resolve_requested_effort(cfg: Config, model: str,
                              effort: str | None,
                              adapter_name: str | None = None) -> str | None:
-    """Translate the abstract effort to the actual CLI value for the current adapter, by
-    "tier section > flat > identity". Unknown adapters fail closed rather than falling back to
-    Claude's translation table."""
+    """Resolve the selected effort to the actual CLI value for the current adapter.
+
+    Literals bypass translation. Portable effort uses tier section, then flat
+    mapping, then baseline; a literal model has no tier-specific section.
+    """
     return cfg.adapter_settings(
         adapter_name or cfg.adapter_name).resolve_requested_effort(
         model, effort)
@@ -86,6 +89,54 @@ def resolve_session(cfg: Config, adapter: Adapter, task: Task,
     )
 
 
+def literal_adapter_errors(cfg: Config, task: Task) -> list[str]:
+    """Require every effective literal task/role profile to name one adapter."""
+    profiles: list[tuple[str, str | None, str | None, tuple[str, ...]]] = []
+
+    def add(label: str, role, adapters: tuple[str, ...]) -> None:
+        model = role.model or task.model
+        effort = inherited_effort(role.model, role.effort, task.effort)
+        profiles.append((label, model, effort, adapters))
+
+    workflow = task.workflow if task.workflow is not None else cfg.workflow_task
+    if workflow is None:
+        profiles.append(("task profile", task.model, task.effort,
+                         cfg.adapter_names))
+    elif not workflow:
+        for index, step in enumerate(cfg.workflow_plan):
+            if isinstance(step, WorkflowActionStep):
+                continue
+            add(f"workflow.plan[{index}] role {step.role!r}",
+                step.resolved_role, step.adapters)
+    elif task.workflow is None:
+        for index, step in enumerate(workflow):
+            if isinstance(step, WorkflowActionStep):
+                continue
+            add(f"workflow.task[{index}] role {step.role!r}",
+                step.resolved_role, step.adapters or cfg.adapter_names)
+    else:
+        for index, entry in enumerate(workflow):
+            if isinstance(entry, TaskWorkflowAction):
+                continue
+            try:
+                role = cfg.resolve_role(str(entry))
+            except AssentError as error:
+                raise AssentError(
+                    f"Task {task.id} workflow[{index}] names missing agent "
+                    f"role {str(entry)!r}") from error
+            add(f"task workflow[{index}] role {str(entry)!r}",
+                role, cfg.adapter_names)
+
+    errors = []
+    for label, model, effort, adapters in profiles:
+        if has_literal(model, effort) and len(adapters) != 1:
+            errors.append(
+                f"task {task.id} {label} uses a literal model or effort and "
+                "must resolve to exactly one adapter"
+            )
+    return errors
+
+
 # --------------------------------------------------------------------------- #
 # adapter capability gate
 # --------------------------------------------------------------------------- #
@@ -104,6 +155,9 @@ def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
             continue
         if task.status not in ("TODO", "WIP"):
             continue
+        literal_errors = literal_adapter_errors(cfg, task)
+        if literal_errors:
+            raise AssentError("; ".join(literal_errors))
         effort = resolve_effort(cfg, task, name)
         requests.append(InvocationRequest(
             task_id=task.id, model=task.model, effort=effort,
@@ -185,7 +239,7 @@ def auto_fix_review_capability_errors(
             request = InvocationRequest(
                 task_id=f"{cfg.tasks_name}/folder-review",
                 model=review.model,
-                effort=review.effort,
+                effort=identity.effort,
                 requested_model=identity.requested_model,
                 requested_effort=identity.requested_effort,
             )
@@ -199,7 +253,7 @@ def auto_fix_review_capability_errors(
 
 def resolve_auto_fix_fixer_session(
         cfg: Config, adapter: Adapter, adapter_name: str,
-        model: str, effort: str) -> SessionIdentity:
+        model: str, effort: str | None) -> SessionIdentity:
     """Resolve one bounded fixer profile through the normal settings tables."""
     settings = cfg.adapter_settings(adapter_name)
     return SessionIdentity(
@@ -212,7 +266,8 @@ def resolve_auto_fix_fixer_session(
 
 def auto_fix_fixer_capability_errors(
         cfg: Config, adapter: Adapter, adapter_name: str,
-        model: str, effort: str) -> tuple[SessionIdentity | None, list[str]]:
+        model: str, effort: str | None
+        ) -> tuple[SessionIdentity | None, list[str]]:
     """Resolve and preflight one write-capable bounded repair invocation."""
     try:
         session = resolve_auto_fix_fixer_session(
@@ -273,9 +328,13 @@ def _task_assignment_line(task: Task, session: SessionIdentity) -> str:
         abstract += f"/{session.effort}"
         if task.effort is None:
             abstract += "*"
+    else:
+        abstract += f"/{effort_identity(None)}"
     actual = session.requested_model
     if session.requested_effort is not None:
         actual += f"/{session.requested_effort}"
+    else:
+        actual += f"/{effort_identity(None)}"
 
     prefix = (f"  {_pad_display(task_name, _ASSIGNMENT_NAME_WIDTH)} "
               f"{_pad_display(abstract, _ASSIGNMENT_ABSTRACT_WIDTH)} -> ")
@@ -287,6 +346,10 @@ def resolve_task_assignments(
         cfg: Config, plan: Plan
         ) -> list[tuple[str, list[tuple[Task, SessionIdentity]]]]:
     """Resolve every task through the same identity path used by ``run``."""
+    literal_errors = [error for task in plan.tasks
+                      for error in literal_adapter_errors(cfg, task)]
+    if literal_errors:
+        raise AssentError("; ".join(literal_errors))
     blocks: list[tuple[str, list[tuple[Task, SessionIdentity]]]] = []
     for adapter_name in cfg.adapter_names:
         adapter = get_adapter(adapter_name, cfg)

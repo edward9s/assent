@@ -87,8 +87,8 @@ Use this 12-field skeleton; no other field is allowed:
 ```toml
 title = "Skeleton and test infrastructure"
 deps = []                        # upstream task ids; always write the array
-model = "core"                   # prime | core | lite
-effort = "normal"                # optional: heavy | normal | slight
+model = "core"                   # prime | core | lite, or [exact model]
+effort = "normal"                # optional portable value or [exact effort]
 workflow = [{ role = "implementer" }]  # optional task-local override
 status = "TODO"                  # TODO | WIP | DONE | BLOCKED | SKIP
 scope = ["src/thing.py", "tests/test_thing.py"]
@@ -139,7 +139,7 @@ all multiline strings so the scheduler can replace exactly that line.
 
 ### Model and effort
 
-Task files use portable tiers, never vendor model names:
+Task files ordinarily use portable tiers:
 
 | `model` | Use |
 | --- | --- |
@@ -149,8 +149,22 @@ Task files use portable tiers, never vendor model names:
 
 `effort` is optional and orthogonal: `heavy`, `normal`, or `slight`. State it
 only to override the configured default. `heavy` means high portable reasoning,
-not a vendor's maximum. Settings resolve a concrete vendor model and effort for
-every session; task files never contain vendor-specific values.
+not a vendor's maximum.
+
+An exact bracketed value deliberately bypasses its adapter mapping:
+
+```toml
+model = "[gpt-5.6-sol]"
+effort = "[xhigh]"
+```
+
+Model and effort literals are independent. Their brackets are removed and the
+case-preserved contents are passed directly. Any effective workflow step that
+uses either literal must resolve to exactly one adapter. A literal model with
+omitted effort passes no effort and uses the vendor default. A portable effort
+beside a literal model uses the adapter's flat effort translation rather than a
+tier-specific translation. An unbracketed value outside the portable vocabulary
+is an error.
 
 ### Planning audit
 
@@ -209,11 +223,13 @@ detail = '''Optional bounded process notes or evidence.'''
 ```
 
 An AI closeout uses its prompt-specified `by` and the actual model and effort
-arguments passed for that invocation. `summary` is one verifiable sentence.
-The service may ultimately report a different model; the journal records what
-Assent requested. Old `by = "ai"` entries and older entries missing newer fields
-remain readable and are not migrated. Scheduler entries may additionally name
-`agent` and event-specific fields.
+arguments passed for that invocation. Omit `requested_effort` when a literal
+model deliberately used the vendor default and no effort argument was passed.
+`summary` is one verifiable sentence. The service may ultimately report a
+different model; the journal records what Assent requested. Old `by = "ai"`
+entries and older entries missing newer fields remain readable and are not
+migrated. Scheduler entries may additionally name `agent` and event-specific
+fields.
 
 The exact event lifecycle, generated `_report.md`, verification receipts, and
 derived `_auto_fix.toml` state belong to `workflow.md`.

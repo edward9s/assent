@@ -10,7 +10,7 @@ command = "claude"
 # If switching to acceptEdits, use --allowedTools to permit the verification
 # command and the tools needed for task closeout.
 extra_args = ["--permission-mode", "bypassPermissions"]
-# abstract tier -> CLI --model argument (task files write only prime/core/lite)
+# abstract tier -> CLI --model argument (a bracketed task/role/workflow literal bypasses this)
 [adapter.claude.models]
 prime = "fable"
 core  = "opus"
@@ -18,8 +18,8 @@ lite  = "sonnet"
 # default value per tier when a task file states no effort (heavy/normal/slight).
 # This table overrides per tier; it does not replace the built-in defaults, so an
 # absent, empty, or partial table keeps the built-in value for every omitted tier.
-# Every tier therefore resolves to a concrete effort -- assent never falls back to
-# the vendor CLI's own default.
+# Every abstract tier therefore resolves to a concrete effort. Only an explicit
+# bracketed literal model with omitted effort uses the vendor CLI's own default.
 [adapter.claude.default_effort]
 prime = "heavy"
 core  = "heavy"

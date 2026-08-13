@@ -227,11 +227,30 @@ class TestParseTaskFile(PlanTestCase):
         with self.assertRaisesRegex(AssentError, "TOML"):
             parse_task_file(path)
 
-    def test_brand_model_name_rejected(self):
-        # Tiers are a strict enum: a task file must never write a vendor model name
+    def test_unmarked_vendor_model_name_rejected(self):
         path = self.write("t001_x.e.toml", task_text(model="fable"))
         with self.assertRaisesRegex(AssentError, "tier"):
             parse_task_file(path)
+
+    def test_literal_model_and_effort_are_preserved_exactly(self):
+        path = self.write(
+            "t001_x.e.toml",
+            task_text(model="[Vendor-Model]", effort="[XHigh]"))
+
+        task = parse_task_file(path)
+
+        self.assertEqual(task.model, "[Vendor-Model]")
+        self.assertEqual(task.effort, "[XHigh]")
+
+    def test_malformed_literal_selection_is_rejected(self):
+        for field, value in (("model", "[model"), ("model", "[]"),
+                             ("effort", "effort]"),
+                             ("effort", "[[high]]")):
+            with self.subTest(field=field, value=value):
+                kwargs = {field: value}
+                path = self.write("t001_x.e.toml", task_text(**kwargs))
+                with self.assertRaisesRegex(AssentError, "malformed literal"):
+                    parse_task_file(path)
 
     def test_bad_status_rejected(self):
         path = self.write("t001_x.e.toml", task_text(status="DOING"))

@@ -47,6 +47,7 @@ from assent.adapters import (Adapter, InvocationRequest, TaskResult, TokenUsage,
                              is_checkpoint_resume_line, normalize_token_usage,
                              parse_checkpoint_resume_output)
 from assent.adapters.process import run_subprocess
+from assent.modeling import has_literal
 
 if TYPE_CHECKING:
     from assent.config import Config
@@ -495,8 +496,11 @@ class AntigravityAdapter(Adapter):
         sent = (f"--model {request.requested_model} --effort {request.requested_effort}"
                 if request.requested_effort
                 else f"--model {request.requested_model} with no --effort")
-        head = (f"task {request.task_id}: model tier {request.model!r} resolves to "
+        head = (f"task {request.task_id}: model selection {request.model!r} resolves to "
                 f"{sent}, but {reason}")
+        if has_literal(request.model, request.effort):
+            return (f"{head}; change the bracketed literal or bind this step "
+                    "to an adapter that accepts it")
         supported = catalog.families.get(request.requested_model)
         if supported and request.effort and request.requested_effort:
             suggestion = recommended_effort(supported, request.requested_effort)

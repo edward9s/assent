@@ -135,7 +135,8 @@ Complete closeout synchronously in this turn:
 2. Change only this task's status line to `DONE` or `BLOCKED`.
 3. Append one `[[entry]]` to the scheduler-provided journal path with `time`,
    prompt-specified `by`, actual `requested_model`, actual
-   `requested_effort`, `event`, a one-sentence verifiable `summary`, and
+   `requested_effort` when the prompt states one, `event`, a one-sentence
+   verifiable `summary`, and
    optional process `detail`.
 4. Do not commit; the scheduler owns the checkpoint.
 

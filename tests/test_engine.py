@@ -517,7 +517,7 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
         self.assertIn(_OK, prompt)
         self.assertIn('by = "claude"', prompt)
         self.assertIn('requested_model = "lite"', prompt)
-        self.assertIn('abstract effort = "normal"', prompt)
+        self.assertIn('selected effort = "normal"', prompt)
         self.assertIn('requested_effort = "medium"', prompt)
 
     def test_codex_prompt_uses_resolved_cli_model(self):

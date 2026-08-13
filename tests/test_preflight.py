@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import engine, gitops, inspection, preflight
+from assent.adapters import get_adapter
 from assent.config import load_config
 from assent.plan import journal_path_for, parse_task_file, set_status
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
@@ -22,6 +23,38 @@ from tests.test_contracts import GlobalContractsMixin
 
 
 class TestInvocationResolution(GlobalContractsMixin, EngineTestCase):
+    def test_literal_task_values_resolve_without_touching_adapter_maps(self):
+        task_path = self.write_task(
+            1, model="[Exact-Model]", effort="[XHigh]")
+        cfg = self.build(adapter_name="codex")
+        task = parse_task_file(task_path)
+        session = preflight.resolve_session(
+            cfg, get_adapter("codex", cfg), task, "codex")
+
+        self.assertEqual(session.requested_model, "Exact-Model")
+        self.assertEqual(session.effort, "[XHigh]")
+        self.assertEqual(session.requested_effort, "XHigh")
+
+        task_path = self.write_task(1, model="[Exact-Model]", effort=None)
+        task = parse_task_file(task_path)
+        session = preflight.resolve_session(
+            cfg, get_adapter("codex", cfg), task, "codex")
+        self.assertIsNone(session.effort)
+        self.assertIsNone(session.requested_effort)
+
+    def test_literal_task_profile_refuses_adapter_rotation(self):
+        task_path = self.write_task(1, model="[Exact-Model]")
+        config_path = self.root / ".assent" / "assent.toml"
+        config_path.write_text(
+            '[adapter]\nname = ["claude", "codex"]\n', encoding="utf-8")
+        cfg = load_config(config_path, "plan01")
+
+        errors = preflight.literal_adapter_errors(
+            cfg, parse_task_file(task_path))
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("exactly one adapter", errors[0])
+
     def test_resolved_effort_is_consistent_across_prompt_call_label_journal(self):
         # One resolved abstract/concrete pair must appear identically in the prompt
         # placeholders, the adapter call, the terminal label, and the scheduler journal.
@@ -37,7 +70,7 @@ class TestInvocationResolution(GlobalContractsMixin, EngineTestCase):
         prompt, requested_model, requested_effort = adapter.calls[0]
         self.assertEqual(requested_model, "lite")
         self.assertEqual(requested_effort, "max")            # concrete CLI value
-        self.assertIn('abstract effort = "heavy"', prompt)    # abstract kept distinct
+        self.assertIn('selected effort = "heavy"', prompt)    # portable kept distinct
         self.assertIn('requested_effort = "max"', prompt)
         # the prompt no longer offers "no value = the CLI default" as a session contract
         self.assertNotIn("CLI default", prompt)

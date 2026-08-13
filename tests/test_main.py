@@ -1681,11 +1681,12 @@ class TestInit(MainTestCase):
                 self.assertEqual(path.read_bytes(), content)
 
         pytest_verifier = verifier.read_bytes()
+        numbered_backup = verifier.with_name("verify.py.bak.02")
+        numbered_backup.write_bytes(b"older numbered backup\n")
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run_init(self.root, test="npm"), 0)
-        self.assertEqual(
-            verifier.with_name("verify.py.bak.02").read_bytes(),
-            pytest_verifier)
+        self.assertEqual(backup.read_bytes(), pytest_verifier)
+        self.assertEqual(numbered_backup.read_bytes(), b"older numbered backup\n")
 
     def test_differing_verifier_can_be_backed_up_and_replaced_from_menu(self):
         run_init(self.root, test="unittest")

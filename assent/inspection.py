@@ -32,6 +32,7 @@ from assent.adapters import Adapter, get_adapter
 from assent.config import PROJECT_LAYER, Config, WorkflowPlanStep
 from assent.folderdeps import parse_folder_dependencies
 from assent.folder_verification import receipt_report_lines
+from assent.modeling import literal_value
 from assent.plan import Plan, Task, read_entries
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               capability_errors, has_git_marker,
@@ -809,14 +810,19 @@ def _assignment_source_lines(
         settings = cfg.adapter_settings(adapter_name)
         keys: list[str] = []
         for task, session in assignments:
-            keys.append(f"models.{task.model}")
+            literal_model = literal_value(task.model) is not None
+            if not literal_model:
+                keys.append(f"models.{task.model}")
             if session.effort is None:
                 continue
-            if task.effort is None:
+            if task.effort is None and not literal_model:
                 keys.append(f"default_effort.{task.model}")
+            if literal_value(session.effort) is not None:
+                continue
             keys.append(
                 f"efforts.{task.model}.{session.effort}"
-                if session.effort in settings.tier_efforts.get(task.model, {})
+                if (not literal_model
+                    and session.effort in settings.tier_efforts.get(task.model, {}))
                 else f"efforts.{session.effort}")
         used = ", ".join(
             f"{key} = {cfg.source_of(f'adapter.{adapter_name}.{key}')}"

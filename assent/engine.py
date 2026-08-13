@@ -58,6 +58,8 @@ from assent.folderdeps import (find_unfinished_prerequisites,
                                parse_folder_dependency_graph)
 from assent.folder_verification_closeout import verify_folder_action
 from assent.inspection import try_write_report
+from assent.modeling import (effort_identity, has_literal, inherited_effort,
+                             literal_value)
 from assent.plan import (Plan, Task, TaskWorkflowAction, append_entry,
                          parse_task_file,
                          read_entries, read_selection_workflow_state,
@@ -71,7 +73,8 @@ from assent.plan import (Plan, Task, TaskWorkflowAction, append_entry,
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               StackState, auto_fix_fixer_capability_errors,
                               auto_fix_review_capability_errors,
-                              has_git_marker, resolve_session, resolve_stack_state,
+                              has_git_marker, literal_adapter_errors,
+                              resolve_session, resolve_stack_state,
                               worktree_configuration_errors)
 from assent.verification_common import (sha256_file, source_snapshot,
                                         summary as verification_summary)
@@ -108,8 +111,10 @@ _PROMPT_TEMPLATE = (
     "That resolved identity is authoritative for this run's journal entry, even when the\n"
     "working instructions or the existing entries only show other agent names.\n"
     "requested_model is the --model value passed to the AI CLI this run.\n"
-    "This run's abstract effort = \"{effort}\", actual requested_effort = \"{requested_effort}\";\n"
-    "requested_effort is the value actually passed to the AI CLI this run.\n"
+    "This run's selected effort = \"{effort}\", actual requested_effort = \"{requested_effort}\";\n"
+    "requested_effort is the value actually passed to the AI CLI this run; "
+    "<vendor-default> means no effort argument was passed and the journal must "
+    "omit requested_effort.\n"
     "{focused_test_policy}\n"
     "When done:\n"
     "1. Change the status of {task_path} to DONE or BLOCKED -- the status line is the only\n"
@@ -1393,8 +1398,8 @@ def _workflow_task_session(
         adapter_name: str) -> SessionIdentity:
     """Resolve one configured task role, falling back to the task's profile."""
     model = step.resolved_role.model or task.model
-    stated_effort = (step.resolved_role.effort
-                     if step.resolved_role.effort is not None else task.effort)
+    stated_effort = inherited_effort(
+        step.resolved_role.model, step.resolved_role.effort, task.effort)
     settings = cfg.adapter_settings(adapter_name)
     effort = settings.resolve_effort(stated_effort, model)
     return SessionIdentity(
@@ -1436,6 +1441,9 @@ def _workflow_task_capability_errors(
             if (task.status not in ("TODO", "WIP")
                     or (task_id is not None and task.id != task_id)):
                 continue
+            errors = literal_adapter_errors(cfg, task)
+            if errors:
+                return errors
             workflow = _effective_task_workflow(cfg, task)
             if workflow is None:
                 session = resolve_session(cfg, adapter, task, adapter_name)
@@ -1483,18 +1491,21 @@ def _plan_step_session(
         cfg: Config, adapter: Adapter, plan: Plan, step: WorkflowPlanStep,
         adapter_name: str) -> SessionIdentity:
     """Resolve a whole-plan worker step through its role or the first task profile."""
+    first = plan.tasks[0]
+    model = step.model or first.model
+    stated_effort = (
+        step.effort
+        if step.model is not None and step.produces_verdict
+        else inherited_effort(step.model, step.effort, first.effort))
+    settings = cfg.adapter_settings(adapter_name)
+    effort = settings.resolve_effort(stated_effort, model)
     if (step.requested_model is not None
             and adapter_name == step.adapter):
         return SessionIdentity(
             agent=step.adapter or adapter_name,
             requested_model=step.requested_model,
-            effort=step.effort,
+            effort=effort,
             requested_effort=step.requested_effort)
-    first = plan.tasks[0]
-    model = step.model or first.model
-    stated_effort = (step.effort if step.effort is not None else first.effort)
-    settings = cfg.adapter_settings(adapter_name)
-    effort = settings.resolve_effort(stated_effort, model)
     return SessionIdentity(
         agent=adapter_name,
         requested_model=adapter.resolve_model(model),
@@ -1507,6 +1518,10 @@ def _plan_workflow_capability_errors(
         adapter_name: str) -> list[str]:
     requests: list[InvocationRequest] = []
     try:
+        for task in plan.tasks:
+            errors = literal_adapter_errors(cfg, task)
+            if errors:
+                return errors
         for index, step in enumerate(cfg.workflow_plan):
             if isinstance(step, WorkflowActionStep):
                 continue
@@ -1581,8 +1596,9 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
             .replace("{task_title}", task.title)
             .replace("{agent}", session.agent)
              .replace("{requested_model}", session.requested_model)
-             .replace("{effort}", session.effort or "")
-             .replace("{requested_effort}", session.requested_effort or "")
+             .replace("{effort}", effort_identity(session.effort))
+             .replace("{requested_effort}",
+                      effort_identity(session.requested_effort))
              .replace("{focused_test_policy}", focused_test_policy))
     # Startup provisioning already reports a classification failure before an
     # adapter is normally reached.  Prompt construction remains best-effort so
@@ -1639,12 +1655,13 @@ def _session_line(adapter_name: str, task: Task,
                   model: str | None = None) -> str:
     """The one opening line that states the whole resolved session identity.
 
-    Four facts, in the order they are decided: which adapter runs, and each abstract choice
+    Four facts, in the order they are decided: which adapter runs, and each selected choice
     beside the concrete value actually sent to that adapter's CLI, e.g.
     ``Session: codex | core->gpt-5.6-luna | heavy->max``.
     """
     return (f"  Session: {adapter_name} | {model or task.model}->{session.requested_model}"
-            f" | {session.effort}->{session.requested_effort}")
+            f" | {effort_identity(session.effort)}->"
+            f"{effort_identity(session.requested_effort)}")
 
 
 def _short(text: str, limit: int = 60) -> str:
@@ -2087,7 +2104,8 @@ def _run_selection_reviewer(
         session = sessions[adapter_name]
         print(f"Selection review session: {adapter_name} | "
               f"{step.model}->{session.requested_model} | "
-              f"{step.effort}->{session.requested_effort}")
+              f"{effort_identity(session.effort)}->"
+              f"{effort_identity(session.requested_effort)}")
         result = _invoke_adapter(
             work_configs[0], reviewer, adapter_name, attempt_prompt,
             session.requested_model, session.requested_effort,
@@ -2329,7 +2347,7 @@ def _persist_selection_findings(
             reviewer_role=step.role, reviewer_step_index=selection.step_index,
             reviewer_adapter=session.agent,
             reviewer_model=session.requested_model,
-            reviewer_effort=session.requested_effort or "",
+            reviewer_effort=effort_identity(session.requested_effort),
             previous=previous, review_context="selection_verification",
             review_stage=stage, workflow_step_index=selection.step_index + 1,
             enforce_transitions=False)
@@ -2451,7 +2469,10 @@ def _selection_fixer_sessions(
 def _workflow_fixer_profile(
         cfg: Config, task: Task, step: WorkflowPlanStep) -> _FixerProfile:
     model = step.model or task.model
-    effort = step.effort if step.effort is not None else task.effort
+    effort = (
+        step.effort
+        if step.model is not None and step.produces_verdict
+        else inherited_effort(step.model, step.effort, task.effort))
     return _FixerProfile(step.adapters, model, effort)
 
 
@@ -2533,7 +2554,8 @@ def _run_selection_target_reconciles(
                 print(f"Selection reconcile session: {adapter_name} | "
                       f"{fixer_step.model or owner.model}->"
                       f"{session.requested_model} | "
-                      f"{session.effort}->{session.requested_effort}")
+                      f"{effort_identity(session.effort)}->"
+                      f"{effort_identity(session.requested_effort)}")
                 result = _invoke_adapter(
                     cfg, adapter, adapter_name, prompt,
                     session.requested_model, session.requested_effort,
@@ -4127,7 +4149,8 @@ def _auto_fix_recovery_config_error(
               state.reviewer_effort)
     position = state.reviewer_step_index
     configured = [
-        (item.role, item.adapter, item.requested_model, item.requested_effort)
+        (item.role, item.adapter, item.requested_model,
+         effort_identity(item.requested_effort))
         for item in rounds]
     expected = (state.reviewer_role, *stored)
     if position >= len(configured) or configured[position] != expected:
@@ -4392,9 +4415,8 @@ def _run_auto_fix_review_once(
     review_index = min(round_index, len(rounds) - 1)
     review = rounds[review_index]
     assert review.adapter is not None
-    assert review.model is not None and review.effort is not None
+    assert review.model is not None
     assert review.requested_model is not None
-    assert review.requested_effort is not None
 
     done = [task for task in plan.tasks if task.status == "DONE"]
     if review_context == "completed_folder" and not done:
@@ -4499,7 +4521,7 @@ def _run_auto_fix_review_once(
                 reviewer_role=review.role,
                 reviewer_step_index=review_index,
                 reviewer_model=review.requested_model,
-                reviewer_effort=review.requested_effort)
+                reviewer_effort=effort_identity(review.requested_effort))
             state = _auto_fix_attach_repair_briefs(
                 cfg, plan, state,
                 blocker_evidence=_auto_fix_blocker_text(blockers),
@@ -4635,7 +4657,7 @@ def _run_auto_fix_review_once(
         reviewer_role=review.role,
         reviewer_step_index=round_index,
         reviewer_model=review.requested_model,
-        reviewer_effort=review.requested_effort,
+        reviewer_effort=effort_identity(review.requested_effort),
         review_context=review_context,
         failure_trigger=failure_trigger,
     )
@@ -4670,7 +4692,8 @@ def _run_auto_fix_review_once(
         session = review_sessions[review_rotation.name]
         print(f"Auto-fix review session: {session.agent} | "
               f"{review.model}->{session.requested_model} | "
-              f"{review.effort}->{session.requested_effort}")
+              f"{effort_identity(session.effort)}->"
+              f"{effort_identity(session.requested_effort)}")
         try:
             result = _invoke_adapter(
                 cfg, reviewer, session.agent, attempt_prompt,
@@ -4873,7 +4896,7 @@ def _run_auto_fix_review_once(
             freshness.update(
                 reviewer_adapter=session.agent,
                 reviewer_model=session.requested_model,
-                reviewer_effort=session.requested_effort or "")
+                reviewer_effort=effort_identity(session.requested_effort))
             next_workflow_step = (
                 initial_role_count
                 if initial_quality_review
@@ -5093,6 +5116,9 @@ def _fixer_rotation_and_sessions(
         worker_rotation: _AdapterRotation | None = None
         ) -> tuple[_AdapterRotation, dict[str, SessionIdentity], list[str]]:
     """Resolve and preflight every declared fallback for one fixer profile."""
+    if has_literal(profile.model, profile.effort) and len(profile.adapters) != 1:
+        return (_AdapterRotation((), ()), {},
+                ["a literal model or effort must resolve to exactly one adapter"])
     adapters: list[Adapter] = []
     names: list[str] = []
     sessions: dict[str, SessionIdentity] = {}
@@ -5104,7 +5130,7 @@ def _fixer_rotation_and_sessions(
                    else get_adapter(name, cfg))
         effort = cfg.adapter_settings(name).resolve_effort(
             profile.effort, profile.model)
-        if effort is None:
+        if effort is None and literal_value(profile.model) is None:
             errors.append(f"{name}: no concrete effort")
             continue
         session, candidate_errors = auto_fix_fixer_capability_errors(

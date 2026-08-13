@@ -72,9 +72,12 @@ effort = "heavy"
 
 `ability` is a nonempty ordered list. The role writes if any included ability
 writes, and produces a verdict if any included ability does so. `model` and
-`effort` are optional for ordinary task roles, which otherwise inherit the
-task's profile. Verdict roles in `workflow.plan` and `workflow.integration`
-must state both values so their accountability is reproducible.
+`effort` are optional. A workflow role entry may override either value; an
+ordinary task step otherwise inherits the task's profile. Verdict steps in
+`workflow.plan` and `workflow.integration` must effectively state a model
+through the role or workflow entry. Their effort may be omitted: a portable
+model uses that adapter's tier default, while a literal model uses the vendor
+default without an effort argument.
 
 ### Scheduler actions
 
@@ -281,12 +284,23 @@ existing credentials and does not manage secrets.
 Plans use portable `prime`, `core`, and `lite` model tiers. Effort is the
 separate `heavy`, `normal`, or `slight` choice. Resolution is explicit task or
 role effort, then the configured default for that model tier, then the built-in
-tier default. Every invocation receives a concrete translated effort.
+tier default. Every abstract-model invocation receives a concrete translated
+effort.
+
+Task, role, and workflow role-entry `model`/`effort` values may independently
+use an exact bracketed literal, such as `model = "[gpt-5.6-sol]"` or
+`effort = "[xhigh]"`. Assent removes the brackets, preserves case, and bypasses
+that value's adapter mapping. A workflow entry overrides its role's value.
+Any workflow step using a literal must resolve to exactly one adapter. A literal
+model with omitted effort sends no effort and uses the vendor default. An
+abstract effort beside a literal model uses the adapter's flat effort mapping,
+not a tier-specific mapping. Literal values do not modify `adapter.toml`.
 
 Every workflow role entry may select one adapter or an ordered fallback list:
 
 ```toml
 { role = "implementer", adapter = "codex" }
+{ role = "reviewer", adapter = "codex", model = "[gpt-5.6-sol]" }
 { role = "task_reviewer_fixer", adapter = ["claude", "codex"] }
 ```
 
@@ -316,10 +330,11 @@ asks about that file separately and defaults to preserving it. For a verifier,
 only content outside the marked project-test command block is framework; commands
 inside the block are project-owned and ignored by this comparison. Missing or
 invalid markers count as a framework difference. Replacement creates a
-byte-exact sibling backup first; replacing a project settings override removes
-it so the shared settings apply. Replacing a verifier without `--test CHOICE`
-opens the 0-9 test menu. Init validates the resulting effective settings before
-writing anything.
+byte-exact `FILE.bak` sibling first, replacing that one backup on a later
+update; existing numbered backups remain untouched. Replacing a project
+settings override removes it so the shared settings apply. Replacing a verifier
+without `--test CHOICE` opens the 0-9 test menu. Init validates the resulting
+effective settings before writing anything.
 
 Task files should use narrower focused commands. If configuration fails, the
 diagnostic names the invalid key and source file. Also confirm that Git is

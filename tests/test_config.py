@@ -275,6 +275,84 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.workflow_task[1].adapters, ("codex", "claude"))
         self.assertIsNone(cfg.workflow_task[2].adapters)
 
+    def test_literal_role_values_require_one_workflow_adapter(self):
+        role = (_WORKFLOW_ROLES
+                + '[roles.literal_fixer]\n'
+                  'ability = ["fix"]\n'
+                  'model = "[Exact-Model]"\n'
+                  'effort = "[XHigh]"\n'
+                  '[adapter]\nname = ["claude", "codex"]\n')
+        cfg = load_config(self.write(
+            role + '[workflow]\ntask = ['
+            '{ role = "literal_fixer", adapter = "codex" }]\n'), "plan01")
+        resolved = cfg.workflow_task[0].resolved_role
+        self.assertEqual(resolved.model, "[Exact-Model]")
+        self.assertEqual(resolved.effort, "[XHigh]")
+
+        with self.assertRaisesRegex(AssentError, "exactly one adapter"):
+            load_config(self.write(
+                role + '[workflow]\ntask = [{ role = "literal_fixer" }]\n'),
+                "plan01")
+
+    def test_workflow_entry_may_override_role_with_literal_values(self):
+        cfg = load_config(self.write(
+            _WORKFLOW_ROLES +
+            '[workflow]\n'
+            'task = [{ role = "fixer", adapter = "codex", '
+            'model = "[Exact-Model]", effort = "[XHigh]" }]\n'), "plan01")
+
+        resolved = cfg.workflow_task[0].resolved_role
+        self.assertEqual(resolved.model, "[Exact-Model]")
+        self.assertEqual(resolved.effort, "[XHigh]")
+
+        with self.assertRaisesRegex(AssentError, "exactly one adapter"):
+            load_config(self.write(
+                _WORKFLOW_ROLES +
+                '[adapter]\nname = ["claude", "codex"]\n'
+                '[workflow]\ntask = [{ role = "fixer", '
+                'model = "[Exact-Model]" }]\n'), "plan01")
+
+    def test_literal_verdict_role_may_omit_effort_for_vendor_default(self):
+        cfg = load_config(self.write(
+            '[abilities.review]\n'
+            'prompt = "Review."\nwrites = false\nproduces_verdict = true\n'
+            '[roles.literal_reviewer]\nability = ["review"]\n'
+            '[workflow]\nintegration = ['
+            '{ action = "full_verify" }, '
+            '{ role = "literal_reviewer", adapter = "codex", '
+            'model = "[Exact-Model]" }, '
+            '{ action = "full_verify" }]\n'), "plan01")
+
+        step = cfg.workflow_integration[1]
+        self.assertEqual(step.requested_model, "Exact-Model")
+        self.assertIsNone(step.effort)
+        self.assertIsNone(step.requested_effort)
+
+    def test_portable_verdict_role_may_use_adapter_default_effort(self):
+        cfg = load_config(self.write(
+            '[abilities.review]\n'
+            'prompt = "Review."\nwrites = false\nproduces_verdict = true\n'
+            '[roles.reviewer]\nability = ["review"]\nmodel = "core"\n'
+            '[adapter]\nname = "codex"\n'
+            '[workflow]\nplan = ['
+            '{ action = "focused_sweep" }, { role = "reviewer" }, '
+            '{ action = "focused_sweep" }]\n'), "plan01")
+
+        step = cfg.workflow_plan[1]
+        self.assertEqual(step.requested_model, "gpt-5.6-terra")
+        self.assertIsNone(step.effort)
+        self.assertEqual(step.requested_effort, "medium")
+
+    def test_verdict_role_still_requires_an_effective_model(self):
+        with self.assertRaisesRegex(AssentError, "must state model"):
+            load_config(self.write(
+                '[abilities.review]\n'
+                'prompt = "Review."\nwrites = false\nproduces_verdict = true\n'
+                '[roles.reviewer]\nability = ["review"]\n'
+                '[workflow]\nplan = ['
+                '{ action = "focused_sweep" }, { role = "reviewer" }, '
+                '{ action = "focused_sweep" }]\n'), "plan01")
+
     def test_plan_and_integration_roles_accept_ordered_adapter_lists(self):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
@@ -987,6 +1065,24 @@ class TestAdapterSettings(ConfigTestCase):
         with self.assertRaisesRegex(AssentError,
                                     r"\[adapter\.codex\.models\]"):
             codex.resolve_model("nonexistent")
+
+    def test_literal_model_and_effort_bypass_adapter_mappings_independently(self):
+        cfg = load_config(self.write(
+            '[adapter.codex.efforts]\nheavy = "flat-heavy"\n'
+            '[adapter.codex.efforts.prime]\nheavy = "tier-heavy"\n'),
+            "plan01")
+        codex = cfg.adapter_settings("codex")
+
+        self.assertEqual(codex.resolve_model("[Exact-Model]"), "Exact-Model")
+        self.assertIsNone(codex.resolve_effort(None, "[Exact-Model]"))
+        self.assertEqual(
+            codex.resolve_requested_effort("prime", "[XHigh]"), "XHigh")
+        self.assertEqual(
+            codex.resolve_requested_effort("[Exact-Model]", "heavy"),
+            "flat-heavy")
+        self.assertEqual(
+            codex.resolve_requested_effort("[Exact-Model]", "[XHigh]"),
+            "XHigh")
 
     def test_codex_builtin_extra_args_match_the_packaged_default(self):
         cfg = load_config(self.write(_MINIMAL), "plan01")

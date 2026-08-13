@@ -20,14 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from assent import AssentError
+from assent.modeling import parse_effort, parse_model
 from assent.verification_common import atomic_write_text
 
 _FORMAL_FILENAME_RE = re.compile(r"^t(\d{3})_(.+)\.e\.toml$")
 _RETIRED_FILENAME_RE = re.compile(r"^t\d{3}_.+\.toml$")
 _ID_RE = re.compile(r"^t\d{3}$")
 _STATUS_VALUES = {"TODO", "WIP", "DONE", "BLOCKED", "SKIP"}
-_MODEL_TIERS = {"prime", "core", "lite"}
-_EFFORT_LEVELS = {"heavy", "normal", "slight"}
 _KNOWN_KEYS = {"title", "deps", "model", "effort", "status", "scope", "verify",
                "goal", "behavior", "acceptance", "notes", "workflow"}
 # Journal identities a new write may claim.  Reading is deliberately unrestricted, so a
@@ -113,8 +112,8 @@ class Task:
     id: str                        # Filename prefix, e.g. "t001" (id exists only in the filename)
     title: str
     deps: list[str]
-    model: str                     # prime | core | lite
-    effort: str | None             # heavy | normal | slight; omitted means the engine applies its default
+    model: str                     # portable tier or [literal adapter model]
+    effort: str | None             # portable effort, [literal], or omitted default
     status: str                    # TODO | WIP | DONE | BLOCKED | SKIP
     scope: list[str]               # Allowed path prefixes; fail-closed, must not be empty
     verify: str                    # Acceptance command
@@ -444,18 +443,14 @@ def parse_task_file(path: Path) -> Task:
             f"Task file {path.name} has status = {status!r}, which is invalid"
             f" ({' / '.join(sorted(_STATUS_VALUES))})")
 
-    model = _require_str(data, path, "model").strip().lower()
-    if model not in _MODEL_TIERS:
-        raise AssentError(
-            f"Task file {path.name} has model = {model!r}, not a valid tier"
-            " (prime / core / lite; do not write a vendor model name, the mapping"
-            " lives in assent.toml)")
+    model = parse_model(
+        _require_str(data, path, "model"), f"Task file {path.name}",
+        lowercase_abstract=True)
 
-    effort_raw = _optional_str(data, path, "effort").strip().lower()
-    if effort_raw and effort_raw not in _EFFORT_LEVELS:
-        raise AssentError(
-            f"Task file {path.name} has effort = {effort_raw!r}, which is invalid"
-            " (heavy / normal / slight, or omit it to use the assent.toml default)")
+    effort_raw = _optional_str(data, path, "effort").strip()
+    if effort_raw:
+        effort_raw = parse_effort(
+            effort_raw, f"Task file {path.name}", lowercase_abstract=True)
 
     deps = _str_list(data, path, "deps")
     for dep in deps:

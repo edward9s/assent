@@ -153,8 +153,8 @@ class InvocationRequest:
     """
 
     task_id: str
-    model: str                     # abstract tier (prime / core / lite)
-    effort: str | None             # abstract effort (heavy / normal / slight), None = unset
+    model: str                     # selected portable tier or bracketed literal
+    effort: str | None             # selected portable/literal effort; None = vendor default
     requested_model: str           # the actual --model value
     requested_effort: str | None    # the actual effort value, None = no effort flag
 
@@ -165,7 +165,7 @@ class Adapter:                     # Base class for each vendor's adapter
     settings: "AdapterSettings | None" = None
 
     def resolve_model(self, model: str) -> str:
-        """Resolve the task's abstract tier into the ``--model`` value passed to the CLI."""
+        """Resolve a portable tier or literal into the CLI's ``--model`` value."""
         if self.settings is None:
             return model
         return self.settings.resolve_model(model)

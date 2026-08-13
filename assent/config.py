@@ -26,6 +26,8 @@ from pathlib import Path
 from assent import AssentError
 from assent.agents import Ability, ResolvedRole, Role, resolve_role
 from assent.lockfile import LOCK_NAME
+from assent.modeling import (EFFORT_LEVELS, MODEL_TIERS, has_literal,
+                             literal_value, parse_effort, parse_model)
 from assent.shared_paths import MANIFEST_LOCK_NAME, MANIFEST_NAME
 from assent.user_home import user_config_path
 
@@ -41,8 +43,6 @@ _TOP_LEVEL_KEYS = {
 BUILTIN_LAYER = "builtin"
 USER_LAYER = "user"
 PROJECT_LAYER = "project"
-_MODEL_TIERS = {"prime", "core", "lite"}
-_EFFORT_LEVELS = {"heavy", "normal", "slight"}
 _ADAPTER_NAMES = {"claude", "codex", "antigravity"}
 # Abstract effort names intentionally differ from vendor names.  A missing translation must
 # resolve through this settings-layer baseline rather than passing the abstract value through;
@@ -107,7 +107,7 @@ _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES = 120
 class AdapterSettings:
     """One vendor adapter's resolved settings: command, tier -> model map, and effort contract.
 
-    Both resolution orders are fixed and live here so no caller has to branch on an adapter
+    Portable resolution and literal bypass live here so no caller has to branch on an adapter
     name to resolve an invocation:
     - abstract effort selection: task annotation > this adapter's tier default;
     - vendor effort translation: tier-specific > flat > built-in baseline.
@@ -125,7 +125,10 @@ class AdapterSettings:
     tier_efforts: dict[str, dict[str, str]]
 
     def resolve_model(self, model: str) -> str:
-        """Resolve the abstract tier into the concrete ``--model`` argument for this adapter."""
+        """Resolve a portable tier or unwrap an exact literal model."""
+        literal = literal_value(model)
+        if literal is not None:
+            return literal
         alias = self.models.get(model)
         if alias is None:
             raise AssentError(
@@ -134,21 +137,28 @@ class AdapterSettings:
         return alias
 
     def resolve_effort(self, task_effort: str | None, model: str) -> str | None:
-        """Choose the abstract effort: the task annotation wins, else this tier's default.
+        """Choose the stated effort, tier default, or literal-model vendor default.
 
-        None is returned only for a tier this adapter states no default for, which a loaded
-        config never leaves open for prime/core/lite.
+        A literal model with no stated effort deliberately returns None so the
+        adapter omits its effort argument. Loaded portable tiers always have a default.
         """
         if task_effort:
             return task_effort
+        if literal_value(model) is not None:
+            return None
         return self.default_effort.get(model)
 
     def resolve_requested_effort(self, model: str,
                                  effort: str | None) -> str | None:
-        """Translate the abstract effort by tier-specific > flat > built-in baseline."""
+        """Unwrap a literal or translate portable effort by tier, flat, then baseline."""
         if effort is None:
             return None
-        return self.tier_efforts.get(model, {}).get(
+        literal = literal_value(effort)
+        if literal is not None:
+            return literal
+        tier_efforts = ({} if literal_value(model) is not None
+                        else self.tier_efforts.get(model, {}))
+        return tier_efforts.get(
             effort, self.efforts.get(effort, _EFFORT_BASELINE.get(effort, effort)))
 
 
@@ -498,14 +508,10 @@ def _parse_roles(section: dict, abilities: dict[str, Ability]) -> dict[str, Role
                     f" {ability_name!r}")
         model = _typed(value, f"[{owner}]", "model", str, None)
         effort = _typed(value, f"[{owner}]", "effort", str, None)
-        if model is not None and model not in _MODEL_TIERS:
-            raise AssentError(
-                f"Config [{owner}].model = {model!r} is not a valid model tier"
-                f" ({'/'.join(sorted(_MODEL_TIERS))})")
-        if effort is not None and effort not in _EFFORT_LEVELS:
-            raise AssentError(
-                f"Config [{owner}].effort = {effort!r} is not a valid effort"
-                f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
+        if model is not None:
+            model = parse_model(model, f"Config [{owner}]")
+        if effort is not None:
+            effort = parse_effort(effort, f"Config [{owner}]")
         roles[name] = Role(tuple(ability_names), model, effort)
     return roles
 
@@ -524,14 +530,14 @@ def _default_effort_map(section: dict, owner: str,
     if raw is None:
         return merged
     for model, eff in raw.items():
-        if model not in _MODEL_TIERS:
+        if model not in MODEL_TIERS:
             raise AssentError(
                 f"[{owner}.default_effort] key {model!r} is not a valid model tier"
-                f" ({'/'.join(sorted(_MODEL_TIERS))})")
-        if eff not in _EFFORT_LEVELS:
+                f" ({'/'.join(sorted(MODEL_TIERS))})")
+        if eff not in EFFORT_LEVELS:
             raise AssentError(
                 f"[{owner}.default_effort] {model} = {eff!r} is not a valid effort"
-                f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
+                f" ({'/'.join(sorted(EFFORT_LEVELS))})")
         merged[model] = eff
     return merged
 
@@ -600,6 +606,16 @@ def _workflow_adapter_candidates(value: dict, owner: str, guard: "_BlankGuard"
     return adapters
 
 
+def _require_single_literal_adapter(model: str | None, effort: str | None,
+                                    adapters: tuple[str, ...], owner: str) -> None:
+    """A vendor literal is meaningful only for one exact adapter."""
+    if has_literal(model, effort) and len(adapters) != 1:
+        raise AssentError(
+            f"Config {owner} uses a literal model or effort and must resolve "
+            "to exactly one adapter"
+        )
+
+
 def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
                             roles: dict[str, Role], abilities: dict[str, Ability]):
     """Parse one workflow array without inventing defaults for an omitted key."""
@@ -633,19 +649,30 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
                     f" [workflow].{key} (valid action: {valid})")
             entries.append(WorkflowActionStep(action))
             continue
-        allowed = {"role", "adapter"}
+        allowed = {"role", "adapter", "model", "effort"}
         _known_keys(value, owner, allowed)
         role = guard.text(_typed(value, f"[{owner}]", "role", str, None),
                           f"workflow.{key}.{index}.role")
         resolved = resolve_role(role, roles, abilities)
+        model = _typed(value, f"[{owner}]", "model", str, None)
+        effort = _typed(value, f"[{owner}]", "effort", str, None)
+        if model is not None:
+            model = parse_model(model, f"Config [{owner}]")
+        if effort is not None:
+            effort = parse_effort(effort, f"Config [{owner}]")
+        if model is not None or effort is not None:
+            resolved = replace(
+                resolved,
+                model=resolved.model if model is None else model,
+                effort=resolved.effort if effort is None else effort)
         adapters = _workflow_adapter_candidates(value, owner, guard)
         if key == "task":
             entries.append(WorkflowTaskStep(role, resolved, adapters))
             continue
-        if resolved.produces_verdict:
-            if resolved.model is None or resolved.effort is None:
-                raise AssentError(
-                    f"Config {owner} verdict-producing role {role!r} must state model and effort")
+        if resolved.produces_verdict and resolved.model is None:
+            raise AssentError(
+                f"Config {owner} verdict-producing role {role!r} must "
+                "state model; effort may use the adapter default")
         entries.append((role, adapters, resolved))
     if key == "task" and entries and not any(
             isinstance(entry, WorkflowTaskStep) for entry in entries):
@@ -665,16 +692,25 @@ def _resolve_accountability_steps(
             continue
         role, configured_names, resolved = raw
         names = configured_names or cfg.adapter_names
+        _require_single_literal_adapter(
+            resolved.model, resolved.effort, names,
+            f"[workflow].{owner} role {role!r}")
         name = names[0]
         adapter_settings = cfg.adapter_settings(name)
-        if resolved.model is None or resolved.effort is None:
+        if (resolved.model is None
+                or (resolved.effort is None
+                    and not resolved.produces_verdict
+                    and literal_value(resolved.model) is None)):
             steps.append(WorkflowPlanStep(
                 role, names, resolved, adapter_settings.command,
                 adapter_settings.extra_args))
             continue
+        effort = adapter_settings.resolve_effort(
+            resolved.effort, resolved.model)
         requested_effort = adapter_settings.resolve_requested_effort(
-            resolved.model, resolved.effort)
-        if requested_effort is None:
+            resolved.model, effort)
+        if (requested_effort is None
+                and literal_value(resolved.model) is None):
             raise AssentError(
                 f"[workflow].{owner} role {role!r} effort did not resolve"
                 " to a requested value")
@@ -818,6 +854,19 @@ def validate_task_workflow_steps(
             "first failure handler between focused_test actions")
 
 
+def _validate_task_literal_adapters(
+        cfg: Config,
+        steps: list[WorkflowTaskStep | WorkflowActionStep] | None) -> None:
+    """Validate adapter binding for literal values stated by task roles."""
+    for index, step in enumerate(steps or ()):
+        if isinstance(step, WorkflowActionStep):
+            continue
+        _require_single_literal_adapter(
+            step.resolved_role.model, step.resolved_role.effort,
+            step.adapters or cfg.adapter_names,
+            f"[workflow].task[{index}] role {step.role!r}")
+
+
 def _parse_adapter_names(section: dict, guard: "_BlankGuard") -> tuple[str, ...]:
     """Parse the configured adapter name or ordered rotation list."""
     if "name" not in section:
@@ -885,17 +934,17 @@ def _effort_maps(section: dict, owner: str, guard: "_BlankGuard",
     by_tier: dict[str, dict[str, str]] = {}
     for key, value in raw.items():
         if isinstance(value, dict):
-            if key not in _MODEL_TIERS:
+            if key not in MODEL_TIERS:
                 raise AssentError(
                     f"Config [{owner}.efforts] section {key!r} is invalid"
-                    f" ({'/'.join(sorted(_MODEL_TIERS))})")
+                    f" ({'/'.join(sorted(MODEL_TIERS))})")
             tier_values: dict[str, str] = {}
             block = f"[{owner}.efforts.{key}]"
             for effort, requested in value.items():
-                if effort not in _EFFORT_LEVELS:
+                if effort not in EFFORT_LEVELS:
                     raise AssentError(
                         f"Config {block} key {effort!r} is not a valid effort"
-                        f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
+                        f" ({'/'.join(sorted(EFFORT_LEVELS))})")
                 if not isinstance(requested, str):
                     raise AssentError(
                         f"Config {block} {effort} must be a non-empty string")
@@ -905,10 +954,10 @@ def _effort_maps(section: dict, owner: str, guard: "_BlankGuard",
             continue
 
         block = f"[{owner}.efforts]"
-        if key not in _EFFORT_LEVELS:
+        if key not in EFFORT_LEVELS:
             raise AssentError(
                 f"Config {block} key {key!r} is not a valid effort"
-                f" ({'/'.join(sorted(_EFFORT_LEVELS))})")
+                f" ({'/'.join(sorted(EFFORT_LEVELS))})")
         if not isinstance(value, str):
             raise AssentError(f"Config {block} {key} must be a non-empty string")
         guard.text(value, f"{owner}.efforts.{key}")
@@ -1218,6 +1267,7 @@ def load_config(path: str | Path, folder: str) -> Config:
         raise AssentError(
             "Config [workflow].plan cannot open any session: no step's role produces a verdict")
     cfg.workflow_plan = plan_steps
+    _validate_task_literal_adapters(cfg, raw_workflow_task)
     validate_task_workflow_steps(raw_workflow_task)
     cfg.workflow_task = (None if raw_workflow_task is None
                           else tuple(raw_workflow_task))

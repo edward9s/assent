@@ -70,8 +70,10 @@ effort = "heavy"
 
 `ability` 是不可為空的有序清單。只要其中一個 ability 可以寫入，role 就可以寫入；
 只要其中一個會產生 verdict，role 就必須產生 verdict。一般 task role 的 `model`
-與 `effort` 可以省略，屆時沿用 task 的設定。`workflow.plan` 與
-`workflow.integration` 的 verdict role 必須明示兩者，讓審查責任可以重現。
+與 `effort` 可以省略；workflow role entry 可以覆寫任一值，一般 task step
+再沿用 task 的設定。`workflow.plan` 與 `workflow.integration` 的 verdict step
+必須由 role 或 workflow entry 形成明確的有效 model。Effort 可以省略：抽象 model
+使用該 adapter 的 tier 預設，literal model 則不傳 effort，使用 vendor 預設值。
 
 ### Scheduler action
 
@@ -268,12 +270,22 @@ vendor effort 轉換都放在 `adapter.toml`。無人值守執行前要先登入
 
 Plan 使用可攜的 `prime`、`core`、`lite` model tier；effort 是另一個獨立選擇：
 `heavy`、`normal`、`slight`。解析順序為 task 或 role 明示值、該 model tier 的
-設定預設值、內建 tier 預設值。每次 invocation 都會取得轉換後的具體 effort。
+設定預設值、內建 tier 預設值。每次使用抽象 model 的 invocation 都會取得轉換後的
+具體 effort。
+
+Task、role 與 workflow role entry 的 `model`／`effort` 可以各自使用明確的
+中括號 literal，例如 `model = "[gpt-5.6-sol]"` 或 `effort = "[xhigh]"`。
+Assent 會移除外層括號、保留大小寫，並略過該值的 adapter mapping；workflow
+entry 會覆寫 role 的值。使用任何 literal 的 workflow step
+必須只解析到一個 adapter。Literal model 省略 effort 時不傳 effort，改用 vendor
+預設值；literal model 搭配抽象 effort 時只使用 adapter 的 flat effort mapping，
+不使用 tier-specific mapping。Literal 不會修改 `adapter.toml`。
 
 每一層 workflow 的 role entry 都可以指定一個 adapter，或依序 fallback 的清單：
 
 ```toml
 { role = "implementer", adapter = "codex" }
+{ role = "reviewer", adapter = "codex", model = "[gpt-5.6-sol]" }
 { role = "task_reviewer_fixer", adapter = ["claude", "codex"] }
 ```
 
