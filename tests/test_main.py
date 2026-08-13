@@ -1679,13 +1679,20 @@ class TestInit(MainTestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(run_init(self.root, test="pytest"), 0)
-        backup = verifier.with_name("verify.py.before-assent-replace")
+        backup = verifier.with_name("verify.py.bak")
         self.assertEqual(backup.read_bytes(), before[verifier])
         self.assertIn('\nrun("pytest")\n', verifier.read_text(encoding="utf-8"))
         self.assertIn("Backed up:", output.getvalue())
         for path, content in before.items():
             if path != verifier:
                 self.assertEqual(path.read_bytes(), content)
+
+        pytest_verifier = verifier.read_bytes()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root, test="npm"), 0)
+        self.assertEqual(
+            verifier.with_name("verify.py.bak.02").read_bytes(),
+            pytest_verifier)
 
     def test_differing_verifier_can_be_backed_up_and_replaced_from_menu(self):
         run_init(self.root, test="unittest")
@@ -1698,7 +1705,7 @@ class TestInit(MainTestCase):
                 contextlib.redirect_stdout(output):
             self.assertEqual(run_init(self.root), 0)
 
-        backup = verifier.with_name("verify.py.before-assent-replace")
+        backup = verifier.with_name("verify.py.bak")
         self.assertEqual(backup.read_bytes(), custom)
         self.assertIn('\nrun("pytest")\n', verifier.read_text(encoding="utf-8"))
         self.assertIn("Choose the project's test command", output.getvalue())
@@ -1746,13 +1753,13 @@ class TestInit(MainTestCase):
 
         self.assertEqual(questions.call_count, 2)
         config_backup = user_config.with_name(
-            "assent.toml.before-assent-replace")
+            "assent.toml.bak")
         self.assertEqual(config_backup.read_bytes(), config_before)
         self.assertIn(
             "retry_per_task = 1", user_config.read_text(encoding="utf-8"))
         self.assertEqual(user_adapter.read_bytes(), adapter_before)
         self.assertFalse(user_adapter.with_name(
-            "adapter.toml.before-assent-replace").exists())
+            "adapter.toml.bak").exists())
         self.assertIn("Backed up:", output.getvalue())
 
         with patch("builtins.input", return_value="y") as questions, \
@@ -1760,7 +1767,7 @@ class TestInit(MainTestCase):
             self.assertEqual(run_init(self.root), 0)
         self.assertEqual(questions.call_count, 1)
         adapter_backup = user_adapter.with_name(
-            "adapter.toml.before-assent-replace")
+            "adapter.toml.bak")
         self.assertEqual(adapter_backup.read_bytes(), adapter_before)
         self.assertIn(
             'command = "codex"', user_adapter.read_text(encoding="utf-8"))
@@ -1839,7 +1846,7 @@ class TestInit(MainTestCase):
         self.assertFalse(project_config.exists())
         self.assertEqual(
             project_config.with_name(
-                "assent.toml.before-assent-replace").read_bytes(),
+                "assent.toml.bak").read_bytes(),
             content)
 
     def test_matching_local_contract_is_removed_and_a_differing_one_is_kept(self):

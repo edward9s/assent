@@ -303,12 +303,12 @@ def _confirm(prompt: str, *, default: bool) -> bool:
 
 def _backup_target(path: Path) -> Path:
     """Choose a new sibling backup name without overwriting an earlier backup."""
-    base = path.with_name(f"{path.name}.before-assent-replace")
+    base = path.with_name(f"{path.name}.bak")
     if not base.exists():
         return base
     suffix = 2
     while True:
-        target = path.with_name(f"{base.name}-{suffix}")
+        target = path.with_name(f"{base.name}.{suffix:02d}")
         if not target.exists():
             return target
         suffix += 1
