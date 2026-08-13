@@ -32,13 +32,9 @@ Tables merge by key; scalars and arrays replace whole values. Omission inherits.
 An empty table adds no override; an accepted empty array is an explicit value;
 empty required strings and invalid TOML are refused with their source path.
 
-`assent init` refreshes `instructions.md`, `format.md`, and `workflow.md` in the
-user home; adds only missing shared settings keys; creates the project verifier
-once; and maintains the `AGENTS.md` bridge and `.gitignore` entry. It preserves
-an existing project override and verifier. Every read and validation completes
-before the first write. Before any AI session, all three user-home contracts
-must be readable and match the installed version; otherwise run `assent init`.
-CRLF and LF compare as equivalent text.
+Before any AI session, `instructions.md`, `format.md`, and `workflow.md` in the
+user home must be readable and match the installed version; otherwise run
+`assent init`. CRLF and LF compare as equivalent contract text.
 
 ## AI session inputs and boundaries
 
@@ -114,12 +110,20 @@ Omission and empty arrays mean:
 - nonempty `integration`: starts and ends with `full_verify`; one action alone
   is valid.
 
+The plan array may begin with one verdict role and an optional separate fixer
+before its first `focused_sweep`. This initial segment runs once after every task
+is complete, so it can review cumulative plan quality even when all focused
+checks would pass. Its position and abilities define that responsibility; its
+names have no engine meaning. PASS proceeds to the first sweep, while a repair is
+mechanically checked before the layer can complete.
+
 A passing action completes its layer and skips every later role. A failing
 non-final action advances to a verdict role. A writable verdict role reviews and
-repairs either failure in one session, returning `FIXED`; a read-only verdict
-role may be followed by one writable non-verdict fixer. The next action rechecks.
-Neither form repeats a successful complete verification. Configuration validates
-this structure before any session or verifier begins.
+repairs either an initial quality finding or an action failure in one session,
+returning `FIXED`; a read-only verdict role may be followed by one writable
+non-verdict fixer. The next action rechecks. Neither form repeats a successful
+complete verification. Configuration validates this structure before any session
+or verifier begins.
 
 ### Task layer
 
@@ -141,12 +145,19 @@ task scope. No AI edits the `.e.toml` task file.
 
 ### Plan layer
 
-The plan workflow is considered only after every task is `DONE` or `SKIP`.
-`focused_sweep` runs each distinct `DONE`-task command against the cumulative
-worktree without a receipt. PASS completes the layer without opening a reviewer.
-Failure opens the next configured plan reviewer/fixer, whose responsibility is
-to decide whether the cumulative implementation conforms to the plan, including
-cross-task interactions.
+The plan workflow is considered only after every task is `DONE` or `SKIP`. An
+optional initial verdict role reviews the cumulative diff, task requirements,
+cross-task interactions, and whether changed tests prove their cited semantics;
+it is a bounded plan-conformance review, not a repository-wide improvement
+search. It decides whether the cumulative implementation conforms to the plan.
+The default role is writable and must repair every finding it authorizes in the
+same session.
+
+After that initial review passes or repairs its findings, `focused_sweep` runs
+each distinct `DONE`-task command against the cumulative worktree without a
+receipt. PASS completes the layer. Failure opens the next configured plan
+reviewer/fixer, whose responsibility is to resolve that failure against the
+existing plan.
 
 Findings must name one existing task and cite an existing requirement or a
 concrete repair regression. They may not invent acceptance criteria, create

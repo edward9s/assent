@@ -12,31 +12,35 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 # Abilities define session responsibility and authority. Names have no engine
 # meaning; writes and produces_verdict do.
 [abilities.write_tests]
-prompt = "Write or update tests that prove the supplied requirements."
+prompt = "Write or update tests that prove the supplied behavioral requirements. Prefer observable semantics and invariants over the current representation: do not treat template example names, default values, serialization, ordering, or internal helpers as contracts unless a requirement explicitly makes them public. For configurable behavior, when applicable use the smallest decisive evidence: an alternate valid combination, a semantics-preserving input transformation, or rejection of an invalid combination. Prove that behavior follows the declared semantics rather than a packaged example. Do not weaken existing tests or mock away the behavior being proved."
 writes = true
 [abilities.implement_source]
-prompt = "Implement the supplied requirements and satisfy the supplied focused checks."
+prompt = "Implement the supplied requirements and satisfy the supplied focused checks. Fix production behavior; do not weaken, narrow, delete, or rewrite tests merely to make a check pass."
 writes = true
 [abilities.task_review]
-prompt = "Resolve only the current task's BLOCKED or focused_test evidence. Diagnose a task-local planning omission; when one exact scope path was omitted, identify it without inventing requirements."
+prompt = "Resolve only the current task's BLOCKED or focused_test evidence. Diagnose a task-local planning omission; when one exact scope path was omitted, identify it without inventing requirements. When relevant test changes are part of the supplied failure evidence, do not accept tests that merely mirror implementation constants, template examples, or incidental representation instead of proving the cited requirement."
 writes = false
 produces_verdict = true
 [abilities.task_fix]
-prompt = "In the same session, repair every authorized task-local finding, including an exact omitted scope path. Do not create tasks or requirements."
+prompt = "In the same session, repair every authorized task-local finding, including an exact omitted scope path. Fix production behavior; do not weaken, narrow, delete, or rewrite tests merely to make a check pass. Do not create tasks or requirements."
 writes = true
+[abilities.plan_quality_review]
+prompt = "Review the completed cumulative worktree once for conformance to the existing plan before focused_sweep. Inspect cross-task interactions and whether changed tests prove cited requirements through observable semantics. Do not accept tests that merely mirror implementation constants, template examples, or incidental representation instead of proving the cited requirement. Report only blocking correctness, safety, unmet-requirement, or focused-test-gap findings tied to an existing task. Do not invent requirements or conduct a repository-wide debt search."
+writes = false
+produces_verdict = true
 [abilities.plan_review]
-prompt = "Review only focused_sweep failure evidence to decide whether the cumulative worktree conforms to the existing plan, including cross-task interactions and concrete regressions."
+prompt = "Review only focused_sweep failure evidence to decide whether the cumulative worktree conforms to the existing plan, including cross-task interactions and concrete regressions. When relevant test changes are part of the supplied failure evidence, do not accept tests that merely mirror implementation constants, template examples, or incidental representation instead of proving the cited requirement."
 writes = false
 produces_verdict = true
 [abilities.plan_fix]
-prompt = "Repair every authorized plan-level finding through its implicated existing tasks. Do not create tasks or requirements."
+prompt = "Repair every authorized plan-level finding through its implicated existing tasks. Fix production behavior; do not weaken, narrow, delete, or rewrite tests merely to make a check pass. Do not create tasks or requirements."
 writes = true
 [abilities.integration_review]
-prompt = "Review only the exact selection's candidate-conflict or full_verify failure evidence. Identify every integration blocker without shrinking the selection, accepting a prefix, or inventing requirements."
+prompt = "Review only the exact selection's candidate-conflict or full_verify failure evidence. Identify every integration blocker without shrinking the selection, accepting a prefix, or inventing requirements. When relevant test changes are part of the supplied failure evidence, do not accept tests that merely mirror implementation constants, template examples, or incidental representation instead of proving the cited requirement."
 writes = false
 produces_verdict = true
 [abilities.integration_fix]
-prompt = "Repair every authorized integration finding in the scheduler-provided workspaces while preserving the exact selection. Do not run Git, Assent, focused tests, full verification, or accept."
+prompt = "Repair every authorized integration finding in the scheduler-provided workspaces while preserving the exact selection. Fix production behavior; do not weaken, narrow, delete, or rewrite tests merely to make a check pass. Do not run Git, Assent, focused tests, full verification, or accept."
 writes = true
 
 # Roles compose abilities and may select abstract model/effort tiers.
@@ -44,6 +48,10 @@ writes = true
 ability = ["write_tests", "implement_source"]
 [roles.task_reviewer_fixer]
 ability = ["task_review", "task_fix"]
+model = "prime"
+effort = "heavy"
+[roles.plan_quality_reviewer_fixer]
+ability = ["plan_quality_review", "plan_fix"]
 model = "prime"
 effort = "heavy"
 [roles.plan_reviewer_fixer]
@@ -67,6 +75,7 @@ task = [
   { action = "focused_test" },
 ]
 plan = [
+  { role = "plan_quality_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
   { role = "plan_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },

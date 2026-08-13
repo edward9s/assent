@@ -26,9 +26,6 @@ workflow.md       scheduler 與驗收契約
 override。Table 依 key 合併；scalar 與 array 整個取代較低層的值。省略才會繼承，
 空 array 則是明確的空值。
 
-`assent init` 會補入新版新增的設定，但保留現有值與註解。它不會擅自用新版預設
-取代既有 workflow；請讀完本指南後自行決定是否採用。
-
 ## 從 workflow 理解設定
 
 設定的核心關係是：
@@ -122,7 +119,7 @@ Action 一旦通過，該層立刻完成，後面的項目全部略過。Action 
 | 階段 | 修復範圍 |
 | --- | --- |
 | `workflow.task` | 處理目前 task 的 `BLOCKED` 或 `focused_test` 證據。它可以補救規劃時的小疏漏，例如漏列一條精確 scope path，並在同一個可寫入 verdict session 內完成修復；不會消耗 plan 的修復次數。 |
-| `workflow.plan` | 檢查所有已完成 task 累積出的 worktree 是否符合既有 plan。它處理 `focused_sweep` 失敗與跨 task regression，並透過受影響的既有 task 修復。 |
+| `workflow.plan` | 檢查所有已完成 task 累積出的 worktree 是否符合既有 plan。它會在第一次 `focused_sweep` 前執行一次常態品質審查，再處理 sweep 失敗與跨 task regression，並透過受影響的既有 task 修復。 |
 | `workflow.integration` | 檢查同一份精確 plan 選集能否重建並通過 `full_verify`。它處理候選版本衝突與完整驗證失敗，不可刪掉某個 folder，也不可只接受能成功的前綴。 |
 
 Integration workflow 只負責驗證與修復，不負責人類驗收。發布仍須稍後明確執行
@@ -151,6 +148,11 @@ produces_verdict = true
 prompt = "In the same session, repair every authorized task-local finding, including an exact omitted scope path. Do not create tasks or requirements."
 writes = true
 
+[abilities.plan_quality_review]
+prompt = "Review the completed cumulative worktree once for conformance to the existing plan before focused_sweep. Inspect cross-task interactions and whether changed tests prove cited requirements through observable semantics. Do not accept tests that merely mirror implementation constants, template examples, or incidental representation instead of proving the cited requirement. Report only blocking correctness, safety, unmet-requirement, or focused-test-gap findings tied to an existing task. Do not invent requirements or conduct a repository-wide debt search."
+writes = false
+produces_verdict = true
+
 [abilities.plan_review]
 prompt = "Review only focused_sweep failure evidence to decide whether the cumulative worktree conforms to the existing plan, including cross-task interactions and concrete regressions."
 writes = false
@@ -177,6 +179,11 @@ ability = ["task_review", "task_fix"]
 model = "prime"
 effort = "heavy"
 
+[roles.plan_quality_reviewer_fixer]
+ability = ["plan_quality_review", "plan_fix"]
+model = "prime"
+effort = "heavy"
+
 [roles.plan_reviewer_fixer]
 ability = ["plan_review", "plan_fix"]
 model = "prime"
@@ -195,6 +202,7 @@ task = [
   { action = "focused_test" },
 ]
 plan = [
+  { role = "plan_quality_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
   { role = "plan_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
@@ -208,8 +216,9 @@ integration = [
 ]
 ```
 
-第一個通過的 `focused_test`、`focused_sweep` 或 `full_verify` 會略過自己 array
-中的後續項目。重複列出的 plan review 是不同修復回合，不代表每次都必須執行。
+第一次 action 前的 plan role 是唯一無條件執行的累積品質審查。它通過或完成修復後，
+第一個通過的 `focused_test`、`focused_sweep` 或 `full_verify` 會略過自己 array 中剩餘的
+失敗處理者。後續重複列出的 plan review 是不同修復回合，不是額外的常態審查。
 
 ## 省略設定與 task override
 
@@ -285,6 +294,11 @@ Authentication failure 會保留進度並略過該候選。若所有候選都需
 assent init --test unittest
 assent doctor
 ```
+
+既有 `assent.toml`、`adapter.toml` 或 verifier 與模板不同時，init 會逐檔詢問，
+預設保留原檔。選擇取代會先建立 byte-exact 同層備份；若是專案設定 override，
+取代代表移除 override，改用共享設定。未指定 `--test CHOICE` 而選擇取代 verifier
+時，接著會顯示 0–9 測試選單。所有結果設定都會在實際寫入前完成驗證。
 
 Task 檔應使用範圍較小的 focused command。設定有誤時，diagnostic 會指出錯誤的
 key 與來源檔。也請確認 Git 可用、選定的 AI CLI 已登入，而且 model mapping

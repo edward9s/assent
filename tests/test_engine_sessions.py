@@ -172,6 +172,50 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 self.root / ".assent", ["plan01"]), 0)
         self.assertEqual(verify_calls, 1)
 
+    def test_initial_writable_plan_quality_review_repairs_before_sweep(self):
+        task_path = self.write_task(
+            1, status="DONE", scope=("src/value.txt",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "value.txt").write_text("old\n", encoding="utf-8")
+        cfg = self.build(extra_config=(
+            '\n[abilities.quality]\n'
+            'prompt = "Review cumulative quality before focused_sweep."\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.any_name]\nability = ["quality"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nplan = [{ role = "any_name" }, '
+            '{ action = "focused_sweep" }]\n'))
+        self.commit_all()
+
+        def repair(prompt):
+            self.assertIn(
+                "Review cumulative quality before focused_sweep.", prompt)
+            self.assertIn(
+                "focused_sweep follows the initial plan quality review", prompt)
+            (self.execution_root() / "src" / "value.txt").write_text(
+                "repaired\n", encoding="utf-8")
+            finding = auto_fix.ReviewFinding(
+                "t001", "src/value.txt", "Cumulative behavior was incorrect",
+                "The existing task requirement is violated by the old value.")
+            return TaskResult(
+                0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("FIXED", (finding,))), False, None)
+
+        passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
+        reviewer = ScriptedAdapter([repair])
+        with mock.patch.object(
+                engine, "_verify_subprocess", return_value=passed) as sweep:
+            self.assertEqual(self.run_quiet(
+                cfg, auto_fix_adapter=reviewer), 0)
+
+        self.assertEqual(len(reviewer.calls), 1)
+        sweep.assert_called_once()
+        self.assertEqual(
+            (self.execution_root() / "src" / "value.txt").read_text(
+                encoding="utf-8"),
+            "repaired\n")
+
     def test_selection_verifier_failure_repairs_and_rechecks_in_one_call(self):
         task_path = self.write_task(
             1, status="TODO", scope=("src/base.txt", "src/value.txt"))

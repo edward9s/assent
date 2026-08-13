@@ -1,15 +1,12 @@
 """Generate and safely upgrade the user home and a project's ``.assent``.
 
-The two contracts and the shared settings belong to the machine's ``~/.assent``:
-initialization refreshes the contracts to this installation's packaged text and
-adds only missing active settings to the operator's configuration, never
-replacing a stated value.  Adapter settings are generated in the sibling
-``adapter.toml`` while an existing inline ``assent.toml`` remains supported.  A
-project keeps only what is genuinely its own -- the verifier, whose test is
-chosen once before a fresh skeleton is written, plus the AGENTS bridge and the
-ignore entry.  An older project copy of a contract is removed only when it
-matches the packaged text exactly, and an existing project ``assent.toml`` is
-preserved untouched as a higher-priority override.
+The three contracts and shared settings belong to the machine's ``~/.assent``.
+Initialization refreshes the contracts and offers to replace differing shared
+settings only after explicit confirmation and a byte-exact backup. The generated
+verifier separates its
+managed runner from the project-owned test region; an explicit repeated
+``--test`` likewise backs up and replaces it.  Project overrides, the AGENTS
+bridge, and unrelated ignore entries remain project-owned.
 """
 from __future__ import annotations
 
@@ -17,10 +14,9 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import re
 import shlex
+import tempfile
 import tomllib
-from collections import defaultdict
 from collections.abc import Sequence
 
 from assent import AssentError, contracts
@@ -285,218 +281,75 @@ def _plan_file(path: Path, content: str, description: str
     return "created", str(path)
 
 
-def _split_toml_path(raw: str) -> tuple[str, ...]:
-    """Split a simple TOML dotted key/header path without a third party parser."""
-    parts: list[str] = []
-    current: list[str] = []
-    quote: str | None = None
-    escaped = False
-    for char in raw.strip():
-        if quote == '"':
-            current.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                quote = None
-            continue
-        if quote == "'":
-            current.append(char)
-            if char == "'":
-                quote = None
-            continue
-        if char in ('"', "'"):
-            quote = char
-            current.append(char)
-        elif char == ".":
-            parts.append("".join(current).strip())
-            current = []
-        else:
-            current.append(char)
-    if quote is not None:
-        raise AssentError(f"invalid TOML key path: {raw!r}")
-    parts.append("".join(current).strip())
-
-    result: list[str] = []
-    for part in parts:
-        if not part:
-            raise AssentError(f"invalid TOML key path: {raw!r}")
-        if part[0] == part[-1] == '"':
-            try:
-                value = json.loads(part)
-            except json.JSONDecodeError as e:
-                raise AssentError(f"invalid TOML key path: {raw!r}") from e
-        elif part[0] == part[-1] == "'":
-            value = part[1:-1].replace("''", "'")
-        else:
-            value = part
-        result.append(value)
-    return tuple(result)
-
-
-def _assignment_key(line: str) -> str | None:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#") or stripped.startswith("["):
-        return None
-    quote: str | None = None
-    escaped = False
-    for index, char in enumerate(stripped):
-        if quote == '"':
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                quote = None
-        elif quote == "'":
-            if char == "'":
-                quote = None
-        elif char in ('"', "'"):
-            quote = char
-        elif char == "=":
-            lhs = stripped[:index].strip()
-            return lhs or None
-    return None
-
-
-def _template_config_entries(text: str) -> list[tuple[tuple[str, ...], str]]:
-    """List active template assignments as (table path, source block)."""
-    current: tuple[str, ...] = ()
-    entries: list[tuple[tuple[str, ...], str]] = []
-    lines = text.splitlines()
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            index += 1
-            continue
-        if stripped.startswith("["):
-            match = re.match(r"^\[([^\[].*?)\]\s*(?:#.*)?$", stripped)
-            if not match:
-                raise AssentError(
-                    f"built-in config template has an invalid table: {line}")
-            current = _split_toml_path(match.group(1))
-            index += 1
-            continue
-        key = _assignment_key(line)
-        if key is not None:
-            block = [line.rstrip()]
-            while True:
-                try:
-                    tomllib.loads("\n".join(block))
-                    break
-                except tomllib.TOMLDecodeError:
-                    index += 1
-                    if index >= len(lines):
-                        raise AssentError(
-                            f"built-in config template has an incomplete value: {line}")
-                    block.append(lines[index].rstrip())
-            entries.append((
-                current + _split_toml_path(key), "\n".join(block)))
-        index += 1
-    return entries
-
-
-def _header_path(line: str) -> tuple[str, ...] | None:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#") or stripped.startswith("[["):
-        return None
-    match = re.match(r"^\[([^\[].*?)\]\s*(?:#.*)?$", stripped)
-    if not match:
-        return None
-    return _split_toml_path(match.group(1))
-
-
-def _lookup(data: object, path: tuple[str, ...]) -> bool:
-    current = data
-    for key in path:
-        if not isinstance(current, dict) or key not in current:
-            return False
-        current = current[key]
-    return True
-
-
-def _format_toml_key(key: str) -> str:
-    if re.match(r"^[A-Za-z0-9_-]+$", key):
-        return key
-    return json.dumps(key, ensure_ascii=False)
-
-
-def _merge_config(existing: str, template: str, description: str
-                  ) -> tuple[str, int]:
-    """Add missing active template settings while retaining existing TOML text."""
+def _confirm(prompt: str, *, default: bool) -> bool:
+    suffix = "[Y/n]" if default else "[y/N]"
     try:
-        existing_data = tomllib.loads(existing)
-    except tomllib.TOMLDecodeError as e:
-        raise AssentError(f"{description} is not valid TOML: {e}") from e
-    try:
-        tomllib.loads(template)
-    except tomllib.TOMLDecodeError as e:
-        raise AssentError(f"built-in assent.toml is not valid TOML: {e}") from e
+        answer = input(f"{prompt} {suffix} ").strip().casefold()
+    except (EOFError, KeyboardInterrupt) as e:
+        raise AssentError("initialization choice cancelled or reached EOF") from e
+    if not answer:
+        return default
+    if answer in {"y", "yes"}:
+        return True
+    if answer in {"n", "no"}:
+        return False
+    raise AssentError(f"expected y or n, got {answer!r}")
 
-    template_entries = _template_config_entries(template)
-    missing: dict[tuple[str, ...], list[str]] = defaultdict(list)
-    for full_path, source_line in template_entries:
-        if not _lookup(existing_data, full_path):
-            missing[full_path[:-1]].append(source_line)
-    if not missing:
-        return existing, 0
 
-    lines = existing.splitlines()
-    headers: list[tuple[int, tuple[str, ...]]] = []
-    for index, line in enumerate(lines):
-        path = _header_path(line)
-        if path is not None:
-            headers.append((index, path))
-    header_positions = {path: index for index, path in headers}
+def _backup_target(path: Path) -> Path:
+    """Choose a new sibling backup name without overwriting an earlier backup."""
+    base = path.with_name(f"{path.name}.before-assent-replace")
+    if not base.exists():
+        return base
+    suffix = 2
+    while True:
+        target = path.with_name(f"{base.name}-{suffix}")
+        if not target.exists():
+            return target
+        suffix += 1
 
-    template_table_order: dict[tuple[str, ...], int] = {}
-    for entry_index, (full_path, _source_line) in enumerate(template_entries):
-        template_table_order.setdefault(full_path[:-1], entry_index)
 
-    insertions: dict[int, list[tuple[tuple[int, int], list[str]]]] = defaultdict(list)
-    for table, values in missing.items():
-        if table in header_positions:
-            insert_at = next(
-                (index for index, _path in headers
-                 if index > header_positions[table]),
-                len(lines),
-            )
-            order = (0, header_positions[table])
-            insertions[insert_at].append((order, values))
-            continue
+def _validate_planned_config(root: Path, user_config_content: str,
+                             user_adapter_content: str | None, *,
+                             removed_project_overrides: frozenset[Path] = frozenset()
+                             ) -> None:
+    """Load the exact planned user settings plus preserved project overrides."""
+    from assent.config import load_config
+    from assent.user_home import ASSENT_HOME_ENV
 
-        descendants = [
-            index for index, path in headers
-            if len(path) > len(table) and path[:len(table)] == table
-        ]
-        insert_at = min(descendants, default=len(lines))
-        block = [
-            "[" + ".".join(_format_toml_key(key) for key in table) + "]",
-            *values,
-        ]
-        order = (1, template_table_order.get(table, len(template_entries)))
-        insertions[insert_at].append((order, block))
+    project_config = root / ".assent" / "assent.toml"
+    project_adapter = root / ".assent" / "adapter.toml"
+    with tempfile.TemporaryDirectory(prefix="assent-init-validate-") as raw_temp:
+        temporary = Path(raw_temp)
+        temporary_user = temporary / "user"
+        temporary_project = temporary / "project" / ".assent"
+        temporary_user.mkdir(parents=True)
+        temporary_project.mkdir(parents=True)
+        (temporary_user / "assent.toml").write_text(
+            user_config_content, encoding="utf-8", newline="\n")
+        if user_adapter_content is not None:
+            (temporary_user / "adapter.toml").write_text(
+                user_adapter_content, encoding="utf-8", newline="\n")
+        if (project_config.is_file()
+                and project_config not in removed_project_overrides):
+            (temporary_project / "assent.toml").write_text(
+                _read_file(project_config, "the project assent.toml"),
+                encoding="utf-8", newline="\n")
+        if (project_adapter.is_file()
+                and project_adapter not in removed_project_overrides):
+            (temporary_project / "adapter.toml").write_text(
+                _read_file(project_adapter, "the project adapter.toml"),
+                encoding="utf-8", newline="\n")
 
-    for index in sorted(insertions, reverse=True):
-        block: list[str] = []
-        for _order, group in sorted(insertions[index], key=lambda item: item[0]):
-            if block and block[-1] != "":
-                block.append("")
-            block.extend(group)
-        if index > 0 and lines[index - 1].strip() and block and block[0] != "":
-            block = [""] + block
-        lines[index:index] = block
-
-    merged = "\n".join(lines) + "\n"
-    try:
-        tomllib.loads(merged)
-    except tomllib.TOMLDecodeError as e:
-        raise AssentError(
-            f"the merged {description} is not valid TOML: {e}") from e
-    return merged, sum(len(values) for values in missing.values())
+        previous = os.environ.get(ASSENT_HOME_ENV)
+        os.environ[ASSENT_HOME_ENV] = str(temporary_user)
+        try:
+            load_config(temporary_project / "assent.toml", "init-validation")
+        finally:
+            if previous is None:
+                os.environ.pop(ASSENT_HOME_ENV, None)
+            else:
+                os.environ[ASSENT_HOME_ENV] = previous
 
 
 def _agents_plan(root: Path) -> tuple[str, tuple[str, str]]:
@@ -558,6 +411,21 @@ def _write(path: Path, content: str) -> None:
         raise AssentError(f"Cannot write {path}: {e}") from e
 
 
+def _write_bytes(path: Path, content: bytes) -> None:
+    """Write a byte-exact recovery copy atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.assent-new-{os.getpid()}")
+    try:
+        temporary.write_bytes(content)
+        os.replace(temporary, path)
+    except OSError as e:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise AssentError(f"Cannot write {path}: {e}") from e
+
+
 def _apply(target: Path, content: str, plan: tuple[str, str]) -> None:
     """Carry out one planned file outcome and report it under its section."""
     state, description = plan
@@ -591,18 +459,56 @@ def init(path: str | Path = ".",
     assent_dir = root / ".assent"
     verifier = assent_dir / "verify.py"
     try:
+        warnings: list[str] = []
+        user_backups: list[tuple[Path, bytes, Path]] = []
+        project_backups: list[tuple[Path, bytes, Path]] = []
         verifier_exists = verifier.exists()
-        if verifier_exists and test is not None and not direct_api_default:
-            raise AssentError(
-                "refusing --test because .assent/verify.py already exists; "
-                "repeat init preserves the existing project verifier")
-
         verify_template = _template("verify.py")
         if verifier_exists:
             if not verifier.is_file():
                 raise AssentError(f".assent/verify.py is not a file: {verifier}")
-            verifier_plan = ("preserved", f"{verifier} (project verifier preserved)")
-            verifier_content = _read_file(verifier, ".assent/verify.py")
+            existing_verifier = _read_file(verifier, ".assent/verify.py")
+            explicit_selection = test is not None and not direct_api_default
+            if explicit_selection:
+                selection = _resolve_selection(test)
+                verifier_content = _render_verifier(verify_template, selection)
+                if verifier_content == existing_verifier:
+                    verifier_plan = (
+                        "preserved", f"{verifier} (already current)")
+                else:
+                    backup = _backup_target(verifier)
+                    project_backups.append(
+                        (verifier, verifier.read_bytes(), backup))
+                    verifier_plan = (
+                        "updated",
+                        f"{verifier} ({selection.label} selected; prior file backed up)")
+            else:
+                current_builtin = any(
+                    existing_verifier == _render_verifier(verify_template, selection)
+                    for selection in _BUILTIN_TESTS.values())
+                if current_builtin:
+                    verifier_content = existing_verifier
+                    verifier_plan = (
+                        "preserved", f"{verifier} (already current)")
+                elif _confirm(
+                        f"{verifier} differs from the current verifier template. "
+                        "Back it up and replace it?", default=False):
+                    selection = _resolve_selection(None)
+                    verifier_content = _render_verifier(
+                        verify_template, selection)
+                    backup = _backup_target(verifier)
+                    project_backups.append(
+                        (verifier, verifier.read_bytes(), backup))
+                    verifier_plan = (
+                        "updated",
+                        f"{verifier} ({selection.label} selected; prior file backed up)")
+                else:
+                    verifier_content = existing_verifier
+                    verifier_plan = (
+                        "preserved", f"{verifier} (replacement declined)")
+                    warnings.append(
+                        f"{verifier} differs from the current verifier template "
+                        "and remains unchanged")
         else:
             selection = (_BUILTIN_TESTS["unittest"] if direct_api_default
                          else _resolve_selection(test))
@@ -619,29 +525,57 @@ def init(path: str | Path = ".",
         user_adapter_plan: tuple[str, str] | None = None
         if user_config.exists():
             existing_user_config = _read_file(user_config, "the user assent.toml")
-            user_config_content, added = _merge_config(
-                existing_user_config,
-                config_template, str(user_config))
-            user_config_plan = (
-                "updated", f"{user_config} (added {added} packaged setting(s))"
-            ) if added else (
-                "preserved", f"{user_config} (your settings preserved)")
-            if "adapter" in tomllib.loads(existing_user_config):
-                # Compatibility layout: do not move or duplicate an author's
-                # existing inline adapter settings.
-                if user_adapter.exists():
-                    user_adapter_plan = (
-                        "preserved",
-                        f"{user_adapter} (existing adapter settings preserved)")
-            elif user_adapter.exists():
-                user_adapter_content, added = _merge_config(
-                    _read_file(user_adapter, "the user adapter.toml"),
-                    adapter_template, str(user_adapter))
-                user_adapter_plan = (
-                    "updated", f"{user_adapter} (added {added} packaged setting(s))"
-                ) if added else (
-                    "preserved", f"{user_adapter} (your settings preserved)")
+            if existing_user_config == config_template:
+                user_config_content = existing_user_config
+                user_config_plan = (
+                    "preserved", f"{user_config} (already current)")
+            elif _confirm(
+                    f"{user_config} differs from the current shared settings "
+                    "template. Back it up and replace it?", default=False):
+                user_config_content = config_template
+                backup = _backup_target(user_config)
+                user_backups.append(
+                    (user_config, user_config.read_bytes(), backup))
+                user_config_plan = (
+                    "updated",
+                    f"{user_config} (replaced; prior file backed up)")
             else:
+                user_config_content = existing_user_config
+                user_config_plan = (
+                    "preserved", f"{user_config} (replacement declined)")
+                warnings.append(
+                    f"{user_config} differs from the current shared settings "
+                    "template and may retain an older workflow")
+
+            try:
+                inline_adapter = "adapter" in tomllib.loads(user_config_content)
+            except tomllib.TOMLDecodeError:
+                inline_adapter = False
+            if user_adapter.exists():
+                existing_user_adapter = _read_file(
+                    user_adapter, "the user adapter.toml")
+                if existing_user_adapter == adapter_template:
+                    user_adapter_content = existing_user_adapter
+                    user_adapter_plan = (
+                        "preserved", f"{user_adapter} (already current)")
+                elif _confirm(
+                        f"{user_adapter} differs from the current shared adapter "
+                        "template. Back it up and replace it?", default=False):
+                    user_adapter_content = adapter_template
+                    backup = _backup_target(user_adapter)
+                    user_backups.append(
+                        (user_adapter, user_adapter.read_bytes(), backup))
+                    user_adapter_plan = (
+                        "updated",
+                        f"{user_adapter} (replaced; prior file backed up)")
+                else:
+                    user_adapter_content = existing_user_adapter
+                    user_adapter_plan = (
+                        "preserved", f"{user_adapter} (replacement declined)")
+                    warnings.append(
+                        f"{user_adapter} differs from the current shared adapter "
+                        "template and remains unchanged")
+            elif not inline_adapter:
                 user_adapter_content = adapter_template
                 user_adapter_plan = ("created", str(user_adapter))
         else:
@@ -659,7 +593,6 @@ def init(path: str | Path = ".",
 
         # The project: its own verifier, plus whatever an older layout left in
         # .assent that now belongs to the user home.
-        warnings: list[str] = []
         legacy_plans: list[tuple[Path, bool, str]] = []
         for name in contracts.CONTRACT_NAMES:
             legacy = assent_dir / name
@@ -680,20 +613,36 @@ def init(path: str | Path = ".",
                     f"not removed; sessions read {global_path}, so delete the "
                     "local copy once you have moved anything you still want")
 
+        project_override_removals: list[Path] = []
         project_config = assent_dir / "assent.toml"
-        if project_config.exists():
-            if not project_config.is_file():
+        project_adapter = assent_dir / "adapter.toml"
+        for project_override in (project_config, project_adapter):
+            if not project_override.exists():
+                continue
+            if not project_override.is_file():
                 raise AssentError(
-                    f".assent/assent.toml is not a file: {project_config}")
-            warnings.append(
-                f"{project_config} is kept byte-for-byte as a compatibility "
-                f"override; it outranks {user_config} and can shadow later "
-                "edits there")
+                    f"project settings override is not a file: {project_override}")
+            if _confirm(
+                    f"{project_override} overrides the current shared settings. "
+                    "Back it up and remove it so the shared template applies?",
+                    default=False):
+                backup = _backup_target(project_override)
+                project_backups.append(
+                    (project_override, project_override.read_bytes(), backup))
+                project_override_removals.append(project_override)
+            else:
+                warnings.append(
+                    f"{project_override} remains a project override and can "
+                    "shadow the current shared settings")
 
         agents_content, agents_plan = _agents_plan(root)
         gitignore_content, gitignore_plan = _gitignore_plan(root)
 
-        # Every validation, merge, and read above happens before the first
+        _validate_planned_config(
+            root, user_config_content, user_adapter_content,
+            removed_project_overrides=frozenset(project_override_removals))
+
+        # Every validation and read above happens before the first
         # write, so a bad selection or an unparsable TOML file leaves neither
         # the user home nor the project half-upgraded.
         try:
@@ -707,16 +656,31 @@ def init(path: str | Path = ".",
                 continue
             contracts.install_contract(name)
             print(f"  {state.title()}: {description}")
+        for source, content, backup in user_backups:
+            _write_bytes(backup, content)
+            print(f"  Backed up: {source} -> {backup}")
         _apply(user_config, user_config_content, user_config_plan)
         if user_adapter_content is not None and user_adapter_plan is not None:
             _apply(user_adapter, user_adapter_content, user_adapter_plan)
 
         print(f"Project {root}:")
+        for source, content, backup in project_backups:
+            _write_bytes(backup, content)
+            print(f"  Backed up: {source} -> {backup}")
         _apply(verifier, verifier_content, verifier_plan)
         _apply(root / "AGENTS.md", agents_content, agents_plan)
         _apply(root / ".gitignore", gitignore_content, gitignore_plan)
-        if project_config.exists():
-            print(f"  Preserved: {project_config} (local override, unchanged)")
+        for project_override in project_override_removals:
+            try:
+                project_override.unlink()
+            except OSError as e:
+                raise AssentError(
+                    f"Cannot remove project override {project_override}: {e}") from e
+            print(f"  Removed: {project_override} (backed up first)")
+        for project_override in (project_config, project_adapter):
+            if (project_override.exists()
+                    and project_override not in project_override_removals):
+                print(f"  Preserved: {project_override} (local override, unchanged)")
         for legacy, removable, description in legacy_plans:
             if not removable:
                 print(f"  Preserved: {description}")

@@ -174,27 +174,24 @@ class TestContractContent(unittest.TestCase):
             (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
                 encoding="utf-8"))
         self.assertEqual(
-            configuration["workflow"]["task"],
-            [{"role": "implementer"}, {"action": "focused_test"},
-             {"role": "task_reviewer_fixer"},
-             {"action": "focused_test"}])
+            [step.get("action", "role")
+             for step in configuration["workflow"]["task"]],
+            ["role", "focused_test", "role", "focused_test"])
         plan_shape = [
-            {key: value for key, value in step.items() if key != "adapter"}
+            {"action": step["action"]} if "action" in step else {"role": "role"}
             for step in configuration["workflow"]["plan"]]
         self.assertEqual(
             plan_shape,
-            [{"action": "focused_sweep"},
-             {"role": "plan_reviewer_fixer"},
-             {"action": "focused_sweep"},
-             {"role": "plan_reviewer_fixer"},
+            [{"role": "role"},
+             {"action": "focused_sweep"}, {"role": "role"},
+             {"action": "focused_sweep"}, {"role": "role"},
              {"action": "focused_sweep"}])
         integration_shape = [
-            {key: value for key, value in step.items() if key != "adapter"}
+            {"action": step["action"]} if "action" in step else {"role": "role"}
             for step in configuration["workflow"]["integration"]]
         self.assertEqual(
             integration_shape,
-            [{"action": "full_verify"},
-             {"role": "integration_reviewer_fixer"},
+            [{"action": "full_verify"}, {"role": "role"},
              {"action": "full_verify"}])
         self.assertIn("current task",
                       configuration["abilities"]["task_review"]["prompt"])
@@ -203,6 +200,46 @@ class TestContractContent(unittest.TestCase):
         self.assertIn(
             "exact selection",
             configuration["abilities"]["integration_review"]["prompt"])
+
+    def test_default_write_abilities_resist_representation_coupled_tests(self):
+        configuration = tomllib.loads(
+            (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
+                encoding="utf-8"))
+        writable_prompts = [
+            ability["prompt"]
+            for ability in configuration["abilities"].values()
+            if ability["writes"]]
+
+        # Prompt text is the shipped behavior under test here. Ability names are
+        # deliberately irrelevant: all default writers share the safety floor.
+        for prompt in writable_prompts:
+            with self.subTest(prompt=prompt):
+                self.assertIn("do not weaken", prompt.lower())
+
+        verdict_prompts = [
+            ability["prompt"]
+            for ability in configuration["abilities"].values()
+            if ability.get("produces_verdict", False)]
+        for prompt in verdict_prompts:
+            with self.subTest(prompt=prompt):
+                self.assertIn(
+                    "do not accept tests that merely mirror", prompt.lower())
+                self.assertIn("proving the cited requirement", prompt.lower())
+
+        semantic_test_prompts = [
+            prompt for prompt in writable_prompts
+            if "tests that prove" in prompt]
+        self.assertEqual(len(semantic_test_prompts), 1)
+        test_prompt = semantic_test_prompts[0]
+        for evidence in (
+                "observable semantics and invariants",
+                "unless a requirement explicitly makes them public",
+                "an alternate valid combination",
+                "a semantics-preserving input transformation",
+                "rejection of an invalid combination",
+                "rather than a packaged example"):
+            with self.subTest(evidence=evidence):
+                self.assertIn(evidence, test_prompt)
 
     def test_task_plan_and_integration_responsibilities_are_distinct(self):
         workflow = self._compact("workflow.md")

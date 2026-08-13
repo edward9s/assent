@@ -108,37 +108,30 @@ ability = ["review"]
         template = (Path(__file__).resolve().parents[1]
                     / "assent" / "templates" / "assent.toml")
         cfg = self.load(template.read_text(encoding="utf-8"))
-        self.assertEqual(set(cfg.abilities),
-                         {"write_tests", "implement_source", "task_review",
-                          "task_fix", "plan_review", "plan_fix",
-                          "integration_review", "integration_fix"})
-        self.assertEqual(set(cfg.roles),
-                         {"implementer", "task_reviewer_fixer",
-                          "plan_reviewer_fixer",
-                          "integration_reviewer_fixer"})
         self.assertEqual(
-            [step.action if hasattr(step, "action") else step.role
+            [step.action if hasattr(step, "action") else "role"
              for step in cfg.workflow_task],
-            ["implementer", "focused_test", "task_reviewer_fixer",
-             "focused_test"])
+            ["role", "focused_test", "role", "focused_test"])
         self.assertEqual(
-            [step.action if hasattr(step, "action") else step.role
+            [step.action if hasattr(step, "action") else "role"
              for step in cfg.workflow_plan],
-            ["focused_sweep", "plan_reviewer_fixer", "focused_sweep",
-             "plan_reviewer_fixer", "focused_sweep"])
+            ["role", "focused_sweep", "role", "focused_sweep", "role",
+             "focused_sweep"])
         self.assertEqual(
-            cfg.roles["implementer"].ability,
-            ("write_tests", "implement_source"))
-        self.assertEqual(cfg.roles["task_reviewer_fixer"].ability,
-                         ("task_review", "task_fix"))
-        self.assertEqual(cfg.roles["plan_reviewer_fixer"].ability,
-                         ("plan_review", "plan_fix"))
-        self.assertEqual(cfg.roles["integration_reviewer_fixer"].ability,
-                         ("integration_review", "integration_fix"))
+            [(step.writes, step.produces_verdict)
+             for step in cfg.workflow_task if not hasattr(step, "action")],
+            [(True, False), (True, True)])
         self.assertEqual(
-            [step.action if hasattr(step, "action") else step.role
+            [(step.writes, step.produces_verdict)
+             for step in cfg.workflow_plan if not hasattr(step, "action")],
+            [(True, True), (True, True), (True, True)])
+        self.assertEqual(
+            [step.action if hasattr(step, "action") else "role"
              for step in cfg.workflow_integration],
-            ["full_verify", "integration_reviewer_fixer", "full_verify"])
+            ["full_verify", "role", "full_verify"])
+        integration_role = cfg.workflow_integration[1]
+        self.assertTrue(integration_role.writes)
+        self.assertTrue(integration_role.produces_verdict)
 
 
 if __name__ == "__main__":

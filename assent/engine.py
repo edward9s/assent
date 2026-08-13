@@ -4302,6 +4302,12 @@ def _run_auto_fix_review_once(
         if isinstance(step, WorkflowPlanStep))
     if not rounds:
         return _AutoFixReviewOutcome(0)
+    first_action_index = next(
+        index for index, step in enumerate(cfg.workflow_plan)
+        if isinstance(step, WorkflowActionStep))
+    initial_role_count = sum(
+        isinstance(step, WorkflowPlanStep)
+        for step in cfg.workflow_plan[:first_action_index])
     # The folder walks the configured reviewer list position by position, and
     # the durable index is what survives a restart mid-sequence.
     existing = _auto_fix_existing_state(cfg)
@@ -4320,6 +4326,11 @@ def _run_auto_fix_review_once(
     runnable = plan.next_task()
     limited = once or task_id is not None
     review_context = "completed_folder"
+    initial_quality_review = bool(
+        review_context == "completed_folder"
+        and initial_role_count
+        and existing is None
+        and round_index < initial_role_count)
 
     if incomplete and existing is None:
         shown = ", ".join(f"{task.id}={task.status}" for task in incomplete)
@@ -4416,8 +4427,14 @@ def _run_auto_fix_review_once(
             line = f"- FAIL: {finding.evidence}"
             focused_lines.append(line)
             identity_lines.append(line)
-    elif review_context == "completed_folder":
+    elif review_context == "completed_folder" and not initial_quality_review:
         print("Auto-fix folder review: running final distinct focused checks.")
+    elif review_context == "completed_folder":
+        print("Plan quality review: reviewing the completed cumulative worktree "
+              "before focused_sweep.")
+        focused_lines.append(
+            "- NOT RUN: focused_sweep follows the initial plan quality review")
+        identity_lines.append(focused_lines[-1])
     else:
         print("Auto-fix blocked adjudication: using durable task failure evidence; "
               "no focused command is run by the reviewer gate.")
@@ -4426,6 +4443,7 @@ def _run_auto_fix_review_once(
         identity_lines.extend(focused_lines)
     distinct: list[str] = []
     for task in (done if review_context == "completed_folder"
+                 and not initial_quality_review
                  and not pending_focused_failure else ()):
         if task.verify in seen:
             continue
@@ -4506,7 +4524,9 @@ def _run_auto_fix_review_once(
     # A passing scheduler action completes the plan layer.  Review roles are
     # failure handlers, so no AI session is opened merely to confirm a
     # mechanically passing focused_sweep.
-    if review_context == "completed_folder" and not pending_focused_failure:
+    if (review_context == "completed_folder"
+            and not pending_focused_failure
+            and not initial_quality_review):
         if existing is None or existing.verdict == "PASS":
             print("Plan focused_sweep: PASS; no reviewer session started.")
             return finish(_AutoFixReviewOutcome(0, existing))
@@ -4855,12 +4875,16 @@ def _run_auto_fix_review_once(
                 reviewer_adapter=session.agent,
                 reviewer_model=session.requested_model,
                 reviewer_effort=session.requested_effort or "")
+            next_workflow_step = (
+                initial_role_count
+                if initial_quality_review
+                and resolved_record.verdict == "PASS"
+                else (round_index if resolved_record.verdict == "PASS"
+                      else round_index + 1))
             state = auto_fix.state_for_review(
                 resolved_record, previous=ledger_previous,
                 review_stage=review_stage,
-                workflow_step_index=(
-                    round_index if resolved_record.verdict == "PASS"
-                    else round_index + 1),
+                workflow_step_index=next_workflow_step,
                 **freshness)
             state = _auto_fix_attach_repair_briefs(
                 cfg, plan, state,
@@ -4922,6 +4946,14 @@ def _run_auto_fix_review_once(
 
         auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
         if resolved_record.verdict == "PASS":
+            if initial_quality_review:
+                print("Plan quality review: PASS; proceeding to focused_sweep.")
+                return _run_auto_fix_review_once(
+                    cfg, once=once, task_id=task_id,
+                    injected_adapter=injected_adapter, sleep=sleep, now=now,
+                    blockers=blockers, trusted_plan=trusted_plan,
+                    trusted_contracts=trusted_contracts,
+                    gate_passes=gate_passes)
             print("Auto-fix folder review: PASS.")
             return finish(_AutoFixReviewOutcome(0, state))
         if resolved_record.verdict == "FIXED":

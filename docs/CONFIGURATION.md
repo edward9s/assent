@@ -25,10 +25,6 @@ and finally any supported command-line override. Tables merge by key; scalars
 and arrays replace the lower value. Omit a value to inherit it. An empty array
 is an intentional empty value.
 
-`assent init` adds newly packaged settings but preserves existing values and
-comments. It does not silently replace an existing workflow with a newer
-default; adopt such changes deliberately after reading this guide.
-
 ## Think in workflows
 
 The central configuration chain is:
@@ -129,7 +125,7 @@ question:
 | Layer | Repair scope |
 | --- | --- |
 | `workflow.task` | The current task's `BLOCKED` or `focused_test` evidence. It may settle a small planning omission, such as one exact missing scope path, and repair it in the same writable verdict session. It does not spend the plan repair budget. |
-| `workflow.plan` | Whether the cumulative worktree from all completed tasks conforms to the existing plan. It handles `focused_sweep` failures and cross-task regressions through implicated existing tasks. |
+| `workflow.plan` | Whether the cumulative worktree from all completed tasks conforms to the existing plan. It runs one normal quality review before the first `focused_sweep`, then handles sweep failures and cross-task regressions through implicated existing tasks. |
 | `workflow.integration` | Whether the same exact selected plan set can be reconstructed and pass `full_verify`. It handles candidate conflicts and complete-verifier failures without dropping a folder or accepting only a prefix. |
 
 The integration workflow verifies and repairs; it never performs human
@@ -158,6 +154,11 @@ produces_verdict = true
 prompt = "In the same session, repair every authorized task-local finding, including an exact omitted scope path. Do not create tasks or requirements."
 writes = true
 
+[abilities.plan_quality_review]
+prompt = "Review the completed cumulative worktree once for conformance to the existing plan before focused_sweep. Inspect cross-task interactions and whether changed tests prove cited requirements through observable semantics. Do not accept tests that merely mirror implementation constants, template examples, or incidental representation instead of proving the cited requirement. Report only blocking correctness, safety, unmet-requirement, or focused-test-gap findings tied to an existing task. Do not invent requirements or conduct a repository-wide debt search."
+writes = false
+produces_verdict = true
+
 [abilities.plan_review]
 prompt = "Review only focused_sweep failure evidence to decide whether the cumulative worktree conforms to the existing plan, including cross-task interactions and concrete regressions."
 writes = false
@@ -184,6 +185,11 @@ ability = ["task_review", "task_fix"]
 model = "prime"
 effort = "heavy"
 
+[roles.plan_quality_reviewer_fixer]
+ability = ["plan_quality_review", "plan_fix"]
+model = "prime"
+effort = "heavy"
+
 [roles.plan_reviewer_fixer]
 ability = ["plan_review", "plan_fix"]
 model = "prime"
@@ -202,6 +208,7 @@ task = [
   { action = "focused_test" },
 ]
 plan = [
+  { role = "plan_quality_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
   { role = "plan_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
@@ -215,9 +222,11 @@ integration = [
 ]
 ```
 
-The first passing `focused_test`, `focused_sweep`, or `full_verify` skips the
-rest of its own array. Repeated plan review positions are separate repair
-rounds, not instructions to run unconditionally.
+The plan role before the first action is the one unconditional cumulative
+quality review. After it passes or repairs its findings, the first passing
+`focused_test`, `focused_sweep`, or `full_verify` skips the remaining failure
+handlers in its own array. Later repeated plan review positions are separate
+repair rounds, not additional normal reviews.
 
 ## Omissions and task overrides
 
@@ -301,6 +310,13 @@ script:
 assent init --test unittest
 assent doctor
 ```
+
+When an existing `assent.toml`, `adapter.toml`, or verifier differs from its
+template, init asks about that file separately and defaults to preserving it.
+Replacement creates a byte-exact sibling backup first; for a project settings
+override, replacement means removing the override so the shared settings apply.
+Replacing a verifier without `--test CHOICE` opens the 0-9 test menu. Init
+validates the resulting effective settings before writing anything.
 
 Task files should use narrower focused commands. If configuration fails, the
 diagnostic names the invalid key and source file. Also confirm that Git is

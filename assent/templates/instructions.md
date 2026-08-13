@@ -16,6 +16,11 @@
 Other documents may reference an owned rule, but must not duplicate it as a
 competing normative contract.
 
+Contract and reader documentation must be concise, present-tense, and
+reader-oriented. Keep only text needed to act or understand; do not add
+development chronology, meeting narrative, or changelog entries unless the
+file explicitly owns historical records.
+
 Git commit messages must contain no AI attribution or advertising text such as
 `Co-Authored-By` or `Generated with`.
 

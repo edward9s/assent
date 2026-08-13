@@ -56,6 +56,10 @@ while operating an assent-managed session live in
   need not go digging. State the conclusion for finished work; do not leave
   dangling notes like "correct this in some later phase" that point at vanished
   context.
+- Contract and reader documentation must be concise, present-tense, and
+  reader-oriented. Keep only text needed to act or understand; do not add
+  development chronology, meeting narrative, or changelog entries unless the
+  file explicitly owns historical records.
 - Token-burned output is never discarded: no process change may introduce
   "revert the workspace on failure" behavior.
 - Assent cleanup must never pass a directory tree containing a junction,

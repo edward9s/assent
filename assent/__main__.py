@@ -324,8 +324,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help=("Select the project test non-interactively: 0/custom followed "
               "by an argv command (custom:<command> also accepts one quoted "
               "command), 1/unittest, 2/pytest, 3/npm, 4/flutter, 5/dotnet, "
-              "6/maven, 7/gradle, 8/cmake-ctest, or 9/make. Omit it on "
-              "fresh init for the numbered menu; repeat init does not prompt"))
+              "6/maven, 7/gradle, 8/cmake-ctest, or 9/make. Omit it for the "
+              "numbered menu when creating a verifier or after agreeing to "
+              "replace one; an explicit repeat choice backs up and replaces "
+              "a differing verifier"))
 
     # The only sanctioned writer of the local shared-path manifest.  It needs no
     # .assent project config: it acts on the Git worktree it is run in.

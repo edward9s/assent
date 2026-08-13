@@ -1471,10 +1471,14 @@ class TestInit(MainTestCase):
         self.assertIn("An AI session never initiates the full suite", agents_md)
         self.assertIn("the scheduler owns workflow `full_verify`", agents_md)
         config = (self.user_home / "assent.toml").read_text(encoding="utf-8")
+        self.assertNotIn("assent-config-schema", config)
         self.assertNotIn("[git]", config)
         self.assertNotIn("[plan]", config)
+        adapter = (self.user_home / "adapter.toml").read_text(encoding="utf-8")
+        self.assertNotIn("assent-adapter-schema", adapter)
         verifier = (self.root / ".assent" / "verify.py").read_text(
             encoding="utf-8")
+        self.assertNotIn("assent-verifier-template", verifier)
         self.assertIn("\nrun_unittest_parallel()\n", verifier)
         self.assertIn("\n# run(\"pytest\")\n", verifier)
         self.assertIn("\n# run(\"npm\", \"test\")\n", verifier)
@@ -1559,7 +1563,9 @@ class TestInit(MainTestCase):
         run_init(self.root, test="unittest")
         user_config = self.user_home / "assent.toml"
         user_config.write_text(
-            '[run]\nretry_per_task = 7\ncustom_setting = "keep"\n',
+            user_config.read_text(encoding="utf-8").replace(
+                "retry_per_task = 1",
+                'retry_per_task = 7\ncustom_setting = "keep"'),
             encoding="utf-8")
         (self.user_home / "instructions.md").write_text(
             "an older assent's working instructions\n", encoding="utf-8")
@@ -1567,7 +1573,7 @@ class TestInit(MainTestCase):
             "old format\n", encoding="utf-8")
         verifier_before = (self.root / ".assent" / "verify.py").read_bytes()
         out = io.StringIO()
-        with patch("builtins.input", side_effect=AssertionError("prompted")), \
+        with patch("builtins.input", return_value="n"), \
                 contextlib.redirect_stdout(out):
             self.assertEqual(run_init(self.root), 0)
         config_text = user_config.read_text(encoding="utf-8")
@@ -1576,18 +1582,25 @@ class TestInit(MainTestCase):
         self.assertEqual(config["run"]["custom_setting"], "keep")
         self.assertIn("quota_poll_minutes", config["run"])
         self.assertIn("watchdog", config)
+        loaded = load_config(self.root / ".assent" / "assent.toml", "plan01")
+        task_steps = loaded.workflow_task
+        self.assertIsNotNone(task_steps)
         self.assertEqual(
-            config["workflow"]["task"],
-            [{"role": "implementer", "adapter": "codex"},
-             {"action": "focused_test"},
-             {"role": "task_reviewer_fixer", "adapter": "claude"},
-             {"action": "focused_test"}])
+            [step.action if hasattr(step, "action") else "role"
+             for step in task_steps],
+            ["role", "focused_test", "role", "focused_test"])
+        task_roles = [step for step in task_steps
+                      if not hasattr(step, "action")]
+        self.assertEqual(
+            [(step.writes, step.produces_verdict) for step in task_roles],
+            [(True, False), (True, True)])
         self.assertEqual(config["workflow"]["integration"][0],
                          {"action": "full_verify"})
         self.assertEqual(config["workflow"]["integration"][-1],
                          {"action": "full_verify"})
         config_after_first_upgrade = user_config.read_bytes()
-        with contextlib.redirect_stdout(io.StringIO()):
+        with patch("builtins.input", return_value="n"), \
+                contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run_init(self.root), 0)
         self.assertEqual(user_config.read_bytes(), config_after_first_upgrade)
         self.assertEqual(
@@ -1612,11 +1625,14 @@ class TestInit(MainTestCase):
         verifier = self.root / ".assent" / "verify.py"
         custom = "# project-specific verifier\n"
         verifier.write_text(custom, encoding="utf-8")
-        with patch("builtins.input", side_effect=AssertionError("prompted")):
+        output = io.StringIO()
+        with patch("builtins.input", return_value="n"), \
+                contextlib.redirect_stdout(output):
             self.assertEqual(run_init(self.root), 0)
         self.assertEqual(verifier.read_text(encoding="utf-8"), custom)
+        self.assertIn("replacement declined", output.getvalue())
 
-    def test_test_option_refuses_when_verifier_already_exists(self):
+    def test_test_option_backs_up_and_replaces_existing_verifier(self):
         run_init(self.root, test="unittest")
         verifier = self.root / ".assent" / "verify.py"
         before = {path: path.read_bytes() for path in (
@@ -1625,10 +1641,30 @@ class TestInit(MainTestCase):
             self.user_home / "assent.toml")}
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            self.assertEqual(run_init(self.root, test="pytest"), 1)
-        self.assertIn("refusing --test", output.getvalue())
+            self.assertEqual(run_init(self.root, test="pytest"), 0)
+        backup = verifier.with_name("verify.py.before-assent-replace")
+        self.assertEqual(backup.read_bytes(), before[verifier])
+        self.assertIn('\nrun("pytest")\n', verifier.read_text(encoding="utf-8"))
+        self.assertIn("Backed up:", output.getvalue())
         for path, content in before.items():
-            self.assertEqual(path.read_bytes(), content)
+            if path != verifier:
+                self.assertEqual(path.read_bytes(), content)
+
+    def test_differing_verifier_can_be_backed_up_and_replaced_from_menu(self):
+        run_init(self.root, test="unittest")
+        verifier = self.root / ".assent" / "verify.py"
+        custom = b"# custom verifier\n"
+        verifier.write_bytes(custom)
+
+        output = io.StringIO()
+        with patch("builtins.input", side_effect=("y", "2")), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root), 0)
+
+        backup = verifier.with_name("verify.py.before-assent-replace")
+        self.assertEqual(backup.read_bytes(), custom)
+        self.assertIn('\nrun("pytest")\n', verifier.read_text(encoding="utf-8"))
+        self.assertIn("Choose the project's test command", output.getvalue())
 
     def test_invalid_existing_toml_does_not_partially_upgrade_managed_files(self):
         run_init(self.root, test="unittest")
@@ -1644,11 +1680,73 @@ class TestInit(MainTestCase):
         )
         before = {path: path.read_bytes() for path in managed}
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        with patch("builtins.input", return_value="n"), \
+                contextlib.redirect_stdout(output):
             self.assertEqual(run_init(self.root), 1)
         self.assertIn("not valid TOML", output.getvalue())
         for path, content in before.items():
             self.assertEqual(path.read_bytes(), content)
+
+    def test_differing_settings_are_prompted_and_replaced_independently(self):
+        run_init(self.root, test="unittest")
+        user_config = self.user_home / "assent.toml"
+        user_adapter = self.user_home / "adapter.toml"
+        user_config.write_text(
+            user_config.read_text(encoding="utf-8").replace(
+                "retry_per_task = 1", "retry_per_task = 7"),
+            encoding="utf-8")
+        user_adapter.write_text(
+            user_adapter.read_text(encoding="utf-8").replace(
+                'command = "codex"', 'command = "custom-codex"'),
+            encoding="utf-8")
+        config_before = user_config.read_bytes()
+        adapter_before = user_adapter.read_bytes()
+
+        output = io.StringIO()
+        with patch("builtins.input", side_effect=("y", "n")) as questions, \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root), 0)
+
+        self.assertEqual(questions.call_count, 2)
+        config_backup = user_config.with_name(
+            "assent.toml.before-assent-replace")
+        self.assertEqual(config_backup.read_bytes(), config_before)
+        self.assertIn(
+            "retry_per_task = 1", user_config.read_text(encoding="utf-8"))
+        self.assertEqual(user_adapter.read_bytes(), adapter_before)
+        self.assertFalse(user_adapter.with_name(
+            "adapter.toml.before-assent-replace").exists())
+        self.assertIn("Backed up:", output.getvalue())
+
+        with patch("builtins.input", return_value="y") as questions, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root), 0)
+        self.assertEqual(questions.call_count, 1)
+        adapter_backup = user_adapter.with_name(
+            "adapter.toml.before-assent-replace")
+        self.assertEqual(adapter_backup.read_bytes(), adapter_before)
+        self.assertIn(
+            'command = "codex"', user_adapter.read_text(encoding="utf-8"))
+
+    def test_effective_config_is_validated_before_contracts_are_refreshed(self):
+        run_init(self.root, test="unittest")
+        stale_contract = self.user_home / "format.md"
+        stale_contract.write_text("stale contract\n", encoding="utf-8")
+        user_config = self.user_home / "assent.toml"
+        user_config.write_text(
+            user_config.read_text(encoding="utf-8").replace(
+                'task = [\n  { role = "implementer"},',
+                'task = [\n  { action = "full_verify" },'),
+            encoding="utf-8")
+
+        output = io.StringIO()
+        with patch("builtins.input", return_value="n"), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root), 1)
+
+        self.assertEqual(
+            stale_contract.read_text(encoding="utf-8"), "stale contract\n")
+        self.assertIn("not valid under [workflow].task", output.getvalue())
 
     def test_two_projects_share_one_config_and_contract_set(self):
         second = self.root / "second-project"
@@ -1662,7 +1760,8 @@ class TestInit(MainTestCase):
             user_config.read_text(encoding="utf-8").replace(
                 "retry_per_task = 1", "retry_per_task = 5"),
             encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()):
+        with patch("builtins.input", return_value="n"), \
+                contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run_init(second, test="unittest"), 0)
         self.assertEqual(
             tomllib.loads(user_config.read_text(encoding="utf-8"))
@@ -1681,12 +1780,30 @@ class TestInit(MainTestCase):
             "[run]\nretry_per_task = 3   # local override\n", encoding="utf-8")
         before = project_config.read_bytes()
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        with patch("builtins.input", return_value="n"), \
+                contextlib.redirect_stdout(output):
             self.assertEqual(run_init(self.root), 0)
         self.assertEqual(project_config.read_bytes(), before)
         text = output.getvalue()
         self.assertIn(f"Warning: {project_config}", text)
-        self.assertIn(str(self.user_home / "assent.toml"), text)
+        self.assertIn("shadow the current shared settings", text)
+
+    def test_project_override_can_be_backed_up_and_removed(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_init(self.root, test="unittest")
+        project_config = self.root / ".assent" / "assent.toml"
+        content = b"[run]\nretry_per_task = 3\n"
+        project_config.write_bytes(content)
+
+        with patch("builtins.input", return_value="y"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root), 0)
+
+        self.assertFalse(project_config.exists())
+        self.assertEqual(
+            project_config.with_name(
+                "assent.toml.before-assent-replace").read_bytes(),
+            content)
 
     def test_matching_local_contract_is_removed_and_a_differing_one_is_kept(self):
         with contextlib.redirect_stdout(io.StringIO()):

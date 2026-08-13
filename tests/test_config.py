@@ -349,7 +349,8 @@ class TestLoadConfig(ConfigTestCase):
     def test_plan_is_the_only_per_plan_review_source(self):
         cfg = load_config(self.write(
             _WORKFLOW_ROLES +
-            '[workflow]\nplan = [{ action = "focused_sweep" }, '
+            '[workflow]\nplan = [{ role = "reviewer_fixer", adapter = "codex" }, '
+            '{ action = "focused_sweep" }, '
             '{ role = "reviewer", adapter = "codex" }, '
             '{ action = "focused_sweep" }, '
             '{ role = "reviewer", adapter = "codex" }, '
@@ -358,7 +359,7 @@ class TestLoadConfig(ConfigTestCase):
 
         self.assertEqual([step.role for step in cfg.workflow_plan
                           if not isinstance(step, WorkflowActionStep)],
-                         ["reviewer", "reviewer"])
+                         ["reviewer_fixer", "reviewer", "reviewer"])
 
     def test_integration_full_verify_repair_positions_are_validated(self):
         cases = (
@@ -417,8 +418,9 @@ class TestLoadConfig(ConfigTestCase):
             ('[workflow]\nplan = true\n', "wrong type"),
             (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "reviewer", adapter = "unknown" }]\n',
              "not a registered adapter"),
-            (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "observer" }]\n',
-             "must start with focused_sweep"),
+            (_WORKFLOW_ROLES + '[workflow]\nplan = [{ role = "observer" }, '
+             '{ action = "focused_sweep" }]\n',
+             "first role before focused_sweep.*must produce a verdict"),
         )
         for text, message in cases:
             with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):
@@ -807,19 +809,18 @@ class TestLayeredConfig(ConfigTestCase):
         cfg = load_config(self.project_config, "plan01")
         self.assertEqual(cfg.adapter_names, ("claude", "codex"))
         self.assertEqual(
-            [step.action if isinstance(step, WorkflowActionStep) else step.role
+            [step.action if isinstance(step, WorkflowActionStep) else "role"
              for step in cfg.workflow_task],
-            ["implementer", "focused_test", "task_reviewer_fixer",
-             "focused_test"])
+            ["role", "focused_test", "role", "focused_test"])
         self.assertEqual(
-            [step.action if isinstance(step, WorkflowActionStep) else step.role
+            [step.action if isinstance(step, WorkflowActionStep) else "role"
              for step in cfg.workflow_plan],
-            ["focused_sweep", "plan_reviewer_fixer", "focused_sweep",
-             "plan_reviewer_fixer", "focused_sweep"])
+            ["role", "focused_sweep", "role", "focused_sweep", "role",
+             "focused_sweep"])
         self.assertEqual(
-            [step.action if isinstance(step, WorkflowActionStep) else step.role
+            [step.action if isinstance(step, WorkflowActionStep) else "role"
              for step in cfg.workflow_integration],
-            ["full_verify", "integration_reviewer_fixer", "full_verify"])
+            ["full_verify", "role", "full_verify"])
 
     def test_init_preserves_existing_inline_adapter_layout(self):
         templates = Path(__file__).resolve().parents[1] / "assent" / "templates"
@@ -834,7 +835,8 @@ class TestLayeredConfig(ConfigTestCase):
         subprocess.run(["git", "init"], cwd=self.root, check=True,
                        capture_output=True)
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        with mock.patch("builtins.input", return_value="n"), \
+                contextlib.redirect_stdout(output):
             result = run_init(self.root)
         self.assertEqual(result, 0, output.getvalue())
 

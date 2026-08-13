@@ -687,20 +687,49 @@ def _resolve_accountability_steps(
 
 def _validate_repair_steps(
         owner: str, action: str,
-        steps: tuple[WorkflowPlanStep | WorkflowActionStep, ...]) -> None:
+        steps: tuple[WorkflowPlanStep | WorkflowActionStep, ...], *,
+        allow_initial_review: bool = False) -> None:
     """Validate one action/failure-repair/action workflow."""
     if not steps:
         return
-    if (not isinstance(steps[0], WorkflowActionStep)
-            or steps[0].action != action):
-        raise AssentError(
-            f"Config [workflow].{owner} must start with {action}")
     if (not isinstance(steps[-1], WorkflowActionStep)
             or steps[-1].action != action):
         raise AssentError(
             f"Config [workflow].{owner} must end with {action}")
     actions = [index for index, step in enumerate(steps)
                if isinstance(step, WorkflowActionStep)]
+    first_action = actions[0]
+    if first_action:
+        if not allow_initial_review:
+            raise AssentError(
+                f"Config [workflow].{owner} must start with {action}")
+        initial_roles = steps[:first_action]
+        reviewer = initial_roles[0]
+        assert isinstance(reviewer, WorkflowPlanStep)
+        if not reviewer.produces_verdict:
+            raise AssentError(
+                f"Config [workflow].{owner}[0] is the first role before "
+                f"{action} and must produce a verdict")
+        if len(initial_roles) > 2:
+            raise AssentError(
+                f"Config [workflow].{owner} may place only one initial verdict "
+                f"role and one optional fixer before {action}")
+        if len(initial_roles) == 2:
+            if reviewer.writes:
+                raise AssentError(
+                    f"Config [workflow].{owner}[0] is a writable initial "
+                    "verdict role and must be the only role before "
+                    f"{action}")
+            fixer = initial_roles[1]
+            assert isinstance(fixer, WorkflowPlanStep)
+            if not fixer.writes or fixer.produces_verdict:
+                raise AssentError(
+                    f"Config [workflow].{owner}[1] is the optional initial "
+                    "fixer and must write without producing a verdict")
+    elif (not isinstance(steps[0], WorkflowActionStep)
+          or steps[0].action != action):
+        raise AssentError(
+            f"Config [workflow].{owner} must start with {action}")
     for left, right in zip(actions, actions[1:]):
         roles = steps[left + 1:right]
         if not roles:
@@ -1176,7 +1205,9 @@ def load_config(path: str | Path, folder: str) -> Config:
     integration_steps = _resolve_accountability_steps(
         cfg, raw_workflow_integration, "integration")
     if raw_workflow_task != []:
-        _validate_repair_steps("plan", "focused_sweep", plan_steps)
+        _validate_repair_steps(
+            "plan", "focused_sweep", plan_steps,
+            allow_initial_review=True)
     _validate_repair_steps("integration", "full_verify", integration_steps)
     plan_roles = [step for step in plan_steps
                   if isinstance(step, WorkflowPlanStep)]
