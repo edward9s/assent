@@ -2,8 +2,8 @@
 """Shared verification script: a task is not complete unless the verify command exits 0.
 
 This script runs outside every AI session: a human starts it, or the scheduler runs
-it once at the end of a whole run (assent run --verify) or on an explicit
-assent verify. A task file's verify field must never name it -- a task's gate is
+it through the integration workflow or on an explicit assent verify. A task
+file's verify field must never name it -- a task's gate is
 the narrow command proving its own acceptance, and the plan parser refuses a task
 that points here.
 Commands between the project-test markers are project-owned. Assent init

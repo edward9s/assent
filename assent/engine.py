@@ -3372,8 +3372,7 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         adapter: Adapter | None = None,
         auto_fix_adapter: Adapter | None = None,
         sleep: Callable[[float], None] | None = None,
-        now: Callable[[], datetime] | None = None,
-        run_level_verify: bool = False) -> int:
+        now: Callable[[], datetime] | None = None) -> int:
     """Run tasks until all are DONE/BLOCKED/SKIP (or only one with once/task_id). Returns the
     process exit code.
 
@@ -7898,8 +7897,8 @@ def _merged_unittest_passes(
     return {command: result for command in matched}
 
 
-def _verify_focused_locked(cfg: Config) -> int:
-    """Run the distinct DONE-task checks from one folder's source worktree.
+def _verify_focused_locked(cfg: Config, task_id: str | None = None) -> int:
+    """Run one task check or the DONE-task sweep from the source worktree.
 
     Focused verification is deliberately separate from receipt-producing full
     verification.  It only proves that the task-level commands pass in the
@@ -7911,52 +7910,66 @@ def _verify_focused_locked(cfg: Config) -> int:
     source = gitops.resolve_folder_source(main, folder, cfg.git_excludes)
     source_cfg = cfg.for_worktree(source.worktree)
 
-    commands: list[str] = []
-    seen: set[str] = set()
-    for task in Plan.parse(cfg.tasks_dir).tasks:
-        if task.status != "DONE" or task.verify in seen:
-            continue
-        seen.add(task.verify)
-        commands.append(task.verify)
-    if not commands:
-        raise AssentError(
-            f"folder {folder} has no DONE task with an eligible focused verify "
-            "command")
+    plan = Plan.parse(cfg.tasks_dir)
+    if task_id is not None:
+        task = plan.get(task_id)
+        if task is None:
+            raise AssentError(f"task {task_id} not found in folder {folder}")
+        commands = [task.verify]
+        label = f"verify {folder} --focus {task_id}"
+        kind = "focused test"
+    else:
+        commands = []
+        seen: set[str] = set()
+        for task in plan.tasks:
+            if task.status != "DONE" or task.verify in seen:
+                continue
+            seen.add(task.verify)
+            commands.append(task.verify)
+        if not commands:
+            raise AssentError(
+                f"folder {folder} has no DONE task with an eligible focused "
+                "verify command")
+        label = f"verify {folder} --focus"
+        kind = "focused sweep"
 
     # --focus provisions the persistent source worktree like every other verify
     # entry point, and writes no receipt of any kind.
     shared_paths.prepare_sources(main, [(folder, source.worktree)])
-    print(f"verify {folder} --focus: source worktree {source.worktree}")
-    print("verify --focus: focused task verification cannot authorize `accept`; "
+    print(f"{label}: source worktree {source.worktree}")
+    print(f"{label}: {kind} cannot authorize `accept`; "
           "complete integration verification has not run")
     # One fixed tree, so overlapping unittest commands are proven together; a
     # failed or ineligible merge leaves every command to run one at a time.
-    merged = _merged_unittest_passes(source_cfg, commands)
+    merged = (_merged_unittest_passes(source_cfg, commands)
+              if task_id is None else {})
     for command in commands:
         proven = merged.get(command)
         if proven is not None:
             _show_verify_result(command, proven)
             continue
         if _run_verify(source_cfg, command) != 0:
-            print(f"verify {folder} --focus: failed; this focused result cannot "
+            print(f"{label}: failed; this focused result cannot "
                   "authorize `accept`")
             return 1
-    print(f"verify {folder} --focus: passed; complete integration verification "
+    print(f"{label}: passed; complete integration verification "
           "has not run and this result cannot authorize `accept`")
     return 0
 
 
-def verify_focused(cfg: Config) -> int:
-    """Run one folder's eligible focused task checks without making receipts."""
+def verify_focused(cfg: Config, task_id: str | None = None) -> int:
+    """Run one task check or a DONE-task sweep without making receipts."""
     folder = cfg.tasks_name
+    label = (f"verify {folder} --focus {task_id}" if task_id is not None
+             else f"verify {folder} --focus")
     try:
         with lockfile.hold_lock(cfg.tasks_dir, folder):
-            return _verify_focused_locked(cfg)
+            return _verify_focused_locked(cfg, task_id)
     except lockfile.LockBusy as e:
-        print(f"verify {folder} --focus: refused ({e})")
+        print(f"{label}: refused ({e})")
         return 1
     except AssentError as e:
-        print(f"verify {folder} --focus: failed ({e})")
+        print(f"{label}: failed ({e})")
         return 1
 
 

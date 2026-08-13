@@ -42,7 +42,7 @@ project-location rules.
 | `run` | Execute task, plan, and integration workflows. |
 | `status` | Show concise state for one or all plans. |
 | `report` | Regenerate the human review agenda. |
-| `verify` | Run focused or complete verification without accepting. |
+| `verify` | Run a requested mechanical verification without AI review, repair, or acceptance. |
 | `accept` | Human publication decision using matching evidence. |
 | `reconcile` | Prepare and finish a human-edited Git conflict resolution. |
 | `rework` | Reopen existing tasks, preserving code by default. |
@@ -80,11 +80,15 @@ assent verify <PLAN>
 assent verify A B
 ```
 
-Run only task-focused checks, with no receipt:
+Run one task check or the plan's `DONE`-task focused sweep, with no receipt:
 
 ```text
+assent verify <PLAN> --focus t003
 assent verify <PLAN> --focus
 ```
+
+Explicit `verify` commands do not enter configured workflow roles or automatic
+repair. A failure returns directly to the caller.
 
 Dynamically verify every currently eligible plan:
 

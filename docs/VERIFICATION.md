@@ -12,11 +12,15 @@ Every task has a narrow `verify` command. `focused_test` runs it for one task;
 `focused_sweep` runs each distinct command for a completed plan. Neither writes
 a receipt.
 
-You can repeat the plan's focused checks with:
+You can run one task's command or repeat the completed plan's distinct commands:
 
 ```text
-assent verify <PLAN> --focus
+assent verify <PLAN> --focus t003  # focused_test
+assent verify <PLAN> --focus       # focused_sweep
 ```
+
+A named task is run regardless of its current status. The sweep includes only
+`DONE` tasks and de-duplicates identical commands.
 
 A focused pass proves only the tested source worktree. It cannot authorize
 `accept`.
@@ -26,6 +30,9 @@ A focused pass proves only the tested source worktree. It cannot authorize
 `full_verify` and `assent verify` build a temporary integration candidate from
 the selected source commits, then run the project's `.assent/verify.py` there.
 They do not change the target ref or accept anything.
+
+Every explicit `assent verify` form is mechanical: it does not enter configured
+workflow roles, start an AI session, or automatically repair a failure.
 
 ```text
 assent verify <PLAN>     # one folder receipt

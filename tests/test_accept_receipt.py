@@ -169,8 +169,9 @@ class TestReceiptGate(AcceptReceiptCase):
         receipt.unlink()
         self._write_verifier(False)
         failed_verify = self._cli("verify", self.folder)
-        self.assertEqual(failed_verify.returncode, 0)
-        self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", failed_verify.stdout)
+        self.assertEqual(failed_verify.returncode, 1)
+        self.assertNotIn(
+            "REVIEW UNRESOLVED, HUMAN DECISION", failed_verify.stdout)
         failed = self._cli("accept", self.folder)
         self._assert_refused_unchanged(before, failed)
         self.assertIn("status is FAILED", failed.stdout)

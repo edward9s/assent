@@ -562,8 +562,8 @@ class TestRemainderSelection(BatchVerifyRepositoryCase):
                 mock.patch("assent.batch_verification.run_full_verifier") as verifier:
             code, output = self.run_cli("aa", "...")
 
-        self.assertEqual(code, 0)
-        self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", output)
+        self.assertEqual(code, 1)
+        self.assertNotIn("REVIEW UNRESOLVED, HUMAN DECISION", output)
         self.assertIn("candidate construction encountered merge conflicts", output)
         self.assertIn("complete exact selection remains required", output)
         ask.assert_not_called()

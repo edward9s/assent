@@ -88,8 +88,10 @@ while operating an assent-managed session live in
 - Human approval is the explicit `assent accept FOLDER` action plus the resulting
   Git integration; do not add a second per-task `review` state alongside task
   execution status.
-- The configured `task`, `plan`, and `integration` workflow arrays are always
-  active. Their scheduler actions are `focused_test`, `focused_sweep` (the
+- During `assent run`, the configured `task`, `plan`, and `integration`
+  workflow arrays are always active. An explicit `assent verify` instead runs
+  only the requested mechanical verification and never enters a workflow role
+  or automatic repair. The scheduler actions are `focused_test`, `focused_sweep` (the
   distinct union of task verify commands without a receipt), and `full_verify`
   (the reconstructed candidate and receipt). A passing action completes that
   layer without an AI reviewer; a failing action advances to the next configured

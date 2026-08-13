@@ -282,13 +282,14 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[2], 1)
 
-    def test_removed_auto_fix_option_is_a_usage_error(self):
+    def test_removed_run_options_are_usage_errors(self):
         config = self.write_config()
         self.write_task("work")
-        with self.assertRaises(SystemExit) as ctx, \
-                contextlib.redirect_stderr(io.StringIO()):
-            main(["run", "work", "--auto-fix", "--config", str(config)])
-        self.assertEqual(ctx.exception.code, 2)
+        for option in ("--auto-fix", "--verify"):
+            with self.subTest(option=option), self.assertRaises(
+                    SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
+                main(["run", "work", option, "--config", str(config)])
+            self.assertEqual(ctx.exception.code, 2)
 
     def test_run_named_folders_dispatch_in_given_order(self):
         config = self.write_config()
@@ -432,29 +433,32 @@ class TestDispatch(MainTestCase):
                 main(argv)
             self.assertEqual(ctx.exception.code, 2)
 
-    def test_verify_dispatches_exact_selection_workflow(self):
+    def test_verify_dispatches_single_folder_mechanical_verification(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
-        with patch("assent.__main__.engine.run_selection_workflow",
-                   side_effect=[0, 1]) as workflow:
+        with patch("assent.__main__.verify_folder",
+                   side_effect=[0, 1]) as verifier, patch(
+                "assent.__main__.engine.run_selection_workflow",
+                side_effect=AssertionError("manual verify entered workflow")):
             codes = [self.run_main(
                 ["verify", "reviewed", "--config", str(config)])[0]
                      for _ in range(2)]
         self.assertEqual(codes, [0, 1])
-        self.assertEqual(workflow.call_count, 2)
-        workflow.assert_called_with(
-            str(config), config.parent.resolve(), ["reviewed"])
+        self.assertEqual(verifier.call_count, 2)
+        self.assertEqual(verifier.call_args.args[0].tasks_name, "reviewed")
 
     def test_verify_dispatches_selected_and_focused_forms(self):
         config = self.write_config()
         self.write_task("later", "DONE")
         self.write_task("earlier", "DONE")
-        with patch("assent.__main__.engine.run_selection_workflow",
-                   return_value=0) as workflow:
+        with patch("assent.__main__.verify_selected_batch",
+                   return_value=0) as verifier, patch(
+                "assent.__main__.engine.run_selection_workflow",
+                side_effect=AssertionError("manual verify entered workflow")):
             code, _ = self.run_main([
                 "verify", "later", "earlier", "--config", str(config)])
         self.assertEqual(code, 0)
-        workflow.assert_called_once_with(
+        verifier.assert_called_once_with(
             str(config), config.parent.resolve(), ["later", "earlier"])
 
         with patch("assent.__main__.engine.verify_focused",
@@ -463,15 +467,27 @@ class TestDispatch(MainTestCase):
                 "verify", "later", "--focus", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(focus.call_args.args[0].tasks_name, "later")
+        self.assertIsNone(focus.call_args.args[1])
 
-    def test_verify_batch_dispatches_dynamic_integration(self):
+        with patch("assent.__main__.engine.verify_focused",
+                   return_value=0) as focus:
+            code, _ = self.run_main([
+                "verify", "later", "--focus", "t001",
+                "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(focus.call_args.args[0].tasks_name, "later")
+        self.assertEqual(focus.call_args.args[1], "t001")
+
+    def test_verify_batch_dispatches_manual_batch_verification(self):
         config = self.write_config()
-        with patch("assent.__main__.engine.run_dynamic_selection_workflow",
-                   return_value=0) as workflow:
+        with patch("assent.__main__.verify_batch",
+                   return_value=0) as verifier, patch(
+                "assent.__main__.engine.run_dynamic_selection_workflow",
+                side_effect=AssertionError("manual verify entered workflow")):
             code, _ = self.run_main([
                 "verify", "--batch", "--config", str(config)])
         self.assertEqual(code, 0)
-        workflow.assert_called_once_with(str(config), config.parent.resolve())
+        verifier.assert_called_once_with(str(config), config.parent.resolve())
 
     def test_verify_batch_help_states_the_conflict_skip_confirmation(self):
         output = io.StringIO()
@@ -488,7 +504,7 @@ class TestDispatch(MainTestCase):
     def test_verify_interrupt_returns_130(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
-        with patch("assent.__main__.engine.run_selection_workflow",
+        with patch("assent.__main__.verify_folder",
                    side_effect=KeyboardInterrupt), \
                 patch("assent.__main__.inspection.try_write_report") as report:
             code, out = self.run_main(
@@ -906,11 +922,11 @@ class TestCommandElapsed(MainTestCase):
 
         cases = {
             "folder": (["verify", "earlier"],
-                       "assent.__main__.engine.run_selection_workflow"),
+                       "assent.__main__.verify_folder"),
             "selected": (["verify", "earlier", "later"],
-                         "assent.__main__.engine.run_selection_workflow"),
+                         "assent.__main__.verify_selected_batch"),
             "batch": (["verify", "--batch"],
-                      "assent.__main__.engine.run_dynamic_selection_workflow"),
+                      "assent.__main__.verify_batch"),
             "focused": (["verify", "earlier", "--focus"],
                          "assent.__main__.engine.verify_focused"),
         }
@@ -926,22 +942,6 @@ class TestCommandElapsed(MainTestCase):
                 self.assertIn(
                     "Full verification finished: elapsed 1.0s, exit code 0",
                     out)
-
-        # `run --verify` is one invocation covering both stages, so it reports
-        # one run-shaped total, not a second verify one.
-        self.write_task("earlier", "DONE")
-        with self.injected_clock(), \
-                patch("assent.__main__.engine.run", return_value=0), \
-                patch("assent.__main__.verify_folder_if_needed",
-                      side_effect=verifier):
-            code, out = self.run_main(
-                ["run", "earlier", "--verify", "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(
-            self.total_lines(out),
-            ["Command `assent run` finished: elapsed 2.5s, exit code 0"])
-        self.assertIn("Full verification finished: elapsed 1.0s, exit code 0",
-                      out)
 
     def test_refusal_and_interrupt_keep_their_result_and_report_elapsed(self):
         config = self.write_config()
@@ -959,7 +959,7 @@ class TestCommandElapsed(MainTestCase):
 
         # A handled Ctrl+C keeps its own diagnostic and its 130.
         with self.injected_clock(), patch(
-                "assent.__main__.engine.run_selection_workflow",
+                "assent.__main__.verify_folder",
                 side_effect=KeyboardInterrupt):
             code, out = self.run_main(
                 ["verify", "reviewed", "--config", str(config)])
@@ -986,7 +986,7 @@ class TestCommandElapsed(MainTestCase):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
         with self.injected_clock(), patch(
-                "assent.__main__.engine.run_selection_workflow",
+                "assent.__main__.verify_folder",
                 return_value=0):
             code, _ = self.run_main(
                 ["verify", "reviewed", "--config", str(config)])
@@ -1076,20 +1076,14 @@ class TestHelpPalette(MainTestCase):
                               "project's `.assent/`", help_text)
                 self.assertIn("pass the name, not a path", help_text)
 
-    def test_help_states_the_remainder_syntax_and_the_two_receipt_paths(self):
+    def test_help_states_the_remainder_syntax_and_accept_receipt_paths(self):
         run_help = " ".join(self.help_output(["run"], {}).split())
         self.assertIn("the literal token `...` as the last argument adds every "
                       "remaining discovered plan", run_help)
         self.assertIn("Each PLAN names a directory directly under the project's "
                       "`.assent/`", run_help)
         self.assertIn("pass the name, not a path", run_help)
-        self.assertIn("After the whole run exits zero, run the complete "
-                      "verification that matches the selection", run_help)
-        self.assertIn("With --once or --task it verifies only when that limited "
-                      "run left the single selected plan complete, and an "
-                      "incomplete plan fails the request without writing a "
-                      "receipt", run_help)
-        self.assertNotIn("cannot be used with --once or --task", run_help)
+        self.assertNotIn("--verify", run_help)
 
         accept_help = " ".join(self.help_output(["accept"], {}).split())
         self.assertIn("a fresh PASSED batch receipt is replayed and released "
@@ -1155,8 +1149,7 @@ class TestRemainderSelection(MainTestCase):
             with self.subTest(argv=argv), \
                     patch("assent.__main__.load_config", side_effect=record), \
                     patch("assent.__main__.engine.run", return_value=0), \
-                    patch("assent.__main__.engine.run_selection_workflow",
-                          return_value=0), \
+                    patch("assent.__main__.verify_folder", return_value=0), \
                     patch("assent.__main__.verify_batch", return_value=0), \
                     patch("assent.__main__.clean_folders", return_value=0), \
                     patch("assent.__main__.archive_folder", return_value=0), \
@@ -1223,7 +1216,7 @@ class TestRemainderSelection(MainTestCase):
         self.write_task("alpha", "DONE")
         self.write_task("beta", "DONE")
         self.write_task("ongoing", "TODO")
-        with patch("assent.__main__.engine.run_selection_workflow",
+        with patch("assent.__main__.verify_selected_batch",
                    return_value=0) as batch:
             code, out = self.run_main(
                 ["verify", "beta", "...", "--config", str(config)])
@@ -1235,11 +1228,11 @@ class TestRemainderSelection(MainTestCase):
         config = self.write_config()
         self.write_task("alpha", "DONE")
         self.write_task("ongoing", "TODO")
-        with patch("assent.__main__.engine.run_selection_workflow",
+        with patch("assent.__main__.verify_folder",
                    return_value=0) as folder:
             code, _ = self.run_main(["verify", "...", "--config", str(config)])
         self.assertEqual(code, 0)
-        self.assertEqual(folder.call_args.args[2], ["alpha"])
+        self.assertEqual(folder.call_args.args[0].tasks_name, "alpha")
 
         # A one-folder expansion is not a batch, so --no-bisect is a usage error
         # exactly as it is for a single named folder.

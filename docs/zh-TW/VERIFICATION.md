@@ -13,11 +13,15 @@ Assent 把快速的 task 檢查與完整 candidate verification 分開。這樣�
 的 command；`focused_sweep` 執行完成 plan 內不重複的所有 command。兩者都不寫
 receipt。
 
-可以手動重跑 plan 的 focused checks：
+可以執行單一 task command，或重跑完成 plan 內不重複的 commands：
 
 ```text
-assent verify <PLAN> --focus
+assent verify <PLAN> --focus t003  # focused_test
+assent verify <PLAN> --focus       # focused_sweep
 ```
+
+明示 task 時不限制目前 status；sweep 只包含 `DONE` tasks，且相同 command 只執行
+一次。
 
 Focused pass 只證明受測的 source worktree，不能授權 `accept`。
 
@@ -26,6 +30,9 @@ Focused pass 只證明受測的 source worktree，不能授權 `accept`。
 `full_verify` 與 `assent verify` 會從選定的 source commit 建立臨時 integration
 candidate，再於其中執行專案的 `.assent/verify.py`。它們不會變更 target ref，
 也不會接受成果。
+
+所有明確的 `assent verify` 用法都只執行機械驗證：不進入設定的 workflow role、
+不啟動 AI session，也不自動修復失敗。
 
 ```text
 assent verify <PLAN>     # 單一 folder receipt

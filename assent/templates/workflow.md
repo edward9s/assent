@@ -284,7 +284,11 @@ and cannot authorize acceptance. Complete verification builds a temporary
 integration candidate and runs `.assent/verify.py` outside every AI session.
 Its folder or exact-batch receipt is derived, deletable evidence bound to source
 commits, reconstructed trees, verifier digest, and shared-input digest.
+An explicit `assent verify` runs only the requested mechanical check. It does
+not enter a configured workflow role, start an AI session, or repair a failure.
 
+- `assent verify FOLDER --focus TASK`: that task's focused command, regardless
+  of task status.
 - `assent verify FOLDER --focus`: distinct `DONE`-task focused commands only.
 - `assent verify FOLDER`: one folder candidate and folder receipt.
 - `assent verify A B`: exactly that dependency-ordered selection, one candidate,

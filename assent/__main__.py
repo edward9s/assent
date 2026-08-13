@@ -157,16 +157,6 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Run all unfinished plans in dependency order")
     run_p.add_argument("--jobs", type=_positive_int, metavar="N",
                        help="Max plans to run concurrently with --all (default: 1)")
-    run_p.add_argument(
-        "--verify", action="store_true",
-        help="After the whole run exits zero, run the complete verification "
-             "that matches the selection: one plan with a per-plan receipt, an "
-             "exact multi-plan selection as that selected batch, and --all or "
-             "a bare `...` as the whole-project batch. A failing run is "
-             "returned as-is and verifies nothing. With --once or --task it "
-             "verifies only when that limited run left the single selected "
-             "plan complete, and an incomplete plan fails the request "
-             "without writing a receipt")
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
@@ -178,13 +168,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "report", help="Generate the human-readable run report _report.md "
                        "(zero tokens)")
     verify_p = sub.add_parser(
-        "verify", help="Refresh full integration verification for one plan, "
-                       "an exact selected batch, or every queued plan with "
-                       "--batch")
+        "verify", help="Run a requested mechanical verification without AI "
+                       "review or automatic repair")
     verify_p.add_argument(
         "folder", nargs="*", metavar="PLAN",
-        help="One completed plan, or two or more exact plans to verify "
-             "as one dependency-ordered candidate (omit with --batch)"
+        help="One plan with --focus; otherwise one completed plan or two or "
+             "more exact plans to verify as one dependency-ordered candidate "
+             "(omit with --batch)"
              + _REMAINDER_HELP + " that is finished." + _PLAN_NAME_HELP)
     verify_p.add_argument(
         "--batch", action="store_true",
@@ -193,10 +183,11 @@ def _build_parser() -> argparse.ArgumentParser:
              "conflicting source is reported and, after one confirmation, "
              "skipped together with the plans queued after it")
     verify_p.add_argument(
-        "--focus", action="store_true",
-        help="With exactly one PLAN, rerun its distinct DONE-task focused "
-             "verify commands in the source worktree; this cannot authorize "
-             "accept and creates no receipt")
+        "--focus", nargs="?", const="", metavar="TASK",
+        help="With exactly one PLAN, run the named task's focused verify "
+             "command; omit TASK to sweep the distinct verify commands of "
+             "all DONE tasks. Focused verification cannot authorize accept "
+             "and creates no receipt")
     verify_p.add_argument(
         "--config", default=_DEFAULT_CONFIG, metavar="PATH",
         help=_CONFIG_HELP)
@@ -515,8 +506,7 @@ def _dispatch_check_all(config_path: str, assent_dir, folders: list[str]) -> int
 
 def _dispatch_run_folders(
         config_path: str, folders: list[str], *, once: bool,
-        task_id: str | None,
-        run_level_verify: bool = False) -> int:
+        task_id: str | None) -> int:
     """Run explicitly named folders in order, stopping on the first failure."""
     for folder in folders:
         try:
@@ -524,28 +514,10 @@ def _dispatch_run_folders(
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
-        result = engine.run(
-            cfg, once=once, task_id=task_id,
-            run_level_verify=run_level_verify)
+        result = engine.run(cfg, once=once, task_id=task_id)
         if result != 0:
             return result
     return 0
-
-
-def _dispatch_run_all(config_path: str, assent_dir: Path, jobs: int, *,
-                      run_level_verify: bool) -> int:
-    """Let scheduler children inherit the invocation-level verification owner."""
-    key = "ASSENT_SELECTION_FULL_VERIFY"
-    previous = os.environ.get(key)
-    if run_level_verify:
-        os.environ[key] = "1"
-    try:
-        return run_all(config_path, assent_dir, jobs)
-    finally:
-        if previous is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = previous
 
 
 def _close_run(result: int, *, config_path: str,
@@ -631,10 +603,6 @@ def _dispatch(argv: list[str]) -> int:
             parser.error("run's --once and --task each require at most one PLAN")
         if not args.all_folders and args.jobs is not None:
             parser.error("run's --jobs can only be used with --all")
-        # --once and --task stay legal with --verify: they select exactly one
-        # folder, so the receipt scope is unambiguous, and verify_folder's own
-        # pre-candidate gate refuses a folder the limited run left incomplete.
-
     if args.command == "accept":
         if remainder and args.all_folders:
             parser.error("accept's `...` and --all cannot be used together")
@@ -648,11 +616,11 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "verify":
         if remainder and args.batch:
             parser.error("verify's `...` and --batch cannot be used together")
-        if remainder and args.focus:
+        if remainder and args.focus is not None:
             parser.error("verify's `...` and --focus cannot be used together")
         if args.batch and args.folder:
             parser.error("verify's --batch and PLAN cannot be used together")
-        if args.focus:
+        if args.focus is not None:
             if args.batch:
                 parser.error("verify's --focus and --batch cannot be used together")
             if len(args.folder) != 1:
@@ -738,9 +706,10 @@ def _dispatch(argv: list[str]) -> int:
             return 1
         # The remainder is snapshotted before the explicit prefix starts, so a
         # folder that appears while the prefix runs cannot join this invocation.
-        # The same snapshot is what `--verify` verifies afterwards, so an
-        # explicit prefix plus `...` certifies exactly the set it ran, while a
-        # bare `...` stays a whole-project request like --all.
+        # The same snapshot is what the integration workflow verifies
+        # afterwards, so an explicit prefix plus `...` certifies exactly the
+        # set it ran, while a bare `...` stays a whole-project request like
+        # --all.
         scheduled: list[str] | None = None
         selection: list[str] | None = None
         if remainder:
@@ -757,8 +726,7 @@ def _dispatch(argv: list[str]) -> int:
             assent_dir=assent_dir, selection=selection)
         if args.folders:
             result = _dispatch_run_folders(
-                args.config, args.folders, once=args.once, task_id=args.task,
-                run_level_verify=args.verify)
+                args.config, args.folders, once=args.once, task_id=args.task)
             if result != 0:
                 return result
         if scheduled is not None:
@@ -769,12 +737,10 @@ def _dispatch(argv: list[str]) -> int:
             # dependency order: `...` selects folders, it does not switch the
             # command over to the whole-project scheduler.
             return closeout(_dispatch_run_folders(
-                args.config, scheduled, once=False, task_id=None,
-                run_level_verify=args.verify))
+                args.config, scheduled, once=False, task_id=None))
         if args.all_folders:
-            return closeout(_dispatch_run_all(
-                args.config, assent_dir, args.jobs or 1,
-                run_level_verify=args.verify))
+            return closeout(run_all(
+                args.config, assent_dir, args.jobs or 1))
         if args.folders:
             return closeout(0)
     if args.command == "accept":
@@ -826,12 +792,13 @@ def _dispatch(argv: list[str]) -> int:
                 return 1
         try:
             if args.batch:
-                return engine.run_dynamic_selection_workflow(
-                    args.config, assent_dir)
-            if args.focus:
-                return engine.verify_focused(cfg)
-            return engine.run_selection_workflow(
-                args.config, assent_dir, selected)
+                return verify_batch(args.config, assent_dir)
+            if args.focus is not None:
+                return engine.verify_focused(cfg, args.focus or None)
+            if len(selected) >= 2:
+                return verify_selected_batch(
+                    args.config, assent_dir, selected)
+            return verify_folder(cfg)
         except KeyboardInterrupt:
             print("\nverify interrupted; temporary resources were cleaned up.")
             return 130
@@ -901,11 +868,8 @@ def _dispatch(argv: list[str]) -> int:
         return 1
 
     if args.command == "run":
-        # The automatically selected folder is one folder, so `--verify` gives it
-        # the same folder receipt an explicitly named one would get.
         return _close_run(
-            engine.run(cfg, once=args.once, task_id=args.task,
-                       run_level_verify=args.verify),
+            engine.run(cfg, once=args.once, task_id=args.task),
             config_path=args.config, assent_dir=assent_dir,
             selection=[folder])
     if args.command == "status":

@@ -1384,8 +1384,8 @@ def prepare_sources(main: Path,
     """Classify and reconcile every source a verification is about to depend on.
 
     This is the one gate every verification entry point goes through -- single
-    folder, exact selected batch, dynamic batch, localization prefix, chained
-    ``run --verify``, and ``--focus``.  Each contributing live source worktree is
+    folder, exact selected batch, dynamic batch, localization prefix, and
+    ``--focus``.  Each contributing live source worktree is
     classified against the local manifest and its Assent-owned declared links are
     reconciled, so a missing one is recreated rather than silently depended on
     from a previous ``run``.  UNKNOWN, STALE, an ordinary destination, a foreign

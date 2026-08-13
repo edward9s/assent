@@ -84,6 +84,34 @@ class TestFocusedVerification(GlobalContractsMixin, EngineTestCase):
         self.assertNotIn("verify: " + later, output.getvalue())
         self.assertFalse((worktree / "later.txt").exists())
 
+    def test_focus_task_runs_only_the_named_command_regardless_of_status(self):
+        self.write_task(1, slug="named", status="TODO", verify=_OK)
+        self.write_task(2, slug="other", status="DONE", verify=_FAILV)
+        cfg = self.build()
+        self.prepare_source()
+
+        output = io.StringIO()
+        with self.counted_verify() as calls, contextlib.redirect_stdout(output):
+            result = engine.verify_focused(cfg, "t001")
+
+        self.assertEqual(result, 0, output.getvalue())
+        self.assertEqual(calls, [_OK])
+        self.assertIn("verify plan01 --focus t001: passed", output.getvalue())
+        self.assertFalse((self.plan_dir / "_verification.toml").exists())
+
+    def test_focus_task_refuses_an_unknown_task_without_running_a_command(self):
+        self.write_task(1, status="DONE", verify=_OK)
+        cfg = self.build()
+        self.prepare_source()
+
+        output = io.StringIO()
+        with self.counted_verify() as calls, contextlib.redirect_stdout(output):
+            result = engine.verify_focused(cfg, "t999")
+
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [])
+        self.assertIn("task t999 not found", output.getvalue())
+
     @contextlib.contextmanager
     def counted_verify(self, codes=None):
         """Script every focused command as a counted, subprocess-free result."""

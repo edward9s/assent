@@ -40,7 +40,7 @@ assent run urgent01 ...
 | `run` | 執行 task、plan 與 integration workflow。 |
 | `status` | 查看一個或全部計畫的簡要狀態。 |
 | `report` | 重新產生人類驗收用的報告。 |
-| `verify` | 執行 focused 或完整驗證，不接受成果。 |
+| `verify` | 執行指定的機械驗證，不啟動 AI review、repair 或 accept。 |
 | `accept` | 人類依相符證據發布成果。 |
 | `reconcile` | 準備並完成由人編輯的 Git 衝突修復。 |
 | `rework` | 保留程式碼，重新開啟既有 task。 |
@@ -77,11 +77,15 @@ assent verify <PLAN>
 assent verify A B
 ```
 
-只跑 focused checks，不寫 receipt：
+只跑單一 task check 或 plan 內 `DONE` tasks 的 focused sweep，不寫 receipt：
 
 ```text
+assent verify <PLAN> --focus t003
 assent verify <PLAN> --focus
 ```
+
+明確執行的 `verify` 不會進入設定的 workflow role 或自動修復；失敗會直接回傳給
+呼叫者。
 
 動態驗證目前所有符合條件的計畫：
 
