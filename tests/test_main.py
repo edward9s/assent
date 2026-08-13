@@ -814,6 +814,45 @@ class TestAutomaticIntegrationChaining(MainTestCase):
         integration.assert_called_once_with(
             str(self.config), self.assent_dir, ["alpha", "beta"])
 
+    def test_exact_run_skips_accepted_folder_before_execution_and_integration(self):
+        self.write_task("alpha", "DONE")
+        self.write_task("beta", "DONE")
+
+        def accepted(cfg):
+            if cfg.tasks_name == "alpha":
+                return "alpha/source", "a" * 40, "master"
+            return None
+
+        with patch("assent.__main__._accepted_run_source",
+                   side_effect=accepted), \
+                patch("assent.__main__.engine.run", return_value=0) as run, \
+                patch("assent.__main__.engine.run_selection_workflow",
+                      return_value=0) as integration:
+            code, output = self.run_main([
+                "run", "alpha", "beta", "--config", str(self.config)])
+
+        self.assertEqual(code, 0)
+        self.assertIn("run alpha: already accepted", output)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0].tasks_name, "beta")
+        integration.assert_called_once_with(
+            str(self.config), self.assent_dir, ["beta"])
+
+    def test_exact_run_with_only_accepted_folders_is_a_noop(self):
+        self.write_task("alpha", "DONE")
+        with patch("assent.__main__._accepted_run_source",
+                   return_value=("alpha/source", "a" * 40, "master")), \
+                patch("assent.__main__.engine.run") as run, \
+                patch("assent.__main__.engine.run_selection_workflow") as integration:
+            code, output = self.run_main([
+                "run", "alpha", "--config", str(self.config)])
+
+        self.assertEqual(code, 0)
+        self.assertIn("run alpha: already accepted", output)
+        self.assertIn("no selected folder has anything left to integrate", output)
+        run.assert_not_called()
+        integration.assert_not_called()
+
     def test_all_runs_dynamic_integration_after_success(self):
         self.write_task("alpha", "DONE")
         with patch("assent.__main__.run_all", return_value=0), \

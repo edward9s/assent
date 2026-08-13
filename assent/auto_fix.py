@@ -463,10 +463,14 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _surface_entries(root: Path, prefix: str,
-                     excluded_roots: Iterable[str] = ()) -> list[tuple[str, str]]:
+def _surface_entries(
+        root: Path, prefix: str, excluded_roots: Iterable[str] = (), *,
+        pruned_directories: Iterable[str] = (),
+        ) -> list[tuple[str, str]]:
     """Inventory one directory without following a directory link/reparse point."""
     excluded = set(excluded_roots)
+    pruned = {PurePosixPath(path).as_posix().rstrip("/")
+              for path in pruned_directories}
     entries: list[tuple[str, str]] = []
 
     def walk(directory: Path, relative: PurePosixPath) -> None:
@@ -495,6 +499,8 @@ def _surface_entries(root: Path, prefix: str,
                             "utf-8", errors="surrogatepass")).hexdigest()
                     entries.append((key, f"link:{identity}"))
                 elif child.is_dir(follow_symlinks=False):
+                    if rel_text in pruned:
+                        continue
                     entries.append((key, "directory"))
                     walk(Path(child.path), child_rel)
                 elif child.is_file(follow_symlinks=False):
@@ -515,6 +521,7 @@ def snapshot_project_surface(source_root: Path,
                              *,
                              tasks_dir: Path | None = None,
                              stable_management_files: Iterable[Path] = (),
+                             prune_ignored_source_directories: bool = False,
                              ) -> ProjectSurfaceSnapshot:
     """Snapshot source plus the management surfaces protected during review.
 
@@ -531,7 +538,15 @@ def snapshot_project_surface(source_root: Path,
     if not assent_dir.is_dir():
         raise AssentError(
             f"Auto-fix review management plane is not a directory: {assent_dir}")
-    entries = _surface_entries(source_root, "source", {".git", ".assent"})
+    pruned: tuple[str, ...] = ()
+    if prune_ignored_source_directories:
+        pruned = tuple(
+            entry.rstrip("/") for entry in gitops.ignored_entries(source_root)
+            if entry.endswith("/")
+            and not pathops.is_link(source_root / entry.rstrip("/")))
+    entries = _surface_entries(
+        source_root, "source", {".git", ".assent"},
+        pruned_directories=pruned)
     if primary_root is not None:
         primary_root = Path(primary_root)
         if not primary_root.is_dir():

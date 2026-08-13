@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -666,6 +667,37 @@ class TestAutoFixState(unittest.TestCase):
         after = snapshot_project_surface(source, management)
         self.assertEqual(before.changed_paths(after), (
             "management:new.toml", "source:code.py"))
+
+    def test_review_surface_prunes_ordinary_ignored_directories_only(self):
+        source = self.root / "source"
+        management = self.root / ".assent"
+        source.mkdir()
+        management.mkdir(exist_ok=True)
+        subprocess.run(["git", "init"], cwd=source, check=True,
+                       capture_output=True)
+        (source / ".gitignore").write_text(
+            "build/\n*.g.dart\n", encoding="utf-8")
+        (source / "lib").mkdir()
+        (source / "lib" / "model.dart").write_text(
+            "tracked\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", ".gitignore", "lib/model.dart"], cwd=source,
+            check=True, capture_output=True)
+        (source / "build").mkdir()
+        generated_tree_file = source / "build" / "cache.bin"
+        generated_leaf = source / "lib" / "model.g.dart"
+        generated_tree_file.write_text("before\n", encoding="utf-8")
+        generated_leaf.write_text("before\n", encoding="utf-8")
+
+        before = snapshot_project_surface(
+            source, management, prune_ignored_source_directories=True)
+        generated_tree_file.write_text("after\n", encoding="utf-8")
+        generated_leaf.write_text("after\n", encoding="utf-8")
+        after = snapshot_project_surface(
+            source, management, prune_ignored_source_directories=True)
+
+        self.assertEqual(before.changed_paths(after), (
+            "source:lib/model.g.dart",))
 
     def test_review_surface_excludes_log_and_unrelated_folder(self):
         source = self.root / "source"

@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import (AssentError, auto_fix, engine, folder_scheduler, gitops,
-                    usage)
+                    shared_paths, usage)
 from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult, TokenUsage
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess, wake_stop_waiters)
@@ -215,6 +215,96 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             (self.execution_root() / "src" / "value.txt").read_text(
                 encoding="utf-8"),
             "repaired\n")
+
+    def test_initial_review_pass_after_source_write_is_not_persisted(self):
+        self.write_task(1, status="DONE", scope=("src/value.txt",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "value.txt").write_text("old\n", encoding="utf-8")
+        cfg = self.build(extra_config=(
+            '\n[abilities.quality]\n'
+            'prompt = "Review cumulative quality."\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.reviewer]\nability = ["quality"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nplan = [{ role = "reviewer" }, '
+            '{ action = "focused_sweep" }]\n'))
+        self.commit_all()
+
+        def invalid_pass(_prompt):
+            (self.execution_root() / "src" / "value.txt").write_text(
+                "changed\n", encoding="utf-8")
+            return TaskResult(
+                0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("PASS", ())), False, None)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = engine.run(cfg, auto_fix_adapter=ScriptedAdapter([invalid_pass]))
+
+        self.assertEqual(rc, 1)
+        self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
+        self.assertIn("Auto-fix reviewer verdict rejected", output.getvalue())
+        self.assertIn("source:src/value.txt", output.getvalue())
+        self.assertEqual(
+            (self.execution_root() / "src" / "value.txt").read_text(
+                encoding="utf-8"),
+            "changed\n")
+
+    def test_pre_action_pass_replays_initial_review_and_settles_shared_paths(self):
+        self.write_task(1, status="DONE", scope=("src/value.txt",))
+        source = self.root / "src"
+        source.mkdir()
+        (source / "value.txt").write_text("done\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text(
+            ".assent/\ncache/\n", encoding="utf-8")
+        cfg = self.build(extra_config=(
+            '\n[abilities.quality]\n'
+            'prompt = "Review cumulative quality."\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.reviewer]\nability = ["quality"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nplan = [{ role = "reviewer" }, '
+            '{ action = "focused_sweep" }]\n'))
+        self.commit_all()
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "generated.bin").write_text("local\n", encoding="utf-8")
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(cfg),
+            auto_fix.state_for_review(
+                auto_fix.ReviewRecord("PASS", ()),
+                source_tree=gitops.tree_of(cfg.root, "HEAD"),
+                task_plan_sha256="a" * 64,
+                review_prompt_sha256="b" * 64,
+                reviewer_adapter="claude", reviewer_role="reviewer",
+                reviewer_model="opus", reviewer_effort="high",
+                workflow_step_index=0))
+
+        def review_shared(prompt):
+            self.assertIn("Shared ignored directories", prompt)
+            self.assertIn("assent shared-paths review", prompt)
+            shared_paths.review(
+                self.root, self.execution_root(), none=True,
+                watch=("AGENTS.md",))
+            return TaskResult(
+                0, auto_fix.review_record_json(
+                    auto_fix.ReviewRecord("PASS", ())), False, None)
+
+        passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
+        reviewer = ScriptedAdapter([review_shared])
+        with mock.patch.object(
+                engine, "_verify_subprocess", return_value=passed):
+            self.assertEqual(self.run_quiet(
+                cfg, auto_fix_adapter=reviewer), 0)
+
+        self.assertEqual(
+            shared_paths.classify(self.root, self.execution_root()).state,
+            shared_paths.REVIEWED_NONE)
+        self.assertEqual(
+            auto_fix.read_auto_fix_state(
+                auto_fix.auto_fix_state_path(cfg)).workflow_step_index,
+            1)
 
     def test_selection_verifier_failure_repairs_and_rechecks_in_one_call(self):
         task_path = self.write_task(

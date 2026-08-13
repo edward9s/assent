@@ -4056,7 +4056,8 @@ def _auto_fix_review_identity(
         review_stage: str = "initial",
         round_index: int = 0,
         blockers: tuple[_AutoFixBlockerEvidence, ...] = (),
-    previous: auto_fix.AutoFixState | None = None,
+        previous: auto_fix.AutoFixState | None = None,
+        shared_contract: shared_paths.Contract | None = None,
         ) -> tuple[str, str, str, str]:
     """Return source tree, task-plan digest, prompt text, and prompt digest."""
     source_tree = gitops.tree_of(cfg.root, "HEAD")
@@ -4124,6 +4125,15 @@ def _auto_fix_review_identity(
         identity_material["focused_evidence"] = focused_identity
     identity = _AUTO_FIX_REVIEW_PROMPT.format(
         prior_evidence=_AUTO_FIX_PRIOR_EVIDENCE_IDENTITY, **identity_material)
+    if shared_contract is None:
+        try:
+            shared_contract = _shared_paths_contract(cfg)
+        except AssentError:
+            pass
+    if shared_contract is not None:
+        clause = shared_paths.review_clause(shared_contract)
+        prompt += clause
+        identity += clause
     plan_digest = _contracts_digest(plan, contracts_by_id)
     prompt_digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return source_tree, plan_digest, prompt, prompt_digest
@@ -4187,7 +4197,18 @@ def _auto_fix_surface_snapshot(cfg: Config) -> auto_fix.ProjectSurfaceSnapshot:
         stable.append(source.path)
     return auto_fix.snapshot_project_surface(
         cfg.root, cfg.assent_dir, cfg.source_root,
-        tasks_dir=cfg.tasks_dir, stable_management_files=stable)
+        tasks_dir=cfg.tasks_dir, stable_management_files=stable,
+        prune_ignored_source_directories=True)
+
+
+def _auto_fix_shared_path_changes(
+        before: shared_paths.Contract,
+        after: shared_paths.Contract) -> set[str]:
+    """Return controlled shared-path changes that a review may settle."""
+    if not before.needs_review or not after.settled:
+        return set()
+    paths = set(before.prior_paths) | set(after.paths)
+    return {"management:manifest.toml", *(f"source:{path}" for path in paths)}
 
 
 def _auto_fix_surface_change(
@@ -4350,8 +4371,9 @@ def _run_auto_fix_review_once(
     review_context = "completed_folder"
     initial_quality_review = bool(
         review_context == "completed_folder"
+        and not incomplete
         and initial_role_count
-        and existing is None
+        and (existing is None or existing.verdict == "PASS")
         and round_index < initial_role_count)
 
     if incomplete and existing is None:
@@ -4641,13 +4663,19 @@ def _run_auto_fix_review_once(
             # must not reclassify a focused gate failure as a worker block.
             assert existing is not None
             failure_trigger = existing.failure_trigger
+    try:
+        review_shared_contract = _shared_paths_contract(cfg)
+    except AssentError as e:
+        print(f"Auto-fix shared-path classification failed: {e}")
+        return finish(_AutoFixReviewOutcome(1, human_reason=str(e)))
     source_tree, plan_digest, prompt, prompt_digest = _auto_fix_review_identity(
         cfg, plan, "\n".join(focused_lines),
         focused_identity="\n".join(identity_lines),
         contracts_by_id=contracts_by_id,
         review_context=review_context, review_stage=review_stage,
         round_index=round_index,
-        blockers=blockers, previous=review_previous)
+        blockers=blockers, previous=review_previous,
+        shared_contract=review_shared_contract)
 
     freshness = dict(
         source_tree=source_tree,
@@ -4727,6 +4755,14 @@ def _run_auto_fix_review_once(
         changed = _auto_fix_surface_change(
             baseline, cfg, baseline_head, baseline_status,
             baseline_primary_head, baseline_primary_status)
+        try:
+            shared_contract_after = _shared_paths_contract(cfg)
+        except AssentError:
+            shared_contract_after = None
+        if shared_contract_after is not None:
+            allowed = _auto_fix_shared_path_changes(
+                review_shared_contract, shared_contract_after)
+            changed = tuple(path for path in changed if path not in allowed)
         # A merged reviewer-fixer round may repair source files, so the general
         # before/after comparison still runs for every round but the refusal is
         # decided against the verdict below.  Writes no round may ever make --
@@ -4847,6 +4883,15 @@ def _run_auto_fix_review_once(
             return finish(outcome)
 
         try:
+            try:
+                shared_contract_after = _shared_paths_contract(cfg)
+            except AssentError as shared_error:
+                raise AssentError(
+                    "Shared-path contract could not be classified after review: "
+                    f"{shared_error}") from shared_error
+            shared_refusal = shared_paths.closeout_refusal(shared_contract_after)
+            if shared_refusal:
+                raise AssentError(shared_refusal[:1].upper() + shared_refusal[1:])
             resolved_record = auto_fix.validate_review_findings(record, plan)
             resolved_record = auto_fix.validate_review_transitions(
                 resolved_record, review_stage=review_stage,
@@ -4888,8 +4933,11 @@ def _run_auto_fix_review_once(
                             "A same-session scope amendment did not repair its "
                             "exact path: " + ", ".join(missing_repairs))
             if changed and resolved_record.verdict != "FIXED":
+                shown = ", ".join(changed[:8]) + (
+                    " ..." if len(changed) > 8 else "")
                 raise AssentError(
-                    "A write-capable verdict role that changed source must return FIXED")
+                    "A write-capable verdict role that changed source must return "
+                    f"FIXED; changed paths: {shown}")
             if resolved_record.verdict == "FIXED" and not changed:
                 raise AssentError(
                     "A write-capable verdict role returned FIXED without changing source")
@@ -4913,6 +4961,10 @@ def _run_auto_fix_review_once(
                 blocker_evidence=_auto_fix_blocker_text(blockers),
                 focused_evidence="\n".join(focused_lines))
         except AssentError as e:
+            if record.verdict in ("PASS", "FIXED"):
+                print(f"Auto-fix reviewer verdict rejected: {e}")
+                return finish(_AutoFixReviewOutcome(
+                    1, ledger_previous, str(e)))
             # Preserve the reviewer's concrete output even though it cannot
             # authorize a write-capable task session.
             try:

@@ -15,7 +15,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from assent import AssentError, contracts, engine, inspection
+from assent import AssentError, contracts, engine, gitops, inspection
 from assent.accept import accept_folder
 from assent.adapters.process import wake_stop_waiters
 from assent.archive import (archive_all, archive_folder, archive_recovery_names,
@@ -28,6 +28,7 @@ from assent.folderdeps import (find_unfinished_prerequisites,
                                infer_folder_completion,
                                order_folders_by_dependency,
                                parse_folder_dependency_graph)
+from assent.folder_source import resolve_source_snapshot
 from assent.folder_scheduler import run_all
 from assent.init import init as run_init
 from assent.main import (add_shared_paths_command, shared_paths_review,
@@ -520,6 +521,42 @@ def _dispatch_run_folders(
     return 0
 
 
+def _accepted_run_source(cfg) -> tuple[str, str, str] | None:
+    """Return the current source and target when this folder is integrated."""
+    try:
+        main = gitops.main_worktree(cfg.root)
+        target_branch = gitops.require_current_branch(main)
+        target_tip = gitops.commit_of(main, target_branch)
+        source_branch, source_tip, _worktree = resolve_source_snapshot(
+            main, cfg.tasks_name, cfg.git_excludes, operation="run")
+    except AssentError:
+        return None
+    if not gitops.is_ancestor(main, source_tip, target_tip):
+        return None
+    return source_branch, source_tip, target_branch
+
+
+def _filter_accepted_run_folders(
+        config_path: str, folders: list[str]) -> list[str]:
+    """Skip named folders whose complete current source is already integrated."""
+    pending: list[str] = []
+    for folder in folders:
+        try:
+            cfg = load_config(config_path, folder)
+        except AssentError:
+            pending.append(folder)
+            continue
+        accepted = _accepted_run_source(cfg)
+        if accepted is None:
+            pending.append(folder)
+            continue
+        source_branch, source_tip, target_branch = accepted
+        print(f"run {folder}: already accepted; current source {source_branch} "
+              f"({source_tip[:12]}) is fully contained in {target_branch}. "
+              "Skipping task and plan workflows.")
+    return pending
+
+
 def _close_run(result: int, *, config_path: str,
                assent_dir: Path, selection: list[str] | None) -> int:
     """Complete a successful run with its matching integration workflow.
@@ -531,6 +568,9 @@ def _close_run(result: int, *, config_path: str,
     """
     if result != 0 or os.environ.get("ASSENT_FOLDER_RUN") == "1":
         return result
+    if selection == []:
+        print("Integration workflow: no selected folder has anything left to integrate.")
+        return 0
     if selection:
         incomplete: list[str] = []
         for folder in selection:
@@ -710,6 +750,7 @@ def _dispatch(argv: list[str]) -> int:
         # afterwards, so an explicit prefix plus `...` certifies exactly the
         # set it ran, while a bare `...` stays a whole-project request like
         # --all.
+        had_explicit_folders = bool(args.folders)
         scheduled: list[str] | None = None
         selection: list[str] | None = None
         if remainder:
@@ -721,6 +762,14 @@ def _dispatch(argv: list[str]) -> int:
             selection = expanded if args.folders else None
         elif not args.all_folders:
             selection = list(args.folders)
+        if selection is not None and (had_explicit_folders or remainder):
+            pending_prefix = _filter_accepted_run_folders(
+                args.config, list(args.folders))
+            pending_remainder = _filter_accepted_run_folders(
+                args.config, scheduled or [])
+            args.folders = pending_prefix
+            scheduled = (pending_remainder if scheduled is not None else None)
+            selection = pending_prefix + pending_remainder
         closeout = functools.partial(
             _close_run, config_path=args.config,
             assent_dir=assent_dir, selection=selection)
@@ -741,7 +790,7 @@ def _dispatch(argv: list[str]) -> int:
         if args.all_folders:
             return closeout(run_all(
                 args.config, assent_dir, args.jobs or 1))
-        if args.folders:
+        if had_explicit_folders:
             return closeout(0)
     if args.command == "accept":
         if args.all_folders:
