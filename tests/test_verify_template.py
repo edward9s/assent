@@ -131,9 +131,13 @@ class VerifyTemplateFixture(unittest.TestCase):
 
 class RunUnittestParallelCase(VerifyTemplateFixture):
     def test_packaged_project_test_examples_are_all_commented(self) -> None:
-        lines = {
-            line.strip() for line in TEMPLATE.read_text(encoding="utf-8").splitlines()
-        }
+        template = TEMPLATE.read_text(encoding="utf-8")
+        lines = {line.strip() for line in template.splitlines()}
+        self.assertEqual(
+            template.count("# --- Project test commands begin (project-owned) ---"),
+            1)
+        self.assertEqual(
+            template.count("# --- Project test commands end ---"), 1)
         examples = (
             "run_unittest_parallel()",
             'run("pytest")',

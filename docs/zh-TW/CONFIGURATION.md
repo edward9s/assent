@@ -295,10 +295,12 @@ assent init --test unittest
 assent doctor
 ```
 
-既有 `assent.toml`、`adapter.toml` 或 verifier 與模板不同時，init 會逐檔詢問，
-預設保留原檔。選擇取代會先建立 byte-exact 同層備份；若是專案設定 override，
-取代代表移除 override，改用共享設定。未指定 `--test CHOICE` 而選擇取代 verifier
-時，接著會顯示 0–9 測試選單。所有結果設定都會在實際寫入前完成驗證。
+既有 `assent.toml` 或 `adapter.toml` 與模板不同時，init 會逐檔詢問，預設保留原檔。
+對 verifier 而言，只有標記的專案測試命令區以外才屬於框架；區內命令由專案擁有，
+不參與比對，缺少標記或標記無效則視為框架不同。選擇取代會先建立 byte-exact
+同層備份；若是專案設定 override，取代代表移除 override，改用共享設定。未指定
+`--test CHOICE` 而選擇取代 verifier 時，接著會顯示 0–9 測試選單。所有結果設定
+都會在實際寫入前完成驗證。
 
 Task 檔應使用範圍較小的 focused command。設定有誤時，diagnostic 會指出錯誤的
 key 與來源檔。也請確認 Git 可用、選定的 AI CLI 已登入，而且 model mapping

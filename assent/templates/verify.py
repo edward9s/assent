@@ -6,8 +6,9 @@ it once at the end of a whole run (assent run --verify) or on an explicit
 assent verify. A task file's verify field must never name it -- a task's gate is
 the narrow command proving its own acceptance, and the plan parser refuses a task
 that points here.
-assent init activates exactly one of the commented project-test examples below;
-the packaged template intentionally leaves every project test disabled.
+Commands between the project-test markers are project-owned. Assent init
+compares only the framework outside that block and leaves every example disabled
+until the operator selects one.
 """
 
 import concurrent.futures
@@ -245,8 +246,9 @@ def run_unittest_parallel(start_dir: str = "tests", jobs: int | None = None) -> 
 run("git", "-c", DIFF_CHECK_CONFIG, "diff", "--check")
 check_committed_delta()
 
-# --- Project test choice (assent init activates exactly one line; the
-# numbering matches the assent init menu) ---
+# --- Project test commands begin (project-owned) ---
+# Assent init activates exactly one line; the
+# numbering matches the assent init menu.
 
 # 0. Custom command (anything not covered below):
 #    assent init --test custom:"<your test command>"
@@ -285,6 +287,8 @@ check_committed_delta()
 
 # 9. C / C++ (Make):
 # run("make", "test")
+
+# --- Project test commands end ---
 
 _print_verifier_totals()
 print("verify: OK")

@@ -1598,11 +1598,11 @@ class TestInit(MainTestCase):
                          {"action": "full_verify"})
         self.assertEqual(config["workflow"]["integration"][-1],
                          {"action": "full_verify"})
-        config_after_first_upgrade = user_config.read_bytes()
+        config_after_first_init = user_config.read_bytes()
         with patch("builtins.input", return_value="n"), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run_init(self.root), 0)
-        self.assertEqual(user_config.read_bytes(), config_after_first_upgrade)
+        self.assertEqual(user_config.read_bytes(), config_after_first_init)
         self.assertEqual(
             (self.user_home / "format.md").read_text(encoding="utf-8"),
             (_PROJECT_ROOT / "assent/templates/format.md").read_text(encoding="utf-8"))
@@ -1631,6 +1631,43 @@ class TestInit(MainTestCase):
             self.assertEqual(run_init(self.root), 0)
         self.assertEqual(verifier.read_text(encoding="utf-8"), custom)
         self.assertIn("replacement declined", output.getvalue())
+
+    def test_init_ignores_project_owned_verifier_commands(self):
+        run_init(self.root, test="unittest")
+        verifier = self.root / ".assent" / "verify.py"
+        content = verifier.read_text(encoding="utf-8")
+        begin = "# --- Project test commands begin (project-owned) ---"
+        end = "# --- Project test commands end ---"
+        prefix, remainder = content.split(begin, 1)
+        _commands, suffix = remainder.split(end, 1)
+        customized = (
+            prefix + begin + "\nrun(\"python\", \"project_check.py\")\n"
+            + end + suffix)
+        verifier.write_text(customized, encoding="utf-8")
+
+        output = io.StringIO()
+        with patch("builtins.input",
+                   side_effect=AssertionError("unexpected replacement prompt")), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root), 0)
+
+        self.assertEqual(verifier.read_text(encoding="utf-8"), customized)
+        self.assertIn("framework already current", output.getvalue())
+
+    def test_init_prompts_when_verifier_framework_differs(self):
+        run_init(self.root, test="unittest")
+        verifier = self.root / ".assent" / "verify.py"
+        customized = verifier.read_text(encoding="utf-8").replace(
+            'print("verify: OK")', 'print("project verify: OK")')
+        verifier.write_text(customized, encoding="utf-8")
+
+        output = io.StringIO()
+        with patch("builtins.input", return_value="n"), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root), 0)
+
+        self.assertEqual(verifier.read_text(encoding="utf-8"), customized)
+        self.assertIn("different verifier framework", output.getvalue())
 
     def test_test_option_backs_up_and_replaces_existing_verifier(self):
         run_init(self.root, test="unittest")
@@ -1666,7 +1703,7 @@ class TestInit(MainTestCase):
         self.assertIn('\nrun("pytest")\n', verifier.read_text(encoding="utf-8"))
         self.assertIn("Choose the project's test command", output.getvalue())
 
-    def test_invalid_existing_toml_does_not_partially_upgrade_managed_files(self):
+    def test_invalid_existing_toml_prevents_partial_initialization(self):
         run_init(self.root, test="unittest")
         # A stale contract would be refreshed by a successful init; here the
         # unparsable user config must stop everything before the first write.

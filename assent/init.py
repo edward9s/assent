@@ -1,13 +1,4 @@
-"""Generate and safely upgrade the user home and a project's ``.assent``.
-
-The three contracts and shared settings belong to the machine's ``~/.assent``.
-Initialization refreshes the contracts and offers to replace differing shared
-settings only after explicit confirmation and a byte-exact backup. The generated
-verifier separates its
-managed runner from the project-owned test region; an explicit repeated
-``--test`` likewise backs up and replaces it.  Project overrides, the AGENTS
-bridge, and unrelated ignore entries remain project-owned.
-"""
+"""Initialize Assent user contracts and project support files safely."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,6 +26,8 @@ _BRIDGE_LINE = (
 )
 _GITIGNORE_LINES = [".assent/"]
 _DIRECT_API_DEFAULT = object()
+_PROJECT_TESTS_BEGIN = "# --- Project test commands begin (project-owned) ---"
+_PROJECT_TESTS_END = "# --- Project test commands end ---"
 
 
 @dataclass(frozen=True)
@@ -270,6 +263,18 @@ def _render_verifier(template: str, selection: _TestSelection) -> str:
     return template.replace(marker, selection.verifier_line, 1)
 
 
+def _verifier_framework(content: str) -> str | None:
+    """Return verifier content outside its project-owned command block."""
+    lines = content.splitlines(keepends=True)
+    begins = [index for index, line in enumerate(lines)
+              if line.rstrip("\r\n") == _PROJECT_TESTS_BEGIN]
+    ends = [index for index, line in enumerate(lines)
+            if line.rstrip("\r\n") == _PROJECT_TESTS_END]
+    if len(begins) != 1 or len(ends) != 1 or begins[0] >= ends[0]:
+        return None
+    return "".join(lines[:begins[0]] + lines[ends[0] + 1:])
+
+
 def _plan_file(path: Path, content: str, description: str
                ) -> tuple[str, str]:
     """Return the outcome for a managed file without changing it."""
@@ -438,7 +443,7 @@ def _apply(target: Path, content: str, plan: tuple[str, str]) -> None:
 
 def init(path: str | Path = ".",
          test: str | Sequence[str] | None | object = _DIRECT_API_DEFAULT) -> int:
-    """Initialize or upgrade the user home and a Git project.
+    """Initialize the user home and a Git project.
 
     Returns a CLI-style exit code.  The shared settings and the two contracts
     live in ``~/.assent``; the project keeps only what is genuinely its own.
@@ -464,6 +469,10 @@ def init(path: str | Path = ".",
         project_backups: list[tuple[Path, bytes, Path]] = []
         verifier_exists = verifier.exists()
         verify_template = _template("verify.py")
+        verifier_framework = _verifier_framework(verify_template)
+        if verifier_framework is None:
+            raise AssentError(
+                "built-in verifier template has invalid project-test markers")
         if verifier_exists:
             if not verifier.is_file():
                 raise AssentError(f".assent/verify.py is not a file: {verifier}")
@@ -483,15 +492,13 @@ def init(path: str | Path = ".",
                         "updated",
                         f"{verifier} ({selection.label} selected; prior file backed up)")
             else:
-                current_builtin = any(
-                    existing_verifier == _render_verifier(verify_template, selection)
-                    for selection in _BUILTIN_TESTS.values())
-                if current_builtin:
+                existing_framework = _verifier_framework(existing_verifier)
+                if existing_framework == verifier_framework:
                     verifier_content = existing_verifier
                     verifier_plan = (
-                        "preserved", f"{verifier} (already current)")
+                        "preserved", f"{verifier} (framework already current)")
                 elif _confirm(
-                        f"{verifier} differs from the current verifier template. "
+                        f"{verifier} has a different verifier framework. "
                         "Back it up and replace it?", default=False):
                     selection = _resolve_selection(None)
                     verifier_content = _render_verifier(
@@ -507,7 +514,7 @@ def init(path: str | Path = ".",
                     verifier_plan = (
                         "preserved", f"{verifier} (replacement declined)")
                     warnings.append(
-                        f"{verifier} differs from the current verifier template "
+                        f"{verifier} has a different verifier framework "
                         "and remains unchanged")
         else:
             selection = (_BUILTIN_TESTS["unittest"] if direct_api_default
@@ -644,7 +651,7 @@ def init(path: str | Path = ".",
 
         # Every validation and read above happens before the first
         # write, so a bad selection or an unparsable TOML file leaves neither
-        # the user home nor the project half-upgraded.
+        # the user home nor the project partially initialized.
         try:
             user_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:

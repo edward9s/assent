@@ -311,12 +311,15 @@ assent init --test unittest
 assent doctor
 ```
 
-When an existing `assent.toml`, `adapter.toml`, or verifier differs from its
-template, init asks about that file separately and defaults to preserving it.
-Replacement creates a byte-exact sibling backup first; for a project settings
-override, replacement means removing the override so the shared settings apply.
-Replacing a verifier without `--test CHOICE` opens the 0-9 test menu. Init
-validates the resulting effective settings before writing anything.
+When an existing `assent.toml` or `adapter.toml` differs from its template, init
+asks about that file separately and defaults to preserving it. For a verifier,
+only content outside the marked project-test command block is framework; commands
+inside the block are project-owned and ignored by this comparison. Missing or
+invalid markers count as a framework difference. Replacement creates a
+byte-exact sibling backup first; replacing a project settings override removes
+it so the shared settings apply. Replacing a verifier without `--test CHOICE`
+opens the 0-9 test menu. Init validates the resulting effective settings before
+writing anything.
 
 Task files should use narrower focused commands. If configuration fails, the
 diagnostic names the invalid key and source file. Also confirm that Git is
