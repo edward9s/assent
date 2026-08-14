@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import subprocess
 import tempfile
 import tomllib
 from collections.abc import Sequence
@@ -18,11 +19,15 @@ _BRIDGE_MARKER = "<!-- assent-instructions -->"
 _BRIDGE_LINE = (
     "- When using assent, first read `~/.assent/instructions.md`, the global "
     "working instructions shared by every project; a scheduled worktree "
-    "session uses the absolute path the scheduler provides. An AI session "
-    "never initiates the full suite or `.assent/verify.py`; the scheduler owns "
-    "workflow `full_verify`, and an interactive session runs complete "
-    "verification only when the human explicitly requests it. "
+    "session uses the absolute path the scheduler provides. "
     f"{_BRIDGE_MARKER}"
+)
+_EXPANDED_BRIDGE_LINE = (
+    _BRIDGE_LINE.removesuffix(f"{_BRIDGE_MARKER}")
+    + "An AI session never initiates the full suite or `.assent/verify.py`; "
+      "the scheduler owns workflow `full_verify`, and an interactive session "
+      "runs complete verification only when the human explicitly requests it. "
+    + _BRIDGE_MARKER
 )
 _GITIGNORE_LINES = [".assent/"]
 _DIRECT_API_DEFAULT = object()
@@ -357,20 +362,69 @@ def _agents_plan(root: Path) -> tuple[str, tuple[str, str]]:
         return content, ("created", str(target))
     existing = _read_file(target, "AGENTS.md")
     if _BRIDGE_MARKER in existing:
-        # An older init wrote a bridge pointing at the project copy of the
-        # instructions; replace that one line in place and leave every other
-        # line of the project's own AGENTS.md exactly as its author wrote it.
-        updated = "\n".join(
-            _BRIDGE_LINE if _BRIDGE_MARKER in line else line
-            for line in existing.splitlines())
-        if existing.endswith("\n"):
-            updated += "\n"
+        # Only the obsolete project-local pointer requires migration. A bridge
+        # that already points to the installed contract stays byte-for-byte
+        # stable when that contract's wording evolves.
+        if any(_BRIDGE_MARKER in line and "`.assent/instructions.md`" in line
+               for line in existing.splitlines()):
+            updated = "\n".join(
+                _BRIDGE_LINE if (_BRIDGE_MARKER in line
+                                 and "`.assent/instructions.md`" in line)
+                else line
+                for line in existing.splitlines())
+            if existing.endswith("\n"):
+                updated += "\n"
+        else:
+            updated = existing
     else:
         updated = existing.rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
     if updated == existing:
         return existing, ("preserved",
                           f"{target} (instructions bridge already current)")
     return updated, ("updated", str(target))
+
+
+def recover_expanded_bridge_drift(root: Path) -> bool:
+    """Restore one known init-generated bridge-only edit to exact HEAD bytes."""
+    root = Path(root)
+    target = root / "AGENTS.md"
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--", "AGENTS.md"], cwd=root,
+            capture_output=True, encoding="utf-8", errors="replace")
+        if (status.returncode != 0
+                or status.stdout.rstrip("\r\n") != " M AGENTS.md"):
+            return False
+        head = subprocess.run(
+            ["git", "show", "HEAD:AGENTS.md"], cwd=root, capture_output=True)
+        if head.returncode != 0:
+            return False
+        working = target.read_bytes()
+    except OSError:
+        return False
+
+    head_lines = head.stdout.splitlines()
+    working_lines = working.splitlines()
+    if len(head_lines) != len(working_lines):
+        return False
+    differences = [
+        index for index, pair in enumerate(zip(head_lines, working_lines))
+        if pair[0] != pair[1]]
+    if len(differences) != 1:
+        return False
+    index = differences[0]
+    try:
+        head_bridge = head_lines[index].decode("utf-8", errors="strict")
+        working_bridge = working_lines[index].decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+    if (head_bridge != _BRIDGE_LINE
+            or working_bridge != _EXPANDED_BRIDGE_LINE):
+        return False
+    restored = subprocess.run(
+        ["git", "checkout-index", "-f", "--", "AGENTS.md"], cwd=root,
+        capture_output=True)
+    return restored.returncode == 0
 
 
 def _gitignore_plan(root: Path) -> tuple[str, tuple[str, str]]:

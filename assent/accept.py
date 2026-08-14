@@ -143,7 +143,7 @@ def _confirm_settled(folder: str, labels: list[str], lines: list[str],
     reading, so every reason is named in one prompt.  Anything other than
     exactly "y"/"Y", including EOF (no TTY or closed stdin), declines.
     """
-    print(f"accept {folder}: the folder auto-fix state is "
+    print(f"accept {folder}: the plan auto-fix state is "
           f"{' and '.join(labels)}.")
     for line in lines:
         print(line)

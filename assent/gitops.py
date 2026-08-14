@@ -1089,6 +1089,86 @@ def abort_merge(worktree: Path) -> None:
     _git(worktree, "merge", "--abort")
 
 
+def _reconstructed_merge(worktree: Path, source_tip: str,
+                         target_tip: str) -> tuple[str, list[str]]:
+    result = _run_git(
+        worktree, "merge-tree", "--write-tree", source_tip, target_tip)
+    if result.returncode not in (0, 1):
+        raise AssentError(
+            "git merge-tree could not reconstruct the stale reconciliation "
+            f"(exit code {result.returncode}): "
+            f"{result.stderr.strip() or result.stdout.strip()}")
+    lines = result.stdout.splitlines()
+    if not lines or not _OBJECT_ID_RE.fullmatch(lines[0].strip()):
+        raise AssentError(
+            "git merge-tree returned no reconstructed reconciliation tree")
+    tree = lines[0].strip()
+    expected_unmerged = sorted(
+        line for line in lines[1:]
+        if re.fullmatch(r"\d+ [0-9a-f]+ [123]\t.+", line))
+    return tree, expected_unmerged
+
+
+def merge_index_matches_generated(worktree: Path, source_tip: str,
+                                  target_tip: str) -> bool:
+    """Prove that the in-progress merge index is still Git's result."""
+    tree, expected_unmerged = _reconstructed_merge(
+        worktree, source_tip, target_tip)
+    conflicts = tuple(conflict_paths(worktree))
+    actual_unmerged = sorted(
+        line for line in _git(worktree, "ls-files", "--unmerged").splitlines()
+        if line)
+    if actual_unmerged != expected_unmerged:
+        return False
+    changed_from_tree = tuple(sorted(
+        line for line in _git(
+            worktree, "diff", "--cached", "--name-only", tree, "--"
+        ).splitlines() if line))
+    if changed_from_tree != conflicts:
+        return False
+    return True
+
+
+def merge_scene_is_unedited(worktree: Path, source_tip: str,
+                            target_tip: str) -> bool:
+    """Prove that an in-progress merge still equals Git's generated result."""
+    if not merge_index_matches_generated(worktree, source_tip, target_tip):
+        return False
+    tree, _ = _reconstructed_merge(worktree, source_tip, target_tip)
+    conflicts = tuple(conflict_paths(worktree))
+    status = working_tree_status(worktree)
+    if status.untracked or set(status.unstaged) - set(conflicts):
+        return False
+
+    def normalized_markers(data: bytes) -> bytes:
+        lines = data.splitlines()
+        normalized = [
+            b"<<<<<<<" if line.startswith(b"<<<<<<< ")
+            else b">>>>>>>" if line.startswith(b">>>>>>> ")
+            else line
+            for line in lines
+        ]
+        return b"\n".join(normalized) + (
+            b"\n" if data.endswith((b"\n", b"\r")) else b"")
+
+    for relative in conflicts:
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts:
+            return False
+        current = worktree / path
+        if not current.is_file() or current.is_symlink():
+            return False
+        expected = subprocess.run(
+            ["git", "cat-file", "blob", f"{tree}:{_normalize(relative)}"],
+            cwd=worktree, capture_output=True)
+        if expected.returncode != 0:
+            return False
+        if normalized_markers(current.read_bytes()) != normalized_markers(
+                expected.stdout):
+            return False
+    return True
+
+
 def stage_paths(worktree: Path, paths: Sequence[str]) -> None:
     """Stage exactly the named paths, including a path the human deleted."""
     if not paths:

@@ -93,7 +93,7 @@ class TestParseTaskFile(PlanTestCase):
         self.assertEqual(read_selection_workflow_state(self.dir), state)
         self.assertEqual(
             selection_workflow_state_path(self.dir).name,
-            "_selection_workflow.toml")
+            "_integration_workflow.toml")
 
     def test_workflow_cursors_reject_invalid_status_and_phase(self):
         folder = WorkflowState(

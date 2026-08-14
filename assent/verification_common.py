@@ -435,6 +435,20 @@ def _mentions_path_below(text: str, relative: str) -> bool:
     return re.search(pattern, text) is not None
 
 
+def mentioned_ordinary_ignored_directories(
+        output: str, worktrees: Iterable[Path | None]) -> tuple[str, ...]:
+    """Ignored directories whose descendant path the output actually names."""
+    text = output.replace("\\", "/")
+    named: set[str] = set()
+    for worktree in worktrees:
+        if worktree is None:
+            continue
+        for relative in ordinary_ignored_directories(worktree):
+            if _mentions_path_below(text, relative):
+                named.add(relative)
+    return tuple(sorted(named))
+
+
 def ignored_input_diagnosis(output: str,
                             worktrees: Iterable[Path | None]) -> str:
     """Explain a verifier failure that names a physically ignored source path.
@@ -450,14 +464,7 @@ def ignored_input_diagnosis(output: str,
     trees are neither listed nor traversed.  An empty string means the failure
     says nothing about an ignored input.
     """
-    text = output.replace("\\", "/")
-    named: set[str] = set()
-    for worktree in worktrees:
-        if worktree is None:
-            continue
-        for relative in ordinary_ignored_directories(worktree):
-            if _mentions_path_below(text, relative):
-                named.add(relative)
+    named = mentioned_ordinary_ignored_directories(output, worktrees)
     if not named:
         return ""
     listed = ", ".join(f"{relative}/" for relative in sorted(named))

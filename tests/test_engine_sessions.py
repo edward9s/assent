@@ -27,11 +27,13 @@ from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess, wake_stop_waiters)
 from assent.config import load_config
 from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
-                         read_entries, read_workflow_state, set_status,
+                         read_entries, read_workflow_state,
+                         SelectionWorkflowState, set_status,
                          workflow_state_path)
 from assent.verification_common import FullVerifyEvidence
 from tests.engine_support import (EngineTestCase, ScriptedAdapter, ok_result,
                                   task_text)
+from tests.link_support import make_directory_link
 from tests.test_contracts import GlobalContractsMixin
 
 
@@ -178,6 +180,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         source = self.root / "src"
         source.mkdir()
         (source / "value.txt").write_text("old\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text(
+            ".assent/\ncache/\n", encoding="utf-8")
         cfg = self.build(extra_config=(
             '\n[abilities.quality]\n'
             'prompt = "Review cumulative quality before focused_sweep."\n'
@@ -187,12 +191,17 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             '[workflow]\nplan = [{ role = "any_name" }, '
             '{ action = "focused_sweep" }]\n'))
         self.commit_all()
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "generated.bin").write_text("local\n", encoding="utf-8")
 
         def repair(prompt):
             self.assertIn(
                 "Review cumulative quality before focused_sweep.", prompt)
             self.assertIn(
                 "focused_sweep follows the initial plan quality review", prompt)
+            self.assertIn("terminal assent.auto_fix_review JSON", prompt)
+            self.assertIn("Do not run `assent shared-paths review`", prompt)
             (self.execution_root() / "src" / "value.txt").write_text(
                 "repaired\n", encoding="utf-8")
             finding = auto_fix.ReviewFinding(
@@ -200,7 +209,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 "The existing task requirement is violated by the old value.")
             return TaskResult(
                 0, auto_fix.review_record_json(
-                    auto_fix.ReviewRecord("FIXED", (finding,))), False, None)
+                    auto_fix.ReviewRecord(
+                        "FIXED", (finding,),
+                        auto_fix.SharedPathsDecision((), ("AGENTS.md",)))),
+                False, None)
 
         passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
         reviewer = ScriptedAdapter([repair])
@@ -215,6 +227,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             (self.execution_root() / "src" / "value.txt").read_text(
                 encoding="utf-8"),
             "repaired\n")
+        self.assertEqual(
+            shared_paths.classify(self.root, self.execution_root()).state,
+            shared_paths.REVIEWED_NONE)
 
     def test_initial_review_pass_after_source_write_is_not_persisted(self):
         self.write_task(1, status="DONE", scope=("src/value.txt",))
@@ -246,6 +261,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
         self.assertIn("Auto-fix reviewer verdict rejected", output.getvalue())
         self.assertIn("source:src/value.txt", output.getvalue())
+        self.assertTrue(
+            gitops.working_tree_status(
+                self.execution_root(), cfg.git_excludes).is_clean)
         self.assertEqual(
             (self.execution_root() / "src" / "value.txt").read_text(
                 encoding="utf-8"),
@@ -258,7 +276,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         (source / "value.txt").write_text("done\n", encoding="utf-8")
         (self.root / ".gitignore").write_text(
             ".assent/\ncache/\n", encoding="utf-8")
-        cfg = self.build(extra_config=(
+        cfg = self.build(retry=2, extra_config=(
             '\n[abilities.quality]\n'
             'prompt = "Review cumulative quality."\n'
             'writes = true\nproduces_verdict = true\n'
@@ -270,6 +288,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         cache = self.root / "cache"
         cache.mkdir()
         (cache / "generated.bin").write_text("local\n", encoding="utf-8")
+        worktree = gitops.ensure_worktree(self.root, "plan01")
+        gitops.ensure_branch(worktree, "plan01/")
+        make_directory_link(worktree / "cache", cache)
         auto_fix.write_auto_fix_state(
             auto_fix.auto_fix_state_path(cfg),
             auto_fix.state_for_review(
@@ -283,24 +304,42 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
         def review_shared(prompt):
             self.assertIn("Shared ignored directories", prompt)
-            self.assertIn("assent shared-paths review", prompt)
-            shared_paths.review(
-                self.root, self.execution_root(), none=True,
-                watch=("AGENTS.md",))
+            self.assertIn("terminal assent.auto_fix_review JSON", prompt)
+            self.assertIn("unreviewed same-primary directory link: cache", prompt)
+            self.assertIn("omits existing ignored directory link", prompt)
             return TaskResult(
                 0, auto_fix.review_record_json(
-                    auto_fix.ReviewRecord("PASS", ())), False, None)
+                    auto_fix.ReviewRecord(
+                        "PASS", (),
+                        auto_fix.SharedPathsDecision(
+                            ("cache",), ("AGENTS.md",)))),
+                False, None)
 
         passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
-        reviewer = ScriptedAdapter([review_shared])
+        missing_decision = TaskResult(
+            0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)
+        omitted_link = TaskResult(
+            0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord(
+                    "PASS", (),
+                    auto_fix.SharedPathsDecision((), ("AGENTS.md",)))),
+            False, None)
+        reviewer = ScriptedAdapter(
+            [missing_decision, omitted_link, review_shared])
         with mock.patch.object(
                 engine, "_verify_subprocess", return_value=passed):
             self.assertEqual(self.run_quiet(
                 cfg, auto_fix_adapter=reviewer), 0)
 
+        self.assertEqual(len(reviewer.calls), 3)
         self.assertEqual(
             shared_paths.classify(self.root, self.execution_root()).state,
-            shared_paths.REVIEWED_NONE)
+            shared_paths.REVIEWED_PATHS)
+        self.assertEqual(
+            shared_paths.classify(
+                self.root, self.execution_root()).paths,
+            ("cache",))
         self.assertEqual(
             auto_fix.read_auto_fix_state(
                 auto_fix.auto_fix_state_path(cfg)).workflow_step_index,
@@ -412,7 +451,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(reviewed["models"][0]["provider_model"],
                          "claude-review")
 
-    def test_selection_target_conflict_uses_ai_reconcile_before_full_verify(self):
+    def test_selection_target_conflict_resumes_ai_reconcile_before_full_verify(self):
         task_path = self.write_task(
             1, status="DONE", scope=("src/value.txt",))
         source = self.root / "src"
@@ -466,7 +505,36 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             return reviewer_and_fixer
 
         with mock.patch("assent.engine.get_adapter",
-                        side_effect=configured_adapter):
+                        side_effect=configured_adapter), mock.patch(
+                "assent.engine.reconcile.automatic_reconcile_continue_locked",
+                side_effect=AssentError("simulated closeout interruption")):
+            self.assertEqual(engine.run_selection_workflow(
+                str(self.root / ".assent" / "assent.toml"),
+                self.root / ".assent", ["plan01"]), 1)
+
+        def approve_existing(prompt):
+            managed = gitops.reconcile_worktree_path(self.root, "plan01")
+            self.assertEqual(
+                (managed / "src" / "value.txt").read_text(encoding="utf-8"),
+                "resolved automatically\n")
+            data = json.loads(auto_fix.review_record_json(
+                auto_fix.ReviewRecord("FIXED", (finding,))))
+            data["findings"][0]["kind"] = "target_alone"
+            return TaskResult(0, json.dumps(data), False, None)
+
+        resumed_reviewer = ScriptedAdapter([approve_existing])
+        with mock.patch("assent.engine.get_adapter",
+                        return_value=resumed_reviewer), mock.patch(
+                "assent.engine._verify_focused_locked", return_value=1):
+            code = engine.run_selection_workflow(
+                str(self.root / ".assent" / "assent.toml"),
+                self.root / ".assent", ["plan01"])
+
+        self.assertEqual(code, 1)
+        with mock.patch(
+                "assent.engine.get_adapter",
+                side_effect=AssertionError(
+                    "a persisted merged repair must not rerun its reviewer")):
             code = engine.run_selection_workflow(
                 str(self.root / ".assent" / "assent.toml"),
                 self.root / ".assent", ["plan01"])
@@ -478,9 +546,127 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             (source_tip, target_tip))
         self.assertEqual(gitops.commit_of(self.root, "HEAD"), target_tip)
         self.assertEqual(len(reviewer_and_fixer.calls), 1)
+        self.assertEqual(len(resumed_reviewer.calls), 1)
         self.assertIn("codex", requested_adapters)
         self.assertIn("do not run tests", reviewer_and_fixer.calls[0][0].lower())
         self.assertEqual(parse_task_file(task_path).status, "DONE")
+
+    def test_selection_focused_failure_reviews_a_named_missing_shared_input(self):
+        self.write_task(1, status="DONE")
+        (self.root / ".gitignore").write_text(
+            ".assent/\ncache/\n", encoding="utf-8")
+        extra = (
+            '\n[abilities.integration_review]\n'
+            'prompt = "Review exact integration evidence."\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.integration_reviewer]\n'
+            'ability = ["integration_review"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nintegration = [{ action = "full_verify" }, '
+            '{ role = "integration_reviewer", adapter = "claude" }, '
+            '{ action = "full_verify" }]\n')
+        cfg = self.build(extra_config=extra)
+        self.commit_all()
+        worktree = gitops.ensure_worktree(self.root, "plan01")
+        source_cfg = cfg.for_worktree(worktree)
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "generated.dart").write_text(
+            "generated\n", encoding="utf-8")
+        shared_paths.review(
+            self.root, worktree, none=True, watch=("AGENTS.md",))
+
+        record = auto_fix.ReviewRecord(
+            "PASS", (), auto_fix.SharedPathsDecision(
+                ("cache",), ("AGENTS.md",)))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(record), False, None)])
+        state = SelectionWorkflowState(
+            ("plan01",), "master", gitops.commit_of(self.root, "HEAD"),
+            (gitops.commit_of(worktree, "HEAD"),), 1,
+            action="full_verify", action_status="FAILED",
+            action_candidate_tree="a" * 40, action_exit_code=1,
+            action_evidence=("VERIFIER_FAILED",))
+        step = cfg.workflow_integration[1]
+
+        with mock.patch("assent.engine.get_adapter", return_value=reviewer):
+            recovered = engine._recover_selection_focused_shared_paths(
+                source_cfg, state, step,
+                "Error reading cache/generated.dart: file not found",
+                sleep=lambda _seconds: None,
+                now=lambda: datetime.now(timezone.utc))
+
+        self.assertTrue(recovered)
+        self.assertEqual(
+            shared_paths.classify(self.root, worktree).paths, ("cache",))
+        shared_paths.require_directory_link_agreement(
+            self.root, worktree,
+            shared_paths.classify(self.root, worktree))
+        self.assertEqual(len(reviewer.calls), 1)
+        self.assertIn("cache", reviewer.calls[0][0])
+
+    def test_selection_reviews_a_profile_switch_before_focused_closeout(self):
+        self.write_task(1, status="DONE")
+        (self.root / ".gitignore").write_text(
+            ".assent/\ncache/\n", encoding="utf-8")
+        (self.root / "deps.txt").write_text("first\n", encoding="utf-8")
+        extra = (
+            '\n[abilities.integration_review]\n'
+            'prompt = "Review exact integration evidence."\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.integration_reviewer]\n'
+            'ability = ["integration_review"]\n'
+            'model = "prime"\neffort = "heavy"\n'
+            '[workflow]\nintegration = [{ action = "full_verify" }, '
+            '{ role = "integration_reviewer", adapter = "claude" }, '
+            '{ action = "full_verify" }]\n')
+        cfg = self.build(extra_config=extra)
+        self.commit_all()
+        worktree = gitops.ensure_worktree(self.root, "plan01")
+        source_cfg = cfg.for_worktree(worktree)
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "generated.dart").write_text(
+            "generated\n", encoding="utf-8")
+
+        shared_paths.review(
+            self.root, worktree, paths=("cache",), watch=("deps.txt",))
+        (worktree / "deps.txt").write_text("second\n", encoding="utf-8")
+        shared_paths.review(
+            self.root, worktree, none=True, watch=("deps.txt",))
+        (worktree / "deps.txt").write_text("first\n", encoding="utf-8")
+        shared_paths.prepare_worktree(self.root, worktree)
+        (worktree / "deps.txt").write_text("second\n", encoding="utf-8")
+        self.assertEqual(
+            shared_paths.prepare_worktree(self.root, worktree).state,
+            shared_paths.STALE)
+
+        record = auto_fix.ReviewRecord(
+            "PASS", (), auto_fix.SharedPathsDecision(
+                ("cache",), ("deps.txt",)))
+        reviewer = ScriptedAdapter([
+            TaskResult(0, auto_fix.review_record_json(record), False, None)])
+        state = SelectionWorkflowState(
+            ("plan01",), "master", gitops.commit_of(self.root, "HEAD"),
+            (gitops.commit_of(worktree, "HEAD"),), 1,
+            action="full_verify", action_status="FAILED",
+            action_candidate_tree="a" * 40, action_exit_code=1,
+            action_evidence=("TARGET_CONFLICT",))
+        step = cfg.workflow_integration[1]
+
+        with mock.patch("assent.engine.get_adapter", return_value=reviewer):
+            engine._recover_pending_selection_shared_paths(
+                (source_cfg,), state, step,
+                sleep=lambda _seconds: None,
+                now=lambda: datetime.now(timezone.utc))
+
+        settled = shared_paths.classify(self.root, worktree)
+        self.assertEqual(settled.state, shared_paths.REVIEWED_PATHS)
+        self.assertEqual(settled.paths, ("cache",))
+        shared_paths.require_directory_link_agreement(
+            self.root, worktree, settled)
+        self.assertEqual(len(reviewer.calls), 1)
+        self.assertIn("Worktree preparation found", reviewer.calls[0][0])
 
     def test_selection_merged_fail_without_edits_skips_final_full_verify(self):
         task_path = self.write_task(1, status="TODO", scope=("src/",))
@@ -555,7 +741,77 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
         self.assertEqual(failed.reviewer_role, review.role)
         self.assertEqual(failed.reviewer_step_index, 0)
-        self.assertIsNone(engine._auto_fix_recovery_config_error(cfg, failed))
+        reconciled, note = engine._reconcile_auto_fix_recovery_config(
+            cfg, failed)
+        self.assertEqual(reconciled, failed)
+        self.assertIsNone(note)
+
+    def test_changed_plan_review_order_restarts_cursor_and_keeps_findings(self):
+        task_path = self.write_task(1, status="DONE")
+        roles = (
+            '[abilities.first_review]\n'
+            'prompt = "First review."\n'
+            'writes = false\nproduces_verdict = true\n'
+            '[abilities.second_review]\n'
+            'prompt = "Second review."\n'
+            'writes = true\nproduces_verdict = true\n'
+            '[roles.first_reviewer]\n'
+            'ability = ["first_review"]\nmodel = "core"\n'
+            '[roles.second_reviewer]\n'
+            'ability = ["second_review"]\nmodel = "prime"\n')
+        cfg = self.build(extra_config=(
+            roles + '[workflow]\nplan = ['
+            '{ role = "first_reviewer", adapter = "codex" }, '
+            '{ action = "focused_sweep" }, '
+            '{ role = "second_reviewer", adapter = "codex" }, '
+            '{ action = "focused_sweep" }]\n'))
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        review = tuple(
+            step for step in cfg.workflow_plan
+            if isinstance(step, engine.WorkflowPlanStep))[1]
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/value.txt", "Pending finding", "Durable evidence.")
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (finding,)),
+            source_tree=gitops.tree_of(cfg.root, "HEAD"),
+            task_plan_sha256=auto_fix.sha256_files(
+                item.path for item in plan.tasks),
+            review_prompt_sha256="a" * 64,
+            reviewer_role=review.role, reviewer_step_index=1,
+            reviewer_adapter=review.adapter,
+            reviewer_model=review.requested_model,
+            reviewer_effort=review.requested_effort,
+            workflow_step_index=2)
+        drifted = self.build(extra_config=(
+            roles + '[workflow]\nplan = ['
+            '{ role = "second_reviewer", adapter = "codex" }, '
+            '{ action = "focused_sweep" }, '
+            '{ role = "first_reviewer", adapter = "codex" }, '
+            '{ action = "focused_sweep" }]\n'))
+
+        restarted, note = engine._reconcile_auto_fix_recovery_config(
+            drifted, state)
+
+        self.assertIsNotNone(note)
+        self.assertEqual(restarted.workflow_step_index, 0)
+        self.assertEqual(restarted.reviewer_step_index, 1)
+        self.assertEqual(restarted.findings, state.findings)
+        self.assertEqual(restarted.current_finding_fingerprints,
+                         state.current_finding_fingerprints)
+
+        auto_fix.write_auto_fix_state(
+            auto_fix.auto_fix_state_path(drifted), state)
+        reviewer = ScriptedAdapter([TaskResult(
+            0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)])
+        self.assertEqual(self.run_quiet(
+            drifted, auto_fix_adapter=reviewer), 0)
+        self.assertEqual(len(reviewer.calls), 1)
+        settled = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(drifted))
+        self.assertEqual(settled.verdict, "PASS")
+        self.assertEqual(settled.reviewer_role, "second_reviewer")
 
     @staticmethod
     def recheck_record(finding):

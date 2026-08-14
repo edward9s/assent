@@ -94,7 +94,15 @@ Assent records the reviewed shared-directory decision in the primary
 worktree's untracked `.assent/manifest.toml` and provisions matching links
 before a session.
 
-- If the prompt says `UNKNOWN` or `STALE`, settle it before closeout with
+- A plan-review prompt that requires a `shared_paths` verdict field owns the
+  semantic decision in that same review session. Return its exact `paths` and
+  `watch` lists in the terminal review record and do not run the CLI command;
+  account for every existing same-primary directory link the prompt names. The
+  scheduler validates the complete link agreement before writing the manifest.
+  An omitted link returns a correction to this bounded reviewer rather than
+  accepting a partial decision.
+- In any other session, if the prompt says `UNKNOWN` or `STALE`, settle it
+  before closeout with
   `assent shared-paths review --path DIR --watch FILE` (repeat either option as
   needed), or `assent shared-paths review --none --watch FILE`. Run it from the
   session cwd: the managed source worktree whose snapshot is being reviewed and

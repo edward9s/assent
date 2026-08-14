@@ -283,7 +283,8 @@ class TestContractContent(unittest.TestCase):
                 "REVIEW UNRESOLVED, HUMAN DECISION",
                 "exits zero so unrelated queued folders continue",
                 "`NEEDS_REPAIR`, `REPAIRING`, `AWAITING_REVIEW`, or `COMPLETE`",
-                "A restart resumes `REPAIRING` or `AWAITING_REVIEW`"):
+                "resets only the orchestration cursor",
+                "re-adjudicates them from the first position of the current workflow"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, workflow)
         self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 7)

@@ -426,6 +426,24 @@ def _automatic_reconcile_context(
             expected, False)
     if (head != expected_source or pending != expected_target
             or current_source != expected_source):
+        superseded = (
+            may_prepare
+            and current_source == expected_source
+            and gitops.is_ancestor(managed.main, head, expected_source)
+            and gitops.is_ancestor(managed.main, pending, expected_target))
+        if superseded:
+            if not gitops.merge_scene_is_unedited(
+                    managed.path, head, pending):
+                raise AssentError(
+                    "superseded automatic reconciliation contains edits; "
+                    "it was retained instead of being reset")
+            gitops.abort_merge(managed.path)
+            _remove_managed(managed, head)
+            print("  superseded unedited reconciliation removed; rebuilding "
+                  "it for the current source and target")
+            return _automatic_reconcile_context(
+                cfg, expected_target, expected_source, expected,
+                may_prepare=True)
         raise AssentError(
             "automatic reconcile source/target/parent identity drifted")
     current_conflicts = tuple(sorted(gitops.conflict_paths(managed.path)))
@@ -435,12 +453,16 @@ def _automatic_reconcile_context(
             + ", ".join(expected) + "; found "
             + (", ".join(current_conflicts) or "none") + ")")
     status = gitops.working_tree_status(managed.path)
-    touched = set(status.staged) | set(status.unstaged) | set(status.untracked)
+    touched = set(status.unstaged) | set(status.untracked)
     outside = sorted(touched - set(expected))
     if outside:
         raise AssentError(
             "automatic reconcile contains edits outside the exact conflict "
             "scene: " + ", ".join(outside))
+    if not gitops.merge_index_matches_generated(
+            managed.path, expected_source, expected_target):
+        raise AssentError(
+            "automatic reconcile index changed outside the exact conflict scene")
     return AutomaticReconcile(
         managed.path, source_branch, current_source, expected_target,
         expected, True)
@@ -462,14 +484,6 @@ def automatic_reconcile_continue_locked(
     context = _automatic_reconcile_context(
         cfg, expected_target, expected_source, expected_paths,
         may_prepare=False)
-    if context.worktree is not None and context.needs_editing:
-        status = gitops.working_tree_status(context.worktree)
-        touched = set(status.staged) | set(status.unstaged) | set(status.untracked)
-        outside = sorted(touched - set(context.conflict_paths))
-        if outside:
-            raise AssentError(
-                "automatic reconcile contains edits outside the exact conflict "
-                "scene: " + ", ".join(outside))
     if context.worktree is not None or gitops.branch_exists(
             _managed(cfg).main, _managed(cfg).branch):
         if _continue(cfg) != 0:

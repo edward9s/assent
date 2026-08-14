@@ -152,7 +152,7 @@ def render_report(cfg: Config, plan: Plan,
                 else "repair")
             lines += ["", "To decide: pending autonomous " + lifecycle
                       + " covers BLOCKED task(s) " + ", ".join(task_ids)
-                      + "; inspect the Folder auto-fix lifecycle below and defer "
+                      + "; inspect the Plan auto-fix lifecycle below and defer "
                         "human task-file disposition until it reaches a terminal outcome."]
     lines += ["", *usage.report_lines(cfg.assent_dir, cfg.tasks_name),
               "", *auto_fix_report_lines(cfg, plan),
@@ -241,7 +241,7 @@ def _pending_auto_fix_for_blocked(
 
 
 def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
-    """Return zero-token folder-level auto-fix evidence for the report.
+    """Return zero-token plan-level auto-fix evidence for the report.
 
     The state file is derived memory, not an acceptance gate.  A valid state is
     fresh only while the source tree and task contracts it names are still the
@@ -250,12 +250,12 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
     """
     path = auto_fix.auto_fix_state_path(cfg)
     if not path.exists():
-        return ["Folder auto-fix: NOT RUN (no review state)"]
+        return ["Plan auto-fix: NOT RUN (no review state)"]
 
     try:
         state = auto_fix.read_auto_fix_state(path)
     except AssentError as e:
-        return [f"Folder auto-fix: STALE (malformed review state: {e})"]
+        return [f"Plan auto-fix: STALE (malformed review state: {e})"]
 
     reasons, current_tree = _auto_fix_binding_reasons(cfg, plan, state)
 
@@ -283,7 +283,7 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
         status = "FAILED"
         freshness = "fresh"
 
-    lines = [f"Folder auto-fix: {status} ({freshness})",
+    lines = [f"Plan auto-fix: {status} ({freshness})",
              f"  Source tree: {state.source_tree}",
              f"  Phase: {state.phase}",
              f"  Verdict: {state.verdict}",
@@ -497,7 +497,7 @@ def _task_status_baseline(
         plan: Plan, state: auto_fix.AutoFixState) -> dict[str, str]:
     """Infer the status shape bound by the review without trusting status edits.
 
-    Completed-folder reviews bind DONE/SKIP contracts.  A blocked review keeps
+    Completed-plan reviews bind DONE/SKIP contracts.  A blocked review keeps
     the live status for unaffected tasks, while an exact automatic rework
     journal records the status that preceded its scheduler reset.
     """
@@ -576,7 +576,7 @@ def _auto_fix_blocker_label(state: auto_fix.AutoFixState) -> str:
     if state.failure_trigger == "focused_gate_failure":
         return "focused task gate failure durable evidence"
     if state.review_context == "completed_folder":
-        return "none (completed-folder review)"
+        return "none (completed-plan review)"
     return "durable blocked-review evidence"
 
 
@@ -593,7 +593,7 @@ def _auto_fix_exhaustion(plan: Plan) -> str | None:
 
 
 def _eligible_technical_debt(state: auto_fix.AutoFixState) -> list[auto_fix.PersistedFinding]:
-    """Return debt first introduced by an INITIAL completed-folder review.
+    """Return debt first introduced by an INITIAL completed-plan review.
 
     The ledger intentionally retains resolved findings.  A transition marked
     ``initial`` is the durable proof that the debt entered through the only
@@ -629,7 +629,7 @@ def _technical_debt_report_text(
         "",
         f"Plan folder: {folder}",
         "This zero-token agenda preserves eligible debt first introduced by an "
-        "INITIAL completed-folder review. It is not task status, acceptance "
+        "INITIAL completed-plan review. It is not task status, acceptance "
         "evidence, or permission to start another repair round.",
     ]
     for index, finding in enumerate(_eligible_technical_debt(state), 1):

@@ -15,6 +15,7 @@ from assent.auto_fix import (
     AutoFixState, ObservedState, PlanDigestTransition,
     RepairBrief, ReviewFinding, ReviewRecord, ReviewTransition,
     ReviewerRecommendation, ScopeAddition, WorkerDisposition,
+    SharedPathsDecision,
     auto_fix_state_is_fresh,
     auto_fix_state_path, current_review_record,
     finding_fingerprint, normalize_finding_path,
@@ -41,7 +42,9 @@ class TestReviewRecord(unittest.TestCase):
     def test_pass_fixed_and_fail_round_trip_deterministically(self):
         records = (
             ReviewRecord("PASS", ()),
-            ReviewRecord("FIXED", (self.finding,)),
+            ReviewRecord(
+                "FIXED", (self.finding,),
+                SharedPathsDecision(("pkg",), ("pubspec.yaml",))),
             ReviewRecord("FAIL", (self.finding,)),
         )
         self.assertEqual(
@@ -53,6 +56,9 @@ class TestReviewRecord(unittest.TestCase):
                 parsed = parse_review_output("adapter preamble\n" + text + "\n")
                 self.assertEqual(review_record_json(parsed), text)
         self.assertEqual(parsed.findings[0].path, "assent/config.py")
+        self.assertIsNone(records[0].shared_paths)
+        fixed = parse_review_output(review_record_json(records[1]))
+        self.assertEqual(fixed.shared_paths, records[1].shared_paths)
 
     def test_findings_require_one_existing_scope_owner(self):
         plan = SimpleNamespace(tasks=(
@@ -163,6 +169,19 @@ class TestReviewRecord(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(AssentError):
                 review_record_json(ReviewRecord("FAIL", (bad,)))
 
+    def test_selection_conflict_kind_alias_is_explicit_and_opt_in(self):
+        data = json.loads(review_record_json(
+            ReviewRecord("FIXED", (self.finding,))))
+        data["findings"][0]["kind"] = "target_alone"
+        output = json.dumps(data)
+
+        with self.assertRaisesRegex(AssentError, "kind is not supported"):
+            parse_review_output(output)
+        parsed = parse_review_output(
+            output, finding_kind_aliases={"target_alone": "correctness"})
+
+        self.assertEqual(parsed.findings[0].kind, "correctness")
+
     def test_recheck_transition_retains_identity_and_separates_new_proof(self):
         first = state_for_review(
             ReviewRecord("FAIL", (self.finding,)), source_tree="1" * 40,
@@ -245,8 +264,12 @@ class TestReviewRecord(unittest.TestCase):
         visit_schema(schema)
         self.assertEqual(schema["type"], "object")
         self.assertFalse(schema["additionalProperties"])
-        self.assertEqual(schema["required"], ["type", "verdict", "findings"])
-        self.assertEqual(set(schema["properties"]), {"type", "verdict", "findings"})
+        self.assertEqual(
+            schema["required"],
+            ["type", "verdict", "findings", "shared_paths"])
+        self.assertEqual(
+            set(schema["properties"]),
+            {"type", "verdict", "findings", "shared_paths"})
         self.assertNotIn("anyOf", schema)
         self.assertEqual(schema["properties"]["type"]["enum"],
                          ["assent.auto_fix_review"])
@@ -258,6 +281,9 @@ class TestReviewRecord(unittest.TestCase):
         self.assertEqual(
             schema["properties"]["findings"]["items"]["properties"]["task_id"]
             ["type"], ["string", "null"])
+        self.assertEqual(
+            schema["properties"]["shared_paths"]["type"],
+            ["object", "null"])
 
     def test_path_normalization_is_project_relative(self):
         self.assertEqual(normalize_finding_path("a\\b.py"), "a/b.py")

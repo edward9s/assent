@@ -42,7 +42,7 @@ import stat
 import tomllib
 import uuid
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time
 from pathlib import Path
 
@@ -686,6 +686,14 @@ def _parent_problem(root: Path, relative: str) -> str:
     return ""
 
 
+def _is_ignored_directory(root: Path, relative: str) -> bool:
+    """True when Git treats the existing directory as one ignored tree."""
+    if gitops.is_path_ignored(root, relative, directory=True):
+        return True
+    expected = relative.rstrip("/") + "/"
+    return expected in gitops.ignored_entries(root)
+
+
 def target_problem(main: Path, relative: str) -> str:
     """Why the primary worktree cannot serve ``relative`` as a shared target.
 
@@ -705,7 +713,7 @@ def target_problem(main: Path, relative: str) -> str:
         return (f"{relative} is not an ordinary directory in the primary "
                 f"worktree {main}")
     try:
-        if not gitops.is_path_ignored(main, relative, directory=True):
+        if not _is_ignored_directory(main, relative):
             return (f"{relative} is no longer Git-ignored in the primary "
                     f"worktree {main}")
     except AssentError as e:
@@ -1057,6 +1065,38 @@ def ignored_directory_links(worktree: Path) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
+def review_contract_with_source_links(
+        main: Path, worktree: Path, contract: Contract) -> Contract:
+    """Expose reviewable same-primary orphan links to the next session.
+
+    A settled profile remains authoritative unless an existing ignored link is
+    already the exact same-relative link Assent would provision from the
+    primary worktree.  Such a link is safe evidence for another bounded review:
+    it is left untouched, named in the prompt, and makes an otherwise settled
+    answer STALE.  Foreign links and unusable primary targets keep the ordinary
+    fail-closed agreement error instead of being presented as reviewable.
+    """
+    main = Path(main)
+    worktree = Path(worktree)
+    unexpected = sorted(
+        set(ignored_directory_links(worktree)) - set(contract.paths))
+    reviewable = tuple(
+        relative for relative in unexpected
+        if not target_problem(main, relative)
+        and _resolves_to(worktree / relative, _link_target(main, relative)))
+    if not reviewable:
+        return contract
+    evidence = contract.evidence + tuple(
+        f"source worktree has an unreviewed same-primary directory link: {relative}"
+        for relative in reviewable
+        if not any(relative in item for item in contract.evidence))
+    if contract.settled:
+        return Contract(
+            STALE, contract.profile, contract.digests, contract.paths,
+            evidence, needs_review=True)
+    return replace(contract, evidence=evidence)
+
+
 def require_directory_link_agreement(
         main: Path, worktree: Path, contract: Contract, *,
         folder: str | None = None, allow_missing: bool = False) -> None:
@@ -1125,15 +1165,14 @@ def _validate_destination(main: Path, worktree: Path,
             raise AssentError(
                 f"refusing to provision the shared path {relative} into {worktree}: "
                 f"{destination} already exists and is not a link to {target}")
+        if not _is_ignored_directory(Path(worktree), relative):
+            raise AssentError(
+                f"refusing to provision the shared path {relative} into {worktree}: "
+                "Git does not ignore the existing directory link there")
     if gitops.tracked_paths(Path(worktree), relative):
         raise AssentError(
             f"refusing to provision the shared path {relative} into {worktree}: "
             "tracked content lives there and a shared link must never shadow it")
-    if not gitops.is_path_ignored(Path(worktree), relative, directory=True):
-        raise AssentError(
-            f"refusing to provision the shared path {relative} into {worktree}: "
-            "Git does not ignore it there, so the link would change what the "
-            "worktree tracks")
     return target
 
 
@@ -1157,6 +1196,20 @@ def _provision_one(main: Path, worktree: Path, relative: str) -> bool:
         raise AssentError(
             f"Unable to link the shared path {relative} in {worktree} to "
             f"{target}: {e}") from e
+    try:
+        if not _is_ignored_directory(Path(worktree), relative):
+            raise AssentError(
+                f"refusing to provision the shared path {relative} into {worktree}: "
+                "Git does not ignore the linked directory there, so the link "
+                "would change what the worktree tracks")
+    except BaseException as primary_error:
+        try:
+            pathops.detach_directory_link(destination)
+        except OSError as cleanup_error:
+            primary_error.add_note(
+                f"Unable to detach the rejected shared-path link {destination}: "
+                f"{cleanup_error}")
+        raise
     return True
 
 
@@ -1427,7 +1480,9 @@ def prepare_worktree(main: Path, worktree: Path, *,
     This is what runs before a scheduled task session: REVIEWED-PATHS provisions
     every declared missing link, REVIEWED-NONE starts with no links and no extra
     AI instructions, and UNKNOWN or STALE touches the filesystem not at all and
-    leaves the session to run the controlled review.
+    leaves the session to run the controlled review. A same-primary orphan link
+    is surfaced as STALE evidence rather than making a reusable worktree
+    permanently refuse before that review can start.
     """
     # Classification and application must observe one manifest generation.  A
     # review running between these two operations must either serialize before
@@ -1437,6 +1492,8 @@ def prepare_worktree(main: Path, worktree: Path, *,
         manifest = read_manifest(main)
         contract = classify(
             main, worktree, manifest, required_evidence=required_evidence)
+        contract = review_contract_with_source_links(
+            main, worktree, contract)
         if contract.settled:
             require_directory_link_agreement(
                 main, worktree, contract, allow_missing=True)
@@ -1489,6 +1546,35 @@ def _validate_watch(worktree: Path, watch: Sequence[str]) -> tuple[str, ...]:
                 f"watch file {relative} is not a readable file in {worktree}")
         normalized.append(relative)
     return tuple(sorted(normalized))
+
+
+def validate_review_decision(
+        main: Path, worktree: Path, paths: Sequence[str],
+        watch: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Validate one structured reviewer decision without mutating anything."""
+    declared = _validate_paths(Path(main), paths) if paths else ()
+    watched = _validate_watch(Path(worktree), watch)
+    unexpected = sorted(
+        set(ignored_directory_links(Path(worktree))) - set(declared))
+    if unexpected:
+        raise AssentError(
+            "shared_paths.paths omits existing ignored directory link(s): "
+            + ", ".join(unexpected)
+            + ". Inspect their tracked build declarations and return a corrected "
+              "shared_paths object that includes every required link; do not run "
+              "the shared-paths CLI")
+    prospective = Contract(
+        REVIEWED_NONE if not declared else REVIEWED_PATHS,
+        Profile("", declared, watched, {}), {}, declared)
+    try:
+        require_directory_link_agreement(
+            Path(main), Path(worktree), prospective, allow_missing=True)
+    except AssentError as e:
+        raise AssentError(
+            "shared_paths does not match the existing source links: " + str(e)
+            + ". Return a corrected shared_paths object; do not run the "
+              "shared-paths CLI") from e
+    return declared, watched
 
 
 def review(main: Path, worktree: Path, *,
@@ -1558,6 +1644,17 @@ _REVIEW_CLAUSE = (
     "The scheduler refuses this task's completion while the shared-path "
     "contract is still unreviewed.")
 
+_REVIEW_RECORD_CLAUSE = (
+    "\nShared ignored directories for this repository are {state}. Decide from "
+    "the repository's Git-ignore rules, its dependency/build declarations and "
+    "this review's verifier evidence alone -- do not audit the whole repository. "
+    "Do not run `{command}` in this plan-review session. Instead, the terminal "
+    "assent.auto_fix_review JSON must set `shared_paths` to an object with exact "
+    "`paths` and `watch` string lists. Use an empty `paths` list when no shared "
+    "directory is required. Name in `watch` exactly the tracked dependency or "
+    "build files that would make this decision worth reconsidering. The scheduler "
+    "validates and applies the decision before accepting the verdict.{prior}{evidence}")
+
 
 def review_clause(contract: Contract) -> str:
     """The bounded review instruction appended to an UNKNOWN or STALE session.
@@ -1573,6 +1670,19 @@ def review_clause(contract: Contract) -> str:
                 if contract.evidence else "")
     return _REVIEW_CLAUSE.format(state=contract.state, command=REVIEW_COMMAND,
                                  prior=prior, evidence=evidence)
+
+
+def review_record_clause(contract: Contract) -> str:
+    """Require a structured decision from a plan reviewer when needed."""
+    if contract.settled or not contract.needs_review:
+        return ""
+    prior = ("\nPreviously reviewed shared paths: "
+             + ", ".join(contract.prior_paths) if contract.prior_paths else "")
+    evidence = ("\nWhat changed: " + "; ".join(contract.evidence)
+                if contract.evidence else "")
+    return _REVIEW_RECORD_CLAUSE.format(
+        state=contract.state, command=REVIEW_COMMAND,
+        prior=prior, evidence=evidence)
 
 
 def closeout_refusal(contract: Contract) -> str:

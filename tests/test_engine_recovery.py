@@ -379,6 +379,63 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertFalse(journal_path_for(path).exists())
 
+    def test_writable_plan_review_boundary_recovers_and_direct_run_continues(self):
+        path = self.write_task(1, status="DONE", scope=("src/",))
+        cfg = self.build(extra_config='''
+[abilities.review_fix]
+prompt = "Review and repair."
+writes = true
+produces_verdict = true
+[roles.folder_reviewer]
+ability = ["review_fix"]
+model = "prime"
+effort = "heavy"
+[workflow]
+plan = [
+  { role = "folder_reviewer", adapter = "claude" },
+  { action = "focused_sweep" },
+]
+''')
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "value.txt").write_text(
+            "closed out\n", encoding="utf-8")
+        self._commit_in_worktree(worktree, "auto(plan01/t001): task complete")
+
+        def interrupted_review(_prompt):
+            (worktree / "src" / "value.txt").write_text(
+                "reviewer repair\n", encoding="utf-8")
+            raise KeyboardInterrupt
+
+        self.assertEqual(
+            self.run_quiet(
+                cfg, auto_fix_adapter=ScriptedAdapter([interrupted_review])),
+            130)
+        self.assertTrue(auto_fix.auto_fix_review_session_path(cfg).is_file())
+        self.assertFalse(gitops.working_tree_status(
+            worktree, cfg.git_excludes).is_clean)
+
+        passed_review = TaskResult(
+            0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)
+        self.assertEqual(
+            self.run_quiet(
+                cfg, auto_fix_adapter=ScriptedAdapter([passed_review])),
+            0)
+
+        self.assertTrue(gitops.working_tree_status(
+            worktree, cfg.git_excludes).is_clean)
+        self.assertFalse(auto_fix.auto_fix_review_session_path(cfg).exists())
+        self.assertTrue(any(
+            subject.startswith(
+                "wip(plan01): recovered interrupted plan-review output")
+            for subject in self.subjects()))
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertEqual(
+            (worktree / "src" / "value.txt").read_text(encoding="utf-8"),
+            "reviewer repair\n")
+
     def test_dirt_outside_the_implicated_task_scope_stays_fail_closed(self):
         cfg, path, worktree = self._reviewed_folder()
         self._write_review_state(cfg)

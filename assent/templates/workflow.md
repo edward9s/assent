@@ -167,6 +167,13 @@ scope or one validated exact addition; a read-only role writes nothing. Any
 management-plane, task-file, other-task, primary-worktree, or Git write makes
 the verdict unusable while preserving edits.
 
+When the shared-input contract is `UNKNOWN` or `STALE`, the same plan reviewer
+returns exact `paths` and `watch` lists in its terminal verdict. The scheduler
+validates and applies that decision before accepting the verdict; the reviewer
+does not write the manifest or run a separate CLI command. A missing or invalid
+decision retries the same unfinished workflow position, and uniquely owned
+source edits are kept in a WIP checkpoint if retries end.
+
 Only the first completed-plan review may record eligible technical debt. It must
 be concrete, encountered in changed or directly interacting code, local to an
 existing task, and testable by that task's focused gate. Rechecks may retain or
@@ -223,13 +230,15 @@ extension.
 
 `_auto_fix.toml` is version-7, untracked, deletable runtime memory, never task
 status, source truth, receipt, or acceptance. It binds source tree, task-plan and
-prompt digests, exact reviewer role/adapter/model/effort and workflow positions;
-keeps cumulative findings, scope decisions, repair briefs/dispositions and
-transitions; and records the recovery phase `NEEDS_REPAIR`, `REPAIRING`,
-`AWAITING_REVIEW`, or `COMPLETE`. A restart resumes `REPAIRING` or
-`AWAITING_REVIEW`; malformed state or missing or drifted workflow configuration
-refuses repair and closeout. A fresh cached `PASS` requires every binding to
-match.
+prompt digests and exact reviewer identity; keeps cumulative findings, scope
+decisions, repair briefs/dispositions and transitions; and records the recovery
+phase `NEEDS_REPAIR`, `REPAIRING`, `AWAITING_REVIEW`, or `COMPLETE`. A restart
+resumes an unchanged workflow. If the stored reviewer no longer occupies the
+same configured position or its identity changed, Assent preserves findings and
+source work, resets only the orchestration cursor, and re-adjudicates them from
+the first position of the current workflow. A missing plan-review sequence or
+malformed state still refuses because no safe recovery path can be selected. A
+fresh cached `PASS` requires every binding to match.
 
 Interrupted writes remain. When durable evidence proves exactly one task owns
 them and all paths fit its scope, startup gathers them into a `wip` checkpoint
@@ -329,13 +338,29 @@ directory profiles keyed by watched Git-ignore and dependency/build inputs:
 
 `assent shared-paths status` classifies the worktree it runs in and reports the
 matching profile and link agreement without writing or provisioning anything.
-Only `assent shared-paths review` writes the manifest. It fingerprints and
-reconciles the worktree it runs in; in the primary worktree it caches that
-snapshot and creates no self-link. Every contributing source link must match its
+Only the validated shared-path review operation writes the manifest. The
+`assent shared-paths review` command and a scheduler-applied structured reviewer
+decision both enter that operation. It fingerprints and reconciles the worktree
+it runs in; in the primary worktree it caches that snapshot and creates no
+self-link. A same-primary source link outside a matching profile becomes STALE
+review evidence. A structured decision that omits an existing source link is
+rejected back to the same bounded reviewer before the manifest changes. Every
+contributing source link must match its
 active profile and exact primary target; undeclared manual links refuse
 verification, reconcile, receipt freshness, reporting, and acceptance. Receipts
 bind `shared_inputs_sha256` before and after verification; acceptance rechecks
 it without provisioning or repair.
+
+Worktree preparation never removes an application-recorded link merely because
+another cached profile omits it. The link stays in place and makes the contract
+STALE; during integration repair, the configured integration verdict role
+settles that evidence in one bounded, read-only shared-input recovery before
+focused checks run. The role may return only the complete `paths` and `watch`
+decision, which the scheduler validates and applies. If an already-damaged or
+incorrect profile is exposed only when focused output names a descendant of an
+omitted ordinary ignored directory, the same recovery runs as a fallback and
+the scheduler retries the focused checks once. General focused failures never
+enter this path, and it is not another source-repair round.
 
 All candidate cleanup detaches every junction, directory symlink, or directory
 reparse-point object before recursive Git or filesystem removal and never

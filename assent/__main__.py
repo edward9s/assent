@@ -962,11 +962,11 @@ def _start_stdin_stop_watcher() -> threading.Thread | None:
     whose parent crashes also cleans itself up instead of becoming an orphan.
 
     ``interrupt_main()`` only makes that exception pending until the main thread
-    next runs bytecode, so it is paired with ``wake_stop_waiters()``: the
-    interrupt is marked first, then every scheduler-owned blocking wait (quota
-    countdown, adapter output queue) is released, and the exception is delivered
-    at once instead of after a countdown segment, the watchdog duration, or --
-    with the watchdog disabled -- never.
+    next runs bytecode, so it is paired with ``wake_stop_waiters()``. The wake is
+    set first and the interrupt is marked immediately afterwards; this avoids
+    Windows terminating a thread still inside an Event wait. An adapter queue
+    wake also raises ``KeyboardInterrupt`` itself if thread scheduling happens
+    between those two operations.
 
     Without ``ASSENT_STDIN_STOP`` no thread is started at all, so a manual
     ``assent run`` keeps its stdin untouched.
@@ -1008,8 +1008,8 @@ def _start_stdin_stop_watcher() -> threading.Thread | None:
         finally:
             if owns_watcher_stream:
                 watcher_stream.close()
-        _thread.interrupt_main()
         wake_stop_waiters()
+        _thread.interrupt_main()
 
     thread = threading.Thread(target=watch, name="assent-stdin-stop", daemon=True)
     thread.start()

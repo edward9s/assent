@@ -404,7 +404,7 @@ class Config:
     @property
     def selection_workflow_state_rel(self) -> str:
         """The project-level, derived exact-selection workflow cursor."""
-        return self.git_rel(self.assent_dir / "_selection_workflow.toml")
+        return self.git_rel(self.assent_dir / "_integration_workflow.toml")
 
     @property
     def shared_paths_manifest_rel(self) -> str:

@@ -61,6 +61,19 @@ assent check
 機械檢查是決策點，不是 AI 意見。通過就完成該層；失敗才使用下一個已設定的
 修復 role，之後再檢查。設定陣列就是全部回合，Assent 不會自行增加次數。
 
+若 shared ignored-directory 證據為 unknown 或 stale，同一個 plan reviewer 會在
+verdict 中附上精確的 shared paths 與 watched files。Assent 先驗證並套用該決定，
+再接受 verdict；不需要另外由人執行指令，也不需要增加 AI session。既有且精確
+指向 primary 同路徑的 directory link 會列入 review 證據；若 verdict 漏列，會在
+manifest 變更前交回同一個 bounded reviewer 修正。
+
+若另一個 cached profile 漏列 application 已記錄的 link，worktree preparation 會
+保留 link 並把 contract 標成 stale。Integration repair 會在 focused checks 前，讓
+已設定的 integration verdict role 執行一次唯讀 shared-input recovery。若既有受損
+profile 直到 focused output 指出 omitted ordinary ignored directory 之下的檔案才被
+發現，則以同一條 recovery 作為安全網；scheduler 驗證並套用 paths/watch 決定後
+重試一次。一般 focused failure 仍照常失敗，不會因此增加 source-repair 回合。
+
 Task 的 `BLOCKED` 證據留在 task 層，不會消耗 plan review。若只是少列一個
 scope 路徑，具備寫入能力的 task reviewer 應在同一個 session 修好；scheduler
 再驗證修改並更新 task。Role 名稱由使用者自訂，真正的權限與 verdict 行為來自
@@ -72,6 +85,11 @@ ability。
 
 中斷後，只要 ownership 明確，成果會成為可恢復的 WIP checkpoint。乾淨的舊版
 `DONE` task 會保留原有歷史，不會事後補造 terminal auto checkpoint。
+
+未完成的 plan review 會依目前的 workflow 設定恢復。若儲存的 reviewer 已移到
+其他位置或 identity 已改變，Assent 會保留 commits 與耐久 findings，只重設
+workflow cursor，再把既有證據交給目前流程重新判斷。只有目前已沒有
+plan-review sequence 可以處理待決證據時，才會拒絕恢復。
 
 ## 3. 驗收會議
 

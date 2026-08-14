@@ -28,6 +28,7 @@ from assent.batch_verification import (SelectionConflictEvidence,
                                        verify_selected_batch_action)
 from assent.config import load_config
 from assent.folder_verification import receipt_path
+from assent.init import _BRIDGE_LINE, _EXPANDED_BRIDGE_LINE
 from assent.lockfile import hold_integration_lock, hold_lock
 from assent.verification_common import build_batch_candidate
 from tests.test_verification import make_directory_link
@@ -350,6 +351,24 @@ class TestBatchCandidateAndReceipt(BatchVerifyRepositoryCase):
 
 
 class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
+    def test_selected_verify_recovers_known_init_bridge_drift(self) -> None:
+        agents = self.root / "AGENTS.md"
+        agents.write_text("# Project\n\n" + _BRIDGE_LINE + "\n",
+                          encoding="utf-8")
+        _git(self.root, "add", "AGENTS.md")
+        _git(self.root, "commit", "-m", "add project rules")
+        self.make_source("aa")
+        self.make_source("bb")
+        agents.write_text("# Project\n\n" + _EXPANDED_BRIDGE_LINE + "\n",
+                          encoding="utf-8")
+
+        code, output = self.run_selected("aa", "bb")
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("Recovered an Assent-generated AGENTS.md bridge update",
+                      output)
+        self.assertEqual(_git(self.root, "status", "--porcelain"), "")
+
     def test_selection_action_collects_the_complete_conflict_wave_before_verify(
             self) -> None:
         self.make_source("aa", filename="one.txt", content="from aa\n")

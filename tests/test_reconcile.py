@@ -181,6 +181,9 @@ class ReconcileRepositoryCase(unittest.TestCase):
     def test_automatic_reconcile_reuses_the_managed_source_first_lifecycle(
             self) -> None:
         self._conflicting_repository()
+        (self.root / "target-only.txt").write_text("target\n", encoding="utf-8")
+        gitops.commit_all(self.root, "add a non-conflicting target change")
+        self.target_tip = gitops.commit_of(self.root, "HEAD")
         cfg = self._config()
 
         context = automatic_reconcile_prepare_locked(
@@ -224,6 +227,52 @@ class ReconcileRepositoryCase(unittest.TestCase):
         self.assertTrue((self._managed_path() / "outside.txt").exists())
         self._assert_source_untouched()
         self._assert_target_untouched(self.target_tip)
+
+    def test_automatic_reconcile_rebuilds_an_unedited_superseded_merge(
+            self) -> None:
+        self._conflicting_repository()
+        cfg = self._config()
+        automatic_reconcile_prepare_locked(
+            cfg, self.target_tip, self.source_tip, ("shared.txt",))
+
+        (self.source_worktree / "later-source.txt").write_text(
+            "later\n", encoding="utf-8")
+        gitops.commit_all(self.source_worktree, "advance source")
+        current_source = gitops.commit_of(self.source_worktree, "HEAD")
+        (self.root / "later-target.txt").write_text("later\n", encoding="utf-8")
+        gitops.commit_all(self.root, "advance target")
+        current_target = gitops.commit_of(self.root, "HEAD")
+
+        context = automatic_reconcile_prepare_locked(
+            cfg, current_target, current_source, ("shared.txt",))
+
+        self.assertTrue(context.needs_editing)
+        self.assertEqual(gitops.commit_of(context.worktree, "HEAD"),
+                         current_source)
+        self.assertEqual(gitops.merge_head(context.worktree), current_target)
+
+    def test_automatic_reconcile_retains_an_edited_superseded_merge(self) -> None:
+        self._conflicting_repository()
+        cfg = self._config()
+        automatic_reconcile_prepare_locked(
+            cfg, self.target_tip, self.source_tip, ("shared.txt",))
+        self._resolve("keep this edit\n")
+
+        (self.source_worktree / "later-source.txt").write_text(
+            "later\n", encoding="utf-8")
+        gitops.commit_all(self.source_worktree, "advance source")
+        current_source = gitops.commit_of(self.source_worktree, "HEAD")
+        (self.root / "later-target.txt").write_text("later\n", encoding="utf-8")
+        gitops.commit_all(self.root, "advance target")
+        current_target = gitops.commit_of(self.root, "HEAD")
+
+        with self.assertRaisesRegex(AssentError, "contains edits"):
+            automatic_reconcile_prepare_locked(
+                cfg, current_target, current_source, ("shared.txt",))
+
+        self.assertEqual(
+            (self._managed_path() / "shared.txt").read_text(encoding="utf-8"),
+            "keep this edit\n")
 
     # --- assertions shared by several cases ---
 

@@ -318,12 +318,12 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
 
         self._write_auto_fix_state(cfg, "PASS")
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
-        self.assertIn("Folder auto-fix: PASSED (fresh)", text)
+        self.assertIn("Plan auto-fix: PASSED (fresh)", text)
         self.assertIn("Source tree:", text)
 
         self._write_auto_fix_state(cfg, "FAIL")
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
-        self.assertIn("Folder auto-fix: FAILED (fresh)", text)
+        self.assertIn("Plan auto-fix: FAILED (fresh)", text)
         self.assertIn("Blocking implementation issue", text)
 
     def test_report_renders_missing_malformed_and_stale_auto_fix_evidence(self):
@@ -333,17 +333,17 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         state_path = auto_fix.auto_fix_state_path(cfg)
 
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
-        self.assertIn("Folder auto-fix: NOT RUN", text)
+        self.assertIn("Plan auto-fix: NOT RUN", text)
 
         state_path.write_text("not valid toml = [\n", encoding="utf-8")
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
-        self.assertIn("Folder auto-fix: STALE (malformed review state:", text)
+        self.assertIn("Plan auto-fix: STALE (malformed review state:", text)
 
         self._write_auto_fix_state(cfg, "PASS")
         (self.root / "source-change.py").write_text("changed\n", encoding="utf-8")
         self.commit_all("source change")
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
-        self.assertIn("Folder auto-fix: STALE (source tree changed)", text)
+        self.assertIn("Plan auto-fix: STALE (source tree changed)", text)
 
     def test_report_names_the_self_fixed_unreviewed_outcome_distinctly(self):
         self.write_task(1, status="DONE")
@@ -374,13 +374,13 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                     f"{review.requested_effort}")
         # A state decided by a later configured round is not drift, and the
         # outcome is named apart from every other rendered state.
-        self.assertIn("Folder auto-fix: SELF-FIXED, UNREVIEWED (fresh)", text)
+        self.assertIn("Plan auto-fix: SELF-FIXED, UNREVIEWED (fresh)", text)
         self.assertIn(f"Self-fixed round: 2 of 2 ({identity})", text)
         self.assertIn(f"Terminal: SELF-FIXED, UNREVIEWED (round 2 of 2, "
                       f"{identity}", text)
-        for other in ("Folder auto-fix: NOT RUN", "Folder auto-fix: STALE",
-                      "Folder auto-fix: PASSED (fresh)",
-                      "Folder auto-fix: FAILED (fresh)"):
+        for other in ("Plan auto-fix: NOT RUN", "Plan auto-fix: STALE",
+                      "Plan auto-fix: PASSED (fresh)",
+                      "Plan auto-fix: FAILED (fresh)"):
             self.assertNotIn(other, text)
 
     def test_report_names_the_unresolved_review_outcome_distinctly(self):
@@ -414,15 +414,15 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         # The state a human must decide is named apart from every other
         # rendered state, and it lists the findings that decision is about.
         self.assertIn(
-            "Folder auto-fix: REVIEW UNRESOLVED, HUMAN DECISION (fresh)", text)
+            "Plan auto-fix: REVIEW UNRESOLVED, HUMAN DECISION (fresh)", text)
         self.assertIn(f"Unresolved review round: 2 of 2 ({identity})", text)
         self.assertIn("Terminal: REVIEW UNRESOLVED, HUMAN DECISION "
                       f"(round 2 of 2, {identity}", text)
         self.assertIn(auto_fix.finding_fingerprint(finding), text)
         self.assertIn(finding.summary, text)
-        for other in ("Folder auto-fix: NOT RUN", "Folder auto-fix: STALE",
-                      "Folder auto-fix: PASSED (fresh)",
-                      "Folder auto-fix: FAILED (fresh)",
+        for other in ("Plan auto-fix: NOT RUN", "Plan auto-fix: STALE",
+                      "Plan auto-fix: PASSED (fresh)",
+                      "Plan auto-fix: FAILED (fresh)",
                       "SELF-FIXED, UNREVIEWED",
                       "Terminal: NONZERO"):
             self.assertNotIn(other, text)
@@ -438,7 +438,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             model="core", adapters=("codex",)))
         text = inspection.render_report(
             drifted, Plan.parse(drifted.tasks_dir))
-        self.assertIn("Folder auto-fix: STALE (workflow role, identity, or step position changed)",
+        self.assertIn("Plan auto-fix: STALE (workflow role, identity, or step position changed)",
                       text)
 
     def test_report_ignores_scheduler_status_transitions_but_detects_contract_edits(self):
@@ -449,7 +449,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
 
         set_status(task_path, "WIP")
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
-        self.assertIn("Folder auto-fix: PASSED (fresh)", text)
+        self.assertIn("Plan auto-fix: PASSED (fresh)", text)
         self.assertNotIn("STALE (task contracts changed)", text)
 
         task_path.write_text(
@@ -457,7 +457,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                 'title = "任務"', 'title = "structural contract edit"'),
             encoding="utf-8")
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
-        self.assertIn("Folder auto-fix: STALE (task contracts changed)", text)
+        self.assertIn("Plan auto-fix: STALE (task contracts changed)", text)
 
     def test_report_defers_blocked_human_guidance_to_pending_auto_fix(self):
         self.write_task(1, status="BLOCKED")
@@ -494,7 +494,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
                     "edit the task file and set status back to TODO", text)
                 self.assertIn("pending autonomous", text)
                 self.assertIn("BLOCKED task(s) t001", text)
-                self.assertIn("Folder auto-fix: FAILED (fresh)", text)
+                self.assertIn("Plan auto-fix: FAILED (fresh)", text)
 
     def test_report_renders_recovery_evidence_and_persistent_debt_agenda(self):
         task_path = self.write_task(1, status="DONE")
@@ -574,7 +574,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         inspection.write_report(cfg, Plan.parse(cfg.tasks_dir))
         report = (cfg.tasks_dir / "_report.md").read_text(encoding="utf-8")
         debt = (cfg.tasks_dir / "_technical_debt.md").read_text(encoding="utf-8")
-        self.assertIn("Folder auto-fix: PASSED (fresh)", report)
+        self.assertIn("Plan auto-fix: PASSED (fresh)", report)
         self.assertIn("prior findings cleared", report)
         self.assertIn("TECHNICAL DEBT REVIEW REQUIRED", report)
         self.assertIn("RESOLVED / absent from the latest current findings", debt)
@@ -582,7 +582,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         blocked_debt = auto_fix.ReviewFinding(
             "t001", "assent/inspection.py", "Blocked debt", "blocked evidence",
             kind="eligible_technical_debt")
-        with self.assertRaisesRegex(AssentError, "limited to completed-folder review"):
+        with self.assertRaisesRegex(AssentError, "limited to completed-plan review"):
             auto_fix.state_for_review(
                 auto_fix.ReviewRecord("FAIL", (blocked_debt,)),
                 source_tree=source_tree,

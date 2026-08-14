@@ -84,6 +84,24 @@ class TestFocusedVerification(GlobalContractsMixin, EngineTestCase):
         self.assertNotIn("verify: " + later, output.getvalue())
         self.assertFalse((worktree / "later.txt").exists())
 
+    def test_focused_failure_evidence_keeps_stdout_and_stderr(self):
+        self.write_task(1, status="DONE", verify=_FAILV)
+        cfg = self.build()
+        self.prepare_source()
+        result = subprocess.CompletedProcess(
+            _FAILV, 1,
+            "Error when reading 'lib/l10n/arb/app_localizations.dart'\n",
+            "Undefined name 'AppLocalizations'\n")
+        failure_output: list[str] = []
+
+        with mock.patch.object(
+                engine, "_verify_subprocess", return_value=result):
+            code = engine._verify_focused_locked(
+                cfg, failure_output=failure_output)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(failure_output, [result.stdout + "\n" + result.stderr])
+
     def test_focus_task_runs_only_the_named_command_regardless_of_status(self):
         self.write_task(1, slug="named", status="TODO", verify=_OK)
         self.write_task(2, slug="other", status="DONE", verify=_FAILV)
@@ -1557,27 +1575,35 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
             auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(drifted)),
             before)
 
-    def test_pending_fail_refuses_recovery_after_reviewer_identity_drift(self):
+    def test_pending_fail_restarts_current_workflow_after_reviewer_identity_drift(self):
         self.write_task(1, status="DONE")
         cfg = self.build_review()
         self.commit_all()
         before = self.write_pending_fail(cfg)
         drifted = self.build_review(model="prime")
         worker = ScriptedAdapter([])
-        reviewer = ScriptedAdapter([])
+        reviewer = ScriptedAdapter([TaskResult(
+            0, auto_fix.review_record_json(
+                auto_fix.ReviewRecord("PASS", ())), False, None)])
         out = io.StringIO()
 
         with contextlib.redirect_stdout(out):
             self.assertEqual(engine.run(
                 drifted, adapter=worker, auto_fix_adapter=reviewer,
-                ), 1)
+                ), 0)
 
         self.assertEqual(worker.calls, [])
-        self.assertEqual(reviewer.calls, [])
-        self.assertIn("reviewer identity no longer matches", out.getvalue())
-        self.assertEqual(
-            auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(drifted)),
-            before)
+        self.assertEqual(len(reviewer.calls), 1)
+        self.assertIn("restarted review from its first step", out.getvalue())
+        after = auto_fix.read_auto_fix_state(
+            auto_fix.auto_fix_state_path(drifted))
+        self.assertEqual(after.verdict, "PASS")
+        current_review = next(
+            step for step in drifted.workflow_plan
+            if getattr(step, "produces_verdict", False))
+        self.assertEqual(after.reviewer_model, current_review.requested_model)
+        self.assertTrue(set(before.current_finding_fingerprints).issubset(
+            {item.fingerprint for item in after.findings}))
 
     def test_pending_fail_cannot_close_an_ordinary_run_without_auto_fix(self):
         self.write_task(1, status="DONE")
@@ -1592,7 +1618,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(engine.run(ordinary, adapter=worker), 1)
 
         self.assertEqual(worker.calls, [])
-        self.assertIn("pending FAIL state", out.getvalue())
+        self.assertIn("pending review state", out.getvalue())
         self.assertEqual(
             auto_fix.read_auto_fix_state(auto_fix.auto_fix_state_path(ordinary)),
             before)
@@ -1700,7 +1726,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(parse_task_file(task).status, "DONE")
-        self.assertNotIn("Auto-fix folder review", out.getvalue())
+        self.assertNotIn("Auto-fix plan review", out.getvalue())
 
 
 class TestReworkPromptFallbacks(GlobalContractsMixin, EngineTestCase):

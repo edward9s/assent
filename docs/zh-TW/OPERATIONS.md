@@ -27,10 +27,11 @@ lock 只能序列化自己的發布動作，無法阻止外部 writer。
 
 ## 中斷與復原
 
-重試失敗、quota 中斷、Ctrl+C 或 crash 後，Assent 都會保留成果。若每個未提交修改
-都能證明屬於同一個可恢復 task，且全部位於 scope 內，下次 run 會在不開 AI session
-的情況下收進 `WIP` checkpoint。若 ownership 不明或超出 scope，dirty worktree 會
-保留供人類檢查，run 則拒絕繼續。
+重試失敗、quota 中斷、Ctrl+C 或 crash 後，Assent 都會保留成果。可寫的 plan
+reviewer 啟動前，Assent 會記錄其確切 plan scope；下次 run 會把邊界內的中斷輸出
+收進 `WIP` checkpoint，接著繼續執行，不另開復原 AI session。Task session 的輸出若
+能證明屬於同一個可恢復 task，也採相同處理。若 ownership 不明或超出 scope，dirty
+worktree 會保留供人類檢查，run 則拒絕繼續。
 
 若 AI 誤寫主要 worktree，只有在每個路徑都符合 scope、而且轉移不會產生歧義時，
 Assent 才會搬回工作 worktree；否則保留兩邊現況，交給人類處理。

@@ -1,4 +1,4 @@
-"""Provider-neutral review records and durable state for folder auto-fix.
+"""Provider-neutral review records and durable state for plan auto-fix.
 
 This module owns data validation and persistence only.  Adapters remain
 responsible for running vendor CLIs, while later scheduler code can consume the
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from assent.plan import Plan
 
 AUTO_FIX_STATE_NAME = "_auto_fix.toml"
+AUTO_FIX_REVIEW_SESSION_NAME = "_auto_fix_review_session.toml"
 AUTO_FIX_STATE_VERSION = 7
 REVIEW_RECORD_TYPE = "assent.auto_fix_review"
 # FIXED is the merged reviewer-fixer verdict: the round found a genuine blocker
@@ -66,7 +67,8 @@ _PHASE_FOR_VERDICT = {
 # Assent's own derived management artifacts.
 _PROTECTED_SCOPE_BASENAMES = frozenset({
     "agents.md", ".gitignore", ".gitattributes", ".gitmodules",
-    "_auto_fix.toml", "_verification.toml", "_batch_verification.toml",
+    "_auto_fix.toml", "_auto_fix_review_session.toml",
+    "_verification.toml", "_batch_verification.toml",
     "_workflow.toml", "_archived.toml", "_report.md", "assent.lock",
 })
 
@@ -79,13 +81,15 @@ MAX_EVIDENCE_LENGTH = 16_000
 MAX_RECOMMENDATION_LENGTH = 4_000
 _TASK_ID_RE = re.compile(r"^t\d{3}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-_REVIEW_KEYS = {"type", "verdict", "findings"}
+_REVIEW_REQUIRED_KEYS = {"type", "verdict", "findings"}
+_REVIEW_KEYS = _REVIEW_REQUIRED_KEYS | {"shared_paths"}
 _FINDING_KEYS = {
     "kind", "task_id", "path", "summary", "evidence", "recommendation",
     "scope_addition", "transition", "prior_fingerprint",
     "transition_evidence",
 }
 _SCOPE_ADDITION_KEYS = {"path", "path_state"}
+_SHARED_PATHS_KEYS = {"paths", "watch"}
 _STATE_KEYS = {
     "version", "source_tree", "task_plan_sha256", "review_prompt_sha256",
     "reviewer_role", "reviewer_adapter", "reviewer_model", "reviewer_effort", "phase", "verdict",
@@ -176,11 +180,26 @@ def review_record_schema() -> dict:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["type", "verdict", "findings"],
+        "required": ["type", "verdict", "findings", "shared_paths"],
         "properties": {
             "type": {"type": "string", "enum": [REVIEW_RECORD_TYPE]},
             "verdict": {"type": "string", "enum": ["PASS", "FIXED", "FAIL"]},
             "findings": findings_schema,
+            "shared_paths": {
+                "type": ["object", "null"],
+                "additionalProperties": False,
+                "required": ["paths", "watch"],
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "watch": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+            },
         },
     }
 
@@ -202,11 +221,26 @@ class ReviewFinding:
 
 
 @dataclass(frozen=True)
+class SharedPathsDecision:
+    """One reviewer decision for an UNKNOWN or STALE shared-path contract."""
+
+    paths: tuple[str, ...]
+    watch: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for name in ("paths", "watch"):
+            value = getattr(self, name)
+            if isinstance(value, list):
+                object.__setattr__(self, name, tuple(value))
+
+
+@dataclass(frozen=True)
 class ReviewRecord:
     """The one terminal, provider-neutral review verdict."""
 
     verdict: str
     findings: tuple[ReviewFinding, ...]
+    shared_paths: SharedPathsDecision | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.findings, list):
@@ -800,7 +834,18 @@ def _validate_review_record(record: ReviewRecord) -> ReviewRecord:
     fingerprints = [finding_fingerprint(finding) for finding in findings]
     if len(fingerprints) != len(set(fingerprints)):
         raise AssentError("Auto-fix review contains a duplicate finding")
-    return ReviewRecord(record.verdict, findings)
+    decision = record.shared_paths
+    if decision is not None:
+        if not isinstance(decision, SharedPathsDecision):
+            raise AssentError(
+                "Auto-fix review shared_paths must be null or a shared-path decision")
+        for name in ("paths", "watch"):
+            values = getattr(decision, name)
+            if (not isinstance(values, tuple)
+                    or not all(isinstance(value, str) for value in values)):
+                raise AssentError(
+                    f"Auto-fix review shared_paths.{name} must be a finite string list")
+    return ReviewRecord(record.verdict, findings, decision)
 
 
 def review_record_json(record: ReviewRecord) -> str:
@@ -809,6 +854,10 @@ def review_record_json(record: ReviewRecord) -> str:
     data = {
         "type": REVIEW_RECORD_TYPE,
         "verdict": record.verdict,
+        "shared_paths": (
+            {"paths": list(record.shared_paths.paths),
+             "watch": list(record.shared_paths.watch)}
+            if record.shared_paths is not None else None),
         "findings": [
             {"kind": finding.kind, "task_id": finding.task_id,
              "path": finding.path, "summary": finding.summary,
@@ -831,10 +880,22 @@ def review_record_json(record: ReviewRecord) -> str:
     return text
 
 
-def _record_from_data(data: object) -> ReviewRecord:
+def _record_from_data(
+        data: object, *, finding_kind_aliases: dict[str, str] | None = None,
+        ) -> ReviewRecord:
     if not isinstance(data, dict):
         raise AssentError("Auto-fix review terminal record must be a JSON object")
-    _require_exact_keys(data, _REVIEW_KEYS, "Auto-fix review terminal record")
+    missing = _REVIEW_REQUIRED_KEYS - set(data)
+    extra = set(data) - _REVIEW_KEYS
+    if missing or extra:
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(sorted(missing)))
+        if extra:
+            details.append("unknown " + ", ".join(sorted(extra)))
+        raise AssentError(
+            "Auto-fix review terminal record has invalid keys: "
+            + "; ".join(details))
     if data["type"] != REVIEW_RECORD_TYPE:
         raise AssentError(
             f"Auto-fix review terminal record type must be {REVIEW_RECORD_TYPE!r}")
@@ -855,18 +916,40 @@ def _record_from_data(data: object) -> ReviewRecord:
                 raw_scope, _SCOPE_ADDITION_KEYS,
                 f"Review findings[{index}] scope_addition")
             scope_addition = ScopeAddition(**raw_scope)
+        kind = raw["kind"]
+        if finding_kind_aliases is not None:
+            kind = finding_kind_aliases.get(kind, kind)
         findings.append(ReviewFinding(
             task_id=raw["task_id"], path=raw["path"],
             summary=raw["summary"], evidence=raw["evidence"],
-            kind=raw["kind"], recommendation=raw["recommendation"],
+            kind=kind, recommendation=raw["recommendation"],
             scope_addition=scope_addition, transition=raw["transition"],
             prior_fingerprint=raw["prior_fingerprint"],
             transition_evidence=raw["transition_evidence"],
         ))
-    return _validate_review_record(ReviewRecord(data["verdict"], tuple(findings)))
+    raw_decision = data.get("shared_paths")
+    decision = None
+    if raw_decision is not None:
+        if not isinstance(raw_decision, dict):
+            raise AssentError(
+                "Auto-fix review shared_paths must be null or a JSON object")
+        _require_exact_keys(
+            raw_decision, _SHARED_PATHS_KEYS,
+            "Auto-fix review shared_paths")
+        if (not isinstance(raw_decision["paths"], list)
+                or not isinstance(raw_decision["watch"], list)):
+            raise AssentError(
+                "Auto-fix review shared_paths paths and watch must be finite JSON lists")
+        decision = SharedPathsDecision(
+            tuple(raw_decision["paths"]), tuple(raw_decision["watch"]))
+    return _validate_review_record(
+        ReviewRecord(data["verdict"], tuple(findings), decision))
 
 
-def parse_review_output(output: str | bytes) -> ReviewRecord:
+def parse_review_output(
+        output: str | bytes, *,
+        finding_kind_aliases: dict[str, str] | None = None,
+        ) -> ReviewRecord:
     """Extract exactly one final review record from adapter output, fail closed."""
     if isinstance(output, bytes):
         try:
@@ -904,7 +987,8 @@ def parse_review_output(output: str | bytes) -> ReviewRecord:
         raise AssentError("Auto-fix review output has trailing non-empty output")
     if len(line.encode("utf-8")) > MAX_REVIEW_RECORD_BYTES:
         raise AssentError("Auto-fix review terminal record exceeds the size limit")
-    return _record_from_data(data)
+    return _record_from_data(
+        data, finding_kind_aliases=finding_kind_aliases)
 
 
 parse_review_record = parse_review_output
@@ -1209,6 +1293,11 @@ def with_workflow_step_index(state: AutoFixState, index: int) -> AutoFixState:
     return _validate_state(replace(state, workflow_step_index=index))
 
 
+def restart_workflow_cursor(state: AutoFixState) -> AutoFixState:
+    """Keep durable review evidence while restarting the current workflow."""
+    return _validate_state(replace(state, workflow_step_index=0))
+
+
 def with_self_fixed_unreviewed(
         state: AutoFixState, *, source_tree: str | None = None) -> AutoFixState:
     """Settle a folder whose round list ended on a repair nothing confirmed.
@@ -1337,6 +1426,70 @@ def auto_fix_state_path(config_or_folder: Config | str | Path) -> Path:
 
 
 state_path = auto_fix_state_path
+
+
+def auto_fix_review_session_path(
+        config_or_folder: Config | str | Path) -> Path:
+    """Return the durable boundary for one writable plan-review session."""
+    if isinstance(config_or_folder, Config):
+        folder = config_or_folder.tasks_dir
+    else:
+        folder = Path(config_or_folder)
+    return Path(folder) / AUTO_FIX_REVIEW_SESSION_NAME
+
+
+def write_auto_fix_review_session(
+        config_or_folder: Config | str | Path,
+        scope: Iterable[str]) -> None:
+    """Record the exact scope owned by a writable plan reviewer before launch."""
+    normalized = tuple(dict.fromkeys(scope))
+    if not normalized or not all(
+            isinstance(item, str) and item for item in normalized):
+        raise AssentError(
+            "Auto-fix review session scope must be a non-empty string list")
+    text = (
+        "version = 1\n"
+        f"scope = {_toml_array(normalized)}\n"
+    )
+    atomic_write_text(auto_fix_review_session_path(config_or_folder), text)
+
+
+def read_auto_fix_review_session(
+        config_or_folder: Config | str | Path) -> tuple[str, ...] | None:
+    """Read a writable reviewer boundary; absence means no session is in flight."""
+    path = auto_fix_review_session_path(config_or_folder)
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise AssentError(
+            f"Unable to read auto-fix review session {path}: {e}") from e
+    except tomllib.TOMLDecodeError as e:
+        raise AssentError(
+            f"Auto-fix review session is not valid TOML ({path}): {e}") from e
+    if set(data) != {"version", "scope"} or data.get("version") != 1:
+        raise AssentError(
+            f"Auto-fix review session {path.name} has an invalid schema")
+    scope = data.get("scope")
+    if (not isinstance(scope, list) or not scope
+            or not all(isinstance(item, str) and item for item in scope)
+            or len(scope) != len(set(scope))):
+        raise AssentError(
+            f"Auto-fix review session {path.name} has invalid scope values")
+    return tuple(scope)
+
+
+def clear_auto_fix_review_session(
+        config_or_folder: Config | str | Path) -> None:
+    """Clear a reviewer boundary only after its source work is clean."""
+    path = auto_fix_review_session_path(config_or_folder)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        raise AssentError(
+            f"Unable to clear auto-fix review session {path}: {e}") from e
 
 
 def _require_digest(value: object, label: str) -> str:
@@ -1560,7 +1713,7 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
     if debt_fingerprints:
         if state.review_context != "completed_folder":
             raise AssentError(
-                "Eligible technical debt is limited to completed-folder review")
+                "Eligible technical debt is limited to completed-plan review")
 
     expected_recommendations = tuple(
         ReviewerRecommendation(item, ledger[item].recommendation)

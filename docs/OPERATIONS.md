@@ -29,10 +29,12 @@ external Git process.
 ## Interruption and recovery
 
 Assent preserves work after retryable failure, quota interruption, Ctrl+C, or a
-crash. When every uncommitted change is provably attributable to one resumable
-task and lies in its scope, the next run gathers it into a `WIP` checkpoint
-without opening an AI session. If ownership is ambiguous or out of scope, the
-dirty worktree remains for human inspection and the run refuses.
+crash. Before a writable plan reviewer starts, Assent records its exact plan
+scope. The next run gathers interrupted output inside that boundary into a
+`WIP` checkpoint and continues without a recovery AI session. Task-session
+output receives the same treatment when it is attributable to one resumable
+task. If ownership is ambiguous or out of scope, the dirty worktree remains for
+human inspection and the run refuses.
 
 If an AI writes into the primary worktree by mistake, Assent ports the edits
 back only when every path is in scope and the transfer is unambiguous. Otherwise

@@ -204,7 +204,7 @@ def resolve_auto_fix_review_session(cfg: Config,
     steps = [step for step in cfg.workflow_plan
              if isinstance(step, WorkflowPlanStep) and step.produces_verdict]
     if not steps:
-        raise AssentError("Auto-fix folder review is not configured")
+        raise AssentError("Auto-fix plan review is not configured")
     return _review_round_session(cfg, steps[0], adapter, steps[0].adapter)
 
 
@@ -237,7 +237,7 @@ def auto_fix_review_capability_errors(
             identity = _review_round_session(
                 cfg, review, round_adapter, name)
             request = InvocationRequest(
-                task_id=f"{cfg.tasks_name}/folder-review",
+                task_id=f"{cfg.tasks_name}/plan-review",
                 model=review.model,
                 effort=identity.effort,
                 requested_model=identity.requested_model,

@@ -55,6 +55,7 @@ from assent.verification_common import (
                                         VERIFY_COMMAND, BatchCandidate,
                                         build_batch_candidate,
                                         diagnosed_ignored_directories,
+                                        mentioned_ordinary_ignored_directories,
                                         run_full_verifier, verifier_digest)
 
 # The full verifier used to be private to this module, and callers outside the
@@ -92,6 +93,7 @@ __all__ = [
     "read_verification_receipt",
     "receipt_matches_current_candidate",
     "diagnosed_ignored_directories",
+    "mentioned_ordinary_ignored_directories",
     "receipt_path",
     "receipt_report_lines",
     "run_full_verifier",

@@ -47,7 +47,7 @@ _SCOPE_LINE_RE = re.compile(
 # a slow project it outlives what a session can wait for at all.
 _FULL_VERIFIER_RE = re.compile(r'\.assent[\\/]verify\.py\b')
 WORKFLOW_STATE_NAME = "_workflow.toml"
-SELECTION_WORKFLOW_STATE_NAME = "_selection_workflow.toml"
+INTEGRATION_WORKFLOW_STATE_NAME = "_integration_workflow.toml"
 _WORKFLOW_ACTIONS = {"focused_test"}
 _ACTION_STATUS_VALUES = {"PASSED", "FAILED", "STALE"}
 _SELECTION_REPAIR_PHASES = {
@@ -131,7 +131,7 @@ def workflow_state_path(tasks_dir: Path) -> Path:
 
 
 def selection_workflow_state_path(assent_dir: Path) -> Path:
-    return assent_dir / SELECTION_WORKFLOW_STATE_NAME
+    return assent_dir / INTEGRATION_WORKFLOW_STATE_NAME
 
 
 def _valid_action_evidence(evidence: object) -> bool:
@@ -236,7 +236,7 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
         with open(path, "rb") as source:
             data = tomllib.load(source)
     except (OSError, tomllib.TOMLDecodeError) as error:
-        raise AssentError(f"Selection workflow state {path.name} is unreadable: {error}") from error
+        raise AssentError(f"Integration workflow state {path.name} is unreadable: {error}") from error
     expected = {
         "version", "folders", "target_ref", "target_commit", "source_commits",
         "step_index", "action", "action_status", "action_candidate_tree",
@@ -244,7 +244,7 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
         "shared_inputs_sha256", "repair_phase",
     }
     if set(data) != expected or data.get("version") != 1:
-        raise AssentError(f"Selection workflow state {path.name} has an invalid schema")
+        raise AssentError(f"Integration workflow state {path.name} has an invalid schema")
     folders = data.get("folders")
     target_ref = data.get("target_ref")
     target_commit = data.get("target_commit")
@@ -276,7 +276,7 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
             or repair_phase not in _SELECTION_REPAIR_PHASES
             or (action_status and (not verification_script_sha256
                                    or not shared_inputs_sha256))):
-        raise AssentError(f"Selection workflow state {path.name} has invalid values")
+        raise AssentError(f"Integration workflow state {path.name} has invalid values")
     return SelectionWorkflowState(
         tuple(folders), target_ref, target_commit, tuple(source_commits),
         step_index, action, action_status, action_candidate_tree,

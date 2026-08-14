@@ -1413,11 +1413,10 @@ print(result.returncode, flush=True)
         self.assertFalse(thread.is_alive())
         interrupt.assert_called_once_with()
 
-    def test_stdin_eof_wakes_blocking_waits_after_marking_the_interrupt(self):
+    def test_stdin_eof_wakes_blocking_waits_before_marking_the_interrupt(self):
         """interrupt_main() only makes the exception pending, so the watcher
-        must also release whatever wait the main thread is parked in -- and in
-        that order, so the wait is never woken before there is anything to
-        deliver."""
+        must first release whatever wait the main thread is parked in, then
+        mark the interrupt immediately afterwards."""
         read_fd, write_fd = os.pipe()
         reader = os.fdopen(read_fd, "rb", buffering=0)
         self.addCleanup(reader.close)
@@ -1437,7 +1436,7 @@ print(result.returncode, flush=True)
             os.close(write_fd)
             thread.join(timeout=10)
 
-        self.assertEqual(order, ["interrupt", "wake"])
+        self.assertEqual(order, ["wake", "interrupt"])
 
     @unittest.skipUnless(os.name == "nt", "stdin pipe inheritance hang is Windows-only")
     def test_watcher_pipe_is_not_inherited_by_git_subprocess(self):
@@ -1500,8 +1499,7 @@ class TestInit(MainTestCase):
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertEqual(agents_md.count("<!-- assent-instructions -->"), 1)
         self.assertIn("`~/.assent/instructions.md`", agents_md)
-        self.assertIn("An AI session never initiates the full suite", agents_md)
-        self.assertIn("the scheduler owns workflow `full_verify`", agents_md)
+        self.assertNotIn("An AI session never initiates the full suite", agents_md)
         config = (self.user_home / "assent.toml").read_text(encoding="utf-8")
         self.assertNotIn("assent-config-schema", config)
         self.assertNotIn("[git]", config)
@@ -1925,7 +1923,6 @@ class TestInit(MainTestCase):
         self.assertIn("- 也保留這行", text)
         self.assertIn("`~/.assent/instructions.md`", text)
         self.assertNotIn("`.assent/instructions.md`", text)
-        self.assertIn("An AI session never initiates the full suite", text)
 
     def test_adds_one_bridge_line_to_existing_agents_md(self):
         (self.root / "AGENTS.md").write_text(

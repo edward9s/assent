@@ -131,6 +131,27 @@ class SharedPathsCase(unittest.TestCase):
 
 
 class TestThreeStateContract(SharedPathsCase):
+    def test_review_accepts_a_wholly_ignored_tree_when_its_name_is_not_ignored(self):
+        ignore = self.root / ".gitignore"
+        ignore.write_text(
+            ignore.read_text(encoding="utf-8").replace(
+                "pkg/\n", "pkg/*.txt\n"),
+            encoding="utf-8")
+        _git(self.root, "add", ".gitignore")
+        _git(self.root, "commit", "-m", "ignore generated package contents")
+        _git(self.worktree, "merge", "trunk")
+
+        self.assertFalse(gitops.is_path_ignored(
+            self.root, "pkg", directory=True))
+        self.assertIn("pkg/", gitops.ignored_entries(self.root))
+
+        contract = self._review("pkg")
+        self.assertEqual(contract.state, shared_paths.REVIEWED_PATHS)
+        self.assertTrue(os.path.islink(self.worktree / "pkg")
+                        or os.path.isdir(self.worktree / "pkg"))
+        shared_paths.require_directory_link_agreement(
+            self.root, self.worktree, contract)
+
     def test_unknown_becomes_reviewed_paths_and_is_cached_atomically(self):
         contract = self._classify()
         self.assertEqual(contract.state, shared_paths.UNKNOWN)
@@ -180,6 +201,36 @@ class TestThreeStateContract(SharedPathsCase):
                 self.root, self.worktree, contract)
         self.assertEqual(
             (external / "sentinel.txt").read_text(encoding="utf-8"), "keep\n")
+
+    def test_same_primary_orphan_is_reviewed_before_manifest_mutation(self):
+        self._review("pkg")
+        make_directory_link(
+            self.worktree / "lib/l10n/arb",
+            self.root / "lib/l10n/arb")
+        settled = self._classify()
+        self.assertEqual(settled.state, shared_paths.REVIEWED_PATHS)
+
+        reviewable = shared_paths.review_contract_with_source_links(
+            self.root, self.worktree, settled)
+        self.assertEqual(reviewable.state, shared_paths.STALE)
+        self.assertTrue(reviewable.needs_review)
+        self.assertIn("lib/l10n/arb", "\n".join(reviewable.evidence))
+        before = shared_paths.manifest_path(self.root).read_bytes()
+
+        prepared = shared_paths.prepare_worktree(self.root, self.worktree)
+        self.assertEqual(prepared.state, shared_paths.STALE)
+        with self.assertRaisesRegex(
+                AssentError, "omits existing ignored directory link.*lib/l10n/arb"):
+            shared_paths.validate_review_decision(
+                self.root, self.worktree, ("pkg",), ("pubspec.yaml",))
+        self.assertEqual(
+            shared_paths.manifest_path(self.root).read_bytes(), before)
+
+        declared, watched = shared_paths.validate_review_decision(
+            self.root, self.worktree, ("pkg", "lib/l10n/arb"),
+            ("pubspec.yaml",))
+        self.assertEqual(declared, ("lib/l10n/arb", "pkg"))
+        self.assertEqual(watched, ("pubspec.yaml",))
 
     def test_a_repository_with_no_ignored_directory_has_nothing_to_review(self):
         bare = self._plain_repository()
@@ -597,6 +648,34 @@ class TestProvisioning(SharedPathsCase):
                          "kept\n")
         self.assertEqual((external / "outside.txt").read_text(encoding="utf-8"),
                          "outside\n")
+
+    def test_profile_switch_preserves_a_recorded_link_until_review(self):
+        original = (self.worktree / "pubspec.yaml").read_text(encoding="utf-8")
+        changed = original + "  extra: any\n"
+
+        self._review("pkg", "assets")
+        (self.worktree / "pubspec.yaml").write_text(changed, encoding="utf-8")
+        self._review("pkg")
+
+        (self.worktree / "pubspec.yaml").write_text(original, encoding="utf-8")
+        shared_paths.prepare_worktree(self.root, self.worktree)
+        self.assertTrue(os.path.lexists(self._link("assets")))
+
+        (self.worktree / "pubspec.yaml").write_text(changed, encoding="utf-8")
+        prepared = shared_paths.prepare_worktree(self.root, self.worktree)
+        self.assertEqual(prepared.state, shared_paths.STALE)
+        self.assertIn("assets", "\n".join(prepared.evidence))
+        self.assertTrue(os.path.lexists(self._link("assets")))
+        self.assertEqual(
+            shared_paths.applied_paths(
+                shared_paths.read_manifest(self.root), self.worktree),
+            ("assets", "pkg"))
+        with self.assertRaisesRegex(AssentError, "outside its active"):
+            shared_paths.prepare_sources(
+                self.root, (("plan\u6e2c\u8a66", self.worktree),))
+
+        self._review("pkg")
+        self.assertFalse(os.path.lexists(self._link("assets")))
 
     def test_a_declared_target_that_disappears_or_changes_type_fails_closed(self):
         self._review("pkg", "assets")
