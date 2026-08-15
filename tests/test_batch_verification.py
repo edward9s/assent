@@ -31,6 +31,7 @@ from assent.folder_verification import receipt_path
 from assent.init import _BRIDGE_LINE, _EXPANDED_BRIDGE_LINE
 from assent.lockfile import hold_integration_lock, hold_lock
 from assent.verification_common import build_batch_candidate
+from tests.test_shared_paths import excluded_inventory
 from tests.test_verification import make_directory_link
 
 _VERIFY_OK = "raise SystemExit(0)\n"
@@ -1068,7 +1069,8 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         declared.add(name)
         self.declared = tuple(sorted(declared))
         shared_paths.review(
-            self.root, worktree, paths=self.declared, watch=("README.md",))
+            self.root, worktree, paths=self.declared, watch=("README.md",),
+            dispositions=excluded_inventory(self.root, self.declared))
         return target
 
     def write_probe_verify(self, *probe: str, absent: tuple[str, ...] = (),
@@ -1116,7 +1118,8 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         (arb / "app_localizations.dart").write_text("// l10n\n", encoding="utf-8")
         shared_paths.review(
             self.root, gitops.worktree_path(self.root, "aa"),
-            paths=("lib/l10n/arb",), watch=("README.md",))
+            paths=("lib/l10n/arb",), watch=("README.md",),
+            dispositions=excluded_inventory(self.root, ("lib/l10n/arb",)))
         part = gitops.worktree_path(self.root, "bb") / "lib/models/task.g.dart"
         part.write_text("// generated part\n", encoding="utf-8")
         cache = gitops.worktree_path(self.root, "bb") / "ignored"
@@ -1260,7 +1263,8 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         self.make_source("aa")
         worktree = gitops.worktree_path(self.root, "aa")
         shared_paths.review(
-            self.root, worktree, none=True, watch=("README.md",))
+            self.root, worktree, none=True, watch=("README.md",),
+            dispositions=excluded_inventory(self.root))
         target = self.link_target("pkg")
         make_directory_link(worktree / "pkg", target)
 

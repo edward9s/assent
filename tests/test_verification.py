@@ -26,7 +26,7 @@ from assent.gitops import (branch_tip, commit_of, folder_branches, tree_of,
 from assent.verification_common import (ProvisionedLink, _require_no_overlap,
                                         provisioned_candidate_links, summary,
                                         union_worktree_links)
-from tests.test_shared_paths import settle_shared_paths
+from tests.test_shared_paths import excluded_inventory, settle_shared_paths
 
 
 def _git(root: Path, *args: str) -> str:
@@ -138,7 +138,8 @@ class VerificationRepositoryCase(unittest.TestCase):
         declared.add(name)
         self.declared = tuple(sorted(declared))
         shared_paths.review(
-            self.root, worktree, paths=self.declared, watch=("README.md",))
+            self.root, worktree, paths=self.declared, watch=("README.md",),
+            dispositions=excluded_inventory(self.root, self.declared))
         return target
 
     def _write_verifier(self, exit_code: int, output_size: int = 0,
@@ -820,7 +821,8 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
             "// generated localizations\n", encoding="utf-8")
         shared_paths.review(
             self.root, self.source_worktree, paths=("lib/l10n/arb",),
-            watch=("README.md",))
+            watch=("README.md",),
+            dispositions=excluded_inventory(self.root, ("lib/l10n/arb",)))
         return target
 
     def _provision_generated_part(self) -> Path:
@@ -975,7 +977,9 @@ class TestSharedPathGate(VerificationRepositoryCase):
 
     def test_a_reviewed_profile_provisions_the_source_and_binds_the_digest(self):
         shared_paths.review(self.root, self.source_worktree,
-                            paths=("pkg",), watch=("README.md",))
+                            paths=("pkg",), watch=("README.md",),
+                            dispositions=excluded_inventory(
+                                self.root, ("pkg",)))
         self._commit_target_verifier(exit_code=0, probe=("pkg",))
 
         self.assertEqual(verify_folder(self.cfg), 0)
@@ -995,7 +999,8 @@ class TestSharedPathGate(VerificationRepositoryCase):
 
     def test_reviewed_none_refuses_an_external_ignored_directory_link(self):
         shared_paths.review(self.root, self.source_worktree,
-                            none=True, watch=("README.md",))
+                            none=True, watch=("README.md",),
+                            dispositions=excluded_inventory(self.root))
         external = self.parent / "external pkg"
         external.mkdir()
         marker = external / "marker.txt"
@@ -1017,7 +1022,9 @@ class TestSharedPathGate(VerificationRepositoryCase):
 
     def test_a_missing_link_is_recreated_rather_than_depended_on(self):
         shared_paths.review(self.root, self.source_worktree,
-                            paths=("pkg",), watch=("README.md",))
+                            paths=("pkg",), watch=("README.md",),
+                            dispositions=excluded_inventory(
+                                self.root, ("pkg",)))
         pathops.detach_directory_link(self.source_worktree / "pkg")
         self._commit_target_verifier(exit_code=0, probe=("pkg",))
 
@@ -1026,7 +1033,9 @@ class TestSharedPathGate(VerificationRepositoryCase):
 
     def test_a_target_changing_during_the_verifier_cannot_pass(self):
         shared_paths.review(self.root, self.source_worktree,
-                            paths=("pkg",), watch=("README.md",))
+                            paths=("pkg",), watch=("README.md",),
+                            dispositions=excluded_inventory(
+                                self.root, ("pkg",)))
         # The stand-in verifier rewrites the declared target's content while it
         # is running, which is exactly the race the second snapshot exists for.
         marker = self.root / "pkg" / "marker.txt"

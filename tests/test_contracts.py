@@ -304,10 +304,11 @@ class TestContractContent(unittest.TestCase):
         instructions = self._compact("instructions.md")
         workflow = self._compact("workflow.md")
         for phrase in (
-                "assent shared-paths review --path DIR --watch FILE",
+                "runs the injected `assent shared-paths review` command",
+                "Cover every listed ordinary ignored directory once",
                 "Never hand-create a source-worktree link",
-                "Never copy the ignored directory tree in",
-                "modify anything inside the linked target"):
+                "Never copy an ignored tree",
+                "modify a linked target"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, instructions)
         for phrase in (

@@ -67,11 +67,12 @@ layer. A failure may use the next configured repair role and is then rechecked.
 The configured arrays are finite; Assent never creates extra repair rounds.
 
 If shared ignored-directory evidence is unknown or stale, the same plan
-reviewer includes exact shared paths and watched files in its verdict. Assent
-validates and applies that decision before accepting the verdict; no separate
-human command or AI session is required. Existing same-primary directory links
-are included in the review evidence, and an omitted link is corrected by the
-same bounded reviewer before the manifest changes.
+reviewer includes exact shared paths, non-shared dispositions with reasons, and
+watched files in its verdict. Assent validates and applies that decision before
+accepting the verdict; no separate human command or AI session is required.
+Existing same-primary directory links are included in the review evidence, and
+an omitted link is corrected by the same bounded reviewer before the manifest
+changes.
 
 Worktree preparation retains an application-recorded link when another cached
 profile omits it and marks the contract stale. During integration repair, the
@@ -79,8 +80,9 @@ configured integration verdict role settles that evidence in one read-only
 shared-input recovery before focused checks run. If an already-damaged profile
 is exposed only when focused output names a file below an omitted ordinary
 ignored directory, the same recovery is the fallback; the scheduler applies
-the validated paths/watch decision and retries once. General focused failures
-remain ordinary failures and do not create an extra source-repair round.
+the validated paths/dispositions/watch decision and retries once. General
+focused failures remain ordinary failures and do not create an extra
+source-repair round.
 
 Task `BLOCKED` evidence remains at the task layer and never spends plan review.
 If a task reviewer finds one omitted scope path, a write-capable reviewer fixes

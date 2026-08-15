@@ -90,40 +90,17 @@ the role-specific prompt defines that responsibility.
 
 ## Shared ignored directories
 
-Assent records the reviewed shared-directory decision in the primary
-worktree's untracked `.assent/manifest.toml` and provisions matching links
-before a session.
+If an injected clause says `UNKNOWN` or `STALE`, settle it before closeout.
+A plan reviewer returns the requested `shared_paths` record and does not run
+the CLI; any other session runs the injected `assent shared-paths review`
+command from its worktree. Cover every listed ordinary ignored directory once
+as shared or non-shared, and watch only the tracked dependency or build files
+that invalidate the decision.
 
-- A plan-review prompt that requires a `shared_paths` verdict field owns the
-  semantic decision in that same review session. Return its exact `paths` and
-  `watch` lists in the terminal review record and do not run the CLI command;
-  account for every existing same-primary directory link the prompt names. The
-  scheduler validates the complete link agreement before writing the manifest.
-  An omitted link returns a correction to this bounded reviewer rather than
-  accepting a partial decision.
-- In any other session, if the prompt says `UNKNOWN` or `STALE`, settle it
-  before closeout with
-  `assent shared-paths review --path DIR --watch FILE` (repeat either option as
-  needed), or `assent shared-paths review --none --watch FILE`. Run it from the
-  session cwd: the managed source worktree whose snapshot is being reviewed and
-  whose links the command reconciles. The primary worktree supplies the targets
-  and holds the manifest; running the command there only caches that primary
-  snapshot and creates no link. A watch path is the exact tracked dependency or
-  build file whose change should invalidate the decision. Judge only from
-  Git-ignore rules, those declarations, and this task's evidence. This command
-  is the manifest's only writer.
-- If it says `NO-IGNORED-DIRECTORY-CANDIDATE`, a successful Git query found no
-  ordinary ignored directory to declare. There is nothing to review; do not run
-  the command just in case. This is not a semantic claim that shared input will
-  never be needed.
-- If the task demonstrably needs an ignored directory, confirm that the same
-  relative path is an ordinary, Git-ignored directory in the primary worktree,
-  then record it with
-  `assent shared-paths review --path DIR --watch FILE`. Assent provisions the
-  junction or directory symlink. Never hand-create a source-worktree link.
-  Never copy the ignored directory tree in, provision unrelated caches or
-  credentials, or modify anything inside the linked target. Ordinary ignored
-  leaf files beside tracked source need no action.
+Share only a demonstrably required directory whose same-relative primary target
+is an ordinary Git-ignored directory. Never copy an ignored tree. Never
+hand-create a source-worktree link, provision unrelated caches or credentials,
+or modify a linked target.
 
 ## Review and acceptance meetings
 

@@ -227,37 +227,24 @@ while operating an assent-managed session live in
   it is Assent-owned local execution memory, not project source, and its only
   writer is the validated `assent shared-paths review` operation. Under
   `[shared_paths]` it retains whole profiles by fingerprint -- normalized
-  project-relative `paths`, exact tracked `watch` files, and a digest of those
-  files plus the tracked Git-ignore rules -- so parallel branches never make the
-  cache oscillate. A source snapshot is UNKNOWN, REVIEWED-NONE (a matching
+  project-relative `paths`, a complete collapsed ordinary ignored-directory inventory,
+  explicit non-shared dispositions with reasons, exact tracked `watch` files,
+  and a digest of those files plus the tracked Git-ignore rules -- so parallel
+  branches never make the cache oscillate and an omitted directory cannot
+  be accepted. A source snapshot is UNKNOWN, REVIEWED-NONE (a matching
   `paths = []` profile is an answer and must never trigger another review),
   REVIEWED-PATHS (Assent provisions the exact Windows junction or POSIX
   directory symlink to the primary worktree's same relative path itself), or
   STALE; conflicting matching profiles fail closed. One further state,
   NO-IGNORED-DIRECTORY-CANDIDATE, is the deterministic zero-token fast path:
-  it means only that a successful Git ignored-entry query of the primary
-  worktree found no existing ordinary ignored directory outside `.git/` and
-  `.assent/`, never that the project semantically needs no shared input. It is
-  settled without a manifest profile, junction, or AI review, contributes a
-  receipt-digest identity distinct from REVIEWED-NONE, and is recomputed
-  cheaply at every applicable gate. It fails closed: a Git ignored-entry
-  discovery error is an actionable refusal and is never turned into an empty
-  candidate set, ignored leaf files do not count, any existing ordinary
-  ignored directory does count even when a review later answers `paths = []`,
-  and a directory appearing later makes the next classification UNKNOWN unless
-  a matching cached profile already answers it. Complete-verifier
-  `required_evidence` naming a missing directory is never settled as
-  NO-IGNORED-DIRECTORY-CANDIDATE: it is classified for review when a valid
-  primary target exists and otherwise refuses with the exact missing or
-  not-ignored target problem. Candidate enumeration deliberately asks the
-  primary worktree, because every allowed link target must be an existing
-  ordinary Git-ignored directory at that same primary relative path and a
-  fresh source checkout is expected to hold no ignored inputs; a directory or
-  ignore rule that exists only on an unaccepted source branch is not yet a
-  provisionable primary target and must produce an actionable refusal rather
-  than a "none needed" claim. UNKNOWN and STALE add one
-  bounded review clause to the next already-scheduled session and refuse its
-  closeout until settled; an unchanged fingerprint consumes no review tokens.
+  a successful primary-worktree query found no existing ordinary ignored
+  directory. It is distinct from REVIEWED-NONE and never claims that shared
+  input is semantically unnecessary. Discovery failure refuses; a new directory
+  makes the next classification UNKNOWN. Complete-verifier `required_evidence`
+  requires a provisionable primary directory or refuses with the exact target
+  problem. UNKNOWN and STALE add one bounded review clause and block closeout
+  until settled. Inventory comes from the primary worktree before the session;
+  ignored leaf files remain on their separate automatic verifier path.
   Every verification entry point and `assent reconcile` classify and reconcile
   before any candidate, verifier, or managed worktree exists, and folder and
   batch receipts bind one `shared_inputs_sha256` -- snapshotted immediately

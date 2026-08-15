@@ -211,7 +211,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 0, auto_fix.review_record_json(
                     auto_fix.ReviewRecord(
                         "FIXED", (finding,),
-                        auto_fix.SharedPathsDecision((), ("AGENTS.md",)))),
+                        auto_fix.SharedPathsDecision(
+                            (), ("AGENTS.md",),
+                            (auto_fix.SharedPathDisposition(
+                                "cache", "generated cache is worktree-local"),)))),
                 False, None)
 
         passed = subprocess.CompletedProcess([], 0, "focused pass\n", "")
@@ -323,7 +326,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             0, auto_fix.review_record_json(
                 auto_fix.ReviewRecord(
                     "PASS", (),
-                    auto_fix.SharedPathsDecision((), ("AGENTS.md",)))),
+                    auto_fix.SharedPathsDecision(
+                        (), ("AGENTS.md",),
+                        (auto_fix.SharedPathDisposition(
+                            "cache", "generated cache is worktree-local"),)))),
             False, None)
         reviewer = ScriptedAdapter(
             [missing_decision, omitted_link, review_shared])
@@ -574,7 +580,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         (cache / "generated.dart").write_text(
             "generated\n", encoding="utf-8")
         shared_paths.review(
-            self.root, worktree, none=True, watch=("AGENTS.md",))
+            self.root, worktree, none=True, watch=("AGENTS.md",),
+            dispositions=(shared_paths.PathDisposition(
+                "cache", "generated cache is worktree-local"),))
 
         record = auto_fix.ReviewRecord(
             "PASS", (), auto_fix.SharedPathsDecision(
@@ -633,7 +641,9 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             self.root, worktree, paths=("cache",), watch=("deps.txt",))
         (worktree / "deps.txt").write_text("second\n", encoding="utf-8")
         shared_paths.review(
-            self.root, worktree, none=True, watch=("deps.txt",))
+            self.root, worktree, none=True, watch=("deps.txt",),
+            dispositions=(shared_paths.PathDisposition(
+                "cache", "generated cache is worktree-local"),))
         (worktree / "deps.txt").write_text("first\n", encoding="utf-8")
         shared_paths.prepare_worktree(self.root, worktree)
         (worktree / "deps.txt").write_text("second\n", encoding="utf-8")

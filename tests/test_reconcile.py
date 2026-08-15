@@ -24,7 +24,7 @@ from assent.reconcile import (automatic_reconcile_continue_locked,
                               reconcile_continue, reconcile_start)
 from tests.link_support import (cleanup_worktree, make_directory_link,
                                 safe_rmtree)
-from tests.test_shared_paths import settle_shared_paths
+from tests.test_shared_paths import excluded_inventory, settle_shared_paths
 
 
 def _git(root: Path, *args: str) -> str:
@@ -333,7 +333,9 @@ class SharedPathContractTest(ReconcileRepositoryCase):
         self._conflicting_repository()
         shared_paths.review(
             self.root, self.source_worktree,
-            paths=("pkg", "lib/l10n/arb"), watch=(".gitignore",))
+            paths=("pkg", "lib/l10n/arb"), watch=(".gitignore",),
+            dispositions=excluded_inventory(
+                self.root, ("pkg", "lib/l10n/arb")))
 
         code, output = self._run(reconcile_start)
 
@@ -357,7 +359,9 @@ class SharedPathContractTest(ReconcileRepositoryCase):
         self._ignored_targets()
         self._conflicting_repository()
         shared_paths.review(self.root, self.source_worktree,
-                            paths=("pkg",), watch=(".gitignore",))
+                            paths=("pkg",), watch=(".gitignore",),
+                            dispositions=excluded_inventory(
+                                self.root, ("pkg",)))
         self.assertEqual(self._run(reconcile_start)[0], 0)
         self._resolve()
         pathops.detach_directory_link(self._managed_path() / "pkg")
@@ -378,7 +382,8 @@ class SharedPathContractTest(ReconcileRepositoryCase):
         self._ignored_targets()
         self._conflicting_repository()
         shared_paths.review(self.root, self.source_worktree, none=True,
-                            watch=(".gitignore",))
+                            watch=(".gitignore",),
+                            dispositions=excluded_inventory(self.root))
 
         self.assertEqual(self._run(reconcile_start)[0], 0)
         for relative in ("pkg", "assets", "lib/l10n/arb"):
@@ -568,7 +573,9 @@ class ContinueTest(ReconcileRepositoryCase):
                 f"{directory} sentinel\n", encoding="utf-8")
         self._conflicting_repository()
         shared_paths.review(self.root, self.source_worktree,
-                            paths=("pkg",), watch=(".gitignore",))
+                            paths=("pkg",), watch=(".gitignore",),
+                            dispositions=excluded_inventory(
+                                self.root, ("pkg",)))
         self.assertEqual(self._run(reconcile_start)[0], 0)
         self._resolve("keep this human resolution\n")
         managed = self._managed_path()
@@ -578,7 +585,9 @@ class ContinueTest(ReconcileRepositoryCase):
         # The watch and ignore rules are unchanged, so this review deliberately
         # reuses the same fingerprint while replacing the reviewed answer.
         shared_paths.review(self.root, self.source_worktree,
-                            paths=("assets",), watch=(".gitignore",))
+                            paths=("assets",), watch=(".gitignore",),
+                            dispositions=excluded_inventory(
+                                self.root, ("assets",)))
 
         code, output = self._run(reconcile_continue)
 

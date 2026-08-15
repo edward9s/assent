@@ -134,13 +134,17 @@ files，以及鏈結是否一致。在主要 worktree 中，鏈結會顯示為�
 或 build file 改變後，原決定應該失效：
 
 ```text
-assent shared-paths review --path assets --path pkg --watch package.lock
+assent shared-paths review --path assets --path pkg --classify build "generated output" --watch package.lock
 ```
 
-若審查後不需要任何 ignored directory，使用 `--none`。決定會快取在主要 worktree
-未追蹤的 `.assent/manifest.toml`。Watch file 或 target 改變後會過期。若成功查詢
-沒有發現候選目錄，狀態是 `NO-IGNORED-DIRECTORY-CANDIDATE`；它只描述目前檔案系統，
-不是「專案永遠不需要 shared input」的語意保證。
+Review prompt 列出的每個 ordinary ignored directory，都必須由 shared `--path`
+或 non-shared `--classify PATH REASON` 覆蓋一次；兩者都可以涵蓋 subtree。沒有目錄
+需要分享時使用 `--none`。Ignored leaf file 仍由 verifier 自動處理，不需要分類。
+
+決定會快取在主要 worktree 未追蹤的 `.assent/manifest.toml`。Watch file、directory
+inventory 或 target 改變後會過期。若成功查詢沒有發現 ordinary ignored directory，
+狀態是 `NO-IGNORED-DIRECTORY-CANDIDATE`；它只描述目前檔案系統，不是「專案永遠
+不需要 shared input」的語意保證。
 
 不能把所有 ignored directory 都建立成鏈結。Ignore rule 還可能包含可寫入的 build
 output、cache、virtual environment、editor state 與 credential；全部連結會共用

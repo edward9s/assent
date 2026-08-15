@@ -1,6 +1,7 @@
 """Safely clean up worktrees and merged branches that are provably redundant for a task folder."""
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from contextlib import ExitStack
 from pathlib import Path
@@ -66,7 +67,9 @@ def has_cleanup_target(cfg: Config) -> bool:
     ``clean_locked``: a source that clean deliberately retained must stop the
     archive rather than be compressed away.
     """
-    return (gitops.worktree_path(cfg.root, cfg.tasks_name).exists()
+    path = gitops.worktree_path(cfg.root, cfg.tasks_name)
+    return (os.path.lexists(path)
+            or gitops.worktree_removal_pending(cfg.root, path)
             or bool(gitops.branches_with_prefix(cfg.root, cfg.branch_prefix)))
 
 
@@ -246,12 +249,10 @@ def clean_locked(cfg: Config, path: Path) -> int:
                 return 0
 
             branches = gitops.branches_with_prefix(root, cfg.branch_prefix)
+            path_present = os.path.lexists(path)
+            valid_worktree = path_present and gitops.is_repo_worktree(root, path)
 
-            if path.exists():
-                if not gitops.is_repo_worktree(root, path):
-                    print(f"{name}: skipped (fixed path is not a valid worktree of "
-                          f"this repo: {path})")
-                    return 0
+            if valid_worktree:
                 try:
                     gitops.ensure_clean(path)
                 except AssentError as e:
@@ -278,7 +279,7 @@ def clean_locked(cfg: Config, path: Path) -> int:
             unmerged = _unmerged_branches(root, branches, head)
 
             if unmerged:
-                retained = ("both worktree and branches retained" if path.exists()
+                retained = ("both worktree and branches retained" if path_present
                             else "branches retained")
                 print(f"{name}: skipped (not all same-prefix branches are merged, "
                       f"{retained})")
@@ -286,9 +287,18 @@ def clean_locked(cfg: Config, path: Path) -> int:
                 return 0
 
             failed = False
-            if path.exists():
+            pending_removal = gitops.worktree_removal_pending(root, path)
+            if path_present and not valid_worktree and not pending_removal:
+                print(f"{name}: skipped (fixed path is not a valid worktree of "
+                      f"this repo and has no Assent removal evidence: {path})")
+                return 0
+
+            if valid_worktree or pending_removal:
                 try:
-                    gitops.remove_worktree(root, path)
+                    if valid_worktree:
+                        gitops.remove_worktree(root, path)
+                    else:
+                        gitops.recover_worktree_removal(root, path)
                     _remove_empty_container(path)
                     print(f"{name}: cleaned (worktree {path})")
                 except AssentError as e:

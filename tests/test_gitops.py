@@ -25,6 +25,17 @@ def _run(root: Path, *args: str) -> None:
                    encoding="utf-8", check=True)
 
 
+def _forget_worktree_metadata(path: Path) -> None:
+    git_file = path / ".git"
+    prefix = "gitdir: "
+    text = git_file.read_text(encoding="utf-8").strip()
+    if not text.startswith(prefix):
+        raise AssertionError(f"unexpected worktree .git file: {text!r}")
+    admin = Path(text.removeprefix(prefix))
+    git_file.unlink()
+    safe_rmtree(admin)
+
+
 class GitTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp())
@@ -222,6 +233,72 @@ class TestEnsureWorktree(GitTestCase):
             ensure_worktree(self.root, "parallel01")
         self.assertEqual((path / "keep.txt").read_text(encoding="utf-8"),
                          "do not overwrite\n")
+
+    def test_remove_finishes_a_partial_git_removal_with_long_ignored_paths(self):
+        (self.root / ".gitignore").write_text("build/\n", encoding="utf-8")
+        _run(self.root, "add", ".gitignore")
+        _run(self.root, "commit", "-m", "ignore build output")
+        path = ensure_worktree(self.root, "parallel01")
+        deep = path / "build" / ("a" * 50) / ("b" * 50) / ("c" * 50)
+        deep.mkdir(parents=True)
+        artifact = deep / (("d" * 80) + ".bin")
+        artifact.write_bytes(b"generated")
+        self.assertGreater(len(str(artifact)), 260)
+        real_run_git = gitops._run_git
+
+        def partial_remove(root: Path, *args: str):
+            if args[:2] == ("worktree", "remove"):
+                _forget_worktree_metadata(path)
+                return subprocess.CompletedProcess(
+                    ["git", *args], 255, "", "Filename too long")
+            return real_run_git(root, *args)
+
+        with mock.patch.object(gitops, "_run_git", side_effect=partial_remove):
+            gitops.remove_worktree(self.root, path)
+
+        self.assertFalse(path.exists())
+        self.assertFalse(gitops.worktree_removal_pending(self.root, path))
+
+    def test_recorded_partial_removal_survives_process_interruption(self):
+        path = ensure_worktree(self.root, "parallel01")
+        real_run_git = gitops._run_git
+
+        def interrupted_remove(root: Path, *args: str):
+            if args[:2] == ("worktree", "remove"):
+                _forget_worktree_metadata(path)
+                raise KeyboardInterrupt
+            return real_run_git(root, *args)
+
+        with mock.patch.object(gitops, "_run_git", side_effect=interrupted_remove):
+            with self.assertRaises(KeyboardInterrupt):
+                gitops.remove_worktree(self.root, path)
+
+        self.assertTrue(path.exists())
+        self.assertTrue(gitops.worktree_removal_pending(self.root, path))
+        self.assertTrue(gitops.recover_worktree_removal(self.root, path))
+        self.assertFalse(path.exists())
+        self.assertFalse(gitops.worktree_removal_pending(self.root, path))
+
+    def test_recorded_removal_refuses_a_replacement_directory(self):
+        path = ensure_worktree(self.root, "parallel01")
+        real_run_git = gitops._run_git
+
+        def interrupted_remove(root: Path, *args: str):
+            if args[:2] == ("worktree", "remove"):
+                raise KeyboardInterrupt
+            return real_run_git(root, *args)
+
+        with mock.patch.object(gitops, "_run_git", side_effect=interrupted_remove):
+            with self.assertRaises(KeyboardInterrupt):
+                gitops.remove_worktree(self.root, path)
+
+        safe_rmtree(path)
+        path.mkdir()
+        foreign = path / "keep.txt"
+        foreign.write_text("replacement\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "changed identity"):
+            gitops.recover_worktree_removal(self.root, path)
+        self.assertEqual(foreign.read_text(encoding="utf-8"), "replacement\n")
 
     def test_branch_and_commit_do_not_affect_main_worktree(self):
         main_branch = subprocess.run(

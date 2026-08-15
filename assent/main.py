@@ -34,12 +34,15 @@ whose snapshot is being reviewed. Running it in the primary worktree records a
 profile for that primary snapshot but creates no links there.
 
 Examples:
-  assent shared-paths review --path assets --path pkg --watch package.lock
-  assent shared-paths review --none --watch package.lock
+  assent shared-paths review --path assets --classify build "build output" --watch package.lock
+  assent shared-paths review --none --classify build "build output" --watch package.lock
 
 --path is a repeatable project-relative ignored directory that compilation or
-testing requires. --watch is a repeatable, tracked dependency or build file;
-changing it makes the decision stale. State either one or more --path values or
+testing requires. --classify accounts for every inventory directory that is not
+shared, with a reason.
+--watch is a repeatable, tracked dependency or build file; changing it makes the
+decision stale. Every inventory directory must be covered exactly once by --path or
+--classify; either may cover a subtree. State one or more --path values or
 --none, and always state at least one --watch file.
 """
 
@@ -68,6 +71,11 @@ def add_shared_paths_command(sub: argparse._SubParsersAction) -> None:
         "--none", action="store_true",
         help="record that this snapshot needs no shared directory at all")
     review.add_argument(
+        "--classify", action="append", nargs=2, default=[],
+        metavar=("PATH", "REASON"),
+        help="record why one ignored inventory directory is not shared "
+             "(repeatable)")
+    review.add_argument(
         "--watch", action="append", default=[], metavar="FILE",
         help="a tracked dependency or build file whose change makes this "
              "decision worth reconsidering (repeatable, required)")
@@ -88,6 +96,7 @@ def _primary_worktree(cwd: Path) -> Path:
 
 
 def shared_paths_review(paths: list[str], watch: list[str], none: bool,
+                        classifications: list[list[str]] | None = None,
                         cwd: Path | None = None) -> int:
     """Run one validated review from the current working tree.
 
@@ -99,7 +108,10 @@ def shared_paths_review(paths: list[str], watch: list[str], none: bool,
     here = Path.cwd() if cwd is None else Path(cwd)
     main = _primary_worktree(here)
     contract = shared_paths.review(
-        main, here, paths=paths, watch=watch, none=none)
+        main, here, paths=paths, watch=watch, none=none,
+        dispositions=tuple(
+            shared_paths.PathDisposition(path, reason)
+            for path, reason in (classifications or [])))
     print(f"Recorded shared-path profile {contract.profile.fingerprint[:12]} "
           f"in {shared_paths.manifest_path(main)}")
     print(shared_paths.describe(contract))
@@ -152,7 +164,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.operation == "status":
             return shared_paths_status()
-        return shared_paths_review(args.path, args.watch, args.none)
+        return shared_paths_review(
+            args.path, args.watch, args.none, args.classify)
     except AssentError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1

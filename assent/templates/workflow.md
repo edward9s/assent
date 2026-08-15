@@ -168,11 +168,12 @@ management-plane, task-file, other-task, primary-worktree, or Git write makes
 the verdict unusable while preserving edits.
 
 When the shared-input contract is `UNKNOWN` or `STALE`, the same plan reviewer
-returns exact `paths` and `watch` lists in its terminal verdict. The scheduler
-validates and applies that decision before accepting the verdict; the reviewer
-does not write the manifest or run a separate CLI command. A missing or invalid
-decision retries the same unfinished workflow position, and uniquely owned
-source edits are kept in a WIP checkpoint if retries end.
+returns exact `paths`, non-shared `dispositions`, and `watch` lists in its
+terminal verdict. The scheduler validates and applies that decision before
+accepting the verdict; the reviewer does not write the manifest or run a
+separate CLI command. A missing or invalid decision retries the same unfinished
+workflow position, and uniquely owned source edits are kept in a WIP checkpoint
+if retries end.
 
 Only the first completed-plan review may record eligible technical debt. It must
 be concrete, encountered in changed or directly interacting code, local to an
@@ -329,15 +330,20 @@ unsafe parents refuse before verification or PASS evidence.
 The primary worktree's untracked `.assent/manifest.toml` stores reviewed shared
 directory profiles keyed by watched Git-ignore and dependency/build inputs:
 
-- `UNKNOWN`: a real candidate has no matching decision;
+- `UNKNOWN`: an ordinary ignored-directory inventory has no matching decision;
 - `REVIEWED-NONE`: matching review chose no paths;
 - `REVIEWED-PATHS`: matching review chose exact same-relative primary targets;
-- `STALE`: watched evidence or a declared target changed;
+- `STALE`: watched evidence, directory inventory, or a declared target changed;
 - `NO-IGNORED-DIRECTORY-CANDIDATE`: a successful current Git query found no
   ordinary ignored directory. This is not a semantic claim that none is needed.
 
 `assent shared-paths status` classifies the worktree it runs in and reports the
 matching profile and link agreement without writing or provisioning anything.
+An `UNKNOWN` or `STALE` review prompt lists every collapsed ordinary ignored
+directory in the primary worktree. Each directory must be covered once by a
+shared path or a non-shared disposition with a reason. Presence alone does not
+make a directory required. Ignored leaf files keep their automatic verifier
+handling and do not enter this review.
 Only the validated shared-path review operation writes the manifest. The
 `assent shared-paths review` command and a scheduler-applied structured reviewer
 decision both enter that operation. It fingerprints and reconciles the worktree
@@ -355,8 +361,9 @@ Worktree preparation never removes an application-recorded link merely because
 another cached profile omits it. The link stays in place and makes the contract
 STALE; during integration repair, the configured integration verdict role
 settles that evidence in one bounded, read-only shared-input recovery before
-focused checks run. The role may return only the complete `paths` and `watch`
-decision, which the scheduler validates and applies. If an already-damaged or
+focused checks run. The role may return only the complete `paths`, non-shared
+`dispositions`, and `watch` decision, which the scheduler validates and
+applies. If an already-damaged or
 incorrect profile is exposed only when focused output names a descendant of an
 omitted ordinary ignored directory, the same recovery runs as a fallback and
 the scheduler retries the focused checks once. General focused failures never

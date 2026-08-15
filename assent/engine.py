@@ -2066,6 +2066,8 @@ def _selection_shared_path_review_material(
         "The paths must include every required directory named above."
         if required else
         "Return the complete path answer for this source snapshot.")
+    inventory = "\n".join(
+        f"- {relative}" for relative in contract.inventory) or "- (none)"
     prompt = f"""Before inspecting source, read the project rules
 {_agents_md_absolute_path_for_prompt(cfg)} and the Assent session rules
 {contracts.instructions_path()}.
@@ -2082,6 +2084,12 @@ journal, Git, receipt, manifest, or any shared-path link. Do not run tests,
 generators, Git, or Assent commands. The scheduler alone applies and validates
 the decision.
 
+Complete primary ignored-directory inventory:
+{inventory}
+Every directory must be covered exactly once by a shared path or a non-shared
+disposition with exact path and non-empty reason. A path or disposition may
+cover its subtree.
+
 Configured role policy:
 {chr(10).join(ability.prompt for ability in step.resolved_role.abilities)}
 
@@ -2090,11 +2098,11 @@ Focused failure evidence:
 
 Finish with exactly one assent.auto_fix_review JSON object on the final
 non-empty line. Return verdict PASS, no findings, and a non-null shared_paths
-object containing exact paths and watch string lists. {required_policy} Watch
+object containing exact paths, dispositions, and watch lists. {required_policy} Watch
 exactly the tracked dependency or build files whose change should invalidate
 the decision.
 
-{{"type":"assent.auto_fix_review","verdict":"PASS","shared_paths":{{"paths":[],"watch":[]}},"findings":[]}}
+{{"type":"assent.auto_fix_review","verdict":"PASS","shared_paths":{{"paths":[],"dispositions":[],"watch":[]}},"findings":[]}}
 """
     return prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
@@ -2266,10 +2274,11 @@ def _run_selection_reviewer(
                     shared_path_recovery)
                 decision = record.shared_paths
                 main = gitops.main_worktree(recovery_cfg.root)
-                declared, _watched = shared_paths.validate_review_decision(
+                validated = shared_paths.validate_review_decision(
                     main, recovery_cfg.root,
-                    decision.paths, decision.watch)
-                omitted = sorted(set(required) - set(declared))
+                    decision.paths, decision.watch,
+                    _shared_path_dispositions(decision))
+                omitted = sorted(set(required) - set(validated.paths))
                 if omitted:
                     raise AssentError(
                         "shared-input recovery omitted verifier-required "
@@ -2853,16 +2862,17 @@ def _apply_selection_shared_path_review(
             cfg, contract, required, evidence, preparation))
     decision = record.shared_paths
     assert decision is not None
-    declared, watched = shared_paths.validate_review_decision(
-        main, cfg.root, decision.paths, decision.watch)
-    omitted = sorted(set(required) - set(declared))
+    validated = shared_paths.validate_review_decision(
+        main, cfg.root, decision.paths, decision.watch,
+        _shared_path_dispositions(decision))
+    omitted = sorted(set(required) - set(validated.paths))
     if omitted:
         raise AssentError(
             "shared-input recovery omitted verifier-required path(s): "
             + ", ".join(omitted))
     shared_paths.review(
-        main, cfg.root, paths=declared, watch=watched,
-        none=not declared)
+        main, cfg.root, paths=validated.paths, watch=validated.watch,
+        none=not validated.paths, dispositions=validated.dispositions)
     settled = shared_paths.classify(
         main, cfg.root, required_evidence=required)
     if not settled.settled:
@@ -4469,11 +4479,19 @@ def _auto_fix_shared_path_changes(
     return {"management:manifest.toml", *(f"source:{path}" for path in paths)}
 
 
+def _shared_path_dispositions(
+        decision: auto_fix.SharedPathsDecision
+        ) -> tuple[shared_paths.PathDisposition, ...]:
+    return tuple(
+        shared_paths.PathDisposition(item.path, item.reason)
+        for item in decision.dispositions)
+
+
 def _validated_auto_fix_shared_paths_decision(
         cfg: Config, before: shared_paths.Contract,
         after: shared_paths.Contract | None,
         record: auto_fix.ReviewRecord,
-        ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+        ) -> shared_paths.ValidatedReview | None:
     """Validate a requested plan-review decision without applying it."""
     decision = record.shared_paths
     if not before.needs_review:
@@ -4488,20 +4506,24 @@ def _validated_auto_fix_shared_paths_decision(
         if decision is None:
             return None
         main = gitops.main_worktree(cfg.root)
-        declared, watched = shared_paths.validate_review_decision(
-            main, cfg.root, decision.paths, decision.watch)
+        validated = shared_paths.validate_review_decision(
+            main, cfg.root, decision.paths, decision.watch,
+            _shared_path_dispositions(decision))
         profile = after.profile
-        if (profile is None or declared != after.paths
-                or watched != profile.watch):
+        if (profile is None or validated.paths != after.paths
+                or validated.watch != profile.watch
+                or validated.dispositions != profile.dispositions):
             raise AssentError(
                 "shared_paths does not match the profile applied in this session")
         return None
     if decision is None:
         raise AssentError(
-            "shared_paths must contain the required paths and watch decision")
+            "shared_paths must contain the required paths, dispositions, and "
+            "watch decision")
     main = gitops.main_worktree(cfg.root)
     return shared_paths.validate_review_decision(
-        main, cfg.root, decision.paths, decision.watch)
+        main, cfg.root, decision.paths, decision.watch,
+        _shared_path_dispositions(decision))
 
 
 def _auto_fix_surface_change(
@@ -5317,10 +5339,11 @@ def _run_auto_fix_review_once(
         try:
             if shared_decision is not None:
                 main = gitops.main_worktree(cfg.root)
-                paths, watch = shared_decision
                 shared_paths.review(
-                    main, cfg.root, paths=paths, watch=watch,
-                    none=not paths)
+                    main, cfg.root, paths=shared_decision.paths,
+                    watch=shared_decision.watch,
+                    none=not shared_decision.paths,
+                    dispositions=shared_decision.dispositions)
             shared_contract_after = _shared_paths_contract(cfg)
             shared_refusal = shared_paths.closeout_refusal(shared_contract_after)
             if shared_refusal:

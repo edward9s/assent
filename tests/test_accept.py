@@ -18,6 +18,7 @@ from assent.accept import accept_folder
 from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
 from tests.link_support import make_directory_link
+from tests.test_shared_paths import excluded_inventory
 
 _DEFAULT_VERIFY = "python -c pass"
 
@@ -462,7 +463,8 @@ class TestReceiptRefusals(AcceptRepositoryCase):
         pkg.mkdir()
         (pkg / "primary.txt").write_text("primary\n", encoding="utf-8")
         shared_paths.review(
-            self.root, self.worktree, none=True, watch=("README.md",))
+            self.root, self.worktree, none=True, watch=("README.md",),
+            dispositions=excluded_inventory(self.root))
         self._write_receipt()
         external = self.parent / "external pkg"
         external.mkdir()

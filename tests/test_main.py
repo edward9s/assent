@@ -134,8 +134,10 @@ class TestDispatch(MainTestCase):
             cwd=self.root, capture_output=True, text=True,
             encoding="utf-8", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--path assets --path pkg", result.stdout)
-        self.assertIn("--none --watch", result.stdout)
+        self.assertIn("--classify PATH REASON", result.stdout)
+        self.assertIn("Every inventory directory must be covered exactly once",
+                      result.stdout)
+        self.assertIn("--none --classify", result.stdout)
         self.assertIn("--watch is a repeatable", result.stdout)
         self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
@@ -151,9 +153,12 @@ class TestDispatch(MainTestCase):
                    return_value=0) as review:
             code, _out = self.run_main(
                 ["shared-paths", "review", "--path", "pkg",
+                 "--classify", "build", "build output",
                  "--watch", "pubspec.yaml"])
         self.assertEqual(code, 0)
-        review.assert_called_once_with(["pkg"], ["pubspec.yaml"], False)
+        review.assert_called_once_with(
+            ["pkg"], ["pubspec.yaml"], False,
+            [["build", "build output"]])
 
         with patch("assent.__main__.shared_paths_status",
                    return_value=0) as status:

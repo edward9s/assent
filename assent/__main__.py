@@ -706,7 +706,8 @@ def _dispatch(argv: list[str]) -> int:
         try:
             if args.operation == "status":
                 return shared_paths_status()
-            return shared_paths_review(args.path, args.watch, args.none)
+            return shared_paths_review(
+                args.path, args.watch, args.none, args.classify)
         except AssentError as e:
             print(f"shared-paths {args.operation}: failed ({e})")
             return 1

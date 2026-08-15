@@ -15,7 +15,7 @@ from assent.auto_fix import (
     AutoFixState, ObservedState, PlanDigestTransition,
     RepairBrief, ReviewFinding, ReviewRecord, ReviewTransition,
     ReviewerRecommendation, ScopeAddition, WorkerDisposition,
-    SharedPathsDecision,
+    SharedPathDisposition, SharedPathsDecision,
     auto_fix_state_is_fresh,
     auto_fix_state_path, current_review_record,
     finding_fingerprint, normalize_finding_path,
@@ -44,12 +44,19 @@ class TestReviewRecord(unittest.TestCase):
             ReviewRecord("PASS", ()),
             ReviewRecord(
                 "FIXED", (self.finding,),
-                SharedPathsDecision(("pkg",), ("pubspec.yaml",))),
+                SharedPathsDecision(
+                    ("pkg",), ("pubspec.yaml",),
+                    (SharedPathDisposition(
+                        "build", "generated build output"),))),
             ReviewRecord("FAIL", (self.finding,)),
         )
         self.assertEqual(
             review_record_schema()["properties"]["verdict"]["enum"],
             ["PASS", "FIXED", "FAIL"])
+        self.assertIn(
+            "dispositions",
+            review_record_schema()["properties"]["shared_paths"]
+            ["properties"])
         for record in records:
             with self.subTest(verdict=record.verdict):
                 text = review_record_json(record)

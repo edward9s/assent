@@ -89,7 +89,8 @@ _FINDING_KEYS = {
     "transition_evidence",
 }
 _SCOPE_ADDITION_KEYS = {"path", "path_state"}
-_SHARED_PATHS_KEYS = {"paths", "watch"}
+_SHARED_PATHS_KEYS = {"paths", "dispositions", "watch"}
+_SHARED_PATH_DISPOSITION_KEYS = {"path", "reason"}
 _STATE_KEYS = {
     "version", "source_tree", "task_plan_sha256", "review_prompt_sha256",
     "reviewer_role", "reviewer_adapter", "reviewer_model", "reviewer_effort", "phase", "verdict",
@@ -188,11 +189,23 @@ def review_record_schema() -> dict:
             "shared_paths": {
                 "type": ["object", "null"],
                 "additionalProperties": False,
-                "required": ["paths", "watch"],
+                "required": ["paths", "dispositions", "watch"],
                 "properties": {
                     "paths": {
                         "type": "array",
                         "items": {"type": "string"},
+                    },
+                    "dispositions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["path", "reason"],
+                            "properties": {
+                                "path": {"type": "string"},
+                                "reason": text_schema,
+                            },
+                        },
                     },
                     "watch": {
                         "type": "array",
@@ -221,17 +234,28 @@ class ReviewFinding:
 
 
 @dataclass(frozen=True)
+class SharedPathDisposition:
+    """Why one ignored directory is intentionally not shared."""
+
+    path: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class SharedPathsDecision:
     """One reviewer decision for an UNKNOWN or STALE shared-path contract."""
 
     paths: tuple[str, ...]
     watch: tuple[str, ...]
+    dispositions: tuple[SharedPathDisposition, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("paths", "watch"):
             value = getattr(self, name)
             if isinstance(value, list):
                 object.__setattr__(self, name, tuple(value))
+        if isinstance(self.dispositions, list):
+            object.__setattr__(self, "dispositions", tuple(self.dispositions))
 
 
 @dataclass(frozen=True)
@@ -845,6 +869,14 @@ def _validate_review_record(record: ReviewRecord) -> ReviewRecord:
                     or not all(isinstance(value, str) for value in values)):
                 raise AssentError(
                     f"Auto-fix review shared_paths.{name} must be a finite string list")
+        if (not isinstance(decision.dispositions, tuple)
+                or not all(isinstance(item, SharedPathDisposition)
+                           and isinstance(item.path, str)
+                           and isinstance(item.reason, str)
+                           for item in decision.dispositions)):
+            raise AssentError(
+                "Auto-fix review shared_paths.dispositions must be a finite "
+                "list of path/reason objects")
     return ReviewRecord(record.verdict, findings, decision)
 
 
@@ -856,6 +888,9 @@ def review_record_json(record: ReviewRecord) -> str:
         "verdict": record.verdict,
         "shared_paths": (
             {"paths": list(record.shared_paths.paths),
+             "dispositions": [
+                 {"path": item.path, "reason": item.reason}
+                 for item in record.shared_paths.dispositions],
              "watch": list(record.shared_paths.watch)}
             if record.shared_paths is not None else None),
         "findings": [
@@ -937,11 +972,25 @@ def _record_from_data(
             raw_decision, _SHARED_PATHS_KEYS,
             "Auto-fix review shared_paths")
         if (not isinstance(raw_decision["paths"], list)
+                or not isinstance(raw_decision["dispositions"], list)
                 or not isinstance(raw_decision["watch"], list)):
             raise AssentError(
-                "Auto-fix review shared_paths paths and watch must be finite JSON lists")
+                "Auto-fix review shared_paths paths, dispositions, and watch "
+                "must be finite JSON lists")
+        dispositions: list[SharedPathDisposition] = []
+        for index, raw in enumerate(raw_decision["dispositions"]):
+            if not isinstance(raw, dict):
+                raise AssentError(
+                    f"Auto-fix review shared_paths.dispositions[{index}] must "
+                    "be a JSON object")
+            _require_exact_keys(
+                raw, _SHARED_PATH_DISPOSITION_KEYS,
+                f"Auto-fix review shared_paths.dispositions[{index}]")
+            dispositions.append(SharedPathDisposition(
+                raw["path"], raw["reason"]))
         decision = SharedPathsDecision(
-            tuple(raw_decision["paths"]), tuple(raw_decision["watch"]))
+            tuple(raw_decision["paths"]), tuple(raw_decision["watch"]),
+            tuple(dispositions))
     return _validate_review_record(
         ReviewRecord(data["verdict"], tuple(findings), decision))
 

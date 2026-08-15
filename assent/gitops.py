@@ -9,6 +9,9 @@ or commits.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -149,7 +152,7 @@ def ensure_worktree(root: Path, folder: str,
     """
     root = root.resolve()
     path = worktree_path(root, folder)
-    if path.exists():
+    if os.path.lexists(path):
         if path.is_dir() and _is_repo_worktree(root, path):
             return path
         raise AssentError(
@@ -164,7 +167,18 @@ def ensure_worktree(root: Path, folder: str,
     return path
 
 
-def _detach_worktree_links(path: Path) -> tuple[Path, ...]:
+def _inventory_worktree_links(path: Path) -> tuple[Path, ...]:
+    """Inventory directory links and preserve the cleanup-specific diagnostic."""
+    try:
+        return pathops.inventory_directory_links(path)
+    except (AssentError, OSError) as e:
+        raise AssentError(
+            f"unable to inventory directory links in worktree {path}; "
+            f"linked target content was not touched: {e}") from e
+
+
+def _detach_worktree_links(
+        path: Path, links: tuple[Path, ...] | None = None) -> tuple[Path, ...]:
     """Empty an owned worktree of directory links before anything recurses into it.
 
     Git's own ``worktree remove`` walks a Windows junction into whatever it
@@ -175,12 +189,7 @@ def _detach_worktree_links(path: Path) -> tuple[Path, ...]:
     partial cleanup leaves external targets intact and a rerun finishes it,
     because an already-detached link is simply absent from the next inventory.
     """
-    try:
-        links = pathops.inventory_directory_links(path)
-    except (AssentError, OSError) as e:
-        raise AssentError(
-            f"unable to inventory directory links in worktree {path}; "
-            f"linked target content was not touched: {e}") from e
+    links = _inventory_worktree_links(path) if links is None else links
     for link in links:
         try:
             pathops.detach_directory_link(link)
@@ -321,6 +330,133 @@ def merge_base(root: Path, first: str, second: str) -> str:
     return bases[0]
 
 
+_WORKTREE_REMOVAL_DIR = "assent-worktree-removals"
+
+
+def _worktree_removal_key(path: Path) -> str:
+    absolute = os.path.abspath(os.fspath(path))
+    return os.path.normcase(absolute).replace("\\", "/")
+
+
+def _worktree_removal_marker(root: Path, path: Path) -> Path:
+    key = _worktree_removal_key(path)
+    name = hashlib.sha256(key.encode("utf-8")).hexdigest() + ".json"
+    return git_common_dir(root) / _WORKTREE_REMOVAL_DIR / name
+
+
+def worktree_removal_pending(root: Path, path: Path) -> bool:
+    """Whether Assent durably recorded an in-flight removal for this fixed path."""
+    return _worktree_removal_marker(root, path).is_file()
+
+
+def _write_worktree_removal_marker(root: Path, path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError as e:
+        raise AssentError(
+            f"unable to identify worktree {path} before removing it: {e}") from e
+    marker = _worktree_removal_marker(root, path)
+    record = {
+        "version": 1,
+        "path": _worktree_removal_key(path),
+        "device": info.st_dev,
+        "inode": info.st_ino,
+    }
+    tmp = marker.with_name(f"{marker.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(record, sort_keys=True) + "\n",
+                       encoding="utf-8", newline="\n")
+        os.replace(tmp, marker)
+    except OSError as e:
+        raise AssentError(
+            f"unable to record the pending removal of worktree {path}: {e}") from e
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def _read_worktree_removal_marker(root: Path, path: Path) -> tuple[Path, dict] | None:
+    marker = _worktree_removal_marker(root, path)
+    try:
+        raw = marker.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise AssentError(
+            f"unable to read the pending worktree removal {marker}: {e}") from e
+    try:
+        record = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise AssentError(
+            f"pending worktree removal record is malformed: {marker}: {e}") from e
+    if (not isinstance(record, dict)
+            or set(record) != {"version", "path", "device", "inode"}
+            or record.get("version") != 1
+            or record.get("path") != _worktree_removal_key(path)
+            or not isinstance(record.get("device"), int)
+            or not isinstance(record.get("inode"), int)):
+        raise AssentError(
+            f"pending worktree removal record does not match {path}: {marker}")
+    return marker, record
+
+
+def _validate_worktree_removal_identity(path: Path, record: dict) -> None:
+    try:
+        info = path.lstat()
+    except OSError as e:
+        raise AssentError(
+            f"unable to re-identify retained worktree path {path}: {e}") from e
+    if (info.st_dev, info.st_ino) != (record["device"], record["inode"]):
+        raise AssentError(
+            f"retained worktree path changed identity after removal began; "
+            f"refusing to remove it: {path}")
+
+
+def adopt_worktree_removal(root: Path, path: Path) -> None:
+    """Record a legacy residue after an operator proves Assent previously owned it.
+
+    New removals record this evidence before Git starts.  This entry point exists
+    only for explicit recovery of an old partial removal that predates the marker;
+    ordinary cleanup never infers ownership from the fixed path alone.
+    """
+    path = Path(path)
+    _inventory_worktree_links(path)
+    _write_worktree_removal_marker(root, path)
+
+
+def _clear_worktree_removal_marker(marker: Path) -> None:
+    try:
+        marker.unlink()
+    except OSError as e:
+        raise AssentError(
+            f"worktree was removed but its retry record could not be cleared: "
+            f"{marker}: {e}") from e
+    with contextlib.suppress(OSError):
+        marker.parent.rmdir()
+
+
+def recover_worktree_removal(root: Path, path: Path) -> bool:
+    """Finish a recorded removal without traversing links or a replacement path."""
+    path = Path(path)
+    pending = _read_worktree_removal_marker(root, path)
+    if pending is None:
+        return False
+    marker, record = pending
+    if path.exists():
+        _validate_worktree_removal_identity(path, record)
+        _detach_worktree_links(path)
+        _validate_worktree_removal_identity(path, record)
+        try:
+            shutil.rmtree(path)
+        except OSError as e:
+            raise AssentError(
+                f"unable to finish removing retained worktree path {path}: {e}") from e
+    _git(root, "worktree", "prune")
+    _clear_worktree_removal_marker(marker)
+    return True
+
+
 def remove_worktree(root: Path, path: Path) -> None:
     """Remove a worktree using Git's ordinary safeguards; deliberately no force option.
 
@@ -330,9 +466,37 @@ def remove_worktree(root: Path, path: Path) -> None:
     detachment stops the removal before Git is invoked at all.
     """
     path = Path(path)
-    if _ordinary_removal_will_proceed(path):
-        _detach_worktree_links(path)
-    _git(root, "worktree", "remove", str(path))
+    if not is_repo_worktree(root, path):
+        raise AssentError(
+            f"fixed path is not a valid worktree of this repo: {path}")
+    if not _ordinary_removal_will_proceed(path):
+        _git(root, "worktree", "remove", str(path))
+        return
+
+    links = _inventory_worktree_links(path)
+    _write_worktree_removal_marker(root, path)
+    _detach_worktree_links(path, links)
+    removed = _run_git(root, "worktree", "remove", str(path))
+    if removed.returncode == 0 and not os.path.lexists(path):
+        pending = _read_worktree_removal_marker(root, path)
+        if pending is not None:
+            _clear_worktree_removal_marker(pending[0])
+        return
+
+    if not os.path.lexists(path) or not is_repo_worktree(root, path):
+        try:
+            recover_worktree_removal(root, path)
+        except AssentError as e:
+            detail = removed.stderr.strip() or removed.stdout.strip() or "unknown error"
+            raise AssentError(
+                f"git worktree remove {path} failed (exit code "
+                f"{removed.returncode}): {detail}; filesystem retry failed: {e}") from e
+        return
+
+    detail = removed.stderr.strip() or removed.stdout.strip() or "unknown error"
+    raise AssentError(
+        f"git worktree remove {path} failed (exit code {removed.returncode}): "
+        f"{detail}")
 
 
 def delete_branch(root: Path, branch: str) -> None:

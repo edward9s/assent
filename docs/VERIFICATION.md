@@ -150,15 +150,19 @@ When review is required, run it in the managed source worktree and name the
 tracked dependency or build files whose changes should invalidate the decision:
 
 ```text
-assent shared-paths review --path assets --path pkg --watch package.lock
+assent shared-paths review --path assets --path pkg --classify build "generated output" --watch package.lock
 ```
 
-Use `--none` when review concludes that no ignored directory is required. The
-decision is cached in the primary worktree's untracked
-`.assent/manifest.toml`. A changed watch file or target makes it stale. A
-successful query that finds no candidate directory is reported as
-`NO-IGNORED-DIRECTORY-CANDIDATE`; that describes current filesystem evidence,
-not a semantic promise that the project will never need shared input.
+Every ordinary ignored directory listed by the review prompt must be covered
+once by a shared `--path` or a non-shared `--classify PATH REASON`; either may
+cover a subtree. Use `--none` when no directory is shared. Ignored leaf files
+remain automatic verifier inputs and do not require classification.
+
+The decision is cached in the primary worktree's untracked
+`.assent/manifest.toml`. A changed watch file, directory inventory, or target
+makes it stale. A successful query that finds no ordinary ignored directory is
+reported as `NO-IGNORED-DIRECTORY-CANDIDATE`; that describes current filesystem
+evidence, not a semantic promise that the project will never need shared input.
 
 Assent cannot safely link everything ignored by Git: ignore rules also cover
 writable build output, caches, virtual environments, editor state, and

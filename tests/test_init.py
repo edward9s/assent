@@ -63,9 +63,12 @@ class TestInitContractRefresh(unittest.TestCase):
 
         text = " ".join((self.user_home / "instructions.md").read_text(
             encoding="utf-8").split())
-        self.assertIn("Never copy the ignored directory tree in", text)
+        self.assertIn("Never copy an ignored tree", text)
         self.assertIn(
-            "assent shared-paths review --path DIR --watch FILE", text)
+            "runs the injected `assent shared-paths review` command",
+            text)
+        self.assertIn("Cover every listed ordinary ignored directory once",
+                      text)
         self.assertIn("Never hand-create a source-worktree link", text)
         self.assertFalse((self.root / ".assent/instructions.md").exists())
 

@@ -46,6 +46,17 @@ def _git(root: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _forget_worktree_metadata(path: Path) -> None:
+    git_file = path / ".git"
+    prefix = "gitdir: "
+    text = git_file.read_text(encoding="utf-8").strip()
+    if not text.startswith(prefix):
+        raise AssertionError(f"unexpected worktree .git file: {text!r}")
+    admin = Path(text.removeprefix(prefix))
+    git_file.unlink()
+    safe_rmtree(admin)
+
+
 class TestArchive(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp())
@@ -302,6 +313,40 @@ class TestArchive(unittest.TestCase):
             _task_text())
         self.assertFalse(zip_path.exists())
         self.assertEqual(read_roster(self.assent_dir), [])
+
+    def test_archive_recovers_a_recorded_partial_worktree_removal(self) -> None:
+        worktree, branch = self._unmerged_source()
+        self._integrate(branch)
+        _forget_worktree_metadata(worktree)
+        self.assertFalse(gitops.is_repo_worktree(self.root, worktree))
+        gitops.adopt_worktree_removal(self.root, worktree)
+
+        code, output = self._archive()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"{self.folder}: cleaned (worktree {worktree})", output)
+        self.assertIn(f"{self.folder}: archived", output)
+        self.assertFalse(worktree.exists())
+        self.assertNotIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"))
+
+    def test_archive_retains_an_unowned_directory_at_the_fixed_path(self) -> None:
+        path = gitops.worktree_path(self.root, self.folder)
+        path.mkdir(parents=True)
+        foreign = path / "keep.txt"
+        foreign.write_text("not an Assent worktree\n", encoding="utf-8")
+        branch = f"{self.folder}/integrated"
+        _git(self.root, "branch", branch, "HEAD")
+
+        code, output = self._archive()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("has no Assent removal evidence", output)
+        self.assertIn("archive refuses to compress", output)
+        self.assertEqual(foreign.read_text(encoding="utf-8"),
+                         "not an Assent worktree\n")
+        self.assertIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.folder}/"))
 
     def test_archive_detaches_main_tree_links_before_publishing(self) -> None:
         worktree, branch, before = self._linked_accepted_source()
