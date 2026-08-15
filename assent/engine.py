@@ -3729,11 +3729,16 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         # Validate the requested folder itself before stack discovery.  This
         # preserves the task-file error as the primary zero-token diagnostic.
         plan = Plan.parse(cfg.tasks_dir)
-        trusted_plan = plan
-        trusted_contracts = _task_contract_snapshots(plan)
     except AssentError as e:
         print(f"Failed to parse task folder: {e}")
         return 1
+    try:
+        plan = _recover_interrupted_blocked_task(cfg, plan)
+    except AssentError as e:
+        print(f"Interrupted task recovery failed: {e}")
+        return 1
+    trusted_plan = plan
+    trusted_contracts = _task_contract_snapshots(plan)
 
     # Every adapter is resolved and its planned invocations proven before the worktree exists,
     # so rotating later can never discover a configuration the vendor would refuse after a
@@ -6665,6 +6670,26 @@ def _recover_or_ensure_clean(cfg: Config, now: Callable[[], datetime]) -> None:
     if _try_recover_attributable_worktree(cfg, now):
         return
     gitops.ensure_clean(cfg.root, cfg.git_excludes)
+
+
+def _recover_interrupted_blocked_task(cfg: Config, plan: Plan) -> Plan:
+    """Resume a task whose AI wrote BLOCKED before scheduler closeout ran."""
+    if not any(task.status == "BLOCKED" for task in plan.tasks):
+        return plan
+    state = read_workflow_state(cfg.tasks_dir)
+    if state is None or state.unit != "task" or not state.started:
+        return plan
+    task = plan.get(state.task_id)
+    if task is None or task.status != "BLOCKED":
+        return plan
+    workflow = _effective_task_workflow(cfg, task)
+    if (not workflow or state.step_index >= len(workflow)
+            or not isinstance(workflow[state.step_index], WorkflowTaskStep)):
+        return plan
+    set_status(task.path, "WIP")
+    print(f"Recovered interrupted BLOCKED task {task.id} as WIP; "
+          f"workflow step {state.step_index + 1} will resume.")
+    return Plan.parse(cfg.tasks_dir)
 
 
 @dataclass(frozen=True)

@@ -1590,6 +1590,42 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         self.assertNotIn("previous adapter session was interrupted",
                          resumed.calls[0][0])
 
+    def test_interrupted_blocked_task_workflow_resumes_instead_of_settling(self):
+        path = self.write_task(1)
+        cfg = self.build(retry=0, extra_config=(
+            self.ACTION_AGENT + self.VERDICT_AGENT
+            + '[workflow]\ntask = [{ role = "worker" }, '
+              '{ action = "focused_test" }, { role = "task_repair" }, '
+              '{ action = "focused_test" }]\n'
+              'plan = []\nintegration = []\n'))
+        self.commit_all()
+
+        def blocked_then_interrupted(_prompt):
+            set_status(path, "BLOCKED")
+            append_entry(
+                journal_path_for(path), by="claude",
+                requested_model="lite", requested_effort="medium",
+                event="blocked", summary="Task-local blocker remains")
+            raise KeyboardInterrupt
+
+        self.assertEqual(self.run_quiet(
+            cfg, once=True,
+            adapter=ScriptedAdapter([blocked_then_interrupted])), 130)
+        self.assertEqual(parse_task_file(path).status, "BLOCKED")
+        interrupted = read_workflow_state(cfg.tasks_dir)
+        self.assertIsNotNone(interrupted)
+        self.assertTrue(interrupted.started)
+
+        resumed = ScriptedAdapter([self.ai_done(path)])
+        self.assertEqual(self.run_quiet(
+            cfg, once=True, adapter=resumed), 0)
+
+        self.assertEqual(len(resumed.calls), 1)
+        self.assertIn("previous adapter session was interrupted",
+                      resumed.calls[0][0])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertFalse(workflow_state_path(cfg.tasks_dir).exists())
+
     def test_empty_task_workflow_runs_one_plan_unit(self):
         first = self.write_task(1, scope=("src/a.txt",))
         second = self.write_task(
