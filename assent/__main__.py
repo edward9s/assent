@@ -430,9 +430,8 @@ def _status_summary(plan: Plan) -> str:
 
 
 def _select_run_folder(config_path: str, folders: list[str]) -> str | None:
-    """Pick the one runnable folder from task and prerequisite status; any
-    ambiguity or bad file is refused rather than guessed."""
-    plans: list[tuple[str, Plan, list[str]]] = []
+    """Pick one runnable folder, including completed work not yet accepted."""
+    plans: list[tuple[str, Plan, list[str], bool]] = []
     errors: list[tuple[str, str]] = []
     for folder in folders:
         try:
@@ -440,27 +439,34 @@ def _select_run_folder(config_path: str, folders: list[str]) -> str | None:
             plan = Plan.parse(cfg.tasks_dir)
             waiting = [item.name for item in
                        find_unfinished_prerequisites(cfg.tasks_dir)]
-            plans.append((folder, plan, waiting))
+            complete = all(
+                task.status in ("DONE", "SKIP") for task in plan.tasks)
+            accepted = bool(
+                complete and _accepted_run_source(cfg) is not None)
+            plans.append((folder, plan, waiting, accepted))
         except AssentError as e:
             errors.append((folder, str(e)))
 
-    runnable = [folder for folder, plan, waiting in plans
-                if (any(task.status in ("TODO", "WIP") for task in plan.tasks)
+    runnable = [folder for folder, plan, waiting, accepted in plans
+                if ((any(task.status in ("TODO", "WIP") for task in plan.tasks)
+                     or (all(task.status in ("DONE", "SKIP")
+                             for task in plan.tasks) and not accepted))
                     and not waiting)]
     if len(runnable) == 1 and not errors:
         selected = runnable[0]
-        print(f"Work folder: {selected} (the only ongoing and runnable one, "
+        print(f"Work folder: {selected} (the only runnable one, "
               f"selected automatically)")
         return selected
 
-    print(f"Cannot auto-select a work folder: {len(runnable)} ongoing and "
-          f"runnable folder(s) found.")
+    print(f"Cannot auto-select a work folder: {len(runnable)} runnable "
+          f"folder(s) found.")
     print("Work folder status:")
     if not plans and not errors:
         print("  (no work folder with a task file found)")
-    for folder, plan, waiting in plans:
-        reason = f" (waiting on {', '.join(waiting)})" if waiting and any(
-            task.status in ("TODO", "WIP") for task in plan.tasks) else ""
+    for folder, plan, waiting, accepted in plans:
+        reason = " (already accepted)" if accepted else (
+            f" (waiting on {', '.join(waiting)})" if waiting and any(
+                task.status in ("TODO", "WIP") for task in plan.tasks) else "")
         print(f"  {folder}: {_status_summary(plan)}{reason}")
     for folder, error in errors:
         print(f"  {folder}: cannot be parsed ({error})")

@@ -284,6 +284,14 @@ class TestReviewRecord(unittest.TestCase):
                          ["PASS", "FIXED", "FAIL"])
         self.assertFalse(schema["properties"]["findings"]["items"]
                          ["additionalProperties"])
+        finding_schema = schema["properties"]["findings"]["items"]
+        expected_finding_keys = {
+            "kind", "task_id", "path", "summary", "evidence",
+            "recommendation", "scope_addition", "transition",
+            "prior_fingerprint", "transition_evidence",
+        }
+        self.assertEqual(set(finding_schema["required"]), expected_finding_keys)
+        self.assertEqual(set(finding_schema["properties"]), expected_finding_keys)
         self.assertEqual(schema["properties"]["findings"]["maxItems"], 100)
         self.assertEqual(
             schema["properties"]["findings"]["items"]["properties"]["task_id"]

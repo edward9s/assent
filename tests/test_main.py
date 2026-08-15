@@ -652,17 +652,40 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 1)
         self.assertIn("unknown top-level keys", out)
 
-    def test_run_without_folder_selects_unique_ongoing_folder(self):
+    def test_run_without_folder_selects_unique_runnable_task_folder(self):
         config = self.write_config()
         self.write_task("active", "TODO")
-        self.write_task("archive", "DONE")
+        self.write_task("blocked", "BLOCKED")
         with patch("assent.__main__.engine.run", return_value=0) as mocked:
             code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertIn(
-            "Work folder: active (the only ongoing and runnable one, "
+            "Work folder: active (the only runnable one, "
             "selected automatically)", out)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "active")
+
+    def test_run_without_folder_selects_unique_unaccepted_completed_folder(self):
+        config = self.write_config()
+        self.write_task("completed", "DONE")
+        with patch("assent.__main__._accepted_run_source", return_value=None), \
+                patch("assent.__main__.engine.run", return_value=0) as run, \
+                patch("assent.__main__._close_run", return_value=0):
+            code, out = self.run_main(["run", "--config", str(config)])
+        self.assertEqual(code, 0)
+        self.assertIn("Work folder: completed (the only runnable one", out)
+        self.assertEqual(run.call_args.args[0].tasks_name, "completed")
+
+    def test_run_without_folder_excludes_accepted_completed_folder(self):
+        config = self.write_config()
+        self.write_task("accepted", "DONE")
+        with patch("assent.__main__._accepted_run_source",
+                   return_value=("accepted/source", "a" * 40, "master")), \
+                patch("assent.__main__.engine.run") as run:
+            code, out = self.run_main(["run", "--config", str(config)])
+        self.assertEqual(code, 1)
+        self.assertIn("0 runnable folder(s) found", out)
+        self.assertIn("(already accepted)", out)
+        run.assert_not_called()
 
     def test_run_without_folder_excludes_waiting_folder(self):
         config = self.write_config()
@@ -690,13 +713,13 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main(["run", "--config", str(config)])
 
         self.assertEqual(code, 1)
-        self.assertIn("0 ongoing and runnable folder(s) found", out)
+        self.assertIn("0 runnable folder(s) found", out)
         self.assertIn("waiting:", out)
         self.assertIn("(waiting on base)", out)
         mocked.assert_not_called()
 
-    def test_run_without_folder_refuses_zero_or_multiple_ongoing(self):
-        for case, statuses in (("zero", [("archive", "DONE")]),
+    def test_run_without_folder_refuses_zero_or_multiple_runnable(self):
+        for case, statuses in (("zero", [("blocked", "BLOCKED")]),
                                ("multiple", [("one", "TODO"),
                                              ("two", "WIP")])):
             with self.subTest(case=case):
@@ -919,9 +942,9 @@ class TestCommandElapsed(MainTestCase):
             for result in (0, 1):
                 with self.subTest(case=name, result=result):
                     self.write_task("alpha")
-                    # The automatic selection needs exactly one ongoing folder.
+                    # The automatic selection needs exactly one runnable folder.
                     self.write_task(
-                        "beta", "DONE" if name == "automatic" else "TODO")
+                        "beta", "BLOCKED" if name == "automatic" else "TODO")
                     with self.injected_clock(), patch(
                             "assent.__main__.engine.run", return_value=result):
                         code, out = self.run_main(

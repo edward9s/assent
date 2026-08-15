@@ -155,23 +155,63 @@ def review_record_schema() -> dict:
         "minLength": 1,
         "pattern": r"^[^\u0000-\u001f\u007f]+$",
     }
-    finding_schema = {
-        "type": "object",
+    scope_addition_schema = {
+        "type": ["object", "null"],
         "additionalProperties": False,
-        "required": ["task_id", "path", "summary", "evidence"],
+        "required": ["path", "path_state"],
         "properties": {
-            "task_id": {
-                "type": ["string", "null"],
-                "pattern": r"^t\d{3}$",
-            },
             "path": {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": MAX_PATH_LENGTH,
             },
-            "summary": {**text_schema, "maxLength": MAX_SUMMARY_LENGTH},
-            "evidence": {**text_schema, "maxLength": MAX_EVIDENCE_LENGTH},
+            "path_state": {
+                "type": "string",
+                "enum": sorted(SCOPE_PATH_STATES),
+            },
         },
+    }
+    finding_properties = {
+        "kind": {
+            "type": "string",
+            "enum": sorted(REVIEW_FINDING_KINDS),
+        },
+        "task_id": {
+            "type": ["string", "null"],
+            "pattern": r"^t\d{3}$",
+        },
+        "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_PATH_LENGTH,
+        },
+        "summary": {**text_schema, "maxLength": MAX_SUMMARY_LENGTH},
+        "evidence": {**text_schema, "maxLength": MAX_EVIDENCE_LENGTH},
+        "recommendation": {
+            **text_schema,
+            "maxLength": MAX_RECOMMENDATION_LENGTH,
+        },
+        "scope_addition": scope_addition_schema,
+        "transition": {
+            "type": "string",
+            "enum": sorted(REVIEW_TRANSITION_KINDS),
+        },
+        "prior_fingerprint": {
+            "type": ["string", "null"],
+            "pattern": r"^[0-9a-f]{64}$",
+        },
+        "transition_evidence": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "maxLength": MAX_EVIDENCE_LENGTH,
+            "pattern": r"^[^\u0000-\u001f\u007f]+$",
+        },
+    }
+    finding_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(finding_properties),
+        "properties": finding_properties,
     }
     findings_schema = {
         "type": "array",
