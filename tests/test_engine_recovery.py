@@ -239,6 +239,28 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertFalse(any(s.startswith("wip(plan01/") for s in self.subjects()))
 
+    def test_prefixed_checkpoint_marker_refuses_dirty_task_ownership(self):
+        path = self.write_task(1, status="DONE", scope=("src/",))
+        cfg = self.build()
+        self.commit_all()
+        worktree = self._reused_worktree()
+        (worktree / "src").mkdir()
+        (worktree / "src" / "checkpointed.py").write_text(
+            "done", encoding="utf-8")
+        self._commit_in_worktree(
+            worktree, "[HOOK] auto(plan01/t001): task complete")
+        (worktree / "src" / "stray.py").write_text("x", encoding="utf-8")
+
+        adapter = ScriptedAdapter([])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(engine.run(cfg, once=True, adapter=adapter), 1)
+
+        self.assertIn("Working tree is not clean", out.getvalue())
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertFalse(any(s.startswith("wip(plan01/") for s in self.subjects()))
+
     def test_dirt_outside_the_done_task_scope_stays_fail_closed(self):
         path = self.write_task(1, status="DONE", scope=("src/",))
         cfg = self.build()

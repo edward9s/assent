@@ -668,6 +668,36 @@ class TestRework(unittest.TestCase):
         self.assertEqual(self._status(task), "DONE")
         self.assertFalse(task.with_name("t001_task.r.toml").exists())
 
+    def test_landed_commit_message_mismatch_is_retained_without_abort(self) -> None:
+        task = self._write_task(1, "DONE")
+        worktree, _ = self._worktree()
+        (worktree / "result.txt").write_text("done\n", encoding="utf-8")
+        gitops.commit_all(worktree, "auto(plan01/t001): completed result")
+        before = gitops.commit_of(worktree, "HEAD")
+        real_commit_all = gitops.commit_all
+
+        def landed_then_report_mismatch(path, message, excludes=()):
+            real_commit_all(path, message, excludes)
+            commit = gitops.commit_of(path, "HEAD")
+            raise gitops.CommitPostconditionError(
+                f"git commit created {commit}, but message was changed; "
+                "the commit was retained",
+                commit)
+
+        with patch("assent.rework.gitops.commit_all",
+                   side_effect=landed_then_report_mismatch), patch(
+                       "assent.rework.gitops.abort_revert") as abort:
+            code, output = self._run(revert_code=True)
+
+        retained = gitops.commit_of(worktree, "HEAD")
+        self.assertEqual(code, 1, output)
+        self.assertNotEqual(retained, before)
+        self.assertIn("no revert abort was attempted", output)
+        self.assertIn(retained, output)
+        abort.assert_not_called()
+        self.assertEqual(self._status(task), "DONE")
+        self.assertFalse(task.with_name("t001_task.r.toml").exists())
+
     def test_revert_journal_interruption_resumes_without_second_revert(self) -> None:
         task = self._write_task(1, "DONE")
         worktree, _ = self._worktree()

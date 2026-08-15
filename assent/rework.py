@@ -688,6 +688,13 @@ def _apply_code_revert(request: _ReworkRequest, state: _ReworkState) -> bool:
         gitops.revert_no_commit(request.path, state.reverted)
         gitops.commit_all(request.path, message)
         state.revert_checkpoint = gitops.commit_of(request.path, "HEAD")
+    except gitops.CommitPostconditionError as e:
+        print(
+            f"{request.name}: code reversion commit failed Assent's "
+            f"postcondition ({e}); no revert abort was attempted. "
+            "Task status and journal state are unchanged; inspect the repository "
+            "hook or Git configuration before recovery.")
+        return False
     except AssentError as e:
         _abort_failed_revert(request.path, request.name, state.head, e)
         return False

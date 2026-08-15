@@ -178,6 +178,23 @@ class ReconcileRepositoryCase(unittest.TestCase):
         _git(path, "commit", "-m", reconcile_commit_message(self.folder))
         return gitops.commit_of(path, "HEAD")
 
+    def _install_message_prefix_hook(self) -> None:
+        hooks_value = _git(self.root, "rev-parse", "--git-path", "hooks")
+        hooks = Path(hooks_value)
+        if not hooks.is_absolute():
+            hooks = self.root / hooks
+        hooks.mkdir(parents=True, exist_ok=True)
+        hook = hooks / "commit-msg"
+        hook.write_text(
+            "#!/bin/sh\n"
+            "message_file=$1\n"
+            "temporary_file=${message_file}.assent-test\n"
+            "printf '%s' '[HOOK] ' > \"$temporary_file\"\n"
+            "cat \"$message_file\" >> \"$temporary_file\"\n"
+            "mv \"$temporary_file\" \"$message_file\"\n",
+            encoding="utf-8", newline="\n")
+        hook.chmod(0o755)
+
     def test_automatic_reconcile_reuses_the_managed_source_first_lifecycle(
             self) -> None:
         self._conflicting_repository()
@@ -652,6 +669,26 @@ class ContinueTest(ReconcileRepositoryCase):
         self._assert_target_untouched(self.target_tip)
         self.assertEqual(
             (self.root / "shared.txt").read_text(encoding="utf-8"), "target\n")
+
+    def test_continue_retains_merge_when_hook_changes_message(self) -> None:
+        self._conflicting_repository()
+        self.assertEqual(self._run(reconcile_start)[0], 0)
+        self._resolve()
+        self._install_message_prefix_hook()
+
+        code, output = self._run(reconcile_continue)
+
+        path = self._managed_path()
+        retained = gitops.commit_of(path, "HEAD")
+        self.assertEqual(code, 1, output)
+        self.assertIn("message was changed", output)
+        self.assertIn(retained, output)
+        self.assertIsNone(gitops.merge_head(path))
+        self.assertEqual(
+            gitops.commit_parents(path, retained),
+            (self.source_tip, self.target_tip))
+        self._assert_source_untouched()
+        self._assert_target_untouched(self.target_tip)
 
     def test_continue_refuses_a_leftover_conflict_marker(self) -> None:
         self._conflicting_repository()

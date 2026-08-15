@@ -32,6 +32,19 @@ RECONCILE_BRANCH_PREFIX = "assent-reconcile/"
 TEMPORARY_BRANCH_PREFIXES = (INTEGRATION_BRANCH_PREFIX, RECONCILE_BRANCH_PREFIX)
 
 
+class CommitPostconditionError(AssentError):
+    """Git reported success, but the created commit does not match Assent's request.
+
+    ``commit`` is the retained commit at HEAD when one can still be identified.
+    Callers must not treat this as a failed ``git commit`` and attempt to abort an
+    operation that Git has already completed.
+    """
+
+    def __init__(self, message: str, commit: str | None) -> None:
+        super().__init__(message)
+        self.commit = commit
+
+
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess:
     # core.quotepath=false: by default Git octal-escapes non-ASCII filenames (Chinese, etc.)
     # into pure ASCII (e.g. "\346\270\254\350\251\246.txt"); turning it off prints the raw
@@ -524,6 +537,52 @@ def commit_message(root: Path, ref: str = "HEAD") -> str:
     return _git(root, "show", "-s", "--format=%B", ref).rstrip("\r\n")
 
 
+def _commit_with_postcondition(
+        root: Path, message: str, commit_args: Sequence[str],
+        expected_parents: tuple[str, ...]) -> str:
+    """Create one commit and verify the exact Git facts Assent depends on.
+
+    Repository hooks remain active.  A hook may refuse the commit normally, but
+    when Git reports success Assent immediately verifies the resulting HEAD,
+    parents, and message instead of discovering a mutation during later recovery.
+    """
+    normalized = _run_git_stdin(root, ("stripspace",), message)
+    if normalized.returncode != 0:
+        raise AssentError(
+            "git stripspace failed while normalizing the requested commit "
+            f"message (exit code {normalized.returncode}): "
+            f"{normalized.stderr.strip() or normalized.stdout.strip()}")
+    expected_message = normalized.stdout.rstrip("\r\n")
+    before = head_ref(root)
+    _git(root, "commit", *commit_args, "-m", expected_message)
+    after = head_ref(root)
+    retained = after if after is not None and after != before else None
+    if retained is None:
+        raise CommitPostconditionError(
+            "git commit reported success, but HEAD did not advance; the Git "
+            "scene was retained",
+            None)
+    try:
+        parents = commit_parents(root, retained)
+        actual_message = commit_message(root, retained)
+    except AssentError as e:
+        raise CommitPostconditionError(
+            f"git commit created {retained}, but Assent could not verify it "
+            f"({e}); the commit was retained",
+            retained) from e
+    problems: list[str] = []
+    if parents != expected_parents:
+        problems.append("parents differ from the requested commit")
+    if actual_message != expected_message:
+        problems.append("message was changed by Git configuration or a hook")
+    if problems:
+        raise CommitPostconditionError(
+            f"git commit created {retained}, but {' and '.join(problems)}; "
+            "the commit was retained",
+            retained)
+    return retained
+
+
 def commit_history(
         root: Path, ref: str = "HEAD",
 ) -> list[tuple[str, tuple[str, ...], str]]:
@@ -698,7 +757,9 @@ def commit_all(root: Path, message: str, excludes: Sequence[str] = ()) -> None:
     spec = ["--", "."] + [f":(exclude){e}"
                           for e in _pathspec_excludes(root, all_excludes)]
     _git(root, "add", "-A", *spec)
-    _git(root, "commit", "-m", message)
+    before = head_ref(root)
+    expected_parents = () if before is None else (before,)
+    _commit_with_postcondition(root, message, (), expected_parents)
 
 
 def commit_if_dirty(root: Path, message: str, excludes: Sequence[str] = ()) -> bool:
@@ -722,7 +783,10 @@ def commit_empty(root: Path, message: str) -> None:
     this separate from :func:`commit_all` means an empty terminal marker never stages or
     traverses project content, including embedded repositories or runtime artifacts.
     """
-    _git(root, "commit", "--allow-empty", "-m", message)
+    before = head_ref(root)
+    expected_parents = () if before is None else (before,)
+    _commit_with_postcondition(
+        root, message, ("--allow-empty",), expected_parents)
 
 
 def head_ref(root: Path) -> str | None:
@@ -1355,10 +1419,12 @@ def diff_cached_check(worktree: Path) -> str | None:
 
 def commit_merge(worktree: Path, message: str) -> str:
     """Commit the staged in-progress merge and return the new commit hash."""
-    if merge_head(worktree) is None:
+    pending = merge_head(worktree)
+    if pending is None:
         raise AssentError(f"no merge is in progress in {worktree}")
-    _git(worktree, "commit", "-m", message)
-    return commit_of(worktree, "HEAD")
+    before = commit_of(worktree, "HEAD")
+    return _commit_with_postcondition(
+        worktree, message, (), (before, pending))
 
 
 @contextlib.contextmanager

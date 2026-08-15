@@ -6805,9 +6805,21 @@ def _uncheckpointed_done_dirt_owner(cfg: Config, plan: Plan) -> Task | None:
         return None
     subjects = {subject for _commit, _parents, subject in history}
 
+    # A hook-prefixed or otherwise contaminated Assent marker is evidence that a
+    # terminal checkpoint may exist but no longer satisfies the protocol.  Treat
+    # that ambiguity as a refusal, never as proof that the checkpoint is absent.
+    contaminated = {
+        task.id for task in plan.tasks
+        if any(
+            f"auto({cfg.tasks_name}/{task.id}): " in subject
+            and not subject.startswith(
+                f"auto({cfg.tasks_name}/{task.id}): ")
+            for subject in subjects)
+    }
     owners = [
         task for task in plan.tasks
         if task.status == "DONE"
+        and task.id not in contaminated
         and not any(s.startswith(f"auto({cfg.tasks_name}/{task.id}): ")
                     for s in subjects)
         and not gitops.changes_outside_scope(

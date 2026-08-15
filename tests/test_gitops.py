@@ -25,6 +25,26 @@ def _run(root: Path, *args: str) -> None:
                    encoding="utf-8", check=True)
 
 
+def _install_message_prefix_hook(root: Path) -> None:
+    hooks_value = subprocess.run(
+        ["git", "rev-parse", "--git-path", "hooks"], cwd=root,
+        capture_output=True, encoding="utf-8", check=True).stdout.strip()
+    hooks = Path(hooks_value)
+    if not hooks.is_absolute():
+        hooks = root / hooks
+    hooks.mkdir(parents=True, exist_ok=True)
+    hook = hooks / "commit-msg"
+    hook.write_text(
+        "#!/bin/sh\n"
+        "message_file=$1\n"
+        "temporary_file=${message_file}.assent-test\n"
+        "printf '%s' '[HOOK] ' > \"$temporary_file\"\n"
+        "cat \"$message_file\" >> \"$temporary_file\"\n"
+        "mv \"$temporary_file\" \"$message_file\"\n",
+        encoding="utf-8", newline="\n")
+    hook.chmod(0o755)
+
+
 def _forget_worktree_metadata(path: Path) -> None:
     git_file = path / ".git"
     prefix = "gitdir: "
@@ -555,6 +575,31 @@ class TestCommitAll(GitTestCase):
             capture_output=True, encoding="utf-8", check=True).stdout.strip()
         self.assertEqual(log, "auto(W2): message check")
 
+    def test_standard_git_message_cleanup_is_not_hook_contamination(self):
+        (self.root / "new.txt").write_text("x", encoding="utf-8")
+
+        commit_all(self.root, "auto(W2): trailing space \n\n")
+
+        self.assertEqual(
+            gitops.commit_message(self.root),
+            "auto(W2): trailing space")
+
+    def test_message_changing_hook_is_detected_after_commit(self):
+        _install_message_prefix_hook(self.root)
+        before = head_ref(self.root)
+        (self.root / "new.txt").write_text("x", encoding="utf-8")
+
+        with self.assertRaises(gitops.CommitPostconditionError) as raised:
+            commit_all(self.root, "auto(W2): exact checkpoint")
+
+        after = head_ref(self.root)
+        self.assertNotEqual(after, before)
+        self.assertEqual(raised.exception.commit, after)
+        self.assertIn("message was changed", str(raised.exception))
+        self.assertTrue(
+            gitops.commit_message(self.root, after).startswith(
+                "[HOOK] auto(W2): exact checkpoint"))
+
     def test_excludes_inside_gitignored_dir_do_not_crash(self):
         # Regression: when the whole .assent/ is gitignored, naming an ignored path in the
         # exclude pathspec makes git add exit 1 (found via dogfooding); filtering must let
@@ -644,6 +689,18 @@ class TestCommitEmpty(GitTestCase):
             subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=self.root,
                            capture_output=True, encoding="utf-8", check=True).stdout.strip(),
             "auto(plan01/t001): resumed task")
+
+    def test_message_changing_hook_is_detected_for_empty_commit(self):
+        _install_message_prefix_hook(self.root)
+        before = head_ref(self.root)
+
+        with self.assertRaises(gitops.CommitPostconditionError) as raised:
+            commit_empty(self.root, "auto(plan01/t001): resumed task")
+
+        after = head_ref(self.root)
+        self.assertNotEqual(after, before)
+        self.assertEqual(raised.exception.commit, after)
+        self.assertEqual(gitops.commit_parents(self.root, after), (before,))
 
 
 class TestHeadRef(GitTestCase):
