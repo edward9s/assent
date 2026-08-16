@@ -5,17 +5,26 @@ installed on the test machine); git and the temp directory are exercised
 through the real subprocess/tempfile calls, patched only for the failure
 scenarios."""
 import contextlib
+import ctypes
 import io
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from assent.__main__ import main
-from assent.doctor import FAIL, PASS, WARN, _print_check, doctor
+from assent.doctor import (
+    FAIL,
+    PASS,
+    WARN,
+    _enable_windows_virtual_terminal,
+    _print_check,
+    doctor,
+)
 
 
 class FakeAdapter:
@@ -116,6 +125,31 @@ def _render(state, encoding, tty):
 
 
 class DoctorMarkerTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows console API")
+    def test_enables_ansi_processing_for_native_windows_console(self):
+        import msvcrt
+
+        calls = []
+
+        class Kernel32:
+            @staticmethod
+            def GetConsoleMode(handle, mode):
+                mode._obj.value = 0x0001
+                return 1
+
+            @staticmethod
+            def SetConsoleMode(handle, mode):
+                calls.append((handle.value, mode.value))
+                return 1
+
+        stream = StubStream("utf-8", True)
+        stream.fileno = lambda: 7
+        with patch.object(msvcrt, "get_osfhandle", return_value=123), \
+                patch.object(ctypes, "WinDLL", return_value=Kernel32()):
+            _enable_windows_virtual_terminal(stream)
+
+        self.assertEqual(calls, [(123, 0x0005)])
+
     def test_utf8_tty_gets_preferred_glyphs_and_colour(self):
         self.assertEqual(_render(PASS, "utf-8", True),
                          "\x1b[32m[√]\x1b[0m check: detail\n")

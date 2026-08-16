@@ -34,6 +34,33 @@ _GLYPHS = {PASS: "√", WARN: "!", FAIL: "×"}
 _ASCII_GLYPHS = {PASS: "OK", WARN: "!", FAIL: "X"}
 _COLORS = {PASS: "\x1b[32m", WARN: "\x1b[33m", FAIL: "\x1b[31m"}
 _RESET = "\x1b[0m"
+_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+
+
+def _enable_windows_virtual_terminal(stream) -> None:
+    """Let native Windows consoles interpret the ANSI colours we emit."""
+    if sys.platform != "win32":
+        return
+    try:
+        if not stream.isatty():
+            return
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(stream.fileno()))
+        mode = wintypes.DWORD()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(
+                handle,
+                wintypes.DWORD(
+                    mode.value | _ENABLE_VIRTUAL_TERMINAL_PROCESSING),
+            )
+    except (AttributeError, ImportError, OSError, ValueError):
+        # Redirected streams and non-console TTY implementations need no
+        # Windows console-mode change; the existing output fallback still works.
+        return
 
 
 def _stream_can_encode(stream, text: str) -> bool:
@@ -216,6 +243,7 @@ def _check_orphaned_branches(cfg: Config,
 
 
 def doctor(confirm: Callable[[str], str] | None = None) -> int:
+    _enable_windows_virtual_terminal(sys.stdout)
     python_ok = _check_python()
     git_ok = _check_git()
 
