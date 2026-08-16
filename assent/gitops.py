@@ -687,7 +687,10 @@ def changes_outside_scope(root: Path, scope: list[str],
     """
     excluded = {_normalize(e) for e in excludes}
     paths: list[str] = []
-    out = _git(root, "status", "--porcelain")
+    # Scope is enforced against leaf paths.  Plain porcelain collapses a wholly
+    # untracked directory to ``?? directory/``, which can falsely reject exact
+    # file scopes below it and makes a broad directory scope look necessary.
+    out = _git(root, "status", "--porcelain", "--untracked-files=all")
     for line in out.splitlines():
         if not line.strip():
             continue
@@ -879,7 +882,7 @@ def dirty_paths(root: Path, excludes: Sequence[str] = ()) -> set[str]:
     Used to snapshot the main worktree before and after an isolated session so the caller can
     diff the two sets and find paths a session wrote outside its isolated worktree.
     """
-    out = _git(root, "status", "--porcelain")
+    out = _git(root, "status", "--porcelain", "--untracked-files=all")
     return {_status_path(line) for line in _meaningful_status_lines(out, excludes)}
 
 
@@ -904,7 +907,8 @@ class _EscapeClassification:
 
 def _classify_escape_paths(root: Path, paths: Sequence[str]) -> _EscapeClassification:
     codes: dict[str, str] = {}
-    for line in _git(root, "status", "--porcelain").splitlines():
+    for line in _git(
+            root, "status", "--porcelain", "--untracked-files=all").splitlines():
         if not line.strip():
             continue
         codes[_status_path(line)] = line[:2]

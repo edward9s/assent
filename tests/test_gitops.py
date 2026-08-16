@@ -13,7 +13,7 @@ from unittest import mock
 from assent import AssentError, gitops, lockfile, pathops, reconcile
 from assent.gitops import (
     branches_with_prefix, changes_outside_scope, commit_all, commit_empty,
-    commit_if_dirty,
+    commit_if_dirty, dirty_paths,
     cleanup_unstarted_worktree, ensure_branch,
     ensure_clean, ensure_worktree, head_ref, resolve_folder_source, restore, tracked_paths,
     worktree_path)
@@ -502,6 +502,29 @@ class TestChangesOutsideScope(GitTestCase):
         (self.root / "tests" / "t.py").write_text("x", encoding="utf-8")
         outside = changes_outside_scope(self.root, ["tests/"])
         self.assertEqual(outside, [])
+
+    def test_exact_new_files_in_wholly_untracked_directory_not_flagged(self):
+        (self.root / "package").mkdir()
+        (self.root / "package" / "one.py").write_text("1", encoding="utf-8")
+        (self.root / "package" / "two.py").write_text("2", encoding="utf-8")
+
+        outside = changes_outside_scope(
+            self.root, ["package/one.py", "package/two.py"])
+
+        self.assertEqual(outside, [])
+        self.assertEqual(
+            dirty_paths(self.root), {"package/one.py", "package/two.py"})
+
+    def test_unscoped_sibling_in_wholly_untracked_directory_is_flagged(self):
+        (self.root / "package").mkdir()
+        (self.root / "package" / "allowed.py").write_text(
+            "ok", encoding="utf-8")
+        (self.root / "package" / "rogue.py").write_text(
+            "no", encoding="utf-8")
+
+        outside = changes_outside_scope(self.root, ["package/allowed.py"])
+
+        self.assertEqual(outside, ["package/rogue.py"])
 
     def test_new_file_outside_scope_flagged(self):
         (self.root / "secret.py").write_text("x", encoding="utf-8")

@@ -1799,6 +1799,7 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
 
         def finish(prompt):
             self.assertIn("scheduler-owned focused_test action", prompt)
+            self.assertIn("Command side effects count as writes", prompt)
             self.assertNotIn("To verify yourself", prompt)
             return self.ai_done(path)(prompt)
 
@@ -1847,6 +1848,7 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         def repair(prompt):
             self.assertIn("PRIOR TASK ROLE BLOCKED EVIDENCE", prompt)
             self.assertIn("Task scope omitted src/needed.py", prompt)
+            self.assertIn("Protected control files", prompt)
             self.assertNotIn("FOCUSED TEST EVIDENCE", prompt)
             (self.execution_root() / "src" / "needed.py").write_text(
                 "value = 2\n", encoding="utf-8")

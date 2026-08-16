@@ -115,6 +115,8 @@ _PROMPT_TEMPLATE = (
     "requested_effort is the value actually passed to the AI CLI this run; "
     "<vendor-default> means no effort argument was passed and the journal must "
     "omit requested_effort.\n"
+    "Command side effects count as writes. Any check, compiler, importer, formatter, or\n"
+    "test you run must leave no non-ignored generated artifact in the project worktree.\n"
     "{focused_test_policy}\n"
     "When done:\n"
     "1. Change the status of {task_path} to DONE or BLOCKED -- the status line is the only\n"
@@ -157,6 +159,13 @@ scope_addition.path the same normalized project-relative path, and set
 scope_addition.path_state to "existing_file" or "new_file" according to the
 state at the start of this session. Never edit the task contract yourself; the
 scheduler validates and appends an accepted exact path at closeout.
+
+Protected control files -- AGENTS.md, .gitignore, .gitattributes, .gitmodules,
+Assent management files, and anything below .git or .assent -- can never be a
+finding path or scope amendment. If the blocker can only be resolved through
+one of them, make no write and return FAIL. Anchor the finding to the current
+task's declared source or test path that exposes the blocker, and explain the
+required human control-file decision in its evidence and recommendation.
 """
 _PLAN_WORKER_PROMPT = """You are the Assent plan execution worker.
 

@@ -290,8 +290,11 @@ behavior of verification, reconcile, acceptance, cleanup, and archive follows.
 ## Verification and receipts
 
 Focused verification runs task commands in source worktrees, writes no receipt,
-and cannot authorize acceptance. Complete verification builds a temporary
-integration candidate and runs `.assent/verify.py` outside every AI session.
+and cannot authorize acceptance. Scheduler-owned `focused_test` and
+`focused_sweep` actions require a clean source worktree: exit 0 with any
+non-ignored worktree change is `STALE` evidence, not a pass. Complete
+verification builds a temporary integration candidate and runs
+`.assent/verify.py` outside every AI session.
 Its folder or exact-batch receipt is derived, deletable evidence bound to source
 commits, reconstructed trees, verifier digest, and shared-input digest.
 An explicit `assent verify` runs only the requested mechanical check. It does

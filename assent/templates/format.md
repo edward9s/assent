@@ -125,8 +125,12 @@ all multiline strings so the scheduler can replace exactly that line.
 - `verify` is the narrow deterministic focused gate for this task. Use the
   smallest module, class, case, or command that covers its behavior. Keep the
   smallest representative integration test when filesystem, Git, or process
-  behavior matters. Exit 0 passes; every other exit fails. Never name
-  `.assent/verify.py` or the full suite.
+  behavior matters. Design the command to leave no non-ignored worktree change;
+  a scheduler-owned focused action treats exit 0 that creates or modifies one
+  as stale evidence, not a pass. Account for predictable caches and generated
+  output in the starting Git snapshot's ignore rules or direct them outside the
+  project rather than adding them to task scope. Every other exit fails. Never
+  name `.assent/verify.py` or the full suite.
 - `workflow` is an ordered task-local override. Each item contains exactly one
   `{ role = "..." }` or `{ action = "focused_test" }`. Roles come from effective
   settings. Omission inherits `[workflow].task`; omission at both levels gives
@@ -177,10 +181,12 @@ item:
 2. Classify each located file as read-only context or a possible write.
 3. Cover every possible write with an exact `scope` entry. Read-only context
    does not belong in scope.
-4. Name known files and symbols in `behavior` or `notes`; do not make the
+4. Audit every `verify` command against the clean-worktree rule above,
+   including predictable cache, coverage, compiler, and generator output.
+5. Name known files and symbols in `behavior` or `notes`; do not make the
    executing AI rediscover facts the meeting already knows.
-5. Make each acceptance item decidable without another human question.
-6. Default ordinary work to `core` or `lite`; reserve `prime` for the cases in
+6. Make each acceptance item decidable without another human question.
+7. Default ordinary work to `core` or `lite`; reserve `prime` for the cases in
    the table above.
 
 ### Media

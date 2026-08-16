@@ -533,12 +533,10 @@ class TestMainTreeEscapeDetection(GlobalContractsMixin, EngineTestCase):
                             for s in self.subjects()))
 
     def test_in_scope_escape_is_ported_back_and_main_tree_restored(self):
-        path = self.write_task(1)  # default scope=("src/",)
-        # "src/" must already be a tracked directory before the leak: otherwise git status
-        # collapses a wholly-new untracked directory into a single "?? src/" line instead of
-        # naming the leaked file, which this test does not exercise.
-        (self.root / "src").mkdir()
-        (self.root / "src" / "existing.py").write_text("existing\n", encoding="utf-8")
+        # Exact scopes below a wholly-new directory exercise detailed untracked
+        # path discovery in both the main-tree escape and task closeout gates.
+        path = self.write_task(
+            1, scope=("src/leaked.py", "src/formal.py"))
         cfg = self.build()         # default retry=1: one retry survives the escaped attempt
         self.commit_all()
 

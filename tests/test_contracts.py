@@ -154,6 +154,8 @@ class TestContractContent(unittest.TestCase):
                 "audit every `goal`, `behavior`, and `acceptance` clause item by item",
                 "Cover every possible write with an exact `scope` entry",
                 "smallest module, class, case, or command",
+                "leave no non-ignored worktree change",
+                "Audit every `verify` command against the clean-worktree rule",
                 "Never name `.assent/verify.py` or the full suite",
                 "A task must be executable by a fresh AI"):
             with self.subTest(phrase=phrase):
@@ -166,6 +168,7 @@ class TestContractContent(unittest.TestCase):
                 "`focused_test` is legal only at task positions",
                 "`focused_sweep` is legal only at plan positions",
                 "`full_verify` is legal only at integration positions",
+                "exit 0 with any non-ignored worktree change is `STALE` evidence",
                 "The engine never infers behavior from a role or ability name"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, workflow)
@@ -200,6 +203,15 @@ class TestContractContent(unittest.TestCase):
         self.assertIn(
             "exact selection",
             configuration["abilities"]["integration_review"]["prompt"])
+
+    def test_scheduled_session_contract_owns_command_side_effects(self):
+        instructions = self._compact("instructions.md")
+        self.assertIn("Command side effects count as writes", instructions)
+        self.assertIn(
+            "never run a scheduler-owned `focused_test` action", instructions)
+        self.assertIn(
+            "Uncommitted primary-tree changes to files such as `AGENTS.md` and `.gitignore` are not inherited",
+            instructions)
 
     def test_default_write_abilities_resist_representation_coupled_tests(self):
         configuration = tomllib.loads(
