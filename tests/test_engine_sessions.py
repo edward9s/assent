@@ -174,6 +174,22 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 self.root / ".assent", ["plan01"]), 0)
         self.assertEqual(verify_calls, 1)
 
+    def test_dynamic_selection_passes_a_path_to_batch_discovery(self):
+        self.write_task(1, status="DONE")
+        cfg = self.build()
+        self.commit_all()
+
+        def select(_config_path, assent_dir, _main, _target):
+            self.assertIsInstance(assent_dir, Path)
+            return mock.Mock(folders=(), skipped=()), {}
+
+        with mock.patch.object(
+                engine.verification, "select_batch_folders",
+                side_effect=select):
+            self.assertEqual(engine.run_dynamic_selection_workflow(
+                str(self.root / ".assent" / "assent.toml"),
+                str(cfg.assent_dir)), 0)
+
     def test_initial_writable_plan_quality_review_repairs_before_sweep(self):
         task_path = self.write_task(
             1, status="DONE", scope=("src/value.txt",))

@@ -38,6 +38,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable, TextIO
 
 from assent import (AssentError, auto_fix, contracts, gitops, lockfile,
@@ -3638,8 +3639,8 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
 def run_dynamic_selection_workflow(config_path: str, assent_dir) -> int:
     """Snapshot a whole-project run's current verification selection once."""
     try:
-        assent_dir = os.fspath(assent_dir)
-        root = os.path.dirname(assent_dir)
+        assent_dir = Path(assent_dir)
+        root = assent_dir.parent
         main = gitops.main_worktree(root)
         target = gitops.commit_of(
             main, gitops.require_current_branch(main))
