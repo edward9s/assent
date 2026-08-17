@@ -1949,6 +1949,9 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         def repair(prompt):
             self.assertIn("FOCUSED TEST EVIDENCE", prompt)
             self.assertIn("Status: FAILED", prompt)
+            self.assertIn("first focused error", prompt)
+            self.assertIn("last focused error", prompt)
+            self.assertIn("...[middle output truncated]...", prompt)
             self.ai_done(path, files={"src/fixed.py": "fixed\n"})(prompt)
             finding = auto_fix.ReviewFinding(
                 "t001", "src/fixed.py", "Focused regression failed",
@@ -1958,7 +1961,10 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
                     auto_fix.ReviewRecord("FIXED", (finding,))), False, None)
 
         results = [
-            subprocess.CompletedProcess([], 3, "focused failure\n", ""),
+            subprocess.CompletedProcess(
+                [], 3,
+                "first focused error\n" + "noise\n" * 1000
+                + "last focused error\n", ""),
             subprocess.CompletedProcess([], 0, "focused pass\n", ""),
         ]
         with mock.patch.object(

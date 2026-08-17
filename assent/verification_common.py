@@ -159,8 +159,8 @@ def verifier_digest(cfg: Config) -> str:
     return sha256_file(script)
 
 
-def summary(*parts: str) -> str:
-    """Normalize child diagnostics and bound receipt growth."""
+def summary(*parts: str, retain_start: bool = False) -> str:
+    """Normalize child diagnostics and bound stored evidence."""
     text = "\n".join(part.strip() for part in parts if part and part.strip())
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = "".join(
@@ -169,8 +169,14 @@ def summary(*parts: str) -> str:
         for character in text
     )
     if len(text) > SUMMARY_LIMIT:
-        marker = "...[earlier output truncated]\n"
-        text = marker + text[-(SUMMARY_LIMIT - len(marker)):]
+        if retain_start:
+            marker = "\n...[middle output truncated]...\n"
+            available = SUMMARY_LIMIT - len(marker)
+            start = available // 2
+            text = text[:start] + marker + text[-(available - start):]
+        else:
+            marker = "...[earlier output truncated]\n"
+            text = marker + text[-(SUMMARY_LIMIT - len(marker)):]
     return text
 
 

@@ -1156,7 +1156,8 @@ def _run_focused_test_action(
         record = replace(
             armed, status="PASSED" if result.returncode == 0 else "FAILED",
             exit_code=result.returncode,
-            summary=verification_summary(result.stdout, result.stderr, fallback))
+            summary=verification_summary(
+                result.stdout, result.stderr, fallback, retain_start=True))
         try:
             unchanged = _focused_test_identity(cfg, task) == identity
         except AssentError:
