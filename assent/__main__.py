@@ -1087,5 +1087,20 @@ def main(argv: list[str] | None = None) -> int:
         return _dispatch_timed(actual_argv)
 
 
+def _exit_main() -> None:
+    """Exit the executable without leaking a traceback for Ctrl+C.
+
+    ``main(argv)`` remains an in-process entry point whose callers can handle
+    ``KeyboardInterrupt`` themselves.  At the executable boundary, however, an
+    interrupt that escapes cleanup is an ordinary interrupted command and has
+    the conventional exit code 130.
+    """
+    try:
+        code = main()
+    except KeyboardInterrupt:
+        code = 130
+    raise SystemExit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _exit_main()

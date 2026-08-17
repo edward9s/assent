@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from assent.__main__ import _start_stdin_stop_watcher, main
+from assent.__main__ import _exit_main, _start_stdin_stop_watcher, main
 from assent.adapters.process import clear_stop_wake
 from assent.config import load_config
 from assent.init import init as run_init
@@ -1048,6 +1048,13 @@ class TestCommandElapsed(MainTestCase):
         self.assertEqual(
             self.total_lines(out.getvalue()),
             ["Command `assent run` interrupted: elapsed 2.5s, exit code 130"])
+
+    def test_executable_boundary_turns_escaping_interrupt_into_exit_130(self):
+        with patch("assent.__main__.main", side_effect=KeyboardInterrupt), \
+                self.assertRaises(SystemExit) as caught:
+            _exit_main()
+
+        self.assertEqual(caught.exception.code, 130)
 
     def test_the_total_is_retained_by_the_ordinary_terminal_log(self):
         config = self.write_config()
