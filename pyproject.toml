@@ -30,7 +30,7 @@ classifiers = [
 dependencies = []
 
 [project.scripts]
-assent = "assent.__main__:main"
+assent = "assent.__main__:_exit_main"
 
 [project.urls]
 Homepage = "https://github.com/edward9s/assent"

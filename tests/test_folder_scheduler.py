@@ -901,12 +901,12 @@ class TestStopRequestEndsRealProcessTrees(unittest.TestCase):
         from assent.lockfile import hold_lock
 
         _start_stdin_stop_watcher()
-        with hold_lock(Path(sys.argv[1]), sys.argv[2]):
-            print("READY", flush=True)
-            try:
+        try:
+            with hold_lock(Path(sys.argv[1]), sys.argv[2]):
+                print("READY", flush=True)
                 _countdown(float(sys.argv[3]), "Quota reset", interruptible_sleep)
-            except KeyboardInterrupt:
-                sys.exit(130)
+        except KeyboardInterrupt:
+            sys.exit(130)
         sys.exit(1)
         """
     )

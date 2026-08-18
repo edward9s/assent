@@ -87,6 +87,13 @@ class MainTestCase(unittest.TestCase):
 
 
 class TestDispatch(MainTestCase):
+    def test_console_script_uses_the_interrupt_safe_executable_boundary(self):
+        project = tomllib.loads(
+            (_PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            project["project"]["scripts"]["assent"],
+            "assent.__main__:_exit_main")
+
     def test_version_reports_installed_distribution_from_empty_directory(self):
         environment = dict(os.environ)
         environment["PYTHONPATH"] = str(_PROJECT_ROOT)
@@ -865,6 +872,27 @@ class TestAutomaticIntegrationChaining(MainTestCase):
         self.assertEqual(run.call_args.args[0].tasks_name, "beta")
         integration.assert_called_once_with(
             str(self.config), self.assent_dir, ["beta"])
+
+    def test_exact_run_never_skips_an_incomplete_folder_at_the_target_tip(self):
+        self.write_task("alpha", "WIP")
+
+        with patch("assent.__main__.gitops.main_worktree",
+                   return_value=self.root), \
+                patch("assent.__main__.gitops.require_current_branch",
+                      return_value="master"), \
+                patch("assent.__main__.gitops.commit_of",
+                      return_value="a" * 40), \
+                patch("assent.__main__.resolve_source_snapshot",
+                      return_value=("alpha/source", "a" * 40, self.root)), \
+                patch("assent.__main__.gitops.is_ancestor",
+                      return_value=True), \
+                patch("assent.__main__.engine.run", return_value=0) as run:
+            code, output = self.run_main([
+                "run", "alpha", "--config", str(self.config)])
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("already accepted", output)
+        run.assert_called_once()
 
     def test_exact_run_with_only_accepted_folders_is_a_noop(self):
         self.write_task("alpha", "DONE")

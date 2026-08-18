@@ -150,7 +150,8 @@ class LanguagePolicyTests(unittest.TestCase):
         self.assertTrue((ROOT / "assent").is_dir())
         self.assertFalse((ROOT / "agents").exists())
         self.assertIn('name = "assent"', _read(Path("pyproject.toml")))
-        self.assertIn('assent = "assent.__main__:main"', _read(Path("pyproject.toml")))
+        self.assertIn('assent = "assent.__main__:_exit_main"',
+                      _read(Path("pyproject.toml")))
         for path in (ROOT / "assent/templates").iterdir():
             if path.is_file() and path.name != "AGENTS.md":
                 with self.subTest(path=path):

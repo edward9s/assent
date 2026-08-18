@@ -530,6 +530,8 @@ def _dispatch_run_folders(
 def _accepted_run_source(cfg) -> tuple[str, str, str] | None:
     """Return the current source and target when this folder is integrated."""
     try:
+        if not infer_folder_completion(cfg.tasks_dir).complete:
+            return None
         main = gitops.main_worktree(cfg.root)
         target_branch = gitops.require_current_branch(main)
         target_tip = gitops.commit_of(main, target_branch)
