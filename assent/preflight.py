@@ -10,7 +10,7 @@ exists, and that `run` and the query commands must answer identically:
 - how the resolved assignment is rendered for a human;
 - whether the project root has its own git marker and whether the `.assent`
   management surface is layered correctly against the worktrees;
-- which commit a folder's worktree stacks on, and which upstream tip that
+- which commit a plan's worktree stacks on, and which upstream tip that
   reading is valid against.
 
 The module deliberately knows nothing about sessions, checkpoints, or reports:
@@ -27,7 +27,7 @@ from assent import AssentError, gitops
 from assent.adapters import Adapter, InvocationRequest, get_adapter
 from assent.config import (Config, WorkflowActionStep, WorkflowPlanStep,
                            WorkflowTaskStep)
-from assent.folderdeps import FolderBaseResolution, resolve_folder_base
+from assent.plandeps import PlanBaseResolution, resolve_plan_base
 from assent.modeling import effort_identity, has_literal, inherited_effort
 from assent.plan import Plan, Task, TaskWorkflowAction
 
@@ -405,25 +405,25 @@ def worktree_configuration_errors(cfg: Config) -> list[str]:
 class StackState:
     """Resolved base plus the declared base identity used to verify races."""
 
-    base: FolderBaseResolution
-    sources: tuple[gitops.FolderSourceSnapshot, ...]
+    base: PlanBaseResolution
+    sources: tuple[gitops.PlanSourceSnapshot, ...]
 
 
 def resolve_stack_state(cfg: Config) -> StackState:
     """Resolve a reproducible base and snapshot only its live source tip.
 
-    A folder without an unaccepted declared base has no source to snapshot:
+    A plan without an unaccepted declared base has no source to snapshot:
     ordering-only ``after`` entries do not provide Git lineage or race evidence.
     """
-    base = resolve_folder_base(
+    base = resolve_plan_base(
         cfg.root, cfg.tasks_dir, excludes=cfg.git_excludes)
     if base.speculative_upstream is None:
         sources = ()
     else:
-        source = gitops.resolve_folder_source(
-            cfg.root, base.speculative_upstream.folder, cfg.git_excludes)
+        source = gitops.resolve_plan_source(
+            cfg.root, base.speculative_upstream.plan, cfg.git_excludes)
         sources = (source,)
-        if (source.folder != base.speculative_upstream.folder
+        if (source.plan != base.speculative_upstream.plan
                 or source.tip != base.speculative_upstream.tip):
             raise AssentError(
                 "upstream source changed while the stack base was being resolved")

@@ -1,4 +1,4 @@
-"""Tests for the all-folders scheduler's dependency order, concurrency, and
+"""Tests for the all-plans scheduler's dependency order, concurrency, and
 stuck-chain detection.
 
 Chinese literals that remain are deliberate user-authored data (task titles,
@@ -23,10 +23,10 @@ from unittest.mock import patch
 import assent
 from assent import AssentError
 from assent.engine import _COUNTDOWN_SEGMENT
-from assent.folder_scheduler import (_INTERRUPT_GRACE_SECONDS,
+from assent.plan_scheduler import (_INTERRUPT_GRACE_SECONDS,
                                      _interrupt_and_wait, _kill_tree,
-                                     _send_interrupt, _start_folder, run_all)
-from assent.folderdeps import parse_folder_dependency_graph
+                                     _send_interrupt, _start_plan, run_all)
+from assent.plandeps import parse_plan_dependency_graph
 from assent.lockfile import LockBusy, hold_lock
 from assent.plan import set_status
 from assent.terminal_log import terminal_logging
@@ -54,7 +54,7 @@ def task_text(status: str) -> str:
 
 
 class FinishedProcess:
-    """Stand-in for a real AI child process: completes the given folder the
+    """Stand-in for a real AI child process: completes the given plan the
     first time it is observed."""
 
     def __init__(self, task: Path, on_finish=None) -> None:
@@ -83,7 +83,7 @@ class OutputProcess(FinishedProcess):
             self.stdout = io.StringIO(output)
 
 
-class FolderSchedulerTestCase(unittest.TestCase):
+class PlanSchedulerTestCase(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.assent_dir = self.root / ".assent"
@@ -94,35 +94,35 @@ class FolderSchedulerTestCase(unittest.TestCase):
         self.config.write_text("", encoding="utf-8")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
-    def make_folder(self, name: str, status: str = "TODO",
+    def make_plan(self, name: str, status: str = "TODO",
                     after: tuple[str, ...] = ()) -> Path:
-        folder = self.assent_dir / name
-        folder.mkdir()
-        task = folder / "t001_task.e.toml"
+        plan_name = self.assent_dir / name
+        plan_name.mkdir()
+        task = plan_name / "t001_task.e.toml"
         task.write_text(task_text(status), encoding="utf-8")
         if after:
             values = ", ".join(f'"{item}"' for item in after)
-            (folder / "_folder.toml").write_text(
+            (plan_name / "_plan_deps.toml").write_text(
                 f"after = [{values}]\n", encoding="utf-8")
         return task
 
-    def archive_roster(self, *folders: str) -> None:
-        """Register folders in the archive roster as if they had been archived
+    def archive_roster(self, *plan_names: str) -> None:
+        """Register plans in the archive roster as if they had been archived
         (their live directories intentionally do not exist)."""
         entries = "".join(
-            f'[[archived]]\nfolder = "{name}"\n'
+            f'[[archived]]\nplan = "{name}"\n'
             f'archived_at = "2026-01-01T00:00:00Z"\n\n'
-            for name in folders)
+            for name in plan_names)
         (self.assent_dir / "_archived.toml").write_text(
             entries, encoding="utf-8")
 
 
-class TestRunAll(FolderSchedulerTestCase):
+class TestRunAll(PlanSchedulerTestCase):
     def test_child_uses_utf8_merged_text_pipe_and_process_group(self):
         process = object()
-        with patch("assent.folder_scheduler.subprocess.Popen",
+        with patch("assent.plan_scheduler.subprocess.Popen",
                    return_value=process) as popen:
-            actual = _start_folder(str(self.config), "work")
+            actual = _start_plan(str(self.config), "work")
 
         self.assertIs(actual, process)
         command = popen.call_args.args[0]
@@ -133,9 +133,9 @@ class TestRunAll(FolderSchedulerTestCase):
         # told to watch it.
         self.assertEqual(options["stdin"], subprocess.PIPE)
         self.assertEqual(options["env"]["ASSENT_STDIN_STOP"], "1")
-        # The child owns one folder, so it labels its own duration instead of
+        # The child owns one plan, so it labels its own duration instead of
         # printing a second copy of this parent's end-to-end total.
-        self.assertEqual(options["env"]["ASSENT_FOLDER_RUN"], "1")
+        self.assertEqual(options["env"]["ASSENT_PLAN_RUN"], "1")
         self.assertEqual(options["stdout"], subprocess.PIPE)
         self.assertEqual(options["stderr"], subprocess.STDOUT)
         self.assertIs(options["text"], True)
@@ -150,18 +150,18 @@ class TestRunAll(FolderSchedulerTestCase):
             self.assertNotIn("creationflags", options)
 
     def test_child_argv_has_no_obsolete_auto_fix_flag(self):
-        with patch("assent.folder_scheduler.subprocess.Popen",
+        with patch("assent.plan_scheduler.subprocess.Popen",
                    return_value=object()) as popen:
-            _start_folder(str(self.config), "work")
+            _start_plan(str(self.config), "work")
 
         command = popen.call_args.args[0]
         self.assertNotIn("--auto-fix", command)
 
     def test_child_runs_from_package_root_with_absolute_config(self):
         package_root = Path(assent.__file__).resolve().parent.parent
-        with patch("assent.folder_scheduler.subprocess.Popen",
+        with patch("assent.plan_scheduler.subprocess.Popen",
                    return_value=object()) as popen:
-            _start_folder(str(self.config), "work")
+            _start_plan(str(self.config), "work")
 
         command = popen.call_args.args[0]
         options = popen.call_args.kwargs
@@ -185,9 +185,9 @@ class TestRunAll(FolderSchedulerTestCase):
         original = Path.cwd()
         os.chdir(self.root)
         self.addCleanup(os.chdir, str(original))
-        with patch("assent.folder_scheduler.subprocess.Popen",
+        with patch("assent.plan_scheduler.subprocess.Popen",
                    return_value=object()) as popen:
-            _start_folder(str(self.config), "work")
+            _start_plan(str(self.config), "work")
         options = popen.call_args.kwargs
 
         # ``-c`` and ``-m`` share the same rule: the working directory heads the
@@ -208,11 +208,11 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(resolved_from(options["cwd"]),
                          package_root / "assent")
 
-    def test_jobs_one_forwards_each_line_with_folder_prefix(self):
-        task = self.make_folder("serial")
+    def test_jobs_one_forwards_each_line_with_plan_prefix(self):
+        task = self.make_plan("serial")
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._start_folder",
+                "assent.plan_scheduler._start_plan",
                 return_value=OutputProcess(task, "第一列\n最後一列")):
             code = run_all(str(self.config), self.assent_dir)
 
@@ -221,12 +221,12 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(lines.count("[serial] 第一列"), 1)
         self.assertEqual(lines.count("[serial] 最後一列"), 1)
         self.assertLess(lines.index("[serial] 最後一列"),
-                        lines.index("Work folder complete: serial (exit code 0)"))
+                        lines.index("Plan complete: serial (exit code 0)"))
 
     def test_jobs_two_serializes_lines_with_correct_source(self):
         tasks = {
-            "alpha": self.make_folder("alpha"),
-            "beta": self.make_folder("beta"),
+            "alpha": self.make_plan("alpha"),
+            "beta": self.make_plan("beta"),
         }
         outputs = {
             "alpha": "甲一\n甲二\n",
@@ -234,11 +234,11 @@ class TestRunAll(FolderSchedulerTestCase):
         }
         out = io.StringIO()
 
-        def fake_start(_config, folder):
-            return OutputProcess(tasks[folder], outputs[folder])
+        def fake_start(_config, plan_name):
+            return OutputProcess(tasks[plan_name], outputs[plan_name])
 
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._start_folder", side_effect=fake_start):
+                "assent.plan_scheduler._start_plan", side_effect=fake_start):
             code = run_all(str(self.config), self.assent_dir, jobs=2)
 
         self.assertEqual(code, 0)
@@ -251,16 +251,16 @@ class TestRunAll(FolderSchedulerTestCase):
 
     def test_parallel_children_need_no_repair_policy_flag(self):
         tasks = {
-            "alpha": self.make_folder("alpha"),
-            "beta": self.make_folder("beta"),
+            "alpha": self.make_plan("alpha"),
+            "beta": self.make_plan("beta"),
         }
         started = []
 
-        def fake_start(_config, folder):
-            started.append(folder)
-            return FinishedProcess(tasks[folder])
+        def fake_start(_config, plan_name):
+            started.append(plan_name)
+            return FinishedProcess(tasks[plan_name])
 
-        with patch("assent.folder_scheduler._start_folder",
+        with patch("assent.plan_scheduler._start_plan",
                    side_effect=fake_start):
             code = run_all(str(self.config), self.assent_dir, jobs=2)
 
@@ -269,8 +269,8 @@ class TestRunAll(FolderSchedulerTestCase):
 
     def test_parallel_children_receive_no_obsolete_auto_fix_flag(self):
         tasks = {
-            "alpha": self.make_folder("alpha"),
-            "beta": self.make_folder("beta"),
+            "alpha": self.make_plan("alpha"),
+            "beta": self.make_plan("beta"),
         }
         commands = []
         real_popen = subprocess.Popen
@@ -281,7 +281,7 @@ class TestRunAll(FolderSchedulerTestCase):
             commands.append(command)
             return FinishedProcess(tasks[command[4]])
 
-        with patch("assent.folder_scheduler.subprocess.Popen",
+        with patch("assent.plan_scheduler.subprocess.Popen",
                    side_effect=fake_popen):
             code = run_all(str(self.config), self.assent_dir, jobs=2)
 
@@ -293,11 +293,11 @@ class TestRunAll(FolderSchedulerTestCase):
             self.assertNotIn("--auto-fix", command)
 
     def test_merged_stderr_bad_utf8_and_unterminated_line_are_forwarded(self):
-        task = self.make_folder("encoded")
+        task = self.make_plan("encoded")
         out = io.StringIO()
         raw = "標準錯誤\n".encode("utf-8") + b"bad:\xff"
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._start_folder",
+                "assent.plan_scheduler._start_plan",
                 return_value=OutputProcess(task, raw)):
             code = run_all(str(self.config), self.assent_dir)
 
@@ -306,18 +306,18 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertIn("[encoded] bad:\ufffd\n", out.getvalue())
 
     def test_terminal_only_forwarding_does_not_enter_root_log_or_child_log(self):
-        task = self.make_folder("work")
+        task = self.make_plan("work")
         child_log = task.parent / "_assent.log"
         terminal = io.StringIO()
 
-        def fake_start(_config, _folder):
+        def fake_start(_config, _plan_name):
             child_log.write_text("子行程原始訊息\n", encoding="utf-8")
             return OutputProcess(task, "子行程原始訊息\n")
 
         argv = ["run", "--all", "--config", str(self.config)]
         with contextlib.redirect_stdout(terminal):
             with terminal_logging(argv) as root_log, patch(
-                    "assent.folder_scheduler._start_folder",
+                    "assent.plan_scheduler._start_plan",
                     side_effect=fake_start):
                 code = run_all(str(self.config), self.assent_dir)
 
@@ -326,21 +326,21 @@ class TestRunAll(FolderSchedulerTestCase):
         root_text = root_log.read_text(encoding="utf-8")
         self.assertIn("[work] 子行程原始訊息", terminal_text)
         self.assertIn("ASSENT START", root_text)
-        self.assertIn("Starting work folder: work", root_text)
-        self.assertIn("Work folder complete: work", root_text)
+        self.assertIn("Starting plan: work", root_text)
+        self.assertIn("Plan complete: work", root_text)
         self.assertNotIn("子行程原始訊息", root_text)
         self.assertEqual(child_log.read_text(encoding="utf-8"),
                          "子行程原始訊息\n")
 
-    def test_no_git_rejects_completed_folders_before_inspection(self):
-        self.make_folder("done", "DONE")
-        self.make_folder("skipped", "SKIP")
+    def test_no_git_rejects_completed_plans_before_inspection(self):
+        self.make_plan("done", "DONE")
+        self.make_plan("skipped", "SKIP")
         self.git_marker.rmdir()
         out = io.StringIO()
 
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler.parse_folder_dependency_graph") as parse, \
-                patch("assent.folder_scheduler._start_folder") as start:
+                "assent.plan_scheduler.parse_plan_dependency_graph") as parse, \
+                patch("assent.plan_scheduler._start_plan") as start:
             code = run_all(str(self.config), self.assent_dir)
 
         self.assertEqual(code, 1)
@@ -350,17 +350,17 @@ class TestRunAll(FolderSchedulerTestCase):
         start.assert_not_called()
 
     def test_completion_unlocks_downstream_in_topological_order(self):
-        first = self.make_folder("first")
-        second = self.make_folder("second", after=("first",))
-        third = self.make_folder("third", after=("second",))
+        first = self.make_plan("first")
+        second = self.make_plan("second", after=("first",))
+        third = self.make_plan("third", after=("second",))
         tasks = {"first": first, "second": second, "third": third}
         started = []
 
-        def fake_start(_config, folder):
-            started.append(folder)
-            return FinishedProcess(tasks[folder])
+        def fake_start(_config, plan_name):
+            started.append(plan_name)
+            return FinishedProcess(tasks[plan_name])
 
-        with patch("assent.folder_scheduler._start_folder", side_effect=fake_start):
+        with patch("assent.plan_scheduler._start_plan", side_effect=fake_start):
             code = run_all(str(self.config), self.assent_dir)
 
         self.assertEqual(code, 0)
@@ -372,15 +372,15 @@ class TestRunAll(FolderSchedulerTestCase):
         # it.  run --all's inline runnable check used to do plans[name] and
         # raise KeyError; the roster-aware predicate must instead treat the
         # archived upstream as complete and schedule the downstream.
-        downstream = self.make_folder("downstream", after=("upstream_archived",))
+        downstream = self.make_plan("downstream", after=("upstream_archived",))
         self.archive_roster("upstream_archived")
         started = []
 
-        def fake_start(_config, folder):
-            started.append(folder)
+        def fake_start(_config, plan_name):
+            started.append(plan_name)
             return FinishedProcess(downstream)
 
-        with patch("assent.folder_scheduler._start_folder",
+        with patch("assent.plan_scheduler._start_plan",
                    side_effect=fake_start):
             code = run_all(str(self.config), self.assent_dir)
 
@@ -388,29 +388,29 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(started, ["downstream"])
 
     def test_after_referencing_unknown_name_fails_closed_with_clear_error(self):
-        # A name in neither the live folders nor the roster is refused with a
+        # A name in neither the live plans nor the roster is refused with a
         # clear scheduling error naming it, not a traceback, and starts nothing.
-        self.make_folder("downstream", after=("ghost",))
+        self.make_plan("downstream", after=("ghost",))
         out = io.StringIO()
 
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._start_folder") as start:
+                "assent.plan_scheduler._start_plan") as start:
             code = run_all(str(self.config), self.assent_dir)
 
         self.assertEqual(code, 1)
-        self.assertIn("Folder scheduling failed", out.getvalue())
+        self.assertIn("Plan scheduling failed", out.getvalue())
         self.assertIn("ghost", out.getvalue())
         start.assert_not_called()
 
     def test_real_git_launch_prints_resolved_stack_decision_before_child(self):
-        task = self.make_folder("downstream")
+        task = self.make_plan("downstream")
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._has_usable_git", return_value=True), patch(
-                "assent.folder_scheduler._stack_launch_decision",
+                "assent.plan_scheduler._has_usable_git", return_value=True), patch(
+                "assent.plan_scheduler._stack_launch_decision",
                 return_value=("Stack decision: downstream: base abc from unaccepted "
                               "upstream upstream @ abc; worktree create.", None)), patch(
-                "assent.folder_scheduler._start_folder",
+                "assent.plan_scheduler._start_plan",
                 return_value=FinishedProcess(task)):
             code = run_all(str(self.config), self.assent_dir)
 
@@ -418,36 +418,36 @@ class TestRunAll(FolderSchedulerTestCase):
         text = out.getvalue()
         self.assertIn("unaccepted upstream upstream", text)
         self.assertLess(text.index("Stack decision:"),
-                        text.index("Starting work folder: downstream"))
+                        text.index("Starting plan: downstream"))
 
     def test_stack_refusal_does_not_start_a_child(self):
-        self.make_folder("downstream")
+        self.make_plan("downstream")
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._has_usable_git", return_value=True), patch(
-                "assent.folder_scheduler._stack_launch_decision",
-                return_value=(None, "multiple unaccepted upstream folders")), patch(
-                "assent.folder_scheduler._start_folder") as start:
+                "assent.plan_scheduler._has_usable_git", return_value=True), patch(
+                "assent.plan_scheduler._stack_launch_decision",
+                return_value=(None, "multiple unaccepted upstream plans")), patch(
+                "assent.plan_scheduler._start_plan") as start:
             code = run_all(str(self.config), self.assent_dir)
 
         self.assertEqual(code, 1)
-        self.assertIn("Work folder refused: downstream", out.getvalue())
+        self.assertIn("Plan refused: downstream", out.getvalue())
         start.assert_not_called()
 
-    def test_jobs_two_starts_two_independent_folders_before_polling(self):
-        alpha = self.make_folder("alpha")
-        beta = self.make_folder("beta")
+    def test_jobs_two_starts_two_independent_plans_before_polling(self):
+        alpha = self.make_plan("alpha")
+        beta = self.make_plan("beta")
         tasks = {"alpha": alpha, "beta": beta}
         started = []
         first_poll_started_count = []
 
-        def fake_start(_config, folder):
-            started.append(folder)
+        def fake_start(_config, plan_name):
+            started.append(plan_name)
             return FinishedProcess(
-                tasks[folder],
+                tasks[plan_name],
                 lambda: first_poll_started_count.append(len(started)))
 
-        with patch("assent.folder_scheduler._start_folder", side_effect=fake_start):
+        with patch("assent.plan_scheduler._start_plan", side_effect=fake_start):
             code = run_all(str(self.config), self.assent_dir, jobs=2)
 
         self.assertEqual(code, 0)
@@ -455,9 +455,9 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(first_poll_started_count[0], 2)
 
     def test_jobs_two_never_starts_dependent_while_upstream_is_active(self):
-        upstream = self.make_folder("upstream")
-        downstream = self.make_folder("downstream", after=("upstream",))
-        independent = self.make_folder("independent")
+        upstream = self.make_plan("upstream")
+        downstream = self.make_plan("downstream", after=("upstream",))
+        independent = self.make_plan("independent")
         tasks = {
             "upstream": upstream,
             "downstream": downstream,
@@ -465,16 +465,16 @@ class TestRunAll(FolderSchedulerTestCase):
         }
         started = []
 
-        def fake_start(_config, folder):
-            if folder == "downstream":
+        def fake_start(_config, plan_name):
+            if plan_name == "downstream":
                 self.assertEqual(
                     next(task for name, task in tasks.items()
                          if name == "upstream").read_text(encoding="utf-8"),
                     task_text("DONE"))
-            started.append(folder)
-            return FinishedProcess(tasks[folder])
+            started.append(plan_name)
+            return FinishedProcess(tasks[plan_name])
 
-        with patch("assent.folder_scheduler._start_folder",
+        with patch("assent.plan_scheduler._start_plan",
                    side_effect=fake_start):
             code = run_all(str(self.config), self.assent_dir, jobs=2)
 
@@ -482,9 +482,9 @@ class TestRunAll(FolderSchedulerTestCase):
         self.assertEqual(started[:2], ["independent", "upstream"])
         self.assertEqual(started[2], "downstream")
 
-    def test_recalculation_does_not_read_a_running_folders_partial_write(self):
-        alpha = self.make_folder("alpha")
-        beta = self.make_folder("beta")
+    def test_recalculation_does_not_read_a_running_plans_partial_write(self):
+        alpha = self.make_plan("alpha")
+        beta = self.make_plan("beta")
 
         class WritingProcess:
             def __init__(self):
@@ -502,20 +502,20 @@ class TestRunAll(FolderSchedulerTestCase):
             "alpha": FinishedProcess(alpha),
             "beta": WritingProcess(),
         }
-        with patch("assent.folder_scheduler._start_folder",
-                   side_effect=lambda _config, folder: processes[folder]):
+        with patch("assent.plan_scheduler._start_plan",
+                   side_effect=lambda _config, plan_name: processes[plan_name]):
             code = run_all(str(self.config), self.assent_dir, jobs=2)
 
         self.assertEqual(code, 0)
 
     def test_blocked_prerequisite_reports_complete_chain(self):
-        self.make_folder("base", "BLOCKED")
-        self.make_folder("middle", after=("base",))
-        self.make_folder("leaf", after=("middle",))
+        self.make_plan("base", "BLOCKED")
+        self.make_plan("middle", after=("base",))
+        self.make_plan("leaf", after=("middle",))
         out = io.StringIO()
 
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._start_folder") as start:
+                "assent.plan_scheduler._start_plan") as start:
             code = run_all(str(self.config), self.assent_dir)
 
         self.assertEqual(code, 1)
@@ -524,7 +524,7 @@ class TestRunAll(FolderSchedulerTestCase):
         start.assert_not_called()
 
     def test_child_failure_stops_with_log_location(self):
-        self.make_folder("work")
+        self.make_plan("work")
 
         class FailedProcess:
             def poll(self):
@@ -532,16 +532,16 @@ class TestRunAll(FolderSchedulerTestCase):
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._start_folder",
+                "assent.plan_scheduler._start_plan",
                 return_value=FailedProcess()):
             code = run_all(str(self.config), self.assent_dir)
 
         self.assertEqual(code, 1)
-        self.assertIn("Work folder failed: work (exit code 7", out.getvalue())
+        self.assertIn("Plan failed: work (exit code 7", out.getvalue())
         self.assertIn("_assent.log", out.getvalue())
 
     def test_status_control_c_exit_code_is_treated_as_interrupt(self):
-        self.make_folder("work")
+        self.make_plan("work")
 
         class ControlCExitProcess:
             def poll(self):
@@ -549,17 +549,17 @@ class TestRunAll(FolderSchedulerTestCase):
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._start_folder",
+                "assent.plan_scheduler._start_plan",
                 return_value=ControlCExitProcess()):
             code = run_all(str(self.config), self.assent_dir)
 
         self.assertEqual(code, 130)
-        self.assertIn("Work folder interrupted: work (exit code 3221225786)",
+        self.assertIn("Plan interrupted: work (exit code 3221225786)",
                       out.getvalue())
-        self.assertNotIn("Work folder failed", out.getvalue())
+        self.assertNotIn("Plan failed", out.getvalue())
 
     def test_keyboard_interrupt_is_forwarded_and_waits_for_child(self):
-        self.make_folder("work")
+        self.make_plan("work")
 
         class InterruptedProcess:
             def __init__(self):
@@ -573,9 +573,9 @@ class TestRunAll(FolderSchedulerTestCase):
                 return 130
 
         process = InterruptedProcess()
-        with patch("assent.folder_scheduler._start_folder",
+        with patch("assent.plan_scheduler._start_plan",
                    return_value=process), patch(
-                       "assent.folder_scheduler._send_interrupt") as send:
+                       "assent.plan_scheduler._send_interrupt") as send:
             code = run_all(str(self.config), self.assent_dir)
 
         self.assertEqual(code, 130)
@@ -643,7 +643,7 @@ class DeafChild:
         return self.returncode
 
 
-class TestStopChannelAndEscalation(FolderSchedulerTestCase):
+class TestStopChannelAndEscalation(PlanSchedulerTestCase):
     """The stdin stop channel is the primary route out; a forced tree
     termination is the backstop when neither the channel nor a signal is
     honoured, so the parent never waits without a bound."""
@@ -653,10 +653,10 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
         the death they would really cause."""
         out = io.StringIO() if out is None else out
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler.subprocess.run",
+                "assent.plan_scheduler.subprocess.run",
                 side_effect=lambda *a, **k: [
                     child.die() for child in active.values()]), patch(
-                "assent.folder_scheduler.os.killpg", create=True,
+                "assent.plan_scheduler.os.killpg", create=True,
                 side_effect=lambda *a, **k: [
                     child.die() for child in active.values()]):
             _interrupt_and_wait(active, {}, queue.Queue())
@@ -668,8 +668,8 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
         out = self.interrupt({"work": child})
 
         self.assertTrue(child.stdin.closed)
-        self.assertIn("Work folder finished: work (exit code 130)", out)
-        self.assertNotIn("Escalating work folder", out)
+        self.assertIn("Plan finished: work (exit code 130)", out)
+        self.assertNotIn("Escalating plan", out)
 
     def test_child_deaf_to_signal_and_stdin_is_force_terminated(self):
         child = DeafChild(reads_stdin=False)
@@ -677,7 +677,7 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
         out = self.interrupt({"work": child})
 
         self.assertTrue(child.stdin.closed)
-        self.assertIn("Escalating work folder: work", out)
+        self.assertIn("Escalating plan: work", out)
         self.assertIn("no exit within 60 seconds of the stop request", out)
         self.assertEqual(child.returncode, -9)
 
@@ -712,20 +712,20 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
                              InterruptingStream(set(range(1, 6))))
 
         self.assertIn("Second interrupt (Ctrl+C)", out)
-        for folder, child in (("a", first), ("b", second)):
-            self.assertTrue(child.killed, folder)
-            self.assertEqual(child.returncode, -9, folder)
-            self.assertTrue(child.stdin.closed, folder)
+        for plan_name, child in (("a", first), ("b", second)):
+            self.assertTrue(child.killed, plan_name)
+            self.assertEqual(child.returncode, -9, plan_name)
+            self.assertTrue(child.stdin.closed, plan_name)
 
     def test_scheduling_error_does_not_return_while_a_child_still_runs(self):
         """The parent owns every child it started on every exit path.
 
-        Returning from a mid-run refusal while a work folder is still going
-        would orphan it -- and the orphan keeps its task-folder lock, so the
+        Returning from a mid-run refusal while a plan is still going
+        would orphan it -- and the orphan keeps its plan lock, so the
         next ``run --all`` is refused by a run nobody is watching any more.
         """
-        alpha = self.make_folder("alpha")
-        self.make_folder("beta")
+        alpha = self.make_plan("alpha")
+        self.make_plan("beta")
         children = {"alpha": FinishedProcess(alpha),
                     "beta": DeafChild(reads_stdin=True)}
         graph_calls = 0
@@ -734,27 +734,27 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
             nonlocal graph_calls
             graph_calls += 1
             if graph_calls == 2:  # beta is still running by now
-                raise AssentError("a folder declaration went bad mid-run")
-            return parse_folder_dependency_graph(assent_dir)
+                raise AssentError("a plan declaration went bad mid-run")
+            return parse_plan_dependency_graph(assent_dir)
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._start_folder",
-                side_effect=lambda config_path, folder: children[folder]), patch(
-                "assent.folder_scheduler.parse_folder_dependency_graph",
+                "assent.plan_scheduler._start_plan",
+                side_effect=lambda config_path, plan_name: children[plan_name]), patch(
+                "assent.plan_scheduler.parse_plan_dependency_graph",
                 side_effect=graph_then_fail), patch(
-                "assent.folder_scheduler._has_usable_git",
+                "assent.plan_scheduler._has_usable_git",
                 return_value=False), patch(
-                "assent.folder_scheduler.os.killpg", create=True):
+                "assent.plan_scheduler.os.killpg", create=True):
             code = run_all(str(self.config), self.assent_dir, jobs=2)
 
         self.assertEqual(code, 1)
-        self.assertIn("Folder scheduling failed", out.getvalue())
+        self.assertIn("Plan scheduling failed", out.getvalue())
         self.assertTrue(children["beta"].stdin.closed)
         self.assertEqual(children["beta"].returncode, 130)
 
     def test_second_interrupt_force_kills_everything_and_returns_130(self):
-        self.make_folder("work")
+        self.make_plan("work")
         child = DeafChild(reads_stdin=False)
 
         ctrl_c = iter([True])  # only the very first poll is the user's Ctrl+C
@@ -781,11 +781,11 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
         child.wait = second_ctrl_c
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler._start_folder",
+                "assent.plan_scheduler._start_plan",
                 return_value=child), patch(
-                "assent.folder_scheduler.subprocess.run",
+                "assent.plan_scheduler.subprocess.run",
                 side_effect=fake_run), patch(
-                "assent.folder_scheduler.os.killpg", create=True,
+                "assent.plan_scheduler.os.killpg", create=True,
                 side_effect=lambda *a, **k: child.die()):
             code = run_all(str(self.config), self.assent_dir)
 
@@ -798,7 +798,7 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
         child = DeafChild(reads_stdin=False, pid=1234)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler.subprocess.run",
+                "assent.plan_scheduler.subprocess.run",
                 side_effect=lambda *a, **k: child.die()) as run:
             _kill_tree("work", child, "test")
 
@@ -811,7 +811,7 @@ class TestStopChannelAndEscalation(FolderSchedulerTestCase):
         child = DeafChild(reads_stdin=False, pid=1234)  # never dies
         out = io.StringIO()
         with contextlib.redirect_stdout(out), patch(
-                "assent.folder_scheduler.os.killpg") as killpg:
+                "assent.plan_scheduler.os.killpg") as killpg:
             _kill_tree("work", child, "test")
 
         self.assertEqual([call.args for call in killpg.call_args_list],
@@ -877,18 +877,18 @@ class TestStdinStopChannelChild(unittest.TestCase):
 
 
 class TestStopRequestEndsRealProcessTrees(unittest.TestCase):
-    """Real processes holding real task-folder locks, stopped the way
+    """Real processes holding real plan locks, stopped the way
     ``run --all`` stops them.
 
-    A work-folder child that is still alive legitimately still owns its folder
+    A plan child that is still alive legitimately still owns its plan
     lock, so the next ``run --all`` is refused even though the previous command
     looked finished. Every case here therefore proves the lock is free again --
     the only portable evidence that a process really is gone -- instead of
     trusting terminal output or the PID recorded in ``assent.lock``.
     """
 
-    # A work-folder child in the exact state that used to hang: the stdin stop
-    # watcher armed, the real folder lock held, and the main thread parked in a
+    # A plan child in the exact state that used to hang: the stdin stop
+    # watcher armed, the real plan lock held, and the main thread parked in a
     # long non-tty quota countdown. interrupt_main() alone leaves the exception
     # pending until the current 60-second segment ends.
     _QUOTA_CHILD = textwrap.dedent(
@@ -1036,7 +1036,7 @@ class TestStopRequestEndsRealProcessTrees(unittest.TestCase):
                               "after the parent disappeared")
                 time.sleep(0.1)
 
-    def test_stop_ends_a_long_quota_wait_and_frees_the_folder_lock(self):
+    def test_stop_ends_a_long_quota_wait_and_frees_the_plan_lock(self):
         tasks_dir = self.tasks_dir("quota01")
         process = self.start(
             self.script("quota_child.py", self._QUOTA_CHILD),
@@ -1069,7 +1069,7 @@ class TestStopRequestEndsRealProcessTrees(unittest.TestCase):
 
         self.assertEqual(returncode, 130)
         self.assertLess(elapsed, _PROMPT_SECONDS)
-        # Neither the work-folder child nor the AI CLI it started survives: each
+        # Neither the plan child nor the AI CLI it started survives: each
         # would still be holding the lock it took.
         self.assert_lock_free(work_dir, "work01")
         self.assert_lock_free(adapter_dir, "adapter01")

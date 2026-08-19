@@ -36,14 +36,14 @@ class TestRework(unittest.TestCase):
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "init")
 
-        self.folder = "plan01"
-        self.tasks_dir = self.root / ".assent" / self.folder
+        self.plan_name = "plan01"
+        self.tasks_dir = self.root / ".assent" / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.root / ".assent" / "assent.toml"
         self.config_path.write_text("", encoding="utf-8")
         (self.tasks_dir / "assent.lock").write_text(
-            'folder = "plan01"\n', encoding="utf-8")
-        self.cfg = load_config(self.config_path, self.folder)
+            'plan = "plan01"\n', encoding="utf-8")
+        self.cfg = load_config(self.config_path, self.plan_name)
         self.container = self.root.parent / f"{self.root.name}.worktrees"
         self.addCleanup(self._cleanup_worktrees)
 
@@ -82,7 +82,7 @@ class TestRework(unittest.TestCase):
         return code, output.getvalue()
 
     def _worktree(self, prefix: str | None = None) -> tuple[Path, str]:
-        path = gitops.ensure_worktree(self.root, self.folder)
+        path = gitops.ensure_worktree(self.root, self.plan_name)
         branch = gitops.ensure_branch(path, prefix or self.cfg.branch_prefix)
         return path, branch
 
@@ -91,11 +91,11 @@ class TestRework(unittest.TestCase):
         import assent.reject as reject_module
         import assent.rework as rework_module
 
-        self.assertFalse(hasattr(clean_module, "reject_folder"))
+        self.assertFalse(hasattr(clean_module, "reject_plan"))
         self.assertFalse(hasattr(clean_module, "rework_task"))
         self.assertFalse(hasattr(reject_module, "rework_task"))
-        self.assertFalse(hasattr(rework_module, "clean_folders"))
-        self.assertFalse(hasattr(rework_module, "reject_folder"))
+        self.assertFalse(hasattr(rework_module, "clean_plans"))
+        self.assertFalse(hasattr(rework_module, "reject_plan"))
 
     def test_rework_transaction_is_split_into_named_phases(self) -> None:
         import inspect
@@ -118,7 +118,7 @@ class TestRework(unittest.TestCase):
         second = self._write_task(2, "DONE", deps=(1,))
         worktree, _branch = self._worktree()
         cfg = self.cfg.for_worktree(worktree)
-        with hold_lock(self.tasks_dir, self.folder):
+        with hold_lock(self.tasks_dir, self.plan_name):
             code = rework_tasks_locked(
                 cfg, ["t001"], "review finding needs repair")
         self.assertEqual(code, 0)
@@ -275,7 +275,7 @@ class TestRework(unittest.TestCase):
 
     def test_fake_worktree_and_wrong_branch_fail_closed(self) -> None:
         task = self._write_task(1, "DONE")
-        fake = gitops.worktree_path(self.root, self.folder)
+        fake = gitops.worktree_path(self.root, self.plan_name)
         fake.mkdir(parents=True)
         (fake / "不可動.txt").write_text("保留\n", encoding="utf-8")
 
@@ -292,7 +292,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(branch_code, 1)
         self.assertEqual(self._status(task), "DONE")
         self.assertTrue(worktree.exists())
-        self.assertIn("on a branch outside this folder", branch_output)
+        self.assertIn("on a branch outside this plan", branch_output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
 
     def test_checkpoint_failure_does_not_touch_status_or_journal(self) -> None:
@@ -338,7 +338,7 @@ class TestRework(unittest.TestCase):
 
     def test_busy_and_missing_lock_fail_closed(self) -> None:
         task = self._write_task(1, "DONE")
-        with hold_lock(self.tasks_dir, self.folder):
+        with hold_lock(self.tasks_dir, self.plan_name):
             busy_code, busy_output = self._run()
         (self.tasks_dir / "assent.lock").unlink()
 
@@ -479,7 +479,7 @@ class TestRework(unittest.TestCase):
         task = self._write_task(1, "DONE")
 
         missing_code, missing_output = self._run(revert_code=True)
-        worktree = gitops.ensure_worktree(self.root, self.folder)
+        worktree = gitops.ensure_worktree(self.root, self.plan_name)
         detached_code, detached_output = self._run(revert_code=True)
         gitops.ensure_branch(worktree, "other/")
         wrong_code, wrong_output = self._run(revert_code=True)
@@ -488,7 +488,7 @@ class TestRework(unittest.TestCase):
         self.assertEqual(self._status(task), "DONE")
         self.assertIn("worktree does not exist", missing_output)
         self.assertIn("detached HEAD", detached_output)
-        self.assertIn("on a branch outside this folder", wrong_output)
+        self.assertIn("on a branch outside this plan", wrong_output)
         self.assertFalse(task.with_name("t001_task.r.toml").exists())
 
     def test_revert_code_dirty_is_rejected_without_checkpoint(self) -> None:

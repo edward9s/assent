@@ -129,9 +129,9 @@ def ensure_branch(root: Path, prefix: str) -> str:
     return branch
 
 
-def worktree_path(root: Path, folder: str) -> Path:
-    """Return the fixed worktree path for the given task folder."""
-    return root.parent / f"{root.name}.worktrees" / folder
+def worktree_path(root: Path, plan_name: str) -> Path:
+    """Return the fixed worktree path for the given plan."""
+    return root.parent / f"{root.name}.worktrees" / plan_name
 
 
 def _resolved_git_path(root: Path, value: str) -> Path:
@@ -155,7 +155,7 @@ def _is_repo_worktree(root: Path, path: Path) -> bool:
             == _resolved_git_path(root, root_common))
 
 
-def ensure_worktree(root: Path, folder: str,
+def ensure_worktree(root: Path, plan_name: str,
                     start_snapshot: str | None = None) -> Path:
     """Create or reuse a fixed-path, detached-HEAD git worktree.
 
@@ -164,7 +164,7 @@ def ensure_worktree(root: Path, folder: str,
     its HEAD or changes its branch, even when a different snapshot is passed.
     """
     root = root.resolve()
-    path = worktree_path(root, folder)
+    path = worktree_path(root, plan_name)
     if os.path.lexists(path):
         if path.is_dir() and _is_repo_worktree(root, path):
             return path
@@ -236,10 +236,10 @@ def _ordinary_removal_will_proceed(path: Path) -> bool:
             f"touched: {e}") from e
 
 
-def cleanup_unstarted_worktree(root: Path, folder: str,
+def cleanup_unstarted_worktree(root: Path, plan_name: str,
                                expected_tip: str,
                                branch_prefix: str) -> None:
-    """Remove a newly created, still-unused folder worktree conservatively.
+    """Remove a newly created, still-unused plan worktree conservatively.
 
     This is exclusively for setup failures before an AI session starts.  The
     exact path, clean state, HEAD and branch ownership must all be provable.
@@ -247,7 +247,7 @@ def cleanup_unstarted_worktree(root: Path, folder: str,
     widening cleanup or deleting uncertain resources.
     """
     primary = main_worktree(Path(root).resolve())
-    path = worktree_path(primary, folder)
+    path = worktree_path(primary, plan_name)
     snapshot = _commit_snapshot(primary, expected_tip)
     if not path.exists():
         return
@@ -305,7 +305,7 @@ def is_repo_worktree(root: Path, path: Path) -> bool:
 
 def branches_with_prefix(root: Path, prefix: str) -> list[str]:
     """List local ``refs/heads`` branches with the given prefix, sorted by name."""
-    # Do not pass prefix straight to Git as a ref pattern: task folder names already forbid
+    # Do not pass prefix straight to Git as a ref pattern: plan names already forbid
     # path separators but may still contain *, ?, [ — wildcards must not widen cleanup scope.
     out = _git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
     return sorted(branch for line in out.splitlines()
@@ -985,28 +985,28 @@ def port_back_main_tree_escape(main_root: Path, worktree_root: Path,
     return True, None
 
 
-def folder_worktree(root: Path, folder: str) -> Path | None:
-    """Return a folder's valid fixed worktree, if it exists."""
+def plan_worktree(root: Path, plan_name: str) -> Path | None:
+    """Return a plan's valid fixed worktree, if it exists."""
     primary = main_worktree(root)
-    path = worktree_path(primary, folder)
+    path = worktree_path(primary, plan_name)
     if is_repo_worktree(primary, path):
         return path.resolve()
     return None
 
 
-def folder_branches(root: Path, folder: str) -> list[str]:
-    """Return local branches belonging to ``<folder>/*``."""
-    return branches_with_prefix(root, f"{folder}/")
+def plan_branches(root: Path, plan_name: str) -> list[str]:
+    """Return local branches belonging to ``<plan>/*``."""
+    return branches_with_prefix(root, f"{plan_name}/")
 
 
-def unique_folder_branch(root: Path, folder: str) -> str | None:
-    """Return the folder's sole local branch, or refuse an ambiguous set."""
-    branches = folder_branches(root, folder)
+def unique_plan_branch(root: Path, plan_name: str) -> str | None:
+    """Return the plan's sole local branch, or refuse an ambiguous set."""
+    branches = plan_branches(root, plan_name)
     if not branches:
         return None
     if len(branches) != 1:
         raise AssentError(
-            f"task folder {folder} has multiple local branches: {', '.join(branches)}")
+            f"plan {plan_name} has multiple local branches: {', '.join(branches)}")
     return branches[0]
 
 
@@ -1016,63 +1016,63 @@ def branch_tip(root: Path, branch: str) -> str:
 
 
 @dataclass(frozen=True)
-class FolderSourceSnapshot:
-    """Immutable identity of a folder's sole clean, attached source."""
+class PlanSourceSnapshot:
+    """Immutable identity of a plan's sole clean, attached source."""
 
-    folder: str
+    plan: str
     branch: str
     worktree: Path
     tip: str
 
 
-def resolve_folder_source(
-        root: Path, folder: str,
-        excludes: Sequence[str] = ()) -> FolderSourceSnapshot:
-    """Resolve a folder's current source without guessing from historical metadata.
+def resolve_plan_source(
+        root: Path, plan_name: str,
+        excludes: Sequence[str] = ()) -> PlanSourceSnapshot:
+    """Resolve a plan's current source without guessing from historical metadata.
 
     Speculative stacking needs stronger evidence than ordinary cleanup discovery:
-    the fixed worktree must exist, be clean and attached to the folder's one and
+    the fixed worktree must exist, be clean and attached to the plan's one and
     only local branch.  Reading the tip twice detects a branch that moves during
     resolution instead of returning a mixed snapshot.
     """
     primary = main_worktree(Path(root).resolve())
-    branches = folder_branches(primary, folder)
+    branches = plan_branches(primary, plan_name)
     if not branches:
         raise AssentError(
-            f"upstream folder {folder} has no {folder}/* source branch")
+            f"upstream plan {plan_name} has no {plan_name}/* source branch")
     if len(branches) != 1:
         raise AssentError(
-            f"upstream folder {folder} has ambiguous source branches: "
+            f"upstream plan {plan_name} has ambiguous source branches: "
             f"{', '.join(branches)}")
     branch = branches[0]
 
-    worktree = folder_worktree(primary, folder)
+    worktree = plan_worktree(primary, plan_name)
     if worktree is None:
         raise AssentError(
-            f"upstream folder {folder} has no valid fixed source worktree")
+            f"upstream plan {plan_name} has no valid fixed source worktree")
     attached = current_branch(worktree)
     if not attached:
         raise AssentError(
-            f"upstream folder {folder} source worktree {worktree} is detached")
+            f"upstream plan {plan_name} source worktree {worktree} is detached")
     if attached != branch:
         raise AssentError(
-            f"upstream folder {folder} source worktree {worktree} is on foreign "
+            f"upstream plan {plan_name} source worktree {worktree} is on foreign "
             f"branch {attached}; expected {branch}")
     if not working_tree_status(worktree, excludes).is_clean:
         raise AssentError(
-            f"upstream folder {folder} source worktree {worktree} is dirty")
+            f"upstream plan {plan_name} source worktree {worktree} is dirty")
 
     tip = branch_tip(primary, branch)
     worktree_tip = commit_of(worktree, "HEAD")
     confirmed_tip = branch_tip(primary, branch)
     if worktree_tip != tip or confirmed_tip != tip:
         raise AssentError(
-            f"upstream folder {folder} source changed while its tip was being resolved")
-    return FolderSourceSnapshot(folder, branch, worktree, tip)
+            f"upstream plan {plan_name} source changed while its tip was being resolved")
+    return PlanSourceSnapshot(plan_name, branch, worktree, tip)
 
 
 # Machine-readable evidence recorded on an accept merge.
-ACCEPT_TRAILER_FOLDER = "Assent-Folder"
+ACCEPT_TRAILER_PLAN = "Assent-Plan"
 ACCEPT_TRAILER_SOURCE_BRANCH = "Assent-Source-Branch"
 ACCEPT_TRAILER_SOURCE_TIP = "Assent-Source-Tip"
 ACCEPT_TRAILER_VERIFIED_TREE = "Assent-Verified-Tree"
@@ -1094,18 +1094,18 @@ def _validate_evidence_value(name: str, value: str) -> None:
             f"accept evidence {name} must not contain control characters")
 
 
-def build_accept_trailers(folder: str, source_branch: str,
+def build_accept_trailers(plan_name: str, source_branch: str,
                           source_tip: str, verified_tree: str,
                           verifier_sha256: str) -> str:
     """Build passive, human-readable audit metadata for an accept merge."""
-    _validate_evidence_value("folder", folder)
+    _validate_evidence_value("plan", plan_name)
     _validate_evidence_value("source branch", source_branch)
     _validate_evidence_value("source tip", source_tip)
     _validate_evidence_value("verified tree", verified_tree)
     _validate_evidence_value("verifier digest", verifier_sha256)
-    if not source_branch.startswith(f"{folder}/") or source_branch == f"{folder}/":
+    if not source_branch.startswith(f"{plan_name}/") or source_branch == f"{plan_name}/":
         raise AssentError(
-            f"accept evidence source branch must belong to task folder {folder}")
+            f"accept evidence source branch must belong to plan {plan_name}")
     if not _OBJECT_ID_RE.fullmatch(source_tip):
         raise AssentError(
             "accept evidence source tip must be a 40- or 64-character lowercase "
@@ -1118,20 +1118,20 @@ def build_accept_trailers(folder: str, source_branch: str,
         raise AssentError(
             "accept evidence verifier digest must be a 64-character lowercase "
             "hexadecimal SHA-256 digest")
-    return (f"{ACCEPT_TRAILER_FOLDER}: {folder}\n"
+    return (f"{ACCEPT_TRAILER_PLAN}: {plan_name}\n"
             f"{ACCEPT_TRAILER_SOURCE_BRANCH}: {source_branch}\n"
             f"{ACCEPT_TRAILER_SOURCE_TIP}: {source_tip}\n"
             f"{ACCEPT_TRAILER_VERIFIED_TREE}: {verified_tree}\n"
             f"{ACCEPT_TRAILER_VERIFIER_SHA256}: {verifier_sha256}")
 
 
-def accept_commit_message(subject: str, folder: str, source_branch: str,
+def accept_commit_message(subject: str, plan_name: str, source_branch: str,
                           source_tip: str, verified_tree: str,
                           verifier_sha256: str) -> str:
     """Compose a one-line subject and passive accept audit metadata."""
     _validate_evidence_value("subject", subject)
     trailers = build_accept_trailers(
-        folder, source_branch, source_tip, verified_tree, verifier_sha256)
+        plan_name, source_branch, source_tip, verified_tree, verifier_sha256)
     return f"{subject}\n\n{trailers}\n"
 
 
@@ -1256,14 +1256,14 @@ def fast_forward(root: Path, commit: str) -> None:
 # --- Conflict reconciliation primitives ---
 
 
-def reconcile_worktree_path(root: Path, folder: str) -> Path:
-    """Return the fixed reconciliation worktree path for one task folder.
+def reconcile_worktree_path(root: Path, plan_name: str) -> Path:
+    """Return the fixed reconciliation worktree path for one plan.
 
     A sibling container beside ``<repo>.worktrees`` keeps a reconciliation out of
-    the folder-source namespace, so a reconciliation worktree can never be
-    mistaken for (or clean up as) a folder's own source worktree.
+    the plan-source namespace, so a reconciliation worktree can never be
+    mistaken for (or clean up as) a plan's own source worktree.
     """
-    return root.parent / f"{root.name}.reconcile" / folder
+    return root.parent / f"{root.name}.reconcile" / plan_name
 
 
 def branch_exists(root: Path, branch: str) -> bool:
@@ -1433,14 +1433,14 @@ def commit_merge(worktree: Path, message: str) -> str:
 
 @contextlib.contextmanager
 def temporary_integration_worktree(
-        root: Path, folder: str,
+        root: Path, plan_name: str,
         target_snapshot: str) -> Iterator[tuple[Path, str]]:
     """Create a temporary branch/worktree from an explicit target snapshot."""
-    _validate_evidence_value("folder", folder)
+    _validate_evidence_value("plan", plan_name)
     primary = main_worktree(root)
     snapshot = _commit_snapshot(primary, target_snapshot)
     suffix = uuid.uuid4().hex
-    branch = f"{INTEGRATION_BRANCH_PREFIX}{folder}/{suffix}"
+    branch = f"{INTEGRATION_BRANCH_PREFIX}{plan_name}/{suffix}"
     path = _temporary_container(primary) / f"target-{suffix}"
     path.parent.mkdir(parents=True, exist_ok=True)
     primary_error: BaseException | None = None
@@ -1583,7 +1583,7 @@ def remove_temporary_branches(
     proof.
 
     Deleting a branch is the only mutation performed: no worktree is removed or
-    pruned, and no integration target or folder branch is touched.  A branch
+    pruned, and no integration target or plan branch is touched.  A branch
     outside the two owned prefixes is a programming error and raises before
     anything at all is deleted.  Every branch is attempted, and one that cannot
     be deleted is reported rather than raised, so a single undeletable ref

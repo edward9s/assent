@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from assent import AssentError, auto_fix, gitops, shared_paths, verification
 from assent import accept as accept_mod
-from assent.accept import accept_folder
+from assent.accept import accept_plan
 from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
 from tests.link_support import make_directory_link
@@ -45,9 +45,9 @@ class AcceptRepositoryCase(unittest.TestCase):
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "initial")
 
-        self.folder = "plan01"
+        self.plan_name = "plan01"
         self.assent_dir = self.root / ".assent"
-        self.tasks_dir = self.assent_dir / self.folder
+        self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.assent_dir / "assent.toml"
         self.config_path.write_text("", encoding="utf-8")
@@ -71,9 +71,9 @@ class AcceptRepositoryCase(unittest.TestCase):
         shutil.rmtree(self.parent, ignore_errors=True)
 
     def _write_task(self, task_id: str = "t001", status: str = "DONE", *,
-                    folder: str | None = None,
+                    plan_name: str | None = None,
                     verify: str = _DEFAULT_VERIFY) -> Path:
-        tasks_dir = self.assent_dir / (folder or self.folder)
+        tasks_dir = self.assent_dir / (plan_name or self.plan_name)
         tasks_dir.mkdir(parents=True, exist_ok=True)
         path = tasks_dir / f"{task_id}_task.e.toml"
         path.write_text(
@@ -88,44 +88,44 @@ class AcceptRepositoryCase(unittest.TestCase):
             encoding="utf-8")
         return path
 
-    def _make_source(self, folder: str | None = None, *,
+    def _make_source(self, plan_name: str | None = None, *,
                      filename: str | None = None, content: str = "result\n"
                      ) -> tuple[Path, str, str]:
-        folder = folder or self.folder
-        filename = filename or f"{folder}-result.txt"
-        worktree = gitops.ensure_worktree(self.root, folder)
-        branch = gitops.ensure_branch(worktree, f"{folder}/")
+        plan_name = plan_name or self.plan_name
+        filename = filename or f"{plan_name}-result.txt"
+        worktree = gitops.ensure_worktree(self.root, plan_name)
+        branch = gitops.ensure_branch(worktree, f"{plan_name}/")
         (worktree / filename).write_text(content, encoding="utf-8")
-        gitops.commit_all(worktree, f"finish {folder}")
+        gitops.commit_all(worktree, f"finish {plan_name}")
         return worktree, branch, gitops.branch_tip(self.root, branch)
 
-    def _config(self, folder: str | None = None):
-        return load_config(self.config_path, folder or self.folder)
+    def _config(self, plan_name: str | None = None):
+        return load_config(self.config_path, plan_name or self.plan_name)
 
-    def _accept(self, folder: str | None = None,
+    def _accept(self, plan_name: str | None = None,
                 confirm=None) -> tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = accept_folder(self._config(folder), confirm)
+            code = accept_plan(self._config(plan_name), confirm)
         return code, output.getvalue()
 
     def _head(self, ref: str = "HEAD") -> str:
         return _git(self.root, "rev-parse", ref)
 
     def _write_receipt(
-            self, folder: str | None = None, *, status: str = "PASSED",
+            self, plan_name: str | None = None, *, status: str = "PASSED",
             integration_tree: str | None = None,
             assert_exact: bool = True) -> verification.VerificationReceipt:
-        folder = folder or self.folder
-        cfg = self._config(folder)
+        plan_name = plan_name or self.plan_name
+        cfg = self._config(plan_name)
         target_tip = self._head()
-        branches = gitops.folder_branches(self.root, folder)
+        branches = gitops.plan_branches(self.root, plan_name)
         self.assertEqual(len(branches), 1)
         source_tip = gitops.branch_tip(self.root, branches[0])
         with gitops.temporary_integration_worktree(
-                self.root, folder, target_tip) as (candidate, _branch):
+                self.root, plan_name, target_tip) as (candidate, _branch):
             outcome = gitops.merge_no_ff(
-                candidate, source_tip, f"prepare receipt for {folder}")
+                candidate, source_tip, f"prepare receipt for {plan_name}")
             self.assertTrue(outcome.ok, outcome.conflicts)
             self.assertEqual(
                 gitops.commit_parents(candidate), (target_tip, source_tip))
@@ -199,14 +199,14 @@ class TestAcceptSuccess(AcceptRepositoryCase):
         self.assertEqual(gitops.tree_of(self.root, after), receipt.integration_tree)
         message = gitops.commit_message(self.root, after)
         for value in (
-                f"Assent-Folder: {self.folder}",
+                f"Assent-Plan: {self.plan_name}",
                 f"Assent-Source-Branch: {branch}",
                 f"Assent-Source-Tip: {source_tip}",
                 f"Assent-Verified-Tree: {receipt.integration_tree}",
                 f"Assent-Verifier-SHA256: {receipt.verify_script_sha256}"):
             self.assertIn(value, message)
         self.assertTrue(worktree.exists())
-        self.assertIn(branch, gitops.folder_branches(self.root, self.folder))
+        self.assertIn(branch, gitops.plan_branches(self.root, self.plan_name))
         self.assertIn("without running verification", output)
         self.assertIn("retain it while a dependent may still need its source evidence",
                       output)
@@ -229,7 +229,7 @@ class TestAcceptSuccess(AcceptRepositoryCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(self._head("HEAD^2"), source_tip)
         self.assertEqual(gitops.tree_of(self.root, "HEAD"), receipt.integration_tree)
-        self.assertIn(branch, gitops.folder_branches(self.root, self.folder))
+        self.assertIn(branch, gitops.plan_branches(self.root, self.plan_name))
         self._assert_no_temporary_state()
 
     def test_cleaned_source_is_not_reauthorized_by_audit_trailers(self) -> None:
@@ -250,7 +250,7 @@ class TestAcceptSuccess(AcceptRepositoryCase):
 
 
 class TestIdempotentAfterTargetAdvance(AcceptRepositoryCase):
-    """Reproduces the acceptall01 incident: a folder accepted into main, with
+    """Reproduces the acceptall01 incident: a plan accepted into main, with
 
     main advancing further afterwards, must still resolve as an idempotent
     no-op on rerun -- ancestry alone proves nothing is left to publish, so
@@ -327,7 +327,7 @@ class TestAcceptPrechecks(AcceptRepositoryCase):
         before = self._head()
         events: list[str] = []
         original_integration = accept_mod.hold_integration_lock
-        original_folder = accept_mod.hold_lock
+        original_plan = accept_mod.hold_lock
 
         @contextlib.contextmanager
         def traced_integration(path):
@@ -337,20 +337,20 @@ class TestAcceptPrechecks(AcceptRepositoryCase):
             events.append("exit integration")
 
         @contextlib.contextmanager
-        def traced_folder(path, folder):
-            events.append("enter folder")
-            with original_folder(path, folder):
+        def traced_plan(path, plan_name):
+            events.append("enter plan")
+            with original_plan(path, plan_name):
                 yield
-            events.append("exit folder")
+            events.append("exit plan")
 
         with patch.object(accept_mod, "hold_integration_lock", traced_integration), \
-                patch.object(accept_mod, "hold_lock", traced_folder):
+                patch.object(accept_mod, "hold_lock", traced_plan):
             code, output = self._accept()
         self.assertEqual(code, 0, output)
         self.assertEqual(events, [
-            "enter integration", "enter folder", "exit folder", "exit integration"])
+            "enter integration", "enter plan", "exit plan", "exit integration"])
 
-        with hold_lock(self.tasks_dir, self.folder):
+        with hold_lock(self.tasks_dir, self.plan_name):
             code, output = self._accept()
         self.assertEqual(code, 1, output)
         self.assertIn("already processing", output)
@@ -361,7 +361,7 @@ class TestAcceptPrechecks(AcceptRepositoryCase):
         self.assertNotEqual(self._head(), before)
 
         with hold_integration_lock(self.assent_dir):
-            with hold_lock(self.tasks_dir, self.folder):
+            with hold_lock(self.tasks_dir, self.plan_name):
                 pass
 
     def test_target_must_be_clean_and_attached(self) -> None:
@@ -378,7 +378,7 @@ class TestAcceptPrechecks(AcceptRepositoryCase):
         output = self._assert_refused_unchanged(before, self._accept())
         self.assertIn("detached HEAD", output)
 
-    def test_source_must_be_clean_attached_and_on_folder_branch(self) -> None:
+    def test_source_must_be_clean_attached_and_on_plan_branch(self) -> None:
         self._write_task()
         worktree, _branch, _tip = self._make_source()
         self._write_receipt()
@@ -390,12 +390,12 @@ class TestAcceptPrechecks(AcceptRepositoryCase):
         (worktree / "dirty.txt").unlink()
 
         gitops.remove_worktree(self.root, worktree)
-        worktree = gitops.ensure_worktree(self.root, self.folder)
+        worktree = gitops.ensure_worktree(self.root, self.plan_name)
         output = self._assert_refused_unchanged(before, self._accept())
         self.assertIn("detached HEAD", output)
 
         gitops.remove_worktree(self.root, worktree)
-        worktree = gitops.ensure_worktree(self.root, self.folder)
+        worktree = gitops.ensure_worktree(self.root, self.plan_name)
         _git(worktree, "checkout", "-b", "foreign/run")
         output = self._assert_refused_unchanged(before, self._accept())
         self.assertIn("not a plan01/* branch", output)
@@ -408,14 +408,14 @@ class TestAcceptPrechecks(AcceptRepositoryCase):
         self.assertIn("no source worktree", output)
         self.assertIn("does not infer authorization", output)
 
-        _git(self.root, "branch", f"{self.folder}/one", "HEAD")
-        _git(self.root, "branch", f"{self.folder}/two", "HEAD")
+        _git(self.root, "branch", f"{self.plan_name}/one", "HEAD")
+        _git(self.root, "branch", f"{self.plan_name}/two", "HEAD")
         code, output = self._accept()
         self.assertEqual(code, 1, output)
         self.assertIn("multiple candidate", output)
         self.assertEqual(self._head(), before)
 
-    def test_bad_selected_plan_or_folder_graph_fails_closed(self) -> None:
+    def test_bad_selected_plan_or_plan_graph_fails_closed(self) -> None:
         before = self._head()
         malformed = self.tasks_dir / "t001_task.e.toml"
         malformed.write_text("not valid = [\n", encoding="utf-8")
@@ -425,7 +425,7 @@ class TestAcceptPrechecks(AcceptRepositoryCase):
 
         malformed.unlink()
         self._write_task()
-        (self.tasks_dir / "_folder.toml").write_text(
+        (self.tasks_dir / "_plan_deps.toml").write_text(
             'after = ["missing"]\n', encoding="utf-8")
         code, output = self._accept()
         self.assertEqual(code, 1, output)
@@ -505,14 +505,14 @@ class TestReceiptRefusals(AcceptRepositoryCase):
 
 class TestDependencyGate(AcceptRepositoryCase):
     def _dependent(self, name: str, upstream: str) -> None:
-        self._write_task(folder=name)
-        (self.assent_dir / name / "_folder.toml").write_text(
+        self._write_task(plan_name=name)
+        (self.assent_dir / name / "_plan_deps.toml").write_text(
             f'after = ["{upstream}"]\n', encoding="utf-8")
         self._make_source(name)
 
     def test_only_current_upstream_ancestry_authorizes_dependency(self) -> None:
         base = "base"
-        self._write_task(folder=base)
+        self._write_task(plan_name=base)
         _base_worktree, base_branch, base_tip = self._make_source(base)
         _git(self.root, "merge", "--no-ff", "-m", "accept base manually", base_branch)
         self.assertTrue(gitops.is_ancestor(self.root, base_tip, self._head()))
@@ -521,7 +521,7 @@ class TestDependencyGate(AcceptRepositoryCase):
         unrelated.mkdir()
         (unrelated / "t001_bad.e.toml").write_text(
             "not valid = [\n", encoding="utf-8")
-        self._dependent(self.folder, base)
+        self._dependent(self.plan_name, base)
         receipt = self._write_receipt()
 
         code, output = self._accept()
@@ -531,14 +531,14 @@ class TestDependencyGate(AcceptRepositoryCase):
 
     def test_archived_upstream_authorizes_accept_without_a_live_tip(self) -> None:
         base = "base"
-        self._write_task(folder=base)
+        self._write_task(plan_name=base)
         base_worktree, base_branch, base_tip = self._make_source(base)
         _git(self.root, "merge", "--no-ff", "-m", "accept base manually", base_branch)
         self.assertTrue(gitops.is_ancestor(self.root, base_tip, self._head()))
-        self._dependent(self.folder, base)
+        self._dependent(self.plan_name, base)
 
         # clean removed the accepted upstream's source, then archive retired the
-        # folder itself: no live directory and no branch remain, so demanding a
+        # plan itself: no live directory and no branch remain, so demanding a
         # prerequisite tip would refuse a legitimate accept.  The roster entry is
         # the whole proof; no recorded hash is consulted.
         gitops.remove_worktree(self.root, base_worktree)
@@ -546,7 +546,7 @@ class TestDependencyGate(AcceptRepositoryCase):
         shutil.rmtree(self.assent_dir / base)
         (self.assent_dir / "_archived.toml").write_text(
             "[[archived]]\n"
-            f'folder = "{base}"\n'
+            f'plan = "{base}"\n'
             'archived_at = "2026-01-01T00:00:00+00:00"\n',
             encoding="utf-8")
         receipt = self._write_receipt()
@@ -558,7 +558,7 @@ class TestDependencyGate(AcceptRepositoryCase):
 
     def test_upstream_advance_missing_and_ambiguity_all_fail_closed(self) -> None:
         base = "base"
-        self._write_task(folder=base)
+        self._write_task(plan_name=base)
         base_worktree, base_branch, _base_tip = self._make_source(base)
         _git(self.root, "merge", "--no-ff", "-m", "accept base manually", base_branch)
         (base_worktree / "later.txt").write_text("later\n", encoding="utf-8")
@@ -591,14 +591,14 @@ class TestDependencyGate(AcceptRepositoryCase):
     def test_only_declared_base_must_be_in_downstream_source(self) -> None:
         first = "first"
         second = "second"
-        self._write_task(folder=first)
+        self._write_task(plan_name=first)
         _first_worktree, first_branch, first_tip = self._make_source(first)
-        self._write_task(folder=second)
+        self._write_task(plan_name=second)
         _second_worktree, second_branch, second_tip = self._make_source(second)
         _git(self.root, "merge", "--no-ff", "-m", "accept first manually", first_branch)
 
         self._write_task()
-        (self.assent_dir / self.folder / "_folder.toml").write_text(
+        (self.assent_dir / self.plan_name / "_plan_deps.toml").write_text(
             'after = ["first", "second"]\n'
             'base = "first"\n', encoding="utf-8")
         _downstream_worktree, _downstream_branch, downstream_tip = self._make_source()
@@ -618,13 +618,13 @@ class TestDependencyGate(AcceptRepositoryCase):
     def test_no_declared_base_skips_downstream_lineage_requirement(self) -> None:
         first = "first"
         second = "second"
-        self._write_task(folder=first)
+        self._write_task(plan_name=first)
         _first_worktree, first_branch, first_tip = self._make_source(first)
-        self._write_task(folder=second)
+        self._write_task(plan_name=second)
         _second_worktree, second_branch, second_tip = self._make_source(second)
 
         self._write_task()
-        (self.assent_dir / self.folder / "_folder.toml").write_text(
+        (self.assent_dir / self.plan_name / "_plan_deps.toml").write_text(
             'after = ["first", "second"]\n', encoding="utf-8")
         _downstream_worktree, _downstream_branch, downstream_tip = self._make_source()
         _git(self.root, "merge", "--no-ff", "-m", "accept first manually", first_branch)
@@ -670,7 +670,7 @@ class TestSelfFixedConfirmation(AcceptRepositoryCase):
     def _must_not_ask(self, prompt: str) -> str:
         raise AssertionError(f"accept asked for confirmation: {prompt}")
 
-    def test_ordinary_and_passed_folders_are_never_asked_to_confirm(self) -> None:
+    def test_ordinary_and_passed_plans_are_never_asked_to_confirm(self) -> None:
         before = self._head()
 
         code, output = self._accept(confirm=self._must_not_ask)
@@ -689,7 +689,7 @@ class TestSelfFixedConfirmation(AcceptRepositoryCase):
             gitops.tree_of(self.root, "HEAD"), self.receipt.integration_tree)
         self.assertNotIn("SELF-FIXED", output)
 
-    def test_confirmed_self_fixed_folder_publishes_an_ordinary_accept(self) -> None:
+    def test_confirmed_self_fixed_plan_publishes_an_ordinary_accept(self) -> None:
         before = self._head()
         self._write_auto_fix_state("FIXED", self_fixed=True)
         asked: list[str] = []
@@ -710,7 +710,7 @@ class TestSelfFixedConfirmation(AcceptRepositoryCase):
             gitops.tree_of(self.root, after), self.receipt.integration_tree)
         message = gitops.commit_message(self.root, after)
         self.assertEqual(message.strip(), accept_mod.accept_merge_message(
-            "trunk", self.folder, self.branch, self.source_tip,
+            "trunk", self.plan_name, self.branch, self.source_tip,
             self.receipt.integration_tree,
             self.receipt.verify_script_sha256).strip())
         for marker in ("SELF-FIXED", "UNREVIEWED", "confirm"):
@@ -729,7 +729,7 @@ class TestSelfFixedConfirmation(AcceptRepositoryCase):
                     before, self._accept(confirm=lambda prompt: answer))
                 self.assertIn("SELF-FIXED, UNREVIEWED", output)
                 self.assertIn("was not confirmed", output)
-                self.assertIn(f"assent accept {self.folder}", output)
+                self.assertIn(f"assent accept {self.plan_name}", output)
                 # Distinct from the ordinary stale-receipt refusal.
                 self.assertNotIn("refresh the verification receipt", output)
 
@@ -739,7 +739,7 @@ class TestSelfFixedConfirmation(AcceptRepositoryCase):
         self.assertEqual(
             gitops.branch_tip(self.root, self.branch), self.source_tip)
 
-        # Only the answer changed: the same folder still publishes.
+        # Only the answer changed: the same plan still publishes.
         code, output = self._accept(confirm=lambda prompt: "Y")
         self.assertEqual(code, 0, output)
         self.assertNotEqual(self._head(), before)
@@ -806,7 +806,7 @@ class TestUnresolvedReviewConfirmation(AcceptRepositoryCase):
         self.assertNotEqual(self._head(), before)
         self.assertNotIn("REVIEW UNRESOLVED", output)
 
-    def test_confirmed_unresolved_folder_publishes_an_ordinary_accept(self) -> None:
+    def test_confirmed_unresolved_plan_publishes_an_ordinary_accept(self) -> None:
         before = self._head()
         self._write_unresolved()
         asked: list[str] = []
@@ -829,7 +829,7 @@ class TestUnresolvedReviewConfirmation(AcceptRepositoryCase):
             gitops.tree_of(self.root, after), self.receipt.integration_tree)
         message = gitops.commit_message(self.root, after)
         self.assertEqual(message.strip(), accept_mod.accept_merge_message(
-            "trunk", self.folder, self.branch, self.source_tip,
+            "trunk", self.plan_name, self.branch, self.source_tip,
             self.receipt.integration_tree,
             self.receipt.verify_script_sha256).strip())
         for marker in ("UNRESOLVED", "HUMAN DECISION", "confirm"):
@@ -861,7 +861,7 @@ class TestUnresolvedReviewConfirmation(AcceptRepositoryCase):
                     before, self._accept(confirm=lambda prompt: answer))
                 self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", output)
                 self.assertIn("was not confirmed", output)
-                self.assertIn(f"assent accept {self.folder}", output)
+                self.assertIn(f"assent accept {self.plan_name}", output)
                 # Distinct from the ordinary stale-receipt refusal and from the
                 # self-fixed decline alike.
                 self.assertNotIn("refresh the verification receipt", output)
@@ -873,14 +873,14 @@ class TestUnresolvedReviewConfirmation(AcceptRepositoryCase):
         self.assertEqual(
             gitops.branch_tip(self.root, self.branch), self.source_tip)
 
-        # Only the answer changed: the same folder still publishes.
+        # Only the answer changed: the same plan still publishes.
         code, output = self._accept(confirm=lambda prompt: "Y")
         self.assertEqual(code, 0, output)
         self.assertNotEqual(self._head(), before)
 
     def test_both_settled_outcomes_ask_once_and_name_both_reasons(self) -> None:
         # A state carrying both outcomes cannot be written or read back -- one
-        # folder settles exactly once -- so the state is injected directly to
+        # plan settles exactly once -- so the state is injected directly to
         # prove the gate asks one question per accept rather than one per
         # reason.  Two prompts for one decision train a human to answer without
         # reading.
@@ -928,7 +928,7 @@ class TestUnresolvedReviewConfirmation(AcceptRepositoryCase):
         self.assertEqual(len(asked), 1)
         self.assertIn(
             "publishing a SELF-FIXED, UNREVIEWED and REVIEW UNRESOLVED, "
-            "HUMAN DECISION folder was not confirmed", output)
+            "HUMAN DECISION plan was not confirmed", output)
 
 
 class TestAcceptTransactionalFailures(AcceptRepositoryCase):
@@ -941,7 +941,7 @@ class TestAcceptTransactionalFailures(AcceptRepositoryCase):
     def _assert_preserved(self, before: str) -> None:
         self.assertEqual(self._head("trunk"), before)
         self.assertTrue(self.worktree.exists())
-        self.assertIn(self.branch, gitops.folder_branches(self.root, self.folder))
+        self.assertIn(self.branch, gitops.plan_branches(self.root, self.plan_name))
         self._assert_no_temporary_state()
 
     def _race_after_candidate_tree(self, action) -> tuple[int, str]:
@@ -976,10 +976,10 @@ class TestAcceptTransactionalFailures(AcceptRepositoryCase):
         self.assertIn("Conflicting file(s)", output)
         self.assertIn("README.md", output)
         # The recovery path is reconciliation, not the invalid one-argument
-        # `assent rework FOLDER`, which needs a task id as well.
-        self.assertIn(f"assent reconcile {self.folder}", output)
-        self.assertIn(f"assent verify {self.folder}", output)
-        self.assertNotIn(f"assent rework {self.folder}", output)
+        # `assent rework PLAN`, which needs a task id as well.
+        self.assertIn(f"assent reconcile {self.plan_name}", output)
+        self.assertIn(f"assent verify {self.plan_name}", output)
+        self.assertNotIn(f"assent rework {self.plan_name}", output)
         self._assert_preserved(before)
 
     def test_final_target_head_move_is_not_overwritten(self) -> None:
@@ -1048,7 +1048,7 @@ class TestAcceptTransactionalFailures(AcceptRepositoryCase):
                 gitops, "_cleanup_temporary_worktree",
                 side_effect=cleanup_then_report):
             with contextlib.redirect_stdout(output):
-                code = accept_folder(self._config())
+                code = accept_plan(self._config())
 
         self.assertEqual(code, 0, output.getvalue())
         self.assertNotEqual(self._head(), before)

@@ -35,7 +35,7 @@ candidate，再於其中執行專案的 `.assent/verify.py`。它們不會變更
 不啟動 AI session，也不自動修復失敗。
 
 ```text
-assent verify <PLAN>     # 單一 folder receipt
+assent verify <PLAN>     # 單一 plan receipt
 assent verify A B        # 一份精確 batch receipt
 assent verify --batch    # 動態發現的 batch
 ```
@@ -43,9 +43,9 @@ assent verify --batch    # 動態發現的 batch
 明確選取必須整組成功。若要求 `A B C`，Assent 不能只驗證 `A C`，再宣稱
 `A B C` 通過。前半段通過可以協助診斷，但不能授權原本的 request。
 
-動態 `--batch` 不同，因為 folder 是由指令自己發現。建立 candidate 遇到衝突時，
+動態 `--batch` 不同，因為 plan 是由指令自己發現。建立 candidate 遇到衝突時，
 它會列出所有衝突與受影響的 dependent，再詢問是否只驗證其餘互不衝突的部分。
-最後 receipt 只會記錄實際驗證的 folder。
+最後 receipt 只會記錄實際驗證的 plan。
 
 ## Receipt
 
@@ -53,9 +53,9 @@ Receipt 是可刪除的證據，不是 source of truth。它記錄重現結果�
 source commit、重建過程的 tree、verifier digest 與 reviewed shared-input digest。
 任何相關 source、candidate、verifier 或 shared input 改變，都會讓 receipt 過期。
 
-完整 folder verification 會在 receipt operation 與所有 verification lock 結束後，
-恰好刷新一次該 folder 的 `_report.md`。這是 best-effort 動作，不會改變驗證結果。
-Focused 與 batch verification 不刷新個別 folder report。
+完整 plan verification 會在 receipt operation 與所有 verification lock 結束後，
+恰好刷新一次該 plan 的 `_report.md`。這是 best-effort 動作，不會改變驗證結果。
+Focused 與 batch verification 不刷新個別 plan report。
 
 直接或明確選取的 accept 需要新鮮且完全相符的 PASS receipt，只有 ancestry 已證明
 整合的 no-op 例外。`accept --all` 可以原子重播新鮮 batch receipt；沒有可用 batch

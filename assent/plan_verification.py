@@ -1,6 +1,6 @@
-"""One folder verified against the integration target, and its receipt.
+"""One plan verified against the integration target, and its receipt.
 
-The per-folder receipt (``<folder>/_verification.toml``) is a derived runtime
+The per-plan receipt (``<plan>/_verification.toml``) is a derived runtime
 cache.  It records facts about one explicit source snapshot, the resulting
 integration tree, and the main-tree verification script; it is not human
 approval and never advances a Git ref.
@@ -20,8 +20,8 @@ from pathlib import Path
 
 from assent import AssentError, gitops, shared_paths
 from assent.config import Config
-from assent.folderdeps import (infer_folder_completion, live_upstreams,
-                               parse_folder_dependencies)
+from assent.plandeps import (infer_plan_completion, live_upstreams,
+                               parse_plan_dependencies)
 from assent.init import recover_expanded_bridge_drift
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
@@ -43,7 +43,7 @@ RECEIPT_NAME = "_verification.toml"
 RECEIPT_VERSION = 2
 _COMPLETE_STATUSES = ("DONE", "SKIP")
 # The receipt records a source/target conflict with this prefix, which is also
-# what tells a failed `verify FOLDER` to point at `assent reconcile`.
+# what tells a failed `verify PLAN` to point at `assent reconcile`.
 _CONFLICT_SUMMARY_PREFIX = "Integration conflict: "
 _RECEIPT_KEYS = {
     "version", "status", "source_tip", "target_tip", "integration_tree",
@@ -79,16 +79,16 @@ class VerificationReceipt:
 
 
 def receipt_path(cfg: Config) -> Path:
-    """Return the explicitly selected folder's derived receipt path."""
+    """Return the explicitly selected plan's derived receipt path."""
     return cfg.tasks_dir / RECEIPT_NAME
 
 
-def invalidate_folder_receipt(cfg: Config) -> bool:
-    """Delete one folder's receipt so no accept can consume it; True if one existed.
+def invalidate_plan_receipt(cfg: Config) -> bool:
+    """Delete one plan's receipt so no accept can consume it; True if one existed.
 
     Every command that changes what the receipt was written against uses this
     rather than unlinking the file itself.  The receipt is derived and
-    disposable, so deleting it only ever costs one ``assent verify FOLDER``.
+    disposable, so deleting it only ever costs one ``assent verify PLAN``.
     """
     path = receipt_path(cfg)
     existed = path.exists()
@@ -208,11 +208,11 @@ write_verification_receipt = write_receipt
 
 
 def _stack_sources(cfg: Config, target_tip: str,
-                   downstream_tip: str) -> tuple[gitops.FolderSourceSnapshot, ...]:
+                   downstream_tip: str) -> tuple[gitops.PlanSourceSnapshot, ...]:
     """Snapshot the declared live base and prove the downstream contains it.
 
-    Only direct dependencies participate here.  An unrelated malformed folder
-    must not invalidate this folder's receipt, while every declared live
+    Only direct dependencies participate here.  An unrelated malformed plan
+    must not invalidate this plan's receipt, while every declared live
     upstream is required to be complete.  Only the explicitly declared base
     contributes a source identity or ancestry requirement; non-base ``after``
     entries provide ordering only.
@@ -220,21 +220,21 @@ def _stack_sources(cfg: Config, target_tip: str,
     An archived upstream is proven complete by the roster and has no source
     left to snapshot, so it is filtered out first (see ``live_upstreams``).
     """
-    dependencies = parse_folder_dependencies(cfg.tasks_dir)
-    sources: list[gitops.FolderSourceSnapshot] = []
-    for folder in live_upstreams(cfg.assent_dir, dependencies):
-        completion = infer_folder_completion(cfg.assent_dir / folder)
+    dependencies = parse_plan_dependencies(cfg.tasks_dir)
+    sources: list[gitops.PlanSourceSnapshot] = []
+    for plan_name in live_upstreams(cfg.assent_dir, dependencies):
+        completion = infer_plan_completion(cfg.assent_dir / plan_name)
         if not completion.complete:
             raise AssentError(
-                f"upstream folder {folder} is incomplete: {completion.reason}")
-        if dependencies.base != folder:
+                f"upstream plan {plan_name} is incomplete: {completion.reason}")
+        if dependencies.base != plan_name:
             continue
-        source = gitops.resolve_folder_source(
-            cfg.root, folder, cfg.git_excludes)
+        source = gitops.resolve_plan_source(
+            cfg.root, plan_name, cfg.git_excludes)
         sources.append(source)
         if not gitops.is_ancestor(cfg.root, source.tip, downstream_tip):
             raise AssentError(
-                f"stale stack for {cfg.tasks_name}: current upstream {folder} tip "
+                f"stale stack for {cfg.tasks_name}: current upstream {plan_name} tip "
                 f"{source.tip} is not an ancestor of downstream tip "
                 f"{downstream_tip}; the downstream source and existing receipt "
                 f"were preserved. Run `assent rework {cfg.tasks_name}` after "
@@ -278,7 +278,7 @@ def _verify_locked(cfg: Config, *,
     if unfinished:
         invalidate_receipt(path)
         raise AssentError(
-            "folder is not complete; every task must be DONE or SKIP "
+            "plan is not complete; every task must be DONE or SKIP "
             f"({', '.join(unfinished)})")
 
     target_branch = gitops.require_current_branch(main)
@@ -303,7 +303,7 @@ def _verify_locked(cfg: Config, *,
     # earlier `run` having left a junction behind, and UNKNOWN or STALE refuses
     # here with the zero-AI review remedy rather than at the verifier.
     shared_sources = [(cfg.tasks_name, source_worktree),
-                      *((source.folder, source.worktree)
+                      *((source.plan, source.worktree)
                         for source in upstream_sources)]
     contracts = shared_paths.prepare_sources(main, shared_sources)
     shared_inputs = shared_paths.shared_inputs_digest(main, contracts)
@@ -418,23 +418,23 @@ def _verify_locked(cfg: Config, *,
     return receipt
 
 
-def verify_folder_receipt(cfg: Config) -> int:
+def verify_plan_receipt(cfg: Config) -> int:
     """Verify exactly ``cfg.tasks_name`` and return zero only for PASSED."""
-    folder = cfg.tasks_name
-    result = verify_folder_action(cfg, _record_conflict_receipt=True)
+    plan_name = cfg.tasks_name
+    result = verify_plan_action(cfg, _record_conflict_receipt=True)
     if result.passed:
-        print(f"verify {folder}: passed ({result.candidate_tree})")
+        print(f"verify {plan_name}: passed ({result.candidate_tree})")
         return 0
     detail = result.evidence[0] if result.evidence else result.outcome
-    print(f"verify {folder}: failed ({detail})")
+    print(f"verify {plan_name}: failed ({detail})")
     if result.outcome == "TARGET_CONFLICT":
-        print(f"Run `assent reconcile {folder}` to resolve the source-versus-"
+        print(f"Run `assent reconcile {plan_name}` to resolve the source-versus-"
               "target conflict in an isolated worktree, then verify again.")
     return 1
 
 
 def _receipt_matches_current_candidate_locked(cfg: Config) -> bool:
-    """Compare any settled receipt while integration and folder locks are held."""
+    """Compare any settled receipt while integration and plan locks are held."""
     main = gitops.main_worktree(cfg.root)
     receipt = read_receipt(receipt_path(cfg), main)
     script = (cfg.assent_dir / "verify.py").resolve()
@@ -490,20 +490,20 @@ def _evidence_from_receipt(cfg: Config, receipt: VerificationReceipt, *,
         tuple(item for item in (receipt.failure_summary,) if item), reused)
 
 
-def verify_folder_action(cfg: Config, *, recheck: bool = False,
+def verify_plan_action(cfg: Config, *, recheck: bool = False,
                          _record_conflict_receipt: bool = False
                          ) -> FullVerifyEvidence:
-    """Run or reuse the exact folder transaction and return typed evidence."""
-    folder = cfg.tasks_name
+    """Run or reuse the exact plan transaction and return typed evidence."""
+    plan_name = cfg.tasks_name
     try:
         with hold_integration_lock(cfg.assent_dir):
-            with hold_lock(cfg.tasks_dir, folder):
+            with hold_lock(cfg.tasks_dir, plan_name):
                 path = receipt_path(cfg)
                 if path.exists():
                     receipt = read_receipt(path, gitops.main_worktree(cfg.root))
                     if (_receipt_matches_current_candidate_locked(cfg)
                             and (receipt.status == "PASSED" or not recheck)):
-                        print(f"verify {folder}: existing {receipt.status} receipt "
+                        print(f"verify {plan_name}: existing {receipt.status} receipt "
                               "is fresh; full suite skipped")
                         return _evidence_from_receipt(cfg, receipt, reused=True)
                 receipt = _verify_locked(
@@ -513,14 +513,14 @@ def verify_folder_action(cfg: Config, *, recheck: bool = False,
         return error.result
     except (LockBusy, AssentError) as error:
         return FullVerifyEvidence(
-            "INFRASTRUCTURE_FAILED", (folder,), "", (), "", "", "", 1,
+            "INFRASTRUCTURE_FAILED", (plan_name,), "", (), "", "", "", 1,
             (str(error),))
 
 
 def _current_shared_inputs(
         cfg: Config, main: Path, worktree: Path | None,
-        upstream_sources: tuple[gitops.FolderSourceSnapshot, ...]) -> str:
-    """Recompute this folder's shared-input digest without repairing anything.
+        upstream_sources: tuple[gitops.PlanSourceSnapshot, ...]) -> str:
+    """Recompute this plan's shared-input digest without repairing anything.
 
     Freshness is a question, not a repair: a profile that changed identity, a
     declared target that moved, or content that differs recomputes to another
@@ -529,25 +529,25 @@ def _current_shared_inputs(
     acceptance refuses instead of publishing on unproven evidence.
     """
     sources = [(cfg.tasks_name, worktree),
-               *((source.folder, source.worktree) for source in upstream_sources)]
+               *((source.plan, source.worktree) for source in upstream_sources)]
     contracts: list[tuple[str, shared_paths.Contract]] = []
     manifest = shared_paths.read_manifest(main)
-    for folder, tree in sources:
+    for plan_name, tree in sources:
         # A vanished source worktree falls back to the primary worktree, exactly
         # as ``prepare_sources`` did when the receipt was written.
         contract = shared_paths.classify(main, tree or main, manifest)
         if not contract.settled:
             raise AssentError(
-                f"the shared-path contract for {folder} is {contract.state}; "
+                f"the shared-path contract for {plan_name} is {contract.state}; "
                 "the receipt's shared-input evidence can no longer be reproduced")
         shared_paths.require_directory_link_agreement(
-            main, tree or main, contract, folder=folder)
-        contracts.append((folder, contract))
+            main, tree or main, contract, plan_name=plan_name)
+        contracts.append((plan_name, contract))
     return shared_paths.shared_inputs_digest(main, contracts)
 
 
 def current_shared_inputs(cfg: Config) -> str:
-    """This folder's shared-input digest as it stands right now.
+    """This plan's shared-input digest as it stands right now.
 
     ``accept`` uses it for the same pre-publication recheck it already performs
     on the source, target, and verifier: the evidence a receipt was written
@@ -573,18 +573,18 @@ def receipt_matches_current_candidate(cfg: Config) -> bool:
             return _receipt_matches_current_candidate_locked(cfg)
 
 
-def verify_folder_receipt_if_needed(cfg: Config) -> int:
+def verify_plan_receipt_if_needed(cfg: Config) -> int:
     """Run unattended verification unless an exact current PASSED receipt exists.
 
     This is the post-task scheduler entry point.  It deliberately acquires the
-    repository integration lock before the folder lock, after the AI session has
-    released its folder lock.  A malformed existing receipt is refused rather
+    repository integration lock before the plan lock, after the AI session has
+    released its plan lock.  A malformed existing receipt is refused rather
     than silently replaced; explicit ``assent verify`` remains the refresh path.
     """
-    folder = cfg.tasks_name
+    plan_name = cfg.tasks_name
     try:
         with hold_integration_lock(cfg.assent_dir):
-            with hold_lock(cfg.tasks_dir, folder):
+            with hold_lock(cfg.tasks_dir, plan_name):
                 plan = Plan.parse(cfg.tasks_dir)
                 if any(task.status not in _COMPLETE_STATUSES for task in plan.tasks):
                     return 0
@@ -593,31 +593,31 @@ def verify_folder_receipt_if_needed(cfg: Config) -> int:
                     try:
                         fresh = _receipt_matches_current_candidate_locked(cfg)
                     except AssentError as e:
-                        print(f"verify {folder}: invalid existing receipt ({e})")
+                        print(f"verify {plan_name}: invalid existing receipt ({e})")
                         return 1
                     if fresh:
                         receipt = read_receipt(path, gitops.main_worktree(cfg.root))
-                        print("verify " + folder + f": existing {receipt.status} "
+                        print("verify " + plan_name + f": existing {receipt.status} "
                               "receipt is fresh "
                               f"({receipt.integration_tree}); full suite skipped")
                         return 0 if receipt.status == "PASSED" else 1
-                    print(f"verify {folder}: existing receipt is stale; refreshing")
+                    print(f"verify {plan_name}: existing receipt is stale; refreshing")
                 receipt = _verify_locked(cfg)
     except LockBusy as e:
-        print(f"verify {folder}: refused ({e})")
+        print(f"verify {plan_name}: refused ({e})")
         return 1
     except AssentError as e:
-        print(f"verify {folder}: failed ({e})")
+        print(f"verify {plan_name}: failed ({e})")
         return 1
     if receipt.status == "PASSED":
-        print(f"verify {folder}: passed ({receipt.integration_tree})")
+        print(f"verify {plan_name}: passed ({receipt.integration_tree})")
         return 0
-    print(f"verify {folder}: failed ({receipt.failure_summary})")
+    print(f"verify {plan_name}: failed ({receipt.failure_summary})")
     return 1
 
 
 def receipt_report_lines(cfg: Config) -> list[str]:
-    """Return read-only folder-verification facts for the human report.
+    """Return read-only plan-verification facts for the human report.
 
     Freshness here is intentionally conservative and side-effect free: exact
     source, target, verifier, and shared-input identities are fresh. Acceptance
@@ -625,7 +625,7 @@ def receipt_report_lines(cfg: Config) -> list[str]:
     """
     path = receipt_path(cfg)
     if not path.exists():
-        return ["Folder verification: NOT RUN (no receipt)"]
+        return ["Plan verification: NOT RUN (no receipt)"]
     try:
         main = gitops.main_worktree(cfg.root)
         receipt = read_receipt(path, main)
@@ -648,11 +648,11 @@ def receipt_report_lines(cfg: Config) -> list[str]:
         if receipt.status != "PASSED":
             reasons.append(f"exit code {receipt.exit_code}")
     except AssentError as e:
-        return [f"Folder verification: INVALID ({e})"]
+        return [f"Plan verification: INVALID ({e})"]
 
     freshness = "fresh" if not reasons else "stale: " + "; ".join(reasons)
     lines = [
-        f"Folder verification: {receipt.status} ({freshness})",
+        f"Plan verification: {receipt.status} ({freshness})",
         f"  Source tip: {receipt.source_tip}",
         f"  Candidate tree: {receipt.integration_tree}",
         f"  Completed at: {receipt.completed_at}",

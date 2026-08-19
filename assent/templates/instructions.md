@@ -34,7 +34,7 @@ A **meeting / interactive session** starts with:
 4. `~/.assent/workflow.md` when CLI or scheduler mechanics matter, including
    `[workflow]`, `[roles]`, or `[abilities]`, or when reviewing implementation
    against a plan; and
-5. the current folder's task files, `_report.md`, and directly relevant source
+5. the current plan's task files, `_report.md`, and directly relevant source
    and tests as needed.
 
 An **assent-scheduled task session** reads only:
@@ -46,7 +46,7 @@ An **assent-scheduled task session** reads only:
 
 Use scheduler-provided absolute paths. A worktree has no `.assent/`; task and
 journal files live in the main tree, while contracts live under `~/.assent`.
-Do not read old folders, journals, or `_assent.log` unless debugging or asked.
+Do not read old plans, journals, or `_assent.log` unless debugging or asked.
 
 ## Verification boundary
 

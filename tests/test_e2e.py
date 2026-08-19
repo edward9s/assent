@@ -1,4 +1,4 @@
-"""End-to-end walkthrough: temporary repo + task folder + scriptable fake adapter, a set of
+"""End-to-end walkthrough: temporary repo + plan + scriptable fake adapter, a set of
 scenario integration tests.
 
 Stands on its own repo/adapter scaffolding rather than sharing tests.engine_support; the one
@@ -114,8 +114,8 @@ class E2ETestCase(unittest.TestCase):
         self._git("add", "-A")
         self._git("commit", "-m", "init")
 
-    def execution_root(self, folder="plan01") -> Path:
-        candidate = gitops.worktree_path(self.root, folder)
+    def execution_root(self, plan_name="plan01") -> Path:
+        candidate = gitops.worktree_path(self.root, plan_name)
         return candidate if candidate.exists() else self.root
 
     def done_step(self, path, files=None):
@@ -131,11 +131,11 @@ class E2ETestCase(unittest.TestCase):
         return step
 
     def run_engine(self, adapter, **kw) -> int:
-        # Folder-final verification has separate authority tests in
+        # Plan-final verification has separate authority tests in
         # tests.test_verification_engine.  These scenarios exercise task and
         # worktree behavior only, so avoid imposing candidate-source fixtures.
         with contextlib.redirect_stdout(io.StringIO()), \
-                mock.patch("assent.engine.verification.verify_folder_if_needed",
+                mock.patch("assent.engine.verification.verify_plan_if_needed",
                            return_value=0):
             return engine.run(self.cfg(), adapter=adapter, **kw)
 
@@ -318,25 +318,25 @@ class TestWorktreeScenarios(E2ETestCase):
             return ok_result()
         return step
 
-    def make_source(self, folder, start="HEAD"):
-        worktree = gitops.worktree_path(self.root, folder)
-        self._git("worktree", "add", "-b", f"{folder}/run",
+    def make_source(self, plan_name, start="HEAD"):
+        worktree = gitops.worktree_path(self.root, plan_name)
+        self._git("worktree", "add", "-b", f"{plan_name}/run",
                   str(worktree), start)
-        (worktree / f"{folder}.txt").write_text(
-            f"{folder}\n", encoding="utf-8")
+        (worktree / f"{plan_name}.txt").write_text(
+            f"{plan_name}\n", encoding="utf-8")
         self.git_at(worktree, "add", "-A")
-        self.git_at(worktree, "commit", "-m", f"finish {folder}")
+        self.git_at(worktree, "commit", "-m", f"finish {plan_name}")
         return worktree, self.git_at(
             worktree, "rev-parse", "HEAD").strip()
 
-    def add_upstream_dependency(self, folder="upstream", base=False):
-        upstream = self.root / ".assent" / folder
+    def add_upstream_dependency(self, plan_name="upstream", base=False):
+        upstream = self.root / ".assent" / plan_name
         upstream.mkdir()
         (upstream / "t001_task.e.toml").write_text(
             task_text(status="DONE"), encoding="utf-8", newline="\n")
-        (self.plan_dir / "_folder.toml").write_text(
-            f'after = ["{folder}"]\n'
-            + (f'base = "{folder}"\n' if base else ""),
+        (self.plan_dir / "_plan_deps.toml").write_text(
+            f'after = ["{plan_name}"]\n'
+            + (f'base = "{plan_name}"\n' if base else ""),
             encoding="utf-8")
 
     def test_run_isolated_from_main_tree_and_queries_use_worktree(self):
@@ -401,7 +401,7 @@ class TestWorktreeScenarios(E2ETestCase):
         adapter.steps.append(finish)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), mock.patch(
-                "assent.engine.verification.verify_folder_if_needed",
+                "assent.engine.verification.verify_plan_if_needed",
                 return_value=0):
             self.assertEqual(engine.run(
                 self.cfg(), once=True, adapter=adapter), 0)
@@ -593,7 +593,7 @@ class TestWorktreeScenarios(E2ETestCase):
         self.assertEqual(self.run_engine(adapter, once=True), 0)
         self.assertEqual(parse_task_file(task).status, "DONE")
 
-    def test_tracked_task_folder_is_rejected_before_worktree_creation(self):
+    def test_tracked_task_plan_is_rejected_before_worktree_creation(self):
         self.configure_git_run()
         task = self.add_task(1)
         self._git("add", "-f", str(task.relative_to(self.root)))
@@ -632,7 +632,7 @@ class TestWorktreeScenarios(E2ETestCase):
         self.assertTrue(worktree.exists())
         self.assertIn("skip if absent", adapter.calls[0])
 
-    def test_two_folders_use_independent_worktrees_and_branches(self):
+    def test_two_plans_use_independent_worktrees_and_branches(self):
         self.configure_git_run()
         task1 = self.add_task(1)
         plan2 = self.root / ".assent" / "plan02"
@@ -641,12 +641,12 @@ class TestWorktreeScenarios(E2ETestCase):
         task2.write_text(task_text(), encoding="utf-8", newline="\n")
         self.start()
 
-        for folder, task, filename in (("plan01", task1, "one.py"),
+        for plan_name, task, filename in (("plan01", task1, "one.py"),
                                        ("plan02", task2, "two.py")):
             adapter = ScriptedAdapter([])
             adapter.steps.append(self.isolated_done_step(
-                adapter, task, {f"src/{filename}": folder}))
-            cfg = load_config(self.root / ".assent" / "assent.toml", folder=folder)
+                adapter, task, {f"src/{filename}": plan_name}))
+            cfg = load_config(self.root / ".assent" / "assent.toml", plan_name=plan_name)
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(engine.run(cfg, once=True, adapter=adapter), 0)
 

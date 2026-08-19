@@ -1,4 +1,4 @@
-"""Tests for folder-level dependency parsing, completion inference, and cycle checks."""
+"""Tests for plan-level dependency parsing, completion inference, and cycle checks."""
 import json
 import shutil
 import subprocess
@@ -7,11 +7,11 @@ import unittest
 from pathlib import Path
 
 from assent import AssentError
-from assent.folderdeps import (find_unfinished_prerequisites,
-                               infer_folder_completion,
-                               parse_folder_dependencies,
-                               parse_folder_dependency_graph,
-                               resolve_folder_base)
+from assent.plandeps import (find_unfinished_prerequisites,
+                               infer_plan_completion,
+                               parse_plan_dependencies,
+                               parse_plan_dependency_graph,
+                               resolve_plan_base)
 from assent.gitops import worktree_path
 
 _OK = 'python -c "raise SystemExit(0)"'
@@ -36,20 +36,20 @@ def task_text(status: str = "TODO") -> str:
     ))
 
 
-class FolderDepsTestCase(unittest.TestCase):
+class PlanDepsTestCase(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.assent_dir = self.root / ".assent"
         self.assent_dir.mkdir()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
-    def make_folder(self, name: str, *statuses: str) -> Path:
-        folder = self.assent_dir / name
-        folder.mkdir()
+    def make_plan(self, name: str, *statuses: str) -> Path:
+        plan_name = self.assent_dir / name
+        plan_name.mkdir()
         for index, status in enumerate(statuses, 1):
-            (folder / f"t{index:03d}_task.e.toml").write_text(
+            (plan_name / f"t{index:03d}_task.e.toml").write_text(
                 task_text(status), encoding="utf-8")
-        return folder
+        return plan_name
 
     def write_roster(self, *names: str) -> None:
         """Write an archive roster listing ``names`` (no live directory needed)."""
@@ -57,7 +57,7 @@ class FolderDepsTestCase(unittest.TestCase):
         for name in names:
             lines.extend((
                 "[[archived]]",
-                f"folder = {json.dumps(name)}",
+                f"plan = {json.dumps(name)}",
                 'archived_at = "2026-07-25T00:00:00+00:00"',
                 "",
             ))
@@ -65,61 +65,61 @@ class FolderDepsTestCase(unittest.TestCase):
             "\n".join(lines), encoding="utf-8")
 
 
-class TestParseFolderDependencies(FolderDepsTestCase):
+class TestParsePlanDependencies(PlanDepsTestCase):
     def test_valid_declaration(self):
-        first = self.make_folder("first", "DONE")
-        second = self.make_folder("second", "TODO")
-        (second / "_folder.toml").write_text(
+        first = self.make_plan("first", "DONE")
+        second = self.make_plan("second", "TODO")
+        (second / "_plan_deps.toml").write_text(
             'after = ["first"]\n', encoding="utf-8")
 
-        dependencies = parse_folder_dependencies(second)
+        dependencies = parse_plan_dependencies(second)
 
         self.assertEqual(dependencies.name, "second")
         self.assertEqual(dependencies.after, ["first"])
-        self.assertEqual(dependencies.path, (second / "_folder.toml").resolve())
+        self.assertEqual(dependencies.path, (second / "_plan_deps.toml").resolve())
 
     def test_empty_after(self):
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text("after = []\n", encoding="utf-8")
-        self.assertEqual(parse_folder_dependencies(folder).after, [])
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text("after = []\n", encoding="utf-8")
+        self.assertEqual(parse_plan_dependencies(plan_name).after, [])
 
     def test_missing_file_means_no_dependencies(self):
-        folder = self.make_folder("work", "TODO")
-        dependencies = parse_folder_dependencies(folder)
+        plan_name = self.make_plan("work", "TODO")
+        dependencies = parse_plan_dependencies(plan_name)
         self.assertEqual(dependencies.after, [])
         self.assertIsNone(dependencies.base)
 
     def test_existing_file_requires_after(self):
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'base = "first"\n', encoding="utf-8")
         with self.assertRaisesRegex(AssentError, "missing after"):
-            parse_folder_dependencies(folder)
+            parse_plan_dependencies(plan_name)
 
     def test_unknown_key_lists_valid_key(self):
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = []\nbefore = ["other"]\n', encoding="utf-8")
         with self.assertRaisesRegex(AssentError, r"unknown keys.*valid keys: after"):
-            parse_folder_dependencies(folder)
+            parse_plan_dependencies(plan_name)
 
     def test_after_must_be_string_array(self):
-        folder = self.make_folder("work", "TODO")
+        plan_name = self.make_plan("work", "TODO")
         for value in ('"first"', '["first", 2]'):
-            (folder / "_folder.toml").write_text(
+            (plan_name / "_plan_deps.toml").write_text(
                 f"after = {value}\n", encoding="utf-8")
             with self.assertRaisesRegex(AssentError, "array of strings"):
-                parse_folder_dependencies(folder)
+                parse_plan_dependencies(plan_name)
 
     def test_self_dependency_rejected(self):
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = ["work"]\n', encoding="utf-8")
         with self.assertRaisesRegex(AssentError, "must not depend on itself"):
-            parse_folder_dependencies(folder)
+            parse_plan_dependencies(plan_name)
 
     def test_invalid_dependency_name_rejected(self):
-        folder = self.make_folder("work", "TODO")
+        plan_name = self.make_plan("work", "TODO")
         invalid = (
             "", "bad/name", "bad\\name", "bad name", "-bad", ".bad",
             "bad\x00name", "bad~name", "bad^name", "bad:name",
@@ -128,178 +128,178 @@ class TestParseFolderDependencies(FolderDepsTestCase):
             "bad.lock", "bad.LOCK", "CON.txt", "COM¹")
         for name in invalid:
             with self.subTest(name=name):
-                (folder / "_folder.toml").write_text(
+                (plan_name / "_plan_deps.toml").write_text(
                     f"after = {json.dumps([name])}\n", encoding="utf-8")
                 with self.assertRaises(AssentError) as raised:
-                    parse_folder_dependencies(folder)
+                    parse_plan_dependencies(plan_name)
                 self.assertIn(repr(name), str(raised.exception))
-                self.assertIn("not a valid task folder name", str(raised.exception))
+                self.assertIn("not a valid plan name", str(raised.exception))
 
-    def test_missing_folder_rejected(self):
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+    def test_missing_plan_rejected(self):
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = ["missing"]\n', encoding="utf-8")
         with self.assertRaisesRegex(AssentError, "does not exist"):
-            parse_folder_dependencies(folder)
+            parse_plan_dependencies(plan_name)
 
-    def test_folder_without_tasks_rejected(self):
+    def test_plan_without_tasks_rejected(self):
         empty = self.assent_dir / "empty"
         empty.mkdir()
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = ["empty"]\n', encoding="utf-8")
         with self.assertRaisesRegex(AssentError, "no task files"):
-            parse_folder_dependencies(folder)
+            parse_plan_dependencies(plan_name)
 
-    def test_folder_config_is_not_treated_as_task(self):
-        folder = self.make_folder("work", "DONE")
-        (folder / "_folder.toml").write_text("after = []\n", encoding="utf-8")
-        result = infer_folder_completion(folder)
+    def test_plan_config_is_not_treated_as_task(self):
+        plan_name = self.make_plan("work", "DONE")
+        (plan_name / "_plan_deps.toml").write_text("after = []\n", encoding="utf-8")
+        result = infer_plan_completion(plan_name)
         self.assertTrue(result.complete)
 
-    def test_archived_dependency_resolves_without_live_folder(self):
+    def test_archived_dependency_resolves_without_live_plan(self):
         # "first" has been archived (no live directory), yet the after reference
         # still resolves through the roster.
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = ["first"]\n', encoding="utf-8")
         self.write_roster("first")
-        self.assertEqual(parse_folder_dependencies(folder).after, ["first"])
+        self.assertEqual(parse_plan_dependencies(plan_name).after, ["first"])
 
-    def test_missing_folder_message_notes_roster_was_checked(self):
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+    def test_missing_plan_message_notes_roster_was_checked(self):
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = ["missing"]\n', encoding="utf-8")
         self.write_roster("other")
         with self.assertRaisesRegex(
                 AssentError, "does not exist.*not in the archive roster"):
-            parse_folder_dependencies(folder)
+            parse_plan_dependencies(plan_name)
 
     def test_live_and_archived_same_name_fails_closed(self):
-        self.make_folder("dup", "DONE")
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+        self.make_plan("dup", "DONE")
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = ["dup"]\n', encoding="utf-8")
         self.write_roster("dup")
         with self.assertRaisesRegex(
-                AssentError, "both as a live task folder and in the archive roster"):
-            parse_folder_dependencies(folder)
+                AssentError, "both as a live plan and in the archive roster"):
+            parse_plan_dependencies(plan_name)
 
     def test_malformed_roster_fails_closed(self):
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = ["first"]\n', encoding="utf-8")
         (self.assent_dir / "_archived.toml").write_text(
             "archived = [\n", encoding="utf-8")
         with self.assertRaisesRegex(AssentError, "not valid TOML"):
-            parse_folder_dependencies(folder)
+            parse_plan_dependencies(plan_name)
 
 
-class TestInferFolderCompletion(FolderDepsTestCase):
+class TestInferPlanCompletion(PlanDepsTestCase):
     def test_all_done_and_skip_is_complete(self):
-        folder = self.make_folder("work", "DONE", "SKIP")
-        result = infer_folder_completion(folder)
+        plan_name = self.make_plan("work", "DONE", "SKIP")
+        result = infer_plan_completion(plan_name)
         self.assertTrue(result.complete)
         self.assertIn("DONE or SKIP", result.reason)
 
     def test_todo_is_incomplete(self):
-        result = infer_folder_completion(self.make_folder("work", "TODO"))
+        result = infer_plan_completion(self.make_plan("work", "TODO"))
         self.assertFalse(result.complete)
         self.assertIn("t001=TODO", result.reason)
 
     def test_blocked_is_incomplete(self):
-        result = infer_folder_completion(self.make_folder("work", "BLOCKED"))
+        result = infer_plan_completion(self.make_plan("work", "BLOCKED"))
         self.assertFalse(result.complete)
         self.assertIn("t001=BLOCKED", result.reason)
 
     def test_bad_task_file_is_incomplete_with_reason(self):
-        folder = self.make_folder("work", "DONE")
-        (folder / "t001_task.e.toml").write_text(
+        plan_name = self.make_plan("work", "DONE")
+        (plan_name / "t001_task.e.toml").write_text(
             "status = [\n", encoding="utf-8")
-        result = infer_folder_completion(folder)
+        result = infer_plan_completion(plan_name)
         self.assertFalse(result.complete)
         self.assertIn("TOML", result.reason)
 
     def test_no_tasks_is_incomplete_with_reason(self):
-        folder = self.make_folder("work")
-        result = infer_folder_completion(folder)
+        plan_name = self.make_plan("work")
+        result = infer_plan_completion(plan_name)
         self.assertFalse(result.complete)
         self.assertIn("no task files", result.reason)
 
     def test_unfinished_prerequisites_include_status_counts(self):
-        self.make_folder("base", "TODO", "WIP", "BLOCKED", "DONE", "SKIP")
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+        self.make_plan("base", "TODO", "WIP", "BLOCKED", "DONE", "SKIP")
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
 
-        result = find_unfinished_prerequisites(folder)
+        result = find_unfinished_prerequisites(plan_name)
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].total, 3)
         self.assertEqual(
             result[0].message(),
-            "Prerequisite folder base still has 3 unfinished task(s) (TODO 1, WIP 1, BLOCKED 1)")
+            "Prerequisite plan base still has 3 unfinished task(s) (TODO 1, WIP 1, BLOCKED 1)")
 
     def test_archived_prerequisite_counts_as_finished(self):
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = ["arch"]\n', encoding="utf-8")
         self.write_roster("arch")
-        self.assertEqual(find_unfinished_prerequisites(folder), [])
+        self.assertEqual(find_unfinished_prerequisites(plan_name), [])
 
     def test_archived_and_live_unfinished_reports_only_live(self):
-        self.make_folder("live", "TODO")
-        folder = self.make_folder("work", "TODO")
-        (folder / "_folder.toml").write_text(
+        self.make_plan("live", "TODO")
+        plan_name = self.make_plan("work", "TODO")
+        (plan_name / "_plan_deps.toml").write_text(
             'after = ["arch", "live"]\n', encoding="utf-8")
         self.write_roster("arch")
 
-        result = find_unfinished_prerequisites(folder)
+        result = find_unfinished_prerequisites(plan_name)
 
         self.assertEqual([item.name for item in result], ["live"])
 
 
-class TestFolderDependencyGraph(FolderDepsTestCase):
+class TestPlanDependencyGraph(PlanDepsTestCase):
     def test_acyclic_graph_parsed(self):
-        self.make_folder("first", "DONE")
-        second = self.make_folder("second", "TODO")
-        (second / "_folder.toml").write_text(
+        self.make_plan("first", "DONE")
+        second = self.make_plan("second", "TODO")
+        (second / "_plan_deps.toml").write_text(
             'after = ["first"]\n', encoding="utf-8")
-        graph = parse_folder_dependency_graph(self.assent_dir)
+        graph = parse_plan_dependency_graph(self.assent_dir)
         self.assertEqual(graph["second"].after, ["first"])
 
     def test_cycle_reports_complete_path(self):
-        first = self.make_folder("first", "TODO")
-        second = self.make_folder("second", "TODO")
-        third = self.make_folder("third", "TODO")
-        (first / "_folder.toml").write_text(
+        first = self.make_plan("first", "TODO")
+        second = self.make_plan("second", "TODO")
+        third = self.make_plan("third", "TODO")
+        (first / "_plan_deps.toml").write_text(
             'after = ["second"]\n', encoding="utf-8")
-        (second / "_folder.toml").write_text(
+        (second / "_plan_deps.toml").write_text(
             'after = ["third"]\n', encoding="utf-8")
-        (third / "_folder.toml").write_text(
+        (third / "_plan_deps.toml").write_text(
             'after = ["first"]\n', encoding="utf-8")
         with self.assertRaisesRegex(
                 AssentError, "first -> second -> third -> first"):
-            parse_folder_dependency_graph(self.assent_dir)
+            parse_plan_dependency_graph(self.assent_dir)
 
     def test_archived_upstream_is_a_terminal_leaf(self):
         # An archived upstream has no live directory (so it is not a graph node)
         # yet must resolve as a leaf without a KeyError or a spurious cycle.
-        second = self.make_folder("second", "TODO")
-        (second / "_folder.toml").write_text(
+        second = self.make_plan("second", "TODO")
+        (second / "_plan_deps.toml").write_text(
             'after = ["first"]\n', encoding="utf-8")
         self.write_roster("first")
-        graph = parse_folder_dependency_graph(self.assent_dir)
+        graph = parse_plan_dependency_graph(self.assent_dir)
         self.assertEqual(graph["second"].after, ["first"])
         self.assertNotIn("first", graph)
 
     def test_missing_roster_leaves_resolution_unchanged(self):
-        self.make_folder("first", "DONE")
-        second = self.make_folder("second", "TODO")
-        (second / "_folder.toml").write_text(
+        self.make_plan("first", "DONE")
+        second = self.make_plan("second", "TODO")
+        (second / "_plan_deps.toml").write_text(
             'after = ["first"]\n', encoding="utf-8")
         self.assertFalse((self.assent_dir / "_archived.toml").exists())
-        graph = parse_folder_dependency_graph(self.assent_dir)
+        graph = parse_plan_dependency_graph(self.assent_dir)
         self.assertEqual(graph["second"].after, ["first"])
 
 
@@ -309,7 +309,7 @@ def _git(root: Path, *args: str) -> str:
         check=True).stdout.strip()
 
 
-class ResolveFolderBaseTestCase(FolderDepsTestCase):
+class ResolvePlanBaseTestCase(PlanDepsTestCase):
     def setUp(self):
         super().setUp()
         _git(self.root, "init")
@@ -335,72 +335,72 @@ class ResolveFolderBaseTestCase(FolderDepsTestCase):
         if container.exists():
             container.rmdir()
 
-    def make_source(self, folder: str, start: str = "HEAD") -> tuple[Path, str]:
-        path = worktree_path(self.root, folder)
-        _git(self.root, "worktree", "add", "-b", f"{folder}/run", str(path), start)
-        (path / f"{folder}.txt").write_text(f"{folder}\n", encoding="utf-8")
+    def make_source(self, plan_name: str, start: str = "HEAD") -> tuple[Path, str]:
+        path = worktree_path(self.root, plan_name)
+        _git(self.root, "worktree", "add", "-b", f"{plan_name}/run", str(path), start)
+        (path / f"{plan_name}.txt").write_text(f"{plan_name}\n", encoding="utf-8")
         _git(path, "add", "-A")
-        _git(path, "commit", "-m", f"finish {folder}")
-        return path, _git(self.root, "rev-parse", f"{folder}/run")
+        _git(path, "commit", "-m", f"finish {plan_name}")
+        return path, _git(self.root, "rev-parse", f"{plan_name}/run")
 
 
-class TestResolveFolderBase(ResolveFolderBaseTestCase):
+class TestResolvePlanBase(ResolvePlanBaseTestCase):
     def test_zero_unaccepted_uses_exact_target_head(self):
-        downstream = self.make_folder("downstream", "TODO")
+        downstream = self.make_plan("downstream", "TODO")
         target = _git(self.root, "rev-parse", "HEAD")
 
-        result = resolve_folder_base(self.root, downstream)
+        result = resolve_plan_base(self.root, downstream)
 
         self.assertEqual(result.target_snapshot, target)
         self.assertIsNone(result.speculative_upstream)
         self.assertEqual(result.resolved_base, target)
 
     def test_linked_worktree_caller_still_snapshots_main_target(self):
-        downstream = self.make_folder("downstream", "TODO")
+        downstream = self.make_plan("downstream", "TODO")
         linked, linked_tip = self.make_source("downstream")
         target = _git(self.root, "rev-parse", "HEAD")
         self.assertNotEqual(linked_tip, target)
 
-        result = resolve_folder_base(linked, downstream)
+        result = resolve_plan_base(linked, downstream)
 
         self.assertEqual(result.target_snapshot, target)
         self.assertEqual(result.resolved_base, target)
 
     def test_one_unaccepted_without_base_uses_target_head(self):
-        self.make_folder("upstream", "DONE", "SKIP")
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        self.make_plan("upstream", "DONE", "SKIP")
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["upstream"]\n', encoding="utf-8")
         self.make_source("upstream")
         target = _git(self.root, "rev-parse", "HEAD")
 
-        result = resolve_folder_base(self.root, downstream)
+        result = resolve_plan_base(self.root, downstream)
 
         self.assertEqual(result.target_snapshot, target)
         self.assertIsNone(result.speculative_upstream)
         self.assertEqual(result.resolved_base, target)
 
     def test_mixed_accepted_and_unaccepted_without_base_uses_target_head(self):
-        self.make_folder("accepted", "DONE")
-        self.make_folder("pending", "DONE")
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        self.make_plan("accepted", "DONE")
+        self.make_plan("pending", "DONE")
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["accepted", "pending"]\n', encoding="utf-8")
         _, accepted_tip = self.make_source("accepted")
         _git(self.root, "merge", "--ff-only", accepted_tip)
         self.make_source("pending")
 
-        result = resolve_folder_base(self.root, downstream)
+        result = resolve_plan_base(self.root, downstream)
 
         self.assertEqual(result.target_snapshot, accepted_tip)
         self.assertIsNone(result.speculative_upstream)
         self.assertEqual(result.resolved_base, accepted_tip)
 
     def test_multiple_unaccepted_without_base_use_target_without_state_changes(self):
-        self.make_folder("first", "DONE")
-        self.make_folder("second", "DONE")
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        self.make_plan("first", "DONE")
+        self.make_plan("second", "DONE")
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["first", "second"]\n', encoding="utf-8")
         _, first_tip = self.make_source("first")
         # Even an apparent topology between two unaccepted branches must not turn
@@ -412,7 +412,7 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
             _git(self.root, "worktree", "list", "--porcelain"),
         )
 
-        result = resolve_folder_base(self.root, downstream)
+        result = resolve_plan_base(self.root, downstream)
 
         self.assertIsNone(result.speculative_upstream)
         self.assertEqual(result.resolved_base, result.target_snapshot)
@@ -426,42 +426,42 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
         self.assertEqual(after, before)
 
     def test_declared_base_selects_one_of_multiple_unaccepted_tips(self):
-        self.make_folder("first", "DONE")
-        self.make_folder("second", "DONE")
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        self.make_plan("first", "DONE")
+        self.make_plan("second", "DONE")
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["first", "second"]\nbase = "first"\n',
             encoding="utf-8")
         _, first_tip = self.make_source("first")
         self.make_source("second")
 
-        result = resolve_folder_base(self.root, downstream)
+        result = resolve_plan_base(self.root, downstream)
 
-        self.assertEqual(result.speculative_upstream.folder, "first")
+        self.assertEqual(result.speculative_upstream.plan, "first")
         self.assertEqual(result.speculative_upstream.tip, first_tip)
         self.assertEqual(result.resolved_base, first_tip)
 
     def test_accepted_declared_base_uses_target_despite_unaccepted_peer(self):
-        self.make_folder("first", "DONE")
-        self.make_folder("second", "DONE")
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        self.make_plan("first", "DONE")
+        self.make_plan("second", "DONE")
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["first", "second"]\nbase = "first"\n',
             encoding="utf-8")
         _, first_tip = self.make_source("first")
         _git(self.root, "merge", "--ff-only", first_tip)
         self.make_source("second")
 
-        result = resolve_folder_base(self.root, downstream)
+        result = resolve_plan_base(self.root, downstream)
 
         self.assertEqual(result.target_snapshot, first_tip)
         self.assertIsNone(result.speculative_upstream)
         self.assertEqual(result.resolved_base, first_tip)
 
     def test_incomplete_and_blocked_upstreams_fail_closed(self):
-        upstream = self.make_folder("upstream", "DONE")
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        upstream = self.make_plan("upstream", "DONE")
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["upstream"]\n', encoding="utf-8")
         self.make_source("upstream")
 
@@ -470,28 +470,28 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
                 (upstream / "t001_task.e.toml").write_text(
                     task_text(status), encoding="utf-8")
                 with self.assertRaisesRegex(
-                        AssentError, f"upstream folder upstream is incomplete:.*{status}"):
-                    resolve_folder_base(self.root, downstream)
+                        AssentError, f"upstream plan upstream is incomplete:.*{status}"):
+                    resolve_plan_base(self.root, downstream)
 
     def test_dependency_parse_error_and_cycle_fail_before_git_resolution(self):
-        upstream = self.make_folder("upstream", "DONE")
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        upstream = self.make_plan("upstream", "DONE")
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["upstream"]\n', encoding="utf-8")
-        (upstream / "_folder.toml").write_text(
+        (upstream / "_plan_deps.toml").write_text(
             'after = ["downstream"]\n', encoding="utf-8")
 
         with self.assertRaisesRegex(AssentError, "dependencies form a cycle"):
-            resolve_folder_base(self.root, downstream)
+            resolve_plan_base(self.root, downstream)
 
-        (upstream / "_folder.toml").write_text("after = [\n", encoding="utf-8")
+        (upstream / "_plan_deps.toml").write_text("after = [\n", encoding="utf-8")
         with self.assertRaisesRegex(AssentError, "not valid TOML"):
-            resolve_folder_base(self.root, downstream)
+            resolve_plan_base(self.root, downstream)
 
     def test_advanced_upstream_reports_old_and_new_tips_without_rewrite(self):
-        self.make_folder("upstream", "DONE")
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        self.make_plan("upstream", "DONE")
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["upstream"]\nbase = "upstream"\n', encoding="utf-8")
         upstream_worktree, old_tip = self.make_source("upstream")
         downstream_worktree, _ = self.make_source("downstream", old_tip)
@@ -507,7 +507,7 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
         new_tip = _git(self.root, "rev-parse", "upstream/run")
 
         with self.assertRaises(AssentError) as raised:
-            resolve_folder_base(
+            resolve_plan_base(
                 self.root, downstream, downstream_tip="downstream/run")
 
         message = str(raised.exception)
@@ -518,44 +518,44 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
         self.assertEqual(_git(self.root, "rev-parse", "downstream/run"), downstream_tip)
 
     def test_existing_downstream_must_descend_from_resolved_upstream(self):
-        self.make_folder("upstream", "DONE")
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        self.make_plan("upstream", "DONE")
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["upstream"]\nbase = "upstream"\n', encoding="utf-8")
         _, upstream_tip = self.make_source("upstream")
         _, downstream_tip = self.make_source("downstream", upstream_tip)
 
-        result = resolve_folder_base(
+        result = resolve_plan_base(
             self.root, downstream, downstream_tip=downstream_tip)
 
         self.assertEqual(result.resolved_base, upstream_tip)
 
     def test_archived_upstream_resolves_to_target_without_speculation(self):
-        # An archived upstream (roster only, no live folder or branch) is proven
+        # An archived upstream (roster only, no live plan or branch) is proven
         # integrated, so the base is the exact target HEAD with no speculation.
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["upstream"]\nbase = "upstream"\n', encoding="utf-8")
         self.write_roster("upstream")
         target = _git(self.root, "rev-parse", "HEAD")
 
-        result = resolve_folder_base(self.root, downstream)
+        result = resolve_plan_base(self.root, downstream)
 
         self.assertEqual(result.target_snapshot, target)
         self.assertIsNone(result.speculative_upstream)
         self.assertEqual(result.resolved_base, target)
 
     def test_archived_upstream_ignored_beside_one_live_speculative(self):
-        self.make_folder("live", "DONE", "SKIP")
-        downstream = self.make_folder("downstream", "TODO")
-        (downstream / "_folder.toml").write_text(
+        self.make_plan("live", "DONE", "SKIP")
+        downstream = self.make_plan("downstream", "TODO")
+        (downstream / "_plan_deps.toml").write_text(
             'after = ["arch", "live"]\nbase = "live"\n', encoding="utf-8")
         self.write_roster("arch")
         _, tip = self.make_source("live")
 
-        result = resolve_folder_base(self.root, downstream)
+        result = resolve_plan_base(self.root, downstream)
 
-        self.assertEqual(result.speculative_upstream.folder, "live")
+        self.assertEqual(result.speculative_upstream.plan, "live")
         self.assertEqual(result.resolved_base, tip)
 
     def test_sha1_and_sha256_object_ids_are_preserved_exactly(self):
@@ -583,7 +583,7 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
                         task_text("DONE"), encoding="utf-8")
                     (downstream / "t001_task.e.toml").write_text(
                         task_text("TODO"), encoding="utf-8")
-                    (downstream / "_folder.toml").write_text(
+                    (downstream / "_plan_deps.toml").write_text(
                         'after = ["upstream"]\nbase = "upstream"\n',
                         encoding="utf-8")
                     source = worktree_path(root, "upstream")
@@ -594,7 +594,7 @@ class TestResolveFolderBase(ResolveFolderBaseTestCase):
                     _git(source, "add", "-A")
                     _git(source, "commit", "-m", "finish upstream")
 
-                    result = resolve_folder_base(root, downstream)
+                    result = resolve_plan_base(root, downstream)
 
                     self.assertEqual(len(result.target_snapshot), oid_length)
                     self.assertEqual(len(result.resolved_base), oid_length)

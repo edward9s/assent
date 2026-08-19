@@ -1,7 +1,7 @@
-"""Task folder parsing and writeback (the format contract lives in templates/format.md).
+"""Plan parsing and writeback (the format contract lives in templates/format.md).
 
 - Task file: tNNN_name.e.toml, header fields strictly validated, unknown keys
-  are an error; if a task folder still has a legacy tNNN_name.toml, parsing
+  are an error; if a plan still has a legacy tNNN_name.toml, parsing
   is refused and the caller must move it.
 - Journal file: tNNN_name.r.toml, append-only [[entry]] blocks.
 - There are exactly two scheduler-owned task-file writes: set_status replaces
@@ -90,9 +90,9 @@ class WorkflowState:
 
 @dataclass(frozen=True)
 class SelectionWorkflowState:
-    """Deletable cursor for one exact, source-bound folder selection."""
+    """Deletable cursor for one exact, source-bound plan selection."""
 
-    folders: tuple[str, ...]
+    plan_names: tuple[str, ...]
     target_ref: str
     target_commit: str
     source_commits: tuple[str, ...]
@@ -160,7 +160,7 @@ def _valid_action_result(action: object, status: object, identity: object,
 
 
 def read_workflow_state(tasks_dir: Path) -> WorkflowState | None:
-    """Read the folder workflow cursor; absence means no unit is in flight."""
+    """Read the plan workflow cursor; absence means no unit is in flight."""
     path = workflow_state_path(tasks_dir)
     if not path.is_file():
         return None
@@ -238,14 +238,14 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise AssentError(f"Integration workflow state {path.name} is unreadable: {error}") from error
     expected = {
-        "version", "folders", "target_ref", "target_commit", "source_commits",
+        "version", "plans", "target_ref", "target_commit", "source_commits",
         "step_index", "action", "action_status", "action_candidate_tree",
         "action_exit_code", "action_evidence", "verification_script_sha256",
         "shared_inputs_sha256", "repair_phase",
     }
     if set(data) != expected or data.get("version") != 1:
         raise AssentError(f"Integration workflow state {path.name} has an invalid schema")
-    folders = data.get("folders")
+    plan_names = data.get("plans")
     target_ref = data.get("target_ref")
     target_commit = data.get("target_commit")
     source_commits = data.get("source_commits")
@@ -261,13 +261,13 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
     action_valid = _valid_action_result(
         action, action_status, action_candidate_tree, action_exit_code,
         action_evidence, allowed_action="full_verify")
-    if (not isinstance(folders, list) or not folders
-            or not all(isinstance(item, str) and item for item in folders)
-            or len(set(folders)) != len(folders)
+    if (not isinstance(plan_names, list) or not plan_names
+            or not all(isinstance(item, str) and item for item in plan_names)
+            or len(set(plan_names)) != len(plan_names)
             or not isinstance(target_ref, str) or not target_ref
             or not isinstance(target_commit, str) or not target_commit
             or not isinstance(source_commits, list)
-            or len(source_commits) != len(folders)
+            or len(source_commits) != len(plan_names)
             or not all(isinstance(item, str) and item for item in source_commits)
             or not isinstance(step_index, int) or isinstance(step_index, bool)
             or step_index < 0 or not action_valid
@@ -278,7 +278,7 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
                                    or not shared_inputs_sha256))):
         raise AssentError(f"Integration workflow state {path.name} has invalid values")
     return SelectionWorkflowState(
-        tuple(folders), target_ref, target_commit, tuple(source_commits),
+        tuple(plan_names), target_ref, target_commit, tuple(source_commits),
         step_index, action, action_status, action_candidate_tree,
         action_exit_code, tuple(action_evidence), verification_script_sha256,
         shared_inputs_sha256, repair_phase)
@@ -289,7 +289,7 @@ def write_selection_workflow_state(
     """Atomically persist one exact selection and its recovery boundary."""
     text = "\n".join((
         "version = 1",
-        "folders = [" + ", ".join(json.dumps(item) for item in state.folders) + "]",
+        "plans = [" + ", ".join(json.dumps(item) for item in state.plan_names) + "]",
         f"target_ref = {json.dumps(state.target_ref)}",
         f"target_commit = {json.dumps(state.target_commit)}",
         "source_commits = [" + ", ".join(
@@ -496,7 +496,7 @@ def parse_task_file(path: Path) -> Task:
 
 
 class Plan:
-    """All tasks in a task folder (sorted by filename)."""
+    """All tasks in a plan (sorted by filename)."""
 
     def __init__(self, tasks: list[Task], tasks_dir: Path) -> None:
         self.tasks = tasks
@@ -507,21 +507,21 @@ class Plan:
         tasks_dir = Path(tasks_dir)
         if not tasks_dir.is_dir():
             raise AssentError(
-                f"Task folder not found: {tasks_dir}"
-                " (wrong command-line argument, or did the folder change"
+                f"Plan directory not found: {tasks_dir}"
+                " (wrong command-line argument, or did the plan directory change"
                 " after auto-derivation?)")
         entries = [p for p in tasks_dir.iterdir() if p.is_file()]
         retired = sorted(p.name for p in entries
                          if _is_retired_task_filename(p.name))
         if retired:
             raise AssentError(
-                "Task folder still has retired legacy task files: "
+                "Plan directory still has retired legacy task files: "
                 f"{', '.join(retired)}; move them to tNNN_name.e.toml first")
         files = sorted(p for p in entries
                        if _FORMAL_FILENAME_RE.match(p.name))
         if not files:
             raise AssentError(
-                f"Task folder {tasks_dir} has no task files (tNNN_name.e.toml);"
+                f"Plan directory {tasks_dir} has no task files (tNNN_name.e.toml);"
                 " run an AI planning session first to produce a plan")
 
         tasks: list[Task] = []

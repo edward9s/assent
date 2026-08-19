@@ -46,7 +46,7 @@ class TestInitContractRefresh(unittest.TestCase):
         workflow_text = " ".join(
             workflow_expected.decode("utf-8").split())
         self.assertIn(
-            "Complete folder verification refreshes that folder's `_report.md`",
+            "Complete plan verification refreshes that plan's `_report.md`",
             workflow_text)
         self.assertIn(
             "descriptive `name` segment has no canonical-language requirement",

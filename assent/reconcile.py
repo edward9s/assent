@@ -1,20 +1,20 @@
-"""Human-driven reconciliation of one finished folder's conflict with the target.
+"""Human-driven reconciliation of one finished plan's conflict with the target.
 
 ``reconcile`` prepares, preserves, continues, and aborts a single direct
 source-versus-target merge conflict so a human can resolve it in a dedicated
 worktree.  It is deliberately not an integration engine: it handles exactly one
-folder against the current integration target, never combines speculative peer
-folders, never runs a verifier, a focused test, or an AI adapter, never edits a
+plan against the current integration target, never combines speculative peer
+plans, never runs a verifier, a focused test, or an AI adapter, never edits a
 task status, and never merges anything into the integration target.  Once the
 source really has advanced it deletes the derived receipts that were written
 against the old source identity; proving the new source is a later, explicitly
 human-started ``assent verify``, and approving it is a later ``assent accept``.
 
-There is no state file and no "current folder" pointer.  Everything a later run
+There is no state file and no "current plan" pointer.  Everything a later run
 needs is a deterministic managed fact or a Git fact:
 
-- worktree ``<project>.reconcile/<folder>``, a sibling of the main worktree,
-- temporary branch ``<RECONCILE_BRANCH_PREFIX><folder>``,
+- worktree ``<project>.reconcile/<plan>``, a sibling of the main worktree,
+- temporary branch ``<RECONCILE_BRANCH_PREFIX><plan>``,
 - ``HEAD``, ``MERGE_HEAD``, branch ownership and the merge parents, which
   together say exactly how far an interrupted run got.
 
@@ -33,31 +33,31 @@ from pathlib import Path
 
 from assent import AssentError, gitops, shared_paths, verification
 from assent.config import Config
-from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
+from assent.plan_source import COMPLETE_STATUSES, resolve_source_snapshot
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 
 # gitops owns both temporary branch namespaces; this is the same object, kept
 # under reconcile's own public name for the callers that read it here.
 RECONCILE_BRANCH_PREFIX = gitops.RECONCILE_BRANCH_PREFIX
-RECONCILE_TRAILER_FOLDER = "Assent-Reconcile-Folder"
+RECONCILE_TRAILER_PLAN = "Assent-Reconcile-Plan"
 
 
-def reconcile_commit_message(folder: str) -> str:
+def reconcile_commit_message(plan_name: str) -> str:
     """Compose the one canonical English reconciliation merge message.
 
-    It depends only on the folder name, so any later run can recompute it and use
+    It depends only on the plan name, so any later run can recompute it and use
     it as ownership proof for a merge commit an interrupted run already created.
     """
-    return (f"reconcile({folder}): merge the integration target into the source\n"
-            f"\n{RECONCILE_TRAILER_FOLDER}: {folder}\n")
+    return (f"reconcile({plan_name}): merge the integration target into the source\n"
+            f"\n{RECONCILE_TRAILER_PLAN}: {plan_name}\n")
 
 
 @dataclass(frozen=True)
 class _Managed:
-    """The deterministic managed resources of one folder's reconciliation."""
+    """The deterministic managed resources of one plan's reconciliation."""
 
-    folder: str
+    plan: str
     main: Path
     path: Path
     branch: str
@@ -77,27 +77,27 @@ class AutomaticReconcile:
 
 def _managed(cfg: Config) -> _Managed:
     main = gitops.main_worktree(cfg.root)
-    folder = cfg.tasks_name
-    return _Managed(folder, main,
-                    gitops.reconcile_worktree_path(main, folder),
-                    f"{RECONCILE_BRANCH_PREFIX}{folder}")
+    plan_name = cfg.tasks_name
+    return _Managed(plan_name, main,
+                    gitops.reconcile_worktree_path(main, plan_name),
+                    f"{RECONCILE_BRANCH_PREFIX}{plan_name}")
 
 
 def _remove_empty_container(path: Path) -> None:
     """Drop the ``<repo>.reconcile`` container once it holds nothing.
 
     ``rmdir`` only succeeds on an empty directory, so this can never remove
-    another folder's reconciliation; a failure is simply left alone.
+    another plan's reconciliation; a failure is simply left alone.
     """
     with contextlib.suppress(OSError):
         path.parent.rmdir()
 
 
 def _require_source(cfg: Config, main: Path) -> tuple[str, str, Path]:
-    """Resolve the folder's exact source, requiring its fixed worktree.
+    """Resolve the plan's exact source, requiring its fixed worktree.
 
     ``resolve_source_snapshot`` is the same identity check verification and
-    acceptance perform (sole ``<folder>/*`` branch, attached, clean).
+    acceptance perform (sole ``<plan>/*`` branch, attached, clean).
     Reconciliation needs one fact more: the fast-forward at the end runs *in* the
     source worktree, so a branch without one cannot be advanced without rewriting
     a ref by hand.
@@ -106,7 +106,7 @@ def _require_source(cfg: Config, main: Path) -> tuple[str, str, Path]:
         main, cfg.tasks_name, cfg.git_excludes, operation="reconcile")
     if worktree is None:
         raise AssentError(
-            f"task folder {cfg.tasks_name} has no fixed source worktree; "
+            f"plan {cfg.tasks_name} has no fixed source worktree; "
             "reconciliation fast-forwards the source branch inside its own "
             "worktree and never rewrites a branch ref by hand")
     return branch, tip, worktree
@@ -130,7 +130,7 @@ def _shared_contract(managed: _Managed, worktree: Path,
             managed.main, worktree, manifest=manifest)
         if contract.settled:
             shared_paths.require_directory_link_agreement(
-                managed.main, worktree, contract, folder=managed.folder)
+                managed.main, worktree, contract, plan_name=managed.plan)
     except AssentError as e:
         print(f"{label}: refused, {e}. Nothing was created.")
         return None
@@ -237,7 +237,7 @@ def _fast_forward_source(cfg: Config, managed: _Managed, merge_commit: str,
     run (advance nothing).  Anything else is independent source movement, so the
     reconciliation worktree, branch, and every human edit are preserved.
     """
-    label = f"reconcile continue {managed.folder}"
+    label = f"reconcile continue {managed.plan}"
     if source_tip == merge_commit:
         print(f"{label}: source branch {source_branch} was already "
               "fast-forwarded by an earlier interrupted run; not moved again.")
@@ -255,7 +255,7 @@ def _fast_forward_source(cfg: Config, managed: _Managed, merge_commit: str,
               f"independently to {source_tip} (the reconciliation merges "
               f"{source_parent}). The reconciliation worktree "
               f"{managed.path}, its branch, and every edit were preserved; "
-              f"run `assent reconcile --abort {managed.folder}` and start "
+              f"run `assent reconcile --abort {managed.plan}` and start "
               "again once the source is settled.")
         return 1
 
@@ -273,15 +273,15 @@ def _report_target_drift(managed: _Managed, captured: str,
         return
     print(f"  note: {target_branch} advanced from {captured} to {current} "
           "after this reconciliation started. The captured merge was not "
-          f"rewritten; run `assent verify {managed.folder}` against the "
+          f"rewritten; run `assent verify {managed.plan}` against the "
           "current target, which stays authoritative.")
 
 
 def _batch_source_is_current(main: Path,
                              source: verification.BatchSource) -> bool:
-    """True while the batch receipt's recorded identity for one folder holds."""
+    """True while the batch receipt's recorded identity for one plan holds."""
     try:
-        branch = gitops.unique_folder_branch(main, source.folder)
+        branch = gitops.unique_plan_branch(main, source.plan)
     except AssentError:
         return False  # an ambiguous branch set is no longer a proven identity
     return (branch is not None
@@ -297,7 +297,7 @@ def _invalidate_derived_receipts(cfg: Config, main: Path) -> None:
     existed.  The batch receipt is all-or-nothing by construction, so any one
     recorded source identity that is no longer current expires the whole file.
     """
-    if verification.invalidate_folder_receipt(cfg):
+    if verification.invalidate_plan_receipt(cfg):
         print("  stale verification receipt deleted: "
               f"{verification.receipt_path(cfg)}")
 
@@ -312,7 +312,7 @@ def _invalidate_derived_receipts(cfg: Config, main: Path) -> None:
         print(f"  note: the batch verification receipt {batch_path} cannot be "
               f"read ({e}); it was left in place for inspection")
         return
-    drifted = [source.folder for source in receipt.sources
+    drifted = [source.plan for source in receipt.sources
                if not _batch_source_is_current(main, source)]
     if drifted:
         verification.invalidate_batch_receipt(cfg.assent_dir)
@@ -324,28 +324,28 @@ def _invalidate_derived_receipts(cfg: Config, main: Path) -> None:
 def _finish(cfg: Config, managed: _Managed, source_branch: str,
             merge_commit: str) -> None:
     """Report the resolved source, drop stale receipts, and stop there."""
-    folder = managed.folder
-    print(f"reconcile continue {folder}: done. The resolved source is "
+    plan_name = managed.plan
+    print(f"reconcile continue {plan_name}: done. The resolved source is "
           f"{source_branch} ({merge_commit}); the integration target was not "
           "touched.")
     _invalidate_derived_receipts(cfg, managed.main)
-    print(f"reconcile continue {folder}: no verification has run -- neither "
+    print(f"reconcile continue {plan_name}: no verification has run -- neither "
           "the focused task tests nor the complete verification were executed "
           "here.")
-    print(f"Run `assent verify {folder}` when you want the complete "
+    print(f"Run `assent verify {plan_name}` when you want the complete "
           "verification of the resolved source against the current target (the "
-          f"expensive step), and `assent accept {folder}` afterwards as the "
+          f"expensive step), and `assent accept {plan_name}` afterwards as the "
           "explicit approval that integrates it.")
 
 
 def _is_expected_automatic_merge(managed: _Managed, commit: str,
                                  source_tip: str, target_tip: str) -> bool:
-    """Recognize only this folder's exact source-first reconcile merge."""
+    """Recognize only this plan's exact source-first reconcile merge."""
     try:
         return (gitops.commit_parents(managed.main, commit)
                 == (source_tip, target_tip)
                 and gitops.commit_message(managed.main, commit).strip()
-                == reconcile_commit_message(managed.folder).strip())
+                == reconcile_commit_message(managed.plan).strip())
     except AssentError:
         return False
 
@@ -503,14 +503,14 @@ def automatic_reconcile_continue_locked(
 
 def _start(cfg: Config) -> int:
     """Prepare a reconciliation worktree holding the real conflict."""
-    folder = cfg.tasks_name
-    label = f"reconcile start {folder}"
+    plan_name = cfg.tasks_name
+    label = f"reconcile start {plan_name}"
 
     plan = Plan.parse(cfg.tasks_dir)
     unfinished = [f"{task.id}={task.status}" for task in plan.tasks
                   if task.status not in COMPLETE_STATUSES]
     if unfinished:
-        print(f"{label}: refused, the folder is not finished "
+        print(f"{label}: refused, the plan is not finished "
               f"({', '.join(unfinished)}); every task must be DONE or SKIP")
         return 1
 
@@ -541,8 +541,8 @@ def _start(cfg: Config) -> int:
         if gitops.branch_exists(managed.main, managed.branch):
             print(f"  branch: {managed.branch} "
                   f"({gitops.branch_tip(managed.main, managed.branch)[:12]})")
-        print(f"Run `assent reconcile --continue {folder}` to finish it, or "
-              f"`assent reconcile --abort {folder}` to discard it.")
+        print(f"Run `assent reconcile --continue {plan_name}` to finish it, or "
+              f"`assent reconcile --abort {plan_name}` to discard it.")
         return 1
 
     # Classification and provisioning share the manifest lock.  A concurrent
@@ -567,7 +567,7 @@ def _start(cfg: Config) -> int:
     except AssentError as e:
         raise AssentError(
             f"{e}. The reconciliation worktree {managed.path} was kept; run "
-            f"`assent reconcile --abort {folder}` to discard it") from e
+            f"`assent reconcile --abort {plan_name}` to discard it") from e
     for relative in created:
         print(f"  shared path provisioned: {relative}")
     try:
@@ -575,7 +575,7 @@ def _start(cfg: Config) -> int:
     except AssentError as e:
         raise AssentError(
             f"{e}. The reconciliation worktree {managed.path} was kept; run "
-            f"`assent reconcile --abort {folder}` to discard it") from e
+            f"`assent reconcile --abort {plan_name}` to discard it") from e
 
     if outcome.ok:
         # An automatic merge is not a reconciliation: undo it and take the
@@ -598,7 +598,7 @@ def _start(cfg: Config) -> int:
     for path in outcome.conflicts:
         print(f"    - {path}")
     print(f"Edit only these files, then run `assent reconcile --continue "
-          f"{folder}`; `assent reconcile --abort {folder}` discards the attempt.")
+          f"{plan_name}`; `assent reconcile --abort {plan_name}` discards the attempt.")
     return 0
 
 
@@ -611,11 +611,11 @@ def _continue_without_worktree(cfg: Config, managed: _Managed,
     already in the source (cleanup was all that remained), or the source still
     sits on that merge's first parent and the fast-forward is what was missed.
     """
-    label = f"reconcile continue {managed.folder}"
+    label = f"reconcile continue {managed.plan}"
     if not gitops.branch_exists(managed.main, managed.branch):
         print(f"{label}: refused, no reconciliation is in progress "
               f"(no {managed.path} and no {managed.branch}). Run "
-              f"`assent reconcile {managed.folder}` to start one.")
+              f"`assent reconcile {managed.plan}` to start one.")
         return 1
 
     tip = gitops.branch_tip(managed.main, managed.branch)
@@ -629,7 +629,7 @@ def _continue_without_worktree(cfg: Config, managed: _Managed,
     parents = gitops.commit_parents(managed.main, tip)
     if (len(parents) == 2
             and gitops.commit_message(managed.main, tip).strip()
-            == reconcile_commit_message(managed.folder).strip()):
+            == reconcile_commit_message(managed.plan).strip()):
         result = _fast_forward_source(
             cfg, managed, tip, parents[0], source_branch, source_tip,
             source_worktree)
@@ -645,8 +645,8 @@ def _continue_without_worktree(cfg: Config, managed: _Managed,
 
 def _continue(cfg: Config) -> int:
     """Turn the human's resolution into the merge commit and advance the source."""
-    folder = cfg.tasks_name
-    label = f"reconcile continue {folder}"
+    plan_name = cfg.tasks_name
+    label = f"reconcile continue {plan_name}"
 
     managed = _managed(cfg)
     target_branch = gitops.require_current_branch(managed.main)
@@ -664,7 +664,7 @@ def _continue(cfg: Config) -> int:
         contract = shared_paths.classify(managed.main, source_worktree)
         if contract.settled:
             shared_paths.require_directory_link_agreement(
-                managed.main, source_worktree, contract, folder=folder)
+                managed.main, source_worktree, contract, plan_name=plan_name)
     except AssentError as e:
         print(f"{label}: refused, {e}. The reconciliation worktree "
               f"{managed.path} and every edit were preserved.")
@@ -717,7 +717,7 @@ def _continue(cfg: Config) -> int:
                   f"{managed.path} and run continue again.")
             return 1
         merge_commit = gitops.commit_merge(
-            managed.path, reconcile_commit_message(folder))
+            managed.path, reconcile_commit_message(plan_name))
         parents = gitops.commit_parents(managed.path, merge_commit)
         if parents != (head, pending):
             raise AssentError(
@@ -730,11 +730,11 @@ def _continue(cfg: Config) -> int:
         parents = gitops.commit_parents(managed.path, head)
         if (len(parents) != 2
                 or gitops.commit_message(managed.path, "HEAD").strip()
-                != reconcile_commit_message(folder).strip()):
+                != reconcile_commit_message(plan_name).strip()):
             print(f"{label}: refused, no merge is in progress in "
                   f"{managed.path} and its HEAD ({head[:12]}) is not a "
                   f"reconciliation merge. Run `assent reconcile --abort "
-                  f"{folder}` and start again.")
+                  f"{plan_name}` and start again.")
             return 1
         if not gitops.working_tree_status(managed.path).is_clean:
             print(f"{label}: refused, the reconciliation merge was already "
@@ -757,8 +757,8 @@ def _continue(cfg: Config) -> int:
 
 def _abort(cfg: Config) -> int:
     """Discard only the managed merge, worktree, and temporary branch."""
-    folder = cfg.tasks_name
-    label = f"reconcile abort {folder}"
+    plan_name = cfg.tasks_name
+    label = f"reconcile abort {plan_name}"
     managed = _managed(cfg)
 
     if not managed.path.exists() and not gitops.branch_exists(
@@ -811,21 +811,21 @@ def _abort(cfg: Config) -> int:
 
 
 def _run(cfg: Config, operation: str, body) -> int:
-    """Hold the integration lock then the folder lock for one invocation.
+    """Hold the integration lock then the plan lock for one invocation.
 
     The lock order matches accept's and must stay fixed.  Both locks are released
     when the call returns, so a human edits the conflict with no assent lock held.
     """
-    folder = cfg.tasks_name
+    plan_name = cfg.tasks_name
     try:
         with hold_integration_lock(cfg.assent_dir):
-            with hold_lock(cfg.tasks_dir, folder):
+            with hold_lock(cfg.tasks_dir, plan_name):
                 return body(cfg)
     except LockBusy as e:
-        print(f"reconcile {operation} {folder}: refused ({e})")
+        print(f"reconcile {operation} {plan_name}: refused ({e})")
         return 1
     except AssentError as e:
-        print(f"reconcile {operation} {folder}: failed ({e})")
+        print(f"reconcile {operation} {plan_name}: failed ({e})")
         return 1
 
 

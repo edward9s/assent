@@ -1,4 +1,4 @@
-"""Unattended per-folder integration verification and its derived receipt."""
+"""Unattended per-plan integration verification and its derived receipt."""
 from __future__ import annotations
 
 import contextlib
@@ -15,13 +15,13 @@ from unittest import mock
 
 from assent import AssentError, pathops, shared_paths
 from assent.config import load_config
-from assent.folder_verification import (RECEIPT_NAME, RECEIPT_VERSION,
+from assent.plan_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         VerificationReceipt, read_receipt,
                                         receipt_matches_current_candidate,
                                         receipt_path, receipt_report_lines,
                                         write_receipt)
-from assent.verification import verify_folder
-from assent.gitops import (branch_tip, commit_of, folder_branches, tree_of,
+from assent.verification import verify_plan
+from assent.gitops import (branch_tip, commit_of, plan_branches, tree_of,
                            working_tree_status)
 from assent.verification_common import (ProvisionedLink, _require_no_overlap,
                                         provisioned_candidate_links, summary,
@@ -214,7 +214,7 @@ class VerificationRepositoryCase(unittest.TestCase):
         _git(self.root, "commit", "-m", "invalid verifier output")
 
     def _temporary_resources(self) -> tuple[list[str], list[Path]]:
-        branches = folder_branches(self.root, "assent-integration")
+        branches = plan_branches(self.root, "assent-integration")
         container = self.parent / f"{self.root.name}.integration"
         paths = list(container.iterdir()) if container.exists() else []
         return branches, paths
@@ -273,7 +273,7 @@ class TestVerificationRun(VerificationRepositoryCase):
         target_before = commit_of(self.root, "trunk")
         source_before = branch_tip(self.root, "plan測試/run")
 
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
 
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
         cwd, parents = self.observed.read_text(encoding="utf-8").splitlines()
@@ -298,7 +298,7 @@ class TestVerificationRun(VerificationRepositoryCase):
             "AssertionError: expected failure diagnosis\x00")
         self._commit_target_verifier(
             exit_code=7, output_size=5000, stderr=traceback)
-        self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertEqual(verify_plan(self.cfg), 1)
         receipt = read_receipt(self.tasks_dir / RECEIPT_NAME, self.root)
         self.assertEqual(receipt.status, "FAILED")
         self.assertEqual(receipt.exit_code, 7)
@@ -315,11 +315,11 @@ class TestVerificationRun(VerificationRepositoryCase):
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
         self.assertEqual(self._temporary_resources(), ([], []))
 
-    def test_non_ascii_verifier_output_survives_folder_failure_summary(self):
+    def test_non_ascii_verifier_output_survives_plan_failure_summary(self):
         self._commit_target_verifier(
             exit_code=7, stderr="繁體中文資料錯誤")
 
-        self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertEqual(verify_plan(self.cfg), 1)
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertIn("繁體中文資料錯誤", receipt.failure_summary)
         self.assertNotIn("\ufffd", receipt.failure_summary)
@@ -327,7 +327,7 @@ class TestVerificationRun(VerificationRepositoryCase):
     def test_invalid_verifier_output_writes_bounded_failure_evidence(self):
         self._commit_raw_verifier(exit_code=7)
 
-        self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertEqual(verify_plan(self.cfg), 1)
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "FAILED")
         self.assertEqual(receipt.exit_code, 7)
@@ -343,7 +343,7 @@ class TestVerificationRun(VerificationRepositoryCase):
     def test_zero_exit_with_invalid_verifier_output_cannot_pass(self):
         self._commit_raw_verifier(exit_code=0)
 
-        self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertEqual(verify_plan(self.cfg), 1)
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "FAILED")
         self.assertEqual(receipt.exit_code, 1)
@@ -376,7 +376,7 @@ class TestVerificationRun(VerificationRepositoryCase):
         _git(self.root, "add", "README.md")
         _git(self.root, "commit", "-m", "target conflict")
 
-        self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertEqual(verify_plan(self.cfg), 1)
 
         self.assertFalse(self.counter.exists())
         receipt = read_receipt(self.tasks_dir / RECEIPT_NAME, self.root)
@@ -385,13 +385,13 @@ class TestVerificationRun(VerificationRepositoryCase):
         self.assertEqual(self._temporary_resources(), ([], []))
 
     def test_incomplete_plan_refuses_before_candidate_and_invalidates_old_receipt(self):
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
         task = self.tasks_dir / "t001_complete.e.toml"
         task.write_text(
             task.read_text(encoding="utf-8").replace(
                 'status = "DONE"', 'status = "BLOCKED"'),
             encoding="utf-8")
-        self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertEqual(verify_plan(self.cfg), 1)
         self.assertFalse((self.tasks_dir / RECEIPT_NAME).exists())
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
 
@@ -399,14 +399,14 @@ class TestVerificationRun(VerificationRepositoryCase):
         with mock.patch("assent.verification_common.subprocess.run",
                         side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
-                verify_folder(self.cfg)
+                verify_plan(self.cfg)
         self.assertFalse((self.tasks_dir / RECEIPT_NAME).exists())
         self.assertEqual(self._temporary_resources(), ([], []))
 
     def test_deleted_receipt_is_rebuilt(self):
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
         (self.tasks_dir / RECEIPT_NAME).unlink()
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "2")
 
 
@@ -420,7 +420,7 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
     def _verify(self) -> tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = verify_folder(self.cfg)
+            code = verify_plan(self.cfg)
         return code, output.getvalue()
 
     def test_archived_upstream_needs_no_source_and_keeps_the_receipt_fresh(self):
@@ -432,7 +432,7 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
             'scope = ["result.txt"]\nverify = "python --version"\n'
             'goal = "done"\nacceptance = "verified"\n',
             encoding="utf-8")
-        (self.tasks_dir / "_folder.toml").write_text(
+        (self.tasks_dir / "_plan_deps.toml").write_text(
             'after = ["base"]\nbase = "base"\n', encoding="utf-8")
         self._commit_assent("declare a live upstream")
 
@@ -448,7 +448,7 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
         shutil.rmtree(upstream)
         (self.assent_dir / "_archived.toml").write_text(
             "[[archived]]\n"
-            'folder = "base"\n'
+            'plan = "base"\n'
             'archived_at = "2026-01-01T00:00:00+00:00"\n',
             encoding="utf-8")
         self._commit_assent("archive the upstream")
@@ -461,17 +461,17 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
         self.assertTrue(receipt_matches_current_candidate(self.cfg))
 
     def test_declared_base_allows_other_unaccepted_after_upstream(self):
-        for folder in ("A", "B"):
-            upstream = self.assent_dir / folder
+        for plan_name in ("A", "B"):
+            upstream = self.assent_dir / plan_name
             upstream.mkdir()
-            (upstream / f"t001_{folder.lower()}.e.toml").write_text(
-                f'title = "{folder}"\n'
+            (upstream / f"t001_{plan_name.lower()}.e.toml").write_text(
+                f'title = "{plan_name}"\n'
                 'deps = []\nmodel = "core"\nstatus = "DONE"\n'
-                f'scope = ["{folder.lower()}.txt"]\n'
+                f'scope = ["{plan_name.lower()}.txt"]\n'
                 'verify = "python --version"\n'
                 'goal = "done"\nacceptance = "verified"\n',
                 encoding="utf-8")
-        (self.tasks_dir / "_folder.toml").write_text(
+        (self.tasks_dir / "_plan_deps.toml").write_text(
             'after = ["A", "B"]\nbase = "A"\n', encoding="utf-8")
         self._commit_assent("declare two live upstreams with base A")
 
@@ -499,17 +499,17 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
         self.assertNotIn("stale stack", output)
 
     def test_multiple_unaccepted_after_upstreams_without_base_are_allowed(self):
-        for folder in ("A", "B"):
-            upstream = self.assent_dir / folder
+        for plan_name in ("A", "B"):
+            upstream = self.assent_dir / plan_name
             upstream.mkdir()
-            (upstream / f"t001_{folder.lower()}.e.toml").write_text(
-                f'title = "{folder}"\n'
+            (upstream / f"t001_{plan_name.lower()}.e.toml").write_text(
+                f'title = "{plan_name}"\n'
                 'deps = []\nmodel = "core"\nstatus = "DONE"\n'
-                f'scope = ["{folder.lower()}.txt"]\n'
+                f'scope = ["{plan_name.lower()}.txt"]\n'
                 'verify = "python --version"\n'
                 'goal = "done"\nacceptance = "verified"\n',
                 encoding="utf-8")
-        (self.tasks_dir / "_folder.toml").write_text(
+        (self.tasks_dir / "_plan_deps.toml").write_text(
             'after = ["A", "B"]\n', encoding="utf-8")
         self._commit_assent("declare two ordering-only upstreams")
 
@@ -541,7 +541,7 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
 class TestReceiptMatching(VerificationRepositoryCase):
     def setUp(self) -> None:
         super().setUp()
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
 
     def test_source_and_verifier_changes_are_stale(self):
         self.assertTrue(receipt_matches_current_candidate(self.cfg))
@@ -568,7 +568,7 @@ class TestReceiptMatching(VerificationRepositoryCase):
 
 class TestReceiptParsing(VerificationRepositoryCase):
     def test_round_trip_and_unknown_partial_or_wrong_object_fail_closed(self):
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
         path = self.tasks_dir / RECEIPT_NAME
         receipt = read_receipt(path, self.root)
         copy = self.tasks_dir / "copy.toml"
@@ -605,8 +605,8 @@ class TestReceiptParsing(VerificationRepositoryCase):
             write_receipt(self.tasks_dir / "bad.toml", bad, self.root)
 
 
-class TestFolderConflictDiagnostic(VerificationRepositoryCase):
-    """A single folder that conflicts with the target is sent to reconcile."""
+class TestPlanConflictDiagnostic(VerificationRepositoryCase):
+    """A single plan that conflicts with the target is sent to reconcile."""
 
     def test_a_conflicting_source_names_reconcile_and_not_a_one_argument_rework(
             self) -> None:
@@ -620,7 +620,7 @@ class TestFolderConflictDiagnostic(VerificationRepositoryCase):
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = verify_folder(self.cfg)
+            code = verify_plan(self.cfg)
         text = output.getvalue()
 
         self.assertEqual(code, 1, text)
@@ -644,7 +644,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         assets = self._provision_link(self.source_worktree, "assets")
         self._commit_target_verifier(exit_code=0, probe=("pkg", "assets"))
 
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
 
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "PASSED")
@@ -664,7 +664,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         self._commit_target_verifier(
             exit_code=0, probe=("pkg",), absent=("ignored",))
 
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
 
         self.assertEqual(
             read_receipt(receipt_path(self.cfg), self.root).status, "PASSED")
@@ -720,7 +720,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
         pkg = self._provision_link(self.source_worktree, "pkg")
         self._commit_target_verifier(exit_code=3, probe=("pkg",))
 
-        self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertEqual(verify_plan(self.cfg), 1)
 
         self.assertEqual(
             read_receipt(receipt_path(self.cfg), self.root).status, "FAILED")
@@ -746,7 +746,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = verify_folder(self.cfg)
+            code = verify_plan(self.cfg)
         text = output.getvalue()
 
         self.assertEqual(code, 1, text)
@@ -777,7 +777,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
             exit_code=3, probe=("pkg",),
             stderr="dependency resolution failed for pkg/fl_chart")
 
-        self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertEqual(verify_plan(self.cfg), 1)
 
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "FAILED")
@@ -793,7 +793,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = verify_folder(self.cfg)
+            code = verify_plan(self.cfg)
 
         # The human provisioned pkg deliberately, so a target that has gone
         # missing is a refusal rather than a candidate quietly missing it.
@@ -836,7 +836,7 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
         self._commit_target_verifier(
             exit_code=0, read=("lib/l10n/arb/app_localizations.dart",))
 
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
 
         self.assertEqual(
             read_receipt(receipt_path(self.cfg), self.root).status, "PASSED")
@@ -856,7 +856,7 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
         # No hardlink twin and no symlink were prepared: the file is an
         # ordinary ignored file beside its tracked source.
         self.assertFalse(os.path.islink(part))
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
 
         self.assertEqual(
             read_receipt(receipt_path(self.cfg), self.root).status, "PASSED")
@@ -877,7 +877,7 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
         self._commit_target_verifier(
             exit_code=0, read=("lib/models/task.g.dart",),
             absent=("lib/.cache",))
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
         self.assertTrue((cache / "build.g.dart").is_file())
 
     def test_a_windows_separator_path_in_a_nested_ignored_tree_is_diagnosed(self):
@@ -890,7 +890,7 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
             exit_code=2,
             stderr=r"FileNotFoundError: lib\.cache\build.g.dart is missing")
 
-        self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertEqual(verify_plan(self.cfg), 1)
 
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertIn("Ignored input diagnosis: lib/.cache/",
@@ -968,7 +968,7 @@ class TestSharedPathGate(VerificationRepositoryCase):
         self._commit_target_verifier(exit_code=0, stderr="gate")
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            self.assertEqual(verify_folder(self.cfg), 1)
+            self.assertEqual(verify_plan(self.cfg), 1)
         self.assertIn("UNKNOWN", output.getvalue())
         self.assertIn("assent shared-paths review", output.getvalue())
         # No verifier ran and no receipt was written.
@@ -982,7 +982,7 @@ class TestSharedPathGate(VerificationRepositoryCase):
                                 self.root, ("pkg",)))
         self._commit_target_verifier(exit_code=0, probe=("pkg",))
 
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
 
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "PASSED")
@@ -1010,7 +1010,7 @@ class TestSharedPathGate(VerificationRepositoryCase):
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            self.assertEqual(verify_folder(self.cfg), 1)
+            self.assertEqual(verify_plan(self.cfg), 1)
 
         diagnostic = output.getvalue()
         self.assertIn("outside its active REVIEWED-NONE profile", diagnostic)
@@ -1028,7 +1028,7 @@ class TestSharedPathGate(VerificationRepositoryCase):
         pathops.detach_directory_link(self.source_worktree / "pkg")
         self._commit_target_verifier(exit_code=0, probe=("pkg",))
 
-        self.assertEqual(verify_folder(self.cfg), 0)
+        self.assertEqual(verify_plan(self.cfg), 0)
         self.assertTrue(pathops.is_link(self.source_worktree / "pkg"))
 
     def test_a_target_changing_during_the_verifier_cannot_pass(self):
@@ -1049,7 +1049,7 @@ class TestSharedPathGate(VerificationRepositoryCase):
         _git(self.root, "add", ".assent/verify.py")
         _git(self.root, "commit", "-m", "verifier that disturbs a shared target")
 
-        self.assertEqual(verify_folder(self.cfg), 1)
+        self.assertEqual(verify_plan(self.cfg), 1)
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "FAILED")
         self.assertIn("shared input changed", receipt.failure_summary)

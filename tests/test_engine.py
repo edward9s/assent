@@ -208,7 +208,7 @@ class TestFocusedVerification(GlobalContractsMixin, EngineTestCase):
         self.assertIn(f"  verify: {second}\n  verify failed (exit 1)", text)
         self.assertIn(f"  verify: {first}\n  verify passed (exit 0)", text)
 
-    def test_focus_refuses_busy_folder_and_no_eligible_command(self):
+    def test_focus_refuses_busy_plan_and_no_eligible_command(self):
         path = self.write_task(1, status="SKIP")
         self.write_task(2, slug="waiting", status="TODO")
         cfg = self.build()
@@ -232,14 +232,14 @@ class TestFocusedVerification(GlobalContractsMixin, EngineTestCase):
 
 
 class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
-    def test_unfinished_folder_prerequisite_refuses_before_lock(self):
+    def test_unfinished_plan_prerequisite_refuses_before_lock(self):
         self.write_task(1)
         base = self.root / ".assent" / "base"
         base.mkdir()
         for index, status in enumerate(("TODO", "WIP", "BLOCKED", "DONE"), 1):
             (base / f"t{index:03d}_task.e.toml").write_text(
                 task_text(status=status), encoding="utf-8")
-        (self.plan_dir / "_folder.toml").write_text(
+        (self.plan_dir / "_plan_deps.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
         cfg = self.build()
         self.commit_all()
@@ -253,19 +253,19 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
                     result = engine.run(cfg, adapter=adapter, **options)
                 self.assertEqual(result, 1)
                 self.assertIn(
-                    "Prerequisite folder base still has 3 unfinished task(s)"
+                    "Prerequisite plan base still has 3 unfinished task(s)"
                     " (TODO 1, WIP 1, BLOCKED 1)", out.getvalue())
                 hold_lock.assert_not_called()
         self.assertEqual(adapter.calls, [])
 
-    def test_done_and_skip_folder_prerequisite_allows_run(self):
+    def test_done_and_skip_plan_prerequisite_allows_run(self):
         path = self.write_task(1)
         base = self.root / ".assent" / "base"
         base.mkdir()
         for index, status in enumerate(("DONE", "SKIP"), 1):
             (base / f"t{index:03d}_task.e.toml").write_text(
                 task_text(status=status), encoding="utf-8")
-        (self.plan_dir / "_folder.toml").write_text(
+        (self.plan_dir / "_plan_deps.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
         cfg = self.build()
         self.commit_all()
@@ -287,26 +287,26 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
 
     def test_only_declared_base_must_be_ancestor_of_downstream(self):
         path = self.write_task(1)
-        for folder in ("A", "B"):
-            upstream = self.root / ".assent" / folder
+        for plan_name in ("A", "B"):
+            upstream = self.root / ".assent" / plan_name
             upstream.mkdir()
             (upstream / "t001_task.e.toml").write_text(
                 task_text(status="DONE"), encoding="utf-8")
-        (self.plan_dir / "_folder.toml").write_text(
+        (self.plan_dir / "_plan_deps.toml").write_text(
             'after = ["A", "B"]\nbase = "A"\n', encoding="utf-8")
         cfg = self.build()
         self.commit_all()
-        for folder in ("A", "B"):
-            source = gitops.worktree_path(self.root, folder)
-            self._git("worktree", "add", "-b", f"{folder}/run",
+        for plan_name in ("A", "B"):
+            source = gitops.worktree_path(self.root, plan_name)
+            self._git("worktree", "add", "-b", f"{plan_name}/run",
                       str(source), "HEAD")
-            (source / f"{folder}.txt").write_text(
-                f"{folder}\n", encoding="utf-8")
+            (source / f"{plan_name}.txt").write_text(
+                f"{plan_name}\n", encoding="utf-8")
             subprocess.run(
                 ["git", "add", "-A"], cwd=source,
                 capture_output=True, encoding="utf-8", check=True)
             subprocess.run(
-                ["git", "commit", "-m", f"finish {folder}"], cwd=source,
+                ["git", "commit", "-m", f"finish {plan_name}"], cwd=source,
                 capture_output=True, encoding="utf-8", check=True)
         adapter = ScriptedAdapter([self.ai_done(path, {"src/result.py": "ok"})])
         out = io.StringIO()
@@ -319,26 +319,26 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
 
     def test_ordering_only_prerequisites_do_not_supply_a_stack_base(self):
         path = self.write_task(1)
-        for folder in ("A", "B"):
-            upstream = self.root / ".assent" / folder
+        for plan_name in ("A", "B"):
+            upstream = self.root / ".assent" / plan_name
             upstream.mkdir()
             (upstream / "t001_task.e.toml").write_text(
                 task_text(status="DONE"), encoding="utf-8")
-        (self.plan_dir / "_folder.toml").write_text(
+        (self.plan_dir / "_plan_deps.toml").write_text(
             'after = ["A", "B"]\n', encoding="utf-8")
         cfg = self.build()
         self.commit_all()
-        for folder in ("A", "B"):
-            source = gitops.worktree_path(self.root, folder)
-            self._git("worktree", "add", "-b", f"{folder}/run",
+        for plan_name in ("A", "B"):
+            source = gitops.worktree_path(self.root, plan_name)
+            self._git("worktree", "add", "-b", f"{plan_name}/run",
                       str(source), "HEAD")
-            (source / f"{folder}.txt").write_text(
-                f"{folder}\n", encoding="utf-8")
+            (source / f"{plan_name}.txt").write_text(
+                f"{plan_name}\n", encoding="utf-8")
             subprocess.run(
                 ["git", "add", "-A"], cwd=source,
                 capture_output=True, encoding="utf-8", check=True)
             subprocess.run(
-                ["git", "commit", "-m", f"finish {folder}"], cwd=source,
+                ["git", "commit", "-m", f"finish {plan_name}"], cwd=source,
                 capture_output=True, encoding="utf-8", check=True)
         adapter = ScriptedAdapter([self.ai_done(path, {"src/result.py": "ok"})])
         out = io.StringIO()
@@ -349,17 +349,17 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertIn("Stacked upstream: none", out.getvalue())
 
-    def test_archived_folder_prerequisite_creates_worktree_without_a_source(self):
+    def test_archived_plan_prerequisite_creates_worktree_without_a_source(self):
         # Incident regression: the downstream's after named an upstream that had
         # already been accepted, cleaned and archived, so no base/* branch was
         # left to snapshot and worktree creation died on "has no base/* source
         # branch".  Roster membership alone must resolve it.
         path = self.write_task(1)
-        (self.plan_dir / "_folder.toml").write_text(
+        (self.plan_dir / "_plan_deps.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
         (self.root / ".assent" / "_archived.toml").write_text(
             "[[archived]]\n"
-            'folder = "base"\n'
+            'plan = "base"\n'
             'archived_at = "2026-01-01T00:00:00+00:00"\n',
             encoding="utf-8")
         cfg = self.build()
@@ -1059,7 +1059,7 @@ class TestReworkPromptSuffix(GlobalContractsMixin, EngineTestCase):
         self.assertNotIn("rejected by a human reviewer", prompt)
 
 
-class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
+class TestAutoFixPlanReviewGate(GlobalContractsMixin, EngineTestCase):
     def build_review(self, retry=1, rounds=1, model="core"):
         # The merged reviewer-fixer loop walks this list position by position,
         # so a case needing more than one reviewer session configures more than
@@ -1639,7 +1639,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
         contexts = sorted(auto_fix.REVIEW_CONTEXTS)
         stages = sorted(auto_fix.REVIEW_STAGES)
         self.assertEqual(contexts, [
-            "blocked_adjudication", "completed_folder",
+            "blocked_adjudication", "completed_plan",
             "selection_verification",
         ])
         self.assertEqual(stages, ["initial", "recheck"])
@@ -1690,7 +1690,7 @@ class TestAutoFixFolderReviewGate(GlobalContractsMixin, EngineTestCase):
 
 
 
-    def test_incomplete_limited_and_all_skip_folders_spend_no_review_tokens(self):
+    def test_incomplete_limited_and_all_skip_plans_spend_no_review_tokens(self):
         first = self.write_task(1)
         second = self.write_task(2, deps=("t001",))
         cfg = self.build_review()

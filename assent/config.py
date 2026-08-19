@@ -1,4 +1,4 @@
-"""Loading assent.toml, and enumerating and validating task folders.
+"""Loading assent.toml, and enumerating and validating plans.
 
 - Settings are layered: built-in defaults, then the user-wide
   ~/.assent/assent.toml plus its optional adapter.toml, then the optional
@@ -7,7 +7,7 @@
 - The config path the caller supplies stays the project locator: the project
   root is the parent of the .assent directory that path lives in, whether or
   not the project file itself exists.
-- The task folder name is supplied by the caller; the git branch prefix is
+- The plan name is supplied by the caller; the git branch prefix is
   that name plus "/".
 - Fields not supplied fall back to defaults; an unknown top-level key is
   always an error (so a typo cannot fail silently).
@@ -49,12 +49,12 @@ _ADAPTER_NAMES = {"claude", "codex", "antigravity"}
 # this table is not vendor knowledge embedded in adapter code.
 _EFFORT_BASELINE = {"heavy": "high", "normal": "medium", "slight": "low"}
 
-# A task folder name becomes the first component of every Assent branch name.
+# A plan name becomes the first component of every Assent branch name.
 # Keep this contract local and explicit instead of relying on a later Git command:
 # the name must also remain usable as a Windows directory name.
 _GIT_REF_FORBIDDEN_CHARS = frozenset("~^:?*[")
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|')
-_FOLDER_FORBIDDEN_CHARS = (
+_PLAN_FORBIDDEN_CHARS = (
     _GIT_REF_FORBIDDEN_CHARS | _WINDOWS_FORBIDDEN_CHARS | {"/", "\\"})
 _WINDOWS_RESERVED_DEVICE_NAMES = frozenset({
     "con", "prn", "aux", "nul",
@@ -63,7 +63,7 @@ _WINDOWS_RESERVED_DEVICE_NAMES = frozenset({
     # The superscript forms are also reserved device names on Windows.
     "com¹", "com²", "com³", "lpt¹", "lpt²", "lpt³",
 })
-_FOLDER_NAME_RULE = (
+_PLAN_NAME_RULE = (
     "must be non-empty, contain no whitespace, path separators, control characters, "
     "or Git-ref/Windows-forbidden characters, must not start with - or ., contain .. "
     "or @{, end with . or .lock, or use a reserved Windows device name; "
@@ -237,8 +237,8 @@ class ConfigSource:
 class Config:
     root: Path                     # Project root = parent of .assent
     assent_dir: Path               # .assent directory (= where the config file lives)
-    tasks_dir: Path                # Task folder (.assent/<tasks>)
-    tasks_name: str                # Task folder name (= git branch prefix stem)
+    tasks_dir: Path                # Plan directory (.assent/<tasks>)
+    tasks_name: str                # Plan name (= git branch prefix stem)
     stall_minutes: int = 0         # 0 = watchdog disabled
     retry_per_task: int = 1
     quota_poll_minutes: int = 30
@@ -393,12 +393,12 @@ class Config:
 
     @property
     def auto_fix_state_rel(self) -> str:
-        """The folder-local, derived auto-fix review state."""
+        """The plan-local, derived auto-fix review state."""
         return self.git_rel(self.tasks_dir / "_auto_fix.toml")
 
     @property
     def workflow_state_rel(self) -> str:
-        """The folder-local, derived workflow execution cursor."""
+        """The plan-local, derived workflow execution cursor."""
         return self.git_rel(self.tasks_dir / "_workflow.toml")
 
     @property
@@ -669,10 +669,15 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
         if key == "task":
             entries.append(WorkflowTaskStep(role, resolved, adapters))
             continue
-        if resolved.produces_verdict and resolved.model is None:
+        # A plan or integration role answers for a whole unit, not for one task,
+        # so it has nothing to inherit a model from: an adapter only translates a
+        # tier it is given.  Requiring the model here keeps the omission a config
+        # error `check` reports rather than a silent inheritance from whichever
+        # task happened to sort first.
+        if resolved.model is None:
             raise AssentError(
-                f"Config {owner} verdict-producing role {role!r} must "
-                "state model; effort may use the adapter default")
+                f"Config {owner} role {role!r} must state model; "
+                "effort may use the adapter default")
         entries.append((role, adapters, resolved))
     if key == "task" and entries and not any(
             isinstance(entry, WorkflowTaskStep) for entry in entries):
@@ -966,9 +971,9 @@ def _effort_maps(section: dict, owner: str, guard: "_BlankGuard",
 
 
 def validate_tasks_name(tasks_name: str, owner: str) -> None:
-    """Validate a task folder name so it is safe to use as a git branch prefix.
+    """Validate a plan name so it is safe to use as a git branch prefix.
 
-    Public because folder-dependency parsing and receipt reading validate names
+    Public because plan-dependency parsing and receipt reading validate names
     this module never sees; ``owner`` names the caller's field so the refusal
     says which input was rejected.
     """
@@ -978,7 +983,7 @@ def validate_tasks_name(tasks_name: str, owner: str) -> None:
             not any(char.isspace() for char in tasks_name)
             and not any(ord(char) < 0x20 or ord(char) == 0x7F
                         for char in tasks_name)
-            and not any(char in _FOLDER_FORBIDDEN_CHARS for char in tasks_name)
+            and not any(char in _PLAN_FORBIDDEN_CHARS for char in tasks_name)
             and tasks_name[0] not in "-."
             and ".." not in tasks_name
             and "@{" not in tasks_name
@@ -988,8 +993,8 @@ def validate_tasks_name(tasks_name: str, owner: str) -> None:
             not in _WINDOWS_RESERVED_DEVICE_NAMES)
     if not valid:
         raise AssentError(
-            f"{owner} = {tasks_name!r} is not a valid task folder name"
-            f" ({_FOLDER_NAME_RULE})")
+            f"{owner} = {tasks_name!r} is not a valid plan name"
+            f" ({_PLAN_NAME_RULE})")
 
 
 def _read_layer(path: Path, label: str) -> dict:
@@ -1127,32 +1132,32 @@ def validate_config(path: str | Path) -> Path:
     return project_path.parent
 
 
-def list_task_folders(assent_dir: str | Path) -> list[str]:
-    """List task folders that contain a formal task file, sorted lexicographically."""
+def list_task_plans(assent_dir: str | Path) -> list[str]:
+    """List plans that contain a formal task file, sorted lexicographically."""
     assent_dir = Path(assent_dir)
     if not assent_dir.is_dir():
         return []
-    folders = []
+    plan_names = []
     for entry in assent_dir.iterdir():
         if (not entry.is_dir() or entry.name == "__pycache__"
                 or entry.name.startswith("_")):
             continue
         if any(child.is_file() and _TASK_FILE_RE.match(child.name)
                for child in entry.iterdir()):
-            validate_tasks_name(entry.name, "Live task folder")
-            folders.append(entry.name)
-    return sorted(folders)
+            validate_tasks_name(entry.name, "Live plan")
+            plan_names.append(entry.name)
+    return sorted(plan_names)
 
 
-def load_config(path: str | Path, folder: str) -> Config:
-    """Load the config and build derived paths from the caller-supplied task folder name."""
+def load_config(path: str | Path, plan_name: str) -> Config:
+    """Load the config and build derived paths from the caller-supplied plan name."""
     project_path, data, sources, provenance = _load_layers(path)
-    validate_tasks_name(folder, "Command-line task folder")
+    validate_tasks_name(plan_name, "Command-line plan")
 
     assent_dir = project_path.parent
     root = assent_dir.parent
 
-    tasks_name = folder
+    tasks_name = plan_name
 
     watchdog = _section(data, "watchdog")
     run = _section(data, "run")

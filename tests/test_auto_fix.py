@@ -130,7 +130,7 @@ class TestReviewRecord(unittest.TestCase):
         self.assertEqual(state.workflow_step_index, 1)
         self.assertEqual(state.current_finding_fingerprints,
                          (finding_fingerprint(self.finding),))
-        # A repaired round is never a settled folder: only an independent PASS
+        # A repaired round is never a settled plan: only an independent PASS
         # may be reused without another review.
         self.assertFalse(auto_fix_state_is_fresh(
             state, source_tree="1" * 40, task_plan_sha256="2" * 64,
@@ -552,7 +552,7 @@ class TestAutoFixState(unittest.TestCase):
             write_auto_fix_state(self.path, invalid)
         self.assertEqual(self.path.read_bytes(), before)
 
-    def test_state_path_is_folder_local(self):
+    def test_state_path_is_plan_local(self):
         self.assertEqual(auto_fix_state_path(self.root / ".assent" / "plan01"),
                          self.path)
 
@@ -602,7 +602,7 @@ class TestAutoFixState(unittest.TestCase):
         write_auto_fix_state(self.path, updated)
         self.assertEqual(read_auto_fix_state(self.path), updated)
 
-    def test_technical_debt_is_only_initial_completed_folder_evidence(self):
+    def test_technical_debt_is_only_initial_completed_plan_evidence(self):
         finding = ReviewFinding(
             "t001", "assent/auto_fix.py", "Interacting debt blocks safety",
             "The initial cumulative-diff review exposed the defect.",
@@ -740,34 +740,34 @@ class TestAutoFixState(unittest.TestCase):
         self.assertEqual(before.changed_paths(after), (
             "source:lib/model.g.dart",))
 
-    def test_review_surface_excludes_log_and_unrelated_folder(self):
+    def test_review_surface_excludes_log_and_unrelated_plan(self):
         source = self.root / "source"
         management = self.root / ".assent"
-        folder = management / "plan01"
+        plan_name = management / "plan01"
         unrelated = management / "plan02"
         source.mkdir()
-        folder.mkdir(parents=True)
+        plan_name.mkdir(parents=True)
         unrelated.mkdir()
-        task = folder / "t001_task.e.toml"
+        task = plan_name / "t001_task.e.toml"
         verifier = management / "verify.py"
         task.write_text('status = "DONE"\n', encoding="utf-8")
         verifier.write_text("before\n", encoding="utf-8")
         before = snapshot_project_surface(
-            source, management, tasks_dir=folder,
+            source, management, tasks_dir=plan_name,
             stable_management_files=(verifier,))
 
-        (folder / "_assent.log").write_text("runtime output\n", encoding="utf-8")
+        (plan_name / "_assent.log").write_text("runtime output\n", encoding="utf-8")
         (unrelated / "t001_task.r.toml").write_text(
             "parallel progress\n", encoding="utf-8")
         unchanged = snapshot_project_surface(
-            source, management, tasks_dir=folder,
+            source, management, tasks_dir=plan_name,
             stable_management_files=(verifier,))
         self.assertEqual(before.changed_paths(unchanged), ())
 
         task.write_text('status = "BLOCKED"\n', encoding="utf-8")
         verifier.write_text("after\n", encoding="utf-8")
         changed = snapshot_project_surface(
-            source, management, tasks_dir=folder,
+            source, management, tasks_dir=plan_name,
             stable_management_files=(verifier,))
         self.assertEqual(before.changed_paths(changed), (
             "management:plan01:t001_task.e.toml", "management:verify.py"))
@@ -775,14 +775,14 @@ class TestAutoFixState(unittest.TestCase):
     def test_review_surface_protects_exact_root_management_state(self):
         source = self.root / "source"
         management = self.root / ".assent"
-        folder = management / "plan01"
+        plan_name = management / "plan01"
         source.mkdir()
-        folder.mkdir(parents=True)
+        plan_name.mkdir(parents=True)
         protected = tuple(management / name for name in (
             "manifest.toml", "_batch_verification.toml", "_archived.toml",
             "_archive"))
         before = snapshot_project_surface(
-            source, management, tasks_dir=folder,
+            source, management, tasks_dir=plan_name,
             stable_management_files=protected)
 
         for path in protected:
@@ -792,7 +792,7 @@ class TestAutoFixState(unittest.TestCase):
             else:
                 path.write_text("mutated during review\n", encoding="utf-8")
         changed = snapshot_project_surface(
-            source, management, tasks_dir=folder,
+            source, management, tasks_dir=plan_name,
             stable_management_files=protected)
         self.assertEqual(before.changed_paths(changed), (
             "management:_archive",
@@ -805,18 +805,18 @@ class TestAutoFixState(unittest.TestCase):
     def test_review_surface_ignores_unselected_root_runtime_output(self):
         source = self.root / "source"
         management = self.root / ".assent"
-        folder = management / "plan01"
+        plan_name = management / "plan01"
         source.mkdir()
-        folder.mkdir(parents=True)
+        plan_name.mkdir(parents=True)
         protected = (management / "manifest.toml",)
         before = snapshot_project_surface(
-            source, management, tasks_dir=folder,
+            source, management, tasks_dir=plan_name,
             stable_management_files=protected)
 
         (management / "parallel-runtime.tmp").write_text(
             "unrelated scheduler output\n", encoding="utf-8")
         after = snapshot_project_surface(
-            source, management, tasks_dir=folder,
+            source, management, tasks_dir=plan_name,
             stable_management_files=protected)
         self.assertEqual(before.changed_paths(after), ())
 

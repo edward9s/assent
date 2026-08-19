@@ -15,7 +15,7 @@ from assent import AssentError, gitops, pathops
 from assent.config import load_config
 from assent.lockfile import hold_lock
 from assent.plan import read_entries
-from assent.reject import reject_folder
+from assent.reject import reject_plan
 from tests.link_support import make_directory_link, safe_rmtree
 
 
@@ -40,14 +40,14 @@ class TestReject(unittest.TestCase):
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "init")
 
-        self.folder = "plan01"
-        self.tasks_dir = self.root / ".assent" / self.folder
+        self.plan_name = "plan01"
+        self.tasks_dir = self.root / ".assent" / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.root / ".assent" / "assent.toml"
         self.config_path.write_text("", encoding="utf-8")
         (self.tasks_dir / "assent.lock").write_text(
-            'folder = "plan01"\n', encoding="utf-8")
-        self.cfg = load_config(self.config_path, self.folder)
+            'plan = "plan01"\n', encoding="utf-8")
+        self.cfg = load_config(self.config_path, self.plan_name)
         self.container = self.root.parent / f"{self.root.name}.worktrees"
         self.addCleanup(self._cleanup_worktrees)
 
@@ -79,12 +79,12 @@ class TestReject(unittest.TestCase):
     def _run_reject(self, confirm=lambda prompt: "y") -> tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = reject_folder(self.cfg, confirm=confirm)
+            code = reject_plan(self.cfg, confirm=confirm)
         return code, output.getvalue()
 
     def _worktree_branch(self, commit: bool = False) -> tuple[Path, str]:
-        worktree = gitops.ensure_worktree(self.root, self.folder)
-        branch = gitops.ensure_branch(worktree, f"{self.folder}/")
+        worktree = gitops.ensure_worktree(self.root, self.plan_name)
+        branch = gitops.ensure_branch(worktree, f"{self.plan_name}/")
         if commit:
             (worktree / "result.txt").write_text(branch, encoding="utf-8")
             gitops.commit_all(worktree, "finish result")
@@ -126,11 +126,11 @@ class TestReject(unittest.TestCase):
             for path in (self.root / directory).rglob("*")
             if path.is_file())
 
-    def _dependent_folder(self, name: str, status: str = "DONE", *,
+    def _dependent_plan(self, name: str, status: str = "DONE", *,
                           after: list[str] | None = None, lock: bool = True) -> Path:
-        folder = self.root / ".assent" / name
-        folder.mkdir(exist_ok=True)
-        (folder / "t001_task.e.toml").write_text(
+        plan_name = self.root / ".assent" / name
+        plan_name.mkdir(exist_ok=True)
+        (plan_name / "t001_task.e.toml").write_text(
             'title = "task"\n'
             'deps = []\n'
             'model = "lite"\n'
@@ -142,12 +142,12 @@ class TestReject(unittest.TestCase):
             encoding="utf-8")
         if after is not None:
             quoted = ", ".join(f'"{item}"' for item in after)
-            (folder / "_folder.toml").write_text(
+            (plan_name / "_plan_deps.toml").write_text(
                 f"after = [{quoted}]\n", encoding="utf-8")
         if lock:
-            (folder / "assent.lock").write_text(
-                f'folder = "{name}"\n', encoding="utf-8")
-        return folder
+            (plan_name / "assent.lock").write_text(
+                f'plan = "{name}"\n', encoding="utf-8")
+        return plan_name
 
     def _dependent_source(self, name: str, *, commit: bool = True) -> tuple[Path, str]:
         worktree = gitops.ensure_worktree(self.root, name)
@@ -159,7 +159,7 @@ class TestReject(unittest.TestCase):
         return worktree, branch
 
     def test_clean_module_does_not_expose_reject(self) -> None:
-        self.assertFalse(hasattr(clean, "reject_folder"))
+        self.assertFalse(hasattr(clean, "reject_plan"))
 
     def test_reject_removes_unmerged_state_and_resets_tasks(self) -> None:
         done = self._write_task(1, "DONE")
@@ -175,7 +175,7 @@ class TestReject(unittest.TestCase):
         self.assertFalse(worktree.exists())
         self.assertFalse(self.container.exists())
         self.assertEqual(gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"), [])
+            self.root, f"{self.plan_name}/"), [])
         # A branch without this prefix (the main branch) is unaffected.
         self.assertTrue(_git(self.root, "branch", "--show-current"))
         self.assertIn(tip, output)
@@ -202,7 +202,7 @@ class TestReject(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(worktree.exists())
         self.assertEqual(gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"), [])
+            self.root, f"{self.plan_name}/"), [])
         self.assertIn("uncommitted changes archived as a wip commit", output)
 
     def test_reject_detaches_main_tree_links_before_resetting_tasks(self) -> None:
@@ -214,7 +214,7 @@ class TestReject(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertFalse(worktree.exists())
         self.assertNotIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
         self.assertEqual(self._task_status(done), "TODO")
         self.assertEqual(self._target_inventory({
             "pkg": {"sentinel.txt": ""},
@@ -234,7 +234,7 @@ class TestReject(unittest.TestCase):
         self.assertIn("linked target content was not touched", output)
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
         self.assertEqual(self._task_status(done), "DONE")
         self.assertEqual(self._target_inventory({
             "pkg": {"sentinel.txt": ""},
@@ -264,7 +264,7 @@ class TestReject(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
         self.assertEqual(self._task_status(done), "DONE")
         self.assertIn("task files could not be parsed", output)
         self.assertIn("Git scene unchanged", output)
@@ -273,13 +273,13 @@ class TestReject(unittest.TestCase):
         done = self._write_task(1, "DONE")
         worktree, branch = self._worktree_branch(commit=True)
 
-        with hold_lock(self.tasks_dir, self.folder):
+        with hold_lock(self.tasks_dir, self.plan_name):
             code, output = self._run_reject()
 
         self.assertEqual(code, 1)
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
         self.assertEqual(self._task_status(done), "DONE")
         self.assertIn("reject aborted (a run is in progress)", output)
 
@@ -327,7 +327,7 @@ class TestReject(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
         self.assertEqual(self._task_status(done), "DONE")
         self.assertIn("cancelled", output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
@@ -344,7 +344,7 @@ class TestReject(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
         self.assertEqual(self._task_status(done), "DONE")
         self.assertIn("cancelled", output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
@@ -364,14 +364,14 @@ class TestReject(unittest.TestCase):
     def test_reject_unaccepted_dependent_defaults_to_refused(self) -> None:
         self._write_task(1, "DONE")
         worktree, branch = self._worktree_branch(commit=True)
-        self._dependent_folder("downstream", status="TODO", after=[self.folder])
+        self._dependent_plan("downstream", status="TODO", after=[self.plan_name])
 
         code, output = self._run_reject(confirm=lambda prompt: "n")
 
         self.assertEqual(code, 1)
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
         self.assertIn("downstream", output)
         self.assertIn("unfinished tasks: t001=TODO", output)
         self.assertIn("Two ways forward", output)
@@ -380,7 +380,7 @@ class TestReject(unittest.TestCase):
     def test_reject_unaccepted_dependent_confirmed_records_stranded(self) -> None:
         self._write_task(1, "DONE")
         worktree, branch = self._worktree_branch(commit=True)
-        self._dependent_folder("downstream", status="TODO", after=[self.folder])
+        self._dependent_plan("downstream", status="TODO", after=[self.plan_name])
 
         code, output = self._run_reject()
 
@@ -395,8 +395,8 @@ class TestReject(unittest.TestCase):
     def test_reject_dependent_lock_busy_refuses_without_prompt(self) -> None:
         self._write_task(1, "DONE")
         worktree, branch = self._worktree_branch(commit=True)
-        dependent_dir = self._dependent_folder(
-            "downstream", status="TODO", after=[self.folder])
+        dependent_dir = self._dependent_plan(
+            "downstream", status="TODO", after=[self.plan_name])
 
         def _fail_confirm(prompt: str) -> str:
             raise AssertionError("confirm must not be asked when a dependent is busy")
@@ -407,15 +407,15 @@ class TestReject(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
         self.assertIn("downstream", output)
-        self.assertIn("its task folder is being changed by another run", output)
+        self.assertIn("its plan is being changed by another run", output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
 
     def test_reject_accepted_dependent_does_not_trigger_guard(self) -> None:
         self._write_task(1, "DONE")
         worktree, branch = self._worktree_branch(commit=True)
-        self._dependent_folder("downstream", status="DONE", after=[self.folder])
+        self._dependent_plan("downstream", status="DONE", after=[self.plan_name])
         _dependent, dependent_branch = self._dependent_source("downstream")
         _git(self.root, "merge", "--no-ff", "-m", "accept downstream", dependent_branch)
 

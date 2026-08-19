@@ -13,7 +13,7 @@ from unittest import mock
 
 from assent import AssentError
 from assent.config import (BUILTIN_LAYER, PROJECT_LAYER, USER_LAYER,
-                           _ADAPTER_NAMES, list_task_folders, load_config,
+                           _ADAPTER_NAMES, list_task_plans, load_config,
                            validate_config, WorkflowActionStep)
 from assent.init import init as run_init
 from assent.user_home import ASSENT_HOME_ENV, user_assent_dir, user_config_path
@@ -21,7 +21,7 @@ from assent.user_home import ASSENT_HOME_ENV, user_assent_dir, user_config_path
 _MINIMAL = ""
 _WORKFLOW_ROLES = '''
 [abilities.review]
-prompt = "Review the folder."
+prompt = "Review the plan."
 writes = false
 produces_verdict = true
 [abilities.fix]
@@ -36,12 +36,14 @@ model = "prime"
 effort = "heavy"
 [roles.fixer]
 ability = ["fix"]
+model = "core"
 [roles.reviewer_fixer]
 ability = ["review", "fix"]
 model = "prime"
 effort = "heavy"
 [roles.observer]
 ability = ["observe"]
+model = "core"
 '''
 
 
@@ -210,8 +212,8 @@ class TestLoadConfig(ConfigTestCase):
                          ".assent/_integration_workflow.toml",
                          ".assent/manifest.toml", ".assent/manifest.lock"))
 
-    def test_provided_folder_updates_all_derived_paths(self):
-        cfg = load_config(self.write(_MINIMAL), folder="parallel02")
+    def test_provided_plan_updates_all_derived_paths(self):
+        cfg = load_config(self.write(_MINIMAL), plan_name="parallel02")
         self.assertEqual(cfg.tasks_name, "parallel02")
         self.assertEqual(cfg.tasks_dir, self.assent_dir.resolve() / "parallel02")
         self.assertEqual(cfg.branch_prefix, "parallel02/")
@@ -311,6 +313,42 @@ class TestLoadConfig(ConfigTestCase):
                 '[adapter]\nname = ["claude", "codex"]\n'
                 '[workflow]\ntask = [{ role = "fixer", '
                 'model = "[Exact-Model]" }]\n'), "plan01")
+
+    def test_plan_and_integration_roles_must_state_a_model(self):
+        # A plan or integration session answers for a whole unit, so it has no
+        # task to inherit a model from. Only workflow.task may omit it.
+        roles = (
+            '[abilities.fix]\nprompt = "Repair."\nwrites = true\n'
+            '[abilities.review]\n'
+            'prompt = "Review."\nwrites = false\nproduces_verdict = true\n'
+            '[roles.reviewer]\nability = ["review"]\nmodel = "prime"\n'
+            '[roles.bare_fixer]\nability = ["fix"]\n')
+        for layer, action in (("plan", "focused_sweep"),
+                              ("integration", "full_verify")):
+            with self.subTest(layer=layer):
+                with self.assertRaisesRegex(
+                        AssentError,
+                        r"role 'bare_fixer' must state model"):
+                    load_config(self.write(
+                        roles + '[workflow]\n'
+                        f'{layer} = [{{ action = "{action}" }}, '
+                        '{ role = "reviewer" }, { role = "bare_fixer" }, '
+                        f'{{ action = "{action}" }}]\n'), "plan01")
+
+        # The same model-less role stays valid inside workflow.task, which does
+        # have a task to inherit from.
+        cfg = load_config(self.write(
+            roles + '[workflow]\ntask = [{ role = "bare_fixer" }]\n'), "plan01")
+        self.assertIsNone(cfg.workflow_task[0].resolved_role.model)
+
+        # Stating it on the workflow entry satisfies the rule without touching
+        # the shared role definition.
+        cfg = load_config(self.write(
+            roles + '[workflow]\nplan = [{ action = "focused_sweep" }, '
+            '{ role = "reviewer" }, '
+            '{ role = "bare_fixer", model = "lite" }, '
+            '{ action = "focused_sweep" }]\n'), "plan01")
+        self.assertEqual(cfg.workflow_plan[2].model, "lite")
 
     def test_literal_verdict_role_may_omit_effort_for_vendor_default(self):
         cfg = load_config(self.write(
@@ -559,7 +597,7 @@ class TestLoadConfig(ConfigTestCase):
         with self.assertRaisesRegex(AssentError, "unknown top-level keys"):
             load_config(self.write("[git]\nenabled = false\n"), "plan01")
 
-    def test_portable_folder_names_are_accepted(self):
+    def test_portable_plan_names_are_accepted(self):
         for good in ("plan01", "selectedbatch01", "conflictreconcile01",
                      "sessionidentity01", "versionflag01", "alpha.beta",
                      "name-with-dash", "name_with_underscore", "v2"):
@@ -567,7 +605,7 @@ class TestLoadConfig(ConfigTestCase):
                 cfg = load_config(self.write(_MINIMAL), good)
                 self.assertEqual(cfg.tasks_name, good)
 
-    def test_git_and_windows_invalid_folder_names_are_rejected(self):
+    def test_git_and_windows_invalid_plan_names_are_rejected(self):
         invalid = (
             "", "my plan", "a/b", "a\\b", "-x", ".x",
             "bad\x00name", "bad\x01name", "bad\x7fname", "bad~name",
@@ -581,11 +619,11 @@ class TestLoadConfig(ConfigTestCase):
                 with self.assertRaises(AssentError) as raised:
                     load_config(self.write(_MINIMAL), bad)
                 self.assertIn(repr(bad), str(raised.exception))
-                self.assertIn("not a valid task folder name", str(raised.exception))
+                self.assertIn("not a valid plan name", str(raised.exception))
 
-    def test_invalid_folder_override_rejected(self):
-        with self.assertRaisesRegex(AssentError, "Command-line task folder"):
-            load_config(self.write(_MINIMAL), folder="bad/name")
+    def test_invalid_plan_override_rejected(self):
+        with self.assertRaisesRegex(AssentError, "Command-line plan"):
+            load_config(self.write(_MINIMAL), plan_name="bad/name")
 
     def test_type_error_reported(self):
         with self.assertRaisesRegex(AssentError, "wrong type"):
@@ -1218,36 +1256,36 @@ class TestAdapterSettings(ConfigTestCase):
             self.assertEqual(settings.resolve_effort(None, tier), "heavy")
 
 
-class TestListTaskFolders(ConfigTestCase):
-    def test_lists_only_visible_folders_containing_formal_task_files(self):
+class TestListTaskPlans(ConfigTestCase):
+    def test_lists_only_visible_plans_containing_formal_task_files(self):
         for name, filename in (("beta", "t002_b.e.toml"),
                                ("alpha", "t001_a.e.toml"),
                                ("empty", "notes.txt"),
                                ("_hidden", "t001_h.e.toml"),
                                ("__pycache__", "t001_c.e.toml")):
-            folder = self.assent_dir / name
-            folder.mkdir()
-            (folder / filename).write_text("", encoding="utf-8")
-        self.assertEqual(list_task_folders(self.assent_dir), ["alpha", "beta"])
+            plan_name = self.assent_dir / name
+            plan_name.mkdir()
+            (plan_name / filename).write_text("", encoding="utf-8")
+        self.assertEqual(list_task_plans(self.assent_dir), ["alpha", "beta"])
 
-    def test_invalid_visible_live_folder_is_rejected(self):
-        folder = self.assent_dir / "bad.lock"
-        folder.mkdir()
-        (folder / "t001_task.e.toml").write_text("", encoding="utf-8")
-        with self.assertRaisesRegex(AssentError, "bad\\.lock.*not a valid task folder name"):
-            list_task_folders(self.assent_dir)
+    def test_invalid_visible_live_plan_is_rejected(self):
+        plan_name = self.assent_dir / "bad.lock"
+        plan_name.mkdir()
+        (plan_name / "t001_task.e.toml").write_text("", encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "bad\\.lock.*not a valid plan name"):
+            list_task_plans(self.assent_dir)
 
     def test_discovers_unicode_task_filename_without_transliteration(self):
-        folder = self.assent_dir / "unicode01"
-        folder.mkdir()
-        (folder / "t001_中文任務.e.toml").write_text(
+        plan_name = self.assent_dir / "unicode01"
+        plan_name.mkdir()
+        (plan_name / "t001_中文任務.e.toml").write_text(
             'title = "English task title"\n', encoding="utf-8")
-        (folder / "t001_中文任務.r.toml").write_text(
+        (plan_name / "t001_中文任務.r.toml").write_text(
             "[[entry]]\n", encoding="utf-8")
-        self.assertEqual(list_task_folders(self.assent_dir), ["unicode01"])
+        self.assertEqual(list_task_plans(self.assent_dir), ["unicode01"])
 
     def test_missing_assent_directory_is_empty(self):
-        self.assertEqual(list_task_folders(self.root / "missing"), [])
+        self.assertEqual(list_task_plans(self.root / "missing"), [])
 
 
 class TestAdapterRegistry(unittest.TestCase):

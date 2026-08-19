@@ -1,4 +1,4 @@
-"""CLI entry point and init tests. ``run`` tees to the work folder's
+"""CLI entry point and init tests. ``run`` tees to the plan's
 _assent.log, so tests always chdir into a temporary directory to avoid
 dirtying the test process's own working directory.
 
@@ -45,9 +45,9 @@ class MainTestCase(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
         os.environ.pop("ASSENT_STDIN_STOP", None)
-        # The same spawned session also exports ASSENT_FOLDER_RUN, which would
+        # The same spawned session also exports ASSENT_PLAN_RUN, which would
         # otherwise relabel every timing line here as a scheduler child's.
-        os.environ.pop("ASSENT_FOLDER_RUN", None)
+        os.environ.pop("ASSENT_PLAN_RUN", None)
         self.root = Path(tempfile.mkdtemp())
         self._old_cwd = os.getcwd()
         os.chdir(self.root)
@@ -70,8 +70,8 @@ class MainTestCase(unittest.TestCase):
         config.write_text(text, encoding="utf-8")
         return config
 
-    def write_task(self, folder: str, status: str = "TODO") -> Path:
-        path = self.root / ".assent" / folder / "t001_task.e.toml"
+    def write_task(self, plan_name: str, status: str = "TODO") -> Path:
+        path = self.root / ".assent" / plan_name / "t001_task.e.toml"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             'title = "任務"\n'
@@ -194,14 +194,14 @@ class TestDispatch(MainTestCase):
              "assent.__main__.verify_selected_batch"),
             (["accept", "AA01", "BB01"],
              "assent.__main__.accept_selected_batch"),
-            (["clean", "AA01", "BB01"], "assent.__main__.clean_folders"),
+            (["clean", "AA01", "BB01"], "assent.__main__.clean_plans"),
             (["archive", "AA01", "BB01"],
              "assent.__main__.archive_selected"),
             (["status", "BB01"], "assent.__main__.inspection.status"),
             (["check", "BB01"], "assent.__main__.inspection.check"),
             (["report", "BB01"], "assent.__main__.inspection.report"),
             (["reconcile", "BB01"], "assent.__main__.reconcile_start"),
-            (["reject", "BB01"], "assent.__main__.reject_folder"),
+            (["reject", "BB01"], "assent.__main__.reject_plan"),
             (["rework", "BB01", "t001"], "assent.__main__.rework_task"),
         )
         for argv, target in cases:
@@ -303,7 +303,7 @@ class TestDispatch(MainTestCase):
                 main(["run", "work", option, "--config", str(config)])
             self.assertEqual(ctx.exception.code, 2)
 
-    def test_run_named_folders_dispatch_in_given_order(self):
+    def test_run_named_plans_dispatch_in_given_order(self):
         config = self.write_config()
         self.write_task("first")
         self.write_task("second")
@@ -315,7 +315,7 @@ class TestDispatch(MainTestCase):
             [call.args[0].tasks_name for call in mocked.call_args_list],
             ["first", "second"])
 
-    def test_run_named_folders_stops_after_first_failure(self):
+    def test_run_named_plans_stops_after_first_failure(self):
         config = self.write_config()
         self.write_task("first")
         self.write_task("second")
@@ -327,7 +327,7 @@ class TestDispatch(MainTestCase):
             [call.args[0].tasks_name for call in mocked.call_args_list],
             ["first"])
 
-    def test_run_named_folders_with_all_runs_remainder_once(self):
+    def test_run_named_plans_with_all_runs_remainder_once(self):
         config = self.write_config()
         self.write_task("first")
         self.write_task("second")
@@ -344,13 +344,13 @@ class TestDispatch(MainTestCase):
             ["first", "second"])
         all_mock.assert_called_once_with(str(config), config.parent.resolve(), 3)
 
-    def test_run_named_folders_rejects_duplicates(self):
+    def test_run_named_plans_rejects_duplicates(self):
         with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
                 io.StringIO()):
             main(["run", "first", "first"])
         self.assertEqual(ctx.exception.code, 2)
 
-    def test_run_named_folders_rejects_single_folder_options(self):
+    def test_run_named_plans_rejects_single_plan_options(self):
         cases = (
             ["run", "first", "second", "--once"],
             ["run", "first", "second", "--task", "t001"],
@@ -365,7 +365,7 @@ class TestDispatch(MainTestCase):
                 main(argv)
             self.assertEqual(ctx.exception.code, 2)
 
-    def test_all_plan_commands_accept_folder_override(self):
+    def test_all_plan_commands_accept_plan_override(self):
         config = self.write_config()
         assent_dir = config.parent
         self.write_task("B")
@@ -380,19 +380,19 @@ class TestDispatch(MainTestCase):
                 self.assertEqual(cfg.tasks_name, "B")
                 self.assertEqual(cfg.tasks_dir, assent_dir.resolve() / "B")
 
-    def test_clean_accepts_folder_override_and_config_option(self):
+    def test_clean_accepts_plan_override_and_config_option(self):
         config = self.write_config()
         self.write_task("B")
-        with patch("assent.__main__.clean_folders", return_value=0) as mocked:
+        with patch("assent.__main__.clean_plans", return_value=0) as mocked:
             code, _ = self.run_main(["clean", "B", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]], ["B"])
 
-    def test_clean_without_folder_uses_all_task_folders(self):
+    def test_clean_without_plan_uses_all_task_plans(self):
         config = self.write_config()
         self.write_task("beta")
         self.write_task("alpha")
-        with patch("assent.__main__.clean_folders", return_value=0) as mocked:
+        with patch("assent.__main__.clean_plans", return_value=0) as mocked:
             code, _ = self.run_main(["clean", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]],
@@ -404,7 +404,7 @@ class TestDispatch(MainTestCase):
             main(["clean", "--force"])
         self.assertEqual(ctx.exception.code, 2)
 
-    def test_accept_requires_a_folder_and_has_no_remote_options(self):
+    def test_accept_requires_a_plan_and_has_no_remote_options(self):
         for argv in (["accept"], ["accept", "one", "--all"],
                      ["accept", "one", "two", "--all"],
                      ["accept", "one", "one"],
@@ -414,16 +414,16 @@ class TestDispatch(MainTestCase):
                 main(argv)
             self.assertEqual(ctx.exception.code, 2)
 
-    def test_accept_dispatches_explicit_folder(self):
+    def test_accept_dispatches_explicit_plan(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
-        with patch("assent.__main__.accept_folder", return_value=0) as mocked:
+        with patch("assent.__main__.accept_plan", return_value=0) as mocked:
             code, _ = self.run_main(
                 ["accept", "reviewed", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "reviewed")
 
-    def test_accept_dispatches_two_or_more_folders_as_selected_batch(self):
+    def test_accept_dispatches_two_or_more_plans_as_selected_batch(self):
         config = self.write_config()
         self.write_task("child", "DONE")
         self.write_task("parent", "DONE")
@@ -445,10 +445,10 @@ class TestDispatch(MainTestCase):
                 main(argv)
             self.assertEqual(ctx.exception.code, 2)
 
-    def test_verify_dispatches_single_folder_mechanical_verification(self):
+    def test_verify_dispatches_single_plan_mechanical_verification(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
-        with patch("assent.__main__.verify_folder",
+        with patch("assent.__main__.verify_plan",
                    side_effect=[0, 1]) as verifier, patch(
                 "assent.__main__.engine.run_selection_workflow",
                 side_effect=AssertionError("manual verify entered workflow")):
@@ -516,7 +516,7 @@ class TestDispatch(MainTestCase):
     def test_verify_interrupt_returns_130(self):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
-        with patch("assent.__main__.verify_folder",
+        with patch("assent.__main__.verify_plan",
                    side_effect=KeyboardInterrupt), \
                 patch("assent.__main__.inspection.try_write_report") as report:
             code, out = self.run_main(
@@ -531,16 +531,16 @@ class TestDispatch(MainTestCase):
             main(["push"])
         self.assertEqual(ctx.exception.code, 2)
 
-    def test_reject_requires_folder(self):
+    def test_reject_requires_plan(self):
         with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
                 io.StringIO()):
             main(["reject"])
         self.assertEqual(ctx.exception.code, 2)
 
-    def test_reject_dispatches_to_reject_folder(self):
+    def test_reject_dispatches_to_reject_plan(self):
         config = self.write_config()
         self.write_task("B")
-        with patch("assent.__main__.reject_folder", return_value=0) as mocked:
+        with patch("assent.__main__.reject_plan", return_value=0) as mocked:
             code, _ = self.run_main(["reject", "B", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "B")
@@ -594,7 +594,7 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main(
                 ["reconcile", "bad/name", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("Folder selection refused", out)
+        self.assertIn("Plan selection refused", out)
         mocked.assert_not_called()
 
     def test_rework_help_shows_only_formal_syntax_and_options(self):
@@ -612,7 +612,7 @@ class TestDispatch(MainTestCase):
         self.assertIn("Keeps code by default", text)
         self.assertIn("contiguous branch tail", text)
 
-    def test_rework_requires_folder_and_task_and_rejects_unknown_options(self):
+    def test_rework_requires_plan_and_task_and_rejects_unknown_options(self):
         for argv in (["rework"], ["rework", "B"],
                      ["rework", "B", "t001", "--all"]):
             with self.subTest(argv=argv), self.assertRaises(
@@ -644,14 +644,14 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main([
                 "rework", "bad/name", "t001", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("Folder selection refused", out)
+        self.assertIn("Plan selection refused", out)
         mocked.assert_not_called()
 
-    def test_invalid_folder_override_reports_error(self):
+    def test_invalid_plan_override_reports_error(self):
         config = self.write_config()
         code, out = self.run_main(["status", "bad/name", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("Command-line task folder", out)
+        self.assertIn("Command-line plan", out)
 
     def test_removed_plan_section_rejected_as_unknown_key(self):
         config = self.write_config('[plan]\ntasks = "A"\n')
@@ -659,7 +659,7 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 1)
         self.assertIn("unknown top-level keys", out)
 
-    def test_run_without_folder_selects_unique_runnable_task_folder(self):
+    def test_run_without_plan_selects_unique_runnable_task_plan(self):
         config = self.write_config()
         self.write_task("active", "TODO")
         self.write_task("blocked", "BLOCKED")
@@ -667,11 +667,11 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertIn(
-            "Work folder: active (the only runnable one, "
+            "Plan: active (the only runnable one, "
             "selected automatically)", out)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "active")
 
-    def test_run_without_folder_selects_unique_unaccepted_completed_folder(self):
+    def test_run_without_plan_selects_unique_unaccepted_completed_plan(self):
         config = self.write_config()
         self.write_task("completed", "DONE")
         with patch("assent.__main__._accepted_run_source", return_value=None), \
@@ -679,10 +679,10 @@ class TestDispatch(MainTestCase):
                 patch("assent.__main__._close_run", return_value=0):
             code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 0)
-        self.assertIn("Work folder: completed (the only runnable one", out)
+        self.assertIn("Plan: completed (the only runnable one", out)
         self.assertEqual(run.call_args.args[0].tasks_name, "completed")
 
-    def test_run_without_folder_excludes_accepted_completed_folder(self):
+    def test_run_without_plan_excludes_accepted_completed_plan(self):
         config = self.write_config()
         self.write_task("accepted", "DONE")
         with patch("assent.__main__._accepted_run_source",
@@ -690,15 +690,15 @@ class TestDispatch(MainTestCase):
                 patch("assent.__main__.engine.run") as run:
             code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("0 runnable folder(s) found", out)
+        self.assertIn("0 runnable plan(s) found", out)
         self.assertIn("(already accepted)", out)
         run.assert_not_called()
 
-    def test_run_without_folder_excludes_waiting_folder(self):
+    def test_run_without_plan_excludes_waiting_plan(self):
         config = self.write_config()
         self.write_task("base", "BLOCKED")
         self.write_task("waiting", "TODO")
-        (config.parent / "waiting" / "_folder.toml").write_text(
+        (config.parent / "waiting" / "_plan_deps.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
         self.write_task("ready", "TODO")
 
@@ -706,50 +706,50 @@ class TestDispatch(MainTestCase):
             code, out = self.run_main(["run", "--config", str(config)])
 
         self.assertEqual(code, 0)
-        self.assertIn("Work folder: ready", out)
+        self.assertIn("Plan: ready", out)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "ready")
 
-    def test_run_without_folder_lists_waiting_reason(self):
+    def test_run_without_plan_lists_waiting_reason(self):
         config = self.write_config()
         self.write_task("base", "BLOCKED")
         self.write_task("waiting", "TODO")
-        (config.parent / "waiting" / "_folder.toml").write_text(
+        (config.parent / "waiting" / "_plan_deps.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
 
         with patch("assent.__main__.engine.run") as mocked:
             code, out = self.run_main(["run", "--config", str(config)])
 
         self.assertEqual(code, 1)
-        self.assertIn("0 runnable folder(s) found", out)
+        self.assertIn("0 runnable plan(s) found", out)
         self.assertIn("waiting:", out)
         self.assertIn("(waiting on base)", out)
         mocked.assert_not_called()
 
-    def test_run_without_folder_refuses_zero_or_multiple_runnable(self):
+    def test_run_without_plan_refuses_zero_or_multiple_runnable(self):
         for case, statuses in (("zero", [("blocked", "BLOCKED")]),
                                ("multiple", [("one", "TODO"),
                                              ("two", "WIP")])):
             with self.subTest(case=case):
                 shutil.rmtree(self.root / ".assent", ignore_errors=True)
                 config = self.write_config()
-                for folder, status in statuses:
-                    self.write_task(folder, status)
+                for plan_name, status in statuses:
+                    self.write_task(plan_name, status)
                 with patch("assent.__main__.engine.run") as mocked:
                     code, out = self.run_main(
                         ["run", "--config", str(config)])
                 self.assertEqual(code, 1)
-                self.assertIn("State the work folder explicitly", out)
-                for folder, _ in statuses:
-                    self.assertIn(folder, out)
+                self.assertIn("State the plan explicitly", out)
+                for plan_name, _ in statuses:
+                    self.assertIn(plan_name, out)
                 mocked.assert_not_called()
 
-    def test_run_without_folder_refuses_when_no_task_folder_exists(self):
+    def test_run_without_plan_refuses_when_no_task_plan_exists(self):
         config = self.write_config()
         code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 1)
-        self.assertIn("no work folder with a task file found", out)
+        self.assertIn("no plan with a task file found", out)
 
-    def test_read_only_commands_without_folder_run_all_folders(self):
+    def test_read_only_commands_without_plan_run_all_plans(self):
         config = self.write_config()
         self.write_task("beta")
         self.write_task("alpha")
@@ -762,7 +762,7 @@ class TestDispatch(MainTestCase):
                     [call.args[0].tasks_name for call in mocked.call_args_list],
                     ["alpha", "beta"])
 
-    def test_check_without_folder_fails_if_any_folder_fails(self):
+    def test_check_without_plan_fails_if_any_plan_fails(self):
         config = self.write_config()
         self.write_task("alpha")
         self.write_task("beta")
@@ -793,7 +793,7 @@ class TestDispatch(MainTestCase):
         self.assertIn("unknown keys: selection", out)
         mocked.assert_not_called()
 
-    def test_check_without_folder_rejects_bad_folder_graph(self):
+    def test_check_without_plan_rejects_bad_plan_graph(self):
         cases = {
             "bad-format": ('after = [\n',),
             "missing-reference": ('after = ["missing"]\n',),
@@ -804,17 +804,17 @@ class TestDispatch(MainTestCase):
                 shutil.rmtree(self.root / ".assent", ignore_errors=True)
                 config = self.write_config()
                 self.write_task("alpha")
-                (config.parent / "alpha" / "_folder.toml").write_text(
+                (config.parent / "alpha" / "_plan_deps.toml").write_text(
                     declarations[0], encoding="utf-8")
                 if len(declarations) == 2:
                     self.write_task("beta")
-                    (config.parent / "beta" / "_folder.toml").write_text(
+                    (config.parent / "beta" / "_plan_deps.toml").write_text(
                         declarations[1], encoding="utf-8")
                 with patch("assent.__main__.inspection.check", return_value=0):
                     code, out = self.run_main(
                         ["check", "--config", str(config)])
                 self.assertEqual(code, 1)
-                self.assertIn("Folder dependency graph: FAIL", out)
+                self.assertIn("Plan dependency graph: FAIL", out)
 
 
 class TestAutomaticIntegrationChaining(MainTestCase):
@@ -826,7 +826,7 @@ class TestAutomaticIntegrationChaining(MainTestCase):
             '[workflow]\nintegration = [{ action = "full_verify" }]\n')
         self.assent_dir = self.config.parent.resolve()
 
-    def test_one_completed_folder_runs_exact_integration(self):
+    def test_one_completed_plan_runs_exact_integration(self):
         self.write_task("alpha", "DONE")
         with patch("assent.__main__.engine.run", return_value=0), \
                 patch("assent.__main__.engine.run_selection_workflow",
@@ -849,7 +849,7 @@ class TestAutomaticIntegrationChaining(MainTestCase):
         integration.assert_called_once_with(
             str(self.config), self.assent_dir, ["alpha", "beta"])
 
-    def test_exact_run_skips_accepted_folder_before_execution_and_integration(self):
+    def test_exact_run_skips_accepted_plan_before_execution_and_integration(self):
         self.write_task("alpha", "DONE")
         self.write_task("beta", "DONE")
 
@@ -873,7 +873,7 @@ class TestAutomaticIntegrationChaining(MainTestCase):
         integration.assert_called_once_with(
             str(self.config), self.assent_dir, ["beta"])
 
-    def test_exact_run_never_skips_an_incomplete_folder_at_the_target_tip(self):
+    def test_exact_run_never_skips_an_incomplete_plan_at_the_target_tip(self):
         self.write_task("alpha", "WIP")
 
         with patch("assent.__main__.gitops.main_worktree",
@@ -894,7 +894,7 @@ class TestAutomaticIntegrationChaining(MainTestCase):
         self.assertNotIn("already accepted", output)
         run.assert_called_once()
 
-    def test_exact_run_with_only_accepted_folders_is_a_noop(self):
+    def test_exact_run_with_only_accepted_plans_is_a_noop(self):
         self.write_task("alpha", "DONE")
         with patch("assent.__main__._accepted_run_source",
                    return_value=("alpha/source", "a" * 40, "master")), \
@@ -905,7 +905,7 @@ class TestAutomaticIntegrationChaining(MainTestCase):
 
         self.assertEqual(code, 0)
         self.assertIn("run alpha: already accepted", output)
-        self.assertIn("no selected folder has anything left to integrate", output)
+        self.assertIn("no selected plan has anything left to integrate", output)
         run.assert_not_called()
         integration.assert_not_called()
 
@@ -958,8 +958,8 @@ class TestCommandElapsed(MainTestCase):
 
     def test_every_run_path_reports_one_total_with_the_unchanged_exit_code(self):
         config = self.write_config()
-        for folder in ("alpha", "beta"):
-            self.write_task(folder)
+        for plan_name in ("alpha", "beta"):
+            self.write_task(plan_name)
         cases = {
             "direct": ["run", "alpha"],
             "selected": ["run", "alpha", "beta"],
@@ -970,7 +970,7 @@ class TestCommandElapsed(MainTestCase):
             for result in (0, 1):
                 with self.subTest(case=name, result=result):
                     self.write_task("alpha")
-                    # The automatic selection needs exactly one runnable folder.
+                    # The automatic selection needs exactly one runnable plan.
                     self.write_task(
                         "beta", "BLOCKED" if name == "automatic" else "TODO")
                     with self.injected_clock(), patch(
@@ -993,22 +993,22 @@ class TestCommandElapsed(MainTestCase):
             self.total_lines(out),
             ["Command `assent run` finished: elapsed 2.5s, exit code 0"])
 
-    def test_a_scheduler_child_labels_its_folder_total_apart(self):
+    def test_a_scheduler_child_labels_its_plan_total_apart(self):
         config = self.write_config()
         self.write_task("work")
-        os.environ["ASSENT_FOLDER_RUN"] = "1"
+        os.environ["ASSENT_PLAN_RUN"] = "1"
         with self.injected_clock(), patch("assent.__main__.engine.run",
                                           return_value=0):
             code, out = self.run_main(["run", "work", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(self.total_lines(out), [])
         self.assertIn(
-            "Scheduled folder run finished: elapsed 2.5s, exit code 0", out)
+            "Scheduled plan run finished: elapsed 2.5s, exit code 0", out)
 
     def test_verification_paths_keep_the_verifier_only_elapsed_line(self):
         config = self.write_config()
-        for folder in ("earlier", "later"):
-            self.write_task(folder, "DONE")
+        for plan_name in ("earlier", "later"):
+            self.write_task(plan_name, "DONE")
 
         def verifier(*args, **kwargs):
             # What the full verifier itself reports, from inside the command.
@@ -1016,8 +1016,8 @@ class TestCommandElapsed(MainTestCase):
             return 0
 
         cases = {
-            "folder": (["verify", "earlier"],
-                       "assent.__main__.verify_folder"),
+            "plan_name": (["verify", "earlier"],
+                       "assent.__main__.verify_plan"),
             "selected": (["verify", "earlier", "later"],
                          "assent.__main__.verify_selected_batch"),
             "batch": (["verify", "--batch"],
@@ -1054,7 +1054,7 @@ class TestCommandElapsed(MainTestCase):
 
         # A handled Ctrl+C keeps its own diagnostic and its 130.
         with self.injected_clock(), patch(
-                "assent.__main__.verify_folder",
+                "assent.__main__.verify_plan",
                 side_effect=KeyboardInterrupt):
             code, out = self.run_main(
                 ["verify", "reviewed", "--config", str(config)])
@@ -1088,7 +1088,7 @@ class TestCommandElapsed(MainTestCase):
         config = self.write_config()
         self.write_task("reviewed", "DONE")
         with self.injected_clock(), patch(
-                "assent.__main__.verify_folder",
+                "assent.__main__.verify_plan",
                 return_value=0):
             code, _ = self.run_main(
                 ["verify", "reviewed", "--config", str(config)])
@@ -1105,12 +1105,12 @@ class TestCommandElapsed(MainTestCase):
             "status": (["status"], None),
             "check": (["check"], None),
             "report": (["report"], None),
-            "accept": (["accept", "done"], "assent.__main__.accept_folder"),
-            "clean": (["clean", "done"], "assent.__main__.clean_folders"),
-            "archive": (["archive", "done"], "assent.__main__.archive_folder"),
+            "accept": (["accept", "done"], "assent.__main__.accept_plan"),
+            "clean": (["clean", "done"], "assent.__main__.clean_plans"),
+            "archive": (["archive", "done"], "assent.__main__.archive_plan"),
             "reconcile": (["reconcile", "done"],
                           "assent.__main__.reconcile_start"),
-            "reject": (["reject", "done"], "assent.__main__.reject_folder"),
+            "reject": (["reject", "done"], "assent.__main__.reject_plan"),
             "rework": (["rework", "done", "t001"],
                        "assent.__main__.rework_task"),
             "doctor": (["doctor"], "assent.__main__.run_doctor"),
@@ -1198,7 +1198,7 @@ class TestHelpPalette(MainTestCase):
 class TestRemainderSelection(MainTestCase):
     """The literal `...` token as a remainder selector across the workflow.
 
-    `A B ...` is A and B plus the folders that command would otherwise discover
+    `A B ...` is A and B plus the plans that command would otherwise discover
     for the whole project.  These tests patch the operation each branch calls,
     so they prove what the CLI selects rather than re-testing the operations.
     """
@@ -1235,15 +1235,15 @@ class TestRemainderSelection(MainTestCase):
             with self.subTest(argv=argv):
                 self.usage_error(argv)
 
-    def test_marker_never_reaches_configuration_loading_as_a_folder_name(self):
+    def test_marker_never_reaches_configuration_loading_as_a_plan_name(self):
         config = self.write_config()
         self.write_task("alpha", "DONE")
         real_load = load_config
         seen: list[str] = []
 
-        def record(path, folder):
-            seen.append(folder)
-            return real_load(path, folder)
+        def record(path, plan_name):
+            seen.append(plan_name)
+            return real_load(path, plan_name)
 
         commands = (["run", "..."], ["clean", "..."], ["archive", "..."],
                     ["verify", "..."], ["accept", "..."])
@@ -1251,22 +1251,22 @@ class TestRemainderSelection(MainTestCase):
             with self.subTest(argv=argv), \
                     patch("assent.__main__.load_config", side_effect=record), \
                     patch("assent.__main__.engine.run", return_value=0), \
-                    patch("assent.__main__.verify_folder", return_value=0), \
+                    patch("assent.__main__.verify_plan", return_value=0), \
                     patch("assent.__main__.verify_batch", return_value=0), \
-                    patch("assent.__main__.clean_folders", return_value=0), \
-                    patch("assent.__main__.archive_folder", return_value=0), \
-                    patch("assent.__main__.accept_folder", return_value=0):
+                    patch("assent.__main__.clean_plans", return_value=0), \
+                    patch("assent.__main__.archive_plan", return_value=0), \
+                    patch("assent.__main__.accept_plan", return_value=0):
                 code, _ = self.run_main([*argv, "--config", str(config)])
                 self.assertEqual(code, 0)
         self.assertEqual(set(seen), {"alpha"})
 
     def test_run_completes_the_explicit_prefix_before_the_remainder(self):
         config = self.write_config()
-        for folder in ("alpha", "beta", "delta", "gamma"):
-            self.write_task(folder)
+        for plan_name in ("alpha", "beta", "delta", "gamma"):
+            self.write_task(plan_name)
         # delta must wait for beta, so the remainder is dependency-ordered
         # rather than merely lexicographic.
-        (self.root / ".assent" / "delta" / "_folder.toml").write_text(
+        (self.root / ".assent" / "delta" / "_plan_deps.toml").write_text(
             'after = ["beta"]\n', encoding="utf-8")
         order: list[str] = []
         with patch("assent.__main__.engine.run",
@@ -1283,8 +1283,8 @@ class TestRemainderSelection(MainTestCase):
 
     def test_run_explicit_prefix_failure_prevents_remainder_scheduling(self):
         config = self.write_config()
-        for folder in ("alpha", "beta"):
-            self.write_task(folder)
+        for plan_name in ("alpha", "beta"):
+            self.write_task(plan_name)
         with patch("assent.__main__.engine.run", return_value=1) as engine_run, \
                 patch("assent.__main__.run_all",
                       side_effect=AssertionError("remainder was scheduled")):
@@ -1299,21 +1299,21 @@ class TestRemainderSelection(MainTestCase):
         self.write_task("alpha")
         started: list[str] = []
 
-        def create_a_folder_mid_run(cfg, **_):
+        def create_a_plan_mid_run(cfg, **_):
             started.append(cfg.tasks_name)
             self.write_task("appeared")
             return 0
 
         with patch("assent.__main__.engine.run",
-                   side_effect=create_a_folder_mid_run):
+                   side_effect=create_a_plan_mid_run):
             code, out = self.run_main(
                 ["run", "alpha", "...", "--config", str(config)])
 
         self.assertEqual(code, 0)
-        self.assertIn("No remaining work folder to run.", out)
+        self.assertIn("No remaining plan to run.", out)
         self.assertEqual(started, ["alpha"])
 
-    def test_verify_remainder_expands_to_finished_folders_only(self):
+    def test_verify_remainder_expands_to_finished_plans_only(self):
         config = self.write_config()
         self.write_task("alpha", "DONE")
         self.write_task("beta", "DONE")
@@ -1326,18 +1326,18 @@ class TestRemainderSelection(MainTestCase):
         self.assertEqual(batch.call_args.args[2], ["beta", "alpha"])
         self.assertNotIn("ongoing", out)
 
-    def test_verify_remainder_of_one_folder_uses_the_folder_path(self):
+    def test_verify_remainder_of_one_plan_uses_the_plan_path(self):
         config = self.write_config()
         self.write_task("alpha", "DONE")
         self.write_task("ongoing", "TODO")
-        with patch("assent.__main__.verify_folder",
-                   return_value=0) as folder:
+        with patch("assent.__main__.verify_plan",
+                   return_value=0) as plan_name:
             code, _ = self.run_main(["verify", "...", "--config", str(config)])
         self.assertEqual(code, 0)
-        self.assertEqual(folder.call_args.args[0].tasks_name, "alpha")
+        self.assertEqual(plan_name.call_args.args[0].tasks_name, "alpha")
 
-        # A one-folder expansion is not a batch, so --no-bisect is a usage error
-        # exactly as it is for a single named folder.
+        # A one-plan expansion is not a batch, so --no-bisect is a usage error
+        # exactly as it is for a single named plan.
         self.usage_error(["verify", "...", "--no-bisect", "--config",
                           str(config)])
 
@@ -1350,18 +1350,18 @@ class TestRemainderSelection(MainTestCase):
                    return_value=0) as batch, \
                 patch("assent.__main__.accept_all",
                       side_effect=AssertionError("fell back to accept --all")), \
-                patch("assent.__main__.verify_folder",
+                patch("assent.__main__.verify_plan",
                       side_effect=AssertionError("accept verified")):
             code, _ = self.run_main(
                 ["accept", "beta", "...", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(batch.call_args.args[2], ["beta", "alpha"])
 
-    def test_accept_remainder_of_one_folder_uses_the_direct_gate(self):
+    def test_accept_remainder_of_one_plan_uses_the_direct_gate(self):
         config = self.write_config()
         self.write_task("alpha", "DONE")
         self.write_task("ongoing", "TODO")
-        with patch("assent.__main__.accept_folder", return_value=0) as direct, \
+        with patch("assent.__main__.accept_plan", return_value=0) as direct, \
                 patch("assent.__main__.accept_selected_batch",
                       side_effect=AssertionError("used the batch path")):
             code, _ = self.run_main(["accept", "...", "--config", str(config)])
@@ -1370,16 +1370,16 @@ class TestRemainderSelection(MainTestCase):
 
     def test_clean_accepts_an_exact_set_and_a_remainder(self):
         config = self.write_config()
-        for folder in ("alpha", "beta", "gamma"):
-            self.write_task(folder)
-        with patch("assent.__main__.clean_folders", return_value=0) as mocked:
+        for plan_name in ("alpha", "beta", "gamma"):
+            self.write_task(plan_name)
+        with patch("assent.__main__.clean_plans", return_value=0) as mocked:
             code, _ = self.run_main(
                 ["clean", "gamma", "alpha", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]],
                          ["gamma", "alpha"])
 
-        with patch("assent.__main__.clean_folders", return_value=1) as mocked:
+        with patch("assent.__main__.clean_plans", return_value=1) as mocked:
             code, _ = self.run_main(
                 ["clean", "gamma", "...", "--config", str(config)])
         self.assertEqual(code, 1)
@@ -1388,8 +1388,8 @@ class TestRemainderSelection(MainTestCase):
 
     def test_archive_selection_and_remainder_use_the_explicit_policy(self):
         config = self.write_config()
-        for folder in ("alpha", "beta", "gamma"):
-            self.write_task(folder, "DONE")
+        for plan_name in ("alpha", "beta", "gamma"):
+            self.write_task(plan_name, "DONE")
         with patch("assent.__main__.archive_selected", return_value=1) as mocked, \
                 patch("assent.__main__.archive_all",
                       side_effect=AssertionError("used the --all policy")):
@@ -1398,22 +1398,22 @@ class TestRemainderSelection(MainTestCase):
         self.assertEqual(code, 1)
         self.assertEqual(mocked.call_args.args[1], ["gamma", "alpha", "beta"])
 
-        with patch("assent.__main__.archive_folder", return_value=0) as one:
+        with patch("assent.__main__.archive_plan", return_value=0) as one:
             code, _ = self.run_main(
                 ["archive", "beta", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(one.call_args.args[0].tasks_name, "beta")
 
-    def test_archive_restore_stays_a_single_folder_operation(self):
+    def test_archive_restore_stays_a_single_plan_operation(self):
         config = self.write_config()
         self.write_task("alpha", "DONE")
-        with patch("assent.__main__.restore_folder", return_value=0) as mocked:
+        with patch("assent.__main__.restore_plan", return_value=0) as mocked:
             code, _ = self.run_main(
                 ["archive", "alpha", "--restore", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "alpha")
 
-    def test_remainder_without_any_selectable_folder_refuses(self):
+    def test_remainder_without_any_selectable_plan_refuses(self):
         config = self.write_config()
         commands = ("run", "clean", "verify", "accept", "archive")
         for command in commands:
@@ -1421,9 +1421,9 @@ class TestRemainderSelection(MainTestCase):
                 code, out = self.run_main([command, "...", "--config",
                                            str(config)])
                 self.assertEqual(code, 1)
-                self.assertIn(f"{command}: `...` selected no work folder.", out)
+                self.assertIn(f"{command}: `...` selected no plan.", out)
 
-        # verify and accept only ever select finished folders, so an entirely
+        # verify and accept only ever select finished plans, so an entirely
         # unfinished project leaves their remainder empty too.
         self.write_task("ongoing", "TODO")
         for command in ("verify", "accept"):
@@ -1431,7 +1431,7 @@ class TestRemainderSelection(MainTestCase):
                 code, out = self.run_main([command, "...", "--config",
                                            str(config)])
                 self.assertEqual(code, 1)
-                self.assertIn(f"{command}: `...` selected no work folder.", out)
+                self.assertIn(f"{command}: `...` selected no plan.", out)
 
 
 class TestStdinStopWatcher(unittest.TestCase):
@@ -1551,7 +1551,7 @@ class TestInit(MainTestCase):
             self.assertFalse((self.root / rel).exists(), rel)
         for name in ("assent.toml", "instructions.md", "format.md"):
             self.assertTrue((self.user_home / name).is_file(), name)
-        # Work folders are not pre-created: their name is decided by a
+        # Plans are not pre-created: their name is decided by a
         # planning meeting based on the task, so pre-creating one would mislead.
         subdirs = [p for p in (self.root / ".assent").iterdir() if p.is_dir()]
         self.assertEqual(subdirs, [])

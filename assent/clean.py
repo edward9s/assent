@@ -1,4 +1,4 @@
-"""Safely clean up worktrees and merged branches that are provably redundant for a task folder."""
+"""Safely clean up worktrees and merged branches that are provably redundant for a plan."""
 from __future__ import annotations
 
 import os
@@ -7,18 +7,18 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from assent import AssentError, gitops
-from assent.config import Config, list_task_folders, validate_tasks_name
-from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
-from assent.folderdeps import direct_dependents, parse_folder_dependency_graph
+from assent.config import Config, list_task_plans, validate_tasks_name
+from assent.plan_source import COMPLETE_STATUSES, resolve_source_snapshot
+from assent.plandeps import direct_dependents, parse_plan_dependency_graph
 from assent.lockfile import (LockBusy, LockMissing, hold_integration_lock,
                              probe_lock)
 from assent.plan import Plan
 
 
-def validate_live_folder_selection(
-        assent_dir: str | Path, folders: Sequence[str], *,
+def validate_live_plan_selection(
+        assent_dir: str | Path, plan_names: Sequence[str], *,
         recognized: Sequence[str] = ()) -> bool:
-    """Prove that every selected name is a discovered live work folder.
+    """Prove that every selected name is a discovered live plan.
 
     This is an identity check only.  It deliberately does not parse task files,
     inspect completion, acquire locks, or inspect Git.  ``recognized`` is for a
@@ -27,32 +27,32 @@ def validate_live_folder_selection(
     """
     assent_dir = Path(assent_dir)
     try:
-        live = set(list_task_folders(assent_dir))
+        live = set(list_task_plans(assent_dir))
     except (AssentError, OSError) as e:
-        print(f"Folder selection refused; live-folder discovery failed: {e}")
+        print(f"Plan selection refused; live-plan discovery failed: {e}")
         return False
 
     recognized_names = set(recognized)
     unresolved: list[str] = []
     syntax_errors: list[str] = []
     seen: set[str] = set()
-    for folder in folders:
+    for plan_name in plan_names:
         try:
-            validate_tasks_name(folder, "Command-line task folder")
+            validate_tasks_name(plan_name, "Command-line plan")
         except AssentError as e:
-            label = repr(folder)
+            label = repr(plan_name)
             if label not in seen:
                 unresolved.append(label)
                 seen.add(label)
                 syntax_errors.append(str(e))
             continue
-        if folder not in live and folder not in recognized_names:
-            if folder not in seen:
-                unresolved.append(folder)
-                seen.add(folder)
+        if plan_name not in live and plan_name not in recognized_names:
+            if plan_name not in seen:
+                unresolved.append(plan_name)
+                seen.add(plan_name)
 
     if unresolved:
-        print("Folder selection refused; unresolved work folder(s): "
+        print("Plan selection refused; unresolved plan(s): "
               + ", ".join(unresolved))
         for error in syntax_errors:
             print(f"  {error}")
@@ -86,7 +86,7 @@ def _remove_empty_container(path: Path) -> None:
     cleanup entry point; the entry-point attempt clears an empty container left over
     from a previous run (where rmdir failed at the time, or the worktree was removed by
     some other means). rmdir only succeeds on an empty directory, which naturally avoids
-    removing another task folder's worktree by mistake; a non-empty directory or a
+    removing another plan's worktree by mistake; a non-empty directory or a
     failed removal (e.g. held open by another process) is silently retained and does
     not affect the cleanup result.
     """
@@ -105,14 +105,14 @@ def _print_retained_branches(branches: list[str], unmerged: set[str]) -> None:
                   "yet merged, retained)")
 
 
-def clean_folder(cfg: Config) -> int:
-    """Clean one folder; return 1 when evidence is invalid or an action fails."""
+def clean_plan(cfg: Config) -> int:
+    """Clean one plan; return 1 when evidence is invalid or an action fails."""
     name = cfg.tasks_name
-    if not validate_live_folder_selection(cfg.assent_dir, [name]):
+    if not validate_live_plan_selection(cfg.assent_dir, [name]):
         return 1
     path = gitops.worktree_path(cfg.root, name)
     try:
-        # Keep the same integration-then-folder lock order as accept.  The
+        # Keep the same integration-then-plan lock order as accept.  The
         # dependency proof and every destructive action happen inside both.
         with hold_integration_lock(cfg.assent_dir):
             try:
@@ -154,9 +154,9 @@ def _lock_and_check_dependents(cfg: Config, target_head: str,
     """
     name = cfg.tasks_name
     try:
-        graph = parse_folder_dependency_graph(cfg.assent_dir)
+        graph = parse_plan_dependency_graph(cfg.assent_dir)
     except AssentError as e:
-        print(f"{name}: failed (folder dependency graph is invalid: {e})")
+        print(f"{name}: failed (plan dependency graph is invalid: {e})")
         return False, 1
 
     dependents = direct_dependents(graph, name)
@@ -167,14 +167,14 @@ def _lock_and_check_dependents(cfg: Config, target_head: str,
                 cfg.assent_dir / dependent, dependent))
         except LockBusy:
             lock_problems[dependent] = (
-                "its task folder is being changed by another run")
+                "its plan is being changed by another run")
         except LockMissing as e:
             lock_problems[dependent] = str(e)
         except AssentError as e:
-            lock_problems[dependent] = f"its task-folder lock is unavailable: {e}"
+            lock_problems[dependent] = f"its plan lock is unavailable: {e}"
 
     try:
-        locked_graph = parse_folder_dependency_graph(cfg.assent_dir)
+        locked_graph = parse_plan_dependency_graph(cfg.assent_dir)
         locked_dependents = direct_dependents(locked_graph, name)
         if locked_dependents != dependents:
             raise AssentError(
@@ -182,8 +182,8 @@ def _lock_and_check_dependents(cfg: Config, target_head: str,
                 f"({', '.join(dependents) or 'none'} -> "
                 f"{', '.join(locked_dependents) or 'none'})")
         plans = {
-            folder: Plan.parse(cfg.assent_dir / folder)
-            for folder in locked_graph
+            plan_name: Plan.parse(cfg.assent_dir / plan_name)
+            for plan_name in locked_graph
         }
     except AssentError as e:
         print(f"{name}: failed (dependency evidence could not be parsed: {e})")
@@ -222,10 +222,10 @@ def _lock_and_check_dependents(cfg: Config, target_head: str,
 
 
 def clean_locked(cfg: Config, path: Path) -> int:
-    """With the task-folder lock already held, re-gather evidence and perform cleanup.
+    """With the plan lock already held, re-gather evidence and perform cleanup.
 
     Public because ``archive`` runs exactly this proof-and-removal step under its
-    own locks instead of reimplementing a second cleanup; ``clean_folder`` is the
+    own locks instead of reimplementing a second cleanup; ``clean_plan`` is the
     entry point that acquires the locks first.
     """
     root = cfg.root
@@ -265,9 +265,9 @@ def clean_locked(cfg: Config, path: Path) -> int:
                 branch = gitops.current_branch(path)
                 if branch and not branch.startswith(cfg.branch_prefix):
                     print(f"{name}: skipped (worktree is on branch {branch}, which "
-                          "does not belong to this folder, retained)")
+                          "does not belong to this plan, retained)")
                     return 0
-                # When attached to this folder's branch, the all-prefix check
+                # When attached to this plan's branch, the all-prefix check
                 # below decides uniformly.  A detached tip needs its own proof.
                 if not branch:
                     worktree_head = gitops.head_ref(path)
@@ -323,13 +323,13 @@ def clean_locked(cfg: Config, path: Path) -> int:
 def sweep_orphaned_temporary_branches(cfg: Config) -> int:
     """Delete every leftover Assent temporary branch once; return 1 on a refusal or failure.
 
-    The two temporary namespaces are folder-independent: an
-    ``assent-integration/batch/<suffix>`` ref names no work folder at all, and a
-    folder's ``cfg.branch_prefix`` is its own ``<folder>/``, so no per-folder
+    The two temporary namespaces are plan-independent: an
+    ``assent-integration/batch/<suffix>`` ref names no plan at all, and a
+    plan's ``cfg.branch_prefix`` is its own ``<plan>/``, so no per-plan
     cleanup path can ever see these refs.  The sweep therefore belongs to the
     whole-project invocation and runs once for it -- never inside
-    ``clean_folder``/``clean_locked``, because a human naming a subset of
-    folders must not have repository-global refs deleted as a side effect, and
+    ``clean_plan``/``clean_locked``, because a human naming a subset of
+    plans must not have repository-global refs deleted as a side effect, and
     because those two already run inside the integration lock this sweep has to
     take for itself.
 
@@ -368,45 +368,45 @@ def sweep_orphaned_temporary_branches(cfg: Config) -> int:
     return 1 if failed else 0
 
 
-def clean_folders(configs: list[Config]) -> int:
-    """Clean folders upstream-first; one item's result does not block unrelated items."""
+def clean_plans(configs: list[Config]) -> int:
+    """Clean plans upstream-first; one item's result does not block unrelated items."""
     if not configs:
         return 0
-    if not validate_live_folder_selection(
+    if not validate_live_plan_selection(
             configs[0].assent_dir, [cfg.tasks_name for cfg in configs]):
         return 1
     try:
-        graph = parse_folder_dependency_graph(configs[0].assent_dir)
+        graph = parse_plan_dependency_graph(configs[0].assent_dir)
     except AssentError as e:
-        print(f"clean failed (folder dependency graph is invalid: {e})")
+        print(f"clean failed (plan dependency graph is invalid: {e})")
         return 1
 
     by_name = {cfg.tasks_name: cfg for cfg in configs}
     ordered: list[Config] = []
     visited: set[str] = set()
 
-    def add_with_prerequisites(folder: str) -> None:
-        if folder in visited:
+    def add_with_prerequisites(plan_name: str) -> None:
+        if plan_name in visited:
             return
-        visited.add(folder)
-        for prerequisite in graph[folder].after:
+        visited.add(plan_name)
+        for prerequisite in graph[plan_name].after:
             if prerequisite in by_name:
                 add_with_prerequisites(prerequisite)
-        ordered.append(by_name[folder])
+        ordered.append(by_name[plan_name])
 
-    for folder in sorted(by_name):
-        add_with_prerequisites(folder)
+    for plan_name in sorted(by_name):
+        add_with_prerequisites(plan_name)
 
-    # Every clean invocation arrives here, including ``clean FOLDER`` for one
-    # named folder, so whether this invocation owns the repository-global
+    # Every clean invocation arrives here, including ``clean PLAN`` for one
+    # named plan, so whether this invocation owns the repository-global
     # temporary namespace is decided from the selection itself, before anything
-    # is cleaned: it owns it when the selection covers every live folder (bare
+    # is cleaned: it owns it when the selection covers every live plan (bare
     # ``clean``, a ``...`` expansion, or an explicit selection that happens to
     # be the whole project), and it does not when a human named a subset.
     try:
-        whole_project = set(list_task_folders(configs[0].assent_dir)) <= set(by_name)
+        whole_project = set(list_task_plans(configs[0].assent_dir)) <= set(by_name)
     except (AssentError, OSError) as e:
-        print("orphaned temporary branches: skipped (live-folder discovery "
+        print("orphaned temporary branches: skipped (live-plan discovery "
               f"failed: {e})")
         whole_project = False
 
@@ -414,10 +414,10 @@ def clean_folders(configs: list[Config]) -> int:
     for index, cfg in enumerate(ordered):
         if index:
             print()
-        if clean_folder(cfg) != 0:
+        if clean_plan(cfg) != 0:
             failed = True
-    # The sweep runs after every selected folder, so a folder that is retained
-    # or fails does not skip it and it cannot interfere with the per-folder
+    # The sweep runs after every selected plan, so a plan that is retained
+    # or fails does not skip it and it cannot interfere with the per-plan
     # dependency proofs that run first.
     if whole_project and sweep_orphaned_temporary_branches(configs[0]) != 0:
         failed = True

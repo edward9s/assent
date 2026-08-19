@@ -1,7 +1,7 @@
-"""Mirror ``assent run``'s terminal output into the current task folder.
+"""Mirror ``assent run``'s terminal output into the current plan.
 
 The terminal keeps native output (colors and cursor repositioning included), while the
-task folder's ``_assent.log`` keeps portable, immediately-flushed plain text. Errors can
+plan's ``_assent.log`` keeps portable, immediately-flushed plain text. Errors can
 happen before config is even loaded, so this module reads config itself on a best-effort
 basis, without depending on config.py and without raising outward.
 """
@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator, TextIO
 
-from assent.config import list_task_folders
+from assent.config import list_task_plans
 from assent.plan import Plan
 
 _ANSI_RE = re.compile(
@@ -34,7 +34,7 @@ _EMOJI_RE = re.compile(
 # project's own .assent directory even when every setting comes from the user-wide
 # ~/.assent/assent.toml, so the user home is never consulted here.
 _DEFAULT_CONFIG = ".assent/assent.toml"
-_FOLDER_RE = re.compile(r"^[^\s/\\]+$")
+_PLAN_RE = re.compile(r"^[^\s/\\]+$")
 
 
 def sanitize_log_text(text: str) -> str:
@@ -97,22 +97,22 @@ class TeeTextIO:
         return getattr(self.terminal, "errors", None)
 
 
-def _valid_folder(value: object) -> str | None:
-    """Return the value if it is safe to use as a task folder name, otherwise None."""
+def _valid_plan(value: object) -> str | None:
+    """Return the value if it is safe to use as a plan name, otherwise None."""
     if (not isinstance(value, str) or not value
-            or not _FOLDER_RE.match(value) or value[0] in "-."):
+            or not _PLAN_RE.match(value) or value[0] in "-."):
         return None
     return value
 
 
-def _folder_from_tasks(assent_dir: Path) -> str | None:
-    """Best-effort derive the single ongoing task folder; any error is treated as unknown."""
+def _plan_from_tasks(assent_dir: Path) -> str | None:
+    """Best-effort derive the single ongoing plan; any error is treated as unknown."""
     try:
         ongoing = []
-        for folder in list_task_folders(assent_dir):
-            plan = Plan.parse(assent_dir / folder)
+        for plan_name in list_task_plans(assent_dir):
+            plan = Plan.parse(assent_dir / plan_name)
             if any(task.status in ("TODO", "WIP") for task in plan.tasks):
-                ongoing.append(folder)
+                ongoing.append(plan_name)
         return ongoing[0] if len(ongoing) == 1 else None
     # Logging runs before real config is loaded; even unexpected bad files (e.g. encoding
     # errors) must not block the original command.
@@ -120,8 +120,8 @@ def _folder_from_tasks(assent_dir: Path) -> str | None:
         return None
 
 
-def _folder_from_argv(argv: list[str], assent_dir: Path) -> str | None:
-    """Find a discovered run/verify folder argument, skipping options and values."""
+def _plan_from_argv(argv: list[str], assent_dir: Path) -> str | None:
+    """Find a discovered run/verify plan argument, skipping options and values."""
     if not argv or argv[0] not in ("run", "verify"):
         return None
     if "--all" in argv or "--batch" in argv:
@@ -136,19 +136,19 @@ def _folder_from_argv(argv: list[str], assent_dir: Path) -> str | None:
             idx += 1
             continue
         if not arg.startswith("-"):
-            folder = _valid_folder(arg)
-            if folder is None:
+            plan_name = _valid_plan(arg)
+            if plan_name is None:
                 return None
             try:
-                return folder if folder in set(list_task_folders(assent_dir)) else None
+                return plan_name if plan_name in set(list_task_plans(assent_dir)) else None
             except Exception:
                 return None
         idx += 1
     return None
 
 
-def _has_folder_argument(argv: list[str]) -> bool:
-    """Whether run/verify contains a positional value that could name a folder."""
+def _has_plan_argument(argv: list[str]) -> bool:
+    """Whether run/verify contains a positional value that could name a plan."""
     if not argv or argv[0] not in ("run", "verify"):
         return False
     idx = 1
@@ -186,15 +186,15 @@ def _config_path_for_argv(argv: list[str]) -> Path:
 
 
 def log_path_for_argv(argv: list[str]) -> Path:
-    """Best-effort determine the task folder log path, falling back to beside the config file on failure."""
+    """Best-effort determine the plan log path, falling back to beside the config file on failure."""
     path = _config_path_for_argv(argv)
-    explicit = _has_folder_argument(argv)
-    folder = _folder_from_argv(argv, path.parent)
-    if (folder is None and not explicit
+    explicit = _has_plan_argument(argv)
+    plan_name = _plan_from_argv(argv, path.parent)
+    if (plan_name is None and not explicit
             and "--all" not in argv and "--batch" not in argv
             and "..." not in argv):
-        folder = _folder_from_tasks(path.parent)
-    parent = path.parent / folder if folder is not None else path.parent
+        plan_name = _plan_from_tasks(path.parent)
+    parent = path.parent / plan_name if plan_name is not None else path.parent
     return parent / "_assent.log"
 
 

@@ -35,7 +35,7 @@ Every explicit `assent verify` form is mechanical: it does not enter configured
 workflow roles, start an AI session, or automatically repair a failure.
 
 ```text
-assent verify <PLAN>     # one folder receipt
+assent verify <PLAN>     # one plan receipt
 assent verify A B        # one exact batch receipt
 assent verify --batch    # dynamically discovered batch
 ```
@@ -56,15 +56,15 @@ to reproduce the result: selected source commits, reconstructed trees, verifier
 digest, and reviewed shared-input digest. Any relevant source, candidate,
 verifier, or shared-input change makes it stale.
 
-Complete folder verification refreshes `_report.md` once after the receipt
+Complete plan verification refreshes `_report.md` once after the receipt
 operation and all verification locks settle. The refresh is best-effort and
 never changes the verification result. Focused and batch verification do not
-refresh individual folder reports.
+refresh individual plan reports.
 
 Direct and selected acceptance require a fresh matching PASS receipt, except
 for an ancestry-proven already-integrated no-op. `accept --all` may replay one
 fresh batch receipt atomically; without usable batch evidence, it verifies and
-accepts eligible folders one at a time until a failure. A malformed batch
+accepts eligible plans one at a time until a failure. A malformed batch
 receipt is refused rather than ignored.
 
 ## Automatic repair

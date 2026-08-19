@@ -1,9 +1,9 @@
 # Assent plan format
 
-> `~/.assent/format.md` defines work-folder, task, and journal files. Read it
-> before creating, reviewing, or changing a plan. `workflow.md` separately owns
-> scheduler, CLI, report, receipt, and acceptance behavior. `assent check`
-> passing is the mechanical format gate.
+> `~/.assent/format.md` defines the plan folder and its task and journal
+> files. Read it before creating, reviewing, or changing a plan.
+> `workflow.md` separately owns scheduler, CLI, report, receipt, and
+> acceptance behavior. `assent check` passing is the mechanical format gate.
 
 ## Locations
 
@@ -25,7 +25,7 @@ project/
 └── .assent/
     ├── verify.py
     └── <plan>/
-        ├── _folder.toml                 # optional plan dependency
+        ├── _plan_deps.toml              # optional dependency declaration
         ├── t001_descriptive.e.toml      # task file
         └── t001_descriptive.r.toml      # append-only journal
 ```
@@ -35,38 +35,44 @@ never appears in a task's focused `verify` command. A worktree contains no
 `.assent/`; the scheduler supplies absolute management-file paths when needed.
 Any `.assent/` file found in Git is refused as a second source of truth.
 
-## Work folders and dependencies
+## Plan folders and dependencies
 
-A work folder contains at least one `tNNN_name.e.toml`. Its name is also a Git
-branch prefix and must be a portable Windows/Git-ref component: nonempty; no
-whitespace, control character, slash, backslash, `~^:?*[<>"|`, `..`, or `@{`;
-no leading `-` or `.`; no trailing `.` or `.lock`; and no Windows device name
-such as `CON`, `PRN`, `AUX`, `NUL`, `COM1`, or `LPT1`.
+A plan is a folder holding at least one `tNNN_name.e.toml`. Its name is also a
+Git branch prefix and must be a portable Windows/Git-ref component: nonempty;
+no whitespace, control character, slash, backslash, `~^:?*[<>"|`, `..`, or
+`@{`; no leading `-` or `.`; no trailing `.` or `.lock`; and no Windows device
+name such as `CON`, `PRN`, `AUX`, `NUL`, `COM1`, or `LPT1`.
 
 Task numbers are append-only and never renumbered. Add follow-up work to the
-same live, unaccepted folder when it still serves the same objective. Use a new
-folder for a distinct objective, accepted/archived/rejected work, or a separate
+same live, unaccepted plan when it still serves the same objective. Use a new
+plan for a distinct objective, accepted/archived/rejected work, or a separate
 source lineage.
 
-Optional `_folder.toml` declares direct scheduling dependencies and at most one
-source base:
+A new name must not reuse an archived one: read `.assent/_archived.toml`
+before choosing it. An archived name still owns its `_archive/<plan>.zip`,
+so reusing it makes the roster describe a plan folder that is not the one on
+disk. `assent check` refuses the collision.
+
+Optional `_plan_deps.toml` declares direct scheduling dependencies and at
+most one source base:
 
 ```toml
 after = ["bootstrap01", "docs01"]
 base = "bootstrap01"
 ```
 
-- `after` means “must finish before this folder.” It supplies order only.
-- If `_folder.toml` exists, `after` is required; write `after = []` when empty.
+- `after` means “must finish before this plan.” It supplies order only.
+- If `_plan_deps.toml` exists, `after` is required; write `after = []` when
+  empty.
 - `base` means “start from this one unaccepted upstream commit.” It must also
   appear in `after`. Without `base`, start from the current integration target.
 - Never infer `base` from `after`. Multiple `after` entries do not form a stack.
 - When using `base`, state in task `behavior` or `notes` which inherited files
   or symbols the downstream work requires.
-- Every referenced folder must resolve to a live work folder or the archive
+- Every referenced plan must resolve to a live plan folder or the archive
   roster. Cycles and contradictory live-plus-archived identities are invalid.
 
-A folder is complete exactly when every formal task is `DONE` or `SKIP`.
+A plan is complete exactly when every formal task is `DONE` or `SKIP`.
 Scheduler ordering, selection, verification, acceptance, rework, rejection,
 archive, and cleanup are defined in `~/.assent/workflow.md`.
 
@@ -79,7 +85,7 @@ dependency references use only the filename prefix `tNNN`; the paired
 `.r.toml` journal keeps the same descriptive segment. Files execute in
 lexicographic filename order.
 
-Only `.e.toml` is active. A legacy `tNNN_name.toml` in a live folder makes
+Only `.e.toml` is active. A legacy `tNNN_name.toml` in a live plan makes
 `check` and `run` refuse rather than ignore or move it.
 
 Use this 12-field skeleton; no other field is allowed:
@@ -118,7 +124,7 @@ all multiline strings so the scheduler can replace exactly that line.
 
 ### Field rules
 
-- `deps` lists earlier task ids in this folder. Write `[]` when empty.
+- `deps` lists earlier task ids in this plan. Write `[]` when empty.
 - `scope` is a nonempty list of project-relative path prefixes the task may
   change. It is fail-closed. The task's own status line and paired journal are
   scheduler exceptions and need not appear.

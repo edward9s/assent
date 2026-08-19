@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from assent import (AssentError, auto_fix, engine, folder_scheduler, gitops,
+from assent import (AssentError, auto_fix, engine, plan_scheduler, gitops,
                     shared_paths, usage)
 from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult, TokenUsage
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
@@ -63,14 +63,14 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
         """
         adapters = list(names) or ["claude"] * count
         rendered = ', { action = "focused_sweep" }, '.join(
-            f'{{ role = "folder_reviewer", adapter = {json.dumps(name)} }}'
+            f'{{ role = "plan_reviewer", adapter = {json.dumps(name)} }}'
             for name in adapters)
         return (
             '\n[abilities.review_fix]\nprompt = "Review and repair."\n'
             'writes = true\nproduces_verdict = true\n'
             '[abilities.fix]\nprompt = "Repair durable findings."\n'
             'writes = true\n'
-            '[roles.folder_reviewer]\nability = ["review_fix"]\n'
+            '[roles.plan_reviewer]\nability = ["review_fix"]\n'
             'model = "prime"\neffort = "heavy"\n'
             '[roles.bounded_fixer]\nability = ["fix"]\n'
             '[workflow]\nplan = [{ action = "focused_sweep" }, '
@@ -167,7 +167,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 engine.verification.verifier_digest(cfg), "b" * 64, 0, (),
                 False)
 
-        with mock.patch("assent.engine.verify_folder_action",
+        with mock.patch("assent.engine.verify_plan_action",
                         side_effect=verify_action):
             self.assertEqual(engine.run_selection_workflow(
                 str(self.root / ".assent" / "assent.toml"),
@@ -181,10 +181,10 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
 
         def select(_config_path, assent_dir, _main, _target):
             self.assertIsInstance(assent_dir, Path)
-            return mock.Mock(folders=(), skipped=()), {}
+            return mock.Mock(plan_names=(), skipped=()), {}
 
         with mock.patch.object(
-                engine.verification, "select_batch_folders",
+                engine.verification, "select_batch_plans",
                 side_effect=select):
             self.assertEqual(engine.run_dynamic_selection_workflow(
                 str(self.root / ".assent" / "assent.toml"),
@@ -442,7 +442,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 "assent.engine.get_adapter",
                 side_effect=lambda name, _cfg: (
                     unavailable if name == "codex" else reviewer_and_fixer)), \
-                mock.patch("assent.engine.verify_folder_action",
+                mock.patch("assent.engine.verify_plan_action",
                            side_effect=verify_action):
             self.assertEqual(engine.run_selection_workflow(
                 str(self.root / ".assent" / "assent.toml"),
@@ -467,7 +467,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                      if record["context"]["kind"] == "selection"]
         self.assertEqual(invalid, 0)
         self.assertEqual(len(selection), 2)
-        self.assertTrue(all(record["folders"] == ["plan01"]
+        self.assertTrue(all(record["plans"] == ["plan01"]
                             for record in selection))
         reviewed = next(record for record in selection if record["models"])
         self.assertEqual(reviewed["models"][0]["provider_model"],
@@ -731,7 +731,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                 ("src/value.txt failed",), False)
 
         with mock.patch("assent.engine.get_adapter", return_value=reviewer), \
-                mock.patch("assent.engine.verify_folder_action",
+                mock.patch("assent.engine.verify_plan_action",
                            side_effect=verify_action):
             self.assertEqual(engine.run_selection_workflow(
                 str(self.root / ".assent" / "assent.toml"),
@@ -1158,8 +1158,8 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             return []
         return log.read_text(encoding="utf-8").splitlines()
 
-    def self_fixed_folder(self, rounds, *, verify=None, repairs=None):
-        """A folder whose every configured round repairs and none confirms.
+    def self_fixed_plan(self, rounds, *, verify=None, repairs=None):
+        """A plan whose every configured round repairs and none confirms.
 
         The last round leaves a FIXED verdict with no round left to review it,
         which is the exact SELF-FIXED, UNREVIEWED hand-off point.  `verify`
@@ -1259,7 +1259,7 @@ class TestProviderUsageRecording(GlobalContractsMixin, EngineTestCase):
                 assent_dir=cfg.assent_dir, invocation_id=identity,
                 adapter="claude", requested_model="requested",
                 context_kind="task", context_id="t001",
-                folders=("plan01",),
+                plan_names=("plan01",),
                 evidence=(TokenUsage(input_tokens=1),)))
             for identity in identities]
         for thread in threads:
@@ -1269,7 +1269,7 @@ class TestProviderUsageRecording(GlobalContractsMixin, EngineTestCase):
         usage.record_invocation(
             cfg.assent_dir, invocation_id=identities[0], adapter="claude",
             requested_model="requested", context_kind="task",
-            context_id="t001", folders=("plan01",),
+            context_id="t001", plan_names=("plan01",),
             evidence=(TokenUsage(input_tokens=99),))
         records, invalid = usage.read_records(cfg.assent_dir)
         self.assertEqual(invalid, 0)
@@ -1297,7 +1297,7 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
     ACTION_AGENT = (
         '\n[abilities.work]\nprompt = "Work from the supplied evidence."\n'
         'writes = true\n'
-        '[roles.worker]\nability = ["work"]\n')
+        '[roles.worker]\nability = ["work"]\nmodel = "core"\n')
     VERDICT_AGENT = (
         '\n[abilities.review_fix]\n'
         'prompt = "Review and repair the failed focused test."\n'

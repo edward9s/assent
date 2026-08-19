@@ -106,13 +106,13 @@ def _existing_ids(path: Path) -> set[str]:
 def record_invocation(
         assent_dir: Path, *, invocation_id: str, adapter: str,
         requested_model: str | None, context_kind: str, context_id: str,
-        folders: Iterable[str], evidence: tuple[TokenUsage, ...] | None,
+        plan_names: Iterable[str], evidence: tuple[TokenUsage, ...] | None,
         now: datetime | None = None) -> bool:
     """Append one completed invocation without allowing telemetry failure to escape."""
     try:
         directory = Path(assent_dir)
         directory.mkdir(parents=True, exist_ok=True)
-        folder_list = list(dict.fromkeys(str(folder) for folder in folders))
+        plan_list = list(dict.fromkeys(str(plan_name) for plan_name in plan_names))
         record = {
             "version": USAGE_VERSION,
             "invocation_id": invocation_id,
@@ -120,7 +120,7 @@ def record_invocation(
             "adapter": adapter,
             "requested_model": requested_model,
             "context": {"kind": context_kind, "id": context_id},
-            "folders": folder_list,
+            "plans": plan_list,
             "models": [_usage_dict(item) for item in (evidence or ())],
         }
         encoded = json.dumps(
@@ -172,13 +172,13 @@ def read_records(assent_dir: Path) -> tuple[list[dict], int]:
             invalid += 1
             continue
         identity = item.get("invocation_id")
-        folders = item.get("folders")
+        plan_names = item.get("plans")
         models = item.get("models")
         context = item.get("context")
         if (not isinstance(identity, str) or not identity
                 or not isinstance(item.get("adapter"), str)
-                or not isinstance(folders, list)
-                or not all(isinstance(folder, str) for folder in folders)
+                or not isinstance(plan_names, list)
+                or not all(isinstance(plan_name, str) for plan_name in plan_names)
                 or not isinstance(models, list)
                 or not isinstance(context, dict)):
             invalid += 1
@@ -190,14 +190,14 @@ def read_records(assent_dir: Path) -> tuple[list[dict], int]:
     return records, invalid
 
 
-def report_lines(assent_dir: Path, folder: str) -> list[str]:
-    """Render model-aware usage totals for one folder without inventing values."""
+def report_lines(assent_dir: Path, plan_name: str) -> list[str]:
+    """Render model-aware usage totals for one plan without inventing values."""
     records, invalid = read_records(assent_dir)
-    relevant = [item for item in records if folder in item["folders"]]
+    relevant = [item for item in records if plan_name in item["plans"]]
     lines = ["AI usage (provider-reported)"]
     if not relevant:
         lines.append(
-            "  Unavailable: no provider usage evidence is recorded for this folder; "
+            "  Unavailable: no provider usage evidence is recorded for this plan; "
             "historical pre-feature sessions are not reconstructed.")
         if invalid:
             lines.append(f"  Ignored malformed usage records: {invalid}")

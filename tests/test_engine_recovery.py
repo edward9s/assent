@@ -32,7 +32,7 @@ produces_verdict = true
 [abilities.fix]
 prompt = "Repair durable findings."
 writes = true
-[roles.folder_reviewer]
+[roles.plan_reviewer]
 ability = ["review_fix"]
 model = "prime"
 effort = "heavy"
@@ -41,9 +41,9 @@ ability = ["fix"]
 [workflow]
 plan = [
   { action = "focused_sweep" },
-  { role = "folder_reviewer", adapter = "claude" },
+  { role = "plan_reviewer", adapter = "claude" },
   { action = "focused_sweep" },
-  { role = "folder_reviewer", adapter = "claude" },
+  { role = "plan_reviewer", adapter = "claude" },
   { action = "focused_sweep" },
 ]
 '''
@@ -73,7 +73,7 @@ class TestAutoFixRestartRecovery(GlobalContractsMixin, EngineTestCase):
             return ok_result()
         return step
 
-    def test_pending_selection_repair_defers_ordinary_folder_execution(self):
+    def test_pending_selection_repair_defers_ordinary_plan_execution(self):
         task_path = self.write_task(1, status="TODO", scope=("src/",))
         cfg = self.build()
         self.commit_all()
@@ -108,7 +108,7 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
     recorded."""
 
     def _reused_worktree(self):
-        """A worktree that a prior run created and left behind, on the folder's work branch."""
+        """A worktree that a prior run created and left behind, on the plan's work branch."""
         worktree = gitops.ensure_worktree(self.root, "plan01")
         gitops.ensure_branch(worktree, "plan01/")
         return worktree
@@ -330,10 +330,10 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
     # interrupted before its verdict, and deliberately left the durable state
     # untouched so its position does not advance.  The task it was repairing is
     # DONE with its terminal auto() checkpoint, so neither owner above can claim
-    # the remaining dirt -- only the folder's durable in-flight state can.
+    # the remaining dirt -- only the plan's durable in-flight state can.
 
-    def _reviewed_folder(self, extra_tasks=(), *, scope=("src/",)):
-        """A folder whose tasks all finished their ordinary closeout: DONE, each with its own
+    def _reviewed_plan(self, extra_tasks=(), *, scope=("src/",)):
+        """A plan whose tasks all finished their ordinary closeout: DONE, each with its own
         terminal auto() checkpoint, which is exactly what the two existing owners cannot
         claim dirt against."""
         path = self.write_task(1, status="DONE", scope=scope)
@@ -393,7 +393,7 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
             worktree, cfg.git_excludes).is_clean)
 
     def test_same_dirt_without_durable_state_stays_fail_closed(self):
-        cfg, path, worktree = self._reviewed_folder()
+        cfg, path, worktree = self._reviewed_plan()
         (worktree / "src" / "value.txt").write_text(
             "interrupted reviewer repair\n", encoding="utf-8")
 
@@ -408,13 +408,13 @@ class TestCrashDirtyWorktreeRecovery(GlobalContractsMixin, EngineTestCase):
 prompt = "Review and repair."
 writes = true
 produces_verdict = true
-[roles.folder_reviewer]
+[roles.plan_reviewer]
 ability = ["review_fix"]
 model = "prime"
 effort = "heavy"
 [workflow]
 plan = [
-  { role = "folder_reviewer", adapter = "claude" },
+  { role = "plan_reviewer", adapter = "claude" },
   { action = "focused_sweep" },
 ]
 ''')
@@ -459,7 +459,7 @@ plan = [
             "reviewer repair\n")
 
     def test_dirt_outside_the_implicated_task_scope_stays_fail_closed(self):
-        cfg, path, worktree = self._reviewed_folder()
+        cfg, path, worktree = self._reviewed_plan()
         self._write_review_state(cfg)
         (worktree / "src" / "value.txt").write_text(
             "interrupted reviewer repair\n", encoding="utf-8")
@@ -472,7 +472,7 @@ plan = [
     def test_phase_that_is_not_in_flight_does_not_activate_the_new_owner(self):
         # NEEDS_REPAIR is the verdict written before any repair session runs, so
         # no round was writing and the dirt has no proven origin.
-        cfg, path, worktree = self._reviewed_folder()
+        cfg, path, worktree = self._reviewed_plan()
         self._write_review_state(cfg, phase="NEEDS_REPAIR")
         (worktree / "src" / "value.txt").write_text(
             "unexplained\n", encoding="utf-8")
@@ -480,7 +480,7 @@ plan = [
         self._assert_refused(cfg, worktree)
 
     def test_two_implicated_tasks_that_could_own_the_dirt_stay_fail_closed(self):
-        cfg, path, worktree = self._reviewed_folder(extra_tasks=((2, "also"),))
+        cfg, path, worktree = self._reviewed_plan(extra_tasks=((2, "also"),))
         self._write_review_state(cfg, task_ids=("t001", "t002"))
         (worktree / "src" / "value.txt").write_text(
             "ambiguous\n", encoding="utf-8")

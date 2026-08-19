@@ -19,8 +19,8 @@ while operating an assent-managed session live in
   acceptance meeting as `_report.md` evidence. A question the scheduler cannot
   settle is not a run failure. Design such an outcome as exit 0 plus a
   distinctly named report state plus an explicit gate at `accept` — never as a
-  nonzero exit, because `run --all` stops launching further folders once any
-  folder exits nonzero, so nonzero silently cancels unrelated queued work.
+  nonzero exit, because `run --all` stops launching further plans once any
+  plan exits nonzero, so nonzero silently cancels unrelated queued work.
   Reserve nonzero for genuine failure: infrastructure, a refused precondition,
   or a broken gate, where continuing would be unsafe rather than undecided.
 - Standard library only; introduce no third-party dependencies.
@@ -45,7 +45,7 @@ while operating an assent-managed session live in
     task title verbatim, so it is both generated text and user data. The verbatim
     rule wins: assent never transliterates or translates a user's title on its way
     into a commit. It follows that a project keeps the commit language it writes
-    its titles in — so in assent's own `.assent/` plan folders, write task titles
+    its titles in — so in assent's own `.assent/` plans, write task titles
     in English, and this repository's own history stays canonical English without
     the tool having to rewrite anyone's words.
   - Do not place English and Chinese canonical contracts side by side in a
@@ -73,7 +73,7 @@ while operating an assent-managed session live in
   refuses and retains the managed path for an Assent-owned retry.
 - The fail-closed scope check is a safety floor; its meaning must not be
   relaxed.
-- Every explicitly named live work-folder selection is audited in full before
+- Every explicitly named live plan selection is audited in full before
   dispatch: each stated name, including a prefix before `...`, must resolve to
   an existing `.assent/` directory containing a formal `tNNN_name.e.toml` task
   file. Any unresolved name reports with the complete unresolved set and
@@ -82,10 +82,10 @@ while operating an assent-managed session live in
   with an intentionally absent live directory.
 - git is always required; no disable switch or git-less degraded mode may be
   introduced.
-- Do not introduce a hand-maintained "current folder" pointer; the work folder
+- Do not introduce a hand-maintained "current plan" pointer; the plan
   is stated explicitly by argument or derived from task-file facts, and any
   ambiguity is refused.
-- Human approval is the explicit `assent accept FOLDER` action plus the resulting
+- Human approval is the explicit `assent accept PLAN` action plus the resulting
   Git integration; do not add a second per-task `review` state alongside task
   execution status.
 - During `assent run`, the configured `task`, `plan`, and `integration`
@@ -109,48 +109,48 @@ while operating an assent-managed session live in
   plan. The engine derives behavior from workflow position and abilities, never
   from role or ability names. Repair may reopen only existing implicated tasks.
   Eligible pre-existing technical debt may
-  originate only in the initial completed-folder review, must stay visible for the
+  originate only in the initial completed-plan review, must stay visible for the
   later human acceptance agenda, and may not be introduced by task BLOCKED handling
   or recheck. Each repair round carries its reason, selects its finite fixer-profile
   assignments against the pre-round history, and persists every assignment before
   its first write-capable session. The finite arrays are the only convergence
   bound; exhaustion terminates automation as `REVIEW UNRESOLVED, HUMAN DECISION`,
   exit zero, with durable findings and edits for a human. Workflow repair never creates
-  tasks, reverts or deletes source, accepts a folder, or changes the explicit human
+  tasks, reverts or deletes source, accepts a plan, or changes the explicit human
   `accept` boundary.
 - The default adapter permissions remain `danger-full-access` where configured:
   the read-only reviewer's prompt plus before/after write detection is a
   cooperative rule, not a security sandbox and not a preventive permission
   boundary.
 - The literal ASCII token `...` is remainder syntax shared by every
-  folder-taking command (`run`, `verify`, `accept`, `clean`, `archive`): given
-  once, as the last positional argument, it means "and every remaining folder
+  plan-taking command (`run`, `verify`, `accept`, `clean`, `archive`): given
+  once, as the last positional argument, it means "and every remaining plan
   the command itself would discover". It is not an alias for `--all` and may
   not be combined with it (nor with `verify --batch`/`--focus`, `run --once`/
-  `--task`, or `archive --restore`, which takes exactly one folder). The
+  `--task`, or `archive --restore`, which takes exactly one plan). The
   expansion is snapshotted once, before anything is mutated, and each command
-  keeps its own discovery rule: `verify` and `accept` add only finished folders,
-  `run`, `clean` and `archive` add every work folder and decide per folder
+  keeps its own discovery rule: `verify` and `accept` add only finished plans,
+  `run`, `clean` and `archive` add every plan and decide per plan
   afterwards. The remainder is appended after the explicit prefix, and each
   command then applies its own native ordering: `run` keeps the stated prefix
-  order and takes the remainder in folder-dependency order, `verify` and
+  order and takes the remainder in plan-dependency order, `verify` and
   `accept` normalize the whole selection to dependency order, and `clean`
   normalizes it upstream-first.
 - Selection cardinality is what picks a command's path, not the presence of
-  `...`: one folder is the single-folder path (folder receipt, direct accept,
-  `archive_folder`), two or more is the exact selected batch. A
+  `...`: one plan is the single-plan path (plan receipt, direct accept,
+  `archive_plan`), two or more is the exact selected batch. A
   remainder-expanded selection is an ordinary exact selection, so selected
   acceptance still requires evidence for exactly the expanded set and still
   never verifies.
 - A successful `run` automatically follows the configured integration workflow
   for the same exact selection until `full_verify` passes or the finite array is
   exhausted. `--once` and `--task` defer integration when they leave the selected
-  folder incomplete. No run path accepts; publication remains the later human
+  plan incomplete. No run path accepts; publication remains the later human
   `assent accept` action.
-- A multi-folder `archive A B` keeps `archive FOLDER`'s contract, not `--all`'s:
-  the human named those folders, so an ineligible one is a refusal that exits
-  nonzero after every named folder has been attempted, while `--all` skips an
-  ineligible folder without failing.
+- A multi-plan `archive A B` keeps `archive PLAN`'s contract, not `--all`'s:
+  the human named those plans, so an ineligible one is a refusal that exits
+  nonzero after every named plan has been attempted, while `--all` skips an
+  ineligible plan without failing.
 - argparse help may be colorized by the standard library; only the `usage:`
   prefix and section headings are re-themed, away from Python 3.14's barely
   legible dark blue, and only inside argparse's own `_set_color`, so
@@ -160,25 +160,25 @@ while operating an assent-managed session live in
 - Expensive full-project verification belongs to unattended `run` / `verify`,
   not the interactive acceptance decision. Human approval is the explicit
   `assent accept` action plus the resulting Git integration. Direct
-  `accept FOLDER` and selected `accept A B` never start verification; unless a
+  `accept PLAN` and selected `accept A B` never start verification; unless a
   source is already integrated by ancestry as an idempotent no-op, they require
   a fresh receipt that exactly matches the source, reconstructed integration
   tree, and verification-script digest. `accept --all` intentionally has two
   modes: a fresh PASSED batch receipt is replayed and released atomically
   without new verification, while absent or expired batch evidence uses the
-  sequential per-folder `verify_folder_if_needed` step before each
+  sequential per-plan `verify_plan_if_needed` step before each
   not-already-integrated accept, stops on the first failure, and preserves
   earlier publications. A malformed batch receipt refuses rather than falling
   back. Exact receipt replay and the human approval boundary remain mandatory.
-- Every production folder-level complete verification operation, whether
-  `verify_folder` or `verify_folder_if_needed`, refreshes that folder's
+- Every production plan-level complete verification operation, whether
+  `verify_plan` or `verify_plan_if_needed`, refreshes that plan's
   `_report.md` exactly once after the receipt operation settles and all
   verification locks are released. The best-effort refresh observes PASSED,
   FAILED, stale-receipt replacement, fresh-receipt reuse, malformed-receipt
-  refusal, incomplete-folder no-op, and interrupt outcomes without changing or
+  refusal, incomplete-plan no-op, and interrupt outcomes without changing or
   masking the verification result. Focused verification and selected or
-  dynamic batch verification write no folder receipt and therefore do not
-  refresh a folder report.
+  dynamic batch verification write no plan receipt and therefore do not
+  refresh a plan report.
 - A verification receipt is a deletable derived artifact, never an independent
   source of truth: source commits, the reconstructed integration tree, and the
   verification-script digest must reproduce it before it can authorize accept.
@@ -218,7 +218,7 @@ while operating an assent-managed session live in
   path inside a physically ignored source directory gets one appended
   `Ignored input diagnosis:` note naming that directory and the directory-link
   remedy. The note preserves the verifier output and exit code, is stored in
-  whichever receipt records the failure summary, applies to single-folder,
+  whichever receipt records the failure summary, applies to single-plan,
   exact selected, dynamic batch, and localization-prefix verification alike,
   normalizes separators, and reports only a directory the verifier output
   itself names; it never enumerates or traverses an ignored tree.
@@ -246,7 +246,7 @@ while operating an assent-managed session live in
   until settled. Inventory comes from the primary worktree before the session;
   ignored leaf files remain on their separate automatic verifier path.
   Every verification entry point and `assent reconcile` classify and reconcile
-  before any candidate, verifier, or managed worktree exists, and folder and
+  before any candidate, verifier, or managed worktree exists, and plan and
   batch receipts bind one `shared_inputs_sha256` -- snapshotted immediately
   before and after the full verifier -- that acceptance rechecks before
   publishing a ref without ever repairing a link or invoking AI. Do not add a
@@ -258,9 +258,9 @@ while operating an assent-managed session live in
   is unreviewed evidence under every state and refuses verification,
   reconciliation, receipt freshness, reporting, and acceptance; ordinary
   ignored leaf files keep their separate automatic candidate-link behavior.
-- Cross-folder speculative execution stacks only on an explicitly declared
+- Cross-plan speculative execution stacks only on an explicitly declared
   `base`, so at most one not-yet-accepted upstream tip is ever in a stack. A
-  folder that declares no `base` is cut from the integration target; the
+  plan that declares no `base` is cut from the integration target; the
   scheduler must never infer a base from `after` or otherwise build an implicit
   integration engine.
 - Rework preserves existing code by default. A from-scratch rework must be an
@@ -325,11 +325,11 @@ orientation only; the behavioral contracts stay where they already are.
 
 Git-based workflow: `gitops.py`, `accept.py`, `archive.py`, `reconcile.py`,
 `reject.py`, `rework.py`, `clean.py`, `init.py`, `plan.py`, `batch_accept.py`,
-`batch_receipt.py`, `folder_verification.py`,
-`folder_verification_closeout.py`, `batch_verification.py`, `verification.py`,
+`batch_receipt.py`, `plan_verification.py`,
+`plan_verification_closeout.py`, `batch_verification.py`, `verification.py`,
 `verification_common.py`, `shared_paths.py`.
 
-Unattended running: `folder_scheduler.py`, plus the scheduling, session, and
+Unattended running: `plan_scheduler.py`, plus the scheduling, session, and
 resume surface inside `engine.py` -- `_run_locked`, `_process_task`,
 `_evaluate`, adapter rotation, and quota/resume handling.
 
@@ -338,8 +338,8 @@ In-flight review: `auto_fix.py`, plus the review-and-repair surface inside
 `_FocusedGateLedger`, `_AutoFixBlockerEvidence`.
 
 Shared foundation used by more than one category: `config.py`, `contracts.py`,
-`lockfile.py`, `pathops.py`, `user_home.py`, `preflight.py`, `folderdeps.py`,
-`folder_source.py`, `inspection.py`, `doctor.py`, `terminal_log.py`,
+`lockfile.py`, `pathops.py`, `user_home.py`, `preflight.py`, `plandeps.py`,
+`plan_source.py`, `inspection.py`, `doctor.py`, `terminal_log.py`,
 `adapters/`, `__main__.py`, `main.py`.
 
 - When using assent, first read `~/.assent/instructions.md`, the global working instructions shared by every project; a scheduled worktree session uses the absolute path the scheduler provides. An AI session never initiates the full suite or `.assent/verify.py`; the scheduler owns workflow `full_verify`, and an interactive session runs complete verification only when the human explicitly requests it. <!-- assent-instructions -->

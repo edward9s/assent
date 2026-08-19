@@ -1,13 +1,13 @@
-"""The batch receipt: one full verification covering several folders.
+"""The batch receipt: one full verification covering several plans.
 
-One candidate tree merges every queued folder in a recorded order, is verified
-once, and is then released folder by folder.  Each intermediate merge commit
+One candidate tree merges every queued plan in a recorded order, is verified
+once, and is then released plan by plan.  Each intermediate merge commit
 must be comparable against the receipt, so the receipt stores the tree after
 every step, not only the final tree.
 
-The batch receipt (``.assent/_batch_verification.toml``) spans folders and
+The batch receipt (``.assent/_batch_verification.toml``) spans plans and
 therefore lives in ``.assent/`` itself.  It never reads, writes, or depends on
-the per-folder receipt in ``assent.folder_verification``: the two evidence
+the per-plan receipt in ``assent.plan_verification``: the two evidence
 models sit side by side and stay independent.
 
 This module owns the evidence only -- its data, bytes, and freshness rules.
@@ -39,26 +39,26 @@ _BATCH_RECEIPT_KEYS = {
     "verify_script_sha256", "shared_inputs_sha256", "verify_command",
     "exit_code", "completed_at", "failure_summary",
 }
-_BATCH_SOURCE_KEYS = {"folder", "source_tip", "step_tree"}
+_BATCH_SOURCE_KEYS = {"plan", "source_tip", "step_tree"}
 
 
 @dataclass(frozen=True)
 class BatchSource:
-    """One folder's place in the recorded merge order.
+    """One plan's place in the recorded merge order.
 
-    ``step_tree`` is the candidate tree right after this folder was merged, so a
+    ``step_tree`` is the candidate tree right after this plan was merged, so a
     release can compare every intermediate merge commit it creates, not just the
     end of the chain.
     """
 
-    folder: str
+    plan: str
     source_tip: str
     step_tree: str
 
 
 @dataclass(frozen=True)
 class BatchVerificationReceipt:
-    """Evidence of one full verification covering an ordered list of folders."""
+    """Evidence of one full verification covering an ordered list of plans."""
 
     version: int
     status: str
@@ -82,16 +82,16 @@ class BatchVerificationReceipt:
             object.__setattr__(self, "sources", tuple(self.sources))
 
     @property
-    def folders(self) -> tuple[str, ...]:
-        """Folder names in the recorded merge order."""
-        return tuple(source.folder for source in self.sources)
+    def plan_names(self) -> tuple[str, ...]:
+        """Plan names in the recorded merge order."""
+        return tuple(source.plan for source in self.sources)
 
 
 def batch_receipt_path(assent_dir: str | Path) -> Path:
     """Return the repository-level batch receipt path.
 
-    The batch receipt spans folders, so it belongs to ``.assent/`` itself and
-    never to one folder's directory.
+    The batch receipt spans plans, so it belongs to ``.assent/`` itself and
+    never to one plan's directory.
     """
     return Path(assent_dir) / BATCH_RECEIPT_NAME
 
@@ -128,7 +128,7 @@ def _batch_receipt_text(receipt: BatchVerificationReceipt) -> str:
     for source in receipt.sources:
         text += (
             "\n[[sources]]\n"
-            f"folder = {toml_string(source.folder)}\n"
+            f"plan = {toml_string(source.plan)}\n"
             f"source_tip = {toml_string(source.source_tip)}\n"
             f"step_tree = {toml_string(source.step_tree)}\n"
         )
@@ -158,15 +158,15 @@ def _validate_batch_receipt(receipt: BatchVerificationReceipt,
         if not isinstance(source, BatchSource):
             raise AssentError(
                 f"Batch verification receipt sources[{index}] is not a source entry")
-        if not isinstance(source.folder, str):
+        if not isinstance(source.plan, str):
             raise AssentError(
-                f"Batch verification receipt sources[{index}] folder must be a string")
-        validate_tasks_name(source.folder, "Batch verification receipt folder")
-        if source.folder in seen:
+                f"Batch verification receipt sources[{index}] plan must be a string")
+        validate_tasks_name(source.plan, "Batch verification receipt plan")
+        if source.plan in seen:
             raise AssentError(
-                "Batch verification receipt lists folder "
-                f"{source.folder} more than once")
-        seen.add(source.folder)
+                "Batch verification receipt lists plan "
+                f"{source.plan} more than once")
+        seen.add(source.plan)
         _require_oid(source.source_tip, f"sources[{index}] source_tip")
         _require_oid(source.step_tree, f"sources[{index}] step_tree")
     if receipt.final_tree != receipt.sources[-1].step_tree:
@@ -299,16 +299,16 @@ def current_batch_shared_inputs(main: Path,
     manifest = shared_paths.read_manifest(main)
     contracts: list[tuple[str, shared_paths.Contract]] = []
     for source in receipt.sources:
-        worktree = gitops.folder_worktree(main, source.folder)
+        worktree = gitops.plan_worktree(main, source.plan)
         contract = shared_paths.classify(main, worktree or main, manifest)
         if not contract.settled:
             raise AssentError(
-                f"the shared-path contract for {source.folder} is "
+                f"the shared-path contract for {source.plan} is "
                 f"{contract.state}; the batch receipt's shared-input evidence "
                 "can no longer be reproduced")
         shared_paths.require_directory_link_agreement(
-            main, worktree or main, contract, folder=source.folder)
-        contracts.append((source.folder, contract))
+            main, worktree or main, contract, plan_name=source.plan)
+        contracts.append((source.plan, contract))
     return shared_paths.shared_inputs_digest(main, contracts)
 
 
@@ -334,22 +334,22 @@ def batch_receipt_staleness(cfg: Config,
     target_tip = gitops.commit_of(main, gitops.require_current_branch(main))
     for source in receipt.sources:
         try:
-            branch = gitops.unique_folder_branch(main, source.folder)
+            branch = gitops.unique_plan_branch(main, source.plan)
         except AssentError as e:
-            reasons.append(f"source branch for {source.folder} is ambiguous: {e}")
+            reasons.append(f"source branch for {source.plan} is ambiguous: {e}")
             continue
         if branch is None:
-            reasons.append(f"source branch for {source.folder} no longer exists")
+            reasons.append(f"source branch for {source.plan} no longer exists")
             continue
         tip = gitops.branch_tip(main, branch)
         if tip != source.source_tip:
             reasons.append(
-                f"source tip for {source.folder} changed from {source.source_tip} "
+                f"source tip for {source.plan} changed from {source.source_tip} "
                 f"to {tip}")
             continue
         if gitops.is_ancestor(main, tip, target_tip):
             reasons.append(
-                f"{source.folder} has already been accepted into the target "
+                f"{source.plan} has already been accepted into the target "
                 "on its own")
     if reasons:
         return tuple(reasons)
@@ -366,14 +366,14 @@ def batch_receipt_staleness(cfg: Config,
 
     candidate = build_batch_candidate(
         main, target_tip,
-        [(source.folder, source.source_tip) for source in receipt.sources])
+        [(source.plan, source.source_tip) for source in receipt.sources])
     if not candidate.ok:
-        return (f"rebuilt integration of {candidate.conflict_folder} conflicts: "
+        return (f"rebuilt integration of {candidate.conflict_plan} conflicts: "
                 + ", ".join(candidate.conflicts),)
     for source, tree in zip(receipt.sources, candidate.step_trees):
         if tree != source.step_tree:
             reasons.append(
-                f"rebuilt step tree for {source.folder} is {tree}, not the "
+                f"rebuilt step tree for {source.plan} is {tree}, not the "
                 f"recorded {source.step_tree}")
             break
     if not reasons and candidate.step_trees[-1] != receipt.final_tree:

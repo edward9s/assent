@@ -58,7 +58,7 @@ assent clean              # 所有 plan
 ```
 
 `clean` 只移除已證明乾淨、ownership 正確且已整合的 worktree/branch。只要 direct
-dependent 尚未完成、未接受、dirty、遺失或缺乏證明，上游就會保留。多個 folder
+dependent 尚未完成、未接受、dirty、遺失或缺乏證明，上游就會保留。多個 plan
 依 upstream-first 順序處理。沒有 force-delete，`.assent/<PLAN>/` 也不會被刪除。
 
 ## Archive
@@ -70,16 +70,16 @@ assent archive <PLAN> --restore
 ```
 
 Archive 先要求同一套安全 cleanup 證明，再把管理資料存到 `.assent/_archive/`、更新
-roster，並移除 live folder。明示的 plan 不符合條件時會回報錯誤；`--all` 會略過。
-Restore 一次只處理一個 plan，先驗證 archive，也不會覆蓋現有 live folder。
+roster，並移除 live plan directory。明示的 plan 不符合條件時會回報錯誤；`--all` 會略過。
+Restore 一次只處理一個 plan，先驗證 archive，也不會覆蓋現有 live plan directory。
 
 ## 暫存 branch 與 doctor
 
-`assent-integration/<folder>/<suffix>` 和 `assent-reconcile/<folder>` 屬於建立它們的
+`assent-integration/<PLAN>/<suffix>` 和 `assent-reconcile/<PLAN>` 屬於建立它們的
 transaction。只有 repository-wide integration lock 證明沒有 transaction 持有時，
 殘留 branch 才算 orphan。它的 tree 是已發布或已被取代，只是回報資訊，不是刪除條件。
 
-未指定 folder 的 `clean` 每次會掃描這兩種 namespace 一次；`archive --all` 使用相同流程。
+未指定 plan 的 `clean` 每次會掃描這兩種 namespace 一次；`archive --all` 使用相同流程。
 明示的 `clean <PLAN>` 刻意不動 repository-wide 暫存 branch。`assent doctor` 會回報
 殘留項目，重新確認 ownership 後才提供 `[y/N]` 移除。
 

@@ -43,7 +43,7 @@ REVIEW_TRANSITION_KINDS = frozenset({
 })
 SCOPE_PATH_STATES = frozenset({"existing_file", "new_file"})
 REVIEW_CONTEXTS = frozenset({
-    "completed_folder", "blocked_adjudication", "selection_verification",
+    "completed_plan", "blocked_adjudication", "selection_verification",
 })
 REVIEW_STAGES = frozenset({"initial", "recheck"})
 FAILURE_TRIGGERS = frozenset({"worker_blocked", "focused_gate_failure"})
@@ -54,7 +54,7 @@ REPAIR_DISPOSITION_PREFIX = "ASSENT_REPAIR_DISPOSITION "
 AUTO_FIX_PHASES = frozenset({
     "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
 })
-# A merged reviewer-fixer round that repaired what it found leaves the folder
+# A merged reviewer-fixer round that repaired what it found leaves the plan
 # waiting for the next round's independent confirmation; only a reported-but-
 # unrepaired blocker still hands the work to a separate repair session.
 _PHASE_FOR_VERDICT = {
@@ -422,7 +422,7 @@ class ReviewTransition:
 class SelfFixedOutcome:
     """The settled terminal record of a repair no configured round confirmed.
 
-    The round list ended on a round that repaired what it found, so the folder's
+    The round list ended on a round that repaired what it found, so the plan's
     code passed every focused gate its own tasks declare and only independent
     review confirmation is missing.  This is a settled outcome rather than a
     phase: the phases describe positions the loop can resume from, while this
@@ -452,7 +452,7 @@ class UnresolvedReviewOutcome:
     every task keeps the status its own closeout gave it, the findings and edits
     stay on disk, and the remaining decision is the human ``accept`` one.  Like
     ``SelfFixedOutcome`` this is a settled outcome rather than a phase, so its
-    presence makes the folder terminal instead of resumable.
+    presence makes the plan terminal instead of resumable.
     """
 
     round_index: int
@@ -470,7 +470,7 @@ class UnresolvedReviewOutcome:
 
 @dataclass(frozen=True)
 class AutoFixState:
-    """Deletable runtime memory for one folder's bounded review/repair loop."""
+    """Deletable runtime memory for one plan's bounded review/repair loop."""
 
     version: int
     source_tree: str
@@ -484,11 +484,11 @@ class AutoFixState:
     current_finding_fingerprints: tuple[str, ...]
     findings: tuple[PersistedFinding, ...]
     observed_states: tuple[ObservedState, ...]
-    reviewer_role: str = "folder_reviewer"
-    review_context: str = "completed_folder"
+    reviewer_role: str = "plan_reviewer"
+    review_context: str = "completed_plan"
     review_stage: str = "initial"
     failure_trigger: str | None = None
-    # The next 0-based ``[workflow].plan`` position the folder must walk.
+    # The next 0-based ``[workflow].plan`` position the plan must walk.
     workflow_step_index: int = 0
     reviewer_step_index: int = 0
     reviewer_recommendations: tuple[ReviewerRecommendation, ...] = ()
@@ -499,7 +499,7 @@ class AutoFixState:
     plan_digest_transitions: tuple[PlanDigestTransition, ...] = ()
     review_transitions: tuple[ReviewTransition, ...] = ()
     # Present only once the configured round list ended on an unconfirmed
-    # repair.  Its presence is what makes the folder terminal, so a restart
+    # repair.  Its presence is what makes the plan terminal, so a restart
     # reports the settled outcome instead of resuming the loop.
     self_fixed_unreviewed: SelfFixedOutcome | None = None
     # The other terminal outcome, and mutually exclusive with it: the round list
@@ -625,8 +625,8 @@ def snapshot_project_surface(source_root: Path,
 
     A production caller supplies ``tasks_dir`` and the stable root management
     inputs it consumed.  That deliberately excludes the active terminal log and
-    every unrelated work folder, whose scheduler-owned files may advance while
-    another folder is being reviewed.  Omitting ``tasks_dir`` retains the
+    every unrelated plan, whose scheduler-owned files may advance while
+    another plan is being reviewed.  Omitting ``tasks_dir`` retains the
     general whole-directory form used by lower-level callers.
     """
     source_root = Path(source_root)
@@ -662,11 +662,11 @@ def snapshot_project_surface(source_root: Path,
                 assent_dir.absolute()).as_posix()
         except ValueError as e:
             raise AssentError(
-                f"Auto-fix review task folder is outside the management plane: "
+                f"Auto-fix review plan directory is outside the management plane: "
                 f"{tasks_dir}") from e
         if not tasks_dir.is_dir():
             raise AssentError(
-                f"Auto-fix review task folder is not a directory: {tasks_dir}")
+                f"Auto-fix review plan path is not a directory: {tasks_dir}")
         entries.extend(_surface_entries(
             tasks_dir, f"management:{tasks_rel}", {"_assent.log"}))
 
@@ -1377,7 +1377,7 @@ def current_review_record(state: AutoFixState) -> ReviewRecord:
 
 
 def with_workflow_step_index(state: AutoFixState, index: int) -> AutoFixState:
-    """Durably move the folder to the next configured workflow position."""
+    """Durably move the plan to the next configured workflow position."""
     state = _validate_state(state)
     return _validate_state(replace(state, workflow_step_index=index))
 
@@ -1389,7 +1389,7 @@ def restart_workflow_cursor(state: AutoFixState) -> AutoFixState:
 
 def with_self_fixed_unreviewed(
         state: AutoFixState, *, source_tree: str | None = None) -> AutoFixState:
-    """Settle a folder whose round list ended on a repair nothing confirmed.
+    """Settle a plan whose round list ended on a repair nothing confirmed.
 
     Only a FIXED verdict can settle this way: the round repaired what it found
     inside one task's declared scope, and every task still holds the status its
@@ -1420,7 +1420,7 @@ def with_self_fixed_unreviewed(
 
 def with_unresolved_review(
         state: AutoFixState, *, source_tree: str | None = None) -> AutoFixState:
-    """Settle a folder whose round list ended on findings nothing resolved.
+    """Settle a plan whose round list ended on findings nothing resolved.
 
     Only a FAIL verdict settles this way: the last round left a blocker no
     round repaired.  Nothing is reverted, reopened, or re-marked -- the record
@@ -1505,30 +1505,30 @@ def with_scope_amendments(
     return _validate_state(replace(state, scope_amendments=amendments))
 
 
-def auto_fix_state_path(config_or_folder: Config | str | Path) -> Path:
-    """Return the derived state path for a Config or explicit folder directory."""
-    if isinstance(config_or_folder, Config):
-        folder = config_or_folder.tasks_dir
+def auto_fix_state_path(config_or_plan: Config | str | Path) -> Path:
+    """Return the derived state path for a Config or explicit plan directory."""
+    if isinstance(config_or_plan, Config):
+        plan_name = config_or_plan.tasks_dir
     else:
-        folder = Path(config_or_folder)
-    return Path(folder) / AUTO_FIX_STATE_NAME
+        plan_name = Path(config_or_plan)
+    return Path(plan_name) / AUTO_FIX_STATE_NAME
 
 
 state_path = auto_fix_state_path
 
 
 def auto_fix_review_session_path(
-        config_or_folder: Config | str | Path) -> Path:
+        config_or_plan: Config | str | Path) -> Path:
     """Return the durable boundary for one writable plan-review session."""
-    if isinstance(config_or_folder, Config):
-        folder = config_or_folder.tasks_dir
+    if isinstance(config_or_plan, Config):
+        plan_name = config_or_plan.tasks_dir
     else:
-        folder = Path(config_or_folder)
-    return Path(folder) / AUTO_FIX_REVIEW_SESSION_NAME
+        plan_name = Path(config_or_plan)
+    return Path(plan_name) / AUTO_FIX_REVIEW_SESSION_NAME
 
 
 def write_auto_fix_review_session(
-        config_or_folder: Config | str | Path,
+        config_or_plan: Config | str | Path,
         scope: Iterable[str]) -> None:
     """Record the exact scope owned by a writable plan reviewer before launch."""
     normalized = tuple(dict.fromkeys(scope))
@@ -1540,13 +1540,13 @@ def write_auto_fix_review_session(
         "version = 1\n"
         f"scope = {_toml_array(normalized)}\n"
     )
-    atomic_write_text(auto_fix_review_session_path(config_or_folder), text)
+    atomic_write_text(auto_fix_review_session_path(config_or_plan), text)
 
 
 def read_auto_fix_review_session(
-        config_or_folder: Config | str | Path) -> tuple[str, ...] | None:
+        config_or_plan: Config | str | Path) -> tuple[str, ...] | None:
     """Read a writable reviewer boundary; absence means no session is in flight."""
-    path = auto_fix_review_session_path(config_or_folder)
+    path = auto_fix_review_session_path(config_or_plan)
     try:
         with open(path, "rb") as handle:
             data = tomllib.load(handle)
@@ -1571,9 +1571,9 @@ def read_auto_fix_review_session(
 
 
 def clear_auto_fix_review_session(
-        config_or_folder: Config | str | Path) -> None:
+        config_or_plan: Config | str | Path) -> None:
     """Clear a reviewer boundary only after its source work is clean."""
-    path = auto_fix_review_session_path(config_or_folder)
+    path = auto_fix_review_session_path(config_or_plan)
     try:
         path.unlink(missing_ok=True)
     except OSError as e:
@@ -1674,7 +1674,7 @@ def _require_tree(value: object, label: str) -> str:
 def _validate_settled_outcome(
         settled: object, record_type: type, label: str,
         required_verdict: str, verdict: str) -> None:
-    """Validate whichever terminal outcome a settled folder recorded."""
+    """Validate whichever terminal outcome a settled plan recorded."""
     if settled is None:
         return
     if not isinstance(settled, record_type):
@@ -1723,7 +1723,7 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         raise AssentError("Auto-fix state review_context is invalid")
     if state.review_stage not in REVIEW_STAGES:
         raise AssentError("Auto-fix state review_stage is invalid")
-    if state.review_context in {"completed_folder", "selection_verification"}:
+    if state.review_context in {"completed_plan", "selection_verification"}:
         if state.failure_trigger is not None:
             raise AssentError(
                 f"A {state.review_context.replace('_', '-')} review must not "
@@ -1800,7 +1800,7 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         fingerprint for fingerprint in current
         if ledger[fingerprint].kind == "eligible_technical_debt"}
     if debt_fingerprints:
-        if state.review_context != "completed_folder":
+        if state.review_context != "completed_plan":
             raise AssentError(
                 "Eligible technical debt is limited to completed-plan review")
 
@@ -2013,7 +2013,7 @@ def _state_text(state: AutoFixState) -> str:
                  "plan_digest_transitions", "review_transitions"):
         if not getattr(state, name):
             text += f"{name} = []\n"
-    # A folder is settled at most once, so each terminal outcome is written as
+    # A plan is settled at most once, so each terminal outcome is written as
     # an empty or single-entry array of tables rather than a second scalar
     # block.  Both absent keys are written before either table opens, so a
     # settled outcome never swallows the other one's key.
@@ -2146,12 +2146,12 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
         raise AssentError(f"Auto-fix state is not valid TOML ({path}): {e}") from e
     version = data.get("version")
     if type(version) is not int or version != AUTO_FIX_STATE_VERSION:
-        # Derived folder memory is deletable, never migrated: a record written
+        # Derived plan memory is deletable, never migrated: a record written
         # under an earlier schema refuses instead of being silently upgraded.
         raise AssentError(
             f"Auto-fix state version must be {AUTO_FIX_STATE_VERSION} "
             f"(found {version!r} in {path}); delete the derived state to "
-            "review the folder again")
+            "review the plan again")
     _require_exact_keys(data, _STATE_KEYS, "Auto-fix state")
 
     findings: list[PersistedFinding] = []
@@ -2261,7 +2261,7 @@ def auto_fix_state_is_fresh(
         review_prompt_sha256: str, reviewer_adapter: str,
         reviewer_model: str, reviewer_effort: str,
         reviewer_role: str | None = None,
-        review_context: str = "completed_folder",
+        review_context: str = "completed_plan",
         failure_trigger: str | None = None) -> bool:
     """True only when an exact PASS can be reused without another review."""
     _validate_state(state)
@@ -2283,10 +2283,10 @@ def state_for_review(
         record: ReviewRecord, *, source_tree: str, task_plan_sha256: str,
         review_prompt_sha256: str, reviewer_adapter: str,
         reviewer_model: str, reviewer_effort: str,
-        reviewer_role: str = "folder_reviewer",
+        reviewer_role: str = "plan_reviewer",
         reviewer_step_index: int = 0,
         previous: AutoFixState | None = None,
-        review_context: str = "completed_folder",
+        review_context: str = "completed_plan",
         review_stage: str | None = None,
         failure_trigger: str | None = None,
         worker_dispositions: tuple[WorkerDisposition, ...] | None = None,
@@ -2321,7 +2321,7 @@ def state_for_review(
                         "Legacy reviewer output first exposed this blocker after repair.")))
         record = ReviewRecord(record.verdict, tuple(upgraded))
     if enforce_transitions:
-        # ``previous`` also carries the folder's cumulative history forward.
+        # ``previous`` also carries the plan's cumulative history forward.
         # An initial review continues that history but claims no transition
         # lineage, so it validates against no prior findings.
         record = validate_review_transitions(
@@ -2366,7 +2366,7 @@ def state_for_review(
     if workflow_step_index is None:
         # A caller that records something other than a completed review round
         # -- a scheduler-authored gate failure, for instance -- leaves the
-        # folder's round position exactly where the last round left it.
+        # plan's round position exactly where the last round left it.
         workflow_step_index = (
             previous.workflow_step_index if previous is not None else 0)
     transitions = prior_review_transitions + tuple(

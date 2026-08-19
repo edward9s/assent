@@ -253,7 +253,7 @@ def reserved_argument_errors(extra_args: Sequence[str]) -> list[str]:
 def workspace_dirs(cfg: "Config") -> tuple[str, ...]:
     """Directories a task session must reach outside its worktree cwd.
 
-    The main working tree's task folder holds the t/r files the session has to update, and
+    The main working tree's plan holds the t/r files the session has to update, and
     the system temp directory is where tooling writes scratch files; AGY does not
     auto-approve writes outside the workspace, so both are added explicitly.
     """

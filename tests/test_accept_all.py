@@ -1,16 +1,16 @@
 """Behavioral tests for the sequential ``assent accept --all`` chain:
-finished-folder selection, dependency order, verify-then-accept interleaving,
+finished-plan selection, dependency order, verify-then-accept interleaving,
 fail-closed chain stop, and idempotent rerun.
 
 The batch release path -- how ``--all`` chooses between releasing a fresh batch
-receipt and this per-folder chain, and everything the explicit selected
+receipt and this per-plan chain, and everything the explicit selected
 ``accept A B`` release requires -- is covered by tests/test_batch_accept.py,
 which reuses the repository fixture defined here.
 
 CLI argument-combination tests for ``--all`` live in tests/test_accept_cli.py;
 this module exercises ``accept_all`` directly against disposable local
 repositories, the same style ``tests/test_accept.py`` uses for
-``accept_folder``.
+``accept_plan``.
 """
 from __future__ import annotations
 
@@ -25,9 +25,9 @@ from pathlib import Path
 from unittest import mock
 
 from assent import gitops, verification
-from assent.accept import accept_folder
+from assent.accept import accept_plan
 from assent.batch_accept import accept_all
-from assent.clean import clean_folder
+from assent.clean import clean_plan
 from assent.config import load_config
 
 _VERIFY_OK = "raise SystemExit(0)\n"
@@ -79,9 +79,9 @@ class AcceptAllRepositoryCase(unittest.TestCase):
     def _write_verify(self, text: str) -> None:
         (self.assent_dir / "verify.py").write_text(text, encoding="utf-8")
 
-    def _write_task(self, folder: str, task_id: str = "t001",
+    def _write_task(self, plan_name: str, task_id: str = "t001",
                     status: str = "DONE") -> Path:
-        tasks_dir = self.assent_dir / folder
+        tasks_dir = self.assent_dir / plan_name
         tasks_dir.mkdir(parents=True, exist_ok=True)
         path = tasks_dir / f"{task_id}_task.e.toml"
         path.write_text(
@@ -96,23 +96,23 @@ class AcceptAllRepositoryCase(unittest.TestCase):
             encoding="utf-8")
         return path
 
-    def _write_after(self, folder: str, after: tuple[str, ...]) -> None:
+    def _write_after(self, plan_name: str, after: tuple[str, ...]) -> None:
         values = ", ".join(f'"{item}"' for item in after)
-        (self.assent_dir / folder / "_folder.toml").write_text(
+        (self.assent_dir / plan_name / "_plan_deps.toml").write_text(
             f"after = [{values}]\n", encoding="utf-8")
 
-    def _make_source(self, folder: str, *, filename: str | None = None,
+    def _make_source(self, plan_name: str, *, filename: str | None = None,
                      content: str = "result\n",
                      start_snapshot: str | None = None) -> tuple[Path, str, str]:
-        filename = filename or f"{folder}.txt"
-        worktree = gitops.ensure_worktree(self.root, folder, start_snapshot)
-        branch = gitops.ensure_branch(worktree, f"{folder}/")
+        filename = filename or f"{plan_name}.txt"
+        worktree = gitops.ensure_worktree(self.root, plan_name, start_snapshot)
+        branch = gitops.ensure_branch(worktree, f"{plan_name}/")
         (worktree / filename).write_text(content, encoding="utf-8")
-        gitops.commit_all(worktree, f"finish {folder}")
+        gitops.commit_all(worktree, f"finish {plan_name}")
         return worktree, branch, gitops.branch_tip(self.root, branch)
 
-    def _config(self, folder: str):
-        return load_config(self.config_path, folder)
+    def _config(self, plan_name: str):
+        return load_config(self.config_path, plan_name)
 
     def _accept_all(self) -> tuple[int, str]:
         output = io.StringIO()
@@ -127,17 +127,17 @@ class AcceptAllRepositoryCase(unittest.TestCase):
         subjects = _git(self.root, "log", "--format=%s", "--reverse").splitlines()
         return [subject for subject in subjects if subject.startswith("accept(")]
 
-    def _write_receipt(self, folder: str, *, status: str = "PASSED"
+    def _write_receipt(self, plan_name: str, *, status: str = "PASSED"
                        ) -> verification.VerificationReceipt:
-        cfg = self._config(folder)
+        cfg = self._config(plan_name)
         target_tip = self._head()
-        branches = gitops.folder_branches(self.root, folder)
+        branches = gitops.plan_branches(self.root, plan_name)
         self.assertEqual(len(branches), 1)
         source_tip = gitops.branch_tip(self.root, branches[0])
         with gitops.temporary_integration_worktree(
-                self.root, folder, target_tip) as (candidate, _branch):
+                self.root, plan_name, target_tip) as (candidate, _branch):
             outcome = gitops.merge_no_ff(
-                candidate, source_tip, f"prepare receipt for {folder}")
+                candidate, source_tip, f"prepare receipt for {plan_name}")
             self.assertTrue(outcome.ok, outcome.conflicts)
             tree = gitops.tree_of(candidate, "HEAD")
         digest = verification.verifier_digest(cfg)
@@ -160,42 +160,42 @@ class AcceptAllRepositoryCase(unittest.TestCase):
 
 
 class TestSelection(AcceptAllRepositoryCase):
-    def test_no_task_folder_at_all_exits_zero(self) -> None:
+    def test_no_task_plan_at_all_exits_zero(self) -> None:
         code, output = self._accept_all()
         self.assertEqual(code, 0, output)
-        self.assertIn("no work folder with a task file found", output)
+        self.assertIn("no plan with a task file found", output)
 
-    def test_unfinished_folders_are_skipped_not_errors(self) -> None:
+    def test_unfinished_plans_are_skipped_not_errors(self) -> None:
         for status in ("TODO", "WIP", "BLOCKED"):
-            self._write_task(f"folder-{status.lower()}", status=status)
+            self._write_task(f"plan-{status.lower()}", status=status)
 
         code, output = self._accept_all()
 
         self.assertEqual(code, 0, output)
         for status in ("TODO", "WIP", "BLOCKED"):
-            self.assertIn(f"skip folder-{status.lower()}", output)
-        self.assertIn("no finished work folder to accept", output)
+            self.assertIn(f"skip plan-{status.lower()}", output)
+        self.assertIn("no finished plan to accept", output)
 
-    def test_bad_folder_dependency_graph_fails_closed(self) -> None:
+    def test_bad_plan_dependency_graph_fails_closed(self) -> None:
         self._write_task("orphan")
-        (self.assent_dir / "orphan" / "_folder.toml").write_text(
+        (self.assent_dir / "orphan" / "_plan_deps.toml").write_text(
             'after = ["missing"]\n', encoding="utf-8")
 
         code, output = self._accept_all()
 
         self.assertEqual(code, 1, output)
-        self.assertIn("folder dependency graph is invalid", output)
+        self.assertIn("plan dependency graph is invalid", output)
 
 
 class TestOrderingAndPublication(AcceptAllRepositoryCase):
     def test_dependency_order_and_lexicographic_tie_break_publish_all(self) -> None:
-        for folder in ("aaa", "alpha", "beta"):
-            self._write_task(folder)
+        for plan_name in ("aaa", "alpha", "beta"):
+            self._write_task(plan_name)
         self._write_after("beta", ("alpha",))
         self._make_source("aaa")
         _, _, alpha_tip = self._make_source("alpha")
         # Stacked on alpha's still-unaccepted tip: a real downstream task
-        # session would build its worktree the same way (resolve_folder_base).
+        # session would build its worktree the same way (resolve_plan_base).
         self._make_source("beta", start_snapshot=alpha_tip)
 
         code, output = self._accept_all()
@@ -208,14 +208,14 @@ class TestOrderingAndPublication(AcceptAllRepositoryCase):
         ])
         self.assertIn("accepted:  aaa, alpha, beta", output)
 
-    def test_sequential_fallback_refreshes_each_folder_report_once(self) -> None:
-        for folder in ("alpha", "beta"):
-            self._write_task(folder)
-            self._make_source(folder)
+    def test_sequential_fallback_refreshes_each_plan_report_once(self) -> None:
+        for plan_name in ("alpha", "beta"):
+            self._write_task(plan_name)
+            self._make_source(plan_name)
         refreshed: list[str] = []
 
         with mock.patch(
-                "assent.folder_verification_closeout.try_write_report",
+                "assent.plan_verification_closeout.try_write_report",
                 side_effect=lambda cfg: refreshed.append(cfg.tasks_name)) as report:
             code, output = self._accept_all()
 
@@ -250,8 +250,8 @@ class TestOrderingAndPublication(AcceptAllRepositoryCase):
 class TestFailClosedChain(AcceptAllRepositoryCase):
     def test_conflict_stops_chain_but_keeps_prior_accepts_and_leaves_remaining_untouched(
             self) -> None:
-        for folder in ("alpha", "beta", "gamma"):
-            self._write_task(folder)
+        for plan_name in ("alpha", "beta", "gamma"):
+            self._write_task(plan_name)
         self._make_source("alpha", filename="shared.txt", content="alpha\n")
         self._make_source("beta", filename="shared.txt", content="beta\n")
         self._make_source("gamma", filename="gamma.txt", content="gamma\n")
@@ -280,17 +280,17 @@ class TestIdempotentRerun(AcceptAllRepositoryCase):
         self.assertIn("already accepted", second_output)
         self.assertIn("accepted:  solo", second_output)
 
-    def test_multiple_already_merged_folders_noop_then_pending_folder_proceeds(
+    def test_multiple_already_merged_plans_noop_then_pending_plan_proceeds(
             self) -> None:
-        """Reproduces the acceptall01 incident inside ``--all``: folders
+        """Reproduces the acceptall01 incident inside ``--all``: plans
 
         already accepted before main advanced further must each resolve as
         idempotent no-ops, and the chain must still continue on to accept a
-        genuinely pending folder afterwards.
+        genuinely pending plan afterwards.
         """
-        for folder in ("alpha", "beta"):
-            self._write_task(folder)
-            self._make_source(folder)
+        for plan_name in ("alpha", "beta"):
+            self._write_task(plan_name)
+            self._make_source(plan_name)
         first_code, first_output = self._accept_all()
         self.assertEqual(first_code, 0, first_output)
         published = self._head()
@@ -317,22 +317,22 @@ class TestIdempotentRerun(AcceptAllRepositoryCase):
         self.assertEqual(self._head("HEAD^"), advanced)
 
 
-class TestSkipCleanedFolder(AcceptAllRepositoryCase):
-    """Reproduces the crashresume01 incident: a finished folder that was
+class TestSkipCleanedPlan(AcceptAllRepositoryCase):
+    """Reproduces the crashresume01 incident: a finished plan that was
 
     already accepted and then cleaned (branch and worktree both gone, only
     a stale receipt left behind) must not stop the ``--all`` chain.
     """
 
-    def _accept_and_clean(self, folder: str) -> None:
+    def _accept_and_clean(self, plan_name: str) -> None:
         code, output = self._accept_all()
         self.assertEqual(code, 0, output)
-        clean_code = clean_folder(self._config(folder))
+        clean_code = clean_plan(self._config(plan_name))
         self.assertEqual(clean_code, 0)
-        self.assertIsNone(gitops.folder_worktree(self.root, folder))
-        self.assertEqual(gitops.folder_branches(self.root, folder), [])
+        self.assertIsNone(gitops.plan_worktree(self.root, plan_name))
+        self.assertEqual(gitops.plan_branches(self.root, plan_name), [])
 
-    def test_cleaned_folder_is_skipped_and_chain_continues(self) -> None:
+    def test_cleaned_plan_is_skipped_and_chain_continues(self) -> None:
         self._write_task("cleaned")
         self._write_task("zzz-after")
         self._make_source("cleaned")
@@ -349,7 +349,7 @@ class TestSkipCleanedFolder(AcceptAllRepositoryCase):
         self.assertIn("accepted:  zzz-after", output)
         self.assertNotIn("remaining: zzz-after", output)
 
-    def test_folders_after_the_skipped_one_are_processed_normally(self) -> None:
+    def test_plans_after_the_skipped_one_are_processed_normally(self) -> None:
         self._write_task("cleaned")
         self._write_task("zzz-fresh")
         self._make_source("cleaned")
@@ -364,14 +364,14 @@ class TestSkipCleanedFolder(AcceptAllRepositoryCase):
         self.assertIn("accepted:  zzz-fresh", output)
         self.assertIn("remaining: (none)", output)
 
-    def test_direct_accept_of_cleaned_folder_still_fails_closed(self) -> None:
+    def test_direct_accept_of_cleaned_plan_still_fails_closed(self) -> None:
         self._write_task("cleaned")
         self._make_source("cleaned")
         self._accept_and_clean("cleaned")
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = accept_folder(self._config("cleaned"))
+            code = accept_plan(self._config("cleaned"))
 
         self.assertEqual(code, 1)
         self.assertIn("no source worktree", output.getvalue())

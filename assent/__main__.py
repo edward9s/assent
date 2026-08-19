@@ -16,31 +16,31 @@ from collections import Counter
 from pathlib import Path
 
 from assent import AssentError, contracts, engine, gitops, inspection
-from assent.accept import accept_folder
+from assent.accept import accept_plan
 from assent.adapters.process import wake_stop_waiters
-from assent.archive import (archive_all, archive_folder, archive_recovery_names,
-                            archive_selected, restore_folder)
+from assent.archive import (archive_all, archive_plan, archive_recovery_names,
+                            archive_selected, restore_plan)
 from assent.batch_accept import accept_all, accept_selected_batch
-from assent.clean import clean_folders, validate_live_folder_selection
-from assent.config import list_task_folders, load_config, validate_config
+from assent.clean import clean_plans, validate_live_plan_selection
+from assent.config import list_task_plans, load_config, validate_config
 from assent.doctor import doctor as run_doctor
-from assent.folderdeps import (find_unfinished_prerequisites,
-                               infer_folder_completion,
-                               order_folders_by_dependency,
-                               parse_folder_dependency_graph)
-from assent.folder_source import resolve_source_snapshot
-from assent.folder_scheduler import run_all
+from assent.plandeps import (find_unfinished_prerequisites,
+                               infer_plan_completion,
+                               order_plans_by_dependency,
+                               parse_plan_dependency_graph)
+from assent.plan_source import resolve_source_snapshot
+from assent.plan_scheduler import run_all
 from assent.init import init as run_init
 from assent.main import (add_shared_paths_command, shared_paths_review,
                          shared_paths_status)
 from assent.plan import Plan
 from assent.reconcile import (reconcile_abort, reconcile_continue,
                               reconcile_start)
-from assent.reject import reject_folder
+from assent.reject import reject_plan
 from assent.rework import rework_task
 from assent.terminal_log import terminal_logging
-from assent.verification import (verify_batch, verify_folder,
-                                  verify_folder_if_needed,
+from assent.verification import (verify_batch, verify_plan,
+                                  verify_plan_if_needed,
                                   verify_selected_batch)
 
 _DEFAULT_CONFIG = ".assent/assent.toml"
@@ -50,15 +50,15 @@ _CONFIG_HELP = (
     "Optional project settings file, layered over the user-wide "
     "~/.assent/assent.toml, and the locator of the project's .assent directory "
     f"(default: {_DEFAULT_CONFIG})")
-# Set by the parent scheduler on a spawned `assent run <folder>` child to opt
+# Set by the parent scheduler on a spawned `assent run <plan>` child to opt
 # that child into the stdin stop channel; a hand-typed `assent run` never sees
 # it, so an interactive stdin (possibly a tty) is left completely alone.
 _STDIN_STOP_ENV = "ASSENT_STDIN_STOP"
-# Also set by the parent scheduler on a spawned `assent run <folder>` child.  The
+# Also set by the parent scheduler on a spawned `assent run <plan>` child.  The
 # end-to-end total belongs to the user's own invocation, so a child reports its
-# folder duration under its own label instead of a second, identical-looking
+# plan duration under its own label instead of a second, identical-looking
 # command total.
-_FOLDER_CHILD_ENV = "ASSENT_FOLDER_RUN"
+_PLAN_CHILD_ENV = "ASSENT_PLAN_RUN"
 # The two long-running commands whose wall-clock duration is worth reporting:
 # they open AI sessions, build integration candidates, and run whole suites.
 # Every other subcommand returns promptly and its output stays untouched.
@@ -66,12 +66,12 @@ _TIMED_COMMANDS = ("run", "verify")
 # Named so tests can inject a deterministic clock; production always reads the
 # monotonic clock, which no wall-clock or timezone change can move backwards.
 _monotonic = time.monotonic
-# The literal ASCII token `...` is remainder syntax, never a folder name:
-# `A B ...` means "A, then B, then every other discovered work folder".  Folder
+# The literal ASCII token `...` is remainder syntax, never a plan name:
+# `A B ...` means "A, then B, then every other discovered plan".  Plan
 # validation already rejects any name containing `..`, so the token cannot
-# collide with a real folder, and it is stripped here so it never reaches
+# collide with a real plan, and it is stripped here so it never reaches
 # configuration loading.  It is a remainder operator, not an alias for `--all`:
-# the expanded folder set is snapshotted once, before anything is mutated,
+# the expanded plan set is snapshotted once, before anything is mutated,
 # while `--all` keeps its own dynamic whole-project scheduling.
 _REMAINDER = "..."
 _REMAINDER_HELP = ("; the literal token `...` as the last argument adds every "
@@ -147,14 +147,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "run", help="Run one or more plans in order until all tasks are "
                     "DONE/BLOCKED/SKIP")
     run_p.add_argument(
-        "folders", nargs="*", metavar="PLAN",
+        "plan_names", nargs="*", metavar="PLAN",
         help="Plans to run in the stated order; omit to select one "
              "automatically" + _REMAINDER_HELP + "." + _PLAN_NAME_HELP)
     run_p.add_argument("--once", action="store_true",
                        help="Run only the next task, then stop")
     run_p.add_argument("--task", metavar="ID",
                        help="Run one specific task (prerequisites still checked)")
-    run_p.add_argument("--all", action="store_true", dest="all_folders",
+    run_p.add_argument("--all", action="store_true", dest="all_plans",
                        help="Run all unfinished plans in dependency order")
     run_p.add_argument("--jobs", type=_positive_int, metavar="N",
                        help="Max plans to run concurrently with --all (default: 1)")
@@ -172,7 +172,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "verify", help="Run a requested mechanical verification without AI "
                        "review or automatic repair")
     verify_p.add_argument(
-        "folder", nargs="*", metavar="PLAN",
+        "plan_name", nargs="*", metavar="PLAN",
         help="One plan with --focus; otherwise one completed plan or two or "
              "more exact plans to verify as one dependency-ordered candidate "
              "(omit with --batch)"
@@ -195,7 +195,7 @@ def _build_parser() -> argparse.ArgumentParser:
     clean_p = sub.add_parser(
         "clean", help="Remove worktrees and merged branches that are provably redundant")
     clean_p.add_argument(
-        "folder", nargs="*", metavar="PLAN",
+        "plan_name", nargs="*", metavar="PLAN",
         help="The plans to clean upstream-first; omit to act on all plans"
              + _REMAINDER_HELP + "." + _PLAN_NAME_HELP)
     clean_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
@@ -206,11 +206,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         "into _archive/ and register it in the roster; --restore "
                         "reverses one archive")
     archive_p.add_argument(
-        "folder", nargs="*", metavar="PLAN",
+        "plan_name", nargs="*", metavar="PLAN",
         help="The finished plans to archive, or the one plan to restore "
              "(omit only with --all)" + _REMAINDER_HELP + "." + _PLAN_NAME_HELP)
     archive_p.add_argument(
-        "--all", action="store_true", dest="all_folders",
+        "--all", action="store_true", dest="all_plans",
         help="Archive every eligible finished plan in lexicographic order; "
              "ineligible plans are skipped, not failed")
     archive_p.add_argument(
@@ -226,12 +226,12 @@ def _build_parser() -> argparse.ArgumentParser:
                        "into the main worktree's current branch, an exact "
                        "selected batch, or every finished plan with --all")
     accept_p.add_argument(
-        "folder", nargs="*", metavar="PLAN",
+        "plan_name", nargs="*", metavar="PLAN",
         help="One reviewed plan, or two or more exact plans to accept "
              "as a verified batch (omit only with --all)" + _REMAINDER_HELP
              + " that is finished." + _PLAN_NAME_HELP)
     accept_p.add_argument(
-        "--all", action="store_true", dest="all_folders",
+        "--all", action="store_true", dest="all_plans",
         help="Accept every finished plan in dependency order: a "
              "fresh PASSED batch receipt is replayed and released atomically "
              "without new verification, while absent or expired batch evidence "
@@ -253,7 +253,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "complete verification, and never accepts: `assent verify PLAN` "
             "and then `assent accept PLAN` stay separate, explicit steps."))
     reconcile_p.add_argument(
-        "folder", metavar="PLAN",
+        "plan_name", metavar="PLAN",
         help="The finished plan to reconcile (required; one plan only, never "
              "a speculative set of peers)." + _PLAN_NAME_HELP)
     reconcile_action = reconcile_p.add_mutually_exclusive_group()
@@ -272,7 +272,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "reject", help="Human ruling: reject a plan by archiving it, force-"
                        "removing its worktree and branch, and resetting its "
                        "tasks to TODO")
-    reject_p.add_argument("folder", metavar="PLAN",
+    reject_p.add_argument("plan_name", metavar="PLAN",
                           help="The plan to reject (required; cannot target all "
                                "plans)." + _PLAN_NAME_HELP)
     reject_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
@@ -287,7 +287,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "reverts code with a new commit, but only when the checkpoints "
             "form a contiguous branch tail. The command only updates status "
             "and reports; it does not auto-run."))
-    rework_p.add_argument("folder", metavar="PLAN",
+    rework_p.add_argument("plan_name", metavar="PLAN",
                           help="The plan containing the target task (required)."
                                + _PLAN_NAME_HELP)
     rework_p.add_argument("task", metavar="TASK",
@@ -332,7 +332,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     for p in (status_p, check_p, report_p):
         p.add_argument(
-            "folder", nargs="?", metavar="PLAN",
+            "plan_name", nargs="?", metavar="PLAN",
             help="The plan; omit to act on all plans." + _PLAN_NAME_HELP)
         p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                        help=_CONFIG_HELP)
@@ -347,10 +347,10 @@ def _split_remainder(parser: argparse.ArgumentParser, command: str,
                      names: list[str]) -> tuple[list[str], bool]:
     """Strip the literal `...` remainder marker from one positional list.
 
-    Every command that accepts folder names parses the marker here, so the five
+    Every command that accepts plan names parses the marker here, so the five
     dispatch branches share one syntax rather than five near-identical ones.  A
     misplaced or repeated marker is a usage error, and the marker never survives
-    into the returned names, so it can never be loaded as a folder.
+    into the returned names, so it can never be loaded as a plan.
     """
     occurrences = names.count(_REMAINDER)
     if occurrences == 0:
@@ -363,30 +363,30 @@ def _split_remainder(parser: argparse.ArgumentParser, command: str,
 
 
 def _remainder_pool(command: str, assent_dir: Path) -> list[str]:
-    """List the folders `...` may add, by the command's own discovery rule.
+    """List the plans `...` may add, by the command's own discovery rule.
 
-    ``verify`` and ``accept`` only ever work on finished folders -- that is what
+    ``verify`` and ``accept`` only ever work on finished plans -- that is what
     their whole-project ``--batch`` / ``--all`` paths discover -- so an
-    unfinished folder is not part of their remainder.  ``run``, ``clean`` and
-    ``archive`` consider every work folder and make their own per-folder
+    unfinished plan is not part of their remainder.  ``run``, ``clean`` and
+    ``archive`` consider every plan and make their own per-plan
     decision afterwards.
     """
-    folders = list_task_folders(assent_dir)
+    plan_names = list_task_plans(assent_dir)
     if command in ("verify", "accept"):
-        return [folder for folder in folders
-                if infer_folder_completion(assent_dir / folder).complete]
-    return folders
+        return [plan_name for plan_name in plan_names
+                if infer_plan_completion(assent_dir / plan_name).complete]
+    return plan_names
 
 
 def _expand_remainder(command: str, explicit: list[str], assent_dir: Path, *,
                       order_remainder: bool = False) -> list[str] | None:
-    """Snapshot the explicit prefix plus every remaining discovered folder.
+    """Snapshot the explicit prefix plus every remaining discovered plan.
 
     The whole selection is resolved once, before anything is mutated, so a
-    folder appearing during the operation cannot silently broaden it.  ``None``
+    plan appearing during the operation cannot silently broaden it.  ``None``
     means the expansion is unusable and the caller returns 1.
 
-    ``order_remainder`` sorts the added folders with the shared dependency
+    ``order_remainder`` sorts the added plans with the shared dependency
     ordering, for ``run``, which walks the selection itself instead of handing
     it to a command that normalizes the order later.  The explicit prefix keeps
     the order the human stated in either case.
@@ -400,24 +400,24 @@ def _expand_remainder(command: str, explicit: list[str], assent_dir: Path, *,
     remainder = [f for f in pool if f not in chosen]
     if order_remainder and remainder:
         try:
-            graph = parse_folder_dependency_graph(assent_dir)
-            remainder = order_folders_by_dependency(graph, set(remainder))
+            graph = parse_plan_dependency_graph(assent_dir)
+            remainder = order_plans_by_dependency(graph, set(remainder))
         except AssentError as e:
-            print(f"Folder dependency graph: FAIL ({e})")
+            print(f"Plan dependency graph: FAIL ({e})")
             return None
     expanded = list(explicit) + remainder
     if not expanded:
-        print(f"{command}: `...` selected no work folder.")
+        print(f"{command}: `...` selected no plan.")
         return None
     print(f"{command}: `...` selects {', '.join(expanded)}")
     return expanded
 
 
-def _validate_explicit_folders(assent_dir: Path, folders: list[str], *,
+def _validate_explicit_plans(assent_dir: Path, plan_names: list[str], *,
                                recognized: list[str] | set[str] = ()) -> bool:
-    """Run the shared identity gate for a non-empty explicit folder prefix."""
-    return (not folders or validate_live_folder_selection(
-        assent_dir, folders, recognized=recognized))
+    """Run the shared identity gate for a non-empty explicit plan prefix."""
+    return (not plan_names or validate_live_plan_selection(
+        assent_dir, plan_names, recognized=recognized))
 
 
 def _status_summary(plan: Plan) -> str:
@@ -429,13 +429,13 @@ def _status_summary(plan: Plan) -> str:
             f"TODO {counts.get('TODO', 0)} ({len(plan.tasks)} total)")
 
 
-def _select_run_folder(config_path: str, folders: list[str]) -> str | None:
-    """Pick one runnable folder, including completed work not yet accepted."""
+def _select_run_plan(config_path: str, plan_names: list[str]) -> str | None:
+    """Pick one runnable plan, including completed work not yet accepted."""
     plans: list[tuple[str, Plan, list[str], bool]] = []
     errors: list[tuple[str, str]] = []
-    for folder in folders:
+    for plan_name in plan_names:
         try:
-            cfg = load_config(config_path, folder)
+            cfg = load_config(config_path, plan_name)
             plan = Plan.parse(cfg.tasks_dir)
             waiting = [item.name for item in
                        find_unfinished_prerequisites(cfg.tasks_dir)]
@@ -443,50 +443,50 @@ def _select_run_folder(config_path: str, folders: list[str]) -> str | None:
                 task.status in ("DONE", "SKIP") for task in plan.tasks)
             accepted = bool(
                 complete and _accepted_run_source(cfg) is not None)
-            plans.append((folder, plan, waiting, accepted))
+            plans.append((plan_name, plan, waiting, accepted))
         except AssentError as e:
-            errors.append((folder, str(e)))
+            errors.append((plan_name, str(e)))
 
-    runnable = [folder for folder, plan, waiting, accepted in plans
+    runnable = [plan_name for plan_name, plan, waiting, accepted in plans
                 if ((any(task.status in ("TODO", "WIP") for task in plan.tasks)
                      or (all(task.status in ("DONE", "SKIP")
                              for task in plan.tasks) and not accepted))
                     and not waiting)]
     if len(runnable) == 1 and not errors:
         selected = runnable[0]
-        print(f"Work folder: {selected} (the only runnable one, "
+        print(f"Plan: {selected} (the only runnable one, "
               f"selected automatically)")
         return selected
 
-    print(f"Cannot auto-select a work folder: {len(runnable)} runnable "
-          f"folder(s) found.")
-    print("Work folder status:")
+    print(f"Cannot auto-select a plan: {len(runnable)} runnable "
+          f"plan(s) found.")
+    print("Plan status:")
     if not plans and not errors:
-        print("  (no work folder with a task file found)")
-    for folder, plan, waiting, accepted in plans:
+        print("  (no plan with a task file found)")
+    for plan_name, plan, waiting, accepted in plans:
         reason = " (already accepted)" if accepted else (
             f" (waiting on {', '.join(waiting)})" if waiting and any(
                 task.status in ("TODO", "WIP") for task in plan.tasks) else "")
-        print(f"  {folder}: {_status_summary(plan)}{reason}")
-    for folder, error in errors:
-        print(f"  {folder}: cannot be parsed ({error})")
-    print("State the work folder explicitly: assent run <folder>")
+        print(f"  {plan_name}: {_status_summary(plan)}{reason}")
+    for plan_name, error in errors:
+        print(f"  {plan_name}: cannot be parsed ({error})")
+    print("State the plan explicitly: assent run <PLAN>")
     return None
 
 
-def _dispatch_all(command: str, config_path: str, folders: list[str]) -> int:
-    """Run a read-only command against every work folder in turn, aggregating
+def _dispatch_all(command: str, config_path: str, plan_names: list[str]) -> int:
+    """Run a read-only command against every plan in turn, aggregating
     the exit code."""
-    if not folders:
-        print("No work folder with a task file found.")
+    if not plan_names:
+        print("No plan with a task file found.")
         return 1
     operation = getattr(inspection, command)
     result = 0
-    for index, folder in enumerate(folders):
+    for index, plan_name in enumerate(plan_names):
         if index:
             print()
         try:
-            cfg = load_config(config_path, folder)
+            cfg = load_config(config_path, plan_name)
         except AssentError as e:
             print(f"Config error: {e}")
             result = 1
@@ -496,28 +496,28 @@ def _dispatch_all(command: str, config_path: str, folders: list[str]) -> int:
     return result
 
 
-def _dispatch_check_all(config_path: str, assent_dir, folders: list[str]) -> int:
-    """Validate every folder itself, plus the complete dependency graph and
+def _dispatch_check_all(config_path: str, assent_dir, plan_names: list[str]) -> int:
+    """Validate every plan itself, plus the complete dependency graph and
     check for cycles."""
     graph_ok = True
     try:
-        graph = parse_folder_dependency_graph(assent_dir)
-        print(f"Folder dependency graph: OK ({len(graph)} work folder(s), "
+        graph = parse_plan_dependency_graph(assent_dir)
+        print(f"Plan dependency graph: OK ({len(graph)} plan(s), "
               f"references complete and acyclic)")
     except AssentError as e:
         graph_ok = False
-        print(f"Folder dependency graph: FAIL ({e})")
-    checks_ok = _dispatch_all("check", config_path, folders) == 0
+        print(f"Plan dependency graph: FAIL ({e})")
+    checks_ok = _dispatch_all("check", config_path, plan_names) == 0
     return 0 if graph_ok and checks_ok else 1
 
 
-def _dispatch_run_folders(
-        config_path: str, folders: list[str], *, once: bool,
+def _dispatch_run_plans(
+        config_path: str, plan_names: list[str], *, once: bool,
         task_id: str | None) -> int:
-    """Run explicitly named folders in order, stopping on the first failure."""
-    for folder in folders:
+    """Run explicitly named plans in order, stopping on the first failure."""
+    for plan_name in plan_names:
         try:
-            cfg = load_config(config_path, folder)
+            cfg = load_config(config_path, plan_name)
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
@@ -528,9 +528,9 @@ def _dispatch_run_folders(
 
 
 def _accepted_run_source(cfg) -> tuple[str, str, str] | None:
-    """Return the current source and target when this folder is integrated."""
+    """Return the current source and target when this plan is integrated."""
     try:
-        if not infer_folder_completion(cfg.tasks_dir).complete:
+        if not infer_plan_completion(cfg.tasks_dir).complete:
             return None
         main = gitops.main_worktree(cfg.root)
         target_branch = gitops.require_current_branch(main)
@@ -544,22 +544,22 @@ def _accepted_run_source(cfg) -> tuple[str, str, str] | None:
     return source_branch, source_tip, target_branch
 
 
-def _filter_accepted_run_folders(
-        config_path: str, folders: list[str]) -> list[str]:
-    """Skip named folders whose complete current source is already integrated."""
+def _filter_accepted_run_plans(
+        config_path: str, plan_names: list[str]) -> list[str]:
+    """Skip named plans whose complete current source is already integrated."""
     pending: list[str] = []
-    for folder in folders:
+    for plan_name in plan_names:
         try:
-            cfg = load_config(config_path, folder)
+            cfg = load_config(config_path, plan_name)
         except AssentError:
-            pending.append(folder)
+            pending.append(plan_name)
             continue
         accepted = _accepted_run_source(cfg)
         if accepted is None:
-            pending.append(folder)
+            pending.append(plan_name)
             continue
         source_branch, source_tip, target_branch = accepted
-        print(f"run {folder}: already accepted; current source {source_branch} "
+        print(f"run {plan_name}: already accepted; current source {source_branch} "
               f"({source_tip[:12]}) is fully contained in {target_branch}. "
               "Skipping task and plan workflows.")
     return pending
@@ -569,28 +569,28 @@ def _close_run(result: int, *, config_path: str,
                assent_dir: Path, selection: list[str] | None) -> int:
     """Complete a successful run with its matching integration workflow.
 
-    ``selection`` is the exact folder set the run covered; ``None`` keeps the
+    ``selection`` is the exact plan set the run covered; ``None`` keeps the
     whole-project dynamic discovery used by ``--all`` or a bare ``...``. A
-    limited run that leaves an explicit folder incomplete defers integration.
+    limited run that leaves an explicit plan incomplete defers integration.
     A nonzero task run starts no integration work.
     """
-    if result != 0 or os.environ.get("ASSENT_FOLDER_RUN") == "1":
+    if result != 0 or os.environ.get("ASSENT_PLAN_RUN") == "1":
         return result
     if selection == []:
-        print("Integration workflow: no selected folder has anything left to integrate.")
+        print("Integration workflow: no selected plan has anything left to integrate.")
         return 0
     if selection:
         incomplete: list[str] = []
-        for folder in selection:
+        for plan_name in selection:
             try:
-                cfg = load_config(config_path, folder)
+                cfg = load_config(config_path, plan_name)
             except AssentError as e:
                 print(f"Config error: {e}")
                 return 1
-            if not infer_folder_completion(cfg.tasks_dir).complete:
-                incomplete.append(folder)
+            if not infer_plan_completion(cfg.tasks_dir).complete:
+                incomplete.append(plan_name)
         if incomplete:
-            print("Integration workflow deferred: selected folder execution "
+            print("Integration workflow deferred: selected plan execution "
                   "requires human adjudication (" + ", ".join(incomplete) + ")")
             return 0
         try:
@@ -602,10 +602,10 @@ def _close_run(result: int, *, config_path: str,
             return engine.run_selection_workflow(
                 config_path, assent_dir, selection)
     if selection is None:
-        folders = list_task_folders(assent_dir)
-        if folders:
+        plan_names = list_task_plans(assent_dir)
+        if plan_names:
             try:
-                selection_cfg = load_config(config_path, folders[0])
+                selection_cfg = load_config(config_path, plan_names[0])
             except AssentError as e:
                 print(f"Config error: {e}")
                 return 1
@@ -620,45 +620,45 @@ def _close_run(result: int, *, config_path: str,
     except AssentError as e:
         print(f"Config error: {e}")
         return 1
-    if not infer_folder_completion(cfg.tasks_dir).complete:
-        return verify_folder(cfg)
-    return verify_folder_if_needed(cfg)
+    if not infer_plan_completion(cfg.tasks_dir).complete:
+        return verify_plan(cfg)
+    return verify_plan_if_needed(cfg)
 
 
 def _dispatch(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    # One parse of the remainder marker for every folder-taking command; the
-    # attribute is left holding only real folder names afterwards.
+    # One parse of the remainder marker for every plan-taking command; the
+    # attribute is left holding only real plan names afterwards.
     remainder = False
     if args.command in ("run", "verify", "accept", "clean", "archive"):
-        field = "folders" if args.command == "run" else "folder"
+        field = "plan_names" if args.command == "run" else "plan_name"
         names, remainder = _split_remainder(
             parser, args.command, getattr(args, field))
         setattr(args, field, names)
 
     if args.command == "run":
-        if len(args.folders) != len(set(args.folders)):
+        if len(args.plan_names) != len(set(args.plan_names)):
             parser.error("run does not allow duplicate PLAN names")
-        if args.all_folders and (args.once or args.task is not None):
+        if args.all_plans and (args.once or args.task is not None):
             parser.error("run's --all cannot be used with --once or --task")
-        if remainder and args.all_folders:
+        if remainder and args.all_plans:
             parser.error("run's `...` and --all cannot be used together")
         if remainder and (args.once or args.task is not None):
             parser.error("run's --once and --task cannot be used with `...`")
-        if len(args.folders) > 1 and (args.once or args.task is not None):
+        if len(args.plan_names) > 1 and (args.once or args.task is not None):
             parser.error("run's --once and --task each require at most one PLAN")
-        if not args.all_folders and args.jobs is not None:
+        if not args.all_plans and args.jobs is not None:
             parser.error("run's --jobs can only be used with --all")
     if args.command == "accept":
-        if remainder and args.all_folders:
+        if remainder and args.all_plans:
             parser.error("accept's `...` and --all cannot be used together")
-        if args.all_folders and args.folder:
+        if args.all_plans and args.plan_name:
             parser.error("accept's --all and PLAN cannot be used together")
-        if not args.all_folders and not args.folder and not remainder:
+        if not args.all_plans and not args.plan_name and not remainder:
             parser.error("accept requires PLAN or --all")
-        if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
+        if len(args.plan_name) > 1 and len(args.plan_name) != len(set(args.plan_name)):
             parser.error("accept does not allow duplicate PLAN names")
 
     if args.command == "verify":
@@ -666,39 +666,39 @@ def _dispatch(argv: list[str]) -> int:
             parser.error("verify's `...` and --batch cannot be used together")
         if remainder and args.focus is not None:
             parser.error("verify's `...` and --focus cannot be used together")
-        if args.batch and args.folder:
+        if args.batch and args.plan_name:
             parser.error("verify's --batch and PLAN cannot be used together")
         if args.focus is not None:
             if args.batch:
                 parser.error("verify's --focus and --batch cannot be used together")
-            if len(args.folder) != 1:
+            if len(args.plan_name) != 1:
                 parser.error("verify's --focus requires exactly one PLAN")
         elif not args.batch:
-            if not args.folder and not remainder:
+            if not args.plan_name and not remainder:
                 parser.error("verify requires PLAN, a selected batch, or --batch")
-            if len(args.folder) > 1 and len(args.folder) != len(set(args.folder)):
+            if len(args.plan_name) > 1 and len(args.plan_name) != len(set(args.plan_name)):
                 parser.error("verify does not allow duplicate PLAN names")
 
     if args.command == "clean":
-        if len(args.folder) != len(set(args.folder)):
+        if len(args.plan_name) != len(set(args.plan_name)):
             parser.error("clean does not allow duplicate PLAN names")
 
     if args.command == "archive":
-        if len(args.folder) != len(set(args.folder)):
+        if len(args.plan_name) != len(set(args.plan_name)):
             parser.error("archive does not allow duplicate PLAN names")
         if args.restore:
-            if args.all_folders:
+            if args.all_plans:
                 parser.error("archive's --restore and --all cannot be used together")
             if remainder:
                 parser.error("archive's --restore and `...` cannot be used "
                              "together; restore takes exactly one PLAN")
-            if not args.folder:
+            if not args.plan_name:
                 parser.error("archive --restore requires PLAN")
-            if len(args.folder) > 1:
+            if len(args.plan_name) > 1:
                 parser.error("archive --restore takes exactly one PLAN")
-        elif args.all_folders and (args.folder or remainder):
+        elif args.all_plans and (args.plan_name or remainder):
             parser.error("archive's --all and PLAN cannot be used together")
-        elif not args.all_folders and not args.folder and not remainder:
+        elif not args.all_plans and not args.plan_name and not remainder:
             parser.error("archive requires PLAN or --all")
 
     if args.command == "init":
@@ -731,80 +731,80 @@ def _dispatch(argv: list[str]) -> int:
     explicit: list[str] = []
     recognized: list[str] | set[str] = ()
     if args.command == "run":
-        explicit = args.folders
+        explicit = args.plan_names
     elif args.command in ("accept", "verify", "clean"):
-        explicit = args.folder
+        explicit = args.plan_name
     elif args.command in ("status", "check", "report",
                           "reconcile", "reject", "rework"):
-        explicit = [args.folder] if args.folder is not None else []
+        explicit = [args.plan_name] if args.plan_name is not None else []
     elif args.command == "archive" and not args.restore:
-        explicit = args.folder
+        explicit = args.plan_name
         recognized = archive_recovery_names(assent_dir, explicit)
-    if not _validate_explicit_folders(
+    if not _validate_explicit_plans(
             assent_dir, explicit, recognized=recognized):
         return 1
 
     if args.command == "run":
         # The session gate for the global contracts: a run that would point the
         # execution AI at a missing or out-of-date ~/.assent contract is refused
-        # here, before any folder is opened and before any adapter process exists.
+        # here, before any plan is opened and before any adapter process exists.
         try:
             contracts.require_contracts()
         except AssentError as e:
             print(f"Global contracts: FAIL ({e})")
             return 1
         # The remainder is snapshotted before the explicit prefix starts, so a
-        # folder that appears while the prefix runs cannot join this invocation.
+        # plan that appears while the prefix runs cannot join this invocation.
         # The same snapshot is what the integration workflow verifies
         # afterwards, so an explicit prefix plus `...` certifies exactly the
         # set it ran, while a bare `...` stays a whole-project request like
         # --all.
-        had_explicit_folders = bool(args.folders)
+        had_explicit_plans = bool(args.plan_names)
         scheduled: list[str] | None = None
         selection: list[str] | None = None
         if remainder:
-            expanded = _expand_remainder("run", args.folders, assent_dir,
+            expanded = _expand_remainder("run", args.plan_names, assent_dir,
                                          order_remainder=True)
             if expanded is None:
                 return 1
-            scheduled = expanded[len(args.folders):]
-            selection = expanded if args.folders else None
-        elif not args.all_folders:
-            selection = list(args.folders)
-        if selection is not None and (had_explicit_folders or remainder):
-            pending_prefix = _filter_accepted_run_folders(
-                args.config, list(args.folders))
-            pending_remainder = _filter_accepted_run_folders(
+            scheduled = expanded[len(args.plan_names):]
+            selection = expanded if args.plan_names else None
+        elif not args.all_plans:
+            selection = list(args.plan_names)
+        if selection is not None and (had_explicit_plans or remainder):
+            pending_prefix = _filter_accepted_run_plans(
+                args.config, list(args.plan_names))
+            pending_remainder = _filter_accepted_run_plans(
                 args.config, scheduled or [])
-            args.folders = pending_prefix
+            args.plan_names = pending_prefix
             scheduled = (pending_remainder if scheduled is not None else None)
             selection = pending_prefix + pending_remainder
         closeout = functools.partial(
             _close_run, config_path=args.config,
             assent_dir=assent_dir, selection=selection)
-        if args.folders:
-            result = _dispatch_run_folders(
-                args.config, args.folders, once=args.once, task_id=args.task)
+        if args.plan_names:
+            result = _dispatch_run_plans(
+                args.config, args.plan_names, once=args.once, task_id=args.task)
             if result != 0:
                 return result
         if scheduled is not None:
             if not scheduled:
-                print("No remaining work folder to run.")
+                print("No remaining plan to run.")
                 return closeout(0)
-            # The remainder is run through the same explicit-folder path, in
-            # dependency order: `...` selects folders, it does not switch the
+            # The remainder is run through the same explicit-plan path, in
+            # dependency order: `...` selects plans, it does not switch the
             # command over to the whole-project scheduler.
-            return closeout(_dispatch_run_folders(
+            return closeout(_dispatch_run_plans(
                 args.config, scheduled, once=False, task_id=None))
-        if args.all_folders:
+        if args.all_plans:
             return closeout(run_all(
                 args.config, assent_dir, args.jobs or 1))
-        if had_explicit_folders:
+        if had_explicit_plans:
             return closeout(0)
     if args.command == "accept":
-        if args.all_folders:
+        if args.all_plans:
             return accept_all(args.config, assent_dir)
-        selected = args.folder
+        selected = args.plan_name
         if remainder:
             expanded = _expand_remainder("accept", selected, assent_dir)
             if expanded is None:
@@ -817,11 +817,11 @@ def _dispatch(argv: list[str]) -> int:
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
-        return accept_folder(cfg)
+        return accept_plan(cfg)
     if args.command == "archive":
-        if args.all_folders:
+        if args.all_plans:
             return archive_all(args.config, assent_dir)
-        selected = args.folder
+        selected = args.plan_name
         if remainder:
             expanded = _expand_remainder("archive", selected, assent_dir)
             if expanded is None:
@@ -834,9 +834,9 @@ def _dispatch(argv: list[str]) -> int:
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
-        return restore_folder(cfg) if args.restore else archive_folder(cfg)
+        return restore_plan(cfg) if args.restore else archive_plan(cfg)
     if args.command == "verify":
-        selected = args.folder
+        selected = args.plan_name
         if remainder:
             expanded = _expand_remainder("verify", selected, assent_dir)
             if expanded is None:
@@ -856,13 +856,13 @@ def _dispatch(argv: list[str]) -> int:
             if len(selected) >= 2:
                 return verify_selected_batch(
                     args.config, assent_dir, selected)
-            return verify_folder(cfg)
+            return verify_plan(cfg)
         except KeyboardInterrupt:
             print("\nverify interrupted; temporary resources were cleaned up.")
             return 130
     if args.command == "reconcile":
         try:
-            cfg = load_config(args.config, args.folder)
+            cfg = load_config(args.config, args.plan_name)
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
@@ -873,54 +873,54 @@ def _dispatch(argv: list[str]) -> int:
         return reconcile_start(cfg)
     if args.command == "reject":
         try:
-            cfg = load_config(args.config, args.folder)
+            cfg = load_config(args.config, args.plan_name)
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
-        return reject_folder(cfg)
+        return reject_plan(cfg)
     if args.command == "rework":
         try:
-            cfg = load_config(args.config, args.folder)
+            cfg = load_config(args.config, args.plan_name)
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
         return rework_task(
             cfg, args.task, cascade=args.cascade,
             reason=args.reason, revert_code=args.revert_code)
-    folders = list_task_folders(assent_dir)
+    plan_names = list_task_plans(assent_dir)
     if args.command == "clean":
         if remainder:
-            expanded = _expand_remainder("clean", args.folder, assent_dir)
+            expanded = _expand_remainder("clean", args.plan_name, assent_dir)
             if expanded is None:
                 return 1
             selected = expanded
         else:
-            selected = args.folder or folders
+            selected = args.plan_name or plan_names
         if not selected:
-            print("No work folder with a task file found.")
+            print("No plan with a task file found.")
             return 1
         configs = []
-        for selected_folder in selected:
+        for selected_plan in selected:
             try:
-                configs.append(load_config(args.config, selected_folder))
+                configs.append(load_config(args.config, selected_plan))
             except AssentError as e:
                 print(f"Config error: {e}")
                 return 1
-        return clean_folders(configs)
+        return clean_plans(configs)
     if args.command == "run":
-        folder = _select_run_folder(args.config, folders)
-        if folder is None:
+        plan_name = _select_run_plan(args.config, plan_names)
+        if plan_name is None:
             return 1
-    elif args.folder is None:
+    elif args.plan_name is None:
         if args.command == "check":
-            return _dispatch_check_all(args.config, assent_dir, folders)
+            return _dispatch_check_all(args.config, assent_dir, plan_names)
         else:
-            return _dispatch_all(args.command, args.config, folders)
+            return _dispatch_all(args.command, args.config, plan_names)
     else:
-        folder = args.folder
+        plan_name = args.plan_name
 
     try:
-        cfg = load_config(args.config, folder)
+        cfg = load_config(args.config, plan_name)
     except AssentError as e:
         print(f"Config error: {e}")
         return 1
@@ -929,7 +929,7 @@ def _dispatch(argv: list[str]) -> int:
         return _close_run(
             engine.run(cfg, once=args.once, task_id=args.task),
             config_path=args.config, assent_dir=assent_dir,
-            selection=[folder])
+            selection=[plan_name])
     if args.command == "status":
         return inspection.status(cfg)
     if args.command == "check":
@@ -1033,12 +1033,12 @@ def _command_elapsed_line(command: str, elapsed: float, code: int, *,
     verifier's own ``Full verification finished: elapsed ...`` line: that one is
     the expensive suite alone, this one additionally covers validation,
     candidate construction and cleanup.  A scheduler-spawned `run` child owns
-    one folder rather than the human's invocation, so it is labeled apart from
+    one plan rather than the human's invocation, so it is labeled apart from
     the parent's single end-to-end total.
     """
     verb = "interrupted" if interrupted else "finished"
-    if command == "run" and os.environ.get(_FOLDER_CHILD_ENV):
-        subject = "Scheduled folder run"
+    if command == "run" and os.environ.get(_PLAN_CHILD_ENV):
+        subject = "Scheduled plan run"
     else:
         subject = f"Command `assent {command}`"
     return f"{subject} {verb}: elapsed {elapsed:.1f}s, exit code {code}"

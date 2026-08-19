@@ -71,8 +71,8 @@ effort = "heavy"
 `ability` 是不可為空的有序清單。只要其中一個 ability 可以寫入，role 就可以寫入；
 只要其中一個會產生 verdict，role 就必須產生 verdict。一般 task role 的 `model`
 與 `effort` 可以省略；workflow role entry 可以覆寫任一值，一般 task step
-再沿用 task 的設定。`workflow.plan` 與 `workflow.integration` 的 verdict step
-必須由 role 或 workflow entry 形成明確的有效 model。Effort 可以省略：抽象 model
+再沿用 task 的設定。`workflow.plan` 與 `workflow.integration` 的每一個 step
+都必須由 role 或 workflow entry 形成明確的有效 model。Effort 可以省略：抽象 model
 使用該 adapter 的 tier 預設，literal model 則不傳 effort，使用 vendor 預設值。
 
 ### Scheduler action
@@ -122,7 +122,7 @@ Action 一旦通過，該層立刻完成，後面的項目全部略過。Action 
 | --- | --- |
 | `workflow.task` | 處理目前 task 的 `BLOCKED` 或 `focused_test` 證據。它可以補救規劃時的小疏漏，例如漏列一條精確 scope path，並在同一個可寫入 verdict session 內完成修復；不會消耗 plan 的修復次數。 |
 | `workflow.plan` | 檢查所有已完成 task 累積出的 worktree 是否符合既有 plan。它會在第一次 `focused_sweep` 前執行一次常態品質審查，再處理 sweep 失敗與跨 task regression，並透過受影響的既有 task 修復。 |
-| `workflow.integration` | 檢查同一份精確 plan 選集能否重建並通過 `full_verify`。它處理候選版本衝突與完整驗證失敗，不可刪掉某個 folder，也不可只接受能成功的前綴。 |
+| `workflow.integration` | 檢查同一份精確 plan 選集能否重建並通過 `full_verify`。它處理候選版本衝突與完整驗證失敗，不可刪掉某個 plan，也不可只接受能成功的前綴。 |
 
 Integration workflow 只負責驗證與修復，不負責人類驗收。發布仍須稍後明確執行
 `assent accept`。
@@ -269,17 +269,34 @@ vendor effort 轉換都放在 `adapter.toml`。無人值守執行前要先登入
 只使用既有認證，不管理 secrets。
 
 Plan 使用可攜的 `prime`、`core`、`lite` model tier；effort 是另一個獨立選擇：
-`heavy`、`normal`、`slight`。解析順序為 task 或 role 明示值、該 model tier 的
-設定預設值、內建 tier 預設值。每次使用抽象 model 的 invocation 都會取得轉換後的
+`heavy`、`normal`、`slight`。每次使用抽象 model 的 invocation 都會取得轉換後的
 具體 effort。
+
+### Workflow model 與 effort 優先順序
+
+Assent 會分別解析 `model` 與 `effort`。在同一個 role session 中，workflow role
+entry 會覆寫其 `[roles]` 定義；其餘 fallback 依 workflow 層而定：
+
+| Workflow role | Model fallback | Effort fallback |
+| --- | --- | --- |
+| `workflow.task` | 目前的 task | 目前的 task，接著使用所選 adapter 已設定或內建的 tier 預設值 |
+| `workflow.plan` 或 `workflow.integration` | 無；workflow entry 或 role 必須指定 model | 所選 adapter 已設定或內建的 tier 預設值 |
+
+Plan 與 integration 的 role 負責的是一整個單位，沒有可以繼承 model 的 task。
+在這兩層省略 model 是設定錯誤，`assent check` 會回報，與該 role 是否產出
+verdict 無關。
+
+省略 `workflow.task` 時，會使用 task 自己的 model 與 effort 開啟一個隱含 session。
+Adapter 不提供預設 model；它的 `models` table 會把選定的 portable tier 轉換為
+vendor model。Workflow entry 或 role 若選擇 literal model 而沒有一併提供 effort，
+就不會繼承 task effort；Assent 不傳 effort argument，改用 vendor 預設值。
 
 Task、role 與 workflow role entry 的 `model`／`effort` 可以各自使用明確的
 中括號 literal，例如 `model = "[gpt-5.6-sol]"` 或 `effort = "[xhigh]"`。
-Assent 會移除外層括號、保留大小寫，並略過該值的 adapter mapping；workflow
-entry 會覆寫 role 的值。使用任何 literal 的 workflow step
-必須只解析到一個 adapter。Literal model 省略 effort 時不傳 effort，改用 vendor
-預設值；literal model 搭配抽象 effort 時只使用 adapter 的 flat effort mapping，
-不使用 tier-specific mapping。Literal 不會修改 `adapter.toml`。
+Assent 會移除外層括號、保留大小寫，並略過該值的 adapter mapping。使用任何
+literal 的 workflow step 必須只解析到一個 adapter。Literal model 搭配抽象 effort
+時只使用 adapter 的 flat effort mapping，不使用 tier-specific mapping。Literal
+不會修改 `adapter.toml`。
 
 每一層 workflow 的 role entry 都可以指定一個 adapter，或依序 fallback 的清單：
 

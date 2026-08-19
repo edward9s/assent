@@ -96,10 +96,10 @@ class TestParseTaskFile(PlanTestCase):
             "_integration_workflow.toml")
 
     def test_workflow_cursors_reject_invalid_status_and_phase(self):
-        folder = WorkflowState(
+        plan_name = WorkflowState(
             "task", "t001", 0, True, "base", (), "focused_test", "PASSED",
             "tree", 0, ())
-        write_workflow_state(self.dir, folder)
+        write_workflow_state(self.dir, plan_name)
         path = workflow_state_path(self.dir)
         path.write_text(
             path.read_text(encoding="utf-8").replace(
@@ -273,7 +273,7 @@ class TestParseTaskFile(PlanTestCase):
             parse_task_file(path)
 
     def test_full_verifier_as_a_task_gate_rejected(self):
-        # The full verifier is folder closeout's own stage: naming it here makes
+        # The full verifier is plan closeout's own stage: naming it here makes
         # every task re-run the whole suite, and on a slow project it outlives
         # what a session can wait for at all.
         for command in ("python .assent/verify.py",
@@ -364,11 +364,11 @@ class TestPlanParse(PlanTestCase):
         with self.assertRaisesRegex(AssentError, "cycle"):
             Plan.parse(self.dir)
 
-    def test_empty_folder_rejected(self):
+    def test_empty_plan_rejected(self):
         with self.assertRaisesRegex(AssentError, "no task files"):
             Plan.parse(self.dir)
 
-    def test_missing_folder_rejected(self):
+    def test_missing_plan_rejected(self):
         with self.assertRaises(AssentError):
             Plan.parse(self.dir / "nope")
 

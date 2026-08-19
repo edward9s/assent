@@ -263,7 +263,7 @@ class TestContractContent(unittest.TestCase):
                 "The plan workflow is considered only after every task is `DONE` or `SKIP`",
                 "cumulative implementation conforms to the plan",
                 "reconstructs the same exact snapshotted selection",
-                "never asks to skip, silently removes a folder, accepts a compatible prefix"):
+                "never asks to skip, silently removes a plan, accepts a compatible prefix"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, workflow)
 
@@ -284,7 +284,7 @@ class TestContractContent(unittest.TestCase):
                 "Only the explicit human `assent accept` command publishes work",
                 "Focused verification runs task commands in source worktrees, writes no receipt",
                 "Complete verification builds a temporary integration candidate",
-                "Direct `accept FOLDER` and selected `accept A B` never start verification"):
+                "Direct `accept PLAN` and selected `accept A B` never start verification"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, workflow)
 
@@ -293,7 +293,7 @@ class TestContractContent(unittest.TestCase):
         for phrase in (
                 "Failure, interruption, and repair never revert the workspace automatically",
                 "REVIEW UNRESOLVED, HUMAN DECISION",
-                "exits zero so unrelated queued folders continue",
+                "exits zero so unrelated queued plans continue",
                 "`NEEDS_REPAIR`, `REPAIRING`, `AWAITING_REVIEW`, or `COMPLETE`",
                 "resets only the orchestration cursor",
                 "re-adjudicates them from the first position of the current workflow"):

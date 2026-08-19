@@ -8,10 +8,10 @@ advance a Git ref.
 Two independent receipt models live side by side and never read each other's
 files:
 
-* the per-folder receipt (``<folder>/_verification.toml``), covering one folder
-  merged into the target -- ``assent.folder_verification``;
+* the per-plan receipt (``<plan>/_verification.toml``), covering one plan
+  merged into the target -- ``assent.plan_verification``;
 * the batch receipt (``.assent/_batch_verification.toml``), covering one full
-  verification of several folders merged in a recorded order, so that a batch
+  verification of several plans merged in a recorded order, so that a batch
   release can publish them one by one against a single test run --
   ``assent.batch_receipt`` for the evidence, ``assent.batch_verification`` for
   the command that produces it.
@@ -19,10 +19,10 @@ files:
 ``assent.verification_common`` holds what more than one of them needs.  This
 module adds no behavior of its own: it exists so that ``accept``, ``engine``,
 ``reconcile``, ``reject``, ``rework``, and the CLI keep one import name for the
-whole verification surface.  The per-folder entry points own their shared
-closeout handoff through ``assent.folder_verification_closeout``; batch and
+whole verification surface.  The per-plan entry points own their shared
+closeout handoff through ``assent.plan_verification_closeout``; batch and
 focused verification remain receipt paths of their own and do not refresh a
-folder report.
+plan report.
 """
 from __future__ import annotations
 
@@ -36,16 +36,16 @@ from assent.batch_receipt import (BATCH_RECEIPT_NAME, BATCH_RECEIPT_VERSION,
 from assent.batch_verification import (BatchBisectResult, BatchConflict,
                                        BatchSelection, FilteredBatchChain,
                                        bisect_batch_failure,
-                                       confirm_on_terminal, select_batch_folders,
-                                       select_explicit_batch_folders,
+                                       confirm_on_terminal, select_batch_plans,
+                                       select_explicit_batch_plans,
                                        verify_batch, verify_batch_selected,
                                        verify_selected_batch)
-from assent.folder_verification_closeout import (verify_folder,
-                                                 verify_folder_if_needed)
-from assent.folder_verification import (RECEIPT_NAME, RECEIPT_VERSION,
+from assent.plan_verification_closeout import (verify_plan,
+                                                 verify_plan_if_needed)
+from assent.plan_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         VerificationReceipt,
                                         current_shared_inputs,
-                                        invalidate_folder_receipt, read_receipt,
+                                        invalidate_plan_receipt, read_receipt,
                                         read_verification_receipt,
                                         receipt_matches_current_candidate,
                                         receipt_path, receipt_report_lines,
@@ -87,7 +87,7 @@ __all__ = [
     "confirm_on_terminal",
     "current_shared_inputs",
     "invalidate_batch_receipt",
-    "invalidate_folder_receipt",
+    "invalidate_plan_receipt",
     "read_batch_receipt",
     "read_receipt",
     "read_verification_receipt",
@@ -97,13 +97,13 @@ __all__ = [
     "receipt_path",
     "receipt_report_lines",
     "run_full_verifier",
-    "select_batch_folders",
-    "select_explicit_batch_folders",
+    "select_batch_plans",
+    "select_explicit_batch_plans",
     "verifier_digest",
     "verify_batch",
     "verify_batch_selected",
-    "verify_folder",
-    "verify_folder_if_needed",
+    "verify_plan",
+    "verify_plan_if_needed",
     "verify_selected_batch",
     "write_batch_receipt",
     "write_receipt",

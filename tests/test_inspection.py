@@ -1,7 +1,7 @@
 """inspection tests: the read-only report / status / check commands.
 
 These commands take no lock, start no session and change no Git state, so each case checks
-exactly what they print for a folder as it stands -- the progress counts and next task, the
+exactly what they print for a plan as it stands -- the progress counts and next task, the
 environment and format verdicts, the rendered report with its checkpoint hashes, and the
 stack lines both surfaces share. Runs appear here only as a way to produce the state being
 reported on. Shared fixtures come from tests.engine_support.
@@ -26,14 +26,14 @@ from tests.test_contracts import GlobalContractsMixin
 def _workflow_config(model="core", adapters=("claude",), writes=True):
     ability = "review_fix" if writes else "review"
     steps = ', { action = "focused_sweep" }, '.join(
-        f'{{ role = "folder_reviewer", adapter = "{adapter}" }}'
+        f'{{ role = "plan_reviewer", adapter = "{adapter}" }}'
         for adapter in adapters)
     return (
         f'[abilities.{ability}]\n'
-        'prompt = "Review the folder."\n'
+        'prompt = "Review the plan."\n'
         f'writes = {str(writes).lower()}\n'
         'produces_verdict = true\n'
-        '[roles.folder_reviewer]\n'
+        '[roles.plan_reviewer]\n'
         f'ability = ["{ability}"]\n'
         f'model = "{model}"\n'
         'effort = "slight"\n'
@@ -99,7 +99,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(inspection.check(cfg), 0)
         text = out.getvalue()
         self.assertIn(
-            "step 0: role=folder_reviewer; claude / core->opus / slight->low",
+            "step 0: role=plan_reviewer; claude / core->opus / slight->low",
             text)
         self.assertNotIn("reviewer round", text.lower())
 
@@ -114,9 +114,9 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(inspection.check(cfg), 0)
         text = out.getvalue()
         self.assertIn("Auto-fix workflow plan (configured order", text)
-        self.assertIn("step 0: role=folder_reviewer; claude / core->opus / slight->low", text)
-        self.assertIn("step 1: role=folder_reviewer; codex / core->gpt-5.6-terra / slight->low", text)
-        self.assertIn("step 2: role=folder_reviewer; claude / core->opus / slight->low", text)
+        self.assertIn("step 0: role=plan_reviewer; claude / core->opus / slight->low", text)
+        self.assertIn("step 1: role=plan_reviewer; codex / core->gpt-5.6-terra / slight->low", text)
+        self.assertIn("step 2: role=plan_reviewer; claude / core->opus / slight->low", text)
 
     def test_check_fails_on_dependency_cycle(self):
         self.write_task(1, deps=("t002",))
@@ -128,17 +128,34 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(inspection.check(cfg), 1)
         self.assertIn("FAIL", out.getvalue())
 
-    def test_check_validates_selected_folder_declaration(self):
+    def test_check_validates_selected_plan_declaration(self):
         self.write_task(1)
-        (self.plan_dir / "_folder.toml").write_text(
+        (self.plan_dir / "_plan_deps.toml").write_text(
             'after = []\nunknown = true\n', encoding="utf-8")
         cfg = self.build()
         self.commit_all()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(inspection.check(cfg), 1)
-        self.assertIn("Folder dependencies: FAIL", out.getvalue())
+        self.assertIn("Plan dependencies: FAIL", out.getvalue())
         self.assertIn("unknown keys", out.getvalue())
+
+    def test_check_refuses_a_plan_name_already_in_the_archive_roster(self):
+        # Nothing refuses the name when the plan is created, so `check` is where a
+        # reused archived name has to surface -- while renaming is still cheap and
+        # before `archive` meets a roster entry describing different content.
+        self.write_task(1)
+        cfg = self.build()
+        (cfg.assent_dir / "_archived.toml").write_text(
+            "[[archived]]\n"
+            f'plan = "{cfg.tasks_name}"\n'
+            'archived_at = "2026-07-25T00:00:00+00:00"\n', encoding="utf-8")
+        self.commit_all()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(inspection.check(cfg), 1)
+        self.assertIn("Plan name: FAIL", out.getvalue())
+        self.assertIn("already in the archive roster", out.getvalue())
 
     def test_check_displays_resolved_assignment_and_default_marker(self):
         self.write_task(1, slug="任務分配顯示", model="core")
@@ -247,16 +264,16 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertTrue((cfg.tasks_dir / "_report.md").is_file())
         self.assertNotIn("_report.md", self._git_execution("ls-files"))
 
-    def test_report_groups_usage_with_fallbacks_coverage_and_folder_filter(self):
+    def test_report_groups_usage_with_fallbacks_coverage_and_plan_filter(self):
         self.write_task(1, status="DONE")
         cfg = self.build()
         self.commit_all()
 
-        def record(identity, requested, evidence, folders=("plan01",)):
+        def record(identity, requested, evidence, plan_names=("plan01",)):
             self.assertTrue(usage.record_invocation(
                 cfg.assent_dir, invocation_id=identity, adapter="claude",
                 requested_model=requested, context_kind="selection",
-                context_id="workflow.selection[1]", folders=folders,
+                context_id="workflow.selection[1]", plan_names=plan_names,
                 evidence=evidence))
 
         record("actual", "requested-a", (
@@ -472,7 +489,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         # pending exactly as FAIL is and must defer the same human guidance.
         for verdict, context, trigger in (
                 ("FAIL", "blocked_adjudication", "worker_blocked"),
-                ("FAIL", "completed_folder", None),
+                ("FAIL", "completed_plan", None),
                 ("FIXED", "blocked_adjudication", "worker_blocked")):
             with self.subTest(verdict=verdict, context=context):
                 state = auto_fix.state_for_review(
@@ -623,7 +640,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             newline="\n")
         cfg = self.build()
         other_cfg = load_config(
-            self.root / ".assent" / "assent.toml", folder="plan010")
+            self.root / ".assent" / "assent.toml", plan_name="plan010")
         self.commit_all()
 
         def checkpoint(subject):
@@ -780,10 +797,10 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
 
 
 class TestStackReportLines(GlobalContractsMixin, EngineTestCase):
-    """A complete folder (all DONE/SKIP) must skip stack resolution entirely;
-    an incomplete folder must keep today's three existing outputs verbatim."""
+    """A complete plan (all DONE/SKIP) must skip stack resolution entirely;
+    an incomplete plan must keep today's three existing outputs verbatim."""
 
-    def test_complete_folder_skips_resolution_and_reports_not_applicable(self):
+    def test_complete_plan_skips_resolution_and_reports_not_applicable(self):
         self.write_task(1, status="DONE")
         self.write_task(2, slug="skip", status="SKIP", title="略過")
         cfg = self.build()
@@ -793,12 +810,12 @@ class TestStackReportLines(GlobalContractsMixin, EngineTestCase):
         with mock.patch(
                 "assent.inspection.resolve_stack_state",
                 side_effect=AssertionError(
-                    "must not resolve stack state for a complete folder")):
+                    "must not resolve stack state for a complete plan")):
             lines = inspection._stack_report_lines(cfg, plan)
         self.assertEqual(
-            lines, ["Stack base: not applicable (folder complete)"])
+            lines, ["Stack base: not applicable (plan complete)"])
 
-    def test_incomplete_folder_still_reports_current_target_main(self):
+    def test_incomplete_plan_still_reports_current_target_main(self):
         self.write_task(1)  # TODO, no upstream declared
         cfg = self.build()
         self.commit_all()
@@ -809,7 +826,7 @@ class TestStackReportLines(GlobalContractsMixin, EngineTestCase):
             "Stack base: current target main",
             "Speculative upstream: none (all direct upstreams accepted)"])
 
-    def test_incomplete_folder_still_reports_unavailable_on_resolution_error(self):
+    def test_incomplete_plan_still_reports_unavailable_on_resolution_error(self):
         self.write_task(1)  # TODO
         cfg = self.build()
         self.commit_all()
@@ -818,24 +835,24 @@ class TestStackReportLines(GlobalContractsMixin, EngineTestCase):
         with mock.patch(
                 "assent.inspection.resolve_stack_state",
                 side_effect=AssentError(
-                    "upstream folder plan00 has no plan00/* source branch")):
+                    "upstream plan plan00 has no plan00/* source branch")):
             lines = inspection._stack_report_lines(cfg, plan)
         self.assertEqual(lines, [
-            "Stack base: unavailable (upstream folder plan00 has no "
+            "Stack base: unavailable (upstream plan plan00 has no "
             "plan00/* source branch)"])
 
-    def test_incomplete_folder_still_reports_stacked_speculative_upstream(self):
+    def test_incomplete_plan_still_reports_stacked_speculative_upstream(self):
         self.write_task(1)  # TODO
         cfg = self.build()
         self.commit_all()
         from assent.plan import Plan
-        from assent.folderdeps import FolderBaseResolution
+        from assent.plandeps import PlanBaseResolution
         plan = Plan.parse(cfg.tasks_dir)
-        upstream = gitops.FolderSourceSnapshot(
-            folder="plan00", branch="plan00/run", worktree=self.root,
+        upstream = gitops.PlanSourceSnapshot(
+            plan="plan00", branch="plan00/run", worktree=self.root,
             tip="abc123")
         state = preflight.StackState(
-            base=FolderBaseResolution(
+            base=PlanBaseResolution(
                 target_snapshot="deadbeef", speculative_upstream=upstream,
                 resolved_base="abc123"),
             sources=(upstream,))
@@ -846,7 +863,7 @@ class TestStackReportLines(GlobalContractsMixin, EngineTestCase):
             "Stack base: abc123",
             "Speculative upstream: plan00 @ abc123 (unaccepted)"])
 
-    def test_status_and_report_show_not_applicable_for_complete_folder(self):
+    def test_status_and_report_show_not_applicable_for_complete_plan(self):
         self.write_task(1, status="DONE")
         cfg = self.build()
         self.commit_all()
@@ -854,11 +871,11 @@ class TestStackReportLines(GlobalContractsMixin, EngineTestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(inspection.status(cfg), 0)
         self.assertIn(
-            "Stack base: not applicable (folder complete)", out.getvalue())
+            "Stack base: not applicable (plan complete)", out.getvalue())
         from assent.plan import Plan
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn(
-            "Stack base: not applicable (folder complete)", text)
+            "Stack base: not applicable (plan complete)", text)
 
 
 if __name__ == "__main__":

@@ -16,8 +16,8 @@ from assent.gitops import (
     build_accept_trailers,
     commit_parents,
     commit_of,
-    folder_branches,
-    folder_worktree,
+    plan_branches,
+    plan_worktree,
     is_ancestor,
     main_worktree,
     merge_no_ff,
@@ -25,7 +25,7 @@ from assent.gitops import (
     require_current_branch,
     temporary_integration_worktree,
     tree_of,
-    unique_folder_branch,
+    unique_plan_branch,
     working_tree_status,
 )
 from assent.verification_common import (ProvisionedLink,
@@ -106,23 +106,23 @@ class TestRepositoryFacts(GitRepositoryCase):
         self.assertTrue(
             working_tree_status(self.root, ("_assent.log",)).is_clean)
 
-    def test_folder_worktree_is_resolved_from_a_linked_worktree(self) -> None:
+    def test_plan_worktree_is_resolved_from_a_linked_worktree(self) -> None:
         fixed = self.parent / f"{self.root.name}.worktrees" / "plan01"
         fixed.parent.mkdir()
         _git(self.root, "worktree", "add", "--detach", str(fixed), self.initial)
-        self.assertEqual(folder_worktree(fixed, "plan01"), fixed.resolve())
-        self.assertIsNone(folder_worktree(self.root, "missing"))
+        self.assertEqual(plan_worktree(fixed, "plan01"), fixed.resolve())
+        self.assertIsNone(plan_worktree(self.root, "missing"))
 
-    def test_unique_and_multiple_folder_branches(self) -> None:
-        self.assertIsNone(unique_folder_branch(self.root, "plan01"))
+    def test_unique_and_multiple_plan_branches(self) -> None:
+        self.assertIsNone(unique_plan_branch(self.root, "plan01"))
         _git(self.root, "branch", "plan01/one", self.initial)
-        self.assertEqual(unique_folder_branch(self.root, "plan01"), "plan01/one")
+        self.assertEqual(unique_plan_branch(self.root, "plan01"), "plan01/one")
         _git(self.root, "branch", "plan01/two", self.initial)
         _git(self.root, "branch", "plan02/other", self.initial)
         self.assertEqual(
-            folder_branches(self.root, "plan01"), ["plan01/one", "plan01/two"])
+            plan_branches(self.root, "plan01"), ["plan01/one", "plan01/two"])
         with self.assertRaisesRegex(AssentError, "multiple local branches"):
-            unique_folder_branch(self.root, "plan01")
+            unique_plan_branch(self.root, "plan01")
 
     def test_branch_tip_and_ancestor(self) -> None:
         tip = self._source()
@@ -161,7 +161,7 @@ class TestPassiveAcceptMetadata(GitRepositoryCase):
         text = build_accept_trailers(
             "plan01", "plan01/run", "a" * 40, "b" * 64, "c" * 64)
         self.assertEqual(text.splitlines(), [
-            "Assent-Folder: plan01",
+            "Assent-Plan: plan01",
             "Assent-Source-Branch: plan01/run",
             f"Assent-Source-Tip: {'a' * 40}",
             f"Assent-Verified-Tree: {'b' * 64}",
@@ -222,7 +222,7 @@ class TestTemporaryWorktrees(GitRepositoryCase):
             self.assertFalse((path / "later.txt").exists())
         self.assertFalse(path.exists())
         self.assertEqual(self._temporary_entries(), [])
-        self.assertNotIn(branch, folder_branches(self.root, "assent-integration"))
+        self.assertNotIn(branch, plan_branches(self.root, "assent-integration"))
         self.assertEqual(self._metadata_paths(), [self.root.resolve()])
         self.assertTrue(working_tree_status(self.root).is_clean)
 
@@ -391,13 +391,13 @@ class TestNonTraversingWorktreeRemoval(GitRepositoryCase):
             for target in targets
             for path in target.rglob("*") if path.is_file())
 
-    def _linked_worktree(self, folder: str) -> tuple[Path, Path, Path]:
+    def _linked_worktree(self, plan_name: str) -> tuple[Path, Path, Path]:
         """A detached worktree with one root-level and one nested link."""
-        path = self.parent / f"{self.root.name}.worktrees" / folder
+        path = self.parent / f"{self.root.name}.worktrees" / plan_name
         path.parent.mkdir(exist_ok=True)
         _git(self.root, "worktree", "add", "--detach", str(path), self.snapshot)
-        root_target = self._external(f"{folder} pkg")
-        nested_target = self._external(f"{folder} build")
+        root_target = self._external(f"{plan_name} pkg")
+        nested_target = self._external(f"{plan_name} build")
         make_directory_link(path / "pkg", root_target)
         make_directory_link(path / "lib" / "build", nested_target)
         return path, root_target, nested_target
@@ -465,7 +465,7 @@ class TestNonTraversingWorktreeRemoval(GitRepositoryCase):
 
         self.assertFalse(path.exists())
         self.assertEqual(self._listed_worktrees(), [self.root.resolve()])
-        self.assertNotIn(branch, folder_branches(self.root, "assent-integration"))
+        self.assertNotIn(branch, plan_branches(self.root, "assent-integration"))
         self.assertEqual(self._contents(root_target, nested_target), before)
 
     def test_an_unclean_worktree_is_refused_with_its_links_retained(self) -> None:

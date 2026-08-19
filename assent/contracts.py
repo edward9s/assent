@@ -4,7 +4,7 @@
 format), and ``workflow.md`` (the CLI, report, and receipt contract) describe
 the tool, not any one project, so they are installed once into the user-wide
 ``~/.assent`` directory and every project's session reads them from there.  A
-project's own ``.assent`` keeps what genuinely belongs to it: task folders,
+project's own ``.assent`` keeps what genuinely belongs to it: plans,
 journals, receipts, the verifier, and the optional settings override.
 
 All three files are copies of this installation's packaged templates, so the

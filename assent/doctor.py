@@ -147,7 +147,8 @@ def _check_temp_dir() -> bool:
     temp_dir = Path(tempfile.gettempdir())
     probe = temp_dir / f"assent-doctor-{uuid.uuid4().hex}.tmp"
     try:
-        probe.write_text("assent doctor probe\n", encoding="utf-8")
+        probe.write_text("assent doctor probe\n", encoding="utf-8",
+                         newline="\n")
         probe.unlink()
     except OSError as e:
         _print_check(FAIL, "temp directory", f"{temp_dir}: {e}")
@@ -200,12 +201,12 @@ def _check_orphaned_branches(cfg: Config,
     Their existence is untidy, not broken: this check is never a failure and
     never contributes to doctor's exit code, whether orphans are found, the
     human declines, or a removal is refused.  It is also the recovery path, not
-    the routine one -- ``clean`` with no folder sweeps the same refs without asking,
+    the routine one -- ``clean`` with no plan sweeps the same refs without asking,
     because that matches clean's prove-or-retain contract -- so this is the only
     place the question is put to a human.
 
     doctor stays diagnostic apart from that one confirmed branch deletion: it
-    runs no folder operation and touches no work folder, task file or receipt.
+    runs no plan operation and touches no plan, task file or receipt.
     """
     try:
         records = gitops.temporary_branches(cfg.root)

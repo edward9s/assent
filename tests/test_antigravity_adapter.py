@@ -213,10 +213,10 @@ class TestBuildCommand(unittest.TestCase):
         # the CLI log stays outside the isolated worktree
         self.assertNotIn(str(Path(".").resolve()),
                          cmd[cmd.index("--log-file") + 1])
-        # the main tree's task folder is reachable, so the session can update its t/r files
+        # the main tree's plan is reachable, so the session can update its t/r files
         added = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--add-dir"]
         self.assertIn(str(cfg.tasks_dir.resolve()), added)
-        self.assertEqual(len(added), 2)      # task folder plus system temp
+        self.assertEqual(len(added), 2)      # plan plus system temp
         # every element is a separate argument: nothing is ever handed to a shell
         self.assertTrue(all(isinstance(part, str) for part in cmd))
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assent import AssentError, gitops
-from assent.accept import accept_folder
+from assent.accept import accept_plan
 from assent.config import load_config
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -41,16 +41,16 @@ class AcceptReceiptCase(unittest.TestCase):
         self._git("add", "-A")
         self._git("commit", "-m", "baseline")
 
-        self.folder = "plan01"
+        self.plan_name = "plan01"
         self.assent_dir = self.root / ".assent"
-        self.tasks_dir = self.assent_dir / self.folder
+        self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config = self.assent_dir / "assent.toml"
         self.config.write_text("", encoding="utf-8")
         self.counter = self.parent / "verifier-count.txt"
         self._write_verifier(True)
-        self._write_task(self.folder)
-        self.source, self.branch = self._make_source(self.folder)
+        self._write_task(self.plan_name)
+        self.source, self.branch = self._make_source(self.plan_name)
 
     def _git(self, *args: str, cwd: Path | None = None) -> str:
         result = subprocess.run(
@@ -61,18 +61,18 @@ class AcceptReceiptCase(unittest.TestCase):
                       result.stdout + result.stderr)
         return result.stdout.strip()
 
-    def _cli(self, command: str, folder: str | None = None
+    def _cli(self, command: str, plan_name: str | None = None
              ) -> subprocess.CompletedProcess[str]:
         args = [sys.executable, "-m", "assent", command]
-        if folder is not None:
-            args.append(folder)
+        if plan_name is not None:
+            args.append(plan_name)
         args.extend(("--config", str(self.config)))
         return subprocess.run(
             args, cwd=self.root, env=self.env, capture_output=True,
             encoding="utf-8", errors="replace")
 
-    def _write_task(self, folder: str) -> Path:
-        tasks = self.assent_dir / folder
+    def _write_task(self, plan_name: str) -> Path:
+        tasks = self.assent_dir / plan_name
         tasks.mkdir(parents=True, exist_ok=True)
         path = tasks / "t001_task.e.toml"
         path.write_text(
@@ -97,33 +97,33 @@ class AcceptReceiptCase(unittest.TestCase):
             f"raise SystemExit({0 if passes else 7})\n",
             encoding="utf-8")
 
-    def _make_source(self, folder: str, filename: str | None = None,
+    def _make_source(self, plan_name: str, filename: str | None = None,
                      base_ref: str | None = None
                      ) -> tuple[Path, str]:
-        branch = f"{folder}/run"
-        path = self.parent / f"{self.root.name}.worktrees" / folder
+        branch = f"{plan_name}/run"
+        path = self.parent / f"{self.root.name}.worktrees" / plan_name
         args = ["worktree", "add", "-b", branch, str(path)]
         if base_ref is not None:
             args.append(base_ref)
         self._git(*args)
-        (path / (filename or f"{folder}.txt")).write_text(
-            f"{folder}\n", encoding="utf-8")
+        (path / (filename or f"{plan_name}.txt")).write_text(
+            f"{plan_name}\n", encoding="utf-8")
         self._git("add", "-A", cwd=path)
-        self._git("commit", "-m", f"finish {folder}", cwd=path)
+        self._git("commit", "-m", f"finish {plan_name}", cwd=path)
         return path, branch
 
     def _head(self, ref: str = "HEAD") -> str:
         return self._git("rev-parse", ref)
 
-    def _verify_passes(self, folder: str | None = None) -> None:
-        result = self._cli("verify", folder or self.folder)
+    def _verify_passes(self, plan_name: str | None = None) -> None:
+        result = self._cli("verify", plan_name or self.plan_name)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def _assert_refused_unchanged(self, before: str,
                                   result: subprocess.CompletedProcess[str]) -> None:
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self._head(), before)
-        self.assertIn(f"assent verify {self.folder}", result.stdout)
+        self.assertIn(f"assent verify {self.plan_name}", result.stdout)
 
 
 class TestReceiptGate(AcceptReceiptCase):
@@ -133,7 +133,7 @@ class TestReceiptGate(AcceptReceiptCase):
         self._verify_passes()
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
 
-        accepted = self._cli("accept", self.folder)
+        accepted = self._cli("accept", self.plan_name)
 
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
@@ -141,14 +141,14 @@ class TestReceiptGate(AcceptReceiptCase):
         parents = self._git("rev-list", "--parents", "-n", "1", after).split()[1:]
         self.assertEqual(parents, [before, tip])
         message = self._git("show", "-s", "--format=%B", after)
-        self.assertIn(f"Assent-Folder: {self.folder}", message)
+        self.assertIn(f"Assent-Plan: {self.plan_name}", message)
         self.assertIn(f"Assent-Source-Branch: {self.branch}", message)
         self.assertIn(f"Assent-Source-Tip: {tip}", message)
         self.assertIn("Assent-Verified-Tree:", message)
         self.assertIn("Assent-Verifier-SHA256:", message)
         self.assertTrue(self.source.is_dir())
 
-        repeated = self._cli("accept", self.folder)
+        repeated = self._cli("accept", self.plan_name)
         self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
         self.assertEqual(self._head(), after)
         self.assertEqual(self.counter.read_text(encoding="utf-8"), "1")
@@ -156,23 +156,23 @@ class TestReceiptGate(AcceptReceiptCase):
 
     def test_missing_failed_and_malformed_receipts_fail_closed(self) -> None:
         before = self._head()
-        missing = self._cli("accept", self.folder)
+        missing = self._cli("accept", self.plan_name)
         self._assert_refused_unchanged(before, missing)
         self.assertIn("receipt not found", missing.stdout.lower())
 
         receipt = self.tasks_dir / "_verification.toml"
         receipt.write_text("not valid = [\n", encoding="utf-8")
-        malformed = self._cli("accept", self.folder)
+        malformed = self._cli("accept", self.plan_name)
         self._assert_refused_unchanged(before, malformed)
         self.assertIn("not valid TOML", malformed.stdout)
 
         receipt.unlink()
         self._write_verifier(False)
-        failed_verify = self._cli("verify", self.folder)
+        failed_verify = self._cli("verify", self.plan_name)
         self.assertEqual(failed_verify.returncode, 1)
         self.assertNotIn(
             "REVIEW UNRESOLVED, HUMAN DECISION", failed_verify.stdout)
-        failed = self._cli("accept", self.folder)
+        failed = self._cli("accept", self.plan_name)
         self._assert_refused_unchanged(before, failed)
         self.assertIn("status is FAILED", failed.stdout)
 
@@ -182,7 +182,7 @@ class TestReceiptGate(AcceptReceiptCase):
         (self.source / "later.txt").write_text("later\n", encoding="utf-8")
         self._git("add", "later.txt", cwd=self.source)
         self._git("commit", "-m", "advance source", cwd=self.source)
-        source_changed = self._cli("accept", self.folder)
+        source_changed = self._cli("accept", self.plan_name)
         self._assert_refused_unchanged(before, source_changed)
         self.assertIn("source tip changed", source_changed.stdout)
 
@@ -190,7 +190,7 @@ class TestReceiptGate(AcceptReceiptCase):
         self._write_verifier(True)
         with (self.assent_dir / "verify.py").open("a", encoding="utf-8") as handle:
             handle.write("# changed\n")
-        verifier_changed = self._cli("accept", self.folder)
+        verifier_changed = self._cli("accept", self.plan_name)
         self._assert_refused_unchanged(before, verifier_changed)
         self.assertIn("verification script changed", verifier_changed.stdout)
 
@@ -199,7 +199,7 @@ class TestReceiptGate(AcceptReceiptCase):
         self._git("add", "target-only.txt")
         self._git("commit", "-m", "change target tree")
         moved = self._head()
-        candidate_changed = self._cli("accept", self.folder)
+        candidate_changed = self._cli("accept", self.plan_name)
         self._assert_refused_unchanged(moved, candidate_changed)
         self.assertIn("candidate tree differs", candidate_changed.stdout)
 
@@ -210,7 +210,7 @@ class TestReceiptGate(AcceptReceiptCase):
         target_before = self._head()
         self.assertNotEqual(before_metadata, target_before)
 
-        accepted = self._cli("accept", self.folder)
+        accepted = self._cli("accept", self.plan_name)
 
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
         parents = self._git("rev-list", "--parents", "-n", "1", "HEAD").split()[1:]
@@ -218,13 +218,13 @@ class TestReceiptGate(AcceptReceiptCase):
 
     def test_cleaned_source_is_not_reauthorized_from_history(self) -> None:
         self._verify_passes()
-        accepted = self._cli("accept", self.folder)
+        accepted = self._cli("accept", self.plan_name)
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
         after = self._head()
         self._git("worktree", "remove", str(self.source))
         self._git("branch", "-D", self.branch)
 
-        repeated = self._cli("accept", self.folder)
+        repeated = self._cli("accept", self.plan_name)
 
         self.assertEqual(repeated.returncode, 1)
         self.assertEqual(self._head(), after)
@@ -234,7 +234,7 @@ class TestReceiptGate(AcceptReceiptCase):
     def test_cleanup_diagnostic_does_not_turn_published_accept_into_failure(self) -> None:
         self._verify_passes()
         before = self._head()
-        cfg = load_config(self.config, self.folder)
+        cfg = load_config(self.config, self.plan_name)
         original_cleanup = gitops._cleanup_temporary_worktree
 
         def cleanup_then_report(*args, **kwargs) -> None:
@@ -246,7 +246,7 @@ class TestReceiptGate(AcceptReceiptCase):
                 gitops, "_cleanup_temporary_worktree",
                 side_effect=cleanup_then_report):
             with contextlib.redirect_stdout(output):
-                code = accept_folder(cfg)
+                code = accept_plan(cfg)
 
         self.assertEqual(code, 0, output.getvalue())
         self.assertNotEqual(self._head(), before)
@@ -256,7 +256,7 @@ class TestReceiptGate(AcceptReceiptCase):
 
 
 class TestDependencyGate(AcceptReceiptCase):
-    def test_current_upstream_tip_must_be_in_target_and_unrelated_bad_folder_is_ignored(
+    def test_current_upstream_tip_must_be_in_target_and_unrelated_bad_plan_is_ignored(
             self) -> None:
         base = "base"
         self._write_task(base)
@@ -264,15 +264,15 @@ class TestDependencyGate(AcceptReceiptCase):
         self._git("merge", "--no-ff", "-m", "accept base manually", base_branch)
         self._git("worktree", "remove", str(self.source))
         self._git("branch", "-D", self.branch)
-        self.source, self.branch = self._make_source(self.folder)
-        (self.tasks_dir / "_folder.toml").write_text(
+        self.source, self.branch = self._make_source(self.plan_name)
+        (self.tasks_dir / "_plan_deps.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
 
         bad = self.assent_dir / "unrelated"
         bad.mkdir()
         (bad / "t001_bad.e.toml").write_text("not valid = [\n", encoding="utf-8")
         self._verify_passes()
-        accepted = self._cli("accept", self.folder)
+        accepted = self._cli("accept", self.plan_name)
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
 
         (base_source / "base-later.txt").write_text("later\n", encoding="utf-8")
@@ -282,7 +282,7 @@ class TestDependencyGate(AcceptReceiptCase):
         dependent = "dependent"
         self._write_task(dependent)
         dependent_dir = self.assent_dir / dependent
-        (dependent_dir / "_folder.toml").write_text(
+        (dependent_dir / "_plan_deps.toml").write_text(
             'after = ["base"]\n', encoding="utf-8")
         self._make_source(dependent)
         refused = self._cli("accept", dependent)
@@ -314,7 +314,7 @@ class TestStackedReceiptLifecycle(AcceptReceiptCase):
 
         self._write_task(self.downstream)
         downstream_tasks = self.assent_dir / self.downstream
-        (downstream_tasks / "_folder.toml").write_text(
+        (downstream_tasks / "_plan_deps.toml").write_text(
             f'after = ["{self.upstream}"]\n'
             f'base = "{self.upstream}"\n', encoding="utf-8")
         downstream_source, downstream_branch = self._make_source(

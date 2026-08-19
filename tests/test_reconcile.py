@@ -1,4 +1,4 @@
-"""Regressions for the isolated single-folder conflict reconciliation lifecycle."""
+"""Regressions for the isolated single-plan conflict reconciliation lifecycle."""
 from __future__ import annotations
 
 import contextlib
@@ -35,7 +35,7 @@ def _git(root: Path, *args: str) -> str:
 
 
 class ReconcileRepositoryCase(unittest.TestCase):
-    """A repository whose folder source and integration target really conflict."""
+    """A repository whose plan source and integration target really conflict."""
 
     def setUp(self) -> None:
         self.parent = Path(tempfile.mkdtemp(prefix="assent reconcile test "))
@@ -51,9 +51,9 @@ class ReconcileRepositoryCase(unittest.TestCase):
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "initial")
 
-        self.folder = "plan01"
+        self.plan_name = "plan01"
         self.assent_dir = self.root / ".assent"
-        self.tasks_dir = self.assent_dir / self.folder
+        self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.assent_dir / "assent.toml"
         self.config_path.write_text("", encoding="utf-8")
@@ -93,9 +93,9 @@ class ReconcileRepositoryCase(unittest.TestCase):
 
     def _make_source(self, filename: str = "shared.txt",
                      content: str = "source\n") -> None:
-        self.source_worktree = gitops.ensure_worktree(self.root, self.folder)
+        self.source_worktree = gitops.ensure_worktree(self.root, self.plan_name)
         self.source_branch = gitops.ensure_branch(
-            self.source_worktree, f"{self.folder}/")
+            self.source_worktree, f"{self.plan_name}/")
         (self.source_worktree / filename).write_text(content, encoding="utf-8")
         gitops.commit_all(self.source_worktree, "finish plan01")
         self.source_tip = gitops.branch_tip(self.root, self.source_branch)
@@ -153,13 +153,13 @@ class ReconcileRepositoryCase(unittest.TestCase):
             self.root / "lib" / "l10n" / "arb")
 
     def _config(self):
-        return load_config(self.config_path, self.folder)
+        return load_config(self.config_path, self.plan_name)
 
     def _managed_path(self) -> Path:
-        return gitops.reconcile_worktree_path(self.root, self.folder)
+        return gitops.reconcile_worktree_path(self.root, self.plan_name)
 
     def _managed_branch(self) -> str:
-        return f"assent-reconcile/{self.folder}"
+        return f"assent-reconcile/{self.plan_name}"
 
     def _run(self, action) -> tuple[int, str]:
         buffer = io.StringIO()
@@ -175,7 +175,7 @@ class ReconcileRepositoryCase(unittest.TestCase):
         """Simulate an interrupted run that had already created the merge commit."""
         path = self._managed_path()
         _git(path, "add", "-A")
-        _git(path, "commit", "-m", reconcile_commit_message(self.folder))
+        _git(path, "commit", "-m", reconcile_commit_message(self.plan_name))
         return gitops.commit_of(path, "HEAD")
 
     def _install_message_prefix_hook(self) -> None:
@@ -461,9 +461,9 @@ class StartTest(ReconcileRepositoryCase):
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-m", "more files")
 
-        self.source_worktree = gitops.ensure_worktree(self.root, self.folder)
+        self.source_worktree = gitops.ensure_worktree(self.root, self.plan_name)
         self.source_branch = gitops.ensure_branch(
-            self.source_worktree, f"{self.folder}/")
+            self.source_worktree, f"{self.plan_name}/")
         for name in ("a.txt", "b.txt", "shared.txt"):
             (self.source_worktree / name).write_text("source\n", encoding="utf-8")
         gitops.commit_all(self.source_worktree, "finish plan01")
@@ -509,7 +509,7 @@ class StartTest(ReconcileRepositoryCase):
             (self._managed_path() / "shared.txt").read_text(encoding="utf-8"),
             "human edit\n")
 
-    def test_start_refuses_an_unfinished_folder(self) -> None:
+    def test_start_refuses_an_unfinished_plan(self) -> None:
         self._conflicting_repository()
         self._write_task(status="TODO")
 
@@ -656,7 +656,7 @@ class ContinueTest(ReconcileRepositoryCase):
         self.assertEqual(gitops.commit_parents(self.root, merge),
                          (self.source_tip, self.target_tip))
         self.assertEqual(gitops.commit_message(self.root, merge).strip(),
-                         reconcile_commit_message(self.folder).strip())
+                         reconcile_commit_message(self.plan_name).strip())
         # The resolved tree is preserved in the source worktree.
         self.assertEqual(
             (self.source_worktree / "shared.txt").read_text(encoding="utf-8"),
@@ -973,7 +973,7 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    def _write_folder_receipt(self) -> Path:
+    def _write_plan_receipt(self) -> Path:
         cfg = self._config()
         path = verification.receipt_path(cfg)
         verification.write_receipt(path, verification.VerificationReceipt(
@@ -986,14 +986,14 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
             completed_at=self._now(), failure_summary=""), self.root)
         return path
 
-    def _write_batch_receipt(self, *folders: tuple[str, str]) -> Path:
+    def _write_batch_receipt(self, *plan_names: tuple[str, str]) -> Path:
         path = verification.batch_receipt_path(self.assent_dir)
         tree = self._tree()
         verification.write_batch_receipt(path, verification.BatchVerificationReceipt(
             version=verification.BATCH_RECEIPT_VERSION, status="PASSED",
             target_tip=self.target_tip,
-            sources=tuple(verification.BatchSource(folder, tip, tree)
-                          for folder, tip in folders),
+            sources=tuple(verification.BatchSource(plan_name, tip, tree)
+                          for plan_name, tip in plan_names),
             final_tree=tree,
             verify_script_sha256=verification.verifier_digest(self._config()),
             shared_inputs_sha256="0" * 64,
@@ -1001,12 +1001,12 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
             completed_at=self._now(), failure_summary=""), self.root)
         return path
 
-    def _make_peer_source(self, folder: str = "peer01") -> str:
-        """A second finished folder whose own source identity does not move."""
-        worktree = gitops.ensure_worktree(self.root, folder)
-        branch = gitops.ensure_branch(worktree, f"{folder}/")
-        (worktree / f"{folder}.txt").write_text("peer\n", encoding="utf-8")
-        gitops.commit_all(worktree, f"finish {folder}")
+    def _make_peer_source(self, plan_name: str = "peer01") -> str:
+        """A second finished plan whose own source identity does not move."""
+        worktree = gitops.ensure_worktree(self.root, plan_name)
+        branch = gitops.ensure_branch(worktree, f"{plan_name}/")
+        (worktree / f"{plan_name}.txt").write_text("peer\n", encoding="utf-8")
+        gitops.commit_all(worktree, f"finish {plan_name}")
         return gitops.branch_tip(self.root, branch)
 
     def _resolved_continue(self) -> tuple[int, str]:
@@ -1014,9 +1014,9 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
         self._resolve()
         return self._run(reconcile_continue)
 
-    def test_continue_deletes_the_stale_folder_receipt(self) -> None:
+    def test_continue_deletes_the_stale_plan_receipt(self) -> None:
         self._conflicting_repository()
-        receipt = self._write_folder_receipt()
+        receipt = self._write_plan_receipt()
 
         code, output = self._resolved_continue()
 
@@ -1027,23 +1027,23 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
         # The deleted evidence is exactly what accept refuses to do without.
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
-            accepted = accept_mod.accept_folder(self._config())
+            accepted = accept_mod.accept_plan(self._config())
         self.assertEqual(accepted, 1, buffer.getvalue())
         self.assertIn("assent verify", buffer.getvalue())
 
-    def test_continue_invalidates_a_batch_receipt_that_records_this_folder(self
+    def test_continue_invalidates_a_batch_receipt_that_records_this_plan(self
                                                                           ) -> None:
         self._conflicting_repository()
         peer_tip = self._make_peer_source()
         batch = self._write_batch_receipt(
-            (self.folder, self.source_tip), ("peer01", peer_tip))
+            (self.plan_name, self.source_tip), ("peer01", peer_tip))
 
         code, output = self._resolved_continue()
 
         self.assertEqual(code, 0, output)
         self.assertFalse(batch.exists())
         self.assertIn("stale batch verification receipt deleted", output)
-        self.assertIn(self.folder, output)
+        self.assertIn(self.plan_name, output)
 
     def test_continue_keeps_a_batch_receipt_whose_sources_are_all_current(self
                                                                          ) -> None:
@@ -1057,12 +1057,12 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
         self.assertTrue(batch.exists())
         self.assertNotIn("batch verification receipt deleted", output)
         self.assertEqual(
-            verification.read_batch_receipt(batch, self.root).folders, ("peer01",))
+            verification.read_batch_receipt(batch, self.root).plan_names, ("peer01",))
 
     def test_start_and_abort_leave_every_receipt_in_place(self) -> None:
         self._conflicting_repository()
-        receipt = self._write_folder_receipt()
-        batch = self._write_batch_receipt((self.folder, self.source_tip))
+        receipt = self._write_plan_receipt()
+        batch = self._write_batch_receipt((self.plan_name, self.source_tip))
 
         self.assertEqual(self._run(reconcile_start)[0], 0)
         self.assertTrue(receipt.exists())
@@ -1093,14 +1093,14 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
         self.assertIn("no verification has run", output)
         self.assertIn("neither the focused task tests nor the complete "
                       "verification", output)
-        self.assertIn(f"assent verify {self.folder}", output)
-        self.assertIn(f"assent accept {self.folder}", output)
+        self.assertIn(f"assent verify {self.plan_name}", output)
+        self.assertIn(f"assent accept {self.plan_name}", output)
         # The invalid one-argument rework command is never suggested.
-        self.assertNotIn(f"assent rework {self.folder}", output)
+        self.assertNotIn(f"assent rework {self.plan_name}", output)
 
     def test_a_resumed_continue_reports_the_same_boundary_and_receipts(self) -> None:
         self._conflicting_repository()
-        receipt = self._write_folder_receipt()
+        receipt = self._write_plan_receipt()
         self.assertEqual(self._run(reconcile_start)[0], 0)
         self._resolve()
         merge = self._commit_reconcile_merge()
@@ -1113,7 +1113,7 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
         self.assertIn("only cleanup remained", output)
         self.assertFalse(receipt.exists())
         self.assertIn("no verification has run", output)
-        self.assertIn(f"assent accept {self.folder}", output)
+        self.assertIn(f"assent accept {self.plan_name}", output)
 
 
 class LifecycleBoundaryTest(ReconcileRepositoryCase):
@@ -1126,11 +1126,11 @@ class LifecycleBoundaryTest(ReconcileRepositoryCase):
         def _forbidden(*args, **kwargs):
             raise AssertionError("the reconciliation lifecycle started this")
 
-        with patch.object(verification, "verify_folder", _forbidden), \
-                patch.object(verification, "verify_folder_if_needed", _forbidden), \
+        with patch.object(verification, "verify_plan", _forbidden), \
+                patch.object(verification, "verify_plan_if_needed", _forbidden), \
                 patch.object(verification, "_run_full_verifier", _forbidden), \
                 patch.object(verification, "verify_batch", _forbidden), \
-                patch.object(accept_mod, "accept_folder", _forbidden), \
+                patch.object(accept_mod, "accept_plan", _forbidden), \
                 patch.object(batch_accept_mod, "accept_all", _forbidden), \
                 patch.object(engine, "run", _forbidden), \
                 patch.object(engine, "_run_verify", _forbidden), \
@@ -1144,13 +1144,13 @@ class LifecycleBoundaryTest(ReconcileRepositoryCase):
         # The target branch never moved and never entered a merge state.
         self._assert_target_untouched(target_before)
         self.assertFalse(
-            (self.assent_dir / self.folder / "_verification.toml").exists())
+            (self.assent_dir / self.plan_name / "_verification.toml").exists())
 
-    def test_a_busy_folder_lock_refuses_without_touching_anything(self) -> None:
+    def test_a_busy_plan_lock_refuses_without_touching_anything(self) -> None:
         from assent.lockfile import hold_lock
 
         self._conflicting_repository()
-        with hold_lock(self.tasks_dir, self.folder):
+        with hold_lock(self.tasks_dir, self.plan_name):
             code, output = self._run(reconcile_start)
 
         self.assertEqual(code, 1)

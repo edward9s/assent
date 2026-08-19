@@ -21,9 +21,9 @@ from assent.plan import Plan, Task, append_entry, read_entries, set_status
 _CASCADE_STATUSES = {"DONE", "WIP", "BLOCKED"}
 _TASK_STATUSES = {"TODO", "WIP", "DONE", "BLOCKED", "SKIP"}
 _CHECKPOINT_RE = re.compile(
-    r"^(?:wip|auto)\((?P<folder>[^/()]+)/(?P<task>t[0-9]{3})\): .+$")
+    r"^(?:wip|auto)\((?P<plan>[^/()]+)/(?P<task>t[0-9]{3})\): .+$")
 _REWORK_RE = re.compile(
-    r"^rework\((?P<folder>[^/()]+)/(?P<task>t[0-9]{3})\): .+$")
+    r"^rework\((?P<plan>[^/()]+)/(?P<task>t[0-9]{3})\): .+$")
 _REWORK_METADATA_PREFIX = "assent-rework-v1:"
 _HASH_RE = re.compile(r"^[0-9a-f]{40,64}$")
 
@@ -75,7 +75,7 @@ def rework_task(cfg: Config, task_id: str, cascade: bool = False,
 
 
 def rework_tasks_locked(cfg: Config, task_ids: list[str], reason: str) -> int:
-    """Reopen an exact automatic finding set while the caller holds the folder lock.
+    """Reopen an exact automatic finding set while the caller holds the plan lock.
 
     The existing single-task transaction remains the only mutation path.  This
     coordinator merely removes selected descendants whose required cascade is
@@ -215,14 +215,14 @@ def _revert_candidates(path: Path, name: str, task_ids: set[str],
     for record in history:
         subject = record[2]
         boundary = _REWORK_RE.fullmatch(subject)
-        if boundary and boundary.group("folder") == name:
+        if boundary and boundary.group("plan") == name:
             break
         current.append(record)
 
     relevant_positions = [
         index for index, (_, _, subject) in enumerate(current)
         if (match := _CHECKPOINT_RE.fullmatch(subject))
-        and match.group("folder") == name
+        and match.group("plan") == name
         and match.group("task") in task_ids
     ]
     if not relevant_positions:
@@ -234,7 +234,7 @@ def _revert_candidates(path: Path, name: str, task_ids: set[str],
         if len(parents) != 1:
             raise AssentError(f"checkpoint tail contains a merge commit: {commit}")
         match = _CHECKPOINT_RE.fullmatch(subject)
-        if (match is None or match.group("folder") != name
+        if (match is None or match.group("plan") != name
                 or match.group("task") not in task_ids):
             raise AssentError(
                 f"checkpoint does not form a safely revertible continuous tail: "
@@ -280,13 +280,13 @@ def _string_list(value: object, field: str) -> tuple[str, ...]:
 
 def _load_revert_record(path: Path, name: str,
                         target_id: str) -> _RevertRecord | None:
-    """Parse the resume data of a new-style revert checkpoint when HEAD is one for this folder."""
+    """Parse the resume data of a new-style revert checkpoint when HEAD is one for this plan."""
     history = gitops.commit_history(path)
     if not history:
         return None
     checkpoint, parents, subject = history[0]
     match = _REWORK_RE.fullmatch(subject)
-    if (match is None or match.group("folder") != name
+    if (match is None or match.group("plan") != name
             or match.group("task") != target_id):
         return None
 
@@ -463,19 +463,19 @@ class _ReworkState:
     resuming: bool = False
 
 
-def _ensure_folder_worktree(cfg: Config, path: Path) -> None:
+def _ensure_plan_worktree(cfg: Config, path: Path) -> None:
     """Refuse a path that is not this repository's worktree, or one checked out on a
-    branch outside this folder."""
+    branch outside this plan."""
     if not gitops.is_repo_worktree(cfg.root, path):
         raise AssentError(
             f"fixed path is not a valid worktree of this repo: {path}")
     branch = gitops.current_branch(path)
     if not branch.startswith(cfg.branch_prefix):
         shown = branch or "detached HEAD"
-        raise AssentError(f"worktree is on a branch outside this folder: {shown}")
+        raise AssentError(f"worktree is on a branch outside this plan: {shown}")
 
 
-def _folder_worktree_path(cfg: Config) -> Path:
+def _plan_worktree_path(cfg: Config) -> Path:
     """Use the caller's source worktree when execution already runs inside it."""
     try:
         if (gitops.is_repo_worktree(cfg.root, cfg.root)
@@ -526,7 +526,7 @@ def _resolve_request(cfg: Config, task_id: object, cascade: object,
         reason=reason.strip() or "manual rework requested",
         revert_code=revert_code, automatic=automatic, plan=plan, target=target,
         downstream=downstream, blockers=blockers,
-        path=_folder_worktree_path(cfg))
+        path=_plan_worktree_path(cfg))
 
 
 def _adopt_revert_record(request: _ReworkRequest, state: _ReworkState,
@@ -587,13 +587,13 @@ def _adopt_revert_record(request: _ReworkRequest, state: _ReworkState,
 
 def _resume_interrupted_revert(request: _ReworkRequest,
                                state: _ReworkState) -> bool:
-    """Phase: check the Git scene for a revert rework and, when HEAD is this folder's
+    """Phase: check the Git scene for a revert rework and, when HEAD is this plan's
     not-yet-finished revert checkpoint, rebuild the original parameters and statuses
     from its commit body so no code is reverted again."""
     try:
         if not request.path.exists():
             raise AssentError(f"worktree does not exist: {request.path}")
-        _ensure_folder_worktree(request.cfg, request.path)
+        _ensure_plan_worktree(request.cfg, request.path)
         gitops.ensure_clean(request.path)
         head_value = gitops.head_ref(request.path)
         if head_value is None:
@@ -652,7 +652,7 @@ def _prepare_git_scene(request: _ReworkRequest, state: _ReworkState) -> bool:
                 state.reverted = _revert_candidates(
                     request.path, name, {task.id for task in state.changed})
         elif request.path.exists():
-            _ensure_folder_worktree(request.cfg, request.path)
+            _ensure_plan_worktree(request.cfg, request.path)
             if gitops.commit_if_dirty(
                     request.path,
                     f"wip({name}/{request.target.id}): "
@@ -811,7 +811,7 @@ def _rework_locked(cfg: Config, task_id: object, cascade: object,
     if request is None:
         return 1
 
-    # Reopening a task takes the folder back out of the finished set the batch
+    # Reopening a task takes the plan back out of the finished set the batch
     # candidate was built from, so the batch receipt stops describing publishable
     # work here -- before any status, journal, or revert checkpoint is written.
     if verification.invalidate_batch_receipt(cfg.assent_dir):

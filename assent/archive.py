@@ -1,9 +1,9 @@
-"""One-way archival of a finished work folder: clean first, then compress the plan.
+"""One-way archival of a finished plan: clean first, then compress the plan.
 
-``assent archive FOLDER`` retires a work folder that is no longer needed for active
+``assent archive PLAN`` retires a plan that is no longer needed for active
 work.  Archival strictly contains ``clean``: it reuses ``clean``'s mechanical proof
 and removal for any still-present source branch/worktree, then compresses
-``.assent/<FOLDER>/`` into ``.assent/_archive/<FOLDER>.zip``, records the folder in
+``.assent/<PLAN>/`` into ``.assent/_archive/<PLAN>.zip``, records the plan in
 the ``.assent/_archived.toml`` roster (so a downstream ``after`` reference stays
 resolvable long after the live directory is gone), and finally deletes the live
 directory.  The reverse is one-directional: ``clean`` never archives, because
@@ -11,10 +11,10 @@ cleaning is a mechanical judgement (proof of integration) while archiving is a h
 one (this plan will not be consulted again).
 
 Crash-safety and idempotency.  The durable steps are: (1) compress the live directory
-into a temporary zip; (2) register the folder in the roster; (3) publish the zip by
+into a temporary zip; (2) register the plan in the roster; (3) publish the zip by
 renaming the temporary file onto its final name; (4) delete the live directory.  The
 roster entry is written *before* the final zip is published on purpose: the roster is
-the single authority on "this folder's archive is underway/committed", so a final zip
+the single authority on "this plan's archive is underway/committed", so a final zip
 that exists with *no* roster entry can only be a foreign file and is refused rather
 than clobbered.  Re-running ``archive`` after an interruption at any step resolves the
 current on-disk state against the roster and finishes the remaining steps without
@@ -38,10 +38,10 @@ from pathlib import Path
 from assent import AssentError, gitops
 from assent.clean import (clean_locked, has_cleanup_target,
                           sweep_orphaned_temporary_branches,
-                          validate_live_folder_selection)
-from assent.config import (Config, list_task_folders, load_config,
+                          validate_live_plan_selection)
+from assent.config import (Config, list_task_plans, load_config,
                            validate_config, validate_tasks_name)
-from assent.folderdeps import infer_folder_completion
+from assent.plandeps import infer_plan_completion
 from assent.lockfile import (LOCK_NAME, LockBusy, hold_lock,
                              hold_integration_lock)
 
@@ -51,7 +51,7 @@ _ROSTER_NAME = "_archived.toml"
 
 @dataclass(frozen=True)
 class ArchiveResult:
-    """The outcome of archiving one folder, for exit codes and the ``--all`` summary."""
+    """The outcome of archiving one plan, for exit codes and the ``--all`` summary."""
 
     status: str  # "archived" | "skipped" | "error"
     reason: str = ""
@@ -61,7 +61,7 @@ def _toml_basic_str(value: str) -> str:
     """Render a string as a TOML basic string.
 
     ``json.dumps`` emits exactly the escapes TOML basic strings accept for the
-    values we store here (folder names, ISO timestamps, hex hashes), so it is a
+    values we store here (plan names, ISO timestamps, hex hashes), so it is a
     safe, dependency-free encoder.
     """
     return json.dumps(value, ensure_ascii=False)
@@ -71,8 +71,8 @@ def _archive_dir(assent_dir: Path) -> Path:
     return assent_dir / _ARCHIVE_DIRNAME
 
 
-def _zip_path(assent_dir: Path, folder: str) -> Path:
-    return _archive_dir(assent_dir) / f"{folder}.zip"
+def _zip_path(assent_dir: Path, plan_name: str) -> Path:
+    return _archive_dir(assent_dir) / f"{plan_name}.zip"
 
 
 def _roster_path(assent_dir: Path) -> Path:
@@ -83,7 +83,7 @@ def read_roster(assent_dir: str | Path) -> list[dict]:
     """Read the archive roster, failing closed on any malformed content.
 
     A missing roster file means nothing has been archived yet.  Each entry must be
-    a table carrying at least the string keys ``folder`` and ``archived_at``; extra
+    a table carrying at least the string keys ``plan`` and ``archived_at``; extra
     keys (such as a human-readable ``main_tip``) are preserved but never interpreted.
     """
     path = _roster_path(Path(assent_dir))
@@ -101,39 +101,39 @@ def read_roster(assent_dir: str | Path) -> list[dict]:
     for item in raw:
         if not isinstance(item, dict):
             raise AssentError(f"Archive roster {path} has an entry that is not a table")
-        folder = item.get("folder")
+        plan_name = item.get("plan")
         archived_at = item.get("archived_at")
-        if not isinstance(folder, str) or not folder:
-            raise AssentError(f"Archive roster {path} entry is missing a string folder")
+        if not isinstance(plan_name, str) or not plan_name:
+            raise AssentError(f"Archive roster {path} entry is missing a string 'plan' field")
         if not isinstance(archived_at, str) or not archived_at:
             raise AssentError(
-                f"Archive roster {path} entry {folder!r} is missing a string archived_at")
+                f"Archive roster {path} entry {plan_name!r} is missing a string archived_at")
         entries.append(dict(item))
     return entries
 
 
 def archive_recovery_names(assent_dir: str | Path,
-                           folders: Sequence[str]) -> set[str]:
+                           plan_names: Sequence[str]) -> set[str]:
     """Return selected names recognized by archive recovery artifacts.
 
     A malformed roster is left for the archive operation to report.  It must
-    not make a valid live folder fail the identity gate before that existing
+    not make a valid live plan fail the identity gate before that existing
     archive diagnostic can run.
     """
     assent_dir = Path(assent_dir)
     try:
         recognized = {
-            entry["folder"] for entry in read_roster(assent_dir)
+            entry["plan"] for entry in read_roster(assent_dir)
         }
     except AssentError:
         recognized = set()
-    for folder in folders:
+    for plan_name in plan_names:
         try:
-            validate_tasks_name(folder, "Command-line task folder")
+            validate_tasks_name(plan_name, "Command-line plan")
         except AssentError:
             continue
-        if _zip_path(assent_dir, folder).is_file():
-            recognized.add(folder)
+        if _zip_path(assent_dir, plan_name).is_file():
+            recognized.add(plan_name)
     return recognized
 
 
@@ -145,7 +145,7 @@ def _write_roster(assent_dir: Path, entries: list[dict]) -> None:
             path.unlink()
         return
     lines = [
-        "# assent archive roster: finished work folders compressed into _archive/.",
+        "# assent archive roster: finished plans compressed into _archive/.",
         "# A downstream after reference resolves through this roster once the live",
         "# directory is gone. Any hash below is human-readable evidence only; assent",
         "# never trusts a roster hash for verification (git history may be rewritten).",
@@ -153,7 +153,7 @@ def _write_roster(assent_dir: Path, entries: list[dict]) -> None:
     ]
     for entry in entries:
         lines.append("[[archived]]")
-        lines.append(f"folder = {_toml_basic_str(entry['folder'])}")
+        lines.append(f"plan = {_toml_basic_str(entry['plan'])}")
         lines.append(f"archived_at = {_toml_basic_str(entry['archived_at'])}")
         main_tip = entry.get("main_tip")
         if isinstance(main_tip, str) and main_tip:
@@ -161,18 +161,18 @@ def _write_roster(assent_dir: Path, entries: list[dict]) -> None:
         lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text("\n".join(lines), encoding="utf-8")
+    tmp.write_text("\n".join(lines), encoding="utf-8", newline="\n")
     os.replace(tmp, path)
 
 
-def _in_roster(entries: list[dict], folder: str) -> bool:
-    return any(entry["folder"] == folder for entry in entries)
+def _in_roster(entries: list[dict], plan_name: str) -> bool:
+    return any(entry["plan"] == plan_name for entry in entries)
 
 
 def _compress_plan(src_dir: Path, tmp_zip: Path) -> None:
     """Compress every file under ``src_dir`` into ``tmp_zip`` (paths relative to it).
 
-    The folder lock (``assent.lock``) is a runtime management artifact, not plan
+    The plan lock (``assent.lock``) is a runtime management artifact, not plan
     content: archive creates and holds it for the duration of the operation and it
     disappears with the deleted live directory, so it is excluded here rather than
     captured as a stale lock inside the archive.
@@ -188,6 +188,38 @@ def _compress_plan(src_dir: Path, tmp_zip: Path) -> None:
             archive.write(path, relative)
 
 
+def _unarchived_live_content(live_dir: Path, zip_path: Path) -> str | None:
+    """Name live files the published archive does not already hold, or None.
+
+    A resumable archive was interrupted between publishing the zip and deleting
+    the directory the zip was compressed from, so every file still present must
+    also be in the zip byte for byte; a partly deleted directory is a subset.
+    Anything else is a different plan reusing an archived name, and deleting it
+    would discard work no archive ever captured.  ``assent.lock`` is a runtime
+    artifact ``_compress_plan`` never stores, so it is ignored here too.
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            archived = {name: archive.read(name) for name in archive.namelist()}
+    except (OSError, zipfile.BadZipFile) as e:
+        return f"{zip_path.name} cannot be read ({e})"
+
+    unarchived: list[str] = []
+    for path in sorted(live_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(live_dir).as_posix()
+        if relative == LOCK_NAME:
+            continue
+        try:
+            if archived.get(relative) == path.read_bytes():
+                continue
+        except OSError as e:
+            return f"{relative} cannot be read ({e})"
+        unarchived.append(relative)
+    return ", ".join(unarchived) or None
+
+
 def _delete_plan_dir(path: Path) -> None:
     """Remove the live plan directory; a failure surfaces so a re-run can retry."""
     try:
@@ -197,21 +229,21 @@ def _delete_plan_dir(path: Path) -> None:
 
 
 def _do_archive_new(cfg: Config, entries: list[dict]) -> ArchiveResult:
-    """Prove-and-clean, then compress and register, holding the folder lock.
+    """Prove-and-clean, then compress and register, holding the plan lock.
 
     On success the live directory still exists and the caller deletes it after
-    releasing the folder lock, so the deletion never races the open lock handle on
+    releasing the plan lock, so the deletion never races the open lock handle on
     Windows.  Returns ``skipped`` for any unmet precondition and ``error`` for a real
     failure (a failed clean step or a compression error).
     """
     name = cfg.tasks_name
     assent_dir = cfg.assent_dir
 
-    completion = infer_folder_completion(cfg.tasks_dir)
+    completion = infer_plan_completion(cfg.tasks_dir)
     if not completion.complete:
         return ArchiveResult("skipped", completion.reason)
 
-    # Reuse clean's proof and removal for any source still present; a folder whose
+    # Reuse clean's proof and removal for any source still present; a plan whose
     # source is already gone (accepted and cleaned) skips this step.  When a source
     # remains that clean cannot prove safe to remove, archive refuses rather than
     # compressing a plan whose work is not yet integrated.
@@ -235,7 +267,7 @@ def _do_archive_new(cfg: Config, entries: list[dict]) -> ArchiveResult:
     # Register the roster entry before publishing the zip: the roster, not the file,
     # is the authority on a committed archive (see the module docstring).
     entry = {
-        "folder": name,
+        "plan": name,
         "archived_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     main_tip = gitops.head_ref(cfg.root)
@@ -280,6 +312,15 @@ def _resume_or_finish(cfg: Config, entries: list[dict]) -> ArchiveResult:
                     f"roster lists {name} but neither {zip_path.name} nor the live "
                     "directory exists; inspect the archive manually")
         if live_dir.exists():
+            unarchived = _unarchived_live_content(live_dir, zip_path)
+            if unarchived is not None:
+                return ArchiveResult(
+                    "error",
+                    f"{name} is already in the archive roster, but the live "
+                    f"directory holds content {zip_path.name} does not: "
+                    f"{unarchived}. This is a new plan reusing an archived name, "
+                    "not an interrupted archive; rename it (or restore and merge "
+                    "the archive) instead of archiving over the old one")
             _delete_plan_dir(live_dir)
             return ArchiveResult("archived")
         return ArchiveResult("archived", "already archived")
@@ -297,7 +338,7 @@ def _resume_or_finish(cfg: Config, entries: list[dict]) -> ArchiveResult:
 
 
 def _archive_one(cfg: Config) -> ArchiveResult:
-    """Archive one folder under the integration lock, printing a single result line."""
+    """Archive one plan under the integration lock, printing a single result line."""
     name = cfg.tasks_name
     try:
         with hold_integration_lock(cfg.assent_dir):
@@ -309,7 +350,7 @@ def _archive_one(cfg: Config) -> ArchiveResult:
                 return result
 
             # A committed archive (in the roster) or a foreign zip is resolved without
-            # requiring the folder lock, because the live directory (and its lock file)
+            # requiring the plan lock, because the live directory (and its lock file)
             # may already be gone.  Only a genuinely fresh archive must prove no run is
             # in progress, and it does the delete after releasing the lock.
             if _in_roster(entries, name) or _zip_path(cfg.assent_dir, name).exists() \
@@ -318,8 +359,8 @@ def _archive_one(cfg: Config) -> ArchiveResult:
                 _print_result(name, result)
                 return result
 
-            # Acquire the folder lock, creating assent.lock when it is missing: a
-            # missing lock file is positive proof nobody holds the folder (lockfile
+            # Acquire the plan lock, creating assent.lock when it is missing: a
+            # missing lock file is positive proof nobody holds the plan (lockfile
             # distinguishes LockMissing from a live lock), so archive takes the lock
             # rather than refusing.  Holding a real lock across the prove/clean/
             # compress/register/publish work blocks concurrent run/reject/rework and
@@ -332,9 +373,9 @@ def _archive_one(cfg: Config) -> ArchiveResult:
                 result = ArchiveResult("skipped", "a run is in progress")
             except AssentError as e:
                 result = ArchiveResult(
-                    "error", f"folder lock could not be acquired: {e}")
+                    "error", f"plan lock could not be acquired: {e}")
             if result.status == "archived":
-                # Folder lock released: safe to remove the live directory (whose lock
+                # Plan lock released: safe to remove the live directory (whose lock
                 # file we no longer hold open) as the final step.
                 try:
                     _delete_plan_dir(cfg.tasks_dir)
@@ -366,9 +407,9 @@ def _print_result(name: str, result: ArchiveResult) -> None:
         print(f"{name}: archive error ({result.reason})")
 
 
-def archive_folder(cfg: Config) -> int:
-    """Archive one explicitly named folder; refuse (exit 1) on any unmet precondition."""
-    if not validate_live_folder_selection(
+def archive_plan(cfg: Config) -> int:
+    """Archive one explicitly named plan; refuse (exit 1) on any unmet precondition."""
+    if not validate_live_plan_selection(
             cfg.assent_dir, [cfg.tasks_name],
             recognized=archive_recovery_names(cfg.assent_dir, [cfg.tasks_name])):
         return 1
@@ -376,13 +417,13 @@ def archive_folder(cfg: Config) -> int:
     return 0 if result.status == "archived" else 1
 
 
-def archive_selected(config_path: str, folders: Sequence[str]) -> int:
-    """Archive every explicitly named folder; anything not archived is a failure.
+def archive_selected(config_path: str, plan_names: Sequence[str]) -> int:
+    """Archive every explicitly named plan; anything not archived is a failure.
 
-    This is the multi-folder form of ``archive_folder``, and it keeps that
-    command's contract rather than ``--all``'s: the human named these folders,
-    so a folder that is merely ineligible is still a refused request, not a
-    skip.  Every selected folder is attempted, so one refusal does not hide the
+    This is the multi-plan form of ``archive_plan``, and it keeps that
+    command's contract rather than ``--all``'s: the human named these plans,
+    so a plan that is merely ineligible is still a refused request, not a
+    skip.  Every selected plan is attempted, so one refusal does not hide the
     state of the rest.
     """
     try:
@@ -390,26 +431,26 @@ def archive_selected(config_path: str, folders: Sequence[str]) -> int:
     except AssentError as e:
         print(f"archive selection refused (config error: {e})")
         return 1
-    if not validate_live_folder_selection(
-            assent_dir, folders,
-            recognized=archive_recovery_names(assent_dir, folders)):
+    if not validate_live_plan_selection(
+            assent_dir, plan_names,
+            recognized=archive_recovery_names(assent_dir, plan_names)):
         return 1
 
     archived: list[str] = []
     refused: list[str] = []
-    for index, folder in enumerate(folders):
+    for index, plan_name in enumerate(plan_names):
         if index:
             print()
         try:
-            cfg = load_config(config_path, folder)
+            cfg = load_config(config_path, plan_name)
         except AssentError as e:
-            print(f"{folder}: archive error (config error: {e})")
-            refused.append(folder)
+            print(f"{plan_name}: archive error (config error: {e})")
+            refused.append(plan_name)
             continue
         if _archive_one(cfg).status == "archived":
-            archived.append(folder)
+            archived.append(plan_name)
         else:
-            refused.append(folder)
+            refused.append(plan_name)
     print()
     print(f"archive summary: {len(archived)} archived, "
           f"{len(refused)} not archived.")
@@ -417,42 +458,42 @@ def archive_selected(config_path: str, folders: Sequence[str]) -> int:
 
 
 def archive_all(config_path: str, assent_dir: Path) -> int:
-    """Archive every eligible folder in lexicographic order; skips are not failures."""
-    folders = list_task_folders(assent_dir)
-    if not folders:
-        print("No work folder with a task file found.")
+    """Archive every eligible plan in lexicographic order; skips are not failures."""
+    plan_names = list_task_plans(assent_dir)
+    if not plan_names:
+        print("No plan with a task file found.")
         return 1
     archived: list[str] = []
     skipped: list[str] = []
     errored: list[str] = []
     sweep_cfg: Config | None = None
-    for index, folder in enumerate(folders):
+    for index, plan_name in enumerate(plan_names):
         if index:
             print()
         try:
-            cfg = load_config(config_path, folder)
+            cfg = load_config(config_path, plan_name)
         except AssentError as e:
-            print(f"{folder}: archive error (config error: {e})")
-            errored.append(folder)
+            print(f"{plan_name}: archive error (config error: {e})")
+            errored.append(plan_name)
             continue
         if sweep_cfg is None:
             sweep_cfg = cfg
         result = _archive_one(cfg)
         if result.status == "archived":
-            archived.append(folder)
+            archived.append(plan_name)
         elif result.status == "skipped":
-            skipped.append(folder)
+            skipped.append(plan_name)
         else:
-            errored.append(folder)
+            errored.append(plan_name)
 
     # ``archive --all`` is a whole-project invocation, so it owns the
-    # repository-global temporary namespace exactly as folderless ``clean`` does.  It
+    # repository-global temporary namespace exactly as plan-less ``clean`` does.  It
     # delegates to clean's single implementation rather than growing a copy, and
-    # calls it here -- after the per-folder loop -- because every ``_archive_one``
+    # calls it here -- after the per-plan loop -- because every ``_archive_one``
     # holds the integration lock the sweep must take for itself, and because a
-    # folder that is skipped or errors must not skip the sweep.  A config that
-    # only names the archived folder still carries the repository root and
-    # ``.assent`` directory the sweep needs, and both outlive the archived folder.
+    # plan that is skipped or errors must not skip the sweep.  A config that
+    # only names the archived plan still carries the repository root and
+    # ``.assent`` directory the sweep needs, and both outlive the archived plan.
     swept = 0
     if sweep_cfg is not None:
         swept = sweep_orphaned_temporary_branches(sweep_cfg)
@@ -462,7 +503,7 @@ def archive_all(config_path: str, assent_dir: Path) -> int:
     return 1 if errored or swept else 0
 
 
-def restore_folder(cfg: Config) -> int:
+def restore_plan(cfg: Config) -> int:
     """Reverse an archive: extract the zip back to the live directory, deregister, delete the zip.
 
     Refuses when the live directory already exists (nothing to restore onto) or no
@@ -500,7 +541,7 @@ def restore_folder(cfg: Config) -> int:
                 print(f"{name}: restore error (extraction failed: {e})")
                 return 1
 
-            _write_roster(assent_dir, [e for e in entries if e["folder"] != name])
+            _write_roster(assent_dir, [e for e in entries if e["plan"] != name])
             zip_path.unlink(missing_ok=True)
             print(f"{name}: restored (plan extracted to {cfg.rel(live_dir)}, "
                   "removed from roster, archive deleted)")

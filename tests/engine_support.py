@@ -1,7 +1,7 @@
 """Shared fixtures for the engine, inspection and preflight test modules.
 
 One temporary git repository, one scripted adapter, and the small helpers that
-build a task folder in it.  The real AI CLI is never touched: every session is a
+build a plan in it.  The real AI CLI is never touched: every session is a
 ``ScriptedAdapter`` step, and sleep/now are injected by the tests that need them.
 
 Chinese literals that remain here and in the modules using these fixtures are
@@ -91,7 +91,7 @@ class EngineTestCase(unittest.TestCase):
         # These tests exercise task-session scheduling and focused checkpoint
         # gates.  Full candidate verification has its own engine handoff tests.
         verifier = mock.patch(
-            "assent.engine.verification.verify_folder_if_needed", return_value=0)
+            "assent.engine.verification.verify_plan_if_needed", return_value=0)
         verifier.start()
         self.addCleanup(verifier.stop)
 

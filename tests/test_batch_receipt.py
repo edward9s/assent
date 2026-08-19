@@ -1,7 +1,7 @@
 """Batch verification receipt schema, byte layout, and freshness tests.
 
 The batch receipt is evidence only: these tests never run the full verifier.
-They build the merge chain two finished folders currently produce, write the
+They build the merge chain two finished plans currently produce, write the
 receipt that describes it, and then check what survives a round trip and what
 expires it.
 """
@@ -20,12 +20,12 @@ from assent.batch_receipt import (BATCH_RECEIPT_NAME, BATCH_RECEIPT_VERSION,
                                   batch_receipt_staleness,
                                   current_batch_shared_inputs,
                                   read_batch_receipt, write_batch_receipt)
-from assent.folder_verification import RECEIPT_NAME, read_receipt
+from assent.plan_verification import RECEIPT_NAME, read_receipt
 from assent.gitops import commit_of, tree_of
 from assent.verification_common import build_batch_candidate, verifier_digest
-from assent.verification import verify_folder
+from assent.verification import verify_plan
 from tests.link_support import make_directory_link
-# The batch receipt describes the same repository the per-folder receipt tests
+# The batch receipt describes the same repository the per-plan receipt tests
 # already build, so the fixture is shared rather than copied.
 from tests.test_verification import VerificationRepositoryCase
 
@@ -40,7 +40,7 @@ def _git(root: Path, *args: str) -> str:
 
 
 class BatchReceiptCase(VerificationRepositoryCase):
-    """Two independent folders queued behind one full verification."""
+    """Two independent plans queued behind one full verification."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -55,12 +55,12 @@ class BatchReceiptCase(VerificationRepositoryCase):
         self.order = (("plan測試", self.source_tip), ("plan貳", self.second_tip))
 
     def _batch_receipt(self, **overrides) -> BatchVerificationReceipt:
-        """Build a receipt from the merge chain the folders currently produce."""
+        """Build a receipt from the merge chain the plans currently produce."""
         candidate = build_batch_candidate(self.root, self.target_tip, self.order)
         self.assertTrue(candidate.ok, candidate.conflicts)
         sources = tuple(
-            BatchSource(folder, tip, tree)
-            for (folder, tip), tree in zip(self.order, candidate.step_trees))
+            BatchSource(plan_name, tip, tree)
+            for (plan_name, tip), tree in zip(self.order, candidate.step_trees))
         fields = dict(
             version=BATCH_RECEIPT_VERSION, status="PASSED",
             target_tip=self.target_tip,
@@ -103,14 +103,14 @@ class TestBatchReceiptSchema(BatchReceiptCase):
 
         self.assertEqual(path, self.assent_dir / BATCH_RECEIPT_NAME)
         self.assertEqual(read_batch_receipt(path, self.root), receipt)
-        self.assertEqual(receipt.folders, ("plan測試", "plan貳"))
+        self.assertEqual(receipt.plan_names, ("plan測試", "plan貳"))
         step_trees = [source.step_tree for source in receipt.sources]
         self.assertEqual(len(set(step_trees)), 2)
         self.assertEqual(receipt.final_tree, step_trees[-1])
-        # The first step tree is the target with only the first folder merged.
+        # The first step tree is the target with only the first plan merged.
         self.assertEqual(step_trees[0], tree_of(self.root, self.source_tip))
         data = tomllib.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual([entry["folder"] for entry in data["sources"]],
+        self.assertEqual([entry["plan"] for entry in data["sources"]],
                          ["plan測試", "plan貳"])
 
     def test_missing_unknown_and_inconsistent_content_fails_closed(self):
@@ -125,8 +125,8 @@ class TestBatchReceiptSchema(BatchReceiptCase):
             original.replace(f'target_tip = "{receipt.target_tip}"\n', ""),
             original.replace(sources_block, "sources = []\n"),
             original.replace(f'step_tree = "{second.step_tree}"\n', "", 1),
-            original.replace(f'folder = "{second.folder}"',
-                             f'folder = "{first.folder}"'),
+            original.replace(f'plan = "{second.plan}"',
+                             f'plan = "{first.plan}"'),
             original.replace(f'source_tip = "{first.source_tip}"',
                              'source_tip = "abcd"'),
             original.replace(f'final_tree = "{receipt.final_tree}"',
@@ -139,7 +139,7 @@ class TestBatchReceiptSchema(BatchReceiptCase):
             original.replace("exit_code = 0", "exit_code = 3"),
             original.replace('completed_at = "2026-07-24T00:00:00+00:00"',
                              'completed_at = "2026-07-24T00:00:00"'),
-            original.replace('folder = "plan貳"', 'folder = "../escape"'),
+            original.replace('plan = "plan貳"', 'plan = "../escape"'),
         )
         for text in bad_values:
             with self.subTest(text=text[-80:]):
@@ -173,19 +173,19 @@ class TestBatchReceiptSchema(BatchReceiptCase):
         self.assertEqual(read_batch_receipt(path, self.root), receipt)
         self.assertFalse(batch_receipt_is_current(self.cfg, receipt))
 
-    def test_single_folder_receipt_is_untouched_byte_for_byte(self):
-        self.assertEqual(verify_folder(self.cfg), 0)
-        folder_receipt = self.tasks_dir / RECEIPT_NAME
-        before = folder_receipt.read_bytes()
+    def test_single_plan_receipt_is_untouched_byte_for_byte(self):
+        self.assertEqual(verify_plan(self.cfg), 0)
+        plan_receipt = self.tasks_dir / RECEIPT_NAME
+        before = plan_receipt.read_bytes()
 
         receipt = self._batch_receipt()
         path = self._write(receipt)
         self.assertEqual(read_batch_receipt(path, self.root), receipt)
 
-        self.assertEqual(folder_receipt.read_bytes(), before)
+        self.assertEqual(plan_receipt.read_bytes(), before)
         self.assertNotIn("sources", before.decode("utf-8"))
         self.assertFalse((self.tasks_dir / BATCH_RECEIPT_NAME).exists())
-        self.assertEqual(read_receipt(folder_receipt, self.root).status, "PASSED")
+        self.assertEqual(read_receipt(plan_receipt, self.root).status, "PASSED")
 
 
 class TestBatchReceiptStaleness(BatchReceiptCase):

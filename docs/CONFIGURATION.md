@@ -73,7 +73,7 @@ effort = "heavy"
 `ability` is a nonempty ordered list. The role writes if any included ability
 writes, and produces a verdict if any included ability does so. `model` and
 `effort` are optional. A workflow role entry may override either value; an
-ordinary task step otherwise inherits the task's profile. Verdict steps in
+ordinary task step otherwise inherits the task's profile. Every step in
 `workflow.plan` and `workflow.integration` must effectively state a model
 through the role or workflow entry. Their effort may be omitted: a portable
 model uses that adapter's tier default, while a literal model uses the vendor
@@ -129,7 +129,7 @@ question:
 | --- | --- |
 | `workflow.task` | The current task's `BLOCKED` or `focused_test` evidence. It may settle a small planning omission, such as one exact missing scope path, and repair it in the same writable verdict session. It does not spend the plan repair budget. |
 | `workflow.plan` | Whether the cumulative worktree from all completed tasks conforms to the existing plan. It runs one normal quality review before the first `focused_sweep`, then handles sweep failures and cross-task regressions through implicated existing tasks. |
-| `workflow.integration` | Whether the same exact selected plan set can be reconstructed and pass `full_verify`. It handles candidate conflicts and complete-verifier failures without dropping a folder or accepting only a prefix. |
+| `workflow.integration` | Whether the same exact selected plan set can be reconstructed and pass `full_verify`. It handles candidate conflicts and complete-verifier failures without dropping a plan or accepting only a prefix. |
 
 The integration workflow verifies and repairs; it never performs human
 acceptance. Publication remains the later explicit `assent accept` decision.
@@ -282,19 +282,37 @@ mappings, default efforts, and vendor effort translations live in
 existing credentials and does not manage secrets.
 
 Plans use portable `prime`, `core`, and `lite` model tiers. Effort is the
-separate `heavy`, `normal`, or `slight` choice. Resolution is explicit task or
-role effort, then the configured default for that model tier, then the built-in
-tier default. Every abstract-model invocation receives a concrete translated
-effort.
+separate `heavy`, `normal`, or `slight` choice. Every abstract-model invocation
+receives a concrete translated effort.
+
+### Workflow model and effort precedence
+
+Assent resolves `model` and `effort` independently. Within one role session, a
+workflow role entry overrides its `[roles]` definition. The remaining fallback
+depends on the workflow layer:
+
+| Workflow role | Model fallback | Effort fallback |
+| --- | --- | --- |
+| `workflow.task` | Current task | Current task, then the selected adapter's configured or built-in tier default |
+| `workflow.plan` or `workflow.integration` | None; the workflow entry or role must state a model | Selected adapter's configured or built-in tier default |
+
+A plan or integration role answers for a whole unit, so it has no task to
+inherit a model from. Omitting it there is a config error `assent check`
+reports, whether or not the role produces a verdict.
+
+An omitted `workflow.task` opens one implicit session using the task's model and
+effort. An adapter supplies no default model: its `models` table translates the
+selected portable tier to a vendor model. When a workflow entry or role selects
+a literal model without also providing an effort, it does not inherit task
+effort; Assent sends no effort argument and uses the vendor default.
 
 Task, role, and workflow role-entry `model`/`effort` values may independently
 use an exact bracketed literal, such as `model = "[gpt-5.6-sol]"` or
 `effort = "[xhigh]"`. Assent removes the brackets, preserves case, and bypasses
-that value's adapter mapping. A workflow entry overrides its role's value.
-Any workflow step using a literal must resolve to exactly one adapter. A literal
-model with omitted effort sends no effort and uses the vendor default. An
-abstract effort beside a literal model uses the adapter's flat effort mapping,
-not a tier-specific mapping. Literal values do not modify `adapter.toml`.
+that value's adapter mapping. Any workflow step using a literal must resolve to
+exactly one adapter. An abstract effort beside a literal model uses the
+adapter's flat effort mapping, not a tier-specific mapping. Literal values do
+not modify `adapter.toml`.
 
 Every workflow role entry may select one adapter or an ordered fallback list:
 

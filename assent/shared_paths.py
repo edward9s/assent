@@ -1003,7 +1003,7 @@ def shared_inputs_digest(main: Path,
                          contracts: Sequence[tuple[str, Contract]]) -> str:
     """One deterministic digest of every shared input a verification depended on.
 
-    It covers, in the caller's own contributing order, each source's folder name
+    It covers, in the caller's own contributing order, each source's plan name
     and selected profile fingerprint, that profile's normalized declared paths,
     the exact resolved primary-worktree target of each one, and a content
     snapshot of that target.  REVIEWED-NONE contributes an explicit empty-profile
@@ -1013,19 +1013,19 @@ def shared_inputs_digest(main: Path,
     digest = hashlib.sha256()
     digest.update(b"assent-shared-inputs-v1\n")
     snapshots: dict[str, str] = {}
-    for folder, contract in contracts:
+    for plan_name, contract in contracts:
         if not contract.settled:
             raise AssentError(
-                f"refusing to record shared-input evidence for {folder}: its "
+                f"refusing to record shared-input evidence for {plan_name}: its "
                 f"shared-path contract is {contract.state}, not a reviewed answer")
         fingerprint = contract.profile.fingerprint if contract.profile else ""
-        digest.update(f"{folder}\0{contract.state}\0{fingerprint}\n"
+        digest.update(f"{plan_name}\0{contract.state}\0{fingerprint}\n"
                       .encode("utf-8"))
         for relative in contract.paths:
             problem = target_problem(main, relative)
             if problem:
                 raise AssentError(
-                    f"refusing to record shared-input evidence for {folder}: "
+                    f"refusing to record shared-input evidence for {plan_name}: "
                     f"{problem}")
             if relative not in snapshots:
                 snapshots[relative] = snapshot_target(main, relative)
@@ -1311,7 +1311,7 @@ def review_contract_with_source_links(
 
 def require_directory_link_agreement(
         main: Path, worktree: Path, contract: Contract, *,
-        folder: str | None = None, allow_missing: bool = False) -> None:
+        plan_name: str | None = None, allow_missing: bool = False) -> None:
     """Require source directory links to reproduce exactly one reviewed answer.
 
     Git supplies a collapsed ignored-entry inventory and each link object is
@@ -1319,14 +1319,14 @@ def require_directory_link_agreement(
     unreviewed external target is neither enumerated nor hashed for diagnosis.
     """
     root = Path(worktree)
-    folder = folder or root.name
+    plan_name = plan_name or root.name
     declared = set(contract.paths)
     actual = set(ignored_directory_links(root))
     unexpected = sorted(actual - declared)
     if unexpected:
         relative = unexpected[0]
         raise AssentError(
-            f"refusing to rely on shared inputs for {folder}: source worktree "
+            f"refusing to rely on shared inputs for {plan_name}: source worktree "
             f"{root} contains the ignored directory link {relative}, which is "
             f"outside its active {contract.state} profile. Remove the link if "
             "it is irrelevant. If it is required, place its ordinary "
@@ -1343,14 +1343,14 @@ def require_directory_link_agreement(
             if allow_missing:
                 continue
             raise AssentError(
-                f"refusing to rely on shared inputs for {folder}: the active "
+                f"refusing to rely on shared inputs for {plan_name}: the active "
                 f"profile declares {relative}, but {destination} is missing. "
                 "Reconcile the source so Assent can provision the exact "
                 "same-relative primary-worktree link")
         target = _link_target(main, relative)
         if relative not in actual or not _resolves_to(destination, target):
             raise AssentError(
-                f"refusing to rely on shared inputs for {folder}: the active "
+                f"refusing to rely on shared inputs for {plan_name}: the active "
                 f"profile declares {relative}, but {destination} is not a "
                 f"directory link to the reviewed primary target {target}. "
                 "Remove an irrelevant link; otherwise place the required "
@@ -1649,7 +1649,7 @@ def prepare_sources(main: Path,
     """Classify and reconcile every source a verification is about to depend on.
 
     This is the one gate every verification entry point goes through -- single
-    folder, exact selected batch, dynamic batch, localization prefix, and
+    plan, exact selected batch, dynamic batch, localization prefix, and
     ``--focus``.  Each contributing live source worktree is
     classified against the local manifest and its Assent-owned declared links are
     reconciled, so a missing one is recreated rather than silently depended on
@@ -1664,8 +1664,8 @@ def prepare_sources(main: Path,
     prepared: list[tuple[str, Contract]] = []
     with hold_manifest_lock(main):
         manifest = read_manifest(main)
-        for folder, worktree in sources:
-            # A folder whose source worktree is gone has no snapshot of its own,
+        for plan_name, worktree in sources:
+            # A plan whose source worktree is gone has no snapshot of its own,
             # so it is classified against the primary worktree -- the same
             # receipt-backed fallback acceptance already uses.  Doing it here
             # rather than skipping keeps a later freshness check comparable.
@@ -1673,15 +1673,15 @@ def prepare_sources(main: Path,
             if not contract.settled:
                 raise AssentError(
                     f"refusing to verify: the shared-path contract for "
-                    f"{folder} ({worktree}) is {contract.state}. "
+                    f"{plan_name} ({worktree}) is {contract.state}. "
                     f"{closeout_refusal(contract) or 'Run `' + REVIEW_COMMAND + '`'}")
             require_directory_link_agreement(
-                main, worktree or main, contract, folder=folder,
+                main, worktree or main, contract, plan_name=plan_name,
                 allow_missing=True)
             reconcile(main, worktree or main, contract, manifest=manifest)
             require_directory_link_agreement(
-                main, worktree or main, contract, folder=folder)
-            prepared.append((folder, contract))
+                main, worktree or main, contract, plan_name=plan_name)
+            prepared.append((plan_name, contract))
     return tuple(prepared)
 
 

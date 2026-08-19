@@ -127,15 +127,15 @@ class PrivateCrossModuleImports(unittest.TestCase):
         self.assertFalse(_is_private("__all__"))
 
 
-class NeutralFolderServices(unittest.TestCase):
-    """The shared folder services live in neutral modules, not in a command."""
+class NeutralPlanServices(unittest.TestCase):
+    """The shared plan services live in neutral modules, not in a command."""
 
     def test_shared_helpers_are_public_in_their_owning_modules(self) -> None:
-        from assent import clean, config, folder_source, folderdeps
-        self.assertEqual(folder_source.COMPLETE_STATUSES, ("DONE", "SKIP"))
+        from assent import clean, config, plan_source, plandeps
+        self.assertEqual(plan_source.COMPLETE_STATUSES, ("DONE", "SKIP"))
         for owner, name in (
-                (folder_source, "resolve_source_snapshot"),
-                (folderdeps, "direct_dependents"),
+                (plan_source, "resolve_source_snapshot"),
+                (plandeps, "direct_dependents"),
                 (config, "validate_tasks_name"),
                 (clean, "clean_locked"),
                 (clean, "has_cleanup_target")):
@@ -143,12 +143,12 @@ class NeutralFolderServices(unittest.TestCase):
                 self.assertTrue(callable(getattr(owner, name)))
 
     def test_the_neutral_source_module_depends_on_no_command_module(self) -> None:
-        """``folder_source`` must not import back into accept/clean/reject/....
+        """``plan_source`` must not import back into accept/clean/reject/....
 
         A neutral service that imported a command would only move the coupling,
         and would put an import cycle between the two.
         """
-        tree = ast.parse((PACKAGE / "folder_source.py").read_text(
+        tree = ast.parse((PACKAGE / "plan_source.py").read_text(
             encoding="utf-8"))
         commands = {"accept", "archive", "clean", "reconcile", "reject",
                     "rework", "verification", "engine"}
@@ -164,16 +164,16 @@ class NeutralFolderServices(unittest.TestCase):
 class VerificationModuleBoundaries(unittest.TestCase):
     """Verification is a facade over receipt leaves and one closeout boundary.
 
-    ``assent.verification`` re-exports; ``folder_verification`` and
+    ``assent.verification`` re-exports; ``plan_verification`` and
     ``batch_receipt`` own one receipt model each; ``batch_verification`` runs the
     batch and writes the evidence ``batch_receipt`` defines; and
-    ``folder_verification_closeout`` owns the shared per-folder report handoff.
+    ``plan_verification_closeout`` owns the shared per-plan report handoff.
     ``verification_common`` sits below all receipt implementations without
     knowing any of them.
     """
 
-    LEAVES = ("folder_verification", "batch_receipt", "batch_verification",
-              "folder_verification_closeout")
+    LEAVES = ("plan_verification", "batch_receipt", "batch_verification",
+              "plan_verification_closeout")
 
     def test_the_facade_defines_no_implementation_of_its_own(self) -> None:
         tree = ast.parse((PACKAGE / "verification.py").read_text(
@@ -189,13 +189,13 @@ class VerificationModuleBoundaries(unittest.TestCase):
 
     def test_the_leaves_form_no_import_cycle(self) -> None:
         # Batch execution may use the batch receipt it writes, and closeout may
-        # use the folder receipt it wraps; no other edge between these modules
+        # use the plan receipt it wraps; no other edge between these modules
         # is allowed, and none of them imports the facade.
         allowed = {
-            "folder_verification": set(),
+            "plan_verification": set(),
             "batch_receipt": set(),
             "batch_verification": {"batch_receipt"},
-            "folder_verification_closeout": {"folder_verification"},
+            "plan_verification_closeout": {"plan_verification"},
         }
         for leaf in self.LEAVES:
             with self.subTest(module=leaf):
@@ -204,17 +204,17 @@ class VerificationModuleBoundaries(unittest.TestCase):
                 self.assertEqual(imported & set(self.LEAVES), allowed[leaf])
 
     def test_closeout_uses_static_receipt_and_report_edges(self) -> None:
-        imported = _imported_assent_modules("folder_verification_closeout")
-        self.assertEqual(imported & {"folder_verification", "inspection"},
-                         {"folder_verification", "inspection"})
+        imported = _imported_assent_modules("plan_verification_closeout")
+        self.assertEqual(imported & {"plan_verification", "inspection"},
+                         {"plan_verification", "inspection"})
 
-    def test_inspection_reads_folder_receipt_lines_from_their_owner(self) -> None:
+    def test_inspection_reads_plan_receipt_lines_from_their_owner(self) -> None:
         imported = _imported_assent_modules("inspection")
-        self.assertIn("folder_verification", imported)
+        self.assertIn("plan_verification", imported)
         self.assertNotIn("verification", imported)
 
-    def test_folder_closeout_edge_is_not_hidden_by_runtime_lookup(self) -> None:
-        for module in ("folder_verification", "folder_verification_closeout"):
+    def test_plan_closeout_edge_is_not_hidden_by_runtime_lookup(self) -> None:
+        for module in ("plan_verification", "plan_verification_closeout"):
             with self.subTest(module=module):
                 source = (PACKAGE / f"{module}.py").read_text(encoding="utf-8")
                 self.assertNotIn("import_module", source)
@@ -222,9 +222,9 @@ class VerificationModuleBoundaries(unittest.TestCase):
 
     def test_every_verification_entry_point_stays_importable(self) -> None:
         from assent import verification
-        for name in ("verify_folder", "verify_folder_if_needed", "verify_batch",
+        for name in ("verify_plan", "verify_plan_if_needed", "verify_batch",
                      "verify_selected_batch", "receipt_matches_current_candidate",
-                     "receipt_report_lines", "invalidate_folder_receipt",
+                     "receipt_report_lines", "invalidate_plan_receipt",
                      "invalidate_batch_receipt", "read_receipt", "write_receipt",
                      "read_batch_receipt", "write_batch_receipt",
                      "batch_receipt_staleness", "build_batch_candidate",
@@ -256,7 +256,7 @@ class AcceptanceModuleBoundaries(unittest.TestCase):
 
     def test_each_module_defines_only_its_own_entry_points(self) -> None:
         from assent import accept, batch_accept
-        for owner, name in ((accept, "accept_folder"),
+        for owner, name in ((accept, "accept_plan"),
                             (accept, "accept_merge_message"),
                             (accept, "cleanup_warning"),
                             (accept, "dependency_tip"),
@@ -273,7 +273,7 @@ class AcceptanceModuleBoundaries(unittest.TestCase):
     def test_the_cli_takes_each_path_from_its_owning_module(self) -> None:
         """The command syntax is unchanged, so the dispatch targets must be too."""
         from assent import __main__
-        self.assertEqual(__main__.accept_folder.__module__, "assent.accept")
+        self.assertEqual(__main__.accept_plan.__module__, "assent.accept")
         for name in ("accept_all", "accept_selected_batch"):
             with self.subTest(name=name):
                 self.assertEqual(getattr(__main__, name).__module__,
@@ -417,7 +417,7 @@ class AutoFixStateSchema(unittest.TestCase):
         from assent import auto_fix
 
         self.assertEqual(auto_fix.REVIEW_CONTEXTS,
-                         {"completed_folder", "blocked_adjudication",
+                         {"completed_plan", "blocked_adjudication",
                           "selection_verification"})
         self.assertEqual(auto_fix.REVIEW_STAGES, {"initial", "recheck"})
         self.assertNotIn("complete_verification", auto_fix.REVIEW_FINDING_KINDS)

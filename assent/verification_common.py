@@ -3,15 +3,15 @@
 Only what more than one verification module genuinely needs lives here: the
 receipt-field vocabulary both receipt schemas validate against, the atomic
 write and digest helpers both of them use, the source-identity snapshot the
-folder and batch paths both take, the two candidate builders (one folder
-merged into the target, and an ordered chain of folders) that both the batch
+plan and batch paths both take, the two candidate builders (one plan
+merged into the target, and an ordered chain of plans) that both the batch
 freshness rules and the batch execution path rebuild, the provisioned
-directory links and ignored leaf files the folder and batch runs both mirror
+directory links and ignored leaf files the plan and batch runs both mirror
 into a candidate before starting the full verifier, and the ignored-input
 diagnosis both of them append when a failing verifier names a path inside an
 ignored source directory that was deliberately not mirrored.
 
-This module deliberately imports none of ``folder_verification``,
+This module deliberately imports none of ``plan_verification``,
 ``batch_receipt``, or ``batch_verification``, so those three stay independent
 leaves above it.
 """
@@ -49,7 +49,7 @@ class FullVerifyEvidence:
     """Typed, source-bound result of one complete verification transaction."""
 
     outcome: str
-    folders: tuple[str, ...]
+    plan_names: tuple[str, ...]
     target_commit: str
     source_commits: tuple[str, ...]
     candidate_tree: str
@@ -212,36 +212,36 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 def source_snapshot(cfg: Config, main: Path) -> tuple[str, str, Path | None]:
-    """Resolve one folder's single clean source branch, tip, and worktree."""
-    folder = cfg.tasks_name
-    worktree = gitops.folder_worktree(main, folder)
+    """Resolve one plan's single clean source branch, tip, and worktree."""
+    plan_name = cfg.tasks_name
+    worktree = gitops.plan_worktree(main, plan_name)
     if worktree is not None:
         branch = gitops.current_branch(worktree)
         if not branch:
             raise AssentError(
                 f"source worktree {worktree} is detached; no source branch is explicit")
-        if not branch.startswith(f"{folder}/") or branch == f"{folder}/":
+        if not branch.startswith(f"{plan_name}/") or branch == f"{plan_name}/":
             raise AssentError(
-                f"source worktree {worktree} is on {branch}, not a {folder}/* branch")
+                f"source worktree {worktree} is on {branch}, not a {plan_name}/* branch")
         if not gitops.working_tree_status(
                 worktree, cfg.git_excludes).is_clean:
             raise AssentError(f"source worktree {worktree} is not clean")
     else:
-        branches = gitops.folder_branches(main, folder)
+        branches = gitops.plan_branches(main, plan_name)
         if len(branches) != 1:
             detail = ", ".join(branches) if branches else "none"
             raise AssentError(
-                f"source branch identity is ambiguous for {folder} ({detail})")
+                f"source branch identity is ambiguous for {plan_name} ({detail})")
         branch = branches[0]
     return branch, gitops.branch_tip(main, branch), worktree
 
 
-def candidate_tree(main: Path, folder: str, target_tip: str,
+def candidate_tree(main: Path, plan_name: str, target_tip: str,
                    source_tip: str) -> tuple[str | None, gitops.MergeOutcome]:
     """Build and remove one no-FF candidate, returning its tree or conflicts."""
-    message = f"verify({folder}): temporary integration candidate"
+    message = f"verify({plan_name}): temporary integration candidate"
     with gitops.temporary_integration_worktree(
-            main, folder, target_tip) as (candidate, _branch):
+            main, plan_name, target_tip) as (candidate, _branch):
         outcome = gitops.merge_no_ff(candidate, source_tip, message)
         if not outcome.ok:
             return None, outcome
@@ -714,36 +714,36 @@ class BatchCandidate:
     """The rebuilt merge chain: either every step tree, or the first conflict."""
 
     step_trees: tuple[str, ...] = ()
-    conflict_folder: str = ""
+    conflict_plan: str = ""
     conflicts: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
-        return not self.conflict_folder
+        return not self.conflict_plan
 
 
 def merge_chain(candidate: Path,
                 sources: Sequence[tuple[str, str]]) -> BatchCandidate:
-    """Merge every ``(folder, source_tip)`` into an open candidate worktree.
+    """Merge every ``(plan_name, source_tip)`` into an open candidate worktree.
 
     Each step is asserted before the next one starts: a no-fast-forward merge
     must produce exactly the two expected parents, the previous step and this
-    folder's source.  Anything else (a source already contained in the chain, so
+    plan's source.  Anything else (a source already contained in the chain, so
     that Git reports "already up to date" and creates no commit) is an
     unexpected shape rather than a conflict, and fails closed instead of
     recording a step tree that no release could reproduce.
     """
     step_trees: list[str] = []
-    for folder, source_tip in sources:
+    for plan_name, source_tip in sources:
         previous = gitops.commit_of(candidate, "HEAD")
-        message = f"verify(batch/{folder}): temporary integration candidate"
+        message = f"verify(batch/{plan_name}): temporary integration candidate"
         outcome = gitops.merge_no_ff(candidate, source_tip, message)
         if not outcome.ok:
             return BatchCandidate(
-                tuple(step_trees), folder, tuple(outcome.conflicts))
+                tuple(step_trees), plan_name, tuple(outcome.conflicts))
         if gitops.commit_parents(candidate, "HEAD") != (previous, source_tip):
             raise AssentError(
-                f"merging {folder} did not produce the expected two-parent "
+                f"merging {plan_name} did not produce the expected two-parent "
                 "batch candidate")
         step_trees.append(gitops.tree_of(candidate, "HEAD"))
     return BatchCandidate(tuple(step_trees))
@@ -751,17 +751,17 @@ def merge_chain(candidate: Path,
 
 def build_batch_candidate(main: Path, target_tip: str,
                           sources: Sequence[tuple[str, str]]) -> BatchCandidate:
-    """Merge every ``(folder, source_tip)`` in order and return each step tree.
+    """Merge every ``(plan_name, source_tip)`` in order and return each step tree.
 
     The chain is built in one temporary worktree that is always removed, and the
-    first conflicting folder stops it.  Every step is a no-fast-forward merge, so
+    first conflicting plan stops it.  Every step is a no-fast-forward merge, so
     the trees recorded here are exactly the trees a release reproduces.
 
     Both the batch freshness rules and the batch execution path rebuild the same
     chain, so the primitive lives here rather than in either of them.
     """
     if not sources:
-        raise AssentError("a batch candidate needs at least one source folder")
+        raise AssentError("a batch candidate needs at least one source plan")
     with gitops.temporary_integration_worktree(
             main, "batch", target_tip) as (candidate, _branch):
         return merge_chain(candidate, sources)

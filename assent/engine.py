@@ -54,10 +54,10 @@ from assent.batch_verification import (SelectionCandidateConflict,
                                        selection_conflict_line,
                                        selection_conflicts_from_evidence,
                                        verify_selected_batch_action)
-from assent.folderdeps import (find_unfinished_prerequisites,
-                               order_folders_by_dependency,
-                               parse_folder_dependency_graph)
-from assent.folder_verification_closeout import verify_folder_action
+from assent.plandeps import (find_unfinished_prerequisites,
+                               order_plans_by_dependency,
+                               parse_plan_dependency_graph)
+from assent.plan_verification_closeout import verify_plan_action
 from assent.inspection import try_write_report
 from assent.modeling import (effort_identity, has_literal, inherited_effort,
                              literal_value)
@@ -85,7 +85,7 @@ def _invoke_adapter(
         cfg: Config, adapter: Adapter, adapter_name: str, prompt: str,
         requested_model: str, requested_effort: str | None, cwd, *,
         context_kind: str, context_id: str,
-        folders: tuple[str, ...] | None = None, structured: bool = False):
+        plan_names: tuple[str, ...] | None = None, structured: bool = False):
     """Run one provider command and record its result without making usage gating."""
     invocation_id = usage.new_invocation_id()
     method = adapter.run_structured_task if structured else adapter.run_task
@@ -94,7 +94,7 @@ def _invoke_adapter(
         usage.record_invocation(
             cfg.assent_dir, invocation_id=invocation_id, adapter=adapter_name,
             requested_model=requested_model, context_kind=context_kind,
-            context_id=context_id, folders=folders or (cfg.tasks_name,),
+            context_id=context_id, plan_names=plan_names or (cfg.tasks_name,),
             evidence=result.usage)
     except Exception:
         # Telemetry is derived observability evidence and can never replace the
@@ -171,7 +171,7 @@ required human control-file decision in its evidence and recommendation.
 _PLAN_WORKER_PROMPT = """You are the Assent plan execution worker.
 
 First read the project rules {agents_md_path} and the Assent working instructions
-{instructions_path}. This folder uses `[workflow].task = []`, so the whole plan,
+{instructions_path}. This plan uses `[workflow].task = []`, so the whole plan,
 not any individual task, is the accountability unit. Do not edit any task file or
 journal; the scheduler owns their closeout.
 
@@ -189,7 +189,7 @@ The scheduler will run these focused commands, deduplicated in plan order:
 Task contracts:
 {contracts}
 
-Folder dependency state:
+Plan dependency state:
 {dependency_state}
 {completed_context}
 Do not run the full project verifier and do not commit. Complete the scheduled
@@ -246,7 +246,7 @@ Review all of the following before deciding:
 - every authoritative checkpoint task contract and relevant journal below
 - any current on-disk task text explicitly labelled UNTRUSTED evidence
 - the exact scheduler blocker reasons and focused-command evidence
-- the remaining folder dependency state
+- the remaining plan dependency state
 - implementation and tests named by those contracts, plus directly necessary
   interacting code encountered through read-only inspection
 
@@ -278,7 +278,7 @@ Never propose a glob, directory, control/management path, removal, verifier
 change, new task, or unrelated scope expansion.
 {scope_policy}
 
-Folder: {folder}
+Plan: {plan_name}
 Source tree: {source_tree}
 Base commit: {base_ref}
 
@@ -291,7 +291,7 @@ Exact durable blocker evidence:
 Scheduler-supplied focused evidence:
 {focused_evidence}
 
-Remaining folder dependency state:
+Remaining plan dependency state:
 {dependency_state}
 
 Prior review and repair evidence:
@@ -343,7 +343,7 @@ safety gate an ordinary worker session faces -- a management-plane file, a task
 file, another task's scope, a commit, or any write in the primary worktree
 makes your verdict unusable while preserving your exact edits. Assent alone
 owns task status, task contracts, and Git state: never create a task, change a
-task's requirements or scope, revert or delete sources, or accept the folder.
+task's requirements or scope, revert or delete sources, or accept the plan.
 
 Report a repair with verdict "FIXED", carrying the same finding fields a
 reported blocker uses: what was wrong in summary and evidence, and what you
@@ -376,8 +376,8 @@ the existing requirements pass, FIXED only when you actually repaired the
 blocker, or FAIL with the concrete unresolved evidence. Never invent an
 acceptance criterion and never pretend a blocker was fixed."""
 
-_AUTO_FIX_COMPLETED_POLICY = """This COMPLETED_FOLDER review examines the
-bounded cumulative implementation. Only COMPLETED_FOLDER + INITIAL may report
+_AUTO_FIX_COMPLETED_POLICY = """This COMPLETED_PLAN review examines the
+bounded cumulative implementation. Only COMPLETED_PLAN + INITIAL may report
 eligible technical debt: it must be concrete, encountered in changed or
 directly interacting code, local to an existing task's declared scope, and
 reliably testable by that task's focused gate. Do not conduct a repository-wide
@@ -385,7 +385,7 @@ debt search."""
 
 _AUTO_FIX_BLOCKED_POLICY = """This BLOCKED_ADJUDICATION reviews only the durable
 blockers, their trusted requirements, and directly necessary interacting code.
-Unfinished tasks, TODO work, and the incomplete folder state are expected and
+Unfinished tasks, TODO work, and the incomplete plan state are expected and
 cannot be findings. Technical debt is not eligible in this context. A
 self-marked BLOCKED task legitimately has no focused result because ordinary
 closeout skips that gate; that absence is not a finding.
@@ -462,7 +462,7 @@ requirements, accept a source, shrink the selection, or propose unrelated work.
 Every finding must name one existing task id and a normalized project-relative
 path owned by that task's declared scope. When the exact blocker is an omitted
 scope path, use kind "scope_amendment" and the existing exact scope-addition
-contract. Task ids may repeat between folders; the task id plus path must
+contract. Task ids may repeat between plans; the task id plus path must
 resolve to exactly one selected plan, or the scheduler will retain the evidence
 for a human decision.
 
@@ -472,8 +472,8 @@ exact omission above). "target_alone" and "peer_only" describe conflict origin
 in the supplied evidence; they are not finding kinds.
 
 For typed candidate-conflict evidence, return one finding for every exact
-folder/path pair in the complete wave and no unrelated finding. Preserve the
-folder ownership implied by task id plus scope. A target-alone finding will be
+plan/path pair in the complete wave and no unrelated finding. Preserve the
+plan ownership implied by task id plus scope. A target-alone finding will be
 edited in Assent's managed reconcile worktree; a peer-only finding will reopen
 the existing owning task. Never recommend accepting or omitting a prefix.
 
@@ -517,7 +517,7 @@ change refs or task files, run tests or the full verifier, or edit any other
 path. Assent owns validation, staging, the merge commit, source fast-forward,
 focused gates, candidate rebuild, and cleanup.
 
-Folder: {folder}
+Plan: {plan_name}
 Worktree: {worktree}
 Source tip (ours): {source_tip}
 Target tip (theirs): {target_tip}
@@ -527,7 +527,7 @@ Exact conflict paths:
 Scheduler-captured three-way conflict evidence:
 {three_way_evidence}
 
-Authoritative task contracts for this folder:
+Authoritative task contracts for this plan:
 {contracts}
 
 Resolve every listed conflict semantically and return normally. Leave the
@@ -861,7 +861,7 @@ def _adapter_availability_failed(result: TaskResult) -> bool:
 # Prompt / small helpers
 # --------------------------------------------------------------------------- #
 def _diagnosed_shared_inputs(cfg: Config) -> tuple[str, ...]:
-    """Directories a stored full-verifier diagnosis proved this folder needs.
+    """Directories a stored full-verifier diagnosis proved this plan needs.
 
     No generic rule can infer that an ignored directory is semantically
     required, so a complete verifier that already failed on one is the evidence
@@ -1473,17 +1473,16 @@ def _workflow_task_capability_errors(
                     requested_effort=session.requested_effort))
                 continue
             if not workflow:
-                task_plan = Plan([task], plan.dir)
                 for index, step in enumerate(cfg.workflow_plan):
                     if isinstance(step, WorkflowActionStep):
                         continue
                     if adapter_name not in step.adapters:
                         continue
                     session = _plan_step_session(
-                        cfg, adapter, task_plan, step, adapter_name)
+                        cfg, adapter, step, adapter_name)
                     requests.append(InvocationRequest(
                         task_id=f"{task.id} workflow.plan[{index}]",
-                        model=step.model or task.model,
+                        model=step.model,
                         effort=session.effort,
                         requested_model=session.requested_model,
                         requested_effort=session.requested_effort))
@@ -1508,17 +1507,19 @@ def _workflow_task_capability_errors(
 
 
 def _plan_step_session(
-        cfg: Config, adapter: Adapter, plan: Plan, step: WorkflowPlanStep,
+        cfg: Config, adapter: Adapter, step: WorkflowPlanStep,
         adapter_name: str) -> SessionIdentity:
-    """Resolve a whole-plan worker step through its role or the first task profile."""
-    first = plan.tasks[0]
-    model = step.model or first.model
-    stated_effort = (
-        step.effort
-        if step.model is not None and step.produces_verdict
-        else inherited_effort(step.model, step.effort, first.effort))
+    """Resolve a plan or integration step from its own stated profile.
+
+    Config refuses a plan or integration role without a model, so the step never
+    inherits one: such a session answers for a whole unit, and taking one task's
+    tier would make the answer depend on which task happened to sort first.
+    ``resolve_effort`` still supplies the adapter tier default, and a literal
+    model with no stated effort still sends none.
+    """
+    model = step.model
     settings = cfg.adapter_settings(adapter_name)
-    effort = settings.resolve_effort(stated_effort, model)
+    effort = settings.resolve_effort(step.effort, model)
     if (step.requested_model is not None
             and adapter_name == step.adapter):
         return SessionIdentity(
@@ -1548,10 +1549,10 @@ def _plan_workflow_capability_errors(
             if adapter_name not in step.adapters:
                 continue
             session = _plan_step_session(
-                cfg, adapter, plan, step, adapter_name)
+                cfg, adapter, step, adapter_name)
             requests.append(InvocationRequest(
                 task_id=f"{cfg.tasks_name} workflow.plan[{index}]",
-                model=step.model or plan.tasks[0].model,
+                model=step.model,
                 effort=session.effort,
                 requested_model=session.requested_model,
                 requested_effort=session.requested_effort))
@@ -1762,7 +1763,7 @@ def _append_adapter_failure_entry(task: Task, session: SessionIdentity,
 
 
 def _checkpoint_subject(cfg: Config, kind: str, task: Task, detail: str) -> str:
-    """Build a task checkpoint subject namespaced by the task folder."""
+    """Build a task checkpoint subject namespaced by the plan."""
     return f"{kind}({cfg.tasks_name}/{task.id}): {detail}"
 
 
@@ -1806,14 +1807,14 @@ def _require_stack_ancestry(cfg: Config, state: StackState,
         return
     raise AssentError(
         f"stale stack for {cfg.tasks_name}: current upstream "
-        f"{source.folder} tip {source.tip} is not an ancestor of downstream "
+        f"{source.plan} tip {source.tip} is not an ancestor of downstream "
         f"tip {downstream_tip}; all existing work is preserved. Run `assent "
         f"rework {cfg.tasks_name}` after deciding how to handle the upstream "
         "change, or replan the dependency")
 
 
 def _prepare_worktree(cfg: Config) -> Config:
-    """Create or validate the folder worktree before any adapter is started."""
+    """Create or validate the plan worktree before any adapter is started."""
     errors = worktree_configuration_errors(cfg)
     if errors:
         detail = "\n".join(f"  - {error}" for error in errors)
@@ -1862,15 +1863,15 @@ def _prepare_worktree(cfg: Config) -> Config:
                 f"{state_before.base.resolved_base}")
 
         state_after = resolve_stack_state(cfg)
-        tips_before = {source.folder: source.tip for source in state_before.sources}
-        tips_after = {source.folder: source.tip for source in state_after.sources}
+        tips_before = {source.plan: source.tip for source in state_before.sources}
+        tips_after = {source.plan: source.tip for source in state_after.sources}
         if tips_after != tips_before:
             changes = sorted(set(tips_before) | set(tips_after))
             detail = ", ".join(
-                f"{folder}: {tips_before.get(folder, '(missing)')} -> "
-                f"{tips_after.get(folder, '(missing)')}"
-                for folder in changes
-                if tips_before.get(folder) != tips_after.get(folder))
+                f"{plan_name}: {tips_before.get(plan_name, '(missing)')} -> "
+                f"{tips_after.get(plan_name, '(missing)')}"
+                for plan_name in changes
+                if tips_before.get(plan_name) != tips_after.get(plan_name))
             raise AssentError(
                 "upstream source changed between stack resolution and worktree "
                 f"validation ({detail})")
@@ -1889,7 +1890,7 @@ def _prepare_worktree(cfg: Config) -> Config:
         if stacked is None:
             print("Stacked upstream: none")
         else:
-            print(f"Stacked upstream: {stacked.folder} @ {stacked.tip}")
+            print(f"Stacked upstream: {stacked.plan} @ {stacked.tip}")
         print(f"Work branch: {branch}")
         return worktree_cfg
     except BaseException as primary_error:
@@ -1924,7 +1925,7 @@ def _selection_snapshot(configs: tuple[Config, ...]) -> tuple[
                       if task.status not in ("DONE", "SKIP")]
         if unfinished:
             raise AssentError(
-                f"selection folder {cfg.tasks_name} is incomplete: "
+                f"selected plan {cfg.tasks_name} is incomplete: "
                 + ", ".join(unfinished))
         _branch, tip, _worktree = source_snapshot(cfg, main)
         sources.append(tip)
@@ -1944,7 +1945,7 @@ def _selection_locks(configs: tuple[Config, ...]):
 
 def _selection_worktree_configs(
         configs: tuple[Config, ...]) -> tuple[Config, ...]:
-    """Resolve the persistent source worktree for every selected folder."""
+    """Resolve the persistent source worktree for every selected plan."""
     main = gitops.main_worktree(configs[0].root)
     resolved: list[Config] = []
     for cfg in configs:
@@ -2008,7 +2009,7 @@ def _selection_review_material(
                     f"{previous.phase})\n" + ("\n".join(lines) or "- none"))
 
     selection_evidence = "\n".join((
-        f"Folders: {', '.join(state.folders)}",
+        f"Plans: {', '.join(state.plan_names)}",
         f"Target ref: {state.target_ref}",
         f"Target commit: {state.target_commit}",
         f"Source commits: {', '.join(state.source_commits)}",
@@ -2084,7 +2085,7 @@ def _selection_shared_path_review_material(
 {contracts.instructions_path()}.
 
 This is a bounded, read-only shared-input recovery for exact selection
-{', '.join(state.folders)} at workflow.integration[{state.step_index}].
+{', '.join(state.plan_names)} at workflow.integration[{state.step_index}].
 {trigger}
 
 The active shared-path answer is {contract.state}; its paths are
@@ -2162,8 +2163,7 @@ def _run_selection_reviewer(
     sessions: dict[str, SessionIdentity] = {}
     for adapter_name, reviewer in zip(rotation.names, rotation.adapters):
         session = _plan_step_session(
-            work_configs[0], reviewer,
-            Plan.parse(work_configs[0].tasks_dir), step, adapter_name)
+            work_configs[0], reviewer, step, adapter_name)
         errors = reviewer.preflight([InvocationRequest(
             task_id="selection-verification-review", model=step.model,
             effort=session.effort, requested_model=session.requested_model,
@@ -2205,7 +2205,7 @@ def _run_selection_reviewer(
             context_id=(f"workflow.selection[{state.step_index}].shared_paths"
                         if shared_path_recovery is not None else
                         f"workflow.selection[{state.step_index}].review"),
-            folders=state.folders, structured=True)
+            plan_names=state.plan_names, structured=True)
         interval_changes: list[str] = []
         forbidden: list[str] = []
         for cfg, baseline in zip(work_configs, baselines):
@@ -2331,15 +2331,15 @@ def _selection_owned_findings(
                 continue
             candidates.append((cfg.tasks_name, resolved.findings[0]))
         if len(candidates) != 1:
-            shown = ", ".join(folder for folder, _item in candidates) or "none"
+            shown = ", ".join(plan_name for plan_name, _item in candidates) or "none"
             raise AssentError(
                 f"selection finding {finding.task_id} {finding.path!r} must "
                 f"resolve to exactly one selected plan (matched: {shown})")
-        folder, resolved = candidates[0]
-        grouped.setdefault(folder, []).append(resolved)
+        plan_name, resolved = candidates[0]
+        grouped.setdefault(plan_name, []).append(resolved)
     return {
-        folder: auto_fix.ReviewRecord(record.verdict, tuple(findings))
-        for folder, findings in grouped.items()
+        plan_name: auto_fix.ReviewRecord(record.verdict, tuple(findings))
+        for plan_name, findings in grouped.items()
     }
 
 
@@ -2360,12 +2360,12 @@ def _validate_selection_conflict_assignments(
     if not conflicts:
         return
     allowed = {
-        (conflict.folder, path)
+        (conflict.plan, path)
         for conflict in conflicts for path in conflict.paths
     }
     assigned = {
-        (folder, finding.path)
-        for folder, record in grouped.items() for finding in record.findings
+        (plan_name, finding.path)
+        for plan_name, record in grouped.items() for finding in record.findings
     }
     missing = sorted(allowed - assigned)
     extra = sorted(assigned - allowed)
@@ -2373,10 +2373,10 @@ def _validate_selection_conflict_assignments(
         detail: list[str] = []
         if missing:
             detail.append("unassigned: " + ", ".join(
-                f"{folder}:{path}" for folder, path in missing))
+                f"{plan_name}:{path}" for plan_name, path in missing))
         if extra:
             detail.append("outside conflict wave: " + ", ".join(
-                f"{folder}:{path}" for folder, path in extra))
+                f"{plan_name}:{path}" for plan_name, path in extra))
         raise AssentError(
             "selection conflict ownership is incomplete (" + "; ".join(detail)
             + ")")
@@ -2409,15 +2409,15 @@ def _selection_three_way_evidence(
 def _selection_peer_context(
         cfg: Config, conflicts: tuple[SelectionCandidateConflict, ...]) -> str:
     relevant = [item for item in conflicts
-                if item.folder == cfg.tasks_name and item.kind == "peer_only"]
+                if item.plan == cfg.tasks_name and item.kind == "peer_only"]
     if not relevant:
         return ""
     parts = ["\n\nSelection peer-conflict context (read-only evidence):"]
     for conflict in relevant:
         prefix = ", ".join(
-            f"{folder}@{tip}" for folder, tip in conflict.prefix_sources)
+            f"{plan_name}@{tip}" for plan_name, tip in conflict.prefix_sources)
         parts.append(
-            f"\nFolder: {conflict.folder}\nCompatible prefix: "
+            f"\nPlan: {conflict.plan}\nCompatible prefix: "
             f"{prefix or '(target only)'}\nCompatible prefix tree: "
             f"{conflict.prefix_tree}\nDependent exclusions: "
             + (", ".join(conflict.dependent_exclusions) or "none") + "\n"
@@ -2520,7 +2520,7 @@ def _selection_merged_fix_already_persisted(
         selection: SelectionWorkflowState,
         conflicts: tuple[SelectionCandidateConflict, ...]) -> bool:
     """Recognize the post-merge, post-ledger focused-closeout boundary."""
-    expected = {conflict.folder for conflict in conflicts}
+    expected = {conflict.plan for conflict in conflicts}
     found: set[str] = set()
     for cfg in work_configs:
         path = auto_fix.auto_fix_state_path(cfg)
@@ -2590,13 +2590,12 @@ def _selection_fixer_sessions(
         ) -> tuple[_AdapterRotation, dict[str, SessionIdentity]]:
     """Resolve every declared adapter candidate for a selection fixer role."""
     rotation = _workflow_step_rotation(cfg, step)
-    plan = Plan.parse(cfg.tasks_dir)
     sessions: dict[str, SessionIdentity] = {}
     for adapter_name, adapter in zip(rotation.names, rotation.adapters):
-        session = _plan_step_session(cfg, adapter, plan, step, adapter_name)
+        session = _plan_step_session(cfg, adapter, step, adapter_name)
         errors = adapter.preflight([InvocationRequest(
             task_id=f"{cfg.tasks_name} selection conflict fixer",
-            model=step.model or task.model, effort=session.effort,
+            model=step.model, effort=session.effort,
             requested_model=session.requested_model,
             requested_effort=session.requested_effort)])
         if errors:
@@ -2635,7 +2634,7 @@ def _selection_reconcile_prompt(
         workflow_role=step.role,
         role_policy="\n\n".join(
             ability.prompt for ability in step.resolved_role.abilities),
-        folder=cfg.tasks_name, worktree=worktree,
+        plan_name=cfg.tasks_name, worktree=worktree,
         source_tip=conflict.source_tip, target_tip=conflict.target_tip,
         conflict_paths="\n".join(f"- {path}" for path in conflict.paths),
         three_way_evidence=_selection_three_way_evidence(
@@ -2661,10 +2660,10 @@ def _run_selection_target_reconciles(
     for conflict in conflicts:
         if conflict.kind != "target_alone":
             continue
-        cfg = configs.get(conflict.folder)
+        cfg = configs.get(conflict.plan)
         if cfg is None:
             raise AssentError(
-                f"selection conflict names unknown folder {conflict.folder}")
+                f"selection conflict names unknown plan {conflict.plan}")
         plan = Plan.parse(cfg.tasks_dir)
         review_record = auto_fix.current_review_record(
             _selection_repair_states(work_configs)[cfg.tasks_name])
@@ -2702,7 +2701,7 @@ def _run_selection_target_reconciles(
                     session.requested_model, session.requested_effort,
                     context.worktree, context_kind="selection",
                     context_id="workflow.selection.reconcile",
-                    folders=tuple(item.tasks_name for item in work_configs))
+                    plan_names=tuple(item.tasks_name for item in work_configs))
                 changed = _selection_surface_changes(
                     work_configs, baselines)
                 if changed:
@@ -2781,14 +2780,14 @@ def _selection_merged_workspace_text(
         conflicts: tuple[SelectionCandidateConflict, ...],
         contexts: dict[str, reconcile.AutomaticReconcile]) -> str:
     """Describe every scheduler-owned path one merged selection role may edit."""
-    target_folders = {
-        conflict.folder for conflict in conflicts
+    target_plans = {
+        conflict.plan for conflict in conflicts
         if conflict.kind == "target_alone"
     }
     lines: list[str] = []
     for cfg in work_configs:
         mode = ("READ ONLY: use the managed reconcile worktree below"
-                if cfg.tasks_name in target_folders else
+                if cfg.tasks_name in target_plans else
                 "WRITABLE within the listed task scopes")
         lines.append(
             f"## {cfg.tasks_name} source worktree\nPath: {cfg.root}\n{mode}")
@@ -2797,17 +2796,17 @@ def _selection_merged_workspace_text(
                 f"- {task.id} scopes: " + ", ".join(task.scope))
     for conflict in conflicts:
         if conflict.kind == "target_alone":
-            context = contexts[conflict.folder]
+            context = contexts[conflict.plan]
             location = (str(context.worktree) if context.worktree is not None
                         else "already reconciled by an earlier resumed step")
             mode = "managed reconcile worktree"
         else:
             cfg = next(item for item in work_configs
-                       if item.tasks_name == conflict.folder)
+                       if item.tasks_name == conflict.plan)
             location = str(cfg.root)
             mode = "source worktree"
         lines.append(
-            f"## {conflict.folder} {mode}\nPath: {location}\n"
+            f"## {conflict.plan} {mode}\nPath: {location}\n"
             "Exact conflict paths:\n"
             + "\n".join(f"- {path}" for path in conflict.paths)
             + "\nThree-way evidence:\n"
@@ -2890,7 +2889,7 @@ def _apply_selection_shared_path_review(
         raise AssentError(
             "shared-input recovery did not settle the active profile")
     shared_paths.require_directory_link_agreement(
-        main, cfg.root, settled, folder=cfg.tasks_name)
+        main, cfg.root, settled, plan_name=cfg.tasks_name)
 
 
 def _recover_pending_selection_shared_paths(
@@ -2992,12 +2991,12 @@ def _run_selection_merged_repairs(
 
     work_configs = _selection_worktree_configs(configs)
     conflicts = _selection_conflicts(state)
-    original_sources = dict(zip(state.folders, state.source_commits))
-    target_folders = {
-        conflict.folder for conflict in conflicts
+    original_sources = dict(zip(state.plan_names, state.source_commits))
+    target_plans = {
+        conflict.plan for conflict in conflicts
         if conflict.kind == "target_alone"
     }
-    cfg_by_folder = {cfg.tasks_name: cfg for cfg in work_configs}
+    cfg_by_plan = {cfg.tasks_name: cfg for cfg in work_configs}
 
     with _selection_locks(configs):
         current_target_ref = gitops.require_current_branch(
@@ -3021,21 +3020,21 @@ def _run_selection_merged_repairs(
         for conflict in conflicts:
             if conflict.kind != "target_alone":
                 continue
-            cfg = cfg_by_folder.get(conflict.folder)
+            cfg = cfg_by_plan.get(conflict.plan)
             if cfg is None:
                 raise AssentError(
-                    f"selection conflict names unknown folder {conflict.folder}")
+                    f"selection conflict names unknown plan {conflict.plan}")
             context = reconcile.automatic_reconcile_prepare_locked(
                 cfg, conflict.target_tip, conflict.source_tip, conflict.paths)
-            contexts[conflict.folder] = context
+            contexts[conflict.plan] = context
             if context.worktree is not None and context.needs_editing:
-                reconcile_baselines[conflict.folder] = (
+                reconcile_baselines[conflict.plan] = (
                     _selection_reconcile_path_state(
                         context.worktree, conflict.paths))
                 if not gitops.merge_scene_is_unedited(
                         context.worktree, conflict.source_tip,
                         conflict.target_tip):
-                    preexisting_reconcile_repairs.add(conflict.folder)
+                    preexisting_reconcile_repairs.add(conflict.plan)
 
         if _selection_merged_fix_already_persisted(
                 work_configs, state, conflicts):
@@ -3076,7 +3075,7 @@ def _run_selection_merged_repairs(
                     raise AssentError(
                         "A writable integration verdict role must repair an "
                         "approved scope omission in the same session and return FIXED")
-                if cfg.tasks_name in target_folders:
+                if cfg.tasks_name in target_plans:
                     raise AssentError(
                         "A target-conflict reconciliation cannot also amend task "
                         "scope in the same repair transaction")
@@ -3105,12 +3104,12 @@ def _run_selection_merged_repairs(
                     gitops.commit_of(cfg.root, "HEAD") != old_source
                     or not gitops.working_tree_status(
                         cfg.root, cfg.git_excludes).is_clean)
-                if cfg.tasks_name in target_folders:
+                if cfg.tasks_name in target_plans:
                     context = contexts[cfg.tasks_name]
                     if context.needs_editing and source_changed:
                         raise AssentError(
                             "a merged selection role edited the source worktree "
-                            f"for target-conflict folder {cfg.tasks_name}; it "
+                            f"for target-conflict plan {cfg.tasks_name}; it "
                             "must edit only the managed reconcile worktree")
                     reconcile_changed = False
                     if context.worktree is not None and context.needs_editing:
@@ -3165,8 +3164,8 @@ def _run_selection_merged_repairs(
             for conflict in conflicts:
                 if conflict.kind != "target_alone":
                     continue
-                cfg = cfg_by_folder[conflict.folder]
-                subset = grouped.get(conflict.folder)
+                cfg = cfg_by_plan[conflict.plan]
+                subset = grouped.get(conflict.plan)
                 assert subset is not None
                 owner_ids = {
                     finding.task_id for finding in subset.findings
@@ -3198,7 +3197,7 @@ def _run_selection_merged_repairs(
                             time_str=now().isoformat(timespec="seconds"))
 
             for cfg in work_configs:
-                if cfg.tasks_name in target_folders:
+                if cfg.tasks_name in target_plans:
                     continue
                 gitops.commit_if_dirty(
                     cfg.root,
@@ -3286,8 +3285,8 @@ def _run_selection_repairs(
         write_selection_workflow_state(configs[0].assent_dir, state)
 
     repair_states = _selection_repair_states(work_configs)
-    peer_folders = {
-        conflict.folder for conflict in conflicts
+    peer_plans = {
+        conflict.plan for conflict in conflicts
         if conflict.kind == "peer_only"
     }
     assignments: list[tuple[Config, Task, _FixerProfile, _AdapterRotation,
@@ -3296,7 +3295,7 @@ def _run_selection_repairs(
         review_state = repair_states.get(cfg.tasks_name)
         if review_state is None:
             continue
-        if conflicts and cfg.tasks_name not in peer_folders:
+        if conflicts and cfg.tasks_name not in peer_plans:
             continue
         plan = Plan.parse(cfg.tasks_dir)
         implicated = list(dict.fromkeys(
@@ -3365,7 +3364,7 @@ def _run_selection_repairs(
                 review_state = repair_states.get(cfg.tasks_name)
                 if review_state is None:
                     continue
-                if conflicts and cfg.tasks_name not in peer_folders:
+                if conflicts and cfg.tasks_name not in peer_plans:
                     continue
                 implicated = list(dict.fromkeys(
                     item.task_id for item in review_state.findings
@@ -3419,7 +3418,7 @@ def _run_selection_repairs(
                 repair_dispositions=task_dispositions,
                 usage_context_kind="selection",
                 usage_context_id=f"workflow.selection.repair:{task.id}",
-                usage_folders=state.folders)
+                usage_plans=state.plan_names)
             active.task = None
             active.session = None
             updated = auto_fix.with_worker_dispositions(
@@ -3471,7 +3470,7 @@ def _run_selection_repairs(
     return 0, state
 
 
-def run_selection_workflow(config_path: str, assent_dir, folders,
+def run_selection_workflow(config_path: str, assent_dir, plan_names,
                            *, sleep: Callable[[float], None] | None = None,
                            now: Callable[[], datetime] | None = None) -> int:
     """Walk and recover the exact selection verification/repair workflow."""
@@ -3479,11 +3478,11 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
     now = now or (lambda: datetime.now(timezone.utc))
     try:
         assent_dir = os.fspath(assent_dir)
-        graph = parse_folder_dependency_graph(assent_dir)
-        ordered = tuple(order_folders_by_dependency(graph, set(folders)))
-        if len(ordered) != len(folders):
-            raise AssentError("exact folder selection is invalid")
-        configs = tuple(load_config(config_path, folder) for folder in ordered)
+        graph = parse_plan_dependency_graph(assent_dir)
+        ordered = tuple(order_plans_by_dependency(graph, set(plan_names)))
+        if len(ordered) != len(plan_names):
+            raise AssentError("exact plan selection is invalid")
+        configs = tuple(load_config(config_path, plan_name) for plan_name in ordered)
         target_ref, target_commit, source_commits = _selection_snapshot(configs)
         state = read_selection_workflow_state(configs[0].assent_dir)
     except AssentError as error:
@@ -3495,7 +3494,7 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
         steps = steps + (WorkflowActionStep("full_verify"),)
     identity = (ordered, target_ref, target_commit, source_commits)
     pending_repair = bool(
-        state is not None and state.folders == ordered
+        state is not None and state.plan_names == ordered
         and state.repair_phase != "NONE")
     if (pending_repair
             and (state.target_ref != target_ref
@@ -3504,7 +3503,7 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
               "durable verifier findings were pending.")
         return 1
     active_repair = pending_repair
-    if (state is None or ((state.folders, state.target_ref, state.target_commit,
+    if (state is None or ((state.plan_names, state.target_ref, state.target_commit,
                            state.source_commits) != identity
                           and not active_repair)):
         state = SelectionWorkflowState(
@@ -3557,7 +3556,7 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
         print(f"Integration workflow step {state.step_index + 1}/{len(steps)}: "
               "full_verify")
         if len(configs) == 1:
-            result = verify_folder_action(
+            result = verify_plan_action(
                 configs[0], recheck=state.repair_phase == "RECHECK")
             if result.outcome == "TARGET_CONFLICT" and result.source_commits:
                 paths = tuple(dict.fromkeys(
@@ -3592,7 +3591,7 @@ def run_selection_workflow(config_path: str, assent_dir, folders,
                                state.source_commits):
                     raise AssentError(
                         "selection source or target changed after verification")
-                if (result.folders != ordered
+                if (result.plan_names != ordered
                         or result.target_commit != state.target_commit
                         or result.source_commits != state.source_commits
                         or result.verification_script_sha256
@@ -3645,17 +3644,17 @@ def run_dynamic_selection_workflow(config_path: str, assent_dir) -> int:
         main = gitops.main_worktree(root)
         target = gitops.commit_of(
             main, gitops.require_current_branch(main))
-        selection, _configs = verification.select_batch_folders(
+        selection, _configs = verification.select_batch_plans(
             config_path, assent_dir, main, target)
     except AssentError as error:
         print(f"Selection full_verify: failed ({error})")
         return 1
-    for folder, reason in selection.skipped:
-        print(f"Selection full_verify: skip {folder} ({reason})")
-    if not selection.folders:
-        print("Selection full_verify: no folder has anything left to verify")
+    for plan_name, reason in selection.skipped:
+        print(f"Selection full_verify: skip {plan_name} ({reason})")
+    if not selection.plan_names:
+        print("Selection full_verify: no plan has anything left to verify")
         return 0
-    return run_selection_workflow(config_path, assent_dir, selection.folders)
+    return run_selection_workflow(config_path, assent_dir, selection.plan_names)
 
 
 def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
@@ -3666,9 +3665,9 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     """Run tasks until all are DONE/BLOCKED/SKIP (or only one with once/task_id). Returns the
     process exit code.
 
-    First check folder prerequisites, then take the task folder's file lock; the lock covers
+    First check plan prerequisites, then take the plan's file lock; the lock covers
     the whole run (including the long sleeps of quota waiting); if another run is already
-    running in the same folder, print a message and fail with exit code 1 without touching
+    running in the same plan, print a message and fail with exit code 1 without touching
     anything in the working tree. status / check / report are read-only, take no lock, and can
     be used while a run is in progress.
     """
@@ -3685,10 +3684,10 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     try:
         unfinished = find_unfinished_prerequisites(cfg.tasks_dir)
     except AssentError as e:
-        print(f"Prerequisite folder gate: FAIL ({e})")
+        print(f"Prerequisite plan gate: FAIL ({e})")
         return 1
     if unfinished:
-        print("Prerequisite folders not finished, refusing to run:")
+        print("Prerequisite plans not finished, refusing to run:")
         for prerequisite in unfinished:
             print(f"  - {prerequisite.message()}")
         return 1
@@ -3716,15 +3715,15 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         return result
 
     # Full candidate verification is outside the AI session and outside the
-    # folder lock above.  The verification layer reacquires locks in the one
-    # safe order used by accept: repository integration, then folder.
+    # plan lock above.  The verification layer reacquires locks in the one
+    # safe order used by accept: repository integration, then plan.
     try:
         plan = Plan.parse(cfg.tasks_dir)
     except AssentError as e:
-        print(f"Failed to parse task folder after run: {e}")
+        print(f"Failed to parse plan directory after run: {e}")
         return 1
     if all(task.status in ("DONE", "SKIP") for task in plan.tasks):
-        print(f"integration {cfg.tasks_name}: folder execution complete; "
+        print(f"integration {cfg.tasks_name}: plan execution complete; "
               "the invocation integration workflow follows")
         try_write_report(cfg)
     return result
@@ -3735,13 +3734,13 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 auto_fix_adapter: Adapter | None,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
-    """The actual run body, after the task folder lock is held."""
+    """The actual run body, after the plan lock is held."""
     try:
-        # Validate the requested folder itself before stack discovery.  This
+        # Validate the requested plan itself before stack discovery.  This
         # preserves the task-file error as the primary zero-token diagnostic.
         plan = Plan.parse(cfg.tasks_dir)
     except AssentError as e:
-        print(f"Failed to parse task folder: {e}")
+        print(f"Failed to parse plan directory: {e}")
         return 1
     try:
         plan = _recover_interrupted_blocked_task(cfg, plan)
@@ -3860,11 +3859,11 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 cfg, plan, rotation, sleep, now, trusted_contracts)
         # Read the durable state even for an ordinary run.  A pending FAIL is
         # not an additional task status and ordinary execution may still make
-        # limited progress, but a complete folder must not silently close over
+        # limited progress, but a complete plan must not silently close over
         # unresolved review evidence just because the invocation omitted the
         # repair authorization.
         existing_auto_fix = _auto_fix_existing_state(cfg)
-        # Selection-verification repair is coordinated only after every folder
+        # Selection-verification repair is coordinated only after every plan
         # run lock has exited.  A restarted invocation therefore leaves its
         # reopened TODO/WIP tasks untouched here and lets the exact selection
         # cursor resume the durable repair wave in ``_close_run``.
@@ -3873,20 +3872,20 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 == "selection_verification"
                 and existing_auto_fix.verdict != "PASS"):
             print("Selection verification repair is pending; deferring this "
-                  "folder to the exact selection coordinator.")
+                  "plan to the exact selection coordinator.")
             return 0
-        # A settled SELF-FIXED, UNREVIEWED folder is terminal, not a resumable
+        # A settled SELF-FIXED, UNREVIEWED plan is terminal, not a resumable
         # phase: a later run must not reopen, re-review, or re-run anything for
         # it just because that durable record exists.  A human who reopens a
-        # task with rework leaves the folder incomplete, and ordinary execution
+        # task with rework leaves the plan incomplete, and ordinary execution
         # continues below as usual.
         settled_self_fixed = bool(
             existing_auto_fix is not None
             and existing_auto_fix.self_fixed_unreviewed is not None
             and all(task.status in ("DONE", "SKIP") for task in plan.tasks))
-        # A settled REVIEW UNRESOLVED folder ends the loop the same way, but it
+        # A settled REVIEW UNRESOLVED plan ends the loop the same way, but it
         # may legitimately hold a BLOCKED task, so "no task is runnable" is what
-        # distinguishes it from a folder a human reopened with rework.
+        # distinguishes it from a plan a human reopened with rework.
         settled_unresolved = bool(
             existing_auto_fix is not None
             and existing_auto_fix.unresolved_review is not None)
@@ -3935,7 +3934,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             if task_id is not None:
                 task = plan.get(task_id)
                 if task is None:
-                    print(f"Task {task_id} not found in task folder")
+                    print(f"Task {task_id} not found in plan")
                     return 1
                 status_by_id = {t.id: t.status for t in plan.tasks}
                 unmet = [d for d in task.deps
@@ -4109,7 +4108,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
             and pending.review_context != "selection_verification"
             and pending.self_fixed_unreviewed is None
             and pending.unresolved_review is None):
-        print("Auto-fix closeout refused: the folder has a pending "
+        print("Auto-fix closeout refused: the plan has a pending "
               f"{pending.verdict} state; "
               "rerun with its current plan workflow policy.")
         _print_summary(final_plan)
@@ -4333,7 +4332,7 @@ def _auto_fix_review_identity(
         cfg: Config, plan: Plan, focused_evidence: str, *,
         focused_identity: str | None = None,
         contracts_by_id: dict[str, str] | None = None,
-        review_context: str = "completed_folder",
+        review_context: str = "completed_plan",
         review_stage: str = "initial",
         round_index: int = 0,
         blockers: tuple[_AutoFixBlockerEvidence, ...] = (),
@@ -4359,7 +4358,7 @@ def _auto_fix_review_identity(
     reviewed_material = dict(
         agents_md_path=_agents_md_absolute_path_for_prompt(cfg),
         instructions_path=contracts.instructions_path(),
-        folder=cfg.tasks_name,
+        plan_name=cfg.tasks_name,
         base_ref=base_ref,
         source_tree=source_tree,
         review_context=review_context.upper(),
@@ -4682,7 +4681,7 @@ def _run_auto_fix_review_once(
     initial_role_count = sum(
         isinstance(step, WorkflowPlanStep)
         for step in cfg.workflow_plan[:first_action_index])
-    # The folder walks the configured reviewer list position by position, and
+    # The plan walks the configured reviewer list position by position, and
     # the durable index is what survives a restart mid-sequence.
     existing = _auto_fix_existing_state(cfg)
     round_index = existing.workflow_step_index if existing is not None else 0
@@ -4699,10 +4698,10 @@ def _run_auto_fix_review_once(
     blocked = [task for task in incomplete if task.status == "BLOCKED"]
     runnable = plan.next_task()
     limited = once or task_id is not None
-    review_context = "completed_folder"
+    review_context = "completed_plan"
     review_session_started = False
     initial_quality_review = bool(
-        review_context == "completed_folder"
+        review_context == "completed_plan"
         and not incomplete
         and initial_role_count
         and (existing is None or existing.verdict == "PASS")
@@ -4788,7 +4787,7 @@ def _run_auto_fix_review_once(
     assert review.requested_model is not None
 
     done = [task for task in plan.tasks if task.status == "DONE"]
-    if review_context == "completed_folder" and not done:
+    if review_context == "completed_plan" and not done:
         print("Auto-fix plan review: all tasks are SKIP; no implementation review session needed.")
         return _AutoFixReviewOutcome(0)
 
@@ -4803,13 +4802,13 @@ def _run_auto_fix_review_once(
     pending_focused_failure = bool(
         existing is not None
         and existing.verdict == "FAIL"
-        and existing.review_context == "completed_folder"
+        and existing.review_context == "completed_plan"
         and existing.source_tree == gitops.tree_of(cfg.root, "HEAD")
         and any(
             finding.fingerprint in current_fingerprints
             and finding.summary == "Final focused verification failed"
             for finding in existing.findings))
-    if review_context == "completed_folder" and pending_focused_failure:
+    if review_context == "completed_plan" and pending_focused_failure:
         print("Plan focused_sweep: reusing durable failure evidence for review.")
         for finding in existing.findings:
             if finding.fingerprint not in current_fingerprints:
@@ -4817,10 +4816,10 @@ def _run_auto_fix_review_once(
             line = f"- FAIL: {finding.evidence}"
             focused_lines.append(line)
             identity_lines.append(line)
-    elif (review_context == "completed_folder"
+    elif (review_context == "completed_plan"
           and not initial_quality_review and not rebound_review):
         print("Auto-fix plan review: running final distinct focused checks.")
-    elif review_context == "completed_folder":
+    elif review_context == "completed_plan":
         print("Plan quality review: reviewing the completed cumulative worktree "
               "before focused_sweep.")
         focused_lines.append(
@@ -4836,7 +4835,7 @@ def _run_auto_fix_review_once(
             f"- {item.task.id}: {item.focused_evidence}" for item in blockers)
         identity_lines.extend(focused_lines)
     distinct: list[str] = []
-    for task in (done if review_context == "completed_folder"
+    for task in (done if review_context == "completed_plan"
                  and not initial_quality_review
                  and not rebound_review
                  and not pending_focused_failure else ()):
@@ -4885,7 +4884,7 @@ def _run_auto_fix_review_once(
                     contracts_by_id=contracts_by_id,
                     round_index=review_index))
             # The scheduler authored this failure; no reviewer round ran, so
-            # the folder's round position stays exactly where it was.
+            # the plan's round position stays exactly where it was.
             state = auto_fix.state_for_review(
                 record, previous=existing,
                 source_tree=source_tree,
@@ -4919,7 +4918,7 @@ def _run_auto_fix_review_once(
     # A passing scheduler action completes the plan layer.  Review roles are
     # failure handlers, so no AI session is opened merely to confirm a
     # mechanically passing focused_sweep.
-    if (review_context == "completed_folder"
+    if (review_context == "completed_plan"
             and not pending_focused_failure
             and not initial_quality_review
             and not rebound_review):
@@ -4994,7 +4993,7 @@ def _run_auto_fix_review_once(
                     else "initial")
     review_previous = existing if review_stage == "recheck" else None
     # The finding ledger, review transitions and technical-debt agenda belong
-    # to the folder rather than to one review stage.  A later initial review
+    # to the plan rather than to one review stage.  A later initial review
     # continues them, so no finding or plan change restarts the finite round
     # sequence; only a recheck may cite prior findings when validating
     # transition identity.
@@ -5010,7 +5009,7 @@ def _run_auto_fix_review_once(
                 else "worker_blocked")
         else:
             # Only an inherited recheck context reaches a blocked adjudication
-            # with no current collection: the repaired folder is complete, so
+            # with no current collection: the repaired plan is complete, so
             # the awaiting-review call carries no blocker.  The event under
             # adjudication is still the original one, and an empty collection
             # must not reclassify a focused gate failure as a worker block.
@@ -5047,7 +5046,7 @@ def _run_auto_fix_review_once(
             cfg, review, injected_adapter)
         review_sessions = {
             name: _plan_step_session(
-                cfg, candidate, plan, review, name)
+                cfg, candidate, review, name)
             for name, candidate in zip(
                 review_rotation.names, review_rotation.adapters)
         }
@@ -6071,8 +6070,8 @@ def _auto_fix_finish_rounds_exhausted(
             state, gate_tasks, evidence)
     try:
         # The durable outcome and the report a human reads must both be on disk
-        # before this folder hands control back, so the report refresh follows
-        # the same unconditional discipline folder verification's own closeout
+        # before this plan hands control back, so the report refresh follows
+        # the same unconditional discipline plan verification's own closeout
         # uses -- a later failure can never leave either unwritten.  A failed
         # settling gate takes the same discipline: its evidence is durable, and
         # only the settled outcome itself is withheld.
@@ -6081,7 +6080,7 @@ def _auto_fix_finish_rounds_exhausted(
             # proven against, exactly as both settle branches below rebind
             # theirs: the final round's repair was checkpointed after the last
             # review bound this record, so writing it unchanged would make the
-            # report call the freshest evidence the folder has STALE (source
+            # report call the freshest evidence the plan has STALE (source
             # tree changed) instead of the pending FAILED (fresh) verdict plus
             # the failing gate's command and evidence.
             current_tree = _auto_fix_current_tree(cfg)
@@ -6092,7 +6091,7 @@ def _auto_fix_finish_rounds_exhausted(
             print(f"Auto-fix review rounds exhausted after "
                   f"{state.workflow_step_index} workflow step(s); the final step's "
                   "repair was not proven by the focused gate of the task it "
-                  "repaired, so the folder did not settle. Every finding, "
+                  "repaired, so the plan did not settle. Every finding, "
                   "edit, and journal entry was preserved without another "
                   "round.")
             return 1
@@ -6119,8 +6118,8 @@ def _auto_fix_settle_unresolved_review(
     The configured rounds ran out with a blocker none of them repaired.  That is
     a question the scheduler cannot settle, not an infrastructure failure, a
     refused precondition, or a broken gate, so it must not exit nonzero: a
-    nonzero folder stops the launch loop and silently cancels every unrelated
-    folder still queued behind it in the same invocation.  The outcome instead
+    nonzero plan stops the launch loop and silently cancels every unrelated
+    plan still queued behind it in the same invocation.  The outcome instead
     becomes a durable terminal record plus a distinctly named report state, and
     the explicit ``accept`` gate stays the human decision point.  Every task
     keeps the status its own closeout gave it; nothing is reverted, reopened, or
@@ -6129,7 +6128,7 @@ def _auto_fix_settle_unresolved_review(
     already_settled = state.unresolved_review is not None
     try:
         # The durable outcome and the report a human reads must both be on disk
-        # before this folder hands control back, under the same unconditional
+        # before this plan hands control back, under the same unconditional
         # discipline the self-fixed settlement above uses.
         settled = auto_fix.with_unresolved_review(
             state, source_tree=_auto_fix_current_tree(cfg))
@@ -6184,8 +6183,8 @@ def _auto_fix_journal_unresolved_review(
                      f"{outcome.rounds_used} ({identity}) ended the configured "
                      "round list with this task's finding still unresolved"),
             detail=("The bounded review-and-repair loop is finitely over, so "
-                    "the folder is REVIEW UNRESOLVED, HUMAN DECISION: the run "
-                    "succeeds so unrelated queued folders still start, the task "
+                    "the plan is REVIEW UNRESOLVED, HUMAN DECISION: the run "
+                    "succeeds so unrelated queued plans still start, the task "
                     "keeps the status its own closeout gave it, and nothing was "
                     "reopened, reverted, or marked BLOCKED. The unresolved "
                     "findings are evidence for the human acceptance meeting.\n"
@@ -6194,7 +6193,7 @@ def _auto_fix_journal_unresolved_review(
 
 
 # The one heading the settling gate writes into a durable brief, so re-proving
-# a folder replaces its own section instead of stacking another copy.
+# a plan replaces its own section instead of stacking another copy.
 _AUTO_FIX_SETTLING_GATE_HEADING = "Settling focused gate evidence"
 
 
@@ -6267,9 +6266,9 @@ def _auto_fix_settling_gates(
 def _auto_fix_with_settling_gate_evidence(
         state: auto_fix.AutoFixState, task_ids: tuple[str, ...],
         evidence: str) -> auto_fix.AutoFixState:
-    """Persist the settling gate result where the folder report already reads.
+    """Persist the settling gate result where the plan report already reads.
 
-    The durable repair brief is the folder's one free-text per-task evidence
+    The durable repair brief is the plan's one free-text per-task evidence
     record, and the report renders its opening, so the gate result leads it: a
     human reading `_report.md` sees which command proved the final repair, and
     when, without opening the derived state file.
@@ -6342,7 +6341,7 @@ def _auto_fix_journal_self_fixed(
                      f"{outcome.rounds_used} ({identity}) repaired this task's "
                      "own finding and no further configured round confirmed it"),
             detail=("The configured per-plan review sequence ended on that "
-                    "repair, so the folder is SELF-FIXED, UNREVIEWED: the task "
+                    "repair, so the plan is SELF-FIXED, UNREVIEWED: the task "
                     "keeps the status its own focused gate proved and nothing "
                     "was reopened, reverted, or marked BLOCKED. Only "
                     "independent review confirmation is missing; acceptance "
@@ -6829,7 +6828,7 @@ def _uncheckpointed_done_dirt_owner(cfg: Config, plan: Plan) -> Task | None:
 
     That crash leaves the produced work uncommitted while ``next_task()`` has already moved on
     to the following TODO task, so the resumable-candidate path above must never be allowed to
-    claim it.  Eligibility needs both halves of the evidence: no ``auto(<folder>/<task>)``
+    claim it.  Eligibility needs both halves of the evidence: no ``auto(<plan>/<task>)``
     checkpoint in this branch's history, and a scope containing every uncommitted path.  A
     missing checkpoint alone proves nothing -- a DONE task whose changes all landed in an
     earlier ``wip`` checkpoint legitimately has none -- so a second plausible owner, an existing
@@ -6872,7 +6871,7 @@ def _interrupted_review_round_dirt_owner(cfg: Config, plan: Plan) -> Task | None
     write and before its verdict leaves dirt neither owner above can claim: the round writes no
     durable verdict (its position must not advance), and the task it was repairing already
     completed its ordinary closeout, so it has its terminal ``auto(...)`` checkpoint.  The
-    folder's durable ``_auto_fix.toml`` supplies the missing evidence -- a ``REPAIRING`` or
+    plan's durable ``_auto_fix.toml`` supplies the missing evidence -- a ``REPAIRING`` or
     ``AWAITING_REVIEW`` phase is a round that was in flight, and its current findings name the
     tasks that round was allowed to write in.  Everything else fails closed: no durable state,
     a settled or not-in-flight phase, an unreadable record, dirt outside the implicated scope,
@@ -7090,7 +7089,7 @@ def _handle_main_tree_escape(cfg: Config, task: Task | None, baseline: set[str],
     - a proven in-scope path that still fails to port (e.g. the worktree copy already
       diverged) -> fail closed, both trees left untouched, needs a human to port manually.
 
-    Known limitation (accepted): under parallel folder runs, scope attribution of concurrent
+    Known limitation (accepted): under parallel plan runs, scope attribution of concurrent
     main-tree dirt is heuristic; overlapping scope between parallel tasks can misattribute a
     path, but the fail-closed branch above guarantees it never silently corrupts the main
     tree's content.
@@ -7293,7 +7292,7 @@ def _process_plan_workflow(
         cfg: Config, plan: Plan, rotation: _AdapterRotation,
         sleep: Callable[[float], None], now: Callable[[], datetime],
         trusted_contracts: dict[str, str]) -> int:
-    """Run a `[workflow].task = []` folder as one plan-owned unit."""
+    """Run a `[workflow].task = []` plan as one plan-owned unit."""
     if not cfg.workflow_plan:
         print("[workflow].task = [] has no [workflow].plan step to execute")
         return 1
@@ -7359,7 +7358,7 @@ def _process_plan_workflow(
         assert step_rotation is not None
         adapter = step_rotation.adapter
         adapter_name = step_rotation.name
-        session = _plan_step_session(cfg, adapter, plan, step, adapter_name)
+        session = _plan_step_session(cfg, adapter, step, adapter_name)
         prompt = _plan_worker_prompt(
             cfg, plan, step, state, trusted_contracts, failure_reason)
         print(f"\nPlan workflow step {state.step_index + 1}/{len(cfg.workflow_plan)}: "
@@ -7499,7 +7498,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                   gate_passes: _FocusedGateLedger | None = None,
                   usage_context_kind: str = "task",
                   usage_context_id: str | None = None,
-                  usage_folders: tuple[str, ...] | None = None,
+                  usage_plans: tuple[str, ...] | None = None,
                   ) -> str | None:
     """Run a single task's full lifecycle; internally handles quota/control resumption and
     retries, and by the end the task is DONE/BLOCKED.
@@ -7688,7 +7687,7 @@ def _process_task(cfg: Config, task: Task, rotation: _AdapterRotation,
                 session.requested_effort, cfg.root,
                 context_kind=usage_context_kind,
                 context_id=usage_context_id or task.id,
-                folders=usage_folders,
+                plan_names=usage_plans,
                 structured=bool(
                     workflow_step is not None
                     and workflow_step.produces_verdict))
@@ -8419,21 +8418,21 @@ def _verify_focused_locked(
 
     Focused verification is deliberately separate from receipt-producing full
     verification.  It only proves that the task-level commands pass in the
-    folder's own source worktree, so it never creates an integration candidate
+    plan's own source worktree, so it never creates an integration candidate
     or touches a verification receipt.
     """
-    folder = cfg.tasks_name
+    plan_name = cfg.tasks_name
     main = gitops.main_worktree(cfg.root)
-    source = gitops.resolve_folder_source(main, folder, cfg.git_excludes)
+    source = gitops.resolve_plan_source(main, plan_name, cfg.git_excludes)
     source_cfg = cfg.for_worktree(source.worktree)
 
     plan = Plan.parse(cfg.tasks_dir)
     if task_id is not None:
         task = plan.get(task_id)
         if task is None:
-            raise AssentError(f"task {task_id} not found in folder {folder}")
+            raise AssentError(f"task {task_id} not found in plan {plan_name}")
         commands = [task.verify]
-        label = f"verify {folder} --focus {task_id}"
+        label = f"verify {plan_name} --focus {task_id}"
         kind = "focused test"
     else:
         commands = []
@@ -8445,14 +8444,14 @@ def _verify_focused_locked(
             commands.append(task.verify)
         if not commands:
             raise AssentError(
-                f"folder {folder} has no DONE task with an eligible focused "
+                f"plan {plan_name} has no DONE task with an eligible focused "
                 "verify command")
-        label = f"verify {folder} --focus"
+        label = f"verify {plan_name} --focus"
         kind = "focused sweep"
 
     # --focus provisions the persistent source worktree like every other verify
     # entry point, and writes no receipt of any kind.
-    shared_paths.prepare_sources(main, [(folder, source.worktree)])
+    shared_paths.prepare_sources(main, [(plan_name, source.worktree)])
     print(f"{label}: source worktree {source.worktree}")
     print(f"{label}: {kind} cannot authorize `accept`; "
           "complete integration verification has not run")
@@ -8482,11 +8481,11 @@ def _verify_focused_locked(
 
 def verify_focused(cfg: Config, task_id: str | None = None) -> int:
     """Run one task check or a DONE-task sweep without making receipts."""
-    folder = cfg.tasks_name
-    label = (f"verify {folder} --focus {task_id}" if task_id is not None
-             else f"verify {folder} --focus")
+    plan_name = cfg.tasks_name
+    label = (f"verify {plan_name} --focus {task_id}" if task_id is not None
+             else f"verify {plan_name} --focus")
     try:
-        with lockfile.hold_lock(cfg.tasks_dir, folder):
+        with lockfile.hold_lock(cfg.tasks_dir, plan_name):
             return _verify_focused_locked(cfg, task_id)
     except lockfile.LockBusy as e:
         print(f"{label}: refused ({e})")

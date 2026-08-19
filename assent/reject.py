@@ -1,4 +1,4 @@
-"""Implementation of manual-decision rejection for a task folder and its task statuses."""
+"""Implementation of manual-decision rejection for a plan and its task statuses."""
 from __future__ import annotations
 
 from contextlib import ExitStack
@@ -7,8 +7,8 @@ from typing import Callable
 
 from assent import AssentError, gitops, verification
 from assent.config import Config
-from assent.folder_source import COMPLETE_STATUSES, resolve_source_snapshot
-from assent.folderdeps import direct_dependents, parse_folder_dependency_graph
+from assent.plan_source import COMPLETE_STATUSES, resolve_source_snapshot
+from assent.plandeps import direct_dependents, parse_plan_dependency_graph
 from assent.lockfile import LockBusy, LockMissing, probe_lock
 from assent.plan import Plan, append_entry, set_status
 
@@ -23,7 +23,7 @@ def _remove_empty_container(path: Path) -> None:
         pass
 
 
-def reject_folder(cfg: Config, confirm: Callable[[str], str] | None = None) -> int:
+def reject_plan(cfg: Config, confirm: Callable[[str], str] | None = None) -> int:
     """Archive, then force-remove the worktree and same-prefix branches, and reset tasks to TODO.
 
     Returns 1 for a busy lock, missing lock, task-file precheck failure, a declined
@@ -66,11 +66,11 @@ def _confirm_destructive(name: str, path: Path, branches: list[str],
     else:
         print("  tasks to reset to TODO: none")
     if stranded:
-        print("  unaccepted dependent folders that would be stranded:")
+        print("  unaccepted dependent plans that would be stranded:")
         for dependent, reason in stranded:
             print(f"    {dependent}: {reason}")
         print("  Two ways forward: (a) reject each dependent first, bottom-up, "
-              "then reject this folder; or (b) confirm below to accept stranding "
+              "then reject this plan; or (b) confirm below to accept stranding "
               "them.")
 
     ask = confirm if confirm is not None else input
@@ -83,9 +83,9 @@ def _confirm_destructive(name: str, path: Path, branches: list[str],
 
 def _check_dependents(cfg: Config, stack: ExitStack
                       ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """Lock direct dependent folders and classify each as busy or unaccepted.
+    """Lock direct dependent plans and classify each as busy or unaccepted.
 
-    Reads the dependent set from ``folderdeps.direct_dependents``, the same
+    Reads the dependent set from ``plandeps.direct_dependents``, the same
     shared edge lookup ``clean`` uses, instead of a second implementation. Every
     direct dependent's ``assent.lock`` is held via ``stack`` for the rest of this
     reject, the same way ``clean.py`` ``_lock_and_check_dependents`` holds them
@@ -98,7 +98,7 @@ def _check_dependents(cfg: Config, stack: ExitStack
     provably accepted, paired with the reason.
     """
     name = cfg.tasks_name
-    graph = parse_folder_dependency_graph(cfg.assent_dir)
+    graph = parse_plan_dependency_graph(cfg.assent_dir)
     dependents = direct_dependents(graph, name)
     if not dependents:
         return [], []
@@ -109,13 +109,13 @@ def _check_dependents(cfg: Config, stack: ExitStack
         try:
             stack.enter_context(probe_lock(cfg.assent_dir / dependent, dependent))
         except LockBusy:
-            busy.append((dependent, "its task folder is being changed by another run"))
+            busy.append((dependent, "its plan is being changed by another run"))
         except LockMissing as e:
             unaccepted.append((dependent, str(e)))
         except AssentError as e:
-            unaccepted.append((dependent, f"its task-folder lock is unavailable: {e}"))
+            unaccepted.append((dependent, f"its plan lock is unavailable: {e}"))
 
-    locked_graph = parse_folder_dependency_graph(cfg.assent_dir)
+    locked_graph = parse_plan_dependency_graph(cfg.assent_dir)
     locked_dependents = direct_dependents(locked_graph, name)
     if locked_dependents != dependents:
         raise AssentError(
@@ -171,7 +171,7 @@ def _reject_locked(cfg: Config, path: Path, dependent_locks: ExitStack,
 
     busy, stranded = _check_dependents(cfg, dependent_locks)
     if busy:
-        print(f"{name}: reject aborted (an unaccepted dependent folder is busy):")
+        print(f"{name}: reject aborted (an unaccepted dependent plan is busy):")
         for dependent, reason in busy:
             print(f"  dependent {dependent}: {reason}")
         return 1
@@ -235,7 +235,7 @@ def _reset_rejected_tasks(cfg: Config, plan: Plan, evidence: list[str],
     detail = "Git evidence before deletion:\n" + (
         "\n".join(evidence) if evidence else "no worktree or same-prefix branches")
     if stranded:
-        detail += "\n\nConfirmed stranding unaccepted dependent folder(s):\n" + "\n".join(
+        detail += "\n\nConfirmed stranding unaccepted dependent plan(s):\n" + "\n".join(
             f"{dependent}: {reason}" for dependent, reason in stranded)
     try:
         for task in plan.tasks:

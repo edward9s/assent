@@ -6,8 +6,8 @@
 
 ## Invariants
 
-- Git is mandatory. Work folders are explicit or derived unambiguously; there
-  is no current-folder pointer or Git-less mode.
+- Git is mandatory. Plans are explicit or derived unambiguously; there
+  is no current-plan pointer or Git-less mode.
 - Preserve every token-burned edit and diagnostic. Failure, interruption, and
   repair never revert the workspace automatically.
 - Scope checks fail closed. AI roles never own task-contract, receipt,
@@ -57,9 +57,9 @@ Prompt rules plus before/after checks detect unauthorized writes but cannot
 prevent access to external files, credentials, network services, or Git writers.
 Use unattended execution only in trusted environments.
 
-One work folder permits one `run`, enforced by an OS lock on its persistent
+One plan folder permits one `run`, enforced by an OS lock on its persistent
 `assent.lock`; file existence alone never means a live or stale lock. Different
-folders may run concurrently in dedicated `<project>.worktrees/<folder>/`
+plans may run concurrently in dedicated `<project>.worktrees/<plan>/`
 worktrees.
 
 ## Workflow configuration
@@ -192,9 +192,9 @@ repairs only that durable failure. On candidate conflict, the scheduler first
 collects one complete typed conflict wave and runs zero full tests. Evidence
 distinguishes:
 
-- `target_alone`: one folder conflicts with the current target. Repair uses an
+- `target_alone`: one plan conflicts with the current target. Repair uses an
   Assent-managed source-first reconcile worktree and exact conflict paths.
-- `peer_only`: selected folders conflict only when combined. Repair reopens the
+- `peer_only`: selected plans conflict only when combined. Repair reopens the
   implicated existing task with compatible-prefix and three-way evidence; it
   never merges a speculative peer directly.
 
@@ -205,7 +205,7 @@ commit, source fast-forward, focused checks, cleanup, candidate rebuild, and the
 next `full_verify`.
 
 The automatic path keeps the original exact selection. It never asks to skip,
-silently removes a folder, accepts a compatible prefix, changes the target, or
+silently removes a plan, accepts a compatible prefix, changes the target, or
 publishes. Resume reuses content-identical source, target, prefix, merge,
 focused-gate, and receipt evidence. Drift, ambiguous ownership, out-of-scene
 writes, remaining conflict markers, or exhausted positions fail closed and
@@ -222,11 +222,11 @@ extension.
 - If the array ends on `FIXED`, a settling gate re-runs the implicated focused
   command through a de-duplicating ledger. PASS settles `SELF-FIXED,
   UNREVIEWED`, preserving task statuses and exiting zero. Failure is distinct:
-  the folder does not settle, no task becomes `BLOCKED`, edits remain, and the
+  the plan does not settle, no task becomes `BLOCKED`, edits remain, and the
   run exits nonzero.
 - If it ends with an unrepaired blocker, it settles `REVIEW UNRESOLVED, HUMAN
   DECISION`, preserves all statuses, findings, journals, and edits, and exits
-  zero so unrelated queued folders continue. Failed mechanical evidence still
+  zero so unrelated queued plans continue. Failed mechanical evidence still
   blocks acceptance.
 
 `_auto_fix.toml` is version-7, untracked, deletable runtime memory, never task
@@ -256,32 +256,32 @@ source.
 
 ## Selection and command rules
 
-Every explicitly named live folder is audited before dispatch. Each name,
-including a prefix before `...`, must resolve to an existing `.assent/` folder
+Every explicitly named live plan is audited before dispatch. Each name,
+including a prefix before `...`, must resolve to an existing `.assent/` plan
 with a formal task file. Any unresolved set is reported in full and prevents all
 selected work from starting. Restore/recovery may intentionally resume an absent
-live folder.
+live plan.
 
-The literal final token `...` appends every remaining folder the command itself
+The literal final token `...` appends every remaining plan the command itself
 would discover. It is not `--all`, may appear only once and last, and cannot be
 combined with `--all` or a mode that has incompatible cardinality. Expansion is
-snapshotted before mutation. `verify` and `accept` add finished folders; `run`,
-`clean`, and `archive` add all work folders. Native ordering then applies:
+snapshotted before mutation. `verify` and `accept` add finished plans; `run`,
+`clean`, and `archive` add all plans. Native ordering then applies:
 `run` preserves its explicit prefix and dependency-orders the remainder;
 `verify` and `accept` dependency-order the whole set; `clean` is upstream-first.
 
-Cardinality selects behavior: one folder uses the single-folder path; two or
+Cardinality selects behavior: one plan uses the single-plan path; two or
 more form one exact batch. Expansion never weakens exact receipt matching or
 causes acceptance to verify.
 
-`run [FOLDER ...]` executes the named folders in stated order; omitted selection
-requires exactly one runnable folder; `--all` runs incomplete folders in
+`run [PLAN ...]` executes the named plans in stated order; omitted selection
+requires exactly one runnable plan; `--all` runs incomplete plans in
 dependency order and `--jobs N` limits concurrency. It stops dispatching after
 a genuine nonzero failure. A successful run follows plan and integration
 workflows for the same selection. `--once` and `--task` defer automatic
-integration when they leave the selected folder incomplete. No run accepts.
+integration when they leave the selected plan incomplete. No run accepts.
 
-`status`, `check`, and `report` act on one explicitly named folder or all when
+`status`, `check`, and `report` act on one explicitly named plan or all when
 omitted. `check` also validates every task and the dependency graph.
 
 For full option syntax, use `assent <command> --help`. The decision-relevant
@@ -295,26 +295,26 @@ and cannot authorize acceptance. Scheduler-owned `focused_test` and
 non-ignored worktree change is `STALE` evidence, not a pass. Complete
 verification builds a temporary integration candidate and runs
 `.assent/verify.py` outside every AI session.
-Its folder or exact-batch receipt is derived, deletable evidence bound to source
+Its plan or exact-batch receipt is derived, deletable evidence bound to source
 commits, reconstructed trees, verifier digest, and shared-input digest.
 An explicit `assent verify` runs only the requested mechanical check. It does
 not enter a configured workflow role, start an AI session, or repair a failure.
 
-- `assent verify FOLDER --focus TASK`: that task's focused command, regardless
+- `assent verify PLAN --focus TASK`: that task's focused command, regardless
   of task status.
-- `assent verify FOLDER --focus`: distinct `DONE`-task focused commands only.
-- `assent verify FOLDER`: one folder candidate and folder receipt.
+- `assent verify PLAN --focus`: distinct `DONE`-task focused commands only.
+- `assent verify PLAN`: one plan candidate and plan receipt.
 - `assent verify A B`: exactly that dependency-ordered selection, one candidate,
   one full run, one exact receipt. Conflict refuses the whole request; it never
   silently shrinks. A localized passing prefix cannot authorize the request.
-- `assent verify --batch`: dynamically discovers finished, unintegrated folders.
+- `assent verify --batch`: dynamically discovers finished, unintegrated plans.
   It tries the whole merge wave, reports every conflict and excluded dependent,
   and may ask once whether to verify the remaining independent subset. A reduced
   receipt names only that subset.
 
 Verification changes no target or source ref and never accepts. A candidate
-conflict is not a verifier failure. Complete folder verification refreshes that
-folder's `_report.md` exactly once, best-effort, after its receipt operation and
+conflict is not a verifier failure. Complete plan verification refreshes that
+plan's `_report.md` exactly once, best-effort, after its receipt operation and
 all verification locks settle; focused and batch operations do not.
 
 ### Shared ignored inputs
@@ -380,9 +380,9 @@ be proven, retain the managed path for Assent recovery.
 
 ## Manual reconcile
 
-`assent reconcile FOLDER` handles a finished folder that conflicts with the
-current target. It creates `<project>.reconcile/<folder>` on
-`assent-reconcile/<folder>`, merges target into the exact source tip, and lets a
+`assent reconcile PLAN` handles a finished plan that conflicts with the
+current target. It creates `<project>.reconcile/<plan>` on
+`assent-reconcile/<plan>`, merges target into the exact source tip, and lets a
 human edit only conflicted paths while Assent owns Git actions.
 
 `--continue` refuses unresolved paths, conflict markers, whitespace errors, and
@@ -403,7 +403,7 @@ status/checkpoints, relevant journal summaries, verification freshness, and
 review outcomes. It is informational, not authorization. `_technical_debt.md`
 is likewise derived meeting evidence.
 
-Direct `accept FOLDER` and selected `accept A B` never start verification.
+Direct `accept PLAN` and selected `accept A B` never start verification.
 Except for an ancestry-proven already-integrated no-op, they require a fresh
 receipt matching exactly the source, reconstructed integration tree, verifier,
 and shared inputs. Selected acceptance replays the recorded merge chain and
@@ -413,7 +413,7 @@ publishes all or none.
 
 1. replay a fresh PASSED batch receipt atomically without verification; or
 2. when batch evidence is absent or expired, sequentially run/reuse each
-   folder's verification immediately before its ordinary accept, stopping at
+   plan's verification immediately before its ordinary accept, stopping at
    the first failure while preserving earlier publications.
 
 A malformed batch receipt refuses instead of falling back. Every mode refuses
@@ -424,17 +424,17 @@ Assent accept operations but cannot stop external Git writers.
 
 ## Cleanup, archive, rejection, and rework
 
-`clean` removes a managed worktree and same-folder branches only after proving
+`clean` removes a managed worktree and same-plan branches only after proving
 cleanliness, expected ownership, and full integration. It retains upstream
 source while any direct dependent remains unfinished, unaccepted, dirty,
 missing, or unproven. There is no force mode. Multiple selections clean
 upstream-first.
 
-`archive FOLDER` requires finished, accepted, proven-integrated state; performs
-the same guarded cleanup; then stores the live management folder in
-`.assent/_archive/<folder>.zip`, updates the archive roster, and removes the
-live directory. Named ineligible folders make a multi-folder request nonzero;
-`--all` skips ineligible folders. Restore takes exactly one folder and validates
+`archive PLAN` requires finished, accepted, proven-integrated state; performs
+the same guarded cleanup; then stores the live management directory in
+`.assent/_archive/<plan>.zip`, updates the archive roster, and removes the
+live directory. Named ineligible plans make a multi-plan request nonzero;
+`--all` skips ineligible plans. Restore takes exactly one plan and validates
 the archive before replacing nothing.
 
 `reject` is an explicitly confirmed destructive reset. It checkpoints dirty
@@ -443,15 +443,15 @@ force-deletes only same-prefix branches, and resets `DONE`, `WIP`, and `BLOCKED`
 tasks to `TODO`; branch content is then recoverable by recorded hash only while
 Git retains it. `rework` reopens existing tasks while preserving code unless
 the human states `--revert-code`; reversal is allowed only for a mechanically
-proven checkpoint tail. Neither command invents a current folder or implicitly
+proven checkpoint tail. Neither command invents a current plan or implicitly
 runs or accepts work.
 
-`assent-integration/<folder>/<suffix>` and `assent-reconcile/<folder>` are
+`assent-integration/<plan>/<suffix>` and `assent-reconcile/<plan>` are
 temporary Assent-owned branches. A survivor is proven orphaned only when the
 repository-wide integration lock is held and no transaction owns it. Whether
 its tree is `published` or `superseded` is reporting information only, never
-the deletion criterion. `clean` with no folder sweeps both namespaces once per
-invocation; `archive --all` inherits that sweep; named `clean FOLDER`
+the deletion criterion. `clean` with no plan sweeps both namespaces once per
+invocation; `archive --all` inherits that sweep; named `clean PLAN`
 deliberately does not. `doctor` reports survivors and offers confirmed `[y/N]`
 recovery.
 
@@ -459,7 +459,7 @@ recovery.
 
 The scheduler validates status, protected task structure, fail-closed scope,
 and focused evidence before a terminal checkpoint. A resumed task may receive
-an empty terminal `auto(<folder>/tNNN)` commit because earlier WIP history owns
+an empty terminal `auto(<plan>/tNNN)` commit because earlier WIP history owns
 the changes. A clean legacy `DONE` task does not retroactively synthesize one.
 
 Quota, checkpoint-resume control, Ctrl+C, adapter failure, and unclean exit keep
@@ -483,5 +483,5 @@ paths fit the task and the transfer is unambiguous; otherwise both trees remain
 untouched and the run refuses.
 
 Never manually remove managed worktrees or temporary branches. History rewrites
-must preserve `auto(<folder>/tNNN):`, `wip(`, `rework(`, and `accept(` subjects,
+must preserve `auto(<plan>/tNNN):`, `wip(`, `rework(`, and `accept(` subjects,
 must not occur during rework, and make all verification receipts stale.

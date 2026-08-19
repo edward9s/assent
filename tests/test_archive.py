@@ -13,9 +13,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assent import gitops, pathops
-from assent.archive import (archive_all, archive_folder, archive_selected,
-                            read_roster, restore_folder, _archive_dir,
-                            _write_roster, _zip_path)
+from assent.archive import (archive_all, archive_plan, archive_selected,
+                            read_roster, restore_plan, _archive_dir,
+                            _compress_plan, _write_roster, _zip_path)
 from assent.config import load_config
 from assent.lockfile import LockBusy, hold_lock
 from assent.__main__ import _dispatch
@@ -70,8 +70,8 @@ class TestArchive(unittest.TestCase):
         _git(self.root, "commit", "-m", "init")
 
         self.assent_dir = self.root / ".assent"
-        self.folder = "plan01"
-        self.tasks_dir = self.assent_dir / self.folder
+        self.plan_name = "plan01"
+        self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.assent_dir / "assent.toml"
         self.config_path.write_text("", encoding="utf-8")
@@ -80,8 +80,8 @@ class TestArchive(unittest.TestCase):
         (self.tasks_dir / "t001_task.r.toml").write_text(
             'note = "journal"\n', encoding="utf-8")
         (self.tasks_dir / "assent.lock").write_text(
-            f'folder = "{self.folder}"\n', encoding="utf-8")
-        self.cfg = load_config(self.config_path, self.folder)
+            f'plan = "{self.plan_name}"\n', encoding="utf-8")
+        self.cfg = load_config(self.config_path, self.plan_name)
         self.container = self.root.parent / f"{self.root.name}.worktrees"
         self.addCleanup(self._cleanup_worktrees)
 
@@ -94,35 +94,35 @@ class TestArchive(unittest.TestCase):
         cfg = cfg or self.cfg
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = archive_folder(cfg)
+            code = archive_plan(cfg)
         return code, output.getvalue()
 
     def _restore(self, cfg=None) -> tuple[int, str]:
         cfg = cfg or self.cfg
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = restore_folder(cfg)
+            code = restore_plan(cfg)
         return code, output.getvalue()
 
-    def _folder(self, name: str, status: str = "DONE") -> Path:
-        folder = self.assent_dir / name
-        folder.mkdir(exist_ok=True)
-        (folder / "t001_task.e.toml").write_text(
+    def _plan_name(self, name: str, status: str = "DONE") -> Path:
+        plan_name = self.assent_dir / name
+        plan_name.mkdir(exist_ok=True)
+        (plan_name / "t001_task.e.toml").write_text(
             _task_text(status), encoding="utf-8")
-        (folder / "assent.lock").write_text(
-            f'folder = "{name}"\n', encoding="utf-8")
-        return folder
+        (plan_name / "assent.lock").write_text(
+            f'plan = "{name}"\n', encoding="utf-8")
+        return plan_name
 
     def _unmerged_source(self) -> tuple[Path, str]:
-        worktree = gitops.ensure_worktree(self.root, self.folder)
-        branch = gitops.ensure_branch(worktree, f"{self.folder}/")
+        worktree = gitops.ensure_worktree(self.root, self.plan_name)
+        branch = gitops.ensure_branch(worktree, f"{self.plan_name}/")
         (worktree / "result.txt").write_text("work\n", encoding="utf-8")
         gitops.commit_all(worktree, "finish result")
         return worktree, branch
 
     def _finished_source(self, name: str) -> str:
-        """Create a finished folder with a committed, not-yet-integrated source."""
-        self._folder(name)
+        """Create a finished plan with a committed, not-yet-integrated source."""
+        self._plan_name(name)
         worktree = gitops.ensure_worktree(self.root, name)
         branch = gitops.ensure_branch(worktree, f"{name}/")
         (worktree / f"{name}.txt").write_text("work\n", encoding="utf-8")
@@ -130,7 +130,7 @@ class TestArchive(unittest.TestCase):
         return branch
 
     def _integrate(self, branch: str) -> None:
-        """Merge a source into the target the way an accepted folder leaves it."""
+        """Merge a source into the target the way an accepted plan leaves it."""
         _git(self.root, "merge", "--no-ff", branch, "-m", f"accept: {branch}")
 
     def _linked_accepted_source(self) -> tuple[Path, str, list[tuple[str, str]]]:
@@ -155,8 +155,8 @@ class TestArchive(unittest.TestCase):
                 target.write_text(content, encoding="utf-8")
         before = self._target_inventory(files)
 
-        worktree = gitops.ensure_worktree(self.root, self.folder)
-        branch = gitops.ensure_branch(worktree, f"{self.folder}/")
+        worktree = gitops.ensure_worktree(self.root, self.plan_name)
+        branch = gitops.ensure_branch(worktree, f"{self.plan_name}/")
         make_directory_link(worktree / "pkg", self.root / "pkg")
         make_directory_link(worktree / "assets", self.root / "assets")
         make_directory_link(
@@ -176,7 +176,7 @@ class TestArchive(unittest.TestCase):
 
     # ---- preconditions ---------------------------------------------------
 
-    def test_unfinished_folder_is_refused(self) -> None:
+    def test_unfinished_plan_is_refused(self) -> None:
         (self.tasks_dir / "t001_task.e.toml").write_text(
             _task_text("TODO"), encoding="utf-8")
 
@@ -184,23 +184,23 @@ class TestArchive(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("Unfinished tasks: t001=TODO", output)
-        self.assertFalse(_zip_path(self.assent_dir, self.folder).exists())
+        self.assertFalse(_zip_path(self.assent_dir, self.plan_name).exists())
         self.assertTrue(self.tasks_dir.exists())
         self.assertEqual(read_roster(self.assent_dir), [])
 
     def test_busy_lock_refuses_archive(self) -> None:
-        with hold_lock(self.tasks_dir, self.folder):
+        with hold_lock(self.tasks_dir, self.plan_name):
             code, output = self._archive()
 
         self.assertEqual(code, 1)
         self.assertIn("a run is in progress", output)
-        self.assertFalse(_zip_path(self.assent_dir, self.folder).exists())
+        self.assertFalse(_zip_path(self.assent_dir, self.plan_name).exists())
         self.assertTrue(self.tasks_dir.exists())
 
-    def test_folder_without_lock_file_archives(self) -> None:
-        # A folder that predates the lock mechanism has no assent.lock; its absence
+    def test_plan_without_lock_file_archives(self) -> None:
+        # A plan that predates the lock mechanism has no assent.lock; its absence
         # is proof nobody holds it, so archive acquires (creates) the lock and files
-        # the folder rather than skipping it (the archive --all=0 incident).
+        # the plan rather than skipping it (the archive --all=0 incident).
         (self.tasks_dir / "assent.lock").unlink()
 
         code, output = self._archive()
@@ -215,13 +215,13 @@ class TestArchive(unittest.TestCase):
         code, output = self._archive()
 
         self.assertEqual(code, 0, output)
-        with zipfile.ZipFile(_zip_path(self.assent_dir, self.folder)) as zf:
+        with zipfile.ZipFile(_zip_path(self.assent_dir, self.plan_name)) as zf:
             names = zf.namelist()
         self.assertNotIn("assent.lock", names)
         self.assertIn("t001_task.e.toml", names)
 
     def test_lock_is_held_across_archive_work(self) -> None:
-        # While archive works, it holds the folder lock, so a concurrent
+        # While archive works, it holds the plan lock, so a concurrent
         # run/reject/rework acquisition is refused — closing the probe-then-act
         # TOCTOU window.  The probe happens mid-archive, during compression.
         import assent.archive as archive_mod
@@ -230,7 +230,7 @@ class TestArchive(unittest.TestCase):
 
         def spy(src_dir, tmp_zip):
             try:
-                with hold_lock(self.tasks_dir, self.folder):
+                with hold_lock(self.tasks_dir, self.plan_name):
                     observed["acquired"] = True
             except LockBusy:
                 observed["blocked"] = True
@@ -255,13 +255,13 @@ class TestArchive(unittest.TestCase):
         self.assertIn("not yet integrated", output)
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
-        self.assertFalse(_zip_path(self.assent_dir, self.folder).exists())
+            self.root, f"{self.plan_name}/"))
+        self.assertFalse(_zip_path(self.assent_dir, self.plan_name).exists())
         self.assertTrue(self.tasks_dir.exists())
         self.assertEqual(read_roster(self.assent_dir), [])
 
     def test_foreign_zip_refuses_archive(self) -> None:
-        zip_path = _zip_path(self.assent_dir, self.folder)
+        zip_path = _zip_path(self.assent_dir, self.plan_name)
         zip_path.parent.mkdir(parents=True, exist_ok=True)
         zip_path.write_bytes(b"not really a zip")
 
@@ -292,11 +292,11 @@ class TestArchive(unittest.TestCase):
 
         self.assertEqual(code, 0, output)
         self.assertIn("archived", output)
-        zip_path = _zip_path(self.assent_dir, self.folder)
+        zip_path = _zip_path(self.assent_dir, self.plan_name)
         self.assertTrue(zip_path.exists())
         self.assertFalse(self.tasks_dir.exists())
         roster = read_roster(self.assent_dir)
-        self.assertEqual([e["folder"] for e in roster], [self.folder])
+        self.assertEqual([e["plan"] for e in roster], [self.plan_name])
         self.assertIn("archived_at", roster[0])
         self.assertEqual(roster[0].get("main_tip"), head)
         with zipfile.ZipFile(zip_path) as zf:
@@ -324,18 +324,18 @@ class TestArchive(unittest.TestCase):
         code, output = self._archive()
 
         self.assertEqual(code, 0, output)
-        self.assertIn(f"{self.folder}: cleaned (worktree {worktree})", output)
-        self.assertIn(f"{self.folder}: archived", output)
+        self.assertIn(f"{self.plan_name}: cleaned (worktree {worktree})", output)
+        self.assertIn(f"{self.plan_name}: archived", output)
         self.assertFalse(worktree.exists())
         self.assertNotIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
 
     def test_archive_retains_an_unowned_directory_at_the_fixed_path(self) -> None:
-        path = gitops.worktree_path(self.root, self.folder)
+        path = gitops.worktree_path(self.root, self.plan_name)
         path.mkdir(parents=True)
         foreign = path / "keep.txt"
         foreign.write_text("not an Assent worktree\n", encoding="utf-8")
-        branch = f"{self.folder}/integrated"
+        branch = f"{self.plan_name}/integrated"
         _git(self.root, "branch", branch, "HEAD")
 
         code, output = self._archive()
@@ -346,7 +346,7 @@ class TestArchive(unittest.TestCase):
         self.assertEqual(foreign.read_text(encoding="utf-8"),
                          "not an Assent worktree\n")
         self.assertIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
 
     def test_archive_detaches_main_tree_links_before_publishing(self) -> None:
         worktree, branch, before = self._linked_accepted_source()
@@ -356,7 +356,7 @@ class TestArchive(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertFalse(worktree.exists())
         self.assertEqual(gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"), [])
+            self.root, f"{self.plan_name}/"), [])
         self.assertEqual(self._target_inventory({
             "pkg": {"sentinel.txt": "", "nested/data.txt": ""},
             "assets": {"sentinel.txt": ""},
@@ -372,10 +372,10 @@ class TestArchive(unittest.TestCase):
             code = archive_all(str(self.config_path), self.assent_dir)
 
         self.assertEqual(code, 0, output.getvalue())
-        self.assertIn(f"{self.folder}: archived", output.getvalue())
+        self.assertIn(f"{self.plan_name}: archived", output.getvalue())
         self.assertFalse(worktree.exists())
         self.assertEqual(gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"), [])
+            self.root, f"{self.plan_name}/"), [])
         self.assertEqual(self._target_inventory({
             "pkg": {"sentinel.txt": "", "nested/data.txt": ""},
             "assets": {"sentinel.txt": ""},
@@ -395,13 +395,13 @@ class TestArchive(unittest.TestCase):
         self.assertIn(str(worktree / "assets"), output)
         self.assertTrue(worktree.exists())
         self.assertIn(branch, gitops.branches_with_prefix(
-            self.root, f"{self.folder}/"))
+            self.root, f"{self.plan_name}/"))
         self.assertEqual(self._target_inventory({
             "pkg": {"sentinel.txt": "", "nested/data.txt": ""},
             "assets": {"sentinel.txt": ""},
             "lib/l10n/arb": {"app.arb": ""},
         }), before)
-        self.assertFalse(_zip_path(self.assent_dir, self.folder).exists())
+        self.assertFalse(_zip_path(self.assent_dir, self.plan_name).exists())
         self.assertEqual(read_roster(self.assent_dir), [])
 
     def test_restore_refuses_when_live_directory_exists(self) -> None:
@@ -414,7 +414,7 @@ class TestArchive(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("already exists", output)
-        self.assertTrue(_zip_path(self.assent_dir, self.folder).exists())
+        self.assertTrue(_zip_path(self.assent_dir, self.plan_name).exists())
         self.assertEqual((self.tasks_dir / "keep.txt").read_text(encoding="utf-8"),
                          "mine\n")
 
@@ -429,10 +429,10 @@ class TestArchive(unittest.TestCase):
     # ---- crash-resume idempotency ---------------------------------------
 
     def _assert_fully_archived(self) -> None:
-        self.assertTrue(_zip_path(self.assent_dir, self.folder).exists())
+        self.assertTrue(_zip_path(self.assent_dir, self.plan_name).exists())
         self.assertFalse(self.tasks_dir.exists())
         self.assertEqual(
-            [e["folder"] for e in read_roster(self.assent_dir)], [self.folder])
+            [e["plan"] for e in read_roster(self.assent_dir)], [self.plan_name])
 
     def test_rerun_after_completion_is_idempotent(self) -> None:
         self._archive()
@@ -446,8 +446,8 @@ class TestArchive(unittest.TestCase):
         # Roster committed but the final zip not yet published (crash between
         # register and rename); the live directory is still present.
         _write_roster(self.assent_dir, [
-            {"folder": self.folder, "archived_at": "2026-07-25T00:00:00+00:00"}])
-        self.assertFalse(_zip_path(self.assent_dir, self.folder).exists())
+            {"plan": self.plan_name, "archived_at": "2026-07-25T00:00:00+00:00"}])
+        self.assertFalse(_zip_path(self.assent_dir, self.plan_name).exists())
 
         code, output = self._archive()
 
@@ -458,11 +458,9 @@ class TestArchive(unittest.TestCase):
         # Roster committed and zip published, but the live directory not yet
         # deleted (crash between rename and delete).
         _write_roster(self.assent_dir, [
-            {"folder": self.folder, "archived_at": "2026-07-25T00:00:00+00:00"}])
-        zip_path = _zip_path(self.assent_dir, self.folder)
-        zip_path.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            zf.writestr("t001_task.e.toml", _task_text())
+            {"plan": self.plan_name, "archived_at": "2026-07-25T00:00:00+00:00"}])
+        zip_path = _zip_path(self.assent_dir, self.plan_name)
+        _compress_plan(self.tasks_dir, zip_path)
         self.assertTrue(self.tasks_dir.exists())
 
         code, output = self._archive()
@@ -470,14 +468,33 @@ class TestArchive(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self._assert_fully_archived()
 
+    def test_a_new_plan_reusing_an_archived_name_is_refused_not_deleted(self) -> None:
+        # The roster and zip belong to an older plan; the live directory is a
+        # different plan that happens to reuse its name. Treating that as an
+        # interrupted archive would delete work no archive ever captured.
+        _write_roster(self.assent_dir, [
+            {"plan": self.plan_name, "archived_at": "2026-07-25T00:00:00+00:00"}])
+        zip_path = _zip_path(self.assent_dir, self.plan_name)
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("t001_older_objective.e.toml", _task_text())
+
+        code, output = self._archive()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("reusing an archived name", output)
+        self.assertIn("t001_task.e.toml", output)
+        self.assertTrue(self.tasks_dir.is_dir())
+        self.assertTrue((self.tasks_dir / "t001_task.e.toml").is_file())
+        with zipfile.ZipFile(zip_path) as zf:
+            self.assertEqual(zf.namelist(), ["t001_older_objective.e.toml"])
+
     def test_resume_during_delete(self) -> None:
         # Roster committed, zip published, live directory half-removed.
         _write_roster(self.assent_dir, [
-            {"folder": self.folder, "archived_at": "2026-07-25T00:00:00+00:00"}])
-        zip_path = _zip_path(self.assent_dir, self.folder)
-        zip_path.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            zf.writestr("t001_task.e.toml", _task_text())
+            {"plan": self.plan_name, "archived_at": "2026-07-25T00:00:00+00:00"}])
+        zip_path = _zip_path(self.assent_dir, self.plan_name)
+        _compress_plan(self.tasks_dir, zip_path)
         (self.tasks_dir / "t001_task.r.toml").unlink()  # partial deletion
 
         code, output = self._archive()
@@ -488,7 +505,7 @@ class TestArchive(unittest.TestCase):
     # ---- --all -----------------------------------------------------------
 
     def test_archive_all_skips_ineligible_without_failing(self) -> None:
-        self._folder("plan02", status="TODO")  # ineligible: unfinished
+        self._plan_name("plan02", status="TODO")  # ineligible: unfinished
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -497,25 +514,25 @@ class TestArchive(unittest.TestCase):
 
         self.assertEqual(code, 0, text)
         self.assertIn("1 archived, 1 skipped, 0 error(s)", text)
-        self.assertTrue(_zip_path(self.assent_dir, self.folder).exists())
+        self.assertTrue(_zip_path(self.assent_dir, self.plan_name).exists())
         self.assertFalse(_zip_path(self.assent_dir, "plan02").exists())
         self.assertEqual(
-            [e["folder"] for e in read_roster(self.assent_dir)], [self.folder])
+            [e["plan"] for e in read_roster(self.assent_dir)], [self.plan_name])
 
     def test_archive_all_files_only_the_work_cleanup_proves_safe(self) -> None:
-        """A partly accepted batch leaves a mixed ``.assent/``, and each folder is
+        """A partly accepted batch leaves a mixed ``.assent/``, and each plan is
         still judged on its own evidence.
 
         Nothing here tells archive why a source was left unaccepted -- a conflict
-        skipped during batch filtering and a folder nobody has accepted yet look
-        identical to it, which is the point: eligibility is per folder, and every
+        skipped during batch filtering and a plan nobody has accepted yet look
+        identical to it, which is the point: eligibility is per plan, and every
         safety-driven retention stays a visible skip rather than an error.
         """
         self._integrate(self._finished_source("independent"))
         self._finished_source("conflicting")
         self._integrate(self._finished_source("upstream"))
         self._finished_source("zdependent")
-        (self.assent_dir / "zdependent" / "_folder.toml").write_text(
+        (self.assent_dir / "zdependent" / "_plan_deps.toml").write_text(
             'after = ["upstream"]\n', encoding="utf-8")
 
         output = io.StringIO()
@@ -542,13 +559,13 @@ class TestArchive(unittest.TestCase):
             self.assertTrue((self.assent_dir / retained).is_dir())
             self.assertNotEqual(
                 gitops.branches_with_prefix(self.root, f"{retained}/"), [])
-        # The roster records archived folders and nothing about the skips.
+        # The roster records archived plans and nothing about the skips.
         roster = read_roster(self.assent_dir)
-        self.assertEqual(sorted(entry["folder"] for entry in roster),
-                         ["independent", self.folder])
+        self.assertEqual(sorted(entry["plan"] for entry in roster),
+                         ["independent", self.plan_name])
         for entry in roster:
             self.assertEqual(sorted(entry),
-                             ["archived_at", "folder", "main_tip"])
+                             ["archived_at", "main_tip", "plan"])
 
     def _orphaned_temporary_branches(self) -> tuple[str, str]:
         """One published and one superseded orphan in Assent's temporary namespaces."""
@@ -569,7 +586,7 @@ class TestArchive(unittest.TestCase):
                       for branch in gitops.branches_with_prefix(self.root, prefix))
 
     def test_archive_all_sweeps_orphaned_temporary_branches(self) -> None:
-        """``archive --all`` owns the global namespace exactly as folderless ``clean``
+        """``archive --all`` owns the global namespace exactly as plan-less ``clean``
         does, and inherits the sweep instead of reimplementing it."""
         published, superseded = self._orphaned_temporary_branches()
 
@@ -582,10 +599,10 @@ class TestArchive(unittest.TestCase):
         self.assertEqual(self._temporary_branches(), [])
         self.assertIn(f"  branch {published}: cleaned (published)", text)
         self.assertIn(f"  branch {superseded}: cleaned (superseded)", text)
-        # The sweep runs once, after the per-folder loop and outside every
-        # per-folder integration-lock hold.
+        # The sweep runs once, after the per-plan loop and outside every
+        # per-plan integration-lock hold.
         self.assertEqual(text.count("orphaned temporary branches:"), 1)
-        self.assertLess(text.index(f"{self.folder}: archived"),
+        self.assertLess(text.index(f"{self.plan_name}: archived"),
                         text.index("orphaned temporary branches:"))
         self.assertIn("1 archived, 0 skipped, 0 error(s)", text)
 
@@ -628,26 +645,26 @@ class TestArchive(unittest.TestCase):
         self.assertEqual(self._temporary_branches(), [published])
         self.assertIn(f"  branch {published}: refused (checked out in", text)
         self.assertIn(f"  branch {superseded}: cleaned (superseded)", text)
-        # The refusal is the sweep's, not the folder's: the folder still archived.
+        # The refusal is the sweep's, not the plan's: the plan still archived.
         self.assertIn("1 archived, 0 skipped, 0 error(s)", text)
 
-    # ---- explicit multi-folder selection ---------------------------------
+    # ---- explicit multi-plan selection ---------------------------------
 
-    def test_selected_archive_reports_an_ineligible_folder_as_a_failure(self) -> None:
-        """``--all`` skips what it cannot archive; a named folder is a request."""
-        self._folder("plan02", status="TODO")  # ineligible: unfinished
+    def test_selected_archive_reports_an_ineligible_plan_as_a_failure(self) -> None:
+        """``--all`` skips what it cannot archive; a named plan is a request."""
+        self._plan_name("plan02", status="TODO")  # ineligible: unfinished
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             code = archive_selected(str(self.config_path),
-                                    [self.folder, "plan02"])
+                                    [self.plan_name, "plan02"])
         text = output.getvalue()
 
         self.assertEqual(code, 1, text)
         self.assertIn("plan02: skipped", text)
         self.assertIn("archive summary: 1 archived, 1 not archived.", text)
-        # The refusal does not stop the folders selected alongside it.
-        self.assertTrue(_zip_path(self.assent_dir, self.folder).exists())
+        # The refusal does not stop the plans selected alongside it.
+        self.assertTrue(_zip_path(self.assent_dir, self.plan_name).exists())
         self.assertFalse(_zip_path(self.assent_dir, "plan02").exists())
 
     def test_selected_archive_audits_all_names_before_first_archive(self) -> None:
@@ -656,34 +673,34 @@ class TestArchive(unittest.TestCase):
                    side_effect=AssertionError("archive started")) as archive_one, \
                 contextlib.redirect_stdout(output):
             code = archive_selected(
-                str(self.config_path), [self.folder, "missing", "also_missing"])
+                str(self.config_path), [self.plan_name, "missing", "also_missing"])
 
         self.assertEqual(code, 1)
         archive_one.assert_not_called()
         self.assertIn("missing, also_missing", output.getvalue())
-        self.assertFalse(_zip_path(self.assent_dir, self.folder).exists())
+        self.assertFalse(_zip_path(self.assent_dir, self.plan_name).exists())
         self.assertFalse((self.assent_dir / "missing").exists())
 
-    def test_direct_archive_of_missing_folder_is_controlled(self) -> None:
+    def test_direct_archive_of_missing_plan_is_controlled(self) -> None:
         missing = load_config(self.config_path, "missing")
         code, output = self._archive(missing)
         self.assertEqual(code, 1)
         self.assertIn("unresolved", output)
         self.assertFalse(missing.tasks_dir.exists())
 
-    def test_selected_archive_files_every_eligible_folder(self) -> None:
-        self._folder("plan02")
+    def test_selected_archive_files_every_eligible_plan(self) -> None:
+        self._plan_name("plan02")
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             code = archive_selected(str(self.config_path),
-                                    ["plan02", self.folder])
+                                    ["plan02", self.plan_name])
         text = output.getvalue()
 
         self.assertEqual(code, 0, text)
         self.assertIn("archive summary: 2 archived, 0 not archived.", text)
         self.assertEqual(
-            sorted(entry["folder"] for entry in read_roster(self.assent_dir)),
+            sorted(entry["plan"] for entry in read_roster(self.assent_dir)),
             ["plan01", "plan02"])
 
     # ---- CLI argument guards --------------------------------------------
@@ -692,7 +709,7 @@ class TestArchive(unittest.TestCase):
         with self.assertRaises(SystemExit):
             _dispatch(["archive"])
 
-    def test_folder_and_all_together_is_a_parser_error(self) -> None:
+    def test_plan_and_all_together_is_a_parser_error(self) -> None:
         with self.assertRaises(SystemExit):
             _dispatch(["archive", "plan01", "--all"])
 
@@ -700,11 +717,11 @@ class TestArchive(unittest.TestCase):
         with self.assertRaises(SystemExit):
             _dispatch(["archive", "--restore", "--all"])
 
-    def test_restore_without_folder_is_a_parser_error(self) -> None:
+    def test_restore_without_plan_is_a_parser_error(self) -> None:
         with self.assertRaises(SystemExit):
             _dispatch(["archive", "--restore"])
 
-    def test_restore_stays_single_folder_even_with_a_remainder(self) -> None:
+    def test_restore_stays_single_plan_even_with_a_remainder(self) -> None:
         for argv in (["archive", "plan01", "plan02", "--restore"],
                      ["archive", "plan01", "...", "--restore"]):
             with self.subTest(argv=argv), self.assertRaises(SystemExit):

@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from assent import auto_fix, gitops
-from assent.accept import accept_folder
+from assent.accept import accept_plan
 from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
 
@@ -55,9 +55,9 @@ class AcceptCliCase(unittest.TestCase):
         self._git("add", "-A")
         self._git("commit", "-m", "baseline")
 
-        self.folder = "計畫01"
+        self.plan_name = "計畫01"
         self.assent_dir = self.root / ".assent"
-        self.tasks_dir = self.assent_dir / self.folder
+        self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config = self.assent_dir / "assent.toml"
         self.config.write_text("", encoding="utf-8", newline="\n")
@@ -87,9 +87,9 @@ class AcceptCliCase(unittest.TestCase):
                       result.stdout + result.stderr)
         return result.stdout.strip()
 
-    def _write_task(self, *, folder: str | None = None,
+    def _write_task(self, *, plan_name: str | None = None,
                     status: str = "DONE") -> Path:
-        name = folder or self.folder
+        name = plan_name or self.plan_name
         tasks_dir = self.assent_dir / name
         tasks_dir.mkdir(parents=True, exist_ok=True)
         path = tasks_dir / "t001_任務.e.toml"
@@ -110,11 +110,11 @@ class AcceptCliCase(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8", newline="\n")
 
-    def _cli(self, command: str, folder: str | None = None, *,
+    def _cli(self, command: str, plan_name: str | None = None, *,
              stdin: str | None = None) -> subprocess.CompletedProcess:
         args = [sys.executable, "-m", "assent", command]
-        if folder is not None:
-            args.append(folder)
+        if plan_name is not None:
+            args.append(plan_name)
         args.extend(("--config", str(self.config)))
         return subprocess.run(
             args, cwd=self.root, capture_output=True, encoding="utf-8",
@@ -123,10 +123,10 @@ class AcceptCliCase(unittest.TestCase):
             # unattended or piped invocation really runs.
             input=stdin, stdin=None if stdin is not None else subprocess.DEVNULL)
 
-    def _make_source(self, *, folder: str | None = None,
+    def _make_source(self, *, plan_name: str | None = None,
                      filename: str = "result with space 空白.txt",
                      content: str = "accepted\n") -> tuple[Path, str, str]:
-        name = folder or self.folder
+        name = plan_name or self.plan_name
         branch = f"{name}/run"
         path = self.parent / f"{self.root.name}.worktrees" / name
         self._git("worktree", "add", "-b", branch, str(path))
@@ -164,20 +164,20 @@ class AcceptCliLineEndingTests:
             "raise SystemExit(0 if Path('result with space 空白.txt').is_file() else 1)\n")
         source, branch, tip = self._make_source()
         before = self._head()
-        verified = self._cli("verify", self.folder)
+        verified = self._cli("verify", self.plan_name)
         self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
 
-        accepted = self._cli("accept", self.folder)
+        accepted = self._cli("accept", self.plan_name)
 
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
         self.assertIn("retain it while a dependent may still need its source evidence",
                       accepted.stdout)
-        self.assertIn(f"clean {self.folder}", accepted.stdout)
+        self.assertIn(f"clean {self.plan_name}", accepted.stdout)
         after = self._head()
         parents = self._git("rev-list", "--parents", "-n", "1", after).split()
         self.assertEqual(parents[1:], [before, tip])
         message = self._git("log", "-1", "--format=%B", "release")
-        self.assertIn(f"Assent-Folder: {self.folder}", message)
+        self.assertIn(f"Assent-Plan: {self.plan_name}", message)
         self.assertIn(f"Assent-Source-Branch: {branch}", message)
         self.assertIn(f"Assent-Source-Tip: {tip}", message)
         self.assertIn("Assent-Verified-Tree:", message)
@@ -186,16 +186,16 @@ class AcceptCliLineEndingTests:
         self.assertTrue(source.is_dir())
         self._assert_no_temporary_integration()
 
-        rerun = self._cli("accept", self.folder)
+        rerun = self._cli("accept", self.plan_name)
         self.assertEqual(rerun.returncode, 0, rerun.stdout + rerun.stderr)
         self.assertEqual(self._head(), after)
         self.assertIn("already accepted", rerun.stdout)
 
-        cleaned = self._cli("clean", self.folder)
+        cleaned = self._cli("clean", self.plan_name)
         self.assertEqual(cleaned.returncode, 0, cleaned.stdout + cleaned.stderr)
         self.assertFalse(source.exists())
         self.assertEqual(self._git("branch", "--list", branch), "")
-        evidence_only = self._cli("accept", self.folder)
+        evidence_only = self._cli("accept", self.plan_name)
         self.assertEqual(evidence_only.returncode, 1,
                          evidence_only.stdout + evidence_only.stderr)
         self.assertEqual(self._head(), after)
@@ -216,17 +216,17 @@ class TestAcceptCliCrlf(AcceptCliLineEndingTests, AcceptCliCase):
 class TestAcceptCliFailures(AcceptCliCase):
     def test_clean_preserves_upstream_until_dependent_is_accepted(self) -> None:
         upstream = "base"
-        self._write_task(folder=upstream)
+        self._write_task(plan_name=upstream)
         upstream_source, upstream_branch, _ = self._make_source(
-            folder=upstream, filename="base.txt")
+            plan_name=upstream, filename="base.txt")
         self._git("merge", "--no-ff", "-m", "accept base", upstream_branch)
 
         dependent = "dependent"
-        self._write_task(folder=dependent)
-        (self.assent_dir / dependent / "_folder.toml").write_text(
+        self._write_task(plan_name=dependent)
+        (self.assent_dir / dependent / "_plan_deps.toml").write_text(
             f'after = ["{upstream}"]\n', encoding="utf-8", newline="\n")
         dependent_source, _dependent_branch, _ = self._make_source(
-            folder=dependent, filename="dependent.txt")
+            plan_name=dependent, filename="dependent.txt")
         with hold_lock(self.assent_dir / upstream, upstream):
             pass
         with hold_lock(self.assent_dir / dependent, dependent):
@@ -259,58 +259,58 @@ class TestAcceptCliFailures(AcceptCliCase):
     def test_locks_and_source_states_refuse_without_mutating_target(self) -> None:
         source, branch, tip = self._make_source()
         before = self._head()
-        with hold_lock(self.tasks_dir, self.folder):
-            result = self._cli("accept", self.folder)
+        with hold_lock(self.tasks_dir, self.plan_name):
+            result = self._cli("accept", self.plan_name)
         self.assertEqual(result.returncode, 1)
         self.assertIn("already processing", result.stdout)
         self._assert_failed_preserves(before, source, branch, tip)
 
         with hold_integration_lock(self.assent_dir):
-            result = self._cli("accept", self.folder)
+            result = self._cli("accept", self.plan_name)
         self.assertEqual(result.returncode, 1)
         self.assertIn("integration is already running", result.stdout)
         self._assert_failed_preserves(before, source, branch, tip)
 
         (source / "dirty.txt").write_text("dirty\n", encoding="utf-8")
-        result = self._cli("accept", self.folder)
+        result = self._cli("accept", self.plan_name)
         self.assertEqual(result.returncode, 1)
         self.assertIn("source worktree", result.stdout)
         self._assert_failed_preserves(before, source, branch, tip)
         (source / "dirty.txt").unlink()
 
         self._git("checkout", "--detach", cwd=source)
-        result = self._cli("accept", self.folder)
+        result = self._cli("accept", self.plan_name)
         self.assertEqual(result.returncode, 1)
         self.assertIn("detached HEAD", result.stdout)
         self._assert_failed_preserves(before, source, branch, tip)
         self._git("checkout", branch, cwd=source)
 
         self._git("checkout", "-b", "foreign/run", cwd=source)
-        result = self._cli("accept", self.folder)
+        result = self._cli("accept", self.plan_name)
         self.assertEqual(result.returncode, 1)
-        self.assertIn(f"not a {self.folder}/* branch", result.stdout)
+        self.assertIn(f"not a {self.plan_name}/* branch", result.stdout)
         self._assert_failed_preserves(before, source, branch, tip)
 
     def test_target_and_source_ambiguity_refuse_fail_closed(self) -> None:
         source, branch, tip = self._make_source()
         before = self._head()
         (self.root / "dirty-target.txt").write_text("dirty\n", encoding="utf-8")
-        result = self._cli("accept", self.folder)
+        result = self._cli("accept", self.plan_name)
         self.assertEqual(result.returncode, 1)
         self.assertIn("main worktree", result.stdout)
         self.assertEqual(self._head(), before)
         (self.root / "dirty-target.txt").unlink()
 
         self._git("checkout", "--detach")
-        result = self._cli("accept", self.folder)
+        result = self._cli("accept", self.plan_name)
         self.assertEqual(result.returncode, 1)
         self.assertIn("detached HEAD", result.stdout)
         self._git("checkout", "trunk")
         self._assert_failed_preserves(before, source, branch, tip)
 
         self._git("worktree", "remove", "--force", str(source))
-        self._git("branch", f"{self.folder}/second", "HEAD")
-        result = self._cli("accept", self.folder)
+        self._git("branch", f"{self.plan_name}/second", "HEAD")
+        result = self._cli("accept", self.plan_name)
         self.assertEqual(result.returncode, 1)
         self.assertIn("multiple candidate", result.stdout)
         self.assertEqual(self._head(), before)
@@ -322,13 +322,13 @@ class TestAcceptCliFailures(AcceptCliCase):
         self._git("add", "README.txt", cwd=source)
         self._git("commit", "-m", "source conflict", cwd=source)
         tip = self._git("rev-parse", branch)
-        verified = self._cli("verify", self.folder)
+        verified = self._cli("verify", self.plan_name)
         self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
         (self.root / "README.txt").write_text("target\n", encoding="utf-8")
         self._git("add", "README.txt")
         self._git("commit", "-m", "target conflict")
         before = self._head()
-        result = self._cli("accept", self.folder)
+        result = self._cli("accept", self.plan_name)
         self.assertEqual(result.returncode, 1)
         self.assertIn("Conflicting file(s)", result.stdout)
         self.assertIn("README.txt", result.stdout)
@@ -336,13 +336,13 @@ class TestAcceptCliFailures(AcceptCliCase):
 
     def test_prerequisite_ancestry_and_forged_evidence_are_distinguished(self) -> None:
         base = "base"
-        self._write_task(folder=base)
-        _, base_branch, _ = self._make_source(folder=base, filename="base.txt")
+        self._write_task(plan_name=base)
+        _, base_branch, _ = self._make_source(plan_name=base, filename="base.txt")
         self._git("merge", "--no-ff", "-m", "manual base merge", base_branch)
-        self._write_task(folder="dependent")
-        (self.assent_dir / "dependent" / "_folder.toml").write_text(
+        self._write_task(plan_name="dependent")
+        (self.assent_dir / "dependent" / "_plan_deps.toml").write_text(
             'after = ["base"]\n', encoding="utf-8", newline="\n")
-        source, _, _ = self._make_source(folder="dependent", filename="dependent.txt")
+        source, _, _ = self._make_source(plan_name="dependent", filename="dependent.txt")
         verified = self._cli("verify", "dependent")
         self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
         accepted = self._cli("accept", "dependent")
@@ -350,14 +350,14 @@ class TestAcceptCliFailures(AcceptCliCase):
         self.assertTrue(source.exists())
 
         absent = "absent"
-        self._write_task(folder=absent)
+        self._write_task(plan_name=absent)
         result = self._cli("accept", absent)
         self.assertEqual(result.returncode, 1)
         self.assertIn("no source worktree", result.stdout)
 
         forged = (
             "forged evidence\n\n"
-            f"Assent-Folder: {absent}\n"
+            f"Assent-Plan: {absent}\n"
             f"Assent-Source-Branch: {absent}/run\n"
             f"Assent-Source-Tip: {'0' * 40}\n")
         (self.root / "forged.txt").write_text("not a merge\n", encoding="utf-8")
@@ -369,12 +369,12 @@ class TestAcceptCliFailures(AcceptCliCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no source worktree", result.stdout)
 
-    def test_self_fixed_folder_needs_a_real_typed_confirmation(self) -> None:
+    def test_self_fixed_plan_needs_a_real_typed_confirmation(self) -> None:
         source, branch, tip = self._make_source()
         before = self._head()
-        verified = self._cli("verify", self.folder)
+        verified = self._cli("verify", self.plan_name)
         self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
-        cfg = load_config(self.config, self.folder)
+        cfg = load_config(self.config, self.plan_name)
         state = auto_fix.state_for_review(
             auto_fix.ReviewRecord("FIXED", (auto_fix.ReviewFinding(
                 "t001", "src/main.py", "Blocking implementation issue",
@@ -391,19 +391,19 @@ class TestAcceptCliFailures(AcceptCliCase):
 
         # Closed stdin: it must decline immediately rather than hang or default
         # to publishing.
-        closed = self._cli("accept", self.folder)
+        closed = self._cli("accept", self.plan_name)
         self.assertEqual(closed.returncode, 1, closed.stdout + closed.stderr)
         self.assertIn("SELF-FIXED, UNREVIEWED", closed.stdout)
         self.assertIn("self-fixed round: 1 of 1 (codex/prime/heavy)", closed.stdout)
         self.assertIn("was not confirmed", closed.stdout)
         self._assert_failed_preserves(before, source, branch, tip)
 
-        declined = self._cli("accept", self.folder, stdin="n\n")
+        declined = self._cli("accept", self.plan_name, stdin="n\n")
         self.assertEqual(declined.returncode, 1, declined.stdout + declined.stderr)
         self.assertIn("was not confirmed", declined.stdout)
         self._assert_failed_preserves(before, source, branch, tip)
 
-        confirmed = self._cli("accept", self.folder, stdin="y\n")
+        confirmed = self._cli("accept", self.plan_name, stdin="y\n")
         self.assertEqual(confirmed.returncode, 0,
                          confirmed.stdout + confirmed.stderr)
         after = self._head()
@@ -412,12 +412,12 @@ class TestAcceptCliFailures(AcceptCliCase):
         self.assertNotIn(
             "SELF-FIXED", self._git("log", "-1", "--format=%B", "trunk"))
 
-    def test_unresolved_review_folder_needs_a_real_typed_confirmation(self) -> None:
+    def test_unresolved_review_plan_needs_a_real_typed_confirmation(self) -> None:
         source, branch, tip = self._make_source()
         before = self._head()
-        verified = self._cli("verify", self.folder)
+        verified = self._cli("verify", self.plan_name)
         self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
-        cfg = load_config(self.config, self.folder)
+        cfg = load_config(self.config, self.plan_name)
         state = auto_fix.state_for_review(
             auto_fix.ReviewRecord("FAIL", (auto_fix.ReviewFinding(
                 "t001", "src/main.py", "The entry point still crashes on start",
@@ -434,7 +434,7 @@ class TestAcceptCliFailures(AcceptCliCase):
 
         # Piping no input at all: it must decline immediately rather than hang
         # or default to publishing.
-        closed = self._cli("accept", self.folder)
+        closed = self._cli("accept", self.plan_name)
         self.assertEqual(closed.returncode, 1, closed.stdout + closed.stderr)
         self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", closed.stdout)
         self.assertIn("unresolved review round: 1 of 1 (codex/prime/heavy)",
@@ -446,12 +446,12 @@ class TestAcceptCliFailures(AcceptCliCase):
         self.assertIn("was not confirmed", closed.stdout)
         self._assert_failed_preserves(before, source, branch, tip)
 
-        declined = self._cli("accept", self.folder, stdin="n\n")
+        declined = self._cli("accept", self.plan_name, stdin="n\n")
         self.assertEqual(declined.returncode, 1, declined.stdout + declined.stderr)
         self.assertIn("was not confirmed", declined.stdout)
         self._assert_failed_preserves(before, source, branch, tip)
 
-        confirmed = self._cli("accept", self.folder, stdin="y\n")
+        confirmed = self._cli("accept", self.plan_name, stdin="y\n")
         self.assertEqual(confirmed.returncode, 0,
                          confirmed.stdout + confirmed.stderr)
         after = self._head()
@@ -464,9 +464,9 @@ class TestAcceptCliFailures(AcceptCliCase):
         source, branch, tip = self._make_source()
         before = self._head()
         self._git("branch", "other", before)
-        verified = self._cli("verify", self.folder)
+        verified = self._cli("verify", self.plan_name)
         self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
-        cfg = load_config(self.config, self.folder)
+        cfg = load_config(self.config, self.plan_name)
         real_commit_parents = gitops.commit_parents
 
         def run_with_action(action: str) -> tuple[int, str]:
@@ -487,7 +487,7 @@ class TestAcceptCliFailures(AcceptCliCase):
             output = io.StringIO()
             with patch("assent.accept.gitops.commit_parents", side_effect=mutate):
                 with contextlib.redirect_stdout(output):
-                    code = accept_folder(cfg)
+                    code = accept_plan(cfg)
             return code, output.getvalue()
 
         code, output = run_with_action("switch")
@@ -523,7 +523,7 @@ class TestAcceptAllCli(AcceptCliCase):
     Ordering, verify-then-accept interleaving, fail-closed chain stop, and
     idempotent rerun are covered directly against ``accept_all`` in
     tests/test_accept_all.py; this class only proves the CLI wiring: the
-    three FOLDER/--all combinations, and one real subprocess round trip.
+    three PLAN/--all combinations, and one real subprocess round trip.
     """
 
     def _cli_all(self) -> subprocess.CompletedProcess:
@@ -532,35 +532,35 @@ class TestAcceptAllCli(AcceptCliCase):
         return subprocess.run(args, cwd=self.root, capture_output=True,
                               encoding="utf-8", errors="replace", env=self.env)
 
-    def test_folder_and_all_combinations_match_behavior_contract(self) -> None:
+    def test_plan_and_all_combinations_match_behavior_contract(self) -> None:
         neither = self._cli("accept")
         self.assertEqual(neither.returncode, 2, neither.stdout + neither.stderr)
 
         both = subprocess.run(
-            [sys.executable, "-m", "assent", "accept", self.folder, "--all",
+            [sys.executable, "-m", "assent", "accept", self.plan_name, "--all",
              "--config", str(self.config)],
             cwd=self.root, capture_output=True, encoding="utf-8",
             errors="replace", env=self.env)
         self.assertEqual(both.returncode, 2, both.stdout + both.stderr)
 
-        folder_only = self._cli("accept", self.folder)
-        self.assertEqual(folder_only.returncode, 1,
-                         folder_only.stdout + folder_only.stderr)
-        self.assertIn("no source worktree", folder_only.stdout)
+        plan_only = self._cli("accept", self.plan_name)
+        self.assertEqual(plan_only.returncode, 1,
+                         plan_only.stdout + plan_only.stderr)
+        self.assertIn("no source worktree", plan_only.stdout)
 
-        # self.folder is already DONE (setUp) but has no source branch or
-        # worktree, so --all dispatches to the same folder instead of being
+        # self.plan is already DONE (setUp) but has no source branch or
+        # worktree, so --all dispatches to the same plan instead of being
         # rejected by argument parsing, then skips it (no source remains) --
-        # unlike a directly named FOLDER, --all never fails closed on this.
+        # unlike a directly named PLAN, --all never fails closed on this.
         all_only = self._cli_all()
         self.assertEqual(all_only.returncode, 0, all_only.stdout + all_only.stderr)
-        self.assertIn(f"skip {self.folder} (no source branch remains", all_only.stdout)
+        self.assertIn(f"skip {self.plan_name} (no source branch remains", all_only.stdout)
 
-    def test_accept_all_publishes_every_finished_folder_via_real_cli(self) -> None:
+    def test_accept_all_publishes_every_finished_plan_via_real_cli(self) -> None:
         second = "second"
-        self._write_task(folder=second)
+        self._write_task(plan_name=second)
         self._make_source()
-        self._make_source(folder=second)
+        self._make_source(plan_name=second)
 
         result = self._cli_all()
 
@@ -569,7 +569,7 @@ class TestAcceptAllCli(AcceptCliCase):
         accept_subjects = [s for s in subjects if s.startswith("accept(")]
         self.assertEqual(accept_subjects, [
             f"accept({second}): integrate into trunk",
-            f"accept({self.folder}): integrate into trunk",
+            f"accept({self.plan_name}): integrate into trunk",
         ])
         self.assertIn("accept --all: summary", result.stdout)
 

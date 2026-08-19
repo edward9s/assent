@@ -67,7 +67,7 @@ assent clean              # all plans
 
 `clean` removes only worktrees and branches proven clean, owned, and integrated.
 It keeps an upstream while a direct dependent remains unfinished, unaccepted,
-dirty, missing, or unproven. Multiple folders are handled upstream-first. There
+dirty, missing, or unproven. Multiple plans are handled upstream-first. There
 is no force-delete option, and `.assent/<PLAN>/` is not removed.
 
 ## Archive
@@ -79,20 +79,20 @@ assent archive <PLAN> --restore
 ```
 
 Archive first requires the same safe-cleanup proof, then stores the management
-folder in `.assent/_archive/`, records it in the archive roster, and removes the
-live folder. A named ineligible plan is an error; `--all` skips ineligible plans.
+directory in `.assent/_archive/`, records it in the archive roster, and removes the
+live plan directory. A named ineligible plan is an error; `--all` skips ineligible plans.
 Restore takes one plan, validates the archive, and never overwrites an existing
-live folder.
+live plan directory.
 
 ## Temporary branches and doctor
 
-`assent-integration/<folder>/<suffix>` and `assent-reconcile/<folder>` belong to
+`assent-integration/<PLAN>/<suffix>` and `assent-reconcile/<PLAN>` belong to
 the transaction that created them. A surviving branch is considered orphaned
 only after the repository-wide integration lock proves no transaction owns it.
 Whether its tree is already published or superseded is just reporting
 information.
 
-`clean` with no folder sweeps these orphaned namespaces once per invocation;
+`clean` with no plan sweeps these orphaned namespaces once per invocation;
 `archive --all` uses the same sweep. A named `clean <PLAN>` deliberately does
 not touch repository-wide temporary branches. `assent doctor` reports them and
 offers a confirmed `[y/N]` removal after checking ownership again.

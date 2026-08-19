@@ -1,4 +1,4 @@
-"""Task-folder file lock tests.
+"""Plan file lock tests.
 
 Cross-process mutual exclusion is verified by launching a lock-holding subprocess (following
 the tests/test_e2e.py convention of exercising real behavior via subprocess); faking flock
@@ -83,8 +83,8 @@ class TestHoldLock(unittest.TestCase):
         proc.stdin.close()  # subprocess readline gets EOF -> exits the with block -> releases the lock
         self.assertEqual(proc.wait(timeout=10), 0)
 
-    def test_second_run_blocked_with_pid_and_folder(self):
-        """While the subprocess holds the lock, a second acquire on the same folder fails immediately, with a message including the holder's PID and folder name."""
+    def test_second_run_blocked_with_pid_and_plan(self):
+        """While the subprocess holds the lock, a second acquire on the same plan fails immediately, with a message including the holder's PID and plan name."""
         proc = self._start_holder()
         with self.assertRaises(LockBusy) as ctx:
             with hold_lock(self.tasks_dir, "parallel01"):
@@ -93,7 +93,7 @@ class TestHoldLock(unittest.TestCase):
         self.assertIn("parallel01", msg)
         self.assertIn(str(proc.pid), msg)
 
-    def test_missing_folder_is_not_created_for_a_lock(self):
+    def test_missing_plan_is_not_created_for_a_lock(self):
         missing = self.root / ".assent" / "missing"
         with self.assertRaises(AssentError):
             with hold_lock(missing, "missing"):
@@ -128,7 +128,7 @@ class TestHoldLock(unittest.TestCase):
         path = self.tasks_dir / LOCK_NAME
         path.write_text(
             'pid = 999999\nstarted_at = "2026-01-01T00:00:00+00:00"\n'
-            'folder = "parallel01"\n', encoding="utf-8")
+            'plan = "parallel01"\n', encoding="utf-8")
         with hold_lock(self.tasks_dir, "parallel01"):
             pass
         self.assertTrue(path.is_file())
@@ -136,7 +136,7 @@ class TestHoldLock(unittest.TestCase):
     def test_killed_holder_frees_the_lock_for_the_next_run_immediately(self):
         """The scheduler's forced tree termination is the backstop for a child
         that will not stop on its own, so the run it kills must not leave the
-        task folder locked against the next one."""
+        plan locked against the next one."""
         proc = self._start_holder()
         proc.kill()
         self.assertNotEqual(proc.wait(timeout=10), 0)  # not a clean release

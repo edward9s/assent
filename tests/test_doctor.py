@@ -230,7 +230,7 @@ class DoctorOrphanBranchTests(unittest.TestCase):
         self._git("commit", "-m", "init")
         self.target = self._git("branch", "--show-current").strip()
         self.worktrees: list[Path] = []
-        # An ordinary folder branch, to prove the offer touches nothing else.
+        # An ordinary plan branch, to prove the offer touches nothing else.
         self._git("branch", "demo/w1")
 
         old_cwd = os.getcwd()
@@ -356,22 +356,22 @@ class DoctorOrphanBranchTests(unittest.TestCase):
         self.assertNotIn("assent-integration/batch/abc", remaining)
         self.assertIn("assent-reconcile/demo", remaining)
 
-    def test_confirmed_removal_performs_no_folder_operation(self):
-        folder = self.root / ".assent" / "demo"
-        folder.mkdir(parents=True)
-        (folder / "t001_x.e.toml").write_text("status = \"DONE\"\n",
+    def test_confirmed_removal_performs_no_plan_operation(self):
+        plan_name = self.root / ".assent" / "demo"
+        plan_name.mkdir(parents=True)
+        (plan_name / "t001_x.e.toml").write_text("status = \"DONE\"\n",
                                               encoding="utf-8")
-        (folder / "_report.md").write_text("# report\n", encoding="utf-8")
-        (folder / "_verification.toml").write_text("result = \"PASSED\"\n",
+        (plan_name / "_report.md").write_text("# report\n", encoding="utf-8")
+        (plan_name / "_verification.toml").write_text("result = \"PASSED\"\n",
                                                    encoding="utf-8")
         before = {path.relative_to(self.root).as_posix():
-                  path.read_bytes() for path in sorted(folder.iterdir())}
+                  path.read_bytes() for path in sorted(plan_name.iterdir())}
         self._published_orphan("assent-integration/batch/abc")
 
         code, _ = self._run(lambda prompt: "y")
 
         self.assertEqual(code, 0)
         after = {path.relative_to(self.root).as_posix():
-                 path.read_bytes() for path in sorted(folder.iterdir())}
+                 path.read_bytes() for path in sorted(plan_name.iterdir())}
         self.assertEqual(after, before)
         self.assertNotIn("assent-integration/batch/abc", self._branches())

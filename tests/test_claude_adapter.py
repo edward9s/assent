@@ -291,7 +291,7 @@ class TestRunSubprocessStopWake(unittest.TestCase):
     """A stop request must end output collection at once.
 
     The queue has no timeout when the watchdog is disabled, so a silent CLI used
-    to keep the whole work-folder process -- and therefore its task-folder lock
+    to keep the whole plan process -- and therefore its plan lock
     -- alive indefinitely after the scheduler had asked it to stop.
     """
 

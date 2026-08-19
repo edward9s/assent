@@ -1,13 +1,13 @@
-"""Task-folder file lock: only one assent run may operate on a given task folder at a time.
+"""Plan file lock: only one assent run may operate on a given plan at a time.
 
-When a run starts, it acquires an OS-level "non-blocking exclusive lock" on the task folder
+When a run starts, it acquires an OS-level "non-blocking exclusive lock" on the plan
 (msvcrt on Windows, fcntl on POSIX), held for the process's lifetime. The lock's lifetime is
 tied to the file handle: however the process terminates (crash / kill / Ctrl+C), the OS
 releases it automatically — so there is no stale lock, no PID-reuse problem, and no manual
 cleanup needed. This is exactly why a "PID lock file + liveness check" scheme was not used.
 
 The lock file is <tasks_dir>/assent.lock; it stays on disk and is never deleted (deleting it
-would introduce a race). Its contents are only PID, start time, and folder name for
+would introduce a race). Its contents are only PID, start time, and plan name for
 diagnostics — never used to decide anything.
 
 Limitation: flock / msvcrt.locking semantics are unreliable on network filesystems (some NFS
@@ -74,7 +74,7 @@ else:
 
 
 class LockBusy(AssentError):
-    """The task folder is already held by another run; the message includes the holder's PID and folder name."""
+    """The plan is already held by another run; the message includes the holder's PID and plan name."""
 
 
 class LockMissing(AssentError):
@@ -82,12 +82,12 @@ class LockMissing(AssentError):
 
 
 def _write_diag(handle, tasks_name: str) -> None:
-    """Write PID, start time (ISO 8601), and folder name into the lock file (rewritten by truncation, diagnostics only)."""
+    """Write PID, start time (ISO 8601), and plan name into the lock file (rewritten by truncation, diagnostics only)."""
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     body = (
         f"pid = {os.getpid()}\n"
         f'started_at = "{started}"\n'
-        f'folder = "{tasks_name}"\n'
+        f'plan = "{tasks_name}"\n'
     )
     handle.seek(0)
     handle.truncate()
@@ -123,8 +123,8 @@ def _busy_message(tasks_name: str, diag: dict) -> str:
         if hhmm:
             detail += f", started at {hhmm}"
         detail += ")"
-    return (f"Another assent run is already processing task folder {tasks_name}{detail}. "
-            "Only one run may operate on a task folder at a time.")
+    return (f"Another assent run is already processing plan {tasks_name}{detail}. "
+            "Only one run may operate on a plan at a time.")
 
 
 @contextlib.contextmanager
@@ -132,14 +132,14 @@ def hold_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
     """Acquire an OS-level non-blocking exclusive lock on <tasks_dir>/assent.lock, held until the with block exits.
 
     If the lock cannot be acquired: read the lock file's diagnostic content and raise
-    LockBusy (message includes the holder's PID and folder name); the caller fails with
+    LockBusy (message includes the holder's PID and plan name); the caller fails with
     exit code 1 based on this, without touching anything in the working tree. On success,
     the diagnostic content is written back into the lock file.
     """
     tasks_dir = Path(tasks_dir)
     if not tasks_dir.is_dir():
         raise AssentError(
-            f"Task folder directory does not exist: {tasks_dir}")
+            f"Plan directory does not exist: {tasks_dir}")
     path = tasks_dir / LOCK_NAME
     # O_CREAT but not O_TRUNC: create the file if missing without truncating existing content
     # (truncating would destroy the holder's diagnostics). Binary mode: locking needs to seek
@@ -203,12 +203,12 @@ def hold_integration_lock(assent_dir: Path) -> Iterator[None]:
 
 @contextlib.contextmanager
 def probe_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
-    """Acquire an existing task-folder lock without ever creating or rewriting ``assent.lock``.
+    """Acquire an existing plan lock without ever creating or rewriting ``assent.lock``.
 
     ``clean`` must use the same lock as ``run``, yet must never touch ``.assent/`` plan
     archival. If the lock file did not exist and were created then deleted, a race would open
     between unlocking and deleting; so this refuses conservatively instead, and the caller
-    skips cleanup. A folder that has run ``run`` normally already has a lock file.
+    skips cleanup. A plan that has run ``run`` normally already has a lock file.
     """
     path = Path(tasks_dir) / LOCK_NAME
     flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
@@ -216,10 +216,10 @@ def probe_lock(tasks_dir: Path, tasks_name: str) -> Iterator[None]:
         descriptor = os.open(str(path), flags)
     except FileNotFoundError as e:
         raise LockMissing(
-            f"Task folder {tasks_name} has no existing {LOCK_NAME}; "
+            f"Plan {tasks_name} has no existing {LOCK_NAME}; "
             "cannot prove it is unlocked without modifying .assent") from e
     except OSError as e:
-        raise AssentError(f"Unable to open lock file for task folder {tasks_name}: {e}") from e
+        raise AssentError(f"Unable to open lock file for plan {tasks_name}: {e}") from e
 
     handle = os.fdopen(descriptor, "r+b")
     try:
