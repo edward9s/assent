@@ -88,13 +88,12 @@ lexicographic filename order.
 Only `.e.toml` is active. A legacy `tNNN_name.toml` in a live plan makes
 `check` and `run` refuse rather than ignore or move it.
 
-Use this 12-field skeleton; no other field is allowed:
+Use this 11-field skeleton; no other field is allowed:
 
 ```toml
 title = "Skeleton and test infrastructure"
 deps = []                        # upstream task ids; always write the array
-model = "core"                   # prime | core | lite, or [exact model]
-effort = "normal"                # optional portable value or [exact effort]
+model = "core"                   # prime | core | lite -- nothing else
 workflow = [{ role = "implementer" }]  # optional task-local override
 status = "TODO"                  # TODO | WIP | DONE | BLOCKED | SKIP
 scope = ["src/thing.py", "tests/test_thing.py"]
@@ -118,7 +117,7 @@ Known facts, file/symbol references, dependencies, and risks.
 ```
 
 Required fields are `title`, `deps`, `model`, `status`, `scope`, `verify`,
-`goal`, and `acceptance`. `effort`, `workflow`, `behavior`, and `notes` are
+`goal`, and `acceptance`. `workflow`, `behavior`, and `notes` are
 optional. Put structural fields before multiline prose; `status` must precede
 all multiline strings so the scheduler can replace exactly that line.
 
@@ -147,9 +146,9 @@ all multiline strings so the scheduler can replace exactly that line.
   `instructions.md`, and this task file alone. A role prompt adds responsibility
   at runtime but does not replace missing requirements.
 
-### Model and effort
+### Model
 
-Task files ordinarily use portable tiers:
+A task states difficulty once, as a portable tier:
 
 | `model` | Use |
 | --- | --- |
@@ -157,24 +156,21 @@ Task files ordinarily use portable tiers:
 | `core` | ordinary implementation and debugging |
 | `lite` | mechanical edits, boilerplate, documentation sync |
 
-`effort` is optional and orthogonal: `heavy`, `normal`, or `slight`. State it
-only to override the configured default. `heavy` means high portable reasoning,
-not a vendor's maximum.
+Effort is not a separate task field. Each adapter maps a tier to one complete
+`"<model>/<effort>"` invocation in `[adapter.<name>.models]`, so the same tier
+already carries the reasoning investment that adapter should spend on it. If a
+tier is being reached for too often "but harder", the tier itself is configured
+too low; change that one line rather than annotating tasks.
 
-An exact bracketed value deliberately bypasses its adapter mapping:
+`prime`, `core`, and `lite` are the only values a task file accepts. Anything
+else is refused while the plan is read, with the valid words in the message.
 
-```toml
-model = "[gpt-5.6-sol]"
-effort = "[xhigh]"
-```
-
-Model and effort literals are independent. Their brackets are removed and the
-case-preserved contents are passed directly. Any effective workflow step that
-uses either literal must resolve to exactly one adapter. A literal model with
-omitted effort passes no effort and uses the vendor default. A portable effort
-beside a literal model uses the adapter's flat effort translation rather than a
-tier-specific translation. An unbracketed value outside the portable vocabulary
-is an error.
+A task file therefore cannot name a vendor model at all. That is deliberate: a
+vendor model id names one release, while a task file is a plan artifact that is
+archived, replayed, and read back long after that release is gone. A step that
+genuinely needs a model outside its adapter's three tiers states it in
+`assent.toml`, on the role or workflow entry that is already bound to one
+adapter.
 
 ### Planning audit
 
@@ -235,8 +231,8 @@ detail = '''Optional bounded process notes or evidence.'''
 ```
 
 An AI closeout uses its prompt-specified `by` and the actual model and effort
-arguments passed for that invocation. Omit `requested_effort` when a literal
-model deliberately used the vendor default and no effort argument was passed.
+arguments passed for that invocation. Omit `requested_effort` when the selection
+omitted the effort and no effort argument was passed.
 `summary` is one verifiable sentence. The service may ultimately report a
 different model; the journal records what Assent requested. Old `by = "ai"`
 entries and older entries missing newer fields remain readable and are not

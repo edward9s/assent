@@ -26,8 +26,8 @@ from pathlib import Path
 from assent import AssentError
 from assent.agents import Ability, ResolvedRole, Role, resolve_role
 from assent.lockfile import LOCK_NAME
-from assent.modeling import (EFFORT_LEVELS, MODEL_TIERS, has_literal,
-                             literal_value, parse_effort, parse_model)
+from assent.modeling import (MODEL_TIERS, has_literal, literal_value,
+                             parse_selection, split_selection)
 from assent.shared_paths import MANIFEST_LOCK_NAME, MANIFEST_NAME
 from assent.user_home import user_config_path
 
@@ -36,18 +36,14 @@ _TOP_LEVEL_KEYS = {
 }
 
 # The ordered settings layers, lowest priority first.  The built-in layer contributes no
-# document of its own: several tables (models, efforts) are replaced whole rather than merged
-# by key, so folding the built-in values into the merged document would resurrect defaults that
-# a stated table means to drop.  The typed parsers below keep applying the built-in defaults,
+# document of its own: the models table is replaced whole rather than merged by key, so
+# folding the built-in values into the merged document would resurrect defaults that a stated
+# table means to drop.  The typed parsers below keep applying the built-in defaults,
 # and BUILTIN_LAYER stays the provenance answer for every leaf no config file states.
 BUILTIN_LAYER = "builtin"
 USER_LAYER = "user"
 PROJECT_LAYER = "project"
 _ADAPTER_NAMES = {"claude", "codex", "antigravity"}
-# Abstract effort names intentionally differ from vendor names.  A missing translation must
-# resolve through this settings-layer baseline rather than passing the abstract value through;
-# this table is not vendor knowledge embedded in adapter code.
-_EFFORT_BASELINE = {"heavy": "high", "normal": "medium", "slight": "low"}
 
 # A plan name becomes the first component of every Assent branch name.
 # Keep this contract local and explicit instead of relying on a later Git command:
@@ -71,95 +67,51 @@ _PLAN_NAME_RULE = (
 _TASK_FILE_RE = re.compile(r"^t\d{3}_.+\.e\.toml$")
 
 _DEFAULT_EXTRA_ARGS = ["--permission-mode", "acceptEdits"]
-# Abstract tier -> claude CLI --model argument
-_DEFAULT_MODELS = {"prime": "fable", "core": "opus", "lite": "sonnet"}
-_DEFAULT_EFFORT = {"prime": "heavy", "core": "heavy", "lite": "normal"}
+# There is deliberately no built-in tier -> model table.  A vendor model id names one
+# release and is replaced whenever that vendor ships a new one, so shipping a default here
+# would bake a value that expires into the code; every id lives in adapter.toml, where a
+# human owns it.  An adapter that is actually selected must state all three tiers, and the
+# refusal below names the missing ones while the config is still being read.
 
 _DEFAULT_CODEX_EXTRA_ARGS = ["--sandbox", "danger-full-access"]
-_DEFAULT_CODEX_MODELS = {
-    "prime": "gpt-5.6-sol", "core": "gpt-5.6-terra", "lite": "gpt-5.6-luna",
-}
-_DEFAULT_CODEX_EFFORT = {"prime": "heavy", "core": "normal", "lite": "slight"}
 
-# Antigravity defaults.  The slugs and the effort translations below are the base family
-# names AGY 1.1.5 proved it accepts; the reasoning behind each one, and the recorded probe
-# it came from, are documented in assent/adapters/antigravity.py.
 # A headless run cannot answer a permission prompt, and assent must not edit the user's own
 # antigravity-cli settings.json, so unattended execution states the skip explicitly.
 _DEFAULT_ANTIGRAVITY_EXTRA_ARGS = ["--dangerously-skip-permissions"]
-_DEFAULT_ANTIGRAVITY_MODELS = {
-    "prime": "gemini-3.1-pro",     # low/high only
-    "core": "gemini-3.6-flash",    # low/medium/high
-    "lite": "gemini-3.5-flash",    # low/medium; AGY exposes no Flash Lite at all
-}
-_DEFAULT_ANTIGRAVITY_EFFORT = {"prime": "heavy", "core": "heavy", "lite": "heavy"}
-# Vendor effort translation lives here, never in adapter code: Gemini 3.1 Pro has no normal
-# (quality-first, so normal goes up to high), and Gemini 3.5 Flash has no heavy (so the lite
-# tier's heavy lands on that family's ceiling instead of being sent and refused).
-_DEFAULT_ANTIGRAVITY_TIER_EFFORTS = {
-    "prime": {"normal": "high"},
-    "lite": {"heavy": "medium"},
-}
 _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES = 120
 
 
 @dataclass(frozen=True)
 class AdapterSettings:
-    """One vendor adapter's resolved settings: command, tier -> model map, and effort contract.
+    """One vendor adapter's resolved settings: command and its tier -> invocation map.
 
-    Portable resolution and literal bypass live here so no caller has to branch on an adapter
-    name to resolve an invocation:
-    - abstract effort selection: task annotation > this adapter's tier default;
-    - vendor effort translation: tier-specific > flat > built-in baseline.
-    A loaded config always carries a default for every known tier (a stated
-    ``default_effort`` table overrides per tier rather than replacing the built-in one), so a
-    known tier resolves to an explicit portable effort instead of a vendor CLI default.
+    A tier names one complete invocation, so resolution is a single lookup with nothing
+    behind it: the mapped value already carries the exact vendor model and the exact vendor
+    effort the CLI receives.  A literal selection bypasses the lookup and is read with the
+    same ``model/effort`` grammar, which is what makes the two interchangeable at a call
+    site without any caller branching on an adapter name.
     """
 
     name: str
     command: str
     extra_args: tuple[str, ...]
     models: dict[str, str]
-    default_effort: dict[str, str]
-    efforts: dict[str, str]
-    tier_efforts: dict[str, dict[str, str]]
 
-    def resolve_model(self, model: str) -> str:
-        """Resolve a portable tier or unwrap an exact literal model."""
+    def resolve(self, model: str) -> tuple[str, str | None]:
+        """Return the vendor model and effort for a portable tier or an exact literal.
+
+        A ``None`` effort means the selection stated none, so the adapter deliberately
+        omits its effort argument and inherits the vendor CLI's own default.
+        """
         literal = literal_value(model)
         if literal is not None:
-            return literal
+            return split_selection(literal, f"literal model {model!r}")
         alias = self.models.get(model)
         if alias is None:
             raise AssentError(
                 f"model tier {model!r} is not in [adapter.{self.name}.models]; "
                 f"check the plan file's suggested model or the config mapping")
-        return alias
-
-    def resolve_effort(self, task_effort: str | None, model: str) -> str | None:
-        """Choose the stated effort, tier default, or literal-model vendor default.
-
-        A literal model with no stated effort deliberately returns None so the
-        adapter omits its effort argument. Loaded portable tiers always have a default.
-        """
-        if task_effort:
-            return task_effort
-        if literal_value(model) is not None:
-            return None
-        return self.default_effort.get(model)
-
-    def resolve_requested_effort(self, model: str,
-                                 effort: str | None) -> str | None:
-        """Unwrap a literal or translate portable effort by tier, flat, then baseline."""
-        if effort is None:
-            return None
-        literal = literal_value(effort)
-        if literal is not None:
-            return literal
-        tier_efforts = ({} if literal_value(model) is not None
-                        else self.tier_efforts.get(model, {}))
-        return tier_efforts.get(
-            effort, self.efforts.get(effort, _EFFORT_BASELINE.get(effort, effort)))
+        return split_selection(alias, f"[adapter.{self.name}.models] {model}")
 
 
 @dataclass(frozen=True)
@@ -177,10 +129,6 @@ class WorkflowPlanStep:
     @property
     def model(self) -> str | None:
         return self.resolved_role.model
-
-    @property
-    def effort(self) -> str | None:
-        return self.resolved_role.effort
 
     @property
     def writes(self) -> bool:
@@ -248,32 +196,15 @@ class Config:
     claude_command: str = "claude"
     claude_extra_args: list[str] = field(
         default_factory=lambda: list(_DEFAULT_EXTRA_ARGS))
-    claude_models: dict[str, str] = field(
-        default_factory=lambda: dict(_DEFAULT_MODELS))
-    claude_default_effort: dict[str, str] = field(
-        default_factory=lambda: dict(_DEFAULT_EFFORT))
-    claude_efforts: dict[str, str] = field(default_factory=dict)
-    claude_tier_efforts: dict[str, dict[str, str]] = field(default_factory=dict)
+    claude_models: dict[str, str] = field(default_factory=dict)
     codex_command: str = "codex"
     codex_extra_args: list[str] = field(
         default_factory=lambda: list(_DEFAULT_CODEX_EXTRA_ARGS))
-    codex_models: dict[str, str] = field(
-        default_factory=lambda: dict(_DEFAULT_CODEX_MODELS))
-    codex_default_effort: dict[str, str] = field(
-        default_factory=lambda: dict(_DEFAULT_CODEX_EFFORT))
-    codex_efforts: dict[str, str] = field(default_factory=dict)
-    codex_tier_efforts: dict[str, dict[str, str]] = field(default_factory=dict)
+    codex_models: dict[str, str] = field(default_factory=dict)
     antigravity_command: str = "agy"
     antigravity_extra_args: list[str] = field(
         default_factory=lambda: list(_DEFAULT_ANTIGRAVITY_EXTRA_ARGS))
-    antigravity_models: dict[str, str] = field(
-        default_factory=lambda: dict(_DEFAULT_ANTIGRAVITY_MODELS))
-    antigravity_default_effort: dict[str, str] = field(
-        default_factory=lambda: dict(_DEFAULT_ANTIGRAVITY_EFFORT))
-    antigravity_efforts: dict[str, str] = field(default_factory=dict)
-    antigravity_tier_efforts: dict[str, dict[str, str]] = field(
-        default_factory=lambda: {tier: dict(values) for tier, values
-                                 in _DEFAULT_ANTIGRAVITY_TIER_EFFORTS.items()})
+    antigravity_models: dict[str, str] = field(default_factory=dict)
     # Print mode has its own upstream wait limit, far shorter than a task session; the
     # adapter always states one instead of inheriting the CLI default.
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
@@ -326,26 +257,17 @@ class Config:
             return AdapterSettings(
                 name="claude", command=self.claude_command,
                 extra_args=tuple(self.claude_extra_args),
-                models=self.claude_models,
-                default_effort=self.claude_default_effort,
-                efforts=self.claude_efforts,
-                tier_efforts=self.claude_tier_efforts)
+                models=self.claude_models)
         if name == "codex":
             return AdapterSettings(
                 name="codex", command=self.codex_command,
                 extra_args=tuple(self.codex_extra_args),
-                models=self.codex_models,
-                default_effort=self.codex_default_effort,
-                efforts=self.codex_efforts,
-                tier_efforts=self.codex_tier_efforts)
+                models=self.codex_models)
         if name == "antigravity":
             return AdapterSettings(
                 name="antigravity", command=self.antigravity_command,
                 extra_args=tuple(self.antigravity_extra_args),
-                models=self.antigravity_models,
-                default_effort=self.antigravity_default_effort,
-                efforts=self.antigravity_efforts,
-                tier_efforts=self.antigravity_tier_efforts)
+                models=self.antigravity_models)
         raise AssentError(
             f"unknown adapter: {name!r} (built in: 'antigravity' / 'claude' / 'codex')")
 
@@ -458,6 +380,27 @@ def _str_list(section: dict, owner: str, key: str, default: list[str]) -> list[s
     return list(val)
 
 
+def _model_map(section: dict, owner: str, guard: "_BlankGuard") -> dict[str, str]:
+    """Parse one adapter's tier -> ``model/effort`` table, fail-closed on any bad entry.
+
+    There is no built-in table to fall back to, so an absent one stays empty here and the
+    refusal is raised later, against the adapters actually selected.  Both halves of every
+    stated entry are checked now rather than at invocation time, so a malformed selection
+    never surfaces as a rejected vendor command line mid-run.  The blank guard runs first so
+    an explicitly empty value keeps its own dotted-key-and-layer refusal instead of being
+    reported as a grammar error.
+    """
+    raw = _str_map(section, owner, "models", {})
+    for tier, selection in raw.items():
+        if tier not in MODEL_TIERS:
+            raise AssentError(
+                f"Config [{owner}.models] key {tier!r} is not a valid model tier"
+                f" ({'/'.join(sorted(MODEL_TIERS))})")
+        guard.text(selection, f"{owner}.models.{tier}")
+        split_selection(selection, f"Config [{owner}.models] {tier}")
+    return raw
+
+
 def _str_map(section: dict, owner: str, key: str, default: dict[str, str]) -> dict[str, str]:
     val = _typed(section, owner, key, dict, None)
     if val is None:
@@ -497,7 +440,7 @@ def _parse_roles(section: dict, abilities: dict[str, Ability]) -> dict[str, Role
         owner = f"roles.{name}"
         if not isinstance(value, dict):
             raise AssentError(f"Config [{owner}] must be a table, not a scalar")
-        _known_keys(value, owner, {"ability", "model", "effort"})
+        _known_keys(value, owner, {"ability", "model"})
         ability_names = _str_list(value, f"[{owner}]", "ability", [])
         if not ability_names:
             raise AssentError(f"Config [{owner}].ability must be a non-empty array")
@@ -507,39 +450,10 @@ def _parse_roles(section: dict, abilities: dict[str, Ability]) -> dict[str, Role
                     f"Config [{owner}].ability references missing ability"
                     f" {ability_name!r}")
         model = _typed(value, f"[{owner}]", "model", str, None)
-        effort = _typed(value, f"[{owner}]", "effort", str, None)
         if model is not None:
-            model = parse_model(model, f"Config [{owner}]")
-        if effort is not None:
-            effort = parse_effort(effort, f"Config [{owner}]")
-        roles[name] = Role(tuple(ability_names), model, effort)
+            model = parse_selection(model, f"Config [{owner}]")
+        roles[name] = Role(tuple(ability_names), model)
     return roles
-
-
-def _default_effort_map(section: dict, owner: str,
-                        builtin: dict[str, str]) -> dict[str, str]:
-    """Merge a stated ``default_effort`` table over the complete built-in tier defaults.
-
-    Unlike ``models`` and ``efforts``, which a stated table replaces whole, this table states
-    per-tier overrides: an absent, empty, or partial table keeps the built-in value for every
-    omitted tier.  A tier therefore always selects an explicit portable effort, instead of an
-    omission silently handing the decision to the vendor CLI's own default.
-    """
-    raw = _typed(section, owner, "default_effort", dict, None)
-    merged = dict(builtin)
-    if raw is None:
-        return merged
-    for model, eff in raw.items():
-        if model not in MODEL_TIERS:
-            raise AssentError(
-                f"[{owner}.default_effort] key {model!r} is not a valid model tier"
-                f" ({'/'.join(sorted(MODEL_TIERS))})")
-        if eff not in EFFORT_LEVELS:
-            raise AssentError(
-                f"[{owner}.default_effort] {model} = {eff!r} is not a valid effort"
-                f" ({'/'.join(sorted(EFFORT_LEVELS))})")
-        merged[model] = eff
-    return merged
 
 
 class _BlankGuard:
@@ -606,12 +520,12 @@ def _workflow_adapter_candidates(value: dict, owner: str, guard: "_BlankGuard"
     return adapters
 
 
-def _require_single_literal_adapter(model: str | None, effort: str | None,
+def _require_single_literal_adapter(model: str | None,
                                     adapters: tuple[str, ...], owner: str) -> None:
     """A vendor literal is meaningful only for one exact adapter."""
-    if has_literal(model, effort) and len(adapters) != 1:
+    if has_literal(model) and len(adapters) != 1:
         raise AssentError(
-            f"Config {owner} uses a literal model or effort and must resolve "
+            f"Config {owner} uses a literal model and must resolve "
             "to exactly one adapter"
         )
 
@@ -649,22 +563,15 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
                     f" [workflow].{key} (valid action: {valid})")
             entries.append(WorkflowActionStep(action))
             continue
-        allowed = {"role", "adapter", "model", "effort"}
+        allowed = {"role", "adapter", "model"}
         _known_keys(value, owner, allowed)
         role = guard.text(_typed(value, f"[{owner}]", "role", str, None),
                           f"workflow.{key}.{index}.role")
         resolved = resolve_role(role, roles, abilities)
         model = _typed(value, f"[{owner}]", "model", str, None)
-        effort = _typed(value, f"[{owner}]", "effort", str, None)
         if model is not None:
-            model = parse_model(model, f"Config [{owner}]")
-        if effort is not None:
-            effort = parse_effort(effort, f"Config [{owner}]")
-        if model is not None or effort is not None:
             resolved = replace(
-                resolved,
-                model=resolved.model if model is None else model,
-                effort=resolved.effort if effort is None else effort)
+                resolved, model=parse_selection(model, f"Config [{owner}]"))
         adapters = _workflow_adapter_candidates(value, owner, guard)
         if key == "task":
             entries.append(WorkflowTaskStep(role, resolved, adapters))
@@ -676,8 +583,7 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
         # task happened to sort first.
         if resolved.model is None:
             raise AssentError(
-                f"Config {owner} role {role!r} must state model; "
-                "effort may use the adapter default")
+                f"Config {owner} role {role!r} must state model")
         entries.append((role, adapters, resolved))
     if key == "task" and entries and not any(
             isinstance(entry, WorkflowTaskStep) for entry in entries):
@@ -698,31 +604,18 @@ def _resolve_accountability_steps(
         role, configured_names, resolved = raw
         names = configured_names or cfg.adapter_names
         _require_single_literal_adapter(
-            resolved.model, resolved.effort, names,
-            f"[workflow].{owner} role {role!r}")
+            resolved.model, names, f"[workflow].{owner} role {role!r}")
         name = names[0]
         adapter_settings = cfg.adapter_settings(name)
-        if (resolved.model is None
-                or (resolved.effort is None
-                    and not resolved.produces_verdict
-                    and literal_value(resolved.model) is None)):
+        if resolved.model is None:
             steps.append(WorkflowPlanStep(
                 role, names, resolved, adapter_settings.command,
                 adapter_settings.extra_args))
             continue
-        effort = adapter_settings.resolve_effort(
-            resolved.effort, resolved.model)
-        requested_effort = adapter_settings.resolve_requested_effort(
-            resolved.model, effort)
-        if (requested_effort is None
-                and literal_value(resolved.model) is None):
-            raise AssentError(
-                f"[workflow].{owner} role {role!r} effort did not resolve"
-                " to a requested value")
+        requested_model, requested_effort = adapter_settings.resolve(resolved.model)
         steps.append(WorkflowPlanStep(
             role, names, resolved, adapter_settings.command,
-            adapter_settings.extra_args,
-            adapter_settings.resolve_model(resolved.model), requested_effort))
+            adapter_settings.extra_args, requested_model, requested_effort))
     return tuple(steps)
 
 
@@ -859,6 +752,28 @@ def validate_task_workflow_steps(
             "first failure handler between focused_test actions")
 
 
+def _require_complete_models(cfg: Config) -> None:
+    """Refuse a selected adapter whose tier -> invocation table is absent or partial.
+
+    Nothing supplies these values but the config file, so an omission cannot silently
+    resolve to something plausible: it would only surface as a failed invocation once a
+    task of that tier was reached.  Only the adapters in the rotation are required, so a
+    project that never selects an adapter is not forced to name models for it; a workflow
+    step naming an adapter outside the rotation is resolved, and refused, where it is read.
+    """
+    for name in cfg.adapter_names:
+        if name not in _ADAPTER_NAMES:
+            continue          # an unknown name has its own refusal, at its own layer
+        models = cfg.adapter_settings(name).models
+        missing = sorted(MODEL_TIERS - set(models))
+        if missing:
+            raise AssentError(
+                f"Config [adapter.{name}.models] must state every model tier"
+                f" ({'/'.join(sorted(MODEL_TIERS))}); missing:"
+                f" {', '.join(missing)}. Assent ships no built-in model ids because a"
+                " vendor model id names one release; state them in adapter.toml")
+
+
 def _validate_task_literal_adapters(
         cfg: Config,
         steps: list[WorkflowTaskStep | WorkflowActionStep] | None) -> None:
@@ -867,7 +782,7 @@ def _validate_task_literal_adapters(
         if isinstance(step, WorkflowActionStep):
             continue
         _require_single_literal_adapter(
-            step.resolved_role.model, step.resolved_role.effort,
+            step.resolved_role.model,
             step.adapters or cfg.adapter_names,
             f"[workflow].task[{index}] role {step.role!r}")
 
@@ -918,56 +833,6 @@ def _parse_adapter_names(section: dict, guard: "_BlankGuard") -> tuple[str, ...]
             f"Config [adapter].name contains duplicate adapter name(s): "
             f"{', '.join(repr(name) for name in duplicates)}")
     return names
-
-
-def _effort_maps(section: dict, owner: str, guard: "_BlankGuard",
-                 default_flat: dict[str, str] | None = None,
-                 default_tier: dict[str, dict[str, str]] | None = None
-                 ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
-    """Parse the flat and per-tier ``efforts`` maps, fail-closed on any bad structure.
-
-    Like ``models``, a stated ``efforts`` table replaces the built-in one whole rather than
-    merging into it: a vendor translation is a single coherent decision, and a half-merged
-    one would hide which value is actually being sent.
-    """
-    raw = _typed(section, f"[{owner}]", "efforts", dict, None)
-    if raw is None:
-        return (dict(default_flat or {}),
-                {tier: dict(values) for tier, values in (default_tier or {}).items()})
-
-    flat: dict[str, str] = {}
-    by_tier: dict[str, dict[str, str]] = {}
-    for key, value in raw.items():
-        if isinstance(value, dict):
-            if key not in MODEL_TIERS:
-                raise AssentError(
-                    f"Config [{owner}.efforts] section {key!r} is invalid"
-                    f" ({'/'.join(sorted(MODEL_TIERS))})")
-            tier_values: dict[str, str] = {}
-            block = f"[{owner}.efforts.{key}]"
-            for effort, requested in value.items():
-                if effort not in EFFORT_LEVELS:
-                    raise AssentError(
-                        f"Config {block} key {effort!r} is not a valid effort"
-                        f" ({'/'.join(sorted(EFFORT_LEVELS))})")
-                if not isinstance(requested, str):
-                    raise AssentError(
-                        f"Config {block} {effort} must be a non-empty string")
-                guard.text(requested, f"{owner}.efforts.{key}.{effort}")
-                tier_values[effort] = requested
-            by_tier[key] = tier_values
-            continue
-
-        block = f"[{owner}.efforts]"
-        if key not in EFFORT_LEVELS:
-            raise AssentError(
-                f"Config {block} key {key!r} is not a valid effort"
-                f" ({'/'.join(sorted(EFFORT_LEVELS))})")
-        if not isinstance(value, str):
-            raise AssentError(f"Config {block} {key} must be a non-empty string")
-        guard.text(value, f"{owner}.efforts.{key}")
-        flat[key] = value
-    return flat, by_tier
 
 
 def validate_tasks_name(tasks_name: str, owner: str) -> None:
@@ -1178,14 +1043,6 @@ def load_config(path: str | Path, plan_name: str) -> Config:
         workflow, "task", guard, roles, abilities)
     raw_workflow_integration = _parse_workflow_entries(
         workflow, "integration", guard, roles, abilities)
-    claude_efforts, claude_tier_efforts = _effort_maps(
-        claude, "adapter.claude", guard)
-    codex_efforts, codex_tier_efforts = _effort_maps(
-        codex, "adapter.codex", guard)
-    antigravity_efforts, antigravity_tier_efforts = _effort_maps(
-        antigravity, "adapter.antigravity", guard,
-        default_tier=_DEFAULT_ANTIGRAVITY_TIER_EFFORTS)
-
     cfg = Config(
         root=root,
         assent_dir=assent_dir,
@@ -1202,39 +1059,21 @@ def load_config(path: str | Path, plan_name: str) -> Config:
             "adapter.claude.command"),
         claude_extra_args=_str_list(claude, "[adapter.claude]", "extra_args",
                                     _DEFAULT_EXTRA_ARGS),
-        claude_models=guard.values(
-            _str_map(claude, "adapter.claude", "models", _DEFAULT_MODELS),
-            "adapter.claude.models"),
-        claude_default_effort=_default_effort_map(claude, "adapter.claude",
-                                                  _DEFAULT_EFFORT),
-        claude_efforts=claude_efforts,
-        claude_tier_efforts=claude_tier_efforts,
+        claude_models=_model_map(claude, "adapter.claude", guard),
         codex_command=guard.text(
             _typed(codex, "[adapter.codex]", "command", str, "codex"),
             "adapter.codex.command"),
         codex_extra_args=_str_list(codex, "[adapter.codex]", "extra_args",
                                    _DEFAULT_CODEX_EXTRA_ARGS),
-        codex_models=guard.values(
-            _str_map(codex, "adapter.codex", "models", _DEFAULT_CODEX_MODELS),
-            "adapter.codex.models"),
-        codex_default_effort=_default_effort_map(codex, "adapter.codex",
-                                                 _DEFAULT_CODEX_EFFORT),
-        codex_efforts=codex_efforts,
-        codex_tier_efforts=codex_tier_efforts,
+        codex_models=_model_map(codex, "adapter.codex", guard),
         antigravity_command=guard.text(
             _typed(antigravity, "[adapter.antigravity]", "command", str, "agy"),
             "adapter.antigravity.command"),
         antigravity_extra_args=_str_list(antigravity, "[adapter.antigravity]",
                                          "extra_args",
                                          _DEFAULT_ANTIGRAVITY_EXTRA_ARGS),
-        antigravity_models=guard.values(
-            _str_map(antigravity, "adapter.antigravity", "models",
-                     _DEFAULT_ANTIGRAVITY_MODELS),
-            "adapter.antigravity.models"),
-        antigravity_default_effort=_default_effort_map(
-            antigravity, "adapter.antigravity", _DEFAULT_ANTIGRAVITY_EFFORT),
-        antigravity_efforts=antigravity_efforts,
-        antigravity_tier_efforts=antigravity_tier_efforts,
+        antigravity_models=_model_map(
+            antigravity, "adapter.antigravity", guard),
         antigravity_print_timeout_minutes=_typed(
             antigravity, "[adapter.antigravity]", "print_timeout_minutes", int,
             _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES),
@@ -1255,6 +1094,7 @@ def load_config(path: str | Path, plan_name: str) -> Config:
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
+    _require_complete_models(cfg)
     plan_steps = _resolve_accountability_steps(cfg, raw_workflow_plan, "plan")
     integration_steps = _resolve_accountability_steps(
         cfg, raw_workflow_integration, "integration")

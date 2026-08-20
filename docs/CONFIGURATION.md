@@ -32,7 +32,7 @@ The central configuration chain is:
 ```text
 ability: prompt + authority
         ↓
-role: one or more abilities + model/effort
+role: one or more abilities + model
         ↓
 workflow: ordered roles and scheduler actions
 ```
@@ -67,17 +67,15 @@ verification. Scheduler rules remain authoritative.
 [roles.task_reviewer_fixer]
 ability = ["task_review", "task_fix"]
 model = "prime"
-effort = "heavy"
 ```
 
 `ability` is a nonempty ordered list. The role writes if any included ability
-writes, and produces a verdict if any included ability does so. `model` and
-`effort` are optional. A workflow role entry may override either value; an
-ordinary task step otherwise inherits the task's profile. Every step in
-`workflow.plan` and `workflow.integration` must effectively state a model
-through the role or workflow entry. Their effort may be omitted: a portable
-model uses that adapter's tier default, while a literal model uses the vendor
-default without an effort argument.
+writes, and produces a verdict if any included ability does so. `model` is
+optional. A workflow role entry may override it; an ordinary task step
+otherwise inherits the task's profile. Every step in `workflow.plan` and
+`workflow.integration` must effectively state a model through the role or
+workflow entry, because such a session answers for a whole unit and has no
+single task to inherit one from.
 
 ### Scheduler actions
 
@@ -186,22 +184,18 @@ ability = ["write_tests", "implement_source"]
 [roles.task_reviewer_fixer]
 ability = ["task_review", "task_fix"]
 model = "prime"
-effort = "heavy"
 
 [roles.plan_quality_reviewer_fixer]
 ability = ["plan_quality_review", "plan_fix"]
 model = "prime"
-effort = "heavy"
 
 [roles.plan_reviewer_fixer]
 ability = ["plan_review", "plan_fix"]
 model = "prime"
-effort = "heavy"
 
 [roles.integration_reviewer_fixer]
 ability = ["integration_review", "integration_fix"]
 model = "prime"
-effort = "heavy"
 
 [workflow]
 task = [
@@ -234,7 +228,7 @@ repair rounds, not additional normal reviews.
 ## Omissions and task overrides
 
 - Omitted `workflow.task` gives each task one implicit session using its own
-  model and effort.
+  model.
 - A nonempty task workflow may put worker roles before `focused_test`. If it
   contains that action, it must end with it. A worker that returns `BLOCKED`
   advances directly to the next verdict role, using the existing evidence.
@@ -273,46 +267,76 @@ Omission inherits `[workflow].task`. `workflow = []` assigns that task to
 plan-wide execution. Override roles still come from the effective `[roles]`
 configuration.
 
-## Adapters, models, and effort
+## Adapters and models
 
 `[adapter].name` selects one adapter or an ordered rotation. Built-in adapters
-are Claude, Codex, and Antigravity. Their commands, arguments, portable model
-mappings, default efforts, and vendor effort translations live in
-`adapter.toml`. Authenticate each CLI before unattended use; Assent uses its
-existing credentials and does not manage secrets.
+are Claude, Codex, and Antigravity. Their commands, arguments, and portable
+model mappings live in `adapter.toml`. Authenticate each CLI before unattended
+use; Assent uses its existing credentials and does not manage secrets.
 
-Plans use portable `prime`, `core`, and `lite` model tiers. Effort is the
-separate `heavy`, `normal`, or `slight` choice. Every abstract-model invocation
-receives a concrete translated effort.
+Plans use the portable `prime`, `core`, and `lite` model tiers, and nothing
+else. Effort is not a separate portable choice and is not a task field: each
+adapter maps a tier to one complete invocation.
 
-### Workflow model and effort precedence
+```toml
+[adapter.codex.models]
+prime = "gpt-5.6-sol/high"
+core  = "gpt-5.6-terra/medium"
+lite  = "gpt-5.6-luna/low"
+```
 
-Assent resolves `model` and `effort` independently. Within one role session, a
-workflow role entry overrides its `[roles]` definition. The remaining fallback
-depends on the workflow layer:
+The first `/` separates the vendor model from the vendor effort, and both are
+passed to that CLI exactly as written. A model name may therefore not contain
+`/`; a second separator is refused when the config loads. Omit the separator
+entirely to pass no effort argument and inherit the vendor CLI's own default:
 
-| Workflow role | Model fallback | Effort fallback |
-| --- | --- | --- |
-| `workflow.task` | Current task | Current task, then the selected adapter's configured or built-in tier default |
-| `workflow.plan` or `workflow.integration` | None; the workflow entry or role must state a model | Selected adapter's configured or built-in tier default |
+```toml
+lite = "gpt-5.6-luna"
+```
+
+Because a tier already carries its reasoning investment, a model family's real
+limits are written into the value where a human can read them. Antigravity's
+`lite` tier ships as `gemini-3.5-flash/medium` because that family has no
+`high`; nothing is shifted silently at run time. If a tier is being reached for
+too often "but harder", the tier itself is configured too low -- change that one
+line rather than annotating individual tasks.
+
+### Workflow model precedence
+
+Within one role session, a workflow role entry overrides its `[roles]`
+definition. The remaining fallback depends on the workflow layer:
+
+| Workflow role | Model fallback |
+| --- | --- |
+| `workflow.task` | Current task |
+| `workflow.plan` or `workflow.integration` | None; the workflow entry or role must state a model |
 
 A plan or integration role answers for a whole unit, so it has no task to
 inherit a model from. Omitting it there is a config error `assent check`
-reports, whether or not the role produces a verdict.
+reports, whether or not the role produces a verdict. An omitted `workflow.task`
+opens one implicit session using the task's own model.
 
-An omitted `workflow.task` opens one implicit session using the task's model and
-effort. An adapter supplies no default model: its `models` table translates the
-selected portable tier to a vendor model. When a workflow entry or role selects
-a literal model without also providing an effort, it does not inherit task
-effort; Assent sends no effort argument and uses the vendor default.
+### Naming a vendor model directly
 
-Task, role, and workflow role-entry `model`/`effort` values may independently
-use an exact bracketed literal, such as `model = "[gpt-5.6-sol]"` or
-`effort = "[xhigh]"`. Assent removes the brackets, preserves case, and bypasses
-that value's adapter mapping. Any workflow step using a literal must resolve to
-exactly one adapter. An abstract effort beside a literal model uses the
-adapter's flat effort mapping, not a tier-specific mapping. Literal values do
-not modify `adapter.toml`.
+A task file accepts `prime`, `core`, and `lite` and nothing else; anything else
+is refused while the plan is read. A vendor model id names one release, and a
+task file outlives it, so the id belongs in configuration rather than in the
+plan.
+
+A `[roles]` entry or a workflow entry may instead name the vendor selection
+itself, using the same `model/effort` grammar as the `models` table. There is no
+marker syntax: any value that is not a tier is read as a vendor selection.
+
+```toml
+[[workflow.plan]]
+role = "plan_reviewer"
+adapter = "codex"
+model = "gpt-5.6-sol/xhigh"     # outside codex's three tiers
+```
+
+This bypasses that adapter's `models` table entirely and does not modify
+`adapter.toml`. Because a vendor string means nothing to another vendor, any
+workflow step using one must resolve to exactly one adapter.
 
 Every workflow role entry may select one adapter or an ordered fallback list:
 

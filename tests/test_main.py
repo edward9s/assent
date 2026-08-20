@@ -18,6 +18,8 @@ import tempfile
 import threading
 import tomllib
 import unittest
+
+from tests.engine_support import models_block
 from pathlib import Path
 from unittest.mock import patch
 
@@ -67,7 +69,7 @@ class MainTestCase(unittest.TestCase):
     def write_config(self, text="") -> Path:
         config = self.root / ".assent" / "assent.toml"
         config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(text, encoding="utf-8")
+        config.write_text(text + models_block(text), encoding="utf-8")
         return config
 
     def write_task(self, plan_name: str, status: str = "TODO") -> Path:
@@ -249,8 +251,9 @@ class TestDispatch(MainTestCase):
 
     def test_an_absent_default_project_file_is_not_an_error(self):
         # Everything stated user-wide is a complete, ordinary setup.
+        text = '[adapter]\nname = "claude"\n'
         (self.user_home / "assent.toml").write_text(
-            '[adapter]\nname = "claude"\n', encoding="utf-8")
+            text + models_block(text), encoding="utf-8")
         self.write_task("plan01")
         self.assertFalse((self.root / ".assent" / "assent.toml").exists())
 
@@ -780,7 +783,6 @@ class TestDispatch(MainTestCase):
             '[roles.reviewer]\n'
             'ability = ["review"]\n'
             'model = "prime"\n'
-            'effort = "heavy"\n'
             '[workflow]\nselection = ['
             '{ role = "reviewer", adapter = "codex" }, '
             '{ action = "full_verify" }]\n')
@@ -1873,8 +1875,8 @@ class TestInit(MainTestCase):
         user_config = self.user_home / "assent.toml"
         user_config.write_text(
             user_config.read_text(encoding="utf-8").replace(
-                'task = [\n  { role = "implementer"},',
-                'task = [\n  { action = "full_verify" },'),
+                '  { role = "implementer"},',
+                '  { action = "full_verify" },'),
             encoding="utf-8")
 
         output = io.StringIO()

@@ -16,6 +16,7 @@ from assent.config import (BUILTIN_LAYER, PROJECT_LAYER, USER_LAYER,
                            _ADAPTER_NAMES, list_task_plans, load_config,
                            validate_config, WorkflowActionStep)
 from assent.init import init as run_init
+from tests.engine_support import models_block
 from assent.user_home import ASSENT_HOME_ENV, user_assent_dir, user_config_path
 
 _MINIMAL = ""
@@ -33,14 +34,12 @@ writes = false
 [roles.reviewer]
 ability = ["review"]
 model = "prime"
-effort = "heavy"
 [roles.fixer]
 ability = ["fix"]
 model = "core"
 [roles.reviewer_fixer]
 ability = ["review", "fix"]
 model = "prime"
-effort = "heavy"
 [roles.observer]
 ability = ["observe"]
 model = "core"
@@ -63,20 +62,32 @@ class ConfigTestCase(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def write(self, text: str) -> Path:
+    def write(self, text: str, *, models: bool = True) -> Path:
+        """Write a project config, supplying tier tables the case did not state.
+
+        Assent ships no built-in model ids, so a config that selects an adapter must
+        state its tiers.  Cases about that refusal pass ``models=False``.
+        """
         path = self.assent_dir / "assent.toml"
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text + (models_block(text) if models else ""),
+                        encoding="utf-8")
         return path
 
-    def write_user(self, text: str) -> Path:
+    def write_user(self, text: str, *, models: bool = True) -> Path:
         path = self.user_dir / "assent.toml"
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text + (models_block(text) if models else ""),
+                        encoding="utf-8")
         return path.resolve()
 
     def write_adapter(self, text: str) -> Path:
         path = self.assent_dir / "adapter.toml"
         path.write_text(text, encoding="utf-8")
         return path
+
+    def _packaged_adapter_text(self) -> str:
+        """The shipped adapter.toml, which is now the only source of vendor model ids."""
+        return (Path(__file__).resolve().parents[1]
+                / "assent" / "templates" / "adapter.toml").read_text(encoding="utf-8")
 
     @property
     def project_config(self) -> Path:
@@ -98,12 +109,8 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.rotation_poll_minutes, 1)
         self.assertEqual(cfg.adapter_name, "claude")
         self.assertEqual(cfg.adapter_names, ("claude",))
-        self.assertEqual(cfg.claude_models["prime"], "fable")
-        self.assertEqual(cfg.codex_models["lite"], "gpt-5.6-luna")
-        self.assertEqual(cfg.claude_efforts, {})
-        self.assertEqual(cfg.claude_tier_efforts, {})
-        self.assertEqual(cfg.codex_efforts, {})
-        self.assertEqual(cfg.codex_tier_efforts, {})
+        self.assertEqual(cfg.claude_models["prime"], "fable/high")
+        self.assertEqual(cfg.codex_models, {})   # nothing selects codex here
         self.assertEqual(cfg.workflow_integration, ())
 
     def test_scalar_and_singleton_adapter_name_are_equivalent(self):
@@ -152,38 +159,29 @@ class TestLoadConfig(ConfigTestCase):
         self.assertEqual(cfg.antigravity_command, "agy")
         self.assertEqual(cfg.antigravity_extra_args,
                          ["--dangerously-skip-permissions"])
-        self.assertEqual(cfg.antigravity_models,
-                         {"prime": "gemini-3.1-pro", "core": "gemini-3.6-flash",
-                          "lite": "gemini-3.5-flash"})
-        # every tier defaults to a heavy investment; the vendor translation below is what
-        # keeps that request sendable for families with a lower ceiling
-        self.assertEqual(cfg.antigravity_default_effort,
-                         {"prime": "heavy", "core": "heavy", "lite": "heavy"})
-        self.assertEqual(cfg.antigravity_efforts, {})
-        self.assertEqual(cfg.antigravity_tier_efforts,
-                         {"prime": {"normal": "high"}, "lite": {"heavy": "medium"}})
+        # The model ids themselves are packaged only in adapter.toml; nothing here
+        # backfills them, so an untouched config maps no tier at all.
+        self.assertEqual(cfg.antigravity_models, {})
         self.assertEqual(cfg.antigravity_print_timeout_minutes, 120)
 
     def test_shipped_template_loads_with_expected_adapter_settings(self):
         template = (Path(__file__).resolve().parents[1]
                     / "assent" / "templates" / "assent.toml")
-        cfg = load_config(self.write(template.read_text(encoding="utf-8")),
-                          "template01")
+        cfg = load_config(
+            self.write(template.read_text(encoding="utf-8")
+                       + self._packaged_adapter_text(), models=False),
+            "template01")
         tiers = {"prime", "core", "lite"}
-        efforts = {"slight", "normal", "heavy"}
         for adapter in ("claude", "codex", "antigravity"):
             with self.subTest(adapter=adapter):
                 settings = cfg.adapter_settings(adapter)
                 self.assertEqual(set(settings.models), tiers)
-                self.assertEqual(set(settings.default_effort), tiers)
-                self.assertTrue(set(settings.default_effort.values()) <= efforts)
+                # every shipped tier resolves to a concrete model and effort
+                for tier in tiers:
+                    model, effort = settings.resolve(tier)
+                    self.assertTrue(model)
+                    self.assertTrue(effort)
         self.assertEqual(cfg.antigravity_print_timeout_minutes, 120)
-
-    def test_antigravity_effort_table_is_replaced_whole_not_merged(self):
-        cfg = load_config(self.write(
-            '[adapter.antigravity.efforts.prime]\nnormal = "medium"\n'), "plan01")
-        self.assertEqual(cfg.antigravity_tier_efforts,
-                         {"prime": {"normal": "medium"}})
 
     def test_antigravity_print_timeout_must_be_positive(self):
         with self.assertRaisesRegex(AssentError, "print_timeout_minutes"):
@@ -281,15 +279,13 @@ class TestLoadConfig(ConfigTestCase):
         role = (_WORKFLOW_ROLES
                 + '[roles.literal_fixer]\n'
                   'ability = ["fix"]\n'
-                  'model = "[Exact-Model]"\n'
-                  'effort = "[XHigh]"\n'
+                  'model = "Exact-Model/XHigh"\n'
                   '[adapter]\nname = ["claude", "codex"]\n')
         cfg = load_config(self.write(
             role + '[workflow]\ntask = ['
             '{ role = "literal_fixer", adapter = "codex" }]\n'), "plan01")
         resolved = cfg.workflow_task[0].resolved_role
-        self.assertEqual(resolved.model, "[Exact-Model]")
-        self.assertEqual(resolved.effort, "[XHigh]")
+        self.assertEqual(resolved.model, "Exact-Model/XHigh")
 
         with self.assertRaisesRegex(AssentError, "exactly one adapter"):
             load_config(self.write(
@@ -301,18 +297,17 @@ class TestLoadConfig(ConfigTestCase):
             _WORKFLOW_ROLES +
             '[workflow]\n'
             'task = [{ role = "fixer", adapter = "codex", '
-            'model = "[Exact-Model]", effort = "[XHigh]" }]\n'), "plan01")
+            'model = "Exact-Model/XHigh" }]\n'), "plan01")
 
         resolved = cfg.workflow_task[0].resolved_role
-        self.assertEqual(resolved.model, "[Exact-Model]")
-        self.assertEqual(resolved.effort, "[XHigh]")
+        self.assertEqual(resolved.model, "Exact-Model/XHigh")
 
         with self.assertRaisesRegex(AssentError, "exactly one adapter"):
             load_config(self.write(
                 _WORKFLOW_ROLES +
                 '[adapter]\nname = ["claude", "codex"]\n'
                 '[workflow]\ntask = [{ role = "fixer", '
-                'model = "[Exact-Model]" }]\n'), "plan01")
+                'model = "Exact-Model" }]\n'), "plan01")
 
     def test_plan_and_integration_roles_must_state_a_model(self):
         # A plan or integration session answers for a whole unit, so it has no
@@ -350,7 +345,7 @@ class TestLoadConfig(ConfigTestCase):
             '{ action = "focused_sweep" }]\n'), "plan01")
         self.assertEqual(cfg.workflow_plan[2].model, "lite")
 
-    def test_literal_verdict_role_may_omit_effort_for_vendor_default(self):
+    def test_literal_selection_may_omit_effort_for_vendor_default(self):
         cfg = load_config(self.write(
             '[abilities.review]\n'
             'prompt = "Review."\nwrites = false\nproduces_verdict = true\n'
@@ -358,15 +353,14 @@ class TestLoadConfig(ConfigTestCase):
             '[workflow]\nintegration = ['
             '{ action = "full_verify" }, '
             '{ role = "literal_reviewer", adapter = "codex", '
-            'model = "[Exact-Model]" }, '
+            'model = "Exact-Model" }, '
             '{ action = "full_verify" }]\n'), "plan01")
 
         step = cfg.workflow_integration[1]
         self.assertEqual(step.requested_model, "Exact-Model")
-        self.assertIsNone(step.effort)
         self.assertIsNone(step.requested_effort)
 
-    def test_portable_verdict_role_may_use_adapter_default_effort(self):
+    def test_portable_verdict_role_uses_the_adapter_tier_mapping(self):
         cfg = load_config(self.write(
             '[abilities.review]\n'
             'prompt = "Review."\nwrites = false\nproduces_verdict = true\n'
@@ -378,7 +372,6 @@ class TestLoadConfig(ConfigTestCase):
 
         step = cfg.workflow_plan[1]
         self.assertEqual(step.requested_model, "gpt-5.6-terra")
-        self.assertIsNone(step.effort)
         self.assertEqual(step.requested_effort, "medium")
 
     def test_verdict_role_still_requires_an_effective_model(self):
@@ -511,10 +504,8 @@ class TestLoadConfig(ConfigTestCase):
             _WORKFLOW_ROLES +
             '[adapter]\nname = "claude"\n'
             '[adapter.codex]\ncommand = "codex-review.cmd"\n'
-            '[adapter.codex.models]\ncore = "review-model"\n'
-            '[adapter.codex.efforts.core]\nslight = "review-effort"\n'
+            '[adapter.codex.models]\ncore = "review-model/review-effort"\n'
             '[roles.reviewer_core]\nability = ["review"]\nmodel = "core"\n'
-            'effort = "slight"\n'
             '[workflow]\nplan = [{ action = "focused_sweep" }, '
             '{ role = "reviewer_core", adapter = "codex" }, '
             '{ action = "focused_sweep" }]\n'), "plan01")
@@ -633,58 +624,14 @@ class TestLoadConfig(ConfigTestCase):
         with self.assertRaises(AssentError):
             load_config(self.write("[watchdog]\nstall_minutes = -1\n"), "plan01")
 
-    def test_models_table_full_replacement(self):
-        cfg = load_config(self.write(
-            '[adapter.claude.models]\nprime = "x"\n'), "plan01")
-        self.assertEqual(cfg.claude_models, {"prime": "x"})  # whole table replaced, not merged
-
-    def test_bad_default_effort_rejected(self):
-        with self.assertRaisesRegex(AssentError, "effort"):
+    def test_selected_adapter_must_state_every_tier(self):
+        # Nothing backfills a missing tier, so a partial table is refused while the
+        # config is being read rather than when a task of that tier is reached.
+        with self.assertRaisesRegex(
+                AssentError, r"must state every model tier.*missing: core, lite"):
             load_config(self.write(
-                '[adapter.claude.default_effort]\nprime = "high"\n'), "plan01")
-
-    def test_efforts_flat_and_tier_sections_loaded(self):
-        cfg = load_config(self.write(
-            '[adapter.codex.efforts]\n'
-            'heavy = "minimal"\nnormal = "balanced"\n'
-            '[adapter.codex.efforts.lite]\n'
-            'slight = "max"\n'), "plan01")
-        self.assertEqual(cfg.codex_efforts,
-                         {"heavy": "minimal", "normal": "balanced"})
-        self.assertEqual(cfg.codex_tier_efforts,
-                         {"lite": {"slight": "max"}})
-
-    def test_bad_efforts_keys_and_section_names_rejected(self):
-        cases = (
-            ('[adapter.claude.efforts]\nlow = "x"\n',
-             r"\[adapter\.claude\.efforts\].*low"),
-            ('[adapter.codex.efforts.ultra]\nheavy = "x"\n',
-             r"\[adapter\.codex\.efforts\].*ultra"),
-            ('[adapter.codex.efforts.lite]\nhigh = "x"\n',
-             r"\[adapter\.codex\.efforts\.lite\].*high"),
-        )
-        for text, message in cases:
-            with self.subTest(text=text), self.assertRaisesRegex(
-                    AssentError, message):
-                load_config(self.write(text), "plan01")
-
-    def test_bad_efforts_values_rejected(self):
-        # A wrong type is a type refusal; a blank string is an explicit-but-useless
-        # value, refused by dotted key (see TestBlankOverrideSemantics).
-        cases = (
-            ('[adapter.claude.efforts]\nheavy = ""\n',
-             r"adapter\.claude\.efforts\.heavy is blank"),
-            ('[adapter.claude.efforts]\nnormal = 1\n',
-             r"\[adapter\.claude\.efforts\].*non-empty string"),
-            ('[adapter.codex.efforts.lite]\nslight = "   "\n',
-             r"adapter\.codex\.efforts\.lite\.slight is blank"),
-            ('[adapter.codex.efforts.lite]\nheavy = false\n',
-             r"\[adapter\.codex\.efforts\.lite\].*non-empty string"),
-        )
-        for text, message in cases:
-            with self.subTest(text=text), self.assertRaisesRegex(
-                    AssentError, message):
-                load_config(self.write(text), "plan01")
+                '[adapter.claude.models]\nprime = "x/high"\n', models=False),
+                "plan01")
 
     def test_removed_workflow_settings_are_rejected(self):
         for text in (
@@ -719,15 +666,13 @@ class TestUserHomePath(unittest.TestCase):
 
 class TestLayeredConfig(ConfigTestCase):
     def test_project_adapter_file_matches_inline_adapter_layout(self):
-        inline = self.write(
-            '[adapter]\nname = ["codex"]\n'
-            '[adapter.codex]\ncommand = "codex-test"\n')
+        adapter_text = ('[adapter]\nname = ["codex"]\n'
+                        '[adapter.codex]\ncommand = "codex-test"\n')
+        inline = self.write(adapter_text)
         inline_cfg = load_config(inline, "plan01")
 
-        self.write(_MINIMAL)
-        split = self.write_adapter(
-            '[adapter]\nname = ["codex"]\n'
-            '[adapter.codex]\ncommand = "codex-test"\n')
+        self.write(_MINIMAL, models=False)
+        split = self.write_adapter(adapter_text + models_block(adapter_text))
         split_cfg = load_config(self.project_config, "plan01")
 
         self.assertEqual(split_cfg, inline_cfg)
@@ -801,21 +746,17 @@ class TestLayeredConfig(ConfigTestCase):
     def test_partial_nested_project_override_wins_only_for_its_stated_keys(self):
         self.write_user(
             '[adapter.claude.models]\n'
-            'prime = "user-prime"\ncore = "user-core"\nlite = "user-lite"\n'
-            '[adapter.claude.default_effort]\nprime = "slight"\ncore = "slight"\n'
-            '[adapter.claude.efforts.lite]\nheavy = "user-heavy"\nnormal = "user-normal"\n')
+            'prime = "user-prime/high"\ncore = "user-core/high"\n'
+            'lite = "user-lite/low"\n')
         cfg = load_config(self.write(
-            '[adapter.claude.models]\ncore = "project-core"\n'
-            '[adapter.claude.default_effort]\ncore = "normal"\n'
-            '[adapter.claude.efforts.lite]\nheavy = "project-heavy"\n'), "plan01")
+            '[adapter.claude.models]\ncore = "project-core/max"\n'), "plan01")
+        # the nested table merges by key across layers; only core was restated
         self.assertEqual(cfg.claude_models,
-                         {"prime": "user-prime", "core": "project-core",
-                          "lite": "user-lite"})
-        self.assertEqual(cfg.claude_default_effort,
-                         {"prime": "slight", "core": "normal", "lite": "normal"})
-        self.assertEqual(cfg.claude_tier_efforts,
-                         {"lite": {"heavy": "project-heavy",
-                                   "normal": "user-normal"}})
+                         {"prime": "user-prime/high", "core": "project-core/max",
+                          "lite": "user-lite/low"})
+        self.assertEqual(cfg.source_of("adapter.claude.models.core"),
+                         PROJECT_LAYER)
+        self.assertEqual(cfg.source_of("adapter.claude.models.lite"), USER_LAYER)
 
     def test_arrays_replace_rather_than_concatenate(self):
         self.write_user(
@@ -876,21 +817,15 @@ class TestLayeredConfig(ConfigTestCase):
     def test_provenance_names_the_layer_of_each_effective_setting(self):
         self.write_user(
             '[adapter]\nname = ["claude", "codex"]\n'
-            '[adapter.claude.models]\nprime = "user-prime"\ncore = "user-core"\n'
-            '[adapter.claude.default_effort]\nprime = "slight"\ncore = "slight"\n'
-            '[adapter.claude.efforts.lite]\nheavy = "user-heavy"\nnormal = "user-normal"\n')
+            '[adapter.claude.models]\n'
+            'prime = "user-prime/high"\ncore = "user-core/high"\n'
+            'lite = "user-lite/low"\n')
         cfg = load_config(self.write(
-            '[adapter.claude.models]\ncore = "project-core"\n'
-            '[adapter.claude.default_effort]\ncore = "normal"\n'
-            '[adapter.claude.efforts.lite]\nheavy = "project-heavy"\n'), "plan01")
+            '[adapter.claude.models]\ncore = "project-core/low"\n'), "plan01")
         expected = {
             "adapter.name": USER_LAYER,                        # adapter selection
             "adapter.claude.models.prime": USER_LAYER,         # model mappings
             "adapter.claude.models.core": PROJECT_LAYER,
-            "adapter.claude.default_effort.prime": USER_LAYER,  # default efforts
-            "adapter.claude.default_effort.core": PROJECT_LAYER,
-            "adapter.claude.efforts.lite.normal": USER_LAYER,   # nested effort mappings
-            "adapter.claude.efforts.lite.heavy": PROJECT_LAYER,
             # nothing states these, so the built-in default is the value in effect
             "adapter.codex.command": BUILTIN_LAYER,
             "watchdog.stall_minutes": BUILTIN_LAYER,
@@ -902,10 +837,14 @@ class TestLayeredConfig(ConfigTestCase):
     def test_single_layer_provenance_and_default_source_chain(self):
         cfg = load_config(self.write(
             '[adapter]\nname = "codex"\n'
-            '[adapter.codex.models]\nprime = "project-prime"\n'), "plan01")
+            '[adapter.codex.models]\n'
+            'prime = "project-prime"\ncore = "c"\nlite = "l"\n',
+            models=False), "plan01")
         self.assertEqual(cfg.source_of("adapter.name"), PROJECT_LAYER)
         self.assertEqual(cfg.source_of("adapter.codex.models.prime"), PROJECT_LAYER)
+        # nothing states claude at all, and nothing is built in to fall back to
         self.assertEqual(cfg.source_of("adapter.claude.models.prime"), BUILTIN_LAYER)
+        self.assertEqual(cfg.claude_models, {})
         # a worktree copy keeps the same answer about where a setting came from
         self.assertEqual(cfg.for_worktree(self.root).source_of("adapter.name"),
                          PROJECT_LAYER)
@@ -1004,17 +943,17 @@ class TestBlankOverrideSemantics(ConfigTestCase):
 
     def test_blank_operational_strings_fail_at_load_naming_key_and_source(self):
         # Every setting whose contract is "useful text": adapter selection, adapter
-        # commands, model mappings, and effort translations.  Each is refused while
-        # loading the config, not later when an adapter is launched.
+        # commands, and the tier -> invocation mappings.  Each is refused while
+        # loading the config, not later when an adapter is launched.  The blank
+        # refusal runs before the model/effort grammar check, so an explicitly
+        # empty value is reported by its own dotted key and layer.
         cases = (
             ('[adapter]\nname = ""\n', "adapter.name"),
             ('[adapter]\nname = ["claude", "  "]\n', "adapter.name"),
             ('[adapter.claude]\ncommand = "   "\n', "adapter.claude.command"),
             ('[adapter.codex.models]\ncore = ""\n', "adapter.codex.models.core"),
-            ('[adapter.claude.efforts]\nnormal = ""\n',
-             "adapter.claude.efforts.normal"),
-            ('[adapter.antigravity.efforts.lite]\nheavy = " "\n',
-             "adapter.antigravity.efforts.lite.heavy"),
+            ('[adapter.antigravity.models]\nlite = " "\n',
+             "adapter.antigravity.models.lite"),
         )
         for text, dotted in cases:
             with self.subTest(dotted=dotted, layer=PROJECT_LAYER):
@@ -1052,28 +991,25 @@ class TestBlankOverrideSemantics(ConfigTestCase):
         with self.assertRaisesRegex(AssentError, "unknown top-level keys"):
             load_config(self.write(
                 '[verification]\nreceipt_refresh = ""\n'), "plan01")
-        with self.assertRaisesRegex(AssentError, "is not a valid effort"):
+        with self.assertRaisesRegex(AssentError, "is not a valid model tier"):
             load_config(self.write(
-                '[adapter.claude.default_effort]\ncore = ""\n'), "plan01")
+                '[adapter.claude.models]\nultra = "x/high"\n'), "plan01")
 
     def test_project_file_of_only_empty_tables_changes_nothing(self):
         self.write_user(
             '[adapter]\nname = "claude"\n'
-            '[adapter.claude.models]\nprime = "user-prime"\ncore = "user-core"\n'
-            '[adapter.claude.efforts.lite]\nheavy = "user-heavy"\n')
+            '[adapter.claude.models]\n'
+            'prime = "user-prime/high"\ncore = "user-core/low"\n'
+            'lite = "user-lite/low"\n')
         cfg = load_config(self.write(
             "[adapter]\n[adapter.claude]\n[adapter.claude.models]\n"
-            "[adapter.claude.efforts]\n[adapter.claude.efforts.lite]\n"
-            "[run]\n[watchdog]\n[workflow]\n"), "plan01")
-        # the user's stated models table still replaces the built-in one whole,
-        # exactly as it does without the project file
+            "[run]\n[watchdog]\n[workflow]\n", models=False), "plan01")
+        # empty project tables state nothing, so the user's entries stand unchanged
         self.assertEqual(cfg.claude_models,
-                         {"prime": "user-prime", "core": "user-core"})
-        self.assertEqual(cfg.claude_tier_efforts, {"lite": {"heavy": "user-heavy"}})
-        self.assertEqual(cfg.claude_default_effort,
-                         {"prime": "heavy", "core": "heavy", "lite": "normal"})
+                         {"prime": "user-prime/high", "core": "user-core/low",
+                          "lite": "user-lite/low"})
         self.assertEqual(cfg.source_of("adapter.claude.models.core"), USER_LAYER)
-        self.assertEqual(cfg.source_of("adapter.claude.efforts.lite.heavy"),
+        self.assertEqual(cfg.source_of("adapter.claude.models.prime"),
                          USER_LAYER)
 
 
@@ -1082,45 +1018,38 @@ class TestAdapterSettings(ConfigTestCase):
         # An unregistered adapter name must fail closed here, never silently inherit
         # another vendor's mapping.
         cfg = load_config(self.write(_MINIMAL), "plan01")
-        self.assertEqual(cfg.adapter_settings("claude").models["prime"], "fable")
-        self.assertEqual(cfg.adapter_settings("codex").models["lite"],
-                         "gpt-5.6-luna")
-        self.assertEqual(cfg.adapter_settings("antigravity").models["prime"],
-                         "gemini-3.1-pro")
+        self.assertEqual(cfg.adapter_settings("claude").models["prime"],
+                         "fable/high")
         with self.assertRaisesRegex(AssentError, "unknown adapter: 'nowhere'"):
             cfg.adapter_settings("nowhere")
 
     def test_settings_carry_vendor_specific_command_and_maps(self):
         cfg = load_config(self.write(
             '[adapter.codex]\ncommand = "codex.cmd"\n'
-            '[adapter.codex.efforts]\nheavy = "minimal"\nnormal = "balanced"\n'
-            '[adapter.codex.efforts.lite]\nslight = "max"\n'), "plan01")
+            '[adapter.codex.models]\nlite = "gpt-5.6-luna/max"\n'), "plan01")
         codex = cfg.adapter_settings("codex")
         self.assertEqual(codex.name, "codex")
         self.assertEqual(codex.command, "codex.cmd")
         self.assertEqual(codex.extra_args, ("--sandbox", "danger-full-access"))
-        self.assertEqual(codex.resolve_model("prime"), "gpt-5.6-sol")
+        self.assertEqual(codex.resolve("lite"), ("gpt-5.6-luna", "max"))
+        # an unmapped *tier* still fails closed; a non-tier is a vendor selection
         with self.assertRaisesRegex(AssentError,
                                     r"\[adapter\.codex\.models\]"):
-            codex.resolve_model("nonexistent")
+            codex.resolve("core")
+        self.assertEqual(codex.resolve("nonexistent"), ("nonexistent", None))
 
-    def test_literal_model_and_effort_bypass_adapter_mappings_independently(self):
+    def test_a_non_tier_selection_bypasses_the_models_table_entirely(self):
         cfg = load_config(self.write(
-            '[adapter.codex.efforts]\nheavy = "flat-heavy"\n'
-            '[adapter.codex.efforts.prime]\nheavy = "tier-heavy"\n'),
-            "plan01")
+            '[adapter.codex.models]\nprime = "gpt-5.6-sol/high"\n'), "plan01")
         codex = cfg.adapter_settings("codex")
 
-        self.assertEqual(codex.resolve_model("[Exact-Model]"), "Exact-Model")
-        self.assertIsNone(codex.resolve_effort(None, "[Exact-Model]"))
-        self.assertEqual(
-            codex.resolve_requested_effort("prime", "[XHigh]"), "XHigh")
-        self.assertEqual(
-            codex.resolve_requested_effort("[Exact-Model]", "heavy"),
-            "flat-heavy")
-        self.assertEqual(
-            codex.resolve_requested_effort("[Exact-Model]", "[XHigh]"),
-            "XHigh")
+        # anything that is not a tier is the vendor selection itself, case preserved
+        self.assertEqual(codex.resolve("Exact-Model/XHigh"),
+                         ("Exact-Model", "XHigh"))
+        # without a separator it deliberately passes no effort at all
+        self.assertEqual(codex.resolve("Exact-Model"), ("Exact-Model", None))
+        # the configured tier is untouched by either
+        self.assertEqual(codex.resolve("prime"), ("gpt-5.6-sol", "high"))
 
     def test_codex_builtin_extra_args_match_the_packaged_default(self):
         cfg = load_config(self.write(_MINIMAL), "plan01")
@@ -1133,127 +1062,67 @@ class TestAdapterSettings(ConfigTestCase):
             tuple(packaged["adapter"]["codex"]["extra_args"]),
         )
 
-    def test_resolve_effort_precedence_task_then_stated_default_then_builtin(self):
+    def test_tier_resolves_to_the_configured_model_and_effort_pair(self):
         cfg = load_config(self.write(
-            '[adapter.claude.default_effort]\n'
-            'prime = "slight"\ncore = "normal"\n'), "plan01")
+            '[adapter.claude.models]\n'
+            'prime = "fable/max"\ncore = "opus/high"\nlite = "sonnet"\n'),
+            "plan01")
         settings = cfg.adapter_settings("claude")
-        # task annotation wins over the tier default
-        self.assertEqual(settings.resolve_effort("slight", "prime"), "slight")
-        # a stated tier default applies when the task omits effort
-        self.assertEqual(settings.resolve_effort(None, "prime"), "slight")
-        self.assertEqual(settings.resolve_effort(None, "core"), "normal")
-        # the partial table overrides only the tiers it names; lite keeps the built-in
-        self.assertEqual(settings.resolve_effort(None, "lite"), "normal")
+        self.assertEqual(settings.resolve("prime"), ("fable", "max"))
+        self.assertEqual(settings.resolve("core"), ("opus", "high"))
+        # no separator: the vendor CLI default applies and no effort is passed
+        self.assertEqual(settings.resolve("lite"), ("sonnet", None))
 
-    def test_default_effort_table_overrides_per_tier_never_suppresses(self):
-        # An absent, empty, and partial table all keep the complete built-in defaults,
-        # so no tier falls through to whatever the vendor CLI would have picked.
-        builtin = {"prime": "heavy", "core": "heavy", "lite": "normal"}
-        for text in ("", '[adapter.claude.default_effort]\n',
-                     '[adapter.claude.default_effort]\ncore = "slight"\n'):
-            with self.subTest(text=text):
-                cfg = load_config(self.write(text), "plan01")
-                settings = cfg.adapter_settings("claude")
-                expected = dict(builtin)
-                if "core =" in text:
-                    expected["core"] = "slight"
-                self.assertEqual(settings.default_effort, expected)
-                for model, effort in expected.items():
-                    self.assertEqual(settings.resolve_effort(None, model), effort)
-                    self.assertEqual(
-                        settings.resolve_requested_effort(model, effort),
-                        {"heavy": "high", "normal": "medium",
-                         "slight": "low"}[effort])
-
-    def test_default_effort_keeps_builtin_defaults_for_every_adapter(self):
+    def test_an_unselected_adapter_may_stay_partial_until_it_is_used(self):
+        # Only the selected adapters are required, so an unused one keeps whatever it
+        # states; the refusal arrives if a tier of it is ever resolved.
         cfg = load_config(self.write(
-            '[adapter.codex.default_effort]\n'
-            '[adapter.antigravity.default_effort]\nlite = "slight"\n'), "plan01")
-        self.assertEqual(cfg.adapter_settings("codex").default_effort,
-                         {"prime": "heavy", "core": "normal", "lite": "slight"})
-        self.assertEqual(cfg.adapter_settings("antigravity").default_effort,
-                         {"prime": "heavy", "core": "heavy", "lite": "slight"})
+            '[adapter.antigravity.models]\nprime = "only/high"\n'), "plan01")
+        settings = cfg.adapter_settings("antigravity")
+        self.assertEqual(settings.resolve("prime"), ("only", "high"))
+        with self.assertRaisesRegex(AssentError,
+                                    r"\[adapter\.antigravity\.models\]"):
+            settings.resolve("core")
 
-    def test_bad_default_effort_tier_key_rejected(self):
+    def test_models_keys_are_validated_against_the_known_tiers(self):
         with self.assertRaisesRegex(
                 AssentError,
-                r"\[adapter\.claude\.default_effort\].*'ultra'.*model tier"):
+                r"\[adapter\.claude\.models\] key 'ultra' is not a valid"):
             load_config(self.write(
-                '[adapter.claude.default_effort]\nultra = "heavy"\n'), "plan01")
-        with self.assertRaisesRegex(AssentError, "wrong type"):
-            load_config(self.write(
-                '[adapter.claude]\ndefault_effort = "heavy"\n'), "plan01")
+                '[adapter.claude.models]\nultra = "x/high"\n'), "plan01")
 
-    def test_requested_effort_grid_tier_then_flat_then_baseline(self):
+    def test_malformed_selection_is_refused_when_the_config_loads(self):
+        cases = (
+            # a second separator would silently truncate the model name
+            ('[adapter.codex.models]\nprime = "vendor/model/high"\n',
+             r"a model name must not contain '/'"),
+            ('[adapter.codex.models]\nprime = "/high"\n',
+             r"empty model name"),
+            ('[adapter.codex.models]\nprime = "gpt-5.6-sol/"\n',
+             r"empty effort after '/'"),
+        )
+        for text, message in cases:
+            with self.subTest(text=text), self.assertRaisesRegex(
+                    AssentError, message):
+                load_config(self.write(text), "plan01")
+
+    def test_antigravity_shipped_tiers_are_supported_by_their_family(self):
+        # Each shipped tier must name an effort its own family actually exposes;
+        # nothing is translated at run time, so a wrong pair would only be caught
+        # by the vendor CLI.
         cfg = load_config(self.write(
-            '[adapter.claude.efforts]\n'
-            'heavy = "minimal"\nnormal = "balanced"\n'   # no flat "slight" -> baseline
-            '[adapter.claude.efforts.lite]\nheavy = "tiny"\n'), "plan01")
-        settings = cfg.adapter_settings("claude")
-        grid = {
-            ("prime", "heavy"): "minimal", ("prime", "normal"): "balanced",
-            ("prime", "slight"): "low",
-            ("core", "heavy"): "minimal", ("core", "normal"): "balanced",
-            ("core", "slight"): "low",
-            ("lite", "heavy"): "tiny",      # tier-specific beats flat
-            ("lite", "normal"): "balanced",
-            ("lite", "slight"): "low",     # built-in baseline fallback
-        }
-        for (model, effort), expected in grid.items():
-            with self.subTest(model=model, effort=effort):
-                self.assertEqual(
-                    settings.resolve_requested_effort(model, effort), expected)
-
-    def test_requested_effort_without_table_uses_builtin_baseline(self):
-        settings = load_config(self.write(_MINIMAL), "plan01").adapter_settings("claude")
-        self.assertEqual(settings.resolve_requested_effort("core", "heavy"), "high")
-        self.assertEqual(settings.resolve_requested_effort("core", "normal"), "medium")
-        self.assertEqual(settings.resolve_requested_effort("core", "slight"), "low")
-
-    def test_requested_effort_flat_mapping_falls_back_per_key_to_baseline(self):
-        settings = load_config(self.write(
-            '[adapter.claude.efforts]\nheavy = "custom-heavy"\n'),
-            "plan01").adapter_settings("claude")
-        self.assertEqual(settings.resolve_requested_effort("core", "heavy"), "custom-heavy")
-        self.assertEqual(settings.resolve_requested_effort("core", "normal"), "medium")
-        self.assertEqual(settings.resolve_requested_effort("core", "slight"), "low")
-
-    def test_requested_effort_precedence_is_tier_then_flat_then_baseline(self):
-        settings = load_config(self.write(
-            '[adapter.claude.efforts]\nheavy = "flat-heavy"\n'
-            '[adapter.claude.efforts.lite]\nheavy = "tier-heavy"\n'),
-            "plan01").adapter_settings("claude")
-        self.assertEqual(settings.resolve_requested_effort("lite", "heavy"), "tier-heavy")
-        self.assertEqual(settings.resolve_requested_effort("core", "heavy"), "flat-heavy")
-        self.assertEqual(settings.resolve_requested_effort("core", "normal"), "medium")
-
-
-    def test_antigravity_shipped_grid_is_complete_and_monotone(self):
-        cfg = load_config(self.write(_MINIMAL), "plan01")
+            self._packaged_adapter_text()), "plan01")
         settings = cfg.adapter_settings("antigravity")
-        grid = {
-            # Gemini 3.1 Pro exposes low and high only: normal goes up, quality first.
-            ("prime", "slight"): ("gemini-3.1-pro", "low"),
-            ("prime", "normal"): ("gemini-3.1-pro", "high"),
-            ("prime", "heavy"): ("gemini-3.1-pro", "high"),
-            ("core", "slight"): ("gemini-3.6-flash", "low"),
-            ("core", "normal"): ("gemini-3.6-flash", "medium"),
-            ("core", "heavy"): ("gemini-3.6-flash", "high"),
-            # AGY exposes no Flash Lite, so lite uses 3.5 Flash, whose ceiling is medium.
-            ("lite", "slight"): ("gemini-3.5-flash", "low"),
-            ("lite", "normal"): ("gemini-3.5-flash", "medium"),
-            ("lite", "heavy"): ("gemini-3.5-flash", "medium"),
+        supported = {
+            "gemini-3.1-pro": ("low", "high"),          # no medium
+            "gemini-3.6-flash": ("low", "medium", "high"),
+            "gemini-3.5-flash": ("low", "medium"),      # no high
         }
-        for (tier, effort), expected in grid.items():
-            with self.subTest(tier=tier, effort=effort):
-                self.assertEqual(
-                    (settings.resolve_model(tier),
-                     settings.resolve_requested_effort(tier, effort)),
-                    expected)
-        # an omitted task effort still lands on the tier default, which is heavy everywhere
         for tier in ("prime", "core", "lite"):
-            self.assertEqual(settings.resolve_effort(None, tier), "heavy")
+            with self.subTest(tier=tier):
+                model, effort = settings.resolve(tier)
+                self.assertIn(model, supported)
+                self.assertIn(effort, supported[model])
 
 
 class TestListTaskPlans(ConfigTestCase):

@@ -12,6 +12,7 @@ verbatim.
 import contextlib
 import io
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -30,7 +31,7 @@ _NEEDS_OK_TXT = ('python -c "import pathlib,sys;'
                  "sys.exit(0 if pathlib.Path('src/ok.txt').exists() else 1)\"")
 
 
-def task_text(*, title="任務", deps=(), model="lite", effort=None,
+def task_text(*, title="任務", deps=(), model="lite",
               status="TODO", scope=("src/",), verify=_OK,
               goal="做一件事。", acceptance="- 完成", notes="") -> str:
     lines = [
@@ -38,8 +39,6 @@ def task_text(*, title="任務", deps=(), model="lite", effort=None,
         "deps = [" + ", ".join(json.dumps(d) for d in deps) + "]",
         f"model = {json.dumps(model)}",
     ]
-    if effort:
-        lines.append(f"effort = {json.dumps(effort)}")
     lines += [
         f"status = {json.dumps(status)}",
         "scope = [" + ", ".join(json.dumps(s) for s in scope) + "]",
@@ -52,20 +51,68 @@ def task_text(*, title="任務", deps=(), model="lite", effort=None,
     return "\n".join(lines) + "\n"
 
 
+# Assent ships no built-in model ids, so every fixture states its own tier table.
+# These values are the fixtures' own, not a packaged default: assertions elsewhere in
+# the suite name them directly.
+TEST_MODELS = {
+    "claude": 'prime = "fable/high"\ncore = "opus/high"\nlite = "sonnet/medium"\n',
+    "codex": ('prime = "gpt-5.6-sol/high"\ncore = "gpt-5.6-terra/medium"\n'
+              'lite = "gpt-5.6-luna/low"\n'),
+    "antigravity": ('prime = "gemini-3.1-pro/high"\ncore = "gemini-3.6-flash/high"\n'
+                    'lite = "gemini-3.5-flash/medium"\n'),
+}
+
+
+# The same tiers as TEST_MODELS, for fixtures that build a Config directly.
+TEST_MODEL_TIERS = {
+    "claude": {"prime": "fable/high", "core": "opus/high",
+               "lite": "sonnet/medium"},
+    "codex": {"prime": "gpt-5.6-sol/high", "core": "gpt-5.6-terra/medium",
+              "lite": "gpt-5.6-luna/low"},
+    "antigravity": {"prime": "gemini-3.1-pro/high",
+                    "core": "gemini-3.6-flash/high",
+                    "lite": "gemini-3.5-flash/medium"},
+}
+
+
+def models_block(text: str = "") -> str:
+    """Tier tables for every adapter ``text`` mentions but states no models for.
+
+    Assent ships no built-in model ids, so any adapter a config selects -- through the
+    rotation or through a workflow step's own binding -- has to name its tiers. Supplying
+    them for an adapter the document never reaches is harmless; skipping any table the
+    document does state is what keeps a case about a partial or blank entry provable.
+    """
+    named = ["claude"] + [vendor for vendor in TEST_MODELS
+                          if f'"{vendor}"' in text]
+    return "".join(
+        f"[adapter.{vendor}.models]\n{TEST_MODELS[vendor]}"
+        for vendor in dict.fromkeys(named)
+        if f"[adapter.{vendor}.models]" not in text)
+
+
 def ok_result() -> TaskResult:
     return TaskResult(exit_code=0, output="", quota_exhausted=False, reset_at=None)
 
 
 class ScriptedAdapter(Adapter):
+    """A test double for one vendor CLI.
+
+    ``resolved_model`` substitutes the model half of the resolved invocation so a test
+    can tell two rotating adapters apart without configuring a models table; the effort
+    half always comes from the settings layer, exactly as a real adapter's does.
+    """
+
     def __init__(self, steps, resolved_model=None):
         self.steps = list(steps)
         self.calls: list[tuple[str, str, str | None]] = []
         self.resolved_model = resolved_model
         self.resolve_calls: list[str] = []
 
-    def resolve_model(self, model):
+    def resolve(self, model):
         self.resolve_calls.append(model)
-        return self.resolved_model or model
+        requested_model, requested_effort = super().resolve(model)
+        return (self.resolved_model or requested_model, requested_effort)
 
     def run_task(self, prompt, model, effort, cwd):
         self.calls.append((prompt, model, effort))
@@ -113,7 +160,8 @@ class EngineTestCase(unittest.TestCase):
             f"[run]\nretry_per_task = {retry}\n"
             f'[adapter]\nname = "{adapter_name}"\n'
             '[adapter.claude]\ncommand = "python"\n'
-            + extra_config,
+            + extra_config
+            + models_block(f'name = "{adapter_name}"\n' + extra_config),
             encoding="utf-8")
         return load_config(self.root / ".assent" / "assent.toml", "plan01")
 

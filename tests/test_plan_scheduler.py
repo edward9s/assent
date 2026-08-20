@@ -17,6 +17,8 @@ import tempfile
 import textwrap
 import time
 import unittest
+
+from tests.engine_support import models_block
 from pathlib import Path
 from unittest.mock import patch
 
@@ -91,7 +93,7 @@ class PlanSchedulerTestCase(unittest.TestCase):
         self.git_marker = self.root / ".git"
         self.git_marker.mkdir()
         self.config = self.assent_dir / "assent.toml"
-        self.config.write_text("", encoding="utf-8")
+        self.config.write_text(models_block(), encoding="utf-8")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def make_plan(self, name: str, status: str = "TODO",

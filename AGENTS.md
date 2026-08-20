@@ -267,22 +267,22 @@ while operating an assent-managed session live in
   explicit human choice and may reverse only a checkpoint tail whose ownership
   is mechanically provable.
 - `build/lib/` is an old build artifact; never modify it.
-- `model` and `effort` ordinarily use the orthogonal portable tiers
-  prime/core/lite and heavy/normal/slight. A task, role, or workflow role entry may deliberately
-  bypass either mapping with one exact bracketed literal, such as
-  `[gpt-5.6-sol]` or `[xhigh]`; the brackets are removed and the case-preserved
-  value is sent only through a workflow step that resolves to one adapter.
-  Literal values never mutate adapter settings. A literal model with omitted
-  effort deliberately uses the vendor default; an abstract effort beside a
-  literal model uses only the adapter's flat translation, never a tier-specific
-  one. `heavy` means a portable high reasoning investment, not a vendor's native
-  maximum tier; an adapter must not silently ignore or up/down-shift an effort a
-  task states explicitly. Abstract and vendor effort names intentionally differ;
-  when a translation is missing, the settings-layer built-in baseline maps
-  heavy -> high, normal -> medium, and slight -> low instead of sending the
-  abstract name as a CLI value. Vendor-specific effort values belong in adapter
-  mappings or an explicit bracketed literal and must not be hardcoded in adapter
-  code.
+- `model` is the only portable selection: the tiers prime/core/lite. Effort is
+  not an independent axis and is not a task field. Each adapter maps a tier to
+  one complete `"<model>/<effort>"` invocation in `[adapter.<name>.models]`;
+  the first `/` separates the two, a model name may not contain `/`, and a
+  selection with no `/` deliberately passes no effort argument and inherits the
+  vendor CLI default. There is no abstract effort vocabulary and no translation
+  table, so an adapter never up/down-shifts anything: the configured value is
+  sent verbatim, and a model family's real ceiling is written into that value
+  where a human can read it. A task file accepts the three tiers and nothing
+  else, so a vendor id cannot be written into a plan artifact that outlives the
+  release it names. An `assent.toml` role or workflow entry may instead state a
+  vendor `model/effort` selection directly -- any value that is not a tier is
+  read as one -- which bypasses the table and is sent only through a step that
+  resolves to exactly one adapter. Such a value never mutates adapter settings.
+  Vendor-specific model and effort strings belong in adapter mappings or in that
+  one place, and must not be hardcoded in adapter code.
 - An adapter command may request an immediate continuation only with the exact,
   provider-neutral `{"type":"assent.checkpoint_resume"}` terminal control
   record. Assent owns the WIP checkpoint and resume lifecycle; the record carries
@@ -296,13 +296,12 @@ while operating an assent-managed session live in
   `AUTHENTICATION REQUIRED`, keep the task resumable rather than `BLOCKED`, and
   do not wait; when authentication and quota failures are mixed, wait only for
   a quota-exhausted candidate that can recover.
-- Effort selection is deterministic: task explicit value, then the configured
-  per-tier `default_effort` override, then the built-in per-tier default. A
-  stated `default_effort` table overrides per tier rather than replacing the
-  built-in one, so an absent, empty, or partial table still leaves every known
-  abstract tier with a value. Every abstract-model invocation therefore passes
-  a concrete requested effort. Only an explicitly bracketed literal model with
-  omitted effort inherits the vendor CLI default.
+- Selection is one lookup with nothing behind it: the tier's entry in that
+  adapter's `models` table, or the vendor selection itself. A stated `models`
+  table replaces the built-in one whole, so its keys are validated against the
+  known tiers at config load and an unmapped tier is a preflight failure rather
+  than a run-time surprise. Only a selection that omits `/` inherits the vendor
+  CLI default effort.
 - Media inputs (image, PDF, audio, and the like) are ordinary project context,
   not a schema feature. The fixed task fields stay as they are: a task names an
   existing media file by project-relative path and purpose in `behavior` or

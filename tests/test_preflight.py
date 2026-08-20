@@ -1,8 +1,7 @@
 """preflight tests: the decisions that must be settled before an AI session exists.
 
-Which abstract effort a task gets and which concrete CLI value that becomes, which adapter
-resolves at all, and whether that adapter would accept every invocation the plan could still
-issue. Both surfaces that consume those decisions are exercised, because `run` and `check`
+Which concrete CLI model and effort a task's tier becomes, which adapter resolves at all,
+and whether that adapter would accept every invocation the plan could still issue. Both surfaces that consume those decisions are exercised, because `run` and `check`
 must answer them identically and neither may spend a token to find out.  Both surfaces also
 fail closed without current global contracts, so every case here mixes in
 GlobalContractsMixin for a temporary user home.
@@ -14,72 +13,78 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from assent import engine, gitops, inspection, preflight
+from assent import AssentError, engine, gitops, inspection, preflight
 from assent.adapters import get_adapter
 from assent.config import load_config
 from assent.plan import journal_path_for, parse_task_file, set_status
-from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
+from tests.engine_support import (EngineTestCase, ScriptedAdapter,
+                                  models_block, ok_result)
 from tests.test_contracts import GlobalContractsMixin
 
 
 class TestInvocationResolution(GlobalContractsMixin, EngineTestCase):
-    def test_literal_task_values_resolve_without_touching_adapter_maps(self):
-        task_path = self.write_task(
-            1, model="[Exact-Model]", effort="[XHigh]")
-        cfg = self.build(adapter_name="codex")
-        task = parse_task_file(task_path)
-        session = preflight.resolve_session(
-            cfg, get_adapter("codex", cfg), task, "codex")
+    def test_a_task_file_cannot_name_a_vendor_model_at_all(self):
+        # The capability lives in assent.toml only, so a plan artifact stays free of
+        # ids that expire with the release they name.
+        for value in ("Exact-Model/XHigh", "[Exact-Model]"):
+            with self.subTest(value=value):
+                task_path = self.write_task(1, model=value)
+                with self.assertRaisesRegex(
+                        AssentError, "vendor model ids belong in"):
+                    parse_task_file(task_path)
 
-        self.assertEqual(session.requested_model, "Exact-Model")
-        self.assertEqual(session.effort, "[XHigh]")
-        self.assertEqual(session.requested_effort, "XHigh")
+    def test_a_role_vendor_selection_resolves_without_touching_adapter_maps(self):
+        text = ('[abilities.fix]\nprompt = "Repair."\nwrites = true\n'
+            '[roles.pinned_fixer]\nability = ["fix"]\n'
+                'model = "Exact-Model/XHigh"\n'
+                '[workflow]\ntask = [{ role = "pinned_fixer", adapter = "codex" }]\n')
+        cfg = self.build(adapter_name="codex", extra_config=text)
+        step = cfg.workflow_task[0]
 
-        task_path = self.write_task(1, model="[Exact-Model]", effort=None)
-        task = parse_task_file(task_path)
-        session = preflight.resolve_session(
-            cfg, get_adapter("codex", cfg), task, "codex")
-        self.assertIsNone(session.effort)
-        self.assertIsNone(session.requested_effort)
+        requested_model, requested_effort = preflight.resolve_selection(
+            cfg, step.resolved_role.model, "codex")
+        self.assertEqual(requested_model, "Exact-Model")
+        self.assertEqual(requested_effort, "XHigh")
 
-    def test_literal_task_profile_refuses_adapter_rotation(self):
-        task_path = self.write_task(1, model="[Exact-Model]")
+    def test_a_role_vendor_selection_refuses_adapter_rotation(self):
+        text = ('[adapter]\nname = ["claude", "codex"]\n'
+                + '[abilities.fix]\nprompt = "Repair."\nwrites = true\n'
+            '[roles.pinned_fixer]\nability = ["fix"]\n'
+                'model = "Exact-Model"\n'
+                '[workflow]\ntask = [{ role = "pinned_fixer" }]\n')
         config_path = self.root / ".assent" / "assent.toml"
-        config_path.write_text(
-            '[adapter]\nname = ["claude", "codex"]\n', encoding="utf-8")
-        cfg = load_config(config_path, "plan01")
+        config_path.write_text(text + models_block(text), encoding="utf-8")
 
-        errors = preflight.literal_adapter_errors(
-            cfg, parse_task_file(task_path))
+        with self.assertRaisesRegex(AssentError, "exactly one adapter"):
+            load_config(config_path, "plan01")
 
-        self.assertEqual(len(errors), 1)
-        self.assertIn("exactly one adapter", errors[0])
-
-    def test_resolved_effort_is_consistent_across_prompt_call_label_journal(self):
-        # One resolved abstract/concrete pair must appear identically in the prompt
-        # placeholders, the adapter call, the terminal label, and the scheduler journal.
-        p1 = self.write_task(1, model="lite", effort="heavy")
+    def test_resolved_selection_is_consistent_across_prompt_call_label_journal(self):
+        # One resolved invocation must appear identically in the prompt placeholders,
+        # the adapter call, the terminal label, and the scheduler journal.
+        p1 = self.write_task(1, model="lite")
         cfg = self.build(extra_config=
-            '[adapter.claude.efforts.lite]\nheavy = "max"\n')
+            '[adapter.claude.models]\n'
+            'prime = "fable/high"\ncore = "opus/high"\n'
+            'lite = "sonnet/max"\n')
         self.commit_all()
-        adapter = ScriptedAdapter([self.ai_done(p1)])
+        adapter = ScriptedAdapter(
+            [self.ai_done(p1, requested_model="sonnet")])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             engine.run(cfg, once=True, adapter=adapter)
 
         prompt, requested_model, requested_effort = adapter.calls[0]
-        self.assertEqual(requested_model, "lite")
+        self.assertEqual(requested_model, "sonnet")
         self.assertEqual(requested_effort, "max")            # concrete CLI value
-        self.assertIn('selected effort = "heavy"', prompt)    # portable kept distinct
         self.assertIn('requested_effort = "max"', prompt)
         # the prompt no longer offers "no value = the CLI default" as a session contract
         self.assertNotIn("CLI default", prompt)
-        self.assertIn("| heavy->max", out.getvalue())
+        self.assertIn("lite->sonnet/max", out.getvalue())
 
         from assent.plan import read_entries
         done = next(e for e in read_entries(journal_path_for(p1))
                     if e["by"] == "claude")
-        self.assertEqual(done["requested_model"], "lite")
+        self.assertEqual(done["requested_model"], "sonnet")
 
     def test_unknown_adapter_run_is_rejected_without_claude_fallback(self):
         self.write_task(1)
@@ -127,42 +132,30 @@ class TestInvocationResolution(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(inspection.check(cfg), 1)
         self.assertIn("codex CLI: FAIL (executable not found", out.getvalue())
 
-    def test_every_builtin_adapter_and_tier_resolves_a_concrete_effort(self):
-        # No supported invocation may plan a None effort for a known tier.
-        cfg = self.build()
+    def test_every_configured_adapter_and_tier_resolves_a_concrete_invocation(self):
+        # No supported invocation may plan an unmapped tier or a missing effort.
+        cfg = self.build(extra_config=models_block(
+            '"claude" "codex" "antigravity"'))
         for tier in ("prime", "core", "lite"):
             for name in ("claude", "codex", "antigravity"):
                 with self.subTest(adapter=name, tier=tier):
-                    settings = cfg.adapter_settings(name)
-                    effort = settings.resolve_effort(None, tier)
+                    model, effort = cfg.adapter_settings(name).resolve(tier)
+                    self.assertTrue(model)
                     self.assertIsNotNone(effort)
-                    self.assertIsNotNone(
-                        settings.resolve_requested_effort(tier, effort))
 
-    def test_effort_translation_uses_tier_then_flat_then_baseline(self):
+    def test_selection_resolves_through_the_adapter_models_table(self):
         cfg = self.build(extra_config=
-            '[adapter.claude.efforts]\n'
-            'slight = "minimal"\nnormal = "balanced"\n'
-            '[adapter.claude.efforts.lite]\nslight = "tiny"\n')
-        self.assertEqual(preflight.resolve_requested_effort(cfg, "lite", "slight"),
-                         "tiny")
-        self.assertEqual(preflight.resolve_requested_effort(
-            cfg, "lite", "normal"), "balanced")
-        self.assertEqual(preflight.resolve_requested_effort(cfg, "lite", "heavy"),
-                         "high")
-        self.assertEqual(preflight.resolve_requested_effort(cfg, "core", "slight"),
-                         "minimal")
-        self.assertEqual(preflight.resolve_requested_effort(cfg, "core", "heavy"),
-                         "high")
-
-        tier_only = self.build(extra_config=
-            '[adapter.claude.efforts.lite]\nheavy = "max"\n')
-        self.assertEqual(preflight.resolve_requested_effort(
-            tier_only, "lite", "heavy"), "max")
-        self.assertEqual(preflight.resolve_requested_effort(
-            tier_only, "lite", "slight"), "low")
-        self.assertEqual(preflight.resolve_requested_effort(
-            tier_only, "core", "heavy"), "high")
+            '[adapter.claude.models]\n'
+            'prime = "p/tiny"\ncore = "c/balanced"\nlite = "l"\n')
+        self.assertEqual(preflight.resolve_selection(cfg, "prime"),
+                         ("p", "tiny"))
+        self.assertEqual(preflight.resolve_selection(cfg, "core"),
+                         ("c", "balanced"))
+        # no separator: no effort argument is passed for that tier
+        self.assertEqual(preflight.resolve_selection(cfg, "lite"), ("l", None))
+        # a non-tier value bypasses the table entirely, on the same grammar
+        self.assertEqual(preflight.resolve_selection(cfg, "Exact/Max"),
+                         ("Exact", "Max"))
 
 
 class TestAntigravityCapabilityPreflight(GlobalContractsMixin, EngineTestCase):
@@ -173,7 +166,10 @@ class TestAntigravityCapabilityPreflight(GlobalContractsMixin, EngineTestCase):
     """
 
     BAD_PRO_NORMAL = ('[adapter]\nname = "antigravity"\n'
-                      '[adapter.antigravity.efforts.prime]\nnormal = "medium"\n')
+                      '[adapter.antigravity.models]\n'
+                      'prime = "gemini-3.1-pro/medium"\n'
+                      'core = "gemini-3.6-flash/high"\n'
+                      'lite = "gemini-3.5-flash/medium"\n')
 
     def setUp(self):
         super().setUp()
@@ -194,12 +190,13 @@ class TestAntigravityCapabilityPreflight(GlobalContractsMixin, EngineTestCase):
         self.addCleanup(session_patch.stop)
 
     def antigravity_cfg(self, extra_config=BAD_PRO_NORMAL):
+        extra_config = extra_config + models_block(extra_config)
         (self.root / ".assent" / "assent.toml").write_text(
             extra_config, encoding="utf-8")
         return load_config(self.root / ".assent" / "assent.toml", "plan01")
 
     def test_run_refuses_pro_normal_before_session_status_or_git_change(self):
-        path = self.write_task(1, model="prime", effort="normal")
+        path = self.write_task(1, model="prime")
         cfg = self.antigravity_cfg()
         self.commit_all()
         commits_before = self._git("log", "--pretty=%H")
@@ -212,7 +209,7 @@ class TestAntigravityCapabilityPreflight(GlobalContractsMixin, EngineTestCase):
         self.assertIn("antigravity capability preflight: FAIL", text)
         self.assertIn("--model gemini-3.1-pro --effort medium", text)
         self.assertIn("available: low, high", text)
-        self.assertIn('[adapter.antigravity.efforts.prime] normal = "high"', text)
+        self.assertIn('[adapter.antigravity.models] prime = "gemini-3.1-pro/high"', text)
         # nothing was started, marked, journalled or committed
         self.session.assert_not_called()
         self.assertEqual(parse_task_file(path).status, "TODO")
@@ -222,7 +219,7 @@ class TestAntigravityCapabilityPreflight(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(gitops.branches_with_prefix(self.root, "plan01/"), [])
 
     def test_check_refuses_the_same_mapping_with_the_same_diagnostic(self):
-        self.write_task(1, model="prime", effort="normal")
+        self.write_task(1, model="prime")
         cfg = self.antigravity_cfg()
         self.commit_all()
 
@@ -232,7 +229,7 @@ class TestAntigravityCapabilityPreflight(GlobalContractsMixin, EngineTestCase):
 
         text = out.getvalue()
         self.assertIn("antigravity capability preflight: FAIL", text)
-        self.assertIn('[adapter.antigravity.efforts.prime] normal = "high"', text)
+        self.assertIn('[adapter.antigravity.models] prime = "gemini-3.1-pro/high"', text)
         self.session.assert_not_called()
 
     def test_shipped_mapping_passes_the_preflight_for_every_tier(self):
@@ -247,7 +244,7 @@ class TestAntigravityCapabilityPreflight(GlobalContractsMixin, EngineTestCase):
         self.assertIn("antigravity capability preflight: OK", out.getvalue())
 
     def test_settled_tasks_do_not_gate_a_run_they_cannot_join(self):
-        self.write_task(1, model="prime", effort="normal", status="DONE")
+        self.write_task(1, model="prime", status="DONE")
         path = self.write_task(2, model="core")
         cfg = self.antigravity_cfg()
         self.commit_all()
@@ -268,7 +265,10 @@ class TestAutoFixReviewRoundPreflight(GlobalContractsMixin, EngineTestCase):
     round whose mapping the vendor would refuse.
     """
 
-    BAD_PRIME_HEAVY = '[adapter.antigravity.efforts.prime]\nheavy = "medium"\n'
+    BAD_PRIME_HEAVY = ('[adapter.antigravity.models]\n'
+                       'prime = "gemini-3.1-pro/medium"\n'
+                       'core = "gemini-3.6-flash/high"\n'
+                       'lite = "gemini-3.5-flash/medium"\n')
     ROLES = '''
 [abilities.review]
 prompt = "Review."
@@ -277,11 +277,9 @@ produces_verdict = true
 [roles.prime_review]
 ability = ["review"]
 model = "prime"
-effort = "heavy"
 [roles.core_review]
 ability = ["review"]
 model = "core"
-effort = "heavy"
 '''
 
     def setUp(self):
@@ -303,7 +301,7 @@ effort = "heavy"
     def review_errors(self, extra_config, adapter_name):
         from assent.adapters import get_adapter
         (self.root / ".assent" / "assent.toml").write_text(
-            extra_config, encoding="utf-8")
+            extra_config + models_block(extra_config), encoding="utf-8")
         cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
         return preflight.auto_fix_review_capability_errors(
             cfg, get_adapter(adapter_name, cfg))

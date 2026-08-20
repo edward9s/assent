@@ -43,30 +43,67 @@ produces_verdict = true
 prompt = "Repair every authorized integration finding in the scheduler-provided workspaces while preserving the exact selection. Fix production behavior; do not weaken, narrow, delete, or rewrite tests merely to make a check pass. Do not run Git, Assent, focused tests, full verification, or accept."
 writes = true
 
-# Roles compose abilities and may select abstract model/effort tiers.
+# Roles compose abilities and may select an abstract model tier. A role that no
+# workflow entry names is inert, so both the combined and the split forms below
+# stay defined and either can be selected by editing [workflow] alone.
+#
+# Every verdict role is prime: a wrong verdict either passes broken work or blocks
+# good work, and the strict output it must return is what weaker models miss first.
+# task_fixer is the one repair role set lower. It repairs one task against an
+# authorized finding list -- the same class of work implement_source does at
+# whatever tier the task itself states -- and a cheap focused_test rechecks it.
+# plan_fixer stays prime because it reasons across tasks, and integration_fixer
+# because it may not run tests to check itself before full_verify does.
 [roles.implementer]
 ability = ["write_tests", "implement_source"]
+[roles.tests_writer]
+ability = ["write_tests"]
+[roles.source_implementer]
+ability = ["implement_source"]
 [roles.task_reviewer_fixer]
 ability = ["task_review", "task_fix"]
 model = "prime"
-effort = "heavy"
+[roles.task_reviewer]
+ability = ["task_review"]
+model = "prime"
+[roles.task_fixer]
+ability = ["task_fix"]
+model = "core"
 [roles.plan_quality_reviewer_fixer]
 ability = ["plan_quality_review", "plan_fix"]
 model = "prime"
-effort = "heavy"
+[roles.plan_quality_reviewer]
+ability = ["plan_quality_review"]
+model = "prime"
 [roles.plan_reviewer_fixer]
 ability = ["plan_review", "plan_fix"]
 model = "prime"
-effort = "heavy"
+[roles.plan_reviewer]
+ability = ["plan_review"]
+model = "prime"
+[roles.plan_fixer]
+ability = ["plan_fix"]
+model = "prime"
 [roles.integration_reviewer_fixer]
 ability = ["integration_review", "integration_fix"]
 model = "prime"
-effort = "heavy"
+[roles.integration_reviewer]
+ability = ["integration_review"]
+model = "prime"
+[roles.integration_fixer]
+ability = ["integration_fix"]
+model = "prime"
 
 # A role may omit adapter for the global rotation, name one fixed adapter, or
 # name an ordered adapter list for availability fallback. A passing scheduler
 # action ends its layer. Failure advances to the next configured repair role,
 # then the next action rechecks the result.
+#
+# Each layer below ships the combined form, and the commented block after it is
+# the split alternative: swap one for the other by editing these arrays only.
+# Splitting costs one extra session per step and buys two things -- the tests are
+# authored before the implementation that has to satisfy them, and the verdict is
+# reached by a session with no write authority, so nothing judges its own repair.
 [workflow]
 task = [
   { role = "implementer"},
@@ -74,6 +111,14 @@ task = [
   { role = "task_reviewer_fixer"},
   { action = "focused_test" },
 ]
+# task = [
+#   { role = "tests_writer" },
+#   { role = "source_implementer" },
+#   { action = "focused_test" },
+#   { role = "task_reviewer" },
+#   { role = "task_fixer" },
+#   { action = "focused_test" },
+# ]
 plan = [
   { role = "plan_quality_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
@@ -82,8 +127,25 @@ plan = [
   { role = "plan_reviewer_fixer", adapter = "codex" },
   { action = "focused_sweep" },
 ]
+# plan = [
+#   { role = "plan_quality_reviewer", adapter = "codex" },
+#   { role = "plan_fixer", adapter = "codex" },
+#   { action = "focused_sweep" },
+#   { role = "plan_reviewer", adapter = "codex" },
+#   { role = "plan_fixer", adapter = "codex" },
+#   { action = "focused_sweep" },
+#   { role = "plan_reviewer", adapter = "codex" },
+#   { role = "plan_fixer", adapter = "codex" },
+#   { action = "focused_sweep" },
+# ]
 integration = [
   { action = "full_verify" },
   { role = "integration_reviewer_fixer", adapter = "codex" },
   { action = "full_verify" },
 ]
+# integration = [
+#   { action = "full_verify" },
+#   { role = "integration_reviewer", adapter = "codex" },
+#   { role = "integration_fixer", adapter = "codex" },
+#   { action = "full_verify" },
+# ]

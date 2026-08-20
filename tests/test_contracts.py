@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from assent import AssentError, auto_fix, contracts
+from assent.config import load_config
 from assent.plan import _KNOWN_KEYS
 from assent.user_home import ASSENT_HOME_ENV
 
@@ -47,7 +48,10 @@ with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     config = root / ".assent" / "assent.toml"
     config.parent.mkdir()
-    config.write_text("", encoding="utf-8")
+    config.write_text(
+        'adapter.claude.models = { prime = "p/high", core = "c/high", '
+        'lite = "l/low" }',
+        encoding="utf-8")
     loaded = load_config(config, "empty")
     if loaded.root != root.resolve():
         raise SystemExit(f"unexpected project root: {loaded.root}")
@@ -128,7 +132,7 @@ class TestContractContent(unittest.TestCase):
         self.assertIsNotNone(match)
         assert match is not None
         skeleton = tomllib.loads(match.group(1))
-        self.assertEqual(len(_KNOWN_KEYS), 12)
+        self.assertEqual(len(_KNOWN_KEYS), 11)
         self.assertEqual(set(skeleton), _KNOWN_KEYS)
 
     def test_contracts_assign_one_owner_and_minimal_reading_scope(self):
@@ -160,6 +164,59 @@ class TestContractContent(unittest.TestCase):
                 "A task must be executable by a fresh AI"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, format_text)
+
+    def test_the_commented_split_workflow_still_loads_when_swapped_in(self):
+        """The shipped alternative is commented out, so nothing else would catch it rotting.
+
+        A commented example cannot be parsed, validated, or refactored with the rest of
+        the file, so a role rename or a workflow rule change would leave it quietly
+        wrong for whoever pastes it in.  Uncommenting it here keeps it honest: it has to
+        name live roles and satisfy the same workflow validation as the active form.
+        """
+        templates = _PROJECT_ROOT / "assent" / "templates"
+        text = (templates / "assent.toml").read_text(encoding="utf-8")
+
+        swapped, dropping = [], False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if re.match(r"^(task|plan|integration) = \[$", stripped):
+                dropping = True
+                continue
+            if dropping:
+                dropping = stripped != "]"
+                continue
+            if re.match(r"^# ((task|plan|integration) = \[|  \{|\])", stripped):
+                swapped.append(stripped[2:] if stripped.startswith("# ")
+                               else stripped[1:])
+                continue
+            swapped.append(line)
+        rebuilt = "\n".join(swapped) + "\n"
+        self.assertNotEqual(rebuilt, text)   # the swap actually changed something
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assent_dir = root / ".assent"
+            (assent_dir / "plan01").mkdir(parents=True)
+            (assent_dir / "assent.toml").write_text(rebuilt, encoding="utf-8")
+            shutil.copy(templates / "adapter.toml", assent_dir / "adapter.toml")
+            with mock.patch.dict(os.environ, {ASSENT_HOME_ENV: str(root / "home")}):
+                cfg = load_config(assent_dir / "assent.toml", "plan01")
+
+        self.assertEqual(
+            [step.action if hasattr(step, "action") else step.role
+             for step in cfg.workflow_task],
+            ["tests_writer", "source_implementer", "focused_test",
+             "task_reviewer", "task_fixer", "focused_test"])
+        self.assertEqual(
+            [step.action if hasattr(step, "action") else step.role
+             for step in cfg.workflow_integration],
+            ["full_verify", "integration_reviewer", "integration_fixer",
+             "full_verify"])
+        # The split form is the one that keeps every verdict out of a writing session.
+        self.assertEqual(
+            [(step.writes, step.produces_verdict)
+             for step in cfg.workflow_plan if not hasattr(step, "action")],
+            [(False, True), (True, False)] * 3)
 
     def test_workflow_layers_match_the_default_configuration(self):
         workflow = self._compact("workflow.md")

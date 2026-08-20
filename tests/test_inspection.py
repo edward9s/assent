@@ -19,7 +19,7 @@ from assent.adapters import TokenUsage
 from assent.config import load_config
 from assent.plan import Plan, journal_path_for, set_status
 from tests.engine_support import (_FAILV, EngineTestCase, ScriptedAdapter,
-                                  ok_result, task_text)
+                                  models_block, ok_result, task_text)
 from tests.test_contracts import GlobalContractsMixin
 
 
@@ -36,7 +36,6 @@ def _workflow_config(model="core", adapters=("claude",), writes=True):
         '[roles.plan_reviewer]\n'
         f'ability = ["{ability}"]\n'
         f'model = "{model}"\n'
-        'effort = "slight"\n'
         '[workflow]\n'
         'plan = [{ action = "focused_sweep" }, '
         f'{steps}, {{ action = "focused_sweep" }}]\n')
@@ -99,8 +98,7 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(inspection.check(cfg), 0)
         text = out.getvalue()
         self.assertIn(
-            "step 0: role=plan_reviewer; claude / core->opus / slight->low",
-            text)
+            "step 0: role=plan_reviewer; claude / core->opus/high", text)
         self.assertNotIn("reviewer round", text.lower())
 
     def test_check_lists_every_configured_reviewer_round_in_order(self):
@@ -114,9 +112,10 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(inspection.check(cfg), 0)
         text = out.getvalue()
         self.assertIn("Auto-fix workflow plan (configured order", text)
-        self.assertIn("step 0: role=plan_reviewer; claude / core->opus / slight->low", text)
-        self.assertIn("step 1: role=plan_reviewer; codex / core->gpt-5.6-terra / slight->low", text)
-        self.assertIn("step 2: role=plan_reviewer; claude / core->opus / slight->low", text)
+        self.assertIn("step 0: role=plan_reviewer; claude / core->opus/high", text)
+        self.assertIn(
+            "step 1: role=plan_reviewer; codex / core->gpt-5.6-terra/medium", text)
+        self.assertIn("step 2: role=plan_reviewer; claude / core->opus/high", text)
 
     def test_check_fails_on_dependency_cycle(self):
         self.write_task(1, deps=("t002",))
@@ -157,22 +156,14 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertIn("Plan name: FAIL", out.getvalue())
         self.assertIn("already in the archive roster", out.getvalue())
 
-    def test_check_displays_resolved_assignment_and_default_marker(self):
+    def test_check_displays_the_resolved_assignment_per_tier(self):
         self.write_task(1, slug="任務分配顯示", model="core")
-        self.write_task(2, slug="explicit", model="lite", effort="heavy",
-                        status="DONE")
+        self.write_task(2, slug="explicit", model="lite", status="DONE")
         cfg = self.build(adapter_name="codex", extra_config=(
             '[adapter.codex]\ncommand = "python"\n'
             '[adapter.codex.models]\n'
-            'core = "gpt-5.6-luna"\n'
-            'lite = "gpt-lite"\n'
-            '[adapter.codex.default_effort]\n'
-            'core = "heavy"\n'
-            'lite = "slight"\n'
-            '[adapter.codex.efforts.core]\n'
-            'heavy = "max"\n'
-            '[adapter.codex.efforts.lite]\n'
-            'heavy = "max"\n'))
+            'prime = "gpt-p/high"\ncore = "gpt-5.6-luna/max"\n'
+            'lite = "gpt-lite/max"\n'))
         self.commit_all()
 
         out = io.StringIO()
@@ -181,20 +172,18 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         text = out.getvalue()
         self.assertIn("Task assignment (adapter = codex):", text)
         self.assertIn("t001_任務分配顯示", text)
-        self.assertIn("core/heavy*", text)
+        self.assertIn("core", text)
         self.assertIn("gpt-5.6-luna/max", text)
-        self.assertIn("lite/heavy", text)
         self.assertIn("gpt-lite/max", text)
-        self.assertIn("(* effort filled from default_effort)", text)
 
-    def test_check_shows_the_builtin_effort_when_the_table_is_empty(self):
-        # An empty default_effort table leaves the built-in codex core default (normal)
-        # in place, so the assignment still names both the abstract and the actual value.
+    def test_check_shows_the_vendor_default_when_the_tier_omits_an_effort(self):
+        # A tier written without a separator passes no effort argument, and the
+        # assignment says so rather than inventing a value.
         self.write_task(1, model="core")
         cfg = self.build(adapter_name="codex", extra_config=(
             '[adapter.codex]\ncommand = "python"\n'
-            '[adapter.codex.models]\ncore = "gpt-core"\n'
-            '[adapter.codex.default_effort]\n'))
+            '[adapter.codex.models]\n'
+            'prime = "gpt-p/high"\ncore = "gpt-core"\nlite = "gpt-l/low"\n'))
         self.commit_all()
 
         out = io.StringIO()
@@ -202,12 +191,11 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
             self.assertEqual(inspection.check(cfg), 0)
         line = next(line for line in out.getvalue().splitlines()
                     if "t001_task" in line)
-        self.assertRegex(line, r"core/normal\*\s+-> gpt-core/medium$")
-        self.assertIn("(* effort filled from default_effort)", out.getvalue())
+        self.assertRegex(line, r"core\s+-> gpt-core/<vendor-default>$")
 
     def test_check_truncates_cjk_task_names_without_exceeding_line_width(self):
         self.write_task(1, slug="這是一個非常非常長的任務名稱甲乙丙丁戊己庚辛壬癸",
-                        model="core", effort="slight")
+                        model="core")
         cfg = self.build(adapter_name="codex", extra_config=(
             '[adapter.codex]\ncommand = "python"\n'))
         self.commit_all()
@@ -221,11 +209,12 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertLessEqual(preflight._display_width(line), 78)
 
     def test_check_displays_one_assignment_block_per_adapter(self):
-        self.write_task(1, model="core", effort="slight")
+        self.write_task(1, model="core")
         (self.root / ".assent" / "assent.toml").write_text(
             '[adapter]\nname = ["claude", "codex"]\n'
             '[adapter.claude]\ncommand = "python"\n'
-            '[adapter.codex]\ncommand = "python"\n',
+            '[adapter.codex]\ncommand = "python"\n'
+            + models_block('"claude" "codex"'),
             encoding="utf-8")
         cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
         self.commit_all()
@@ -237,8 +226,8 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(text.count("Task assignment (adapter = "), 2)
         self.assertIn("Task assignment (adapter = claude):", text)
         self.assertIn("Task assignment (adapter = codex):", text)
-        self.assertIn("opus/low", text)
-        self.assertIn("gpt-5.6-terra/low", text)
+        self.assertIn("opus/high", text)
+        self.assertIn("gpt-5.6-terra/medium", text)
 
     def test_report_lists_checkpoints_and_blocked_summary(self):
         p1 = self.write_task(1)
@@ -737,7 +726,10 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
         self.write_user_config(
             '[adapter]\nname = "codex"\n'
             '[adapter.codex]\ncommand = "python"\n'
-            '[adapter.codex.models]\ncore = "gpt-from-user"\n')
+            '[adapter.codex.models]\n'
+            'prime = "gpt-from-user-p/high"\n'
+            'core = "gpt-from-user"\n'
+            'lite = "gpt-from-user-l/low"\n')
         cfg = self.load()
         self.commit_all()
 
@@ -756,10 +748,10 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
         self.write_user_config(
             '[adapter]\nname = "codex"\n'
             '[adapter.codex]\ncommand = "python"\n'
-            '[adapter.codex.models]\ncore = "gpt-from-user"\n'
-            '[adapter.codex.default_effort]\ncore = "slight"\n')
+            '[adapter.codex.models]\ncore = "gpt-from-user/low"\n')
         (self.root / ".assent" / "assent.toml").write_text(
-            '[adapter.codex.models]\ncore = "gpt-from-project"\n',
+            '[adapter.codex.models]\ncore = "gpt-from-project/high"\n'
+            'prime = "p/high"\nlite = "l/low"\n',
             encoding="utf-8")
         cfg = self.load()
         self.commit_all()
@@ -772,7 +764,6 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
         # The adapter name is still the user's; only the overridden model moved.
         self.assertIn("Setting sources: adapter.name = user (active: codex)", text)
         self.assertIn("codex: models.core = project", text)
-        self.assertIn("default_effort.core = user", text)
         self.assertIn("gpt-from-project", text)
 
     def test_the_source_report_names_only_the_keys_the_assignment_used(self):
@@ -780,7 +771,9 @@ class TestCheckContractsAndSources(GlobalContractsMixin, EngineTestCase):
         self.write_user_config(
             '[adapter]\nname = "claude"\n'
             '[adapter.claude]\ncommand = "python"\n'
-            '[adapter.claude.models]\nlite = "haiku-from-user"\n'
+            '[adapter.claude.models]\n'
+            'prime = "p/high"\ncore = "c/high"\n'
+            'lite = "haiku-from-user"\n'
             '[adapter.codex]\ncommand = "python"\n'
             '[run]\nretry_per_task = 3\n')
         cfg = self.load()

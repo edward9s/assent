@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+from tests.engine_support import models_block
 from pathlib import Path
 from unittest.mock import patch
 
@@ -60,7 +62,7 @@ class AcceptCliCase(unittest.TestCase):
         self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config = self.assent_dir / "assent.toml"
-        self.config.write_text("", encoding="utf-8", newline="\n")
+        self.config.write_text(models_block(), encoding="utf-8", newline="\n")
         self._write_verify("raise SystemExit(0)\n")
         self._write_task()
 

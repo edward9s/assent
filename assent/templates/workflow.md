@@ -75,7 +75,7 @@ worktrees.
 Each entry is a tagged union containing exactly one `role` or `action`. The
 selected role's `[abilities]` carry what that session does through `prompt`,
 `writes`, and optional `produces_verdict`; `[roles]` compose abilities and may
-select model/effort. The engine never infers behavior from a role or ability
+select a model tier. The engine never infers behavior from a role or ability
 name. Task, plan, and integration reviewers should use different ability
 prompts: they resolve one task's failure, cumulative plan conformance, and an
 exact reconstructed selection respectively.
@@ -91,14 +91,14 @@ Authentication failure preserves progress and skips that candidate. If every
 candidate requires login, Assent stops as `AUTHENTICATION REQUIRED`; log in and
 run the command again.
 
-Actions are scheduler-owned and accept no role, adapter, model, effort, ability,
+Actions are scheduler-owned and accept no role, adapter, model, ability,
 prompt, or arbitrary command. `focused_test` is legal only at task positions;
 `focused_sweep` is legal only at plan positions; `full_verify` is legal only at
 integration positions. AI roles never run these actions or the full suite.
 
 Omission and empty arrays mean:
 
-- omitted `task`: one implicit session per task using its model and effort;
+- omitted `task`: one implicit session per task using its model;
 - nonempty `task`: task-scoped roles/actions; if it contains `focused_test`, it
   ends with that action;
 - `task = []`: no per-task sessions; the plan workflow makes the whole plan one

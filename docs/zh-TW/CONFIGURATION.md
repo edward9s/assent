@@ -33,7 +33,7 @@ override。Table 依 key 合併；scalar 與 array 整個取代較低層的值�
 ```text
 ability：prompt + 權限
         ↓
-role：一個或多個 ability + model/effort
+role：一個或多個 ability + model
         ↓
 workflow：依序排列 role 與 scheduler action
 ```
@@ -65,15 +65,14 @@ Prompt 不會擴張 scope、Git 權限或執行驗證的權限；scheduler 規�
 [roles.task_reviewer_fixer]
 ability = ["task_review", "task_fix"]
 model = "prime"
-effort = "heavy"
 ```
 
 `ability` 是不可為空的有序清單。只要其中一個 ability 可以寫入，role 就可以寫入；
 只要其中一個會產生 verdict，role 就必須產生 verdict。一般 task role 的 `model`
-與 `effort` 可以省略；workflow role entry 可以覆寫任一值，一般 task step
-再沿用 task 的設定。`workflow.plan` 與 `workflow.integration` 的每一個 step
-都必須由 role 或 workflow entry 形成明確的有效 model。Effort 可以省略：抽象 model
-使用該 adapter 的 tier 預設，literal model 則不傳 effort，使用 vendor 預設值。
+可以省略；workflow role entry 可以覆寫它，一般 task step 再沿用 task 的設定。
+`workflow.plan` 與 `workflow.integration` 的每一個 step 都必須由 role 或
+workflow entry 形成明確的有效 model——這種 session 負責的是一整個單位，
+沒有單一 task 可以繼承。
 
 ### Scheduler action
 
@@ -179,22 +178,18 @@ ability = ["write_tests", "implement_source"]
 [roles.task_reviewer_fixer]
 ability = ["task_review", "task_fix"]
 model = "prime"
-effort = "heavy"
 
 [roles.plan_quality_reviewer_fixer]
 ability = ["plan_quality_review", "plan_fix"]
 model = "prime"
-effort = "heavy"
 
 [roles.plan_reviewer_fixer]
 ability = ["plan_review", "plan_fix"]
 model = "prime"
-effort = "heavy"
 
 [roles.integration_reviewer_fixer]
 ability = ["integration_review", "integration_fix"]
 model = "prime"
-effort = "heavy"
 
 [workflow]
 task = [
@@ -224,7 +219,7 @@ integration = [
 
 ## 省略設定與 task override
 
-- 省略 `workflow.task` 時，每個 task 會依自己的 model 與 effort 執行一個隱含
+- 省略 `workflow.task` 時，每個 task 會依自己的 model 執行一個隱含
   session。
 - 非空的 task workflow 可以先排列 worker role，再執行 `focused_test`；只要包含
   這個 action，最後一項就必須是它。Worker 回傳 `BLOCKED` 時，會帶著既有證據
@@ -261,42 +256,69 @@ workflow = [
 省略時繼承 `[workflow].task`；`workflow = []` 則把這個 task 交給 plan-wide
 execution。Override 使用的 role 仍須定義在有效的 `[roles]` 設定中。
 
-## Adapter、model 與 effort
+## Adapter 與 model
 
 `[adapter].name` 可指定一個 adapter，或指定依序輪替的清單。內建支援 Claude、
-Codex 與 Antigravity；各自的指令、參數、可攜 model 對應、預設 effort，以及
-vendor effort 轉換都放在 `adapter.toml`。無人值守執行前要先登入各 CLI；Assent
-只使用既有認證，不管理 secrets。
+Codex 與 Antigravity；各自的指令、參數與可攜 model 對應都放在 `adapter.toml`。
+無人值守執行前要先登入各 CLI；Assent 只使用既有認證，不管理 secrets。
 
-Plan 使用可攜的 `prime`、`core`、`lite` model tier；effort 是另一個獨立選擇：
-`heavy`、`normal`、`slight`。每次使用抽象 model 的 invocation 都會取得轉換後的
-具體 effort。
+Plan 只使用可攜的 `prime`、`core`、`lite` model tier。Effort 不是另一個可攜選擇，
+也不是 task 欄位：每個 adapter 把一個 tier 對應到一次完整的 invocation。
 
-### Workflow model 與 effort 優先順序
+```toml
+[adapter.codex.models]
+prime = "gpt-5.6-sol/high"
+core  = "gpt-5.6-terra/medium"
+lite  = "gpt-5.6-luna/low"
+```
 
-Assent 會分別解析 `model` 與 `effort`。在同一個 role session 中，workflow role
-entry 會覆寫其 `[roles]` 定義；其餘 fallback 依 workflow 層而定：
+第一個 `/` 之前是 vendor model，之後是 vendor effort，兩者都會原封不動傳給該 CLI。
+因此 model 名稱不能含 `/`；出現第二個分隔符會在載入設定時被拒絕。完全省略分隔符
+就不會傳 effort argument，改用該 CLI 自己的預設值：
 
-| Workflow role | Model fallback | Effort fallback |
-| --- | --- | --- |
-| `workflow.task` | 目前的 task | 目前的 task，接著使用所選 adapter 已設定或內建的 tier 預設值 |
-| `workflow.plan` 或 `workflow.integration` | 無；workflow entry 或 role 必須指定 model | 所選 adapter 已設定或內建的 tier 預設值 |
+```toml
+lite = "gpt-5.6-luna"
+```
+
+因為 tier 本身已經帶著它的推理投入，模型家族的實際限制就寫在值裡，人看得到。
+Antigravity 的 `lite` 預設是 `gemini-3.5-flash/medium`，因為該家族沒有 `high`；
+執行期不會有任何靜默的升降檔。如果某個 tier 常常需要「但這題比較難」，那是這個
+tier 設得太低——改那一行，而不是去標註個別 task。
+
+### Workflow model 優先順序
+
+在同一個 role session 中，workflow role entry 會覆寫其 `[roles]` 定義；
+其餘 fallback 依 workflow 層而定：
+
+| Workflow role | Model fallback |
+| --- | --- |
+| `workflow.task` | 目前的 task |
+| `workflow.plan` 或 `workflow.integration` | 無；workflow entry 或 role 必須指定 model |
 
 Plan 與 integration 的 role 負責的是一整個單位，沒有可以繼承 model 的 task。
 在這兩層省略 model 是設定錯誤，`assent check` 會回報，與該 role 是否產出
-verdict 無關。
+verdict 無關。省略 `workflow.task` 時，會使用 task 自己的 model 開啟一個隱含
+session。
 
-省略 `workflow.task` 時，會使用 task 自己的 model 與 effort 開啟一個隱含 session。
-Adapter 不提供預設 model；它的 `models` table 會把選定的 portable tier 轉換為
-vendor model。Workflow entry 或 role 若選擇 literal model 而沒有一併提供 effort，
-就不會繼承 task effort；Assent 不傳 effort argument，改用 vendor 預設值。
+### 直接指定 vendor 模型
 
-Task、role 與 workflow role entry 的 `model`／`effort` 可以各自使用明確的
-中括號 literal，例如 `model = "[gpt-5.6-sol]"` 或 `effort = "[xhigh]"`。
-Assent 會移除外層括號、保留大小寫，並略過該值的 adapter mapping。使用任何
-literal 的 workflow step 必須只解析到一個 adapter。Literal model 搭配抽象 effort
-時只使用 adapter 的 flat effort mapping，不使用 tier-specific mapping。Literal
-不會修改 `adapter.toml`。
+Task 檔案只接受 `prime`、`core`、`lite`，其他任何值都會在讀取計畫時被拒絕。
+Vendor model id 只代表一次發布，而 task 檔案的壽命比它長，所以那個 id 屬於
+設定檔，不屬於計畫本身。
+
+`[roles]` 或 workflow entry 則可以直接寫 vendor 選擇，文法跟 `models` table
+同一套。沒有標記語法：任何不是 tier 的值都會被讀成 vendor 選擇。
+
+```toml
+[[workflow.plan]]
+role = "plan_reviewer"
+adapter = "codex"
+model = "gpt-5.6-sol/xhigh"     # codex 三個 tier 以外的模型
+```
+
+這會完全略過該 adapter 的 `models` table，也不會修改 `adapter.toml`。因為
+vendor 字串對別的 vendor 沒有意義，使用它的 workflow step 必須只解析到一個
+adapter。
 
 每一層 workflow 的 role entry 都可以指定一個 adapter，或依序 fallback 的清單：
 

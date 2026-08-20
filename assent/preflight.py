@@ -3,7 +3,7 @@
 Everything here answers a question that has to be settled *before* an AI session
 exists, and that `run` and the query commands must answer identically:
 
-- which selected effort a task gets, and which concrete CLI value that becomes;
+- which concrete CLI model and effort a task's tier becomes;
 - the full session identity (adapter, requested model, effort pair) of one run;
 - whether the active adapter would accept every invocation the plan could still
   issue -- a zero-token gate `run` and `check` share verbatim;
@@ -28,7 +28,7 @@ from assent.adapters import Adapter, InvocationRequest, get_adapter
 from assent.config import (Config, WorkflowActionStep, WorkflowPlanStep,
                            WorkflowTaskStep)
 from assent.plandeps import PlanBaseResolution, resolve_plan_base
-from assent.modeling import effort_identity, has_literal, inherited_effort
+from assent.modeling import effort_identity, has_literal
 from assent.plan import Plan, Task, TaskWorkflowAction
 
 GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
@@ -40,38 +40,26 @@ _ASSIGNMENT_LINE_WIDTH = 78
 
 @dataclass(frozen=True)
 class SessionIdentity:
-    """The selected choices and actual CLI identity shared by one task run."""
+    """The actual CLI identity shared by one task run."""
 
     agent: str
     requested_model: str
-    effort: str | None
     requested_effort: str | None
 
 
 # --------------------------------------------------------------------------- #
-# effort and session identity
+# selection and session identity
 # --------------------------------------------------------------------------- #
-def resolve_effort(cfg: Config, task: Task,
-                   adapter_name: str | None = None) -> str | None:
-    """Selected effort: task annotation, portable-tier default, or vendor default.
+def resolve_selection(cfg: Config, model: str,
+                      adapter_name: str | None = None) -> tuple[str, str | None]:
+    """Resolve one tier or literal into this adapter's CLI model and effort.
 
-    The current adapter's settings are looked up by name and fail closed for an unknown adapter,
-    so a third adapter never inherits Claude's defaults."""
-    return cfg.adapter_settings(adapter_name or cfg.adapter_name).resolve_effort(
-        task.effort, task.model)
-
-
-def resolve_requested_effort(cfg: Config, model: str,
-                             effort: str | None,
-                             adapter_name: str | None = None) -> str | None:
-    """Resolve the selected effort to the actual CLI value for the current adapter.
-
-    Literals bypass translation. Portable effort uses tier section, then flat
-    mapping, then baseline; a literal model has no tier-specific section.
+    The current adapter's settings are looked up by name and fail closed for an unknown
+    adapter, so a third adapter never inherits Claude's defaults.  A ``None`` effort means
+    the selection stated none and the vendor CLI default applies.
     """
     return cfg.adapter_settings(
-        adapter_name or cfg.adapter_name).resolve_requested_effort(
-        model, effort)
+        adapter_name or cfg.adapter_name).resolve(model)
 
 
 def resolve_session(cfg: Config, adapter: Adapter, task: Task,
@@ -79,29 +67,24 @@ def resolve_session(cfg: Config, adapter: Adapter, task: Task,
     """Resolve the identity before starting the adapter; the same result feeds the prompt,
     journal, and CLI command."""
     name = adapter_name or cfg.adapter_name
-    effort = resolve_effort(cfg, task, name)
+    requested_model, requested_effort = resolve_selection(cfg, task.model, name)
     return SessionIdentity(
         agent=name,
-        requested_model=adapter.resolve_model(task.model),
-        effort=effort,
-        requested_effort=resolve_requested_effort(
-            cfg, task.model, effort, name),
+        requested_model=requested_model,
+        requested_effort=requested_effort,
     )
 
 
 def literal_adapter_errors(cfg: Config, task: Task) -> list[str]:
     """Require every effective literal task/role profile to name one adapter."""
-    profiles: list[tuple[str, str | None, str | None, tuple[str, ...]]] = []
+    profiles: list[tuple[str, str | None, tuple[str, ...]]] = []
 
     def add(label: str, role, adapters: tuple[str, ...]) -> None:
-        model = role.model or task.model
-        effort = inherited_effort(role.model, role.effort, task.effort)
-        profiles.append((label, model, effort, adapters))
+        profiles.append((label, role.model or task.model, adapters))
 
     workflow = task.workflow if task.workflow is not None else cfg.workflow_task
     if workflow is None:
-        profiles.append(("task profile", task.model, task.effort,
-                         cfg.adapter_names))
+        profiles.append(("task profile", task.model, cfg.adapter_names))
     elif not workflow:
         for index, step in enumerate(cfg.workflow_plan):
             if isinstance(step, WorkflowActionStep):
@@ -128,10 +111,10 @@ def literal_adapter_errors(cfg: Config, task: Task) -> list[str]:
                 role, cfg.adapter_names)
 
     errors = []
-    for label, model, effort, adapters in profiles:
-        if has_literal(model, effort) and len(adapters) != 1:
+    for label, model, adapters in profiles:
+        if has_literal(model) and len(adapters) != 1:
             errors.append(
-                f"task {task.id} {label} uses a literal model or effort and "
+                f"task {task.id} {label} uses a literal model and "
                 "must resolve to exactly one adapter"
             )
     return errors
@@ -158,12 +141,12 @@ def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
         literal_errors = literal_adapter_errors(cfg, task)
         if literal_errors:
             raise AssentError("; ".join(literal_errors))
-        effort = resolve_effort(cfg, task, name)
+        requested_model, requested_effort = resolve_selection(
+            cfg, task.model, name)
         requests.append(InvocationRequest(
-            task_id=task.id, model=task.model, effort=effort,
-            requested_model=adapter.resolve_model(task.model),
-            requested_effort=resolve_requested_effort(
-                cfg, task.model, effort, name)))
+            task_id=task.id, model=task.model,
+            requested_model=requested_model,
+            requested_effort=requested_effort))
     return requests
 
 
@@ -187,14 +170,12 @@ def capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
 def _review_round_session(cfg: Config, review, adapter: Adapter,
                           adapter_name: str) -> SessionIdentity:
     """Resolve one reviewer candidate through its adapter-specific mappings."""
-    settings = cfg.adapter_settings(adapter_name)
-    effort = settings.resolve_effort(review.effort, review.model)
+    requested_model, requested_effort = resolve_selection(
+        cfg, review.model, adapter_name)
     return SessionIdentity(
         agent=adapter_name,
-        requested_model=adapter.resolve_model(review.model),
-        effort=effort,
-        requested_effort=settings.resolve_requested_effort(
-            review.model, effort),
+        requested_model=requested_model,
+        requested_effort=requested_effort,
     )
 
 
@@ -239,7 +220,6 @@ def auto_fix_review_capability_errors(
             request = InvocationRequest(
                 task_id=f"{cfg.tasks_name}/plan-review",
                 model=review.model,
-                effort=identity.effort,
                 requested_model=identity.requested_model,
                 requested_effort=identity.requested_effort,
             )
@@ -253,29 +233,27 @@ def auto_fix_review_capability_errors(
 
 def resolve_auto_fix_fixer_session(
         cfg: Config, adapter: Adapter, adapter_name: str,
-        model: str, effort: str | None) -> SessionIdentity:
+        model: str) -> SessionIdentity:
     """Resolve one bounded fixer profile through the normal settings tables."""
-    settings = cfg.adapter_settings(adapter_name)
+    requested_model, requested_effort = resolve_selection(
+        cfg, model, adapter_name)
     return SessionIdentity(
         agent=adapter_name,
-        requested_model=adapter.resolve_model(model),
-        effort=effort,
-        requested_effort=settings.resolve_requested_effort(model, effort),
+        requested_model=requested_model,
+        requested_effort=requested_effort,
     )
 
 
 def auto_fix_fixer_capability_errors(
-        cfg: Config, adapter: Adapter, adapter_name: str,
-        model: str, effort: str | None
+        cfg: Config, adapter: Adapter, adapter_name: str, model: str
         ) -> tuple[SessionIdentity | None, list[str]]:
     """Resolve and preflight one write-capable bounded repair invocation."""
     try:
         session = resolve_auto_fix_fixer_session(
-            cfg, adapter, adapter_name, model, effort)
+            cfg, adapter, adapter_name, model)
         request = InvocationRequest(
             task_id=f"{cfg.tasks_name}/auto-fix",
             model=model,
-            effort=effort,
             requested_model=session.requested_model,
             requested_effort=session.requested_effort,
         )
@@ -324,12 +302,6 @@ def _task_assignment_line(task: Task, session: SessionIdentity) -> str:
     """Render one assignment without allowing a long configured value to wrap."""
     task_name = task.path.name[:-len(".e.toml")]
     abstract = task.model
-    if session.effort is not None:
-        abstract += f"/{session.effort}"
-        if task.effort is None:
-            abstract += "*"
-    else:
-        abstract += f"/{effort_identity(None)}"
     actual = session.requested_model
     if session.requested_effort is not None:
         actual += f"/{session.requested_effort}"
@@ -366,13 +338,8 @@ def print_task_assignments(
     """Print one complete assignment block per configured adapter."""
     for adapter_name, assignments in blocks:
         print(f"Task assignment (adapter = {adapter_name}):")
-        used_default = False
         for task, session in assignments:
-            used_default = used_default or (
-                task.effort is None and session.effort is not None)
             print(_task_assignment_line(task, session))
-        if used_default:
-            print("  (* effort filled from default_effort)")
 
 
 # --------------------------------------------------------------------------- #

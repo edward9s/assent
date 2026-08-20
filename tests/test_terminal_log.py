@@ -4,6 +4,8 @@ import os
 import shutil
 import tempfile
 import unittest
+
+from tests.engine_support import models_block
 from pathlib import Path
 from unittest import mock
 
@@ -121,7 +123,7 @@ class TestTerminalLogging(unittest.TestCase):
         self.addCleanup(shutil.rmtree, other, ignore_errors=True)
         config = other / ".assent" / "assent.toml"
         config.parent.mkdir(parents=True)
-        config.write_text("", encoding="utf-8")
+        config.write_text(models_block(), encoding="utf-8")
         (other / ".assent" / "plan09").mkdir()
         (other / ".assent" / "plan09" / "t001_task.e.toml").write_text(
             (self.write_task()).read_text(encoding="utf-8"), encoding="utf-8")

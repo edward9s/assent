@@ -59,8 +59,7 @@ from assent.plandeps import (find_unfinished_prerequisites,
                                parse_plan_dependency_graph)
 from assent.plan_verification_closeout import verify_plan_action
 from assent.inspection import try_write_report
-from assent.modeling import (effort_identity, has_literal, inherited_effort,
-                             literal_value)
+from assent.modeling import effort_identity, has_literal
 from assent.plan import (Plan, Task, TaskWorkflowAction, append_entry,
                          parse_task_file,
                          read_entries, read_selection_workflow_state,
@@ -112,7 +111,7 @@ _PROMPT_TEMPLATE = (
     "That resolved identity is authoritative for this run's journal entry, even when the\n"
     "working instructions or the existing entries only show other agent names.\n"
     "requested_model is the --model value passed to the AI CLI this run.\n"
-    "This run's selected effort = \"{effort}\", actual requested_effort = \"{requested_effort}\";\n"
+    "This run's actual requested_effort = \"{requested_effort}\";\n"
     "requested_effort is the value actually passed to the AI CLI this run; "
     "<vendor-default> means no effort argument was passed and the journal must "
     "omit requested_effort.\n"
@@ -591,7 +590,6 @@ class _FixerProfile:
 
     adapters: tuple[str, ...]
     model: str
-    effort: str | None
 
     @property
     def adapter(self) -> str:
@@ -1418,15 +1416,12 @@ def _workflow_task_session(
         adapter_name: str) -> SessionIdentity:
     """Resolve one configured task role, falling back to the task's profile."""
     model = step.resolved_role.model or task.model
-    stated_effort = inherited_effort(
-        step.resolved_role.model, step.resolved_role.effort, task.effort)
-    settings = cfg.adapter_settings(adapter_name)
-    effort = settings.resolve_effort(stated_effort, model)
+    requested_model, requested_effort = cfg.adapter_settings(
+        adapter_name).resolve(model)
     return SessionIdentity(
         agent=adapter_name,
-        requested_model=adapter.resolve_model(model),
-        effort=effort,
-        requested_effort=settings.resolve_requested_effort(model, effort),
+        requested_model=requested_model,
+        requested_effort=requested_effort,
     )
 
 
@@ -1468,7 +1463,7 @@ def _workflow_task_capability_errors(
             if workflow is None:
                 session = resolve_session(cfg, adapter, task, adapter_name)
                 requests.append(InvocationRequest(
-                    task_id=task.id, model=task.model, effort=session.effort,
+                    task_id=task.id, model=task.model,
                     requested_model=session.requested_model,
                     requested_effort=session.requested_effort))
                 continue
@@ -1483,7 +1478,6 @@ def _workflow_task_capability_errors(
                     requests.append(InvocationRequest(
                         task_id=f"{task.id} workflow.plan[{index}]",
                         model=step.model,
-                        effort=session.effort,
                         requested_model=session.requested_model,
                         requested_effort=session.requested_effort))
                 continue
@@ -1498,7 +1492,6 @@ def _workflow_task_capability_errors(
                 requests.append(InvocationRequest(
                     task_id=f"{task.id} workflow[{index}]",
                     model=step.resolved_role.model or task.model,
-                    effort=session.effort,
                     requested_model=session.requested_model,
                     requested_effort=session.requested_effort))
     except AssentError as error:
@@ -1514,24 +1507,19 @@ def _plan_step_session(
     Config refuses a plan or integration role without a model, so the step never
     inherits one: such a session answers for a whole unit, and taking one task's
     tier would make the answer depend on which task happened to sort first.
-    ``resolve_effort`` still supplies the adapter tier default, and a literal
-    model with no stated effort still sends none.
     """
-    model = step.model
-    settings = cfg.adapter_settings(adapter_name)
-    effort = settings.resolve_effort(step.effort, model)
     if (step.requested_model is not None
             and adapter_name == step.adapter):
         return SessionIdentity(
             agent=step.adapter or adapter_name,
             requested_model=step.requested_model,
-            effort=effort,
             requested_effort=step.requested_effort)
+    requested_model, requested_effort = cfg.adapter_settings(
+        adapter_name).resolve(step.model)
     return SessionIdentity(
         agent=adapter_name,
-        requested_model=adapter.resolve_model(model),
-        effort=effort,
-        requested_effort=settings.resolve_requested_effort(model, effort))
+        requested_model=requested_model,
+        requested_effort=requested_effort)
 
 
 def _plan_workflow_capability_errors(
@@ -1553,7 +1541,6 @@ def _plan_workflow_capability_errors(
             requests.append(InvocationRequest(
                 task_id=f"{cfg.tasks_name} workflow.plan[{index}]",
                 model=step.model,
-                effort=session.effort,
                 requested_model=session.requested_model,
                 requested_effort=session.requested_effort))
     except AssentError as error:
@@ -1617,7 +1604,6 @@ def _build_prompt(cfg: Config, task: Task, failure_reason: str | None,
             .replace("{task_title}", task.title)
             .replace("{agent}", session.agent)
              .replace("{requested_model}", session.requested_model)
-             .replace("{effort}", effort_identity(session.effort))
              .replace("{requested_effort}",
                       effort_identity(session.requested_effort))
              .replace("{focused_test_policy}", focused_test_policy))
@@ -1677,11 +1663,11 @@ def _session_line(adapter_name: str, task: Task,
     """The one opening line that states the whole resolved session identity.
 
     Four facts, in the order they are decided: which adapter runs, and each selected choice
-    beside the concrete value actually sent to that adapter's CLI, e.g.
-    ``Session: codex | core->gpt-5.6-luna | heavy->max``.
+    beside the concrete values actually sent to that adapter's CLI, e.g.
+    ``Session: codex | core->gpt-5.6-luna/max``.
     """
-    return (f"  Session: {adapter_name} | {model or task.model}->{session.requested_model}"
-            f" | {effort_identity(session.effort)}->"
+    return (f"  Session: {adapter_name} | {model or task.model}->"
+            f"{session.requested_model}/"
             f"{effort_identity(session.requested_effort)}")
 
 
@@ -2166,7 +2152,7 @@ def _run_selection_reviewer(
             work_configs[0], reviewer, step, adapter_name)
         errors = reviewer.preflight([InvocationRequest(
             task_id="selection-verification-review", model=step.model,
-            effort=session.effort, requested_model=session.requested_model,
+            requested_model=session.requested_model,
             requested_effort=session.requested_effort)])
         if errors:
             raise AssentError(
@@ -2195,8 +2181,7 @@ def _run_selection_reviewer(
                  if shared_path_recovery is not None
                  else "Selection review session")
         print(f"{label}: {adapter_name} | "
-              f"{step.model}->{session.requested_model} | "
-              f"{effort_identity(session.effort)}->"
+              f"{step.model}->{session.requested_model}/"
               f"{effort_identity(session.requested_effort)}")
         result = _invoke_adapter(
             work_configs[0], reviewer, adapter_name, attempt_prompt,
@@ -2595,7 +2580,7 @@ def _selection_fixer_sessions(
         session = _plan_step_session(cfg, adapter, step, adapter_name)
         errors = adapter.preflight([InvocationRequest(
             task_id=f"{cfg.tasks_name} selection conflict fixer",
-            model=step.model, effort=session.effort,
+            model=step.model,
             requested_model=session.requested_model,
             requested_effort=session.requested_effort)])
         if errors:
@@ -2608,12 +2593,7 @@ def _selection_fixer_sessions(
 
 def _workflow_fixer_profile(
         cfg: Config, task: Task, step: WorkflowPlanStep) -> _FixerProfile:
-    model = step.model or task.model
-    effort = (
-        step.effort
-        if step.model is not None and step.produces_verdict
-        else inherited_effort(step.model, step.effort, task.effort))
-    return _FixerProfile(step.adapters, model, effort)
+    return _FixerProfile(step.adapters, step.model or task.model)
 
 
 def _selection_reconcile_prompt(
@@ -2693,8 +2673,7 @@ def _run_selection_target_reconciles(
                 session = sessions[adapter_name]
                 print(f"Selection reconcile session: {adapter_name} | "
                       f"{fixer_step.model or owner.model}->"
-                      f"{session.requested_model} | "
-                      f"{effort_identity(session.effort)}->"
+                      f"{session.requested_model}/"
                       f"{effort_identity(session.requested_effort)}")
                 result = _invoke_adapter(
                     cfg, adapter, adapter_name, prompt,
@@ -3322,7 +3301,7 @@ def _run_selection_repairs(
             append_entry(
                 task.journal_path, by="scheduler", event="auto_fix_attempt",
                 summary=("Selection verification repair assignment: "
-                         f"{profile.adapter}/{profile.model}/{profile.effort}"),
+                         f"{profile.adapter}/{profile.model}"),
                 detail=detail, agent=session.agent,
                 requested_model=session.requested_model,
                 requested_effort=session.requested_effort,
@@ -5079,8 +5058,7 @@ def _run_auto_fix_review_once(
         reviewer = review_rotation.adapter
         session = review_sessions[review_rotation.name]
         print(f"Auto-fix review session: {session.agent} | "
-              f"{review.model}->{session.requested_model} | "
-              f"{effort_identity(session.effort)}->"
+              f"{review.model}->{session.requested_model}/"
               f"{effort_identity(session.requested_effort)}")
         try:
             result = _invoke_adapter(
@@ -5528,7 +5506,7 @@ def _recover_invalid_reviewer_writes(
 
 def _auto_fix_profile_for_task(cfg: Config, task: Task) -> _FixerProfile:
     """The primary worker's ordinary identity for one reopened task."""
-    return _FixerProfile(cfg.adapter_names, task.model, task.effort)
+    return _FixerProfile(cfg.adapter_names, task.model)
 
 
 def _auto_fix_adapter(
@@ -5547,9 +5525,9 @@ def _fixer_rotation_and_sessions(
         worker_rotation: _AdapterRotation | None = None
         ) -> tuple[_AdapterRotation, dict[str, SessionIdentity], list[str]]:
     """Resolve and preflight every declared fallback for one fixer profile."""
-    if has_literal(profile.model, profile.effort) and len(profile.adapters) != 1:
+    if has_literal(profile.model) and len(profile.adapters) != 1:
         return (_AdapterRotation((), ()), {},
-                ["a literal model or effort must resolve to exactly one adapter"])
+                ["a literal model must resolve to exactly one adapter"])
     adapters: list[Adapter] = []
     names: list[str] = []
     sessions: dict[str, SessionIdentity] = {}
@@ -5559,13 +5537,8 @@ def _fixer_rotation_and_sessions(
                    if worker_rotation is not None
                    and name in worker_rotation.names
                    else get_adapter(name, cfg))
-        effort = cfg.adapter_settings(name).resolve_effort(
-            profile.effort, profile.model)
-        if effort is None and literal_value(profile.model) is None:
-            errors.append(f"{name}: no concrete effort")
-            continue
         session, candidate_errors = auto_fix_fixer_capability_errors(
-            cfg, adapter, name, profile.model, effort)
+            cfg, adapter, name, profile.model)
         if session is not None:
             sessions[name] = session
         errors.extend(f"{name}: {message}" for message in candidate_errors)
@@ -6594,7 +6567,7 @@ def _run_auto_fix_repairs(
                 append_entry(
                     task.journal_path, by="scheduler", event="auto_fix_attempt",
                     summary=("Bounded automatic repair session: "
-                             + f"{profile.adapter}/{profile.model}/{profile.effort}"),
+                             + f"{profile.adapter}/{profile.model}"),
                     detail=("The durable finding ledger and repair brief were "
                             "persisted before this write-capable fixer session; "
                             "all edits and later gate evidence are preserved."),

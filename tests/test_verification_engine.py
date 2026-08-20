@@ -16,6 +16,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+
+from tests.engine_support import models_block
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,7 +56,7 @@ class VerificationEngineCase(GlobalContractsMixin, unittest.TestCase):
         self.tasks_dir = self.assent_dir / "work"
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.assent_dir / "assent.toml"
-        self.config_path.write_text("", encoding="utf-8")
+        self.config_path.write_text(models_block(), encoding="utf-8")
         self.task_path = self.tasks_dir / "t001_task.e.toml"
         self.cfg = load_config(self.config_path, "work")
 
@@ -294,7 +296,7 @@ class TestVerificationPrompt(VerificationEngineCase):
         self.write_status("TODO")
         task = engine.Plan.parse(self.tasks_dir).tasks[0]
         session = engine.SessionIdentity(
-            agent="codex", requested_model="model", effort="heavy",
+            agent="codex", requested_model="model",
             requested_effort="high")
         prompt = engine._build_prompt(self.cfg, task, None, session)
         self.assertIn("focused task gate", prompt)

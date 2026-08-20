@@ -17,6 +17,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+
+from tests.engine_support import models_block
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -82,7 +84,7 @@ class E2ETestCase(unittest.TestCase):
         self.plan_dir = self.root / ".assent" / "plan01"
         self.plan_dir.mkdir(parents=True)
         (self.root / ".assent" / "assent.toml").write_text(
-            '[run]\nretry_per_task = 1\n',
+            '[run]\nretry_per_task = 1\n' + models_block(),
             encoding="utf-8")
         (self.root / "AGENTS.md").write_text("專案規則\n", encoding="utf-8")
         # A legacy project-local copy of the contracts, kept only so the prompt
@@ -303,7 +305,8 @@ class TestWorktreeScenarios(E2ETestCase):
         (self.root / ".gitignore").write_text(
             _WORKTREE_GITIGNORE, encoding="utf-8")
         (self.root / ".assent" / "assent.toml").write_text(
-            '[run]\nretry_per_task = 1\n', encoding="utf-8")
+            '[run]\nretry_per_task = 1\n' + models_block(),
+            encoding="utf-8")
 
     def isolated_done_step(self, adapter, path, files):
         def step(prompt):

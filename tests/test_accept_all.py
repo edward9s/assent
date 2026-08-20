@@ -20,6 +20,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+
+from tests.engine_support import models_block
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -58,7 +60,7 @@ class AcceptAllRepositoryCase(unittest.TestCase):
         self.assent_dir = self.root / ".assent"
         self.assent_dir.mkdir()
         self.config_path = self.assent_dir / "assent.toml"
-        self.config_path.write_text("", encoding="utf-8")
+        self.config_path.write_text(models_block(), encoding="utf-8")
         self._write_verify(_VERIFY_OK)
 
     def _cleanup(self) -> None:

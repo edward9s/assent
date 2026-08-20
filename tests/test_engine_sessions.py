@@ -31,8 +31,8 @@ from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
                          SelectionWorkflowState, set_status,
                          workflow_state_path)
 from assent.verification_common import FullVerifyEvidence
-from tests.engine_support import (EngineTestCase, ScriptedAdapter, ok_result,
-                                  task_text)
+from tests.engine_support import (EngineTestCase, ScriptedAdapter,
+                                  models_block, ok_result, task_text)
 from tests.link_support import make_directory_link
 from tests.test_contracts import GlobalContractsMixin
 
@@ -71,7 +71,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             '[abilities.fix]\nprompt = "Repair durable findings."\n'
             'writes = true\n'
             '[roles.plan_reviewer]\nability = ["review_fix"]\n'
-            'model = "prime"\neffort = "heavy"\n'
+            'model = "prime"\n'
             '[roles.bounded_fixer]\nability = ["fix"]\n'
             '[workflow]\nplan = [{ action = "focused_sweep" }, '
             f'{rendered}, {{ action = "focused_sweep" }}]\n')
@@ -124,7 +124,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             '[roles.implementer]\n'
             'ability = ["write_tests", "implement_source"]\n'
             '[roles.reviewer_fixer]\nability = ["review", "fix"]\n'
-            'model = "prime"\neffort = "heavy"\n'
+            'model = "prime"\n'
             '[workflow]\n'
             'task = [{ role = "implementer" }]\n'
             'plan = [{ action = "focused_sweep" }, '
@@ -203,7 +203,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             'prompt = "Review cumulative quality before focused_sweep."\n'
             'writes = true\nproduces_verdict = true\n'
             '[roles.any_name]\nability = ["quality"]\n'
-            'model = "prime"\neffort = "heavy"\n'
+            'model = "prime"\n'
             '[workflow]\nplan = [{ role = "any_name" }, '
             '{ action = "focused_sweep" }]\n'))
         self.commit_all()
@@ -260,7 +260,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             'prompt = "Review cumulative quality."\n'
             'writes = true\nproduces_verdict = true\n'
             '[roles.reviewer]\nability = ["quality"]\n'
-            'model = "prime"\neffort = "heavy"\n'
+            'model = "prime"\n'
             '[workflow]\nplan = [{ role = "reviewer" }, '
             '{ action = "focused_sweep" }]\n'))
         self.commit_all()
@@ -300,7 +300,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             'prompt = "Review cumulative quality."\n'
             'writes = true\nproduces_verdict = true\n'
             '[roles.reviewer]\nability = ["quality"]\n'
-            'model = "prime"\neffort = "heavy"\n'
+            'model = "prime"\n'
             '[workflow]\nplan = [{ role = "reviewer" }, '
             '{ action = "focused_sweep" }]\n'))
         self.commit_all()
@@ -375,7 +375,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             'prompt = "Diagnose and repair the failed selection verifier."\n'
             'writes = true\nproduces_verdict = true\n'
             '[roles.reviewer_fixer]\nability = ["review_fix"]\n'
-            'model = "prime"\neffort = "heavy"\n'
+            'model = "prime"\n'
             '[workflow]\nintegration = [{ action = "full_verify" }, '
             '{ role = "reviewer_fixer", adapter = ["codex", "claude"] }, '
             '{ action = "full_verify" }]\n')
@@ -484,7 +484,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             'prompt = "Assign and resolve every selection conflict path."\n'
             'writes = true\nproduces_verdict = true\n'
             '[roles.reviewer_fixer]\nability = ["review_fix"]\n'
-            'model = "prime"\neffort = "heavy"\n'
+            'model = "prime"\n'
             '[workflow]\nintegration = [{ action = "full_verify" }, '
             '{ role = "reviewer_fixer", adapter = "codex" }, '
             '{ action = "full_verify" }]\n')
@@ -583,7 +583,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             'writes = true\nproduces_verdict = true\n'
             '[roles.integration_reviewer]\n'
             'ability = ["integration_review"]\n'
-            'model = "prime"\neffort = "heavy"\n'
+            'model = "prime"\n'
             '[workflow]\nintegration = [{ action = "full_verify" }, '
             '{ role = "integration_reviewer", adapter = "claude" }, '
             '{ action = "full_verify" }]\n')
@@ -640,7 +640,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             'writes = true\nproduces_verdict = true\n'
             '[roles.integration_reviewer]\n'
             'ability = ["integration_review"]\n'
-            'model = "prime"\neffort = "heavy"\n'
+            'model = "prime"\n'
             '[workflow]\nintegration = [{ action = "full_verify" }, '
             '{ role = "integration_reviewer", adapter = "claude" }, '
             '{ action = "full_verify" }]\n')
@@ -701,7 +701,7 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             'prompt = "Diagnose and repair the failed selection verifier."\n'
             'writes = true\nproduces_verdict = true\n'
             '[roles.reviewer_fixer]\nability = ["review_fix"]\n'
-            'model = "prime"\neffort = "heavy"\n'
+            'model = "prime"\n'
             '[workflow]\nintegration = [{ action = "full_verify" }, '
             '{ role = "reviewer_fixer", adapter = "claude" }, '
             '{ action = "full_verify" }]\n'))
@@ -1348,8 +1348,7 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         self.commit_all()
         claude = ScriptedAdapter([])
         codex = ScriptedAdapter([
-            self.ai_done(path, by="codex", requested_model="codex-lite")],
-            resolved_model="codex-lite")
+            self.ai_done(path, by="codex", requested_model="codex-lite")])
 
         with mock.patch.object(engine, "get_adapter", return_value=codex):
             self.assertEqual(self.run_quiet(
@@ -1460,8 +1459,7 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         self.commit_all()
         unavailable = TaskResult(1, "provider unavailable", False, None)
         codex = ScriptedAdapter([unavailable, self.ai_done(
-            path, by="codex", requested_model="codex-lite")],
-            resolved_model="codex-lite")
+            path, by="codex", requested_model="codex-lite")])
         claude = ScriptedAdapter([unavailable])
         sleeps: list[float] = []
 
@@ -1483,8 +1481,7 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
         self.commit_all()
         codex = ScriptedAdapter([
             TaskResult(1, "", True, None),
-            self.ai_done(path, by="codex", requested_model="codex-lite")],
-            resolved_model="codex-lite")
+            self.ai_done(path, by="codex", requested_model="codex-lite")])
         claude = ScriptedAdapter([
             TaskResult(1, "provider unavailable", False, None)])
         sleeps: list[float] = []
@@ -1717,7 +1714,7 @@ class TestWorkflowAccountabilityUnit(GlobalContractsMixin, EngineTestCase):
             'prompt = "Review the whole plan."\n'
             'writes = true\nproduces_verdict = true\n'
             '[roles.plan_reviewer]\nability = ["review_plan"]\n'
-            'model = "lite"\neffort = "normal"\n'
+            'model = "lite"\n'
             '[workflow]\ntask = []\n'
             'plan = [{ role = "plan_reviewer", adapter = "codex" }]\n'))
         self.commit_all()
@@ -2103,7 +2100,8 @@ class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
             "工作指示\n\n日誌 by 欄位範例:by = \"codex\" 或 \"claude\"\n",
             encoding="utf-8")
         (self.root / ".assent" / "assent.toml").write_text(
-            '[adapter]\nname = "antigravity"\n', encoding="utf-8")
+            '[adapter]\nname = "antigravity"\n' + models_block('[adapter]\nname = "antigravity"\n'),
+            encoding="utf-8")
         cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
         self.commit_all()
         commands: list[list[str]] = []
@@ -2146,7 +2144,8 @@ class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
     def test_adapter_classification_reaches_the_reason_and_the_journal(self):
         path = self.write_task(1, model="lite")
         (self.root / ".assent" / "assent.toml").write_text(
-            '[run]\nretry_per_task = 0\n[adapter]\nname = "antigravity"\n',
+            '[run]\nretry_per_task = 0\n[adapter]\nname = "antigravity"\n'
+            + models_block('[adapter]\nname = "antigravity"\n'),
             encoding="utf-8")
         cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
         self.commit_all()
@@ -2172,9 +2171,10 @@ class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
         """A quota round and its resume must resolve to the exact same requested_model /
         requested_effort in the prompt, the CLI command, the terminal output, and both the
         scheduler's quota journal entry and the execution AI's own done entry."""
-        path = self.write_task(1, model="prime", effort="slight")
+        path = self.write_task(1, model="prime")
         (self.root / ".assent" / "assent.toml").write_text(
-            '[adapter]\nname = "antigravity"\n', encoding="utf-8")
+            '[adapter]\nname = "antigravity"\n' + models_block('[adapter]\nname = "antigravity"\n'),
+            encoding="utf-8")
         cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
         self.commit_all()
         t0 = datetime(2026, 3, 1, tzinfo=timezone.utc)
@@ -2209,22 +2209,22 @@ class TestAntigravitySession(GlobalContractsMixin, EngineTestCase):
         terminal = out.getvalue()
         for command in calls:
             self.assertEqual(command[command.index("--model") + 1], "gemini-3.1-pro")
-            self.assertEqual(command[command.index("--effort") + 1], "low")
+            self.assertEqual(command[command.index("--effort") + 1], "high")
         self.assertIn("gemini-3.1-pro", terminal)
 
         resume_prompt = prompts[1]
         self.assertIn("resume", resume_prompt.lower())
         self.assertIn('requested_model = "gemini-3.1-pro"', resume_prompt)
-        self.assertIn('requested_effort = "low"', resume_prompt)
+        self.assertIn('requested_effort = "high"', resume_prompt)
 
         from assent.plan import read_entries
         entries = read_entries(journal_path_for(path))
         quota_entry = next(e for e in entries if e["event"] == "quota")
         done_entry = next(e for e in entries if e["event"] == "done")
         self.assertEqual(quota_entry["requested_model"], "gemini-3.1-pro")
-        self.assertEqual(quota_entry["requested_effort"], "low")
+        self.assertEqual(quota_entry["requested_effort"], "high")
         self.assertEqual(done_entry["requested_model"], "gemini-3.1-pro")
-        self.assertEqual(done_entry["requested_effort"], "low")
+        self.assertEqual(done_entry["requested_effort"], "high")
         self.assertEqual(parse_task_file(path).status, "DONE")
 
 
@@ -2267,7 +2267,7 @@ class TestAdapterProcessOutcomes(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(failed["exit_code"], 7)
         self.assertFalse(failed["stalled"])
         self.assertEqual(failed["agent"], "claude")
-        self.assertEqual(failed["requested_model"], "lite")
+        self.assertEqual(failed["requested_model"], "sonnet")
         self.assertEqual(failed["requested_effort"], "medium")
         self.assertNotIn("TOPSECRET", failed["summary"])
         self.assertLess(len(failed["summary"]), 400)
@@ -2425,7 +2425,7 @@ class TestBillingAbort(GlobalContractsMixin, EngineTestCase):
                        if e["by"] == "scheduler" and e["event"] == "billing")
         self.assertIn("top-up", billing["summary"].lower())
         self.assertEqual(billing["agent"], "claude")
-        self.assertEqual(billing["requested_model"], "lite")
+        self.assertEqual(billing["requested_model"], "sonnet")
         self.assertNotIn("blocked", [e["event"] for e in entries])
 
     def test_billing_task_resumes_cleanly_on_a_later_run(self):
@@ -2446,7 +2446,15 @@ class TestBillingAbort(GlobalContractsMixin, EngineTestCase):
 
 class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
     def rotation_config(self):
-        cfg = self.build()
+        # Each adapter states its own lite invocation, so the rotation can be told
+        # apart by the exact model and effort actually sent.
+        cfg = self.build(extra_config=(
+            '[adapter.claude.models]\n'
+            'prime = "claude-prime/high"\ncore = "claude-core/high"\n'
+            'lite = "claude-lite/medium"\n'
+            '[adapter.codex.models]\n'
+            'prime = "codex-prime/high"\ncore = "codex-core/high"\n'
+            'lite = "codex-lite/low"\n'))
         cfg.adapter_names = ("claude", "codex")
         return cfg
 
@@ -2482,7 +2490,6 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         self.assertIn("resume", adapter.calls[1][0])
         self.assertIn("Waiting for quota reset before resuming", out.getvalue())
         # one zero-token capability preflight before the run, then one per attempt
-        self.assertEqual(adapter.resolve_calls, ["lite", "lite", "lite"])
         subjects = self.subjects()
         self.assertTrue(any(s.startswith("wip(plan01/t001): ")
                             for s in subjects))
@@ -2492,7 +2499,7 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         entries = read_entries(journal_path_for(path))
         quota = next(e for e in entries if e["event"] == "quota")
         self.assertEqual(quota["agent"], "claude")
-        self.assertEqual(quota["requested_model"], "lite")
+        self.assertEqual(quota["requested_model"], "sonnet")
         self.assertEqual(quota["requested_effort"], "medium")
         self.assertEqual(
             quota["summary"],
@@ -2548,7 +2555,7 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
 
     def test_checkpoint_resume_keeps_same_adapter_without_wait_rotation_or_retry(self):
         path = self.write_task(1)
-        cfg = self.build(retry=0)
+        cfg = self.build(retry=0, extra_config=models_block('"codex"'))
         cfg.adapter_names = ("claude", "codex")
         self.commit_all()
         control = TaskResult(
@@ -2567,8 +2574,8 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
             return self.ai_done(path)(prompt)
 
         claude = ScriptedAdapter(
-            [checkpoint_step, resumed], resolved_model="claude-lite")
-        codex = ScriptedAdapter([], resolved_model="codex-lite")
+            [checkpoint_step, resumed])
+        codex = ScriptedAdapter([])
         sleeps: list[float] = []
         out = io.StringIO()
 
@@ -2595,7 +2602,7 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         checkpoint = next(entry for entry in entries
                           if entry["event"] == "checkpoint_resume")
         self.assertEqual(checkpoint["agent"], "claude")
-        self.assertEqual(checkpoint["requested_model"], "claude-lite")
+        self.assertEqual(checkpoint["requested_model"], "sonnet")
         self.assertEqual(checkpoint["requested_effort"], "medium")
         self.assertIn(CHECKPOINT_RESUME_RECORD, checkpoint["detail"])
         self.assertNotIn("quota", [entry["event"] for entry in entries])
@@ -2638,11 +2645,10 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
             return TaskResult(
                 exit_code=1, output="", quota_exhausted=True, reset_at=None)
 
-        claude = ScriptedAdapter([quota_step], resolved_model="claude-lite")
+        claude = ScriptedAdapter([quota_step])
         codex = ScriptedAdapter(
             [self.ai_done(
-                path, by="codex", requested_model="codex-lite")],
-            resolved_model="codex-lite")
+                path, by="codex", requested_model="codex-lite")])
         sleeps: list[float] = []
         out = io.StringIO()
 
@@ -2684,10 +2690,9 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
             return TaskResult(
                 exit_code=1, output="", quota_exhausted=True, reset_at=None)
 
-        claude = ScriptedAdapter([quota_step], resolved_model="claude-lite")
+        claude = ScriptedAdapter([quota_step])
         codex = ScriptedAdapter(
-            [self.ai_done(path, by="codex", requested_model="codex-lite")],
-            resolved_model="codex-lite")
+            [self.ai_done(path, by="codex", requested_model="codex-lite")])
         out = io.StringIO()
 
         with mock.patch("assent.engine.get_adapter", return_value=codex):
@@ -2699,8 +2704,8 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(codex.calls[0][2], "low")
         self.assertEqual(
             [line for line in out.getvalue().splitlines() if "Session:" in line],
-            ["  Session: claude | lite->claude-lite | normal->medium",
-             "  Session: codex | lite->codex-lite | slight->low"])
+            ["  Session: claude | lite->claude-lite/medium",
+             "  Session: codex | lite->codex-lite/low"])
 
     def test_complete_quota_rotation_waits_then_continues_from_next_adapter(self):
         path = self.write_task(1)
@@ -2710,8 +2715,8 @@ class TestQuotaAndResume(GlobalContractsMixin, EngineTestCase):
         quota = TaskResult(
             exit_code=1, output="", quota_exhausted=True, reset_at=None)
         claude = ScriptedAdapter(
-            [quota, self.ai_done(path)], resolved_model="claude-lite")
-        codex = ScriptedAdapter([quota], resolved_model="codex-lite")
+            [quota, self.ai_done(path)])
+        codex = ScriptedAdapter([quota])
         sleeps: list[float] = []
         out = io.StringIO()
 
@@ -2796,7 +2801,7 @@ class TestInterruptedTaskResume(GlobalContractsMixin, EngineTestCase):
                          and e["event"] == "interrupt"
                          and "User interrupt" in e["summary"])
         self.assertEqual(interrupt["agent"], "claude")
-        self.assertEqual(interrupt["requested_model"], "lite")
+        self.assertEqual(interrupt["requested_model"], "sonnet")
         self.assertEqual(interrupt["requested_effort"], "medium")
 
         adapter = ScriptedAdapter([self.ai_done(path)])

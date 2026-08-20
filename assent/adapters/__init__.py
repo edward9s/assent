@@ -146,29 +146,28 @@ class TaskResult:
 
 @dataclass(frozen=True)
 class InvocationRequest:
-    """One invocation a run may issue: the abstract choices plus the resolved CLI values.
+    """One invocation a run may issue: the selection plus the resolved CLI values.
 
     The engine resolves these before any session starts so an adapter can validate every
     model/effort combination the run could send without spending a token.
     """
 
     task_id: str
-    model: str                     # selected portable tier or bracketed literal
-    effort: str | None             # selected portable/literal effort; None = vendor default
+    model: str                     # selected portable tier or vendor selection
     requested_model: str           # the actual --model value
     requested_effort: str | None    # the actual effort value, None = no effort flag
 
 
 class Adapter:                     # Base class for each vendor's adapter
-    # Concrete adapters set this from ``cfg.adapter_settings(<name>)``; it owns the command,
-    # the tier -> model map, and the effort contract so callers never branch on the adapter name.
+    # Concrete adapters set this from ``cfg.adapter_settings(<name>)``; it owns the command
+    # and the tier -> invocation map, so callers never branch on the adapter name.
     settings: "AdapterSettings | None" = None
 
-    def resolve_model(self, model: str) -> str:
-        """Resolve a portable tier or literal into the CLI's ``--model`` value."""
+    def resolve(self, model: str) -> tuple[str, str | None]:
+        """Resolve a portable tier or literal into the CLI ``--model``/effort pair."""
         if self.settings is None:
-            return model
-        return self.settings.resolve_model(model)
+            return model, None
+        return self.settings.resolve(model)
 
     def probe_cli(self) -> tuple[bool, str]:
         """Probe this adapter's CLI for doctor/check; returns (ok, a stable English diagnostic).

@@ -333,8 +333,8 @@ def _read_last_message(path: Path) -> tuple[str | None, str | None]:
 class CodexAdapter(Adapter):
     def __init__(self, cfg: "Config") -> None:
         self.cfg = cfg
-        # Model resolution and the effort contract come from the shared typed settings so this
-        # adapter and the engine resolve invocations identically (base Adapter.resolve_model).
+        # Model and effort resolution comes from the shared typed settings so this
+        # adapter and the engine resolve invocations identically (base Adapter.resolve).
         self.settings = cfg.adapter_settings("codex")
 
     def run_task(self, prompt: str, requested_model: str,

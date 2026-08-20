@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+
+from tests.engine_support import models_block
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -74,7 +76,7 @@ class TestArchive(unittest.TestCase):
         self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.assent_dir / "assent.toml"
-        self.config_path.write_text("", encoding="utf-8")
+        self.config_path.write_text(models_block(), encoding="utf-8")
         (self.tasks_dir / "t001_task.e.toml").write_text(
             _task_text(), encoding="utf-8")
         (self.tasks_dir / "t001_task.r.toml").write_text(

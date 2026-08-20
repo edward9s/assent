@@ -35,7 +35,6 @@ writes = true
 [roles.plan_reviewer]
 ability = ["review_fix"]
 model = "prime"
-effort = "heavy"
 [roles.bounded_fixer]
 ability = ["fix"]
 [workflow]
@@ -411,7 +410,6 @@ produces_verdict = true
 [roles.plan_reviewer]
 ability = ["review_fix"]
 model = "prime"
-effort = "heavy"
 [workflow]
 plan = [
   { role = "plan_reviewer", adapter = "claude" },

@@ -20,14 +20,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from assent import AssentError
-from assent.modeling import parse_effort, parse_model
+from assent.modeling import parse_tier
 from assent.verification_common import atomic_write_text
 
 _FORMAL_FILENAME_RE = re.compile(r"^t(\d{3})_(.+)\.e\.toml$")
 _RETIRED_FILENAME_RE = re.compile(r"^t\d{3}_.+\.toml$")
 _ID_RE = re.compile(r"^t\d{3}$")
 _STATUS_VALUES = {"TODO", "WIP", "DONE", "BLOCKED", "SKIP"}
-_KNOWN_KEYS = {"title", "deps", "model", "effort", "status", "scope", "verify",
+_KNOWN_KEYS = {"title", "deps", "model", "status", "scope", "verify",
                "goal", "behavior", "acceptance", "notes", "workflow"}
 # Journal identities a new write may claim.  Reading is deliberately unrestricted, so a
 # journal written before an adapter existed (including the retired catch-all by = "ai")
@@ -112,8 +112,7 @@ class Task:
     id: str                        # Filename prefix, e.g. "t001" (id exists only in the filename)
     title: str
     deps: list[str]
-    model: str                     # portable tier or [literal adapter model]
-    effort: str | None             # portable effort, [literal], or omitted default
+    model: str                     # portable tier or [literal adapter model/effort]
     status: str                    # TODO | WIP | DONE | BLOCKED | SKIP
     scope: list[str]               # Allowed path prefixes; fail-closed, must not be empty
     verify: str                    # Acceptance command
@@ -443,14 +442,8 @@ def parse_task_file(path: Path) -> Task:
             f"Task file {path.name} has status = {status!r}, which is invalid"
             f" ({' / '.join(sorted(_STATUS_VALUES))})")
 
-    model = parse_model(
-        _require_str(data, path, "model"), f"Task file {path.name}",
-        lowercase_abstract=True)
-
-    effort_raw = _optional_str(data, path, "effort").strip()
-    if effort_raw:
-        effort_raw = parse_effort(
-            effort_raw, f"Task file {path.name}", lowercase_abstract=True)
+    model = parse_tier(
+        _require_str(data, path, "model"), f"Task file {path.name}")
 
     deps = _str_list(data, path, "deps")
     for dep in deps:
@@ -481,7 +474,6 @@ def parse_task_file(path: Path) -> Task:
         title=_require_str(data, path, "title").strip(),
         deps=deps,
         model=model,
-        effort=effort_raw or None,
         status=status,
         scope=scope,
         verify=verify,
@@ -740,7 +732,7 @@ def same_except_status(a: Task, b: Task) -> list[str]:
     against loosening one's own acceptance criteria).
     """
     diff = []
-    for name in ("title", "deps", "model", "effort", "workflow", "scope", "verify",
+    for name in ("title", "deps", "model", "workflow", "scope", "verify",
                  "goal", "behavior", "acceptance", "notes"):
         if getattr(a, name) != getattr(b, name):
             diff.append(name)

@@ -19,11 +19,11 @@ transport, so the whole contract was recorded without spending a token.
 
 Two facts from that evidence shape the shipped mapping in ``assent/config.py``:
 
-- Gemini 3.1 Pro has no ``medium``, so ``prime`` maps the abstract medium up to ``high``;
-  quality-first, and never a silent send of an unsupported value.
+- Gemini 3.1 Pro has no ``medium``, so ``prime`` names ``high`` outright; quality-first,
+  and never a silent send of an unsupported value.
 - AGY exposes no Flash Lite at all, so ``lite`` uses the explicitly written Gemini 3.5 Flash
   fallback, whose ceiling is ``medium`` -- the catalog's "Gemini 3.5 Flash (High)" entry is
-  not reachable through ``--effort``.  ``lite`` high therefore maps to that ceiling in the
+  not reachable through ``--effort``.  ``lite`` therefore names that ceiling in the
   configuration table, where it is visible, rather than in adapter code.
 
 1.1.8 is the shipped minimum because it adds the typed ``stream-json`` result and usage
@@ -73,8 +73,7 @@ _RESERVED_ARGS = {
     "--prompt-interactive": "a scheduled task session must not be interactive",
     "-i": "a scheduled task session must not be interactive",
     "--model": f"the model comes from [adapter.{NAME}.models]",
-    "--effort": (f"the effort comes from [adapter.{NAME}.default_effort] and "
-                 f"[adapter.{NAME}.efforts]"),
+    "--effort": f"the effort comes from [adapter.{NAME}.models]",
     "--mode": "the adapter always runs --mode accept-edits",
     "--output-format": "the adapter always consumes stream-json output",
     "--print-timeout": (f"the adapter sets the print timeout from [adapter.{NAME}] "
@@ -440,8 +439,8 @@ class AntigravityAdapter(Adapter):
 
     def __init__(self, cfg: "Config", catalog: ModelCatalog | None = None) -> None:
         self.cfg = cfg
-        # Model resolution and the effort contract come from the shared typed settings so this
-        # adapter and the engine resolve invocations identically (base Adapter.resolve_model).
+        # Model and effort resolution comes from the shared typed settings so this
+        # adapter and the engine resolve invocations identically (base Adapter.resolve).
         self.settings = cfg.adapter_settings(NAME)
         self._catalog = catalog
 
@@ -498,18 +497,19 @@ class AntigravityAdapter(Adapter):
                 else f"--model {request.requested_model} with no --effort")
         head = (f"task {request.task_id}: model selection {request.model!r} resolves to "
                 f"{sent}, but {reason}")
-        if has_literal(request.model, request.effort):
-            return (f"{head}; change the bracketed literal or bind this step "
-                    "to an adapter that accepts it")
+        if has_literal(request.model):
+            return (f"{head}; change the vendor selection stated on this step "
+                    "or bind it to an adapter that accepts it")
         supported = catalog.families.get(request.requested_model)
-        if supported and request.effort and request.requested_effort:
+        if supported and request.requested_effort:
             suggestion = recommended_effort(supported, request.requested_effort)
-            return (f"{head}; set [adapter.{NAME}.efforts.{request.model}] "
-                    f"{request.effort} = \"{suggestion}\" "
-                    f"(current value {request.requested_effort!r})")
+            return (f"{head}; set [adapter.{NAME}.models] {request.model} = "
+                    f"\"{request.requested_model}/{suggestion}\" "
+                    f"(current effort {request.requested_effort!r})")
         if supported:
-            return (f"{head}; set [adapter.{NAME}.default_effort] {request.model} to one "
-                    f"of {', '.join(supported)}")
+            return (f"{head}; set [adapter.{NAME}.models] {request.model} to "
+                    f"{request.requested_model}/<effort>, with an effort from "
+                    f"{', '.join(supported)}")
         return (f"{head}; fix [adapter.{NAME}.models] {request.model} "
                 f"(current value {request.requested_model!r})")
 

@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+from tests.engine_support import models_block
 from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
@@ -68,7 +70,7 @@ class VerificationRepositoryCase(unittest.TestCase):
         self.assent_dir = self.root / ".assent"
         self.tasks_dir = self.assent_dir / "plan測試"
         self.tasks_dir.mkdir(parents=True)
-        (self.assent_dir / "assent.toml").write_text("", encoding="utf-8")
+        (self.assent_dir / "assent.toml").write_text(models_block(), encoding="utf-8")
         self._write_verifier(exit_code=0)
         (self.tasks_dir / "t001_complete.e.toml").write_text(
             'title = "Complete"\n'

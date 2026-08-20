@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+
+from tests.engine_support import models_block
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -56,7 +58,7 @@ class ReconcileRepositoryCase(unittest.TestCase):
         self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.assent_dir / "assent.toml"
-        self.config_path.write_text("", encoding="utf-8")
+        self.config_path.write_text(models_block(), encoding="utf-8")
         (self.assent_dir / "verify.py").write_text(
             "raise SystemExit('reconcile must never run the verifier')\n",
             encoding="utf-8")

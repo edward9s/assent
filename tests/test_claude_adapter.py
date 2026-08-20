@@ -23,14 +23,17 @@ from assent.adapters.claude import (
     parse_output_for_quota, parse_output_for_usage, run_subprocess)
 from assent.adapters.process import clear_stop_wake, wake_stop_waiters
 from assent.config import Config
+from tests.engine_support import TEST_MODEL_TIERS
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def make_cfg(**overrides) -> Config:
-    """Build a test Config; the default tier mapping uses the built-ins (prime -> fable, etc.)."""
+    """Build a test Config. Assent ships no model ids, so these tier tables are
+    the fixture's own; assertions below name their values directly."""
     base = dict(root=Path("."), assent_dir=Path("./.assent"),
-                tasks_dir=Path("./.assent/plan01"), tasks_name="plan01")
+                tasks_dir=Path("./.assent/plan01"), tasks_name="plan01",
+                claude_models=dict(TEST_MODEL_TIERS["claude"]))
     base.update(overrides)
     return Config(**base)
 
@@ -434,7 +437,7 @@ class TestRunTask(unittest.TestCase):
 
         self.patch_run(fake)
         adapter = ClaudeAdapter(make_cfg())
-        requested_model = adapter.resolve_model("prime")
+        requested_model = adapter.resolve("prime")[0]
         result = adapter.run_task(
             "prompt", requested_model, "high", Path("/proj"))
         self.assertIsInstance(result, TaskResult)
@@ -452,7 +455,7 @@ class TestRunTask(unittest.TestCase):
     def test_unknown_tier_raises(self):
         adapter = ClaudeAdapter(make_cfg(claude_models={"core": "opus"}))
         with self.assertRaises(AssentError):
-            adapter.resolve_model("prime")
+            adapter.resolve("prime")[0]
 
     def test_quota_output_sets_flags(self):
         ts = 1784041800
@@ -461,7 +464,7 @@ class TestRunTask(unittest.TestCase):
         self.patch_run(lambda c, w, s, echo=None, input_text=None: (1, quota_line, False))
         adapter = ClaudeAdapter(make_cfg())
         result = adapter.run_task(
-            "p", adapter.resolve_model("lite"), None, Path("."))
+            "p", adapter.resolve("lite")[0], None, Path("."))
         self.assertTrue(result.quota_exhausted)
         self.assertEqual(result.reset_at, datetime.fromtimestamp(ts, tz=timezone.utc))
 
@@ -484,7 +487,7 @@ class TestRunTask(unittest.TestCase):
         self.patch_run(lambda c, w, s, echo=None, input_text=None: (1, output, False))
         adapter = ClaudeAdapter(make_cfg())
         result = adapter.run_task(
-            "p", adapter.resolve_model("lite"), None, Path("."))
+            "p", adapter.resolve("lite")[0], None, Path("."))
         self.assertFalse(result.quota_exhausted)
         self.assertEqual(result.failure_kind, "billing")
         self.assertIsNone(result.reset_at)
@@ -511,7 +514,7 @@ class TestRunTask(unittest.TestCase):
         self.patch_run(lambda c, w, s, echo=None, input_text=None: (0, line + "\n", False))
         adapter = ClaudeAdapter(make_cfg())
         result = adapter.run_task(
-            "p", adapter.resolve_model("lite"), None, Path("."))
+            "p", adapter.resolve("lite")[0], None, Path("."))
         self.assertIsNone(result.failure_kind)
         self.assertFalse(result.quota_exhausted)
 
@@ -521,7 +524,7 @@ class TestRunTask(unittest.TestCase):
         self.patch_run(lambda c, w, s, echo=None, input_text=None: (1, "rate limit exceeded\n", True))
         adapter = ClaudeAdapter(make_cfg())
         result = adapter.run_task(
-            "p", adapter.resolve_model("lite"), None, Path("."))
+            "p", adapter.resolve("lite")[0], None, Path("."))
         self.assertFalse(result.quota_exhausted)
         self.assertTrue(result.stalled)
         self.assertIsNone(result.reset_at)

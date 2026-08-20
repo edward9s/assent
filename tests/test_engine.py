@@ -25,7 +25,8 @@ from assent.lockfile import hold_lock
 from assent.plan import (Plan, append_entry, journal_path_for, parse_task_file,
                          set_status)
 from tests.engine_support import (_FAILV, _NEEDS_OK_TXT, _OK, EngineTestCase,
-                                  ScriptedAdapter, ok_result, task_text)
+                                  ScriptedAdapter, models_block, ok_result,
+                                  task_text)
 from tests.link_support import make_directory_link, safe_rmtree
 from tests.test_contracts import GlobalContractsMixin
 
@@ -468,55 +469,50 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
         self.assertEqual(parse_task_file(p1).status, "BLOCKED")
         self.assertEqual(parse_task_file(p2).status, "DONE")
 
-    def test_effort_from_task_overrides_default(self):
-        p1 = self.write_task(1, effort="slight")
-        cfg = self.build(extra_config=
-            '[adapter.claude.default_effort]\nlite = "heavy"\n'
-            '[adapter.claude.efforts]\nslight = "minimal"\n')
-        self.commit_all()
-        adapter = ScriptedAdapter([self.ai_done(p1)])
-        self.run_quiet(cfg, once=True, adapter=adapter)
-        self.assertEqual(adapter.calls[0][2], "minimal")
-
-    def test_effort_default_applied_per_tier(self):
-        p1 = self.write_task(1, model="lite")  # built-in lite default is normal
-        cfg = self.build(extra_config=
-            '[adapter.claude.efforts]\nnormal = "balanced"\n')
-        self.commit_all()
-        adapter = ScriptedAdapter([self.ai_done(p1)])
-        self.run_quiet(cfg, once=True, adapter=adapter)
-        self.assertEqual(adapter.calls[0],
-                         (adapter.calls[0][0], "lite", "balanced"))
-
-    def test_empty_default_effort_still_sends_the_builtin_tier_effort(self):
-        # An empty table no longer suppresses the built-in mapping: the lite tier keeps
-        # its built-in "normal" and is translated to a concrete value, so the vendor CLI
-        # default is never what decides the reasoning investment.
+    def test_tier_selects_the_configured_model_and_effort(self):
         p1 = self.write_task(1, model="lite")
         cfg = self.build(extra_config=
-            '[adapter.claude.default_effort]\n'
-            '[adapter.claude.efforts]\nnormal = "balanced"\n')
+            '[adapter.claude.models]\n'
+            'prime = "fable/high"\n'
+            'core = "opus/high"\n'
+            'lite = "sonnet/balanced"\n')
         self.commit_all()
-        adapter = ScriptedAdapter([self.ai_done(p1)], resolved_model="sonnet")
+        adapter = ScriptedAdapter([self.ai_done(p1, requested_model="sonnet")])
+        self.run_quiet(cfg, once=True, adapter=adapter)
+        self.assertEqual(adapter.calls[0],
+                         (adapter.calls[0][0], "sonnet", "balanced"))
+
+    def test_builtin_tier_is_used_when_the_models_table_is_absent(self):
+        # Nothing is left for the vendor CLI to decide: the built-in lite entry
+        # already names both halves of the invocation.
+        p1 = self.write_task(1, model="lite")
+        cfg = self.build()
+        self.commit_all()
+        adapter = ScriptedAdapter([self.ai_done(p1, requested_model="sonnet")])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             engine.run(cfg, once=True, adapter=adapter)
-        self.assertEqual(adapter.calls[0][2], "balanced")
-        self.assertIn("Session: claude | lite->sonnet | normal->balanced",
-                      out.getvalue())
+        self.assertEqual(adapter.calls[0][2], "medium")
+        self.assertIn("Session: claude | lite->sonnet/medium", out.getvalue())
         self.assertNotIn("unspecified", out.getvalue())
         self.assertNotIn("CLI default", out.getvalue())
 
-    def test_codex_uses_its_own_effort_translation(self):
-        p1 = self.write_task(1, model="lite", effort="heavy")
+    def test_each_adapter_uses_its_own_tier_mapping(self):
+        p1 = self.write_task(1, model="lite")
         cfg = self.build(adapter_name="codex", extra_config=
-            '[adapter.claude.efforts]\nheavy = "claude-value"\n'
-            '[adapter.codex.efforts.lite]\nheavy = "max"\n')
+            '[adapter.claude.models]\n'
+            'prime = "fable/high"\n'
+            'core = "opus/high"\n'
+            'lite = "claude-value/high"\n'
+            '[adapter.codex.models]\n'
+            'prime = "gpt-5.6-sol/high"\n'
+            'core = "gpt-5.6-terra/medium"\n'
+            'lite = "gpt-cli/max"\n')
         self.commit_all()
         adapter = ScriptedAdapter([
-            self.ai_done(p1, by="codex", requested_model="gpt-cli")],
-            resolved_model="gpt-cli")
+            self.ai_done(p1, by="codex", requested_model="gpt-cli")])
         self.run_quiet(cfg, once=True, adapter=adapter)
+        self.assertEqual(adapter.calls[0][1], "gpt-cli")
         self.assertEqual(adapter.calls[0][2], "max")
 
     def test_prompt_contains_task_and_journal_paths(self):
@@ -534,13 +530,16 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
         self.assertIn(str(p1.with_name("t001_task.r.toml")), prompt)
         self.assertIn(_OK, prompt)
         self.assertIn('by = "claude"', prompt)
-        self.assertIn('requested_model = "lite"', prompt)
-        self.assertIn('selected effort = "normal"', prompt)
+        self.assertIn('requested_model = "sonnet"', prompt)
         self.assertIn('requested_effort = "medium"', prompt)
 
     def test_codex_prompt_uses_resolved_cli_model(self):
         p1 = self.write_task(1)
-        cfg = self.build(adapter_name="codex")
+        cfg = self.build(adapter_name="codex", extra_config=
+            '[adapter.codex.models]\n'
+            'prime = "gpt-5.6-sol/high"\n'
+            'core = "gpt-5.6-terra/medium"\n'
+            'lite = "gpt-cli/low"\n')
         self.commit_all()
 
         def done(prompt):
@@ -557,19 +556,21 @@ class TestRunSuccess(GlobalContractsMixin, EngineTestCase):
         self.assertIn('requested_model = "gpt-cli"', prompt)
         self.assertEqual(requested_model, "gpt-cli")
 
-    def test_session_line_states_the_four_facts_compactly(self):
-        p1 = self.write_task(1, model="lite", effort="heavy")
+    def test_session_line_states_the_resolved_facts_compactly(self):
+        p1 = self.write_task(1, model="lite")
         cfg = self.build(extra_config=
-            '[adapter.claude.efforts.lite]\nheavy = "max"\n')
+            '[adapter.claude.models]\n'
+            'prime = "fable/high"\n'
+            'core = "opus/high"\n'
+            'lite = "sonnet/max"\n')
         self.commit_all()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            engine.run(cfg, once=True,
-                       adapter=ScriptedAdapter([self.ai_done(p1)],
-                                               resolved_model="sonnet"))
+            engine.run(cfg, once=True, adapter=ScriptedAdapter(
+                [self.ai_done(p1, requested_model="sonnet")]))
         lines = [line for line in out.getvalue().splitlines()
                  if "Session:" in line]
-        self.assertEqual(lines, ["  Session: claude | lite->sonnet | heavy->max"])
+        self.assertEqual(lines, ["  Session: claude | lite->sonnet/max"])
 
     def test_worktree_verify_runs_with_the_worktree_as_cwd(self):
         # The main-tree expansion of `.assent/verify.py` was retired with the plan
@@ -751,7 +752,7 @@ class TestAcceptanceGates(GlobalContractsMixin, EngineTestCase):
         blocked = next(e for e in entries if e["by"] == "scheduler"
                        and e["event"] == "blocked")
         self.assertEqual(blocked["agent"], "claude")
-        self.assertEqual(blocked["requested_model"], "lite")
+        self.assertEqual(blocked["requested_model"], "sonnet")
         self.assertEqual(blocked["requested_effort"], "medium")
 
     def test_verify_failure_then_success_on_retry(self):
@@ -931,7 +932,7 @@ class TestSchedulingAndRefusals(GlobalContractsMixin, EngineTestCase):
         nested_plan = nested_root / ".assent" / "plan01"
         nested_plan.mkdir(parents=True)
         config = nested_root / ".assent" / "assent.toml"
-        config.write_text("", encoding="utf-8")
+        config.write_text(models_block(), encoding="utf-8")
         cfg = load_config(config, "plan01")
         adapter = ScriptedAdapter([])
 
@@ -1080,7 +1081,6 @@ class TestAutoFixPlanReviewGate(GlobalContractsMixin, EngineTestCase):
                 '[roles.reviewer_fixer]\n'
                 'ability = ["review_fix"]\n'
                 f'model = "{model}"\n'
-                'effort = "heavy"\n'
                 '[roles.bounded_fixer]\n'
                 'ability = ["fix"]\n'
                 '[workflow]\n'
@@ -1095,7 +1095,7 @@ class TestAutoFixPlanReviewGate(GlobalContractsMixin, EngineTestCase):
                 'prompt = "Adjudicate the durable blocked evidence."\n'
                 'writes = false\nproduces_verdict = true\n'
                 '[roles.adjudicator]\nability = ["review"]\n'
-                f'model = "{model}"\neffort = "heavy"\n'
+                f'model = "{model}"\n'
                 '[workflow]\nplan = [{ action = "focused_sweep" }, '
                 '{ role = "adjudicator", adapter = "codex" }, '
                 '{ action = "focused_sweep" }]\n'))

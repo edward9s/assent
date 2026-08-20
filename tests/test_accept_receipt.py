@@ -11,6 +11,8 @@ import sys
 import tempfile
 import tomllib
 import unittest
+
+from tests.engine_support import models_block
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,7 +48,7 @@ class AcceptReceiptCase(unittest.TestCase):
         self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config = self.assent_dir / "assent.toml"
-        self.config.write_text("", encoding="utf-8")
+        self.config.write_text(models_block(), encoding="utf-8")
         self.counter = self.parent / "verifier-count.txt"
         self._write_verifier(True)
         self._write_task(self.plan_name)

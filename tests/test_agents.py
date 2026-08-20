@@ -9,6 +9,7 @@ from unittest import mock
 from assent import AssentError
 from assent.config import load_config
 from assent.user_home import ASSENT_HOME_ENV
+from tests.engine_support import models_block
 
 
 class RoleConfigTestCase(unittest.TestCase):
@@ -26,8 +27,10 @@ class RoleConfigTestCase(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def load(self, text: str):
+        # Assent ships no built-in model ids, so every selected adapter needs its
+        # tiers stated; these are the fixture's own values.
         path = self.assent_dir / "assent.toml"
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text + models_block(text), encoding="utf-8")
         return load_config(path, "plan01")
 
 
@@ -46,14 +49,12 @@ produces_verdict = true
 [roles.builder_reviewer]
 ability = ["build", "review"]
 model = "core"
-effort = "heavy"
 """)
 
         resolved = cfg.resolve_role("builder_reviewer")
         self.assertEqual(resolved.abilities,
                          (cfg.abilities["build"], cfg.abilities["review"]))
         self.assertEqual(resolved.model, "core")
-        self.assertEqual(resolved.effort, "heavy")
         self.assertTrue(resolved.writes)
         self.assertTrue(resolved.produces_verdict)
 
@@ -93,12 +94,14 @@ ability = ["review"]
             ("[roles.worker]\nability = [1]\n", "all-string"),
             ("[roles.worker]\nability = [\"build\"]\nextra = 1\n",
              "unknown keys"),
+            # A role may name a vendor selection, so only a malformed one is
+            # refused here; the closed tier vocabulary lives in task files.
             ("[abilities.build]\nprompt = \"x\"\nwrites = false\n"
-             "[roles.worker]\nability = [\"build\"]\nmodel = \"max\"\n",
-             "not a valid model tier"),
+             "[roles.worker]\nability = [\"build\"]\nmodel = \"a/b/c\"\n",
+             "must not contain"),
             ("[abilities.build]\nprompt = \"x\"\nwrites = false\n"
              "[roles.worker]\nability = [\"build\"]\neffort = \"high\"\n",
-             "not a valid effort"),
+             "unknown keys: effort"),
         )
         for text, message in cases:
             with self.subTest(text=text), self.assertRaisesRegex(AssentError, message):

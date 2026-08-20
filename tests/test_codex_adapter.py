@@ -10,14 +10,18 @@ from assent.adapters.codex import (
     parse_output_for_quota, parse_output_for_usage,
 )
 from assent.config import Config
+from tests.engine_support import TEST_MODEL_TIERS
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def make_cfg(**overrides) -> Config:
+    """Build a test Config. Assent ships no model ids, so these tier tables are
+    the fixture's own; assertions below name their values directly."""
     values = dict(root=Path("."), assent_dir=Path("./.assent"),
                   tasks_dir=Path("./.assent/plan01"), tasks_name="plan01",
-                  adapter_name="codex")
+                  adapter_name="codex",
+                  codex_models=dict(TEST_MODEL_TIERS["codex"]))
     values.update(overrides)
     return Config(**values)
 
@@ -194,7 +198,7 @@ class TestRunTask(unittest.TestCase):
 
         self.patch_run(fake)
         adapter = CodexAdapter(make_cfg())
-        requested_model = adapter.resolve_model("prime")
+        requested_model = adapter.resolve("prime")[0]
         prompt = "prompt\n臺灣"
         result = adapter.run_task(prompt, requested_model, "high", Path("/p"))
         self.assertIsInstance(result, TaskResult)
@@ -212,11 +216,11 @@ class TestRunTask(unittest.TestCase):
         self.patch_run(lambda *args, **kwargs: (1, quota, False))
         adapter = CodexAdapter(make_cfg())
         self.assertTrue(adapter.run_task(
-            "p", adapter.resolve_model("lite"), None, Path(".")).quota_exhausted)
+            "p", adapter.resolve("lite")[0], None, Path(".")).quota_exhausted)
 
         self.patch_run(lambda *args, **kwargs: (1, quota, True))
         stalled = adapter.run_task(
-            "p", adapter.resolve_model("lite"), None, Path("."))
+            "p", adapter.resolve("lite")[0], None, Path("."))
         self.assertTrue(stalled.stalled)
         self.assertFalse(stalled.quota_exhausted)
 
@@ -238,14 +242,14 @@ class TestRunTask(unittest.TestCase):
         self.patch_run(lambda *args, **kwargs: (1, billing, False))
         adapter = CodexAdapter(make_cfg())
         result = adapter.run_task(
-            "p", adapter.resolve_model("lite"), None, Path("."))
+            "p", adapter.resolve("lite")[0], None, Path("."))
         self.assertFalse(result.quota_exhausted)
         self.assertEqual(result.failure_kind, "billing")
 
         # a stall carrying billing-looking text is still a stall, never billing
         self.patch_run(lambda *args, **kwargs: (1, billing, True))
         stalled = adapter.run_task(
-            "p", adapter.resolve_model("lite"), None, Path("."))
+            "p", adapter.resolve("lite")[0], None, Path("."))
         self.assertTrue(stalled.stalled)
         self.assertIsNone(stalled.failure_kind)
 
@@ -354,7 +358,7 @@ class TestRunTask(unittest.TestCase):
 
     def test_unknown_tier_raises(self):
         with self.assertRaises(AssentError):
-            CodexAdapter(make_cfg(codex_models={"core": "x"})).resolve_model(
+            CodexAdapter(make_cfg(codex_models={"core": "x/high"})).resolve(
                 "prime")
 
 

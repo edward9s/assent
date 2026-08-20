@@ -22,7 +22,7 @@ from assent.plan import (Plan, add_scope_entries, append_entry,
 _OK = 'python -c "raise SystemExit(0)"'
 
 
-def task_text(*, title="Task", deps=(), model="lite", effort=None,
+def task_text(*, title="Task", deps=(), model="lite",
               status="TODO", scope=("src/",), verify=_OK,
               goal="Do one thing.", behavior="", acceptance="- done", notes="",
               workflow=None, extra_line=None, drop=()) -> str:
@@ -35,8 +35,6 @@ def task_text(*, title="Task", deps=(), model="lite", effort=None,
     add("title", f"title = {json.dumps(title, ensure_ascii=False)}")
     add("deps", "deps = [" + ", ".join(json.dumps(d) for d in deps) + "]")
     add("model", f"model = {json.dumps(model)}")
-    if effort:
-        add("effort", f"effort = {json.dumps(effort)}")
     if workflow is not None:
         add("workflow", "workflow = [" + ", ".join(
             f"{{ role = {json.dumps(role)} }}" for role in workflow) + "]")
@@ -129,13 +127,12 @@ class TestParseTaskFile(PlanTestCase):
 
     def test_valid_task_parsed(self):
         path = self.write("t001_demo.e.toml", task_text(
-            title="Scaffold", deps=(), model="prime", effort="heavy",
+            title="Scaffold", deps=(), model="prime",
             scope=("src/", "tests/"), notes="a note"))
         task = parse_task_file(path)
         self.assertEqual(task.id, "t001")
         self.assertEqual(task.title, "Scaffold")
         self.assertEqual(task.model, "prime")
-        self.assertEqual(task.effort, "heavy")
         self.assertEqual(task.status, "TODO")
         self.assertEqual(task.scope, ["src/", "tests/"])
         self.assertEqual(task.journal_path.name, "t001_demo.r.toml")
@@ -232,24 +229,22 @@ class TestParseTaskFile(PlanTestCase):
         with self.assertRaisesRegex(AssentError, "tier"):
             parse_task_file(path)
 
-    def test_literal_model_and_effort_are_preserved_exactly(self):
-        path = self.write(
-            "t001_x.e.toml",
-            task_text(model="[Vendor-Model]", effort="[XHigh]"))
+    def test_tier_is_accepted_case_insensitively(self):
+        path = self.write("t001_x.e.toml", task_text(model="PRIME"))
 
-        task = parse_task_file(path)
+        self.assertEqual(parse_task_file(path).model, "prime")
 
-        self.assertEqual(task.model, "[Vendor-Model]")
-        self.assertEqual(task.effort, "[XHigh]")
-
-    def test_malformed_literal_selection_is_rejected(self):
-        for field, value in (("model", "[model"), ("model", "[]"),
-                             ("effort", "effort]"),
-                             ("effort", "[[high]]")):
-            with self.subTest(field=field, value=value):
-                kwargs = {field: value}
-                path = self.write("t001_x.e.toml", task_text(**kwargs))
-                with self.assertRaisesRegex(AssentError, "malformed literal"):
+    def test_a_task_file_refuses_every_value_that_is_not_a_tier(self):
+        # A task file states difficulty, never a vendor release: the vocabulary is
+        # closed so a typo is caught here, and a model id cannot reach a plan
+        # artifact that outlives the release it names.
+        for value in ("prme", "gpt-5.6-sol", "gpt-5.6-sol/xhigh",
+                      "[gpt-5.6-sol/xhigh]", "fable"):
+            with self.subTest(value=value):
+                path = self.write("t001_x.e.toml", task_text(model=value))
+                with self.assertRaisesRegex(
+                        AssentError,
+                        r"not a valid model tier.*vendor model ids belong in"):
                     parse_task_file(path)
 
     def test_bad_status_rejected(self):
@@ -257,14 +252,12 @@ class TestParseTaskFile(PlanTestCase):
         with self.assertRaises(AssentError):
             parse_task_file(path)
 
-    def test_bad_effort_rejected(self):
-        path = self.write("t001_x.e.toml", task_text(effort="max"))
-        with self.assertRaises(AssentError):
-            parse_task_file(path)
-
-    def test_old_effort_rejected_with_new_vocabulary(self):
-        path = self.write("t001_x.e.toml", task_text(effort="high"))
-        with self.assertRaisesRegex(AssentError, "heavy / normal / slight"):
+    def test_retired_effort_field_is_refused_as_an_undefined_field(self):
+        # Effort is no longer a task field; a plan written for the old schema
+        # must fail loudly rather than have the value silently ignored.
+        path = self.write("t001_x.e.toml",
+                          task_text() + '\neffort = "heavy"\n')
+        with self.assertRaisesRegex(AssentError, "undefined fields: effort"):
             parse_task_file(path)
 
     def test_empty_scope_fail_closed(self):

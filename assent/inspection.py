@@ -11,7 +11,7 @@ questions about a plan as it stands right now:
   adjourns a planning meeting.
 
 Aggregation is mechanical work, zero tokens.  The shared pre-session decisions
-(effort resolution, adapter capability, assignment rendering, stack state) come
+(selection resolution, adapter capability, assignment rendering, stack state) come
 from ``assent.preflight``, which ``assent.engine`` uses too, so a query and a
 run can never answer them differently.  This module must not import
 ``assent.engine``: the report is written from inside a run as a best-effort
@@ -32,12 +32,12 @@ from assent.adapters import Adapter, get_adapter
 from assent.config import PROJECT_LAYER, Config, WorkflowPlanStep
 from assent.plandeps import archived_plan_names, parse_plan_dependencies
 from assent.plan_verification import receipt_report_lines
-from assent.modeling import literal_value
+from assent.modeling import effort_identity, literal_value
 from assent.plan import Plan, Task, read_entries
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               capability_errors, has_git_marker,
-                              print_task_assignments, resolve_effort,
-                              resolve_requested_effort, resolve_stack_state,
+                              print_task_assignments, resolve_selection,
+                              resolve_stack_state,
                               resolve_task_assignments,
                               worktree_configuration_errors)
 
@@ -746,13 +746,13 @@ def status(cfg: Config) -> int:
     if selected is not None:
         nxt, resumed = selected
         try:
-            effort = resolve_effort(cfg, nxt)
-            requested_effort = resolve_requested_effort(cfg, nxt.model, effort)
-            effort_label = f"{effort} -> {requested_effort}"
+            requested_model, requested_effort = resolve_selection(cfg, nxt.model)
+            selection_label = (
+                f"{requested_model}/{effort_identity(requested_effort)}")
         except AssentError as e:
-            effort_label = f"unavailable ({e})"
+            selection_label = f"unavailable ({e})"
         tag = " (WIP resume)" if resumed else ""
-        print(f"Next task: {nxt.id} [{nxt.model} / {effort_label}] "
+        print(f"Next task: {nxt.id} [{nxt.model} -> {selection_label}] "
               f"{nxt.title}{tag}")
     elif counts.get("TODO", 0):
         print("Next task: (TODO remains, but blocked by unfinished prerequisites or a BLOCKED task)")
@@ -801,30 +801,16 @@ def _assignment_source_lines(
         ) -> list[str]:
     """Name the layer behind every setting the printed assignments actually used.
 
-    Only the keys the resolution consumed are shown -- the adapter selection, and per
-    adapter the model, default-effort and effort translation of each tier in the plan --
-    so the provenance answers "why this invocation" without dumping the whole config.
+    Only the keys the resolution consumed are shown -- the adapter selection and the
+    models entry of each tier in the plan -- so the provenance answers "why this
+    invocation" without dumping the whole config.  A literal selection consumed no
+    settings key at all and therefore contributes none.
     """
     lines = [f"Setting sources: adapter.name = {cfg.source_of('adapter.name')}"
              f" (active: {', '.join(cfg.adapter_names)})"]
     for adapter_name, assignments in blocks:
-        settings = cfg.adapter_settings(adapter_name)
-        keys: list[str] = []
-        for task, session in assignments:
-            literal_model = literal_value(task.model) is not None
-            if not literal_model:
-                keys.append(f"models.{task.model}")
-            if session.effort is None:
-                continue
-            if task.effort is None and not literal_model:
-                keys.append(f"default_effort.{task.model}")
-            if literal_value(session.effort) is not None:
-                continue
-            keys.append(
-                f"efforts.{task.model}.{session.effort}"
-                if (not literal_model
-                    and session.effort in settings.tier_efforts.get(task.model, {}))
-                else f"efforts.{session.effort}")
+        keys = [f"models.{task.model}" for task, _session in assignments
+                if literal_value(task.model) is None]
         used = ", ".join(
             f"{key} = {cfg.source_of(f'adapter.{adapter_name}.{key}')}"
             for key in dict.fromkeys(keys))
@@ -838,16 +824,6 @@ def _setting_source_label(cfg: Config, key: str) -> str:
     if layer == "builtin":
         return "builtin (built-in fallback)"
     return f"{layer} (explicit settings layer)"
-
-
-def _review_effort_source_key(cfg: Config, review) -> str:
-    settings = cfg.adapter_settings(review.adapter)
-    tier = settings.tier_efforts.get(review.model, {})
-    if review.effort in tier:
-        return f"adapter.{review.adapter}.efforts.{review.model}.{review.effort}"
-    if review.effort in settings.efforts:
-        return f"adapter.{review.adapter}.efforts.{review.effort}"
-    return "adapter.%s.efforts.%s" % (review.adapter, review.effort)
 
 
 def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
@@ -869,8 +845,8 @@ def _auto_fix_review_source_lines(cfg: Config) -> list[str]:
             continue
         lines.append(
             f"  step {index}: role={step.role}; {adapters} / "
-            f"{step.model}->{step.requested_model} / "
-            f"{step.effort}->{step.requested_effort}")
+            f"{step.model}->{step.requested_model}/"
+            f"{effort_identity(step.requested_effort)}")
     return lines
 
 

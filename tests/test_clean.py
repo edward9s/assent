@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+
+from tests.engine_support import models_block
 from pathlib import Path
 from unittest.mock import patch
 
@@ -59,7 +61,7 @@ class TestClean(unittest.TestCase):
         self.tasks_dir = self.root / ".assent" / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.root / ".assent" / "assent.toml"
-        self.config_path.write_text("", encoding="utf-8")
+        self.config_path.write_text(models_block(), encoding="utf-8")
         (self.tasks_dir / "t001_task.e.toml").write_text(
             _task_text(), encoding="utf-8")
         (self.tasks_dir / "assent.lock").write_text(
@@ -610,7 +612,7 @@ class TestOrphanSweep(unittest.TestCase):
         self.plan_name = "plan01"
         self.config_path = self.root / ".assent" / "assent.toml"
         self.config_path.parent.mkdir(parents=True)
-        self.config_path.write_text("", encoding="utf-8")
+        self.config_path.write_text(models_block(), encoding="utf-8")
         self.cfg = self._plan_name(self.plan_name)
         self.container = self.root.parent / f"{self.root.name}.worktrees"
         self.addCleanup(self._cleanup_worktrees)

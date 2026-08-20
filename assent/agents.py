@@ -21,7 +21,6 @@ class Role:
 
     ability: tuple[str, ...]
     model: str | None = None
-    effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -30,7 +29,6 @@ class ResolvedRole:
 
     abilities: tuple[Ability, ...]
     model: str | None
-    effort: str | None
     writes: bool
     produces_verdict: bool
 
@@ -47,7 +45,6 @@ def resolve_role(name: str, roles: dict[str, Role],
     return ResolvedRole(
         abilities=resolved,
         model=role.model,
-        effort=role.effort,
         writes=any(ability.writes for ability in resolved),
         produces_verdict=any(ability.produces_verdict for ability in resolved),
     )
