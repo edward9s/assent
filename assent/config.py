@@ -752,16 +752,37 @@ def validate_task_workflow_steps(
             "first failure handler between focused_test actions")
 
 
-def _require_complete_models(cfg: Config) -> None:
-    """Refuse a selected adapter whose tier -> invocation table is absent or partial.
+def _workflow_bound_adapters(*raw_entry_lists) -> set[str]:
+    """Every adapter a workflow entry binds itself to, across all three layers.
+
+    Entries arrive in the two shapes ``_parse_workflow_entries`` produces: a task step
+    object, or a ``(role, adapters, resolved)`` tuple for the plan and integration
+    layers.  Scheduler actions bind nothing.
+    """
+    names: set[str] = set()
+    for entries in raw_entry_lists:
+        for entry in entries or ():
+            if isinstance(entry, WorkflowActionStep):
+                continue
+            adapters = (entry.adapters if isinstance(entry, WorkflowTaskStep)
+                        else entry[1])
+            names.update(adapters or ())
+    return names
+
+
+def _require_complete_models(cfg: Config, bound: set[str]) -> None:
+    """Refuse a reachable adapter whose tier -> invocation table is absent or partial.
 
     Nothing supplies these values but the config file, so an omission cannot silently
-    resolve to something plausible: it would only surface as a failed invocation once a
-    task of that tier was reached.  Only the adapters in the rotation are required, so a
-    project that never selects an adapter is not forced to name models for it; a workflow
-    step naming an adapter outside the rotation is resolved, and refused, where it is read.
+    resolve to something plausible.  Required of the rotation and of every adapter a
+    workflow entry binds itself to -- not the rotation alone: a task-layer role may
+    inherit its tier from the task, so its selection is resolved during the run rather
+    than while the config is read, and an unmapped adapter bound there would otherwise
+    pass ``check`` and fail only after a worktree and a checkpoint already existed.  An
+    adapter nothing reaches stays optional, so a project is never forced to name models
+    for a vendor it does not use.
     """
-    for name in cfg.adapter_names:
+    for name in sorted(set(cfg.adapter_names) | bound):
         if name not in _ADAPTER_NAMES:
             continue          # an unknown name has its own refusal, at its own layer
         models = cfg.adapter_settings(name).models
@@ -1094,7 +1115,8 @@ def load_config(path: str | Path, plan_name: str) -> Config:
     if cfg.antigravity_print_timeout_minutes < 1:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
-    _require_complete_models(cfg)
+    _require_complete_models(cfg, _workflow_bound_adapters(
+        raw_workflow_task, raw_workflow_plan, raw_workflow_integration))
     plan_steps = _resolve_accountability_steps(cfg, raw_workflow_plan, "plan")
     integration_steps = _resolve_accountability_steps(
         cfg, raw_workflow_integration, "integration")

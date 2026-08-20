@@ -504,7 +504,9 @@ class TestLoadConfig(ConfigTestCase):
             _WORKFLOW_ROLES +
             '[adapter]\nname = "claude"\n'
             '[adapter.codex]\ncommand = "codex-review.cmd"\n'
-            '[adapter.codex.models]\ncore = "review-model/review-effort"\n'
+            '[adapter.codex.models]\n'
+            'prime = "p/high"\nlite = "l/low"\n'
+            'core = "review-model/review-effort"\n'
             '[roles.reviewer_core]\nability = ["review"]\nmodel = "core"\n'
             '[workflow]\nplan = [{ action = "focused_sweep" }, '
             '{ role = "reviewer_core", adapter = "codex" }, '
@@ -1083,6 +1085,33 @@ class TestAdapterSettings(ConfigTestCase):
         with self.assertRaisesRegex(AssentError,
                                     r"\[adapter\.antigravity\.models\]"):
             settings.resolve("core")
+
+    def test_a_workflow_bound_adapter_must_state_every_tier_too(self):
+        """The rotation is not the only way an adapter becomes reachable.
+
+        A task-layer role may inherit its tier from the task, so its selection is
+        resolved during the run rather than while the config is read.  Without this,
+        binding an unmapped adapter there passed ``check`` and failed only once a
+        worktree and a checkpoint already existed.
+        """
+        bound = ('[abilities.w]\nprompt = "x"\nwrites = true\n'
+                 '[roles.worker]\nability = ["w"]\n'
+                 '[workflow]\ntask = ['
+                 '{ role = "worker", adapter = "antigravity" }]\n'
+                 '[adapter.claude.models]\n'
+                 'prime = "a/high"\ncore = "b/high"\nlite = "c/low"\n')
+        # models=False: supplying antigravity here would defeat the refusal
+        with self.assertRaisesRegex(
+                AssentError,
+                r"\[adapter\.antigravity\.models\] must state every model tier"):
+            load_config(self.write(bound, models=False), "plan01")
+
+    def test_an_adapter_nothing_reaches_is_never_required(self):
+        # Neither the rotation nor any workflow entry names antigravity, so a project
+        # that does not use it is not forced to name models for it.
+        cfg = load_config(self.write(
+            '[adapter]\nname = ["claude"]\n'), "plan01")
+        self.assertEqual(cfg.antigravity_models, {})
 
     def test_models_keys_are_validated_against_the_known_tiers(self):
         with self.assertRaisesRegex(
