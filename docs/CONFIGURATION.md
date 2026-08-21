@@ -12,18 +12,19 @@ Shared files live under `~/.assent/`:
 ```text
 assent.toml       scheduler settings
 adapter.toml      AI CLI commands and model mappings
-instructions.md  AI session rules
+instructions.md   AI session rules
 format.md         plan-file contract
 workflow.md       scheduler and acceptance contract
 ```
 
-The project owns `AGENTS.md`, `.assent/verify.py`, its plans, and an optional
-`.assent/assent.toml` override.
+The project owns `AGENTS.md`, `.assent/verify.py`, its plans, and optional
+`.assent/assent.toml` and `.assent/adapter.toml` overrides.
 
 Settings resolve from built-in defaults, user configuration, project override,
 and finally any supported command-line override. Tables merge by key; scalars
 and arrays replace the lower value. Omit a value to inherit it. An empty array
-is an intentional empty value.
+is an intentional empty value, and so is a blank string, which is refused where
+the setting needs text.
 
 ## Think in workflows
 
@@ -72,7 +73,7 @@ model = "prime"
 `ability` is a nonempty ordered list. The role writes if any included ability
 writes, and produces a verdict if any included ability does so. `model` is
 optional. A workflow role entry may override it; an ordinary task step
-otherwise inherits the task's profile. Every step in `workflow.plan` and
+otherwise inherits the task's profile. Every role step in `workflow.plan` and
 `workflow.integration` must effectively state a model through the role or
 workflow entry, because such a session answers for a whole unit and has no
 single task to inherit one from.
@@ -135,7 +136,11 @@ acceptance. Publication remains the later explicit `assent accept` decision.
 ### Default workflow
 
 The packaged configuration uses one implementation session per task and a
-dedicated reviewer/fixer responsibility at each repair layer:
+dedicated reviewer/fixer responsibility at each repair layer. The abilities
+below are quoted with their prompts shortened; `~/.assent/assent.toml` holds
+the full text and also defines the read-only reviewer and the write-only fixer
+of each layer, with the matching split workflow arrays commented out beside the
+ones it ships:
 
 ```toml
 [abilities.write_tests]
@@ -239,11 +244,13 @@ repair rounds, not additional normal reviews.
   repair.
 
 A task file may override only its task sequence. To split one task between a
-test writer and a source implementer, first define both roles in an effective
-settings file such as `~/.assent/assent.toml`:
+test writer and a source implementer, use the `tests_writer` and
+`source_implementer` roles the packaged configuration already defines. A
+settings file that dropped them states them again in an effective settings file
+such as `~/.assent/assent.toml`:
 
 ```toml
-[roles.test_writer]
+[roles.tests_writer]
 ability = ["write_tests"]
 
 [roles.source_implementer]
@@ -254,7 +261,7 @@ Then put only the sequence override in that task's `.e.toml` file:
 
 ```toml
 workflow = [
-  { role = "test_writer" },
+  { role = "tests_writer" },
   { role = "source_implementer" },
   { action = "focused_test" },
 ]
@@ -276,13 +283,16 @@ use; Assent uses its existing credentials and does not manage secrets.
 
 Plans use the portable `prime`, `core`, and `lite` model tiers, and nothing
 else. Effort is not a separate portable choice and is not a task field: each
-adapter maps a tier to one complete invocation.
+adapter maps a tier to one complete invocation. Every adapter the settings can
+reach -- the `[adapter].name` rotation and every adapter a workflow entry binds
+itself to -- must map all three tiers, and a missing one is refused when the
+config loads; an adapter nothing reaches needs no mapping at all.
 
 ```toml
 [adapter.codex.models]
 prime = "gpt-5.6-sol/high"
-core  = "gpt-5.6-terra/medium"
-lite  = "gpt-5.6-luna/low"
+core  = "gpt-5.6-terra/high"
+lite  = "gpt-5.6-luna/max"
 ```
 
 The first `/` separates the vendor model from the vendor effort, and both are
@@ -328,10 +338,11 @@ itself, using the same `model/effort` grammar as the `models` table. There is no
 marker syntax: any value that is not a tier is read as a vendor selection.
 
 ```toml
-[[workflow.plan]]
-role = "plan_reviewer"
-adapter = "codex"
-model = "gpt-5.6-sol/xhigh"     # outside codex's three tiers
+plan = [
+  # a vendor selection outside codex's three tiers
+  { role = "plan_reviewer_fixer", adapter = "codex", model = "gpt-5.6-sol/xhigh" },
+  { action = "focused_sweep" },
+]
 ```
 
 This bypasses that adapter's `models` table entirely and does not modify
@@ -342,7 +353,7 @@ Every workflow role entry may select one adapter or an ordered fallback list:
 
 ```toml
 { role = "implementer", adapter = "codex" }
-{ role = "reviewer", adapter = "codex", model = "[gpt-5.6-sol]" }
+{ role = "task_fixer", adapter = "codex", model = "gpt-5.6-terra/low" }
 { role = "task_reviewer_fixer", adapter = ["claude", "codex"] }
 ```
 

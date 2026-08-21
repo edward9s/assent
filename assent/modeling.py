@@ -1,4 +1,4 @@
-"""Portable model tiers and the exact ``[model/effort]`` literal escape syntax.
+"""Portable model tiers and the exact ``model/effort`` vendor selection grammar.
 
 A tier names one complete invocation: the vendor model and the vendor effort it is
 always used at.  Effort is not an independent portable axis, so there is no abstract

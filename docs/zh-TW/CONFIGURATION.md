@@ -14,17 +14,17 @@ Assent 需要 Python 3.11+、Git，以及至少一套已安裝並登入的 AI CL
 ```text
 assent.toml       scheduler 設定
 adapter.toml      AI CLI 指令與 model 對應
-instructions.md  AI session 規則
+instructions.md   AI session 規則
 format.md         計畫檔契約
 workflow.md       scheduler 與驗收契約
 ```
 
 專案自己保有 `AGENTS.md`、`.assent/verify.py`、各份計畫，以及可選的
-`.assent/assent.toml` override。
+`.assent/assent.toml` 與 `.assent/adapter.toml` override。
 
 設定優先順序依次是內建預設、使用者設定、專案 override，以及該指令支援的命令列
 override。Table 依 key 合併；scalar 與 array 整個取代較低層的值。省略才會繼承，
-空 array 則是明確的空值。
+空 array 是明確的空值，空字串也是；需要文字的設定寫成空字串會被拒絕。
 
 ## 從 workflow 理解設定
 
@@ -70,7 +70,7 @@ model = "prime"
 `ability` 是不可為空的有序清單。只要其中一個 ability 可以寫入，role 就可以寫入；
 只要其中一個會產生 verdict，role 就必須產生 verdict。一般 task role 的 `model`
 可以省略；workflow role entry 可以覆寫它，一般 task step 再沿用 task 的設定。
-`workflow.plan` 與 `workflow.integration` 的每一個 step 都必須由 role 或
+`workflow.plan` 與 `workflow.integration` 的每一個 role step 都必須由 role 或
 workflow entry 形成明確的有效 model——這種 session 負責的是一整個單位，
 沒有單一 task 可以繼承。
 
@@ -129,7 +129,9 @@ Integration workflow 只負責驗證與修復，不負責人類驗收。發布�
 ### 預設 workflow
 
 內建設定讓每個 task 先由一個實作 session 處理，三個修復層級各自使用專責的
-reviewer/fixer：
+reviewer/fixer。下方引用的 ability prompt 已經精簡，完整內容在
+`~/.assent/assent.toml`；該檔也定義了每一層唯讀的 reviewer 與只寫入的
+fixer，並在內建 workflow array 旁以註解附上對應的拆分版本：
 
 ```toml
 [abilities.write_tests]
@@ -230,10 +232,12 @@ integration = [
 - 省略或設空 `workflow.integration`，表示停用自動 integration repair。
 
 Task 檔只能覆寫自己的 task sequence。若要把一個 task 拆給 test writer 與 source
-implementer，先在有效的設定檔（例如 `~/.assent/assent.toml`）定義兩個 role：
+implementer，直接使用內建設定已定義的 `tests_writer` 與 `source_implementer`；
+若你的設定檔沒有它們，就在有效的設定檔（例如 `~/.assent/assent.toml`）
+補上：
 
 ```toml
-[roles.test_writer]
+[roles.tests_writer]
 ability = ["write_tests"]
 
 [roles.source_implementer]
@@ -244,7 +248,7 @@ ability = ["implement_source"]
 
 ```toml
 workflow = [
-  { role = "test_writer" },
+  { role = "tests_writer" },
   { role = "source_implementer" },
   { action = "focused_test" },
 ]
@@ -263,13 +267,16 @@ Codex 與 Antigravity；各自的指令、參數與可攜 model 對應都放在 
 無人值守執行前要先登入各 CLI；Assent 只使用既有認證，不管理 secrets。
 
 Plan 只使用可攜的 `prime`、`core`、`lite` model tier。Effort 不是另一個可攜選擇，
-也不是 task 欄位：每個 adapter 把一個 tier 對應到一次完整的 invocation。
+也不是 task 欄位：每個 adapter 把一個 tier 對應到一次完整的 invocation。設定實際
+會用到的每個 adapter——`[adapter].name` rotation，以及任何被 workflow entry
+綁定的 adapter——都必須列出三個 tier，缺一個會在載入設定時被拒絕；完全
+用不到的 adapter 則不需要對應表。
 
 ```toml
 [adapter.codex.models]
 prime = "gpt-5.6-sol/high"
-core  = "gpt-5.6-terra/medium"
-lite  = "gpt-5.6-luna/low"
+core  = "gpt-5.6-terra/high"
+lite  = "gpt-5.6-luna/max"
 ```
 
 第一個 `/` 之前是 vendor model，之後是 vendor effort，兩者都會原封不動傳給該 CLI。
@@ -310,10 +317,11 @@ Vendor model id 只代表一次發布，而 task 檔案的壽命比它長，所�
 同一套。沒有標記語法：任何不是 tier 的值都會被讀成 vendor 選擇。
 
 ```toml
-[[workflow.plan]]
-role = "plan_reviewer"
-adapter = "codex"
-model = "gpt-5.6-sol/xhigh"     # codex 三個 tier 以外的模型
+plan = [
+  # codex 三個 tier 以外的 vendor 選擇
+  { role = "plan_reviewer_fixer", adapter = "codex", model = "gpt-5.6-sol/xhigh" },
+  { action = "focused_sweep" },
+]
 ```
 
 這會完全略過該 adapter 的 `models` table，也不會修改 `adapter.toml`。因為
@@ -324,7 +332,7 @@ adapter。
 
 ```toml
 { role = "implementer", adapter = "codex" }
-{ role = "reviewer", adapter = "codex", model = "[gpt-5.6-sol]" }
+{ role = "task_fixer", adapter = "codex", model = "gpt-5.6-terra/low" }
 { role = "task_reviewer_fixer", adapter = ["claude", "codex"] }
 ```
 

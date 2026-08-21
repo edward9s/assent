@@ -112,7 +112,7 @@ class Task:
     id: str                        # Filename prefix, e.g. "t001" (id exists only in the filename)
     title: str
     deps: list[str]
-    model: str                     # portable tier or [literal adapter model/effort]
+    model: str                     # Portable tier: prime | core | lite -- nothing else
     status: str                    # TODO | WIP | DONE | BLOCKED | SKIP
     scope: list[str]               # Allowed path prefixes; fail-closed, must not be empty
     verify: str                    # Acceptance command
