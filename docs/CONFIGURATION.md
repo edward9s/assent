@@ -353,6 +353,7 @@ Every workflow role entry may select one adapter or an ordered fallback list:
 
 ```toml
 { role = "implementer", adapter = "codex" }
+{ role = "plan_reviewer_fixer", model = "prime" } # global rotation
 { role = "task_fixer", adapter = "codex", model = "gpt-5.6-terra/low" }
 { role = "task_reviewer_fixer", adapter = ["claude", "codex"] }
 ```
@@ -367,6 +368,15 @@ changing adapters. Each workflow step starts from the first declared adapter.
 Authentication failure preserves progress and skips that candidate. If every
 candidate requires login, Assent stops with `AUTHENTICATION REQUIRED`; log in
 and run the command again.
+
+| Effective model | May omit `adapter`? | Result |
+| --- | --- | --- |
+| Portable `prime`, `core`, or `lite` | Yes | Use the global rotation and each adapter's tier mapping. |
+| Vendor selection | Only when the global rotation contains exactly one adapter | Otherwise name one adapter on the workflow entry. |
+| No model from the workflow entry or role | Only in `workflow.task` | Inherit the current task's model; plan and integration roles are invalid without a model. |
+
+The default workflow's explicit `adapter = "codex"` entries pin those steps to
+Codex by policy. They are not a restriction of the plan or integration layers.
 
 ## Initialization and troubleshooting
 

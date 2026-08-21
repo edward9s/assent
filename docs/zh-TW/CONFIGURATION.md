@@ -332,6 +332,7 @@ adapter。
 
 ```toml
 { role = "implementer", adapter = "codex" }
+{ role = "plan_reviewer_fixer", model = "prime" } # 使用全域 rotation
 { role = "task_fixer", adapter = "codex", model = "gpt-5.6-terra/low" }
 { role = "task_reviewer_fixer", adapter = ["claude", "codex"] }
 ```
@@ -344,6 +345,15 @@ workflow 或 retry policy 處理，不會因此更換 adapter。每個 workflow 
 自己清單的第一個 adapter 開始。
 Authentication failure 會保留進度並略過該候選。若所有候選都需要登入，Assent
 會以 `AUTHENTICATION REQUIRED` 停止；登入後重新執行指令即可。
+
+| 有效 model | 可以省略 `adapter` 嗎？ | 結果 |
+| --- | --- | --- |
+| 可攜的 `prime`、`core` 或 `lite` | 可以 | 使用全域 rotation 與各 adapter 的 tier mapping。 |
+| Vendor 選擇 | 只有全域 rotation 恰好包含一個 adapter 時可以 | 否則必須在 workflow entry 指定一個 adapter。 |
+| Workflow entry 與 role 都沒有 model | 只有 `workflow.task` 可以 | 繼承目前 task 的 model；plan 與 integration role 沒有 model 時無效。 |
+
+預設 workflow 明寫的 `adapter = "codex"` 是把那些 step 固定到 Codex 的策略選擇，
+不是 plan 或 integration layer 的格式限制。
 
 ## 初始化與排錯
 
