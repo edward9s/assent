@@ -182,6 +182,7 @@ class TestLoadConfig(ConfigTestCase):
                     self.assertTrue(model)
                     self.assertTrue(effort)
         self.assertEqual(cfg.antigravity_print_timeout_minutes, 120)
+        self.assertEqual(cfg.claude_models["prime"], "opus/high")
 
     def test_antigravity_print_timeout_must_be_positive(self):
         with self.assertRaisesRegex(AssentError, "print_timeout_minutes"):

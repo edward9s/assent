@@ -184,6 +184,7 @@ writes = true
 
 [roles.implementer]
 ability = ["write_tests", "implement_source"]
+model = "lite"
 
 [roles.task_reviewer]
 ability = ["task_review"]
@@ -203,7 +204,7 @@ model = "prime"
 
 [roles.plan_fixer]
 ability = ["plan_fix"]
-model = "prime"
+model = "lite"
 
 [roles.integration_reviewer]
 ability = ["integration_review"]
@@ -211,38 +212,39 @@ model = "prime"
 
 [roles.integration_fixer]
 ability = ["integration_fix"]
-model = "prime"
+model = "lite"
 
 [workflow]
 task = [
-  { role = "implementer" },
+  { role = "implementer", adapter = ["codex", "claude"] },
   { action = "focused_test" },
-  { role = "task_reviewer" },
-  { role = "task_fixer" },
+  { role = "task_reviewer", adapter = ["claude", "codex"] },
+  { role = "task_fixer", adapter = ["codex", "claude"] },
   { action = "focused_test" },
 ]
 plan = [
-  { role = "plan_quality_reviewer", adapter = "codex" },
-  { role = "plan_fixer", adapter = "codex" },
+  { role = "plan_quality_reviewer", adapter = ["claude", "codex"] },
+  { role = "plan_fixer", adapter = ["codex", "claude"] },
   { action = "focused_sweep" },
-  { role = "plan_reviewer", adapter = "codex" },
-  { role = "plan_fixer", adapter = "codex" },
+  { role = "plan_reviewer", adapter = ["claude", "codex"] },
+  { role = "plan_fixer", adapter = ["codex", "claude"] },
   { action = "focused_sweep" },
-  { role = "plan_reviewer", adapter = "codex" },
-  { role = "plan_fixer", adapter = "codex" },
+  { role = "plan_reviewer", adapter = ["claude", "codex"] },
+  { role = "plan_fixer", adapter = ["codex", "claude"] },
   { action = "focused_sweep" },
 ]
 integration = [
   { action = "full_verify" },
-  { role = "integration_reviewer", adapter = "codex" },
-  { role = "integration_fixer", adapter = "codex" },
+  { role = "integration_reviewer", adapter = ["claude", "codex"] },
+  { role = "integration_fixer", adapter = ["codex", "claude"] },
   { action = "full_verify" },
 ]
 ```
 
-Every reviewer uses `prime`. The task fixer uses `lite` because it repairs one
-validated task-local finding and is immediately rechecked by `focused_test`.
-Plan and integration fixers stay `prime` for cross-task and cross-plan work.
+Every reviewer uses `prime`; every pure writer uses `lite`. Writer steps prefer
+Codex and fall back to Claude, which resolves to Luna then Sonnet with the
+packaged mappings. Reviewer steps reverse that order, resolving to Opus then
+Sol. The default implementer therefore overrides the model stated by a task.
 
 The plan reviewer before the first action is the one unconditional cumulative
 quality review. A PASS skips its paired fixer; a valid finding authorizes that
@@ -395,8 +397,9 @@ and run the command again.
 | Vendor selection | Only when the global rotation contains exactly one adapter | Otherwise name one adapter on the workflow entry. |
 | No model from the workflow entry or role | Only in `workflow.task` | Inherit the current task's model; plan and integration roles are invalid without a model. |
 
-The default workflow's explicit `adapter = "codex"` entries pin those steps to
-Codex by policy. They are not a restriction of the plan or integration layers.
+The default workflow's explicit adapter lists prefer Codex for writers and
+Claude for reviewers. They are policy choices, not restrictions of a workflow
+layer; each list falls back only for quota, authentication, or availability.
 
 ## Initialization and troubleshooting
 

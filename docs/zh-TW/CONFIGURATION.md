@@ -176,6 +176,7 @@ writes = true
 
 [roles.implementer]
 ability = ["write_tests", "implement_source"]
+model = "lite"
 
 [roles.task_reviewer]
 ability = ["task_review"]
@@ -195,7 +196,7 @@ model = "prime"
 
 [roles.plan_fixer]
 ability = ["plan_fix"]
-model = "prime"
+model = "lite"
 
 [roles.integration_reviewer]
 ability = ["integration_review"]
@@ -203,38 +204,39 @@ model = "prime"
 
 [roles.integration_fixer]
 ability = ["integration_fix"]
-model = "prime"
+model = "lite"
 
 [workflow]
 task = [
-  { role = "implementer" },
+  { role = "implementer", adapter = ["codex", "claude"] },
   { action = "focused_test" },
-  { role = "task_reviewer" },
-  { role = "task_fixer" },
+  { role = "task_reviewer", adapter = ["claude", "codex"] },
+  { role = "task_fixer", adapter = ["codex", "claude"] },
   { action = "focused_test" },
 ]
 plan = [
-  { role = "plan_quality_reviewer", adapter = "codex" },
-  { role = "plan_fixer", adapter = "codex" },
+  { role = "plan_quality_reviewer", adapter = ["claude", "codex"] },
+  { role = "plan_fixer", adapter = ["codex", "claude"] },
   { action = "focused_sweep" },
-  { role = "plan_reviewer", adapter = "codex" },
-  { role = "plan_fixer", adapter = "codex" },
+  { role = "plan_reviewer", adapter = ["claude", "codex"] },
+  { role = "plan_fixer", adapter = ["codex", "claude"] },
   { action = "focused_sweep" },
-  { role = "plan_reviewer", adapter = "codex" },
-  { role = "plan_fixer", adapter = "codex" },
+  { role = "plan_reviewer", adapter = ["claude", "codex"] },
+  { role = "plan_fixer", adapter = ["codex", "claude"] },
   { action = "focused_sweep" },
 ]
 integration = [
   { action = "full_verify" },
-  { role = "integration_reviewer", adapter = "codex" },
-  { role = "integration_fixer", adapter = "codex" },
+  { role = "integration_reviewer", adapter = ["claude", "codex"] },
+  { role = "integration_fixer", adapter = ["codex", "claude"] },
   { action = "full_verify" },
 ]
 ```
 
-所有 reviewer 都使用 `prime`。task fixer 使用 `lite`，因為它只修復一個已驗證的
-task-local finding，隨後立刻由 `focused_test` 重查。plan 與 integration fixer
-維持 `prime`，負責跨 task 與跨 plan 的工作。
+所有 reviewer 都使用 `prime`，所有純寫入角色都使用 `lite`。Writer step 優先
+Codex、fallback 到 Claude，依內建 mapping 會先用 Luna、再用 Sonnet；reviewer
+step 的順序相反，會先用 Opus、再用 Sol。因此預設 implementer 會覆寫 task
+所填的 model。
 
 第一次 action 前的 plan reviewer 是唯一無條件執行的累積品質審查。PASS 會略過配對的
 fixer；有效 finding 才會授權該 fixer。第一個通過的 `focused_test`、`focused_sweep` 或
@@ -374,8 +376,9 @@ Authentication failure 會保留進度並略過該候選。若所有候選都需
 | Vendor 選擇 | 只有全域 rotation 恰好包含一個 adapter 時可以 | 否則必須在 workflow entry 指定一個 adapter。 |
 | Workflow entry 與 role 都沒有 model | 只有 `workflow.task` 可以 | 繼承目前 task 的 model；plan 與 integration role 沒有 model 時無效。 |
 
-預設 workflow 明寫的 `adapter = "codex"` 是把那些 step 固定到 Codex 的策略選擇，
-不是 plan 或 integration layer 的格式限制。
+預設 workflow 明寫的 adapter list 會讓 writer 優先使用 Codex、reviewer 優先
+使用 Claude。這是策略選擇，不是 workflow layer 的格式限制；只有 quota、認證或
+可用性問題才會改用 list 中的下一個 adapter。
 
 ## 初始化與排錯
 

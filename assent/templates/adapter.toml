@@ -19,7 +19,7 @@ extra_args = ["--permission-mode", "bypassPermissions"]
 # abstract tier -> CLI arguments (an assent.toml role may name a vendor selection
 # directly instead, which bypasses this table)
 [adapter.claude.models]
-prime = "fable/high"
+prime = "opus/high"
 core  = "opus/high"
 lite  = "sonnet/high"
 

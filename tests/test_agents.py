@@ -129,11 +129,24 @@ ability = ["review"]
             [(True, False), (False, True), (True, False)])
         self.assertEqual(
             [step.resolved_role.model for step in task_roles],
-            [None, "prime", "lite"])
+            ["lite", "prime", "lite"])
+        self.assertEqual(
+            [step.adapters for step in task_roles],
+            [("codex", "claude"), ("claude", "codex"),
+             ("codex", "claude")])
+        plan_roles = [
+            step for step in cfg.workflow_plan
+            if not hasattr(step, "action")]
         self.assertEqual(
             [(step.writes, step.produces_verdict)
-             for step in cfg.workflow_plan if not hasattr(step, "action")],
+             for step in plan_roles],
             [(False, True), (True, False)] * 3)
+        self.assertEqual(
+            [step.model for step in plan_roles],
+            ["prime", "lite"] * 3)
+        self.assertEqual(
+            [step.adapters for step in plan_roles],
+            [("claude", "codex"), ("codex", "claude")] * 3)
         self.assertEqual(
             [step.action if hasattr(step, "action") else "role"
              for step in cfg.workflow_integration],
@@ -145,7 +158,10 @@ ability = ["review"]
             [(False, True), (True, False)])
         self.assertEqual(
             [step.model for step in integration_roles],
-            ["prime", "prime"])
+            ["prime", "lite"])
+        self.assertEqual(
+            [step.adapters for step in integration_roles],
+            [("claude", "codex"), ("codex", "claude")])
 
 
 if __name__ == "__main__":

@@ -1875,8 +1875,8 @@ class TestInit(MainTestCase):
         user_config = self.user_home / "assent.toml"
         user_config.write_text(
             user_config.read_text(encoding="utf-8").replace(
-                '  { role = "implementer"},',
-                '  { action = "full_verify" },'),
+                "task = [\n",
+                'task = [\n  { action = "full_verify" },\n', 1),
             encoding="utf-8")
 
         output = io.StringIO()
