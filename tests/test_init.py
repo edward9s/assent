@@ -65,7 +65,7 @@ class TestInitContractRefresh(unittest.TestCase):
             encoding="utf-8").split())
         self.assertIn("Never copy an ignored tree", text)
         self.assertIn(
-            "runs the injected `assent shared-paths review` command",
+            "submit the decision with `assent shared-paths declare`",
             text)
         self.assertIn("Cover every listed ordinary ignored directory once",
                       text)

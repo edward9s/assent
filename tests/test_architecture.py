@@ -385,44 +385,5 @@ class VendorAdapterIndependence(unittest.TestCase):
         self.assertTrue(callable(process.run_subprocess))
 
 
-class AutoFixStateSchema(unittest.TestCase):
-    """The version-7 state validator and dataclass expose one exact schema."""
-
-    def test_version_and_exact_field_set_stay_in_parity(self) -> None:
-        from dataclasses import fields
-        from assent import auto_fix
-
-        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 7)
-        self.assertEqual(
-            {field.name for field in fields(auto_fix.AutoFixState)},
-            auto_fix._STATE_KEYS)
-        self.assertIn("phase", auto_fix._STATE_KEYS)
-        for field in (
-                "review_context", "review_stage", "failure_trigger",
-                "reviewer_recommendations", "approved_scope_additions",
-                "scope_amendments", "worker_dispositions", "repair_briefs",
-                "workflow_step_index",
-                "reviewer_step_index", "reviewer_role",
-                "plan_digest_transitions", "review_transitions"):
-            self.assertIn(field, auto_fix._STATE_KEYS)
-        # The merged reviewer-fixer loop terminates by walking the configured
-        # review-round list, so no fixer-escalation bookkeeping is persisted.
-        for removed in ("repair_round_assignments", "consumed_fixer_profiles"):
-            self.assertNotIn(removed, auto_fix._STATE_KEYS)
-        self.assertEqual(auto_fix.AUTO_FIX_PHASES, frozenset({
-            "NEEDS_REPAIR", "REPAIRING", "AWAITING_REVIEW", "COMPLETE",
-        }))
-
-    def test_review_enums_are_bounded_and_exclude_verification_receipts(self) -> None:
-        from assent import auto_fix
-
-        self.assertEqual(auto_fix.REVIEW_CONTEXTS,
-                         {"completed_plan", "blocked_adjudication",
-                          "selection_verification"})
-        self.assertEqual(auto_fix.REVIEW_STAGES, {"initial", "recheck"})
-        self.assertNotIn("complete_verification", auto_fix.REVIEW_FINDING_KINDS)
-        self.assertNotIn("receipt_absence", auto_fix.REVIEW_FINDING_KINDS)
-
-
 if __name__ == "__main__":
     unittest.main()

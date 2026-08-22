@@ -27,7 +27,7 @@ from assent.__main__ import _exit_main, _start_stdin_stop_watcher, main
 from assent.adapters.process import clear_stop_wake
 from assent.config import load_config
 from assent.init import init as run_init
-from assent.plan import Plan
+from assent.plan import Plan, WorkflowState, write_workflow_state
 from tests.test_contracts import install_global_contracts
 from tests.test_shared_paths import settle_shared_paths
 
@@ -69,6 +69,13 @@ class MainTestCase(unittest.TestCase):
     def write_config(self, text="") -> Path:
         config = self.root / ".assent" / "assent.toml"
         config.parent.mkdir(parents=True, exist_ok=True)
+        task_entry = 'task = [{ action = "focused_test" }]\n'
+        if not re.search(r"(?m)^task\s*=", text):
+            if "[workflow]" in text:
+                text = text.replace(
+                    "[workflow]\n", "[workflow]\n" + task_entry, 1)
+            else:
+                text += "[workflow]\n" + task_entry
         config.write_text(text + models_block(text), encoding="utf-8")
         return config
 
@@ -80,7 +87,6 @@ class MainTestCase(unittest.TestCase):
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
-            'scope = ["assent/"]\n'
             'verify = "python -m unittest"\n'
             'goal = "完成任務"\n'
             'acceptance = "驗證通過"\n',
@@ -139,7 +145,7 @@ class TestDispatch(MainTestCase):
         env = dict(os.environ)
         env["PYTHONPATH"] = str(_PROJECT_ROOT)
         result = subprocess.run(
-            [sys.executable, "-m", "assent", "shared-paths", "review", "--help"],
+            [sys.executable, "-m", "assent", "shared-paths", "declare", "--help"],
             cwd=self.root, capture_output=True, text=True,
             encoding="utf-8", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -150,6 +156,13 @@ class TestDispatch(MainTestCase):
         self.assertIn("--watch is a repeatable", result.stdout)
         self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
+        retired = subprocess.run(
+            [sys.executable, "-m", "assent", "shared-paths", "review", "--help"],
+            cwd=self.root, capture_output=True, text=True,
+            encoding="utf-8", env=env)
+        self.assertNotEqual(retired.returncode, 0)
+        self.assertIn("invalid choice", retired.stderr)
+
         result = subprocess.run(
             [sys.executable, "-m", "assent", "shared-paths", "status", "--help"],
             cwd=self.root, capture_output=True, text=True,
@@ -158,14 +171,14 @@ class TestDispatch(MainTestCase):
         self.assertIn("without changing it", result.stdout)
         self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
-        with patch("assent.__main__.shared_paths_review",
-                   return_value=0) as review:
+        with patch("assent.__main__.shared_paths_declare",
+                   return_value=0) as declare:
             code, _out = self.run_main(
-                ["shared-paths", "review", "--path", "pkg",
+                ["shared-paths", "declare", "--path", "pkg",
                  "--classify", "build", "build output",
                  "--watch", "pubspec.yaml"])
         self.assertEqual(code, 0)
-        review.assert_called_once_with(
+        declare.assert_called_once_with(
             ["pkg"], ["pubspec.yaml"], False,
             [["build", "build output"]])
 
@@ -251,7 +264,8 @@ class TestDispatch(MainTestCase):
 
     def test_an_absent_default_project_file_is_not_an_error(self):
         # Everything stated user-wide is a complete, ordinary setup.
-        text = '[adapter]\nname = "claude"\n'
+        text = ('[adapter]\nname = "claude"\n'
+                '[workflow]\ntask = [{ action = "focused_test" }]\n')
         (self.user_home / "assent.toml").write_text(
             text + models_block(text), encoding="utf-8")
         self.write_task("plan01")
@@ -779,7 +793,6 @@ class TestDispatch(MainTestCase):
             '[abilities.review]\n'
             'prompt = "Review the selection."\n'
             'writes = false\n'
-            'produces_verdict = true\n'
             '[roles.reviewer]\n'
             'ability = ["review"]\n'
             'model = "prime"\n'
@@ -940,6 +953,20 @@ class TestAutomaticIntegrationChaining(MainTestCase):
                 "run", "alpha", "--once", "--config", str(self.config)])
         self.assertEqual(code, 0)
         self.assertIn("Integration workflow deferred", out)
+        integration.assert_not_called()
+
+    def test_unresolved_plan_workflow_defers_automatic_integration(self):
+        self.write_task("alpha", "DONE")
+        write_workflow_state(self.assent_dir / "alpha", WorkflowState(
+            "plan", "", 1, False, "HEAD", action="focused_sweep",
+            action_status="FAILED", action_source_tree="tree:commands",
+            action_exit_code=1, action_evidence=("check", "failed")))
+        with patch("assent.__main__.engine.run", return_value=0), \
+                patch("assent.__main__.engine.run_selection_workflow") as integration:
+            code, out = self.run_main([
+                "run", "alpha", "--config", str(self.config)])
+        self.assertEqual(code, 0)
+        self.assertIn("requires human adjudication", out)
         integration.assert_not_called()
 
 class TestCommandElapsed(MainTestCase):
@@ -1659,8 +1686,7 @@ class TestInit(MainTestCase):
         user_config = self.user_home / "assent.toml"
         user_config.write_text(
             user_config.read_text(encoding="utf-8").replace(
-                "retry_per_task = 1",
-                'retry_per_task = 7\ncustom_setting = "keep"'),
+                "quota_poll_minutes = 30", "quota_poll_minutes = 7"),
             encoding="utf-8")
         (self.user_home / "instructions.md").write_text(
             "an older assent's working instructions\n", encoding="utf-8")
@@ -1673,8 +1699,7 @@ class TestInit(MainTestCase):
             self.assertEqual(run_init(self.root), 0)
         config_text = user_config.read_text(encoding="utf-8")
         config = tomllib.loads(config_text)
-        self.assertEqual(config["run"]["retry_per_task"], 7)
-        self.assertEqual(config["run"]["custom_setting"], "keep")
+        self.assertEqual(config["run"]["quota_poll_minutes"], 7)
         self.assertIn("quota_poll_minutes", config["run"])
         self.assertIn("watchdog", config)
         loaded = load_config(self.root / ".assent" / "assent.toml", "plan01")
@@ -1683,12 +1708,10 @@ class TestInit(MainTestCase):
         self.assertEqual(
             [step.action if hasattr(step, "action") else "role"
              for step in task_steps],
-            ["role", "focused_test", "role", "role", "focused_test"])
+            ["role", "focused_test", "role", "focused_test"])
         task_roles = [step for step in task_steps
                       if not hasattr(step, "action")]
-        self.assertEqual(
-            [(step.writes, step.produces_verdict) for step in task_roles],
-            [(True, False), (False, True), (True, False)])
+        self.assertEqual([step.writes for step in task_roles], [True, True])
         self.assertEqual(config["workflow"]["integration"][0],
                          {"action": "full_verify"})
         self.assertEqual(config["workflow"]["integration"][-1],
@@ -1833,7 +1856,7 @@ class TestInit(MainTestCase):
         user_adapter = self.user_home / "adapter.toml"
         user_config.write_text(
             user_config.read_text(encoding="utf-8").replace(
-                "retry_per_task = 1", "retry_per_task = 7"),
+                "rotation_poll_minutes = 1", "rotation_poll_minutes = 7"),
             encoding="utf-8")
         user_adapter.write_text(
             user_adapter.read_text(encoding="utf-8").replace(
@@ -1852,7 +1875,7 @@ class TestInit(MainTestCase):
             "assent.toml.bak")
         self.assertEqual(config_backup.read_bytes(), config_before)
         self.assertIn(
-            "retry_per_task = 1", user_config.read_text(encoding="utf-8"))
+            "rotation_poll_minutes = 1", user_config.read_text(encoding="utf-8"))
         self.assertEqual(user_adapter.read_bytes(), adapter_before)
         self.assertFalse(user_adapter.with_name(
             "adapter.toml.bak").exists())
@@ -1898,14 +1921,14 @@ class TestInit(MainTestCase):
         user_config = self.user_home / "assent.toml"
         user_config.write_text(
             user_config.read_text(encoding="utf-8").replace(
-                "retry_per_task = 1", "retry_per_task = 5"),
+                "quota_poll_minutes = 30", "quota_poll_minutes = 5"),
             encoding="utf-8")
         with patch("builtins.input", return_value="n"), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run_init(second, test="unittest"), 0)
         self.assertEqual(
             tomllib.loads(user_config.read_text(encoding="utf-8"))
-            ["run"]["retry_per_task"], 5)
+            ["run"]["quota_poll_minutes"], 5)
         for root in (self.root, second):
             for name in ("assent.toml", "instructions.md", "format.md"):
                 self.assertFalse((root / ".assent" / name).exists(),
@@ -1917,7 +1940,7 @@ class TestInit(MainTestCase):
             run_init(self.root, test="unittest")
         project_config = self.root / ".assent" / "assent.toml"
         project_config.write_text(
-            "[run]\nretry_per_task = 3   # local override\n", encoding="utf-8")
+            "[run]\nquota_poll_minutes = 3   # local override\n", encoding="utf-8")
         before = project_config.read_bytes()
         output = io.StringIO()
         with patch("builtins.input", return_value="n"), \
@@ -1932,7 +1955,7 @@ class TestInit(MainTestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             run_init(self.root, test="unittest")
         project_config = self.root / ".assent" / "assent.toml"
-        content = b"[run]\nretry_per_task = 3\n"
+        content = b"[run]\nquota_poll_minutes = 3\n"
         project_config.write_bytes(content)
 
         with patch("builtins.input", return_value="y"), \

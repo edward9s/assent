@@ -1,14 +1,13 @@
-"""Human-driven reconciliation of one finished plan's conflict with the target.
+"""Manual and scheduler-owned reconciliation against the integration target.
 
 ``reconcile`` prepares, preserves, continues, and aborts a single direct
 source-versus-target merge conflict so a human can resolve it in a dedicated
-worktree.  It is deliberately not an integration engine: it handles exactly one
-plan against the current integration target, never combines speculative peer
-plans, never runs a verifier, a focused test, or an AI adapter, never edits a
-task status, and never merges anything into the integration target.  Once the
-source really has advanced it deletes the derived receipts that were written
-against the old source identity; proving the new source is a later, explicitly
-human-started ``assent verify``, and approving it is a later ``assent accept``.
+worktree. The integration workflow uses the same Git-proven lifecycle when an
+AI role edits conflict content. This module itself never invokes an adapter or
+verifier, combines speculative peers, edits task status, or merges into the
+integration target. Once the source advances it deletes receipts bound to the
+old source; the caller must reconstruct and verify the new candidate before
+the later explicit ``assent accept``.
 
 There is no state file and no "current plan" pointer.  Everything a later run
 needs is a deterministic managed fact or a Git fact:
@@ -28,6 +27,7 @@ later ``assent verify`` against the then-current target stays authoritative.
 from __future__ import annotations
 
 import contextlib
+import io
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -386,8 +386,15 @@ def _automatic_reconcile_context(
             raise AssentError(
                 "automatic reconciliation resources disappeared before "
                 "the source transition was proven")
-        if _start(cfg) != 0:
-            raise AssentError("automatic reconcile preparation was refused")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = _start(cfg)
+        if code != 0:
+            detail = " ".join(output.getvalue().split())[-1000:]
+            raise AssentError(
+                "automatic reconcile preparation was refused"
+                + (f": {detail}" if detail else ""))
+        print(f"Automatic integration reconcile prepared for {cfg.tasks_name}.")
         return _automatic_reconcile_context(
             cfg, expected_target, expected_source, expected,
             may_prepare=False)
@@ -486,8 +493,15 @@ def automatic_reconcile_continue_locked(
         may_prepare=False)
     if context.worktree is not None or gitops.branch_exists(
             _managed(cfg).main, _managed(cfg).branch):
-        if _continue(cfg) != 0:
-            raise AssentError("automatic reconcile continue was refused")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = _continue(cfg)
+        if code != 0:
+            detail = " ".join(output.getvalue().split())[-1000:]
+            raise AssentError(
+                "automatic reconcile continue was refused"
+                + (f": {detail}" if detail else ""))
+        print(f"Automatic integration reconcile advanced {cfg.tasks_name}.")
     managed = _managed(cfg)
     target_now = gitops.commit_of(
         managed.main, gitops.require_current_branch(managed.main))

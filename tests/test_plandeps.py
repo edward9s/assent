@@ -24,7 +24,6 @@ def task_text(status: str = "TODO") -> str:
         "deps = []",
         'model = "lite"',
         f"status = {json.dumps(status)}",
-        'scope = ["src/"]',
         f"verify = {json.dumps(_OK)}",
         'goal = """',
         "Finish the work.",

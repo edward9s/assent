@@ -48,7 +48,9 @@ class AcceptReceiptCase(unittest.TestCase):
         self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config = self.assent_dir / "assent.toml"
-        self.config.write_text(models_block(), encoding="utf-8")
+        self.config.write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         self.counter = self.parent / "verifier-count.txt"
         self._write_verifier(True)
         self._write_task(self.plan_name)
@@ -82,7 +84,6 @@ class AcceptReceiptCase(unittest.TestCase):
             'deps = []\n'
             'model = "core"\n'
             'status = "DONE"\n'
-            'scope = ["src/"]\n'
             'verify = "python --version"\n'
             'goal = "Finish."\n'
             'acceptance = "Pass."\n',

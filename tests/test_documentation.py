@@ -119,19 +119,27 @@ class DocumentationTests(unittest.TestCase):
     def test_configuration_guides_are_workflow_first_references(self):
         english = _read(Path("docs/CONFIGURATION.md"))
         for phrase in (
-                "ability: prompt + authority", "Names such as `reviewer`",
-                "A passing action completes its layer immediately",
-                "writable verdict role", "Three different repair responsibilities",
-                "integration_fixer", "Omissions and task overrides"):
+                "An ability has a prompt and a write capability",
+                "Ability names have no engine meaning",
+                "A passing action completes the layer",
+                "There is no structured verdict setting",
+                "three arbitrary finite step arrays",
+                "integration_repairer", "Task workflow overrides",
+                '{ role = "tests_writer" }',
+                '{ action = "focused_test" }'):
             with self.subTest(language="English", phrase=phrase):
                 self.assertIn(phrase, english)
 
         chinese = _read(Path("docs/zh-TW/CONFIGURATION.md"))
         for phrase in (
-                "從 workflow 理解設定", "engine 不會從名稱推斷權限",
-                "Action 一旦通過", "可寫入的 verdict role",
-                "三層修復責任不同", "integration_fixer",
-                "省略設定與 task override"):
+                "Ability 只有 prompt 與寫入能力",
+                "Ability 名稱\n對 engine 沒有特殊意義",
+                "Action 通過就完成該層",
+                "設定中沒有 structured verdict",
+                "三個可任意排列、但長度有限的 step array",
+                "integration_repairer", "Task workflow override",
+                '{ role = "tests_writer" }',
+                '{ action = "focused_test" }'):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(phrase, chinese)
 
@@ -164,7 +172,7 @@ class DocumentationTests(unittest.TestCase):
                 "One selected plan", "one exact batch",
                 "assent verify <PLAN> --focus", "Direct and selected acceptance",
                 "assent shared-paths status",
-                "Running `review` in the primary worktree",
+                "Running `declare` in the primary worktree",
                 "cannot safely link everything ignored by Git"):
             with self.subTest(language="English", phrase=phrase):
                 self.assertIn(phrase, english)
@@ -175,21 +183,11 @@ class DocumentationTests(unittest.TestCase):
                 "最後一個 `...`", "不是 `--all`", "一個 plan",
                 "精確 batch", "assent verify <PLAN> --focus",
                 "assent shared-paths status",
-                "在主要 worktree 執行 `review`",
+                "在主要 worktree 執行 `declare`",
                 "不能把所有 ignored directory 都建立成鏈結"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(_flat(phrase), chinese)
 
-    def test_human_guides_omit_internal_and_cosmetic_chapters(self):
-        combined = "\n".join(_read(path) for path in _reader_surfaces())
-        for phrase in (
-                "## Colored help", "## Help colors", "help color",
-                "argparse color", "version = 7", "_STATE_KEYS",
-                "workflow_step_index", "reviewer_step_index",
-                "_auto_fix.toml", "receipt_refresh", "--auto-fix"):
-            with self.subTest(phrase=phrase):
-                self.assertNotIn(phrase, combined)
-        self.assertNotIn("assent clean --all", combined)
 
     def test_reader_guides_distinguish_rework_from_destructive_reject(self):
         english = _flat(_read(Path("docs/WORKFLOW.md")))

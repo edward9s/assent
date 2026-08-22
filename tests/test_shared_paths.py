@@ -49,7 +49,7 @@ def settle_shared_paths(main: Path, worktree: Path, *paths: str) -> None:
     main = Path(main)
     tracked = [entry for entry in gitops.tracked_paths(Path(worktree), ".")
                if not entry.startswith(".assent/")]
-    shared_paths.review(main, Path(worktree), paths=paths,
+    shared_paths.declare(main, Path(worktree), paths=paths,
                         watch=tracked[:1], none=not paths,
                         dispositions=excluded_inventory(main, paths))
 
@@ -124,7 +124,7 @@ class SharedPathsCase(unittest.TestCase):
 
     def _review(self, *paths: str, none: bool = False,
                 watch: tuple[str, ...] = ("pubspec.yaml",)):
-        return shared_paths.review(self.root, self.worktree, paths=paths,
+        return shared_paths.declare(self.root, self.worktree, paths=paths,
                                    watch=watch, none=none,
                                    dispositions=excluded_inventory(
                                        self.root, paths))
@@ -168,115 +168,19 @@ class TestThreeStateContract(SharedPathsCase):
         shared_paths.require_directory_link_agreement(
             self.root, self.worktree, contract)
 
-    def test_unknown_becomes_reviewed_paths_and_is_cached_atomically(self):
-        contract = self._classify()
-        self.assertEqual(contract.state, shared_paths.UNKNOWN)
-        self.assertTrue(contract.needs_review)
-        self.assertEqual(
-            contract.inventory, ("assets", "lib/l10n/arb", "pkg"))
-        clause = shared_paths.review_clause(contract)
-        self.assertIn("shared-paths review", clause)
-        self.assertIn("Complete primary worktree ignored-directory inventory", clause)
-        self.assertIn("  - assets", clause)
-        self.assertIn("  - lib/l10n/arb", clause)
-        self.assertIn("  - pkg", clause)
-        self.assertFalse(shared_paths.manifest_path(self.root).exists())
 
-        self._review("pkg", "lib/l10n/arb")
-        manifest = shared_paths.manifest_path(self.root)
-        self.assertTrue(manifest.exists())
-        # Local execution memory, never project content: Git must not see it.
-        status = _git(self.root, "status", "--porcelain", "--ignored=no")
-        self.assertNotIn("manifest", status)
-        self.assertNotIn("manifest", _git(self.root, "ls-files"))
 
-        settled = self._classify()
-        self.assertEqual(settled.state, shared_paths.REVIEWED_PATHS)
-        self.assertEqual(settled.paths, ("lib/l10n/arb", "pkg"))
-        self.assertEqual(shared_paths.review_clause(settled), "")
-        self.assertEqual(shared_paths.closeout_refusal(settled), "")
-
-    def test_both_review_prompts_inventory_nested_primary_candidates(self):
-        ignore = self.root / ".gitignore"
-        ignore.write_text(
-            ignore.read_text(encoding="utf-8")
-            + "android/app/src/main/res/\n",
-            encoding="utf-8")
-        styles = (self.root / "android" / "app" / "src" / "main" / "res"
-                  / "values" / "styles.xml")
-        styles.parent.mkdir(parents=True)
-        styles.write_text("<resources/>\n", encoding="utf-8")
-        _git(self.root, "add", ".gitignore")
-        _git(self.root, "add", "-f", styles.relative_to(self.root).as_posix())
-        _git(self.root, "commit", "-m", "track Android resource configuration")
-        _git(self.worktree, "merge", "--ff-only", "trunk")
-
-        launcher = (self.root / "android" / "app" / "src" / "main" / "res"
-                    / "mipmap-hdpi" / "ic_launcher.png")
-        launcher.parent.mkdir(parents=True)
-        launcher.write_bytes(b"launcher")
-
-        contract = self._classify()
-        candidate = "android/app/src/main/res/mipmap-hdpi"
-        self.assertIn(candidate, contract.inventory)
-        for clause in (shared_paths.review_clause(contract),
-                       shared_paths.review_record_clause(contract)):
-            self.assertIn("Complete primary worktree ignored-directory inventory", clause)
-            self.assertIn(f"  - {candidate}", clause)
-            self.assertIn("presence alone does not mean", clause)
-
-    def test_a_pre_inventory_profile_goes_stale_once(self):
+    def test_a_retired_manifest_schema_is_refused(self):
         self._review("pkg")
         manifest_path = shared_paths.manifest_path(self.root)
         manifest_path.write_text(
             manifest_path.read_text(encoding="utf-8").replace(
-                f"review_version = {shared_paths.REVIEW_CONTEXT_VERSION}\n", "")
-            .replace(
                 f"version = {shared_paths.SCHEMA_VERSION}\n", "version = 1\n"),
             encoding="utf-8")
 
-        stale = self._classify()
-        self.assertEqual(stale.state, shared_paths.STALE)
-        self.assertIn(
-            "review context upgraded", " ".join(stale.evidence))
-        self.assertEqual(
-            stale.inventory, ("assets", "lib/l10n/arb", "pkg"))
+        with self.assertRaisesRegex(AssentError, "schema version 1 is retired"):
+            shared_paths.read_manifest(self.root)
 
-        refreshed = self._review("pkg")
-        self.assertEqual(
-            refreshed.profile.review_version,
-            shared_paths.REVIEW_CONTEXT_VERSION)
-        self.assertEqual(
-            shared_paths.read_manifest(self.root).version,
-            shared_paths.SCHEMA_VERSION)
-        self.assertEqual(self._classify().state, shared_paths.REVIEWED_PATHS)
-
-    def test_schema_one_profile_with_a_later_review_version_is_stale(self):
-        self._review("pkg")
-        manifest_path = shared_paths.manifest_path(self.root)
-        manifest_path.write_text(
-            manifest_path.read_text(encoding="utf-8")
-            .replace(f"version = {shared_paths.SCHEMA_VERSION}\n", "version = 1\n")
-            .replace(
-                f"review_version = {shared_paths.REVIEW_CONTEXT_VERSION}\n",
-                f"review_version = {shared_paths.REVIEW_CONTEXT_VERSION + 1}\n"),
-            encoding="utf-8")
-
-        stale = self._classify()
-
-        self.assertEqual(stale.state, shared_paths.STALE)
-        self.assertIn("review context upgraded", " ".join(stale.evidence))
-
-    def test_a_reviewed_empty_answer_never_asks_again(self):
-        self._review(none=True)
-        contract = self._classify()
-        self.assertEqual(contract.state, shared_paths.REVIEWED_NONE)
-        self.assertEqual(contract.paths, ())
-        self.assertEqual(shared_paths.review_clause(contract), "")
-        # REVIEWED-NONE is an answer, so it provisions nothing and asks nothing.
-        created, detached = shared_paths.reconcile(
-            self.root, self.worktree, contract)
-        self.assertEqual((created, detached), ((), ()))
 
     def test_settled_is_pure_when_an_undeclared_link_appears(self):
         self._review(none=True)
@@ -314,74 +218,22 @@ class TestThreeStateContract(SharedPathsCase):
         prepared = shared_paths.prepare_worktree(self.root, self.worktree)
         self.assertEqual(prepared.state, shared_paths.STALE)
         with self.assertRaisesRegex(
-                AssentError, "omits existing ignored directory link.*lib/l10n/arb"):
-            shared_paths.validate_review_decision(
+                AssentError, "omitted existing ignored directory link.*lib/l10n/arb"):
+            shared_paths.validate_declaration(
                 self.root, self.worktree, ("pkg",), ("pubspec.yaml",),
                 excluded_inventory(self.root, ("pkg",)))
         self.assertEqual(
             shared_paths.manifest_path(self.root).read_bytes(), before)
 
-        validated = shared_paths.validate_review_decision(
+        validated = shared_paths.validate_declaration(
             self.root, self.worktree, ("pkg", "lib/l10n/arb"),
             ("pubspec.yaml",),
             excluded_inventory(self.root, ("pkg", "lib/l10n/arb")))
         self.assertEqual(validated.paths, ("lib/l10n/arb", "pkg"))
         self.assertEqual(validated.watch, ("pubspec.yaml",))
 
-    def test_a_repository_with_no_ignored_directory_has_nothing_to_review(self):
-        bare = self._plain_repository()
-        contract = shared_paths.classify(bare, bare)
-        self.assertEqual(contract.state,
-                         shared_paths.NO_IGNORED_DIRECTORY_CANDIDATE)
-        self.assertFalse(contract.needs_review)
-        self.assertTrue(contract.settled)
-        self.assertEqual(shared_paths.review_clause(contract), "")
-        self.assertIn("NO-IGNORED-DIRECTORY-CANDIDATE",
-                      shared_paths.describe(contract))
-        # A settled fast path costs no manifest at all.
-        self.assertFalse(shared_paths.manifest_path(bare).exists())
 
-    def test_a_changed_watch_file_goes_stale_with_only_the_changed_evidence(self):
-        self._review("pkg")
-        (self.root / "pubspec.yaml").write_text(
-            "name: demo\ndependencies:\n  shared: any\n  extra: any\n",
-            encoding="utf-8")
-        _git(self.root, "add", "-A")
-        _git(self.root, "commit", "-m", "new dependency")
-        _git(self.worktree, "merge", "--ff-only", "trunk")
 
-        contract = self._classify()
-        self.assertEqual(contract.state, shared_paths.STALE)
-        self.assertEqual(contract.prior_paths, ("pkg",))
-        self.assertEqual(contract.evidence, ("pubspec.yaml (changed)",))
-        clause = shared_paths.review_clause(contract)
-        self.assertIn("Previously reviewed shared paths: pkg", clause)
-        self.assertIn("pubspec.yaml (changed)", clause)
-        self.assertEqual(
-            contract.inventory, ("assets", "lib/l10n/arb", "pkg"))
-        self.assertIn("  - assets", clause)
-
-    def test_a_watch_left_untracked_goes_stale_even_when_ignored_bytes_remain(self):
-        (self.root / ".gitignore").write_text(
-            "pkg/\nassets/\nlib/l10n/arb/\nbuild/\npubspec.yaml\n",
-            encoding="utf-8")
-        _git(self.root, "add", ".gitignore")
-        _git(self.root, "commit", "-m", "ignore the tracked watch")
-        before = (self.root / "pubspec.yaml").read_bytes()
-        shared_paths.review(
-            self.root, self.root, paths=("pkg",), watch=("pubspec.yaml",),
-            dispositions=excluded_inventory(self.root, ("pkg",)))
-
-        _git(self.root, "rm", "--cached", "pubspec.yaml")
-        _git(self.root, "commit", "-m", "remove the watched file from Git")
-
-        contract = shared_paths.classify(self.root, self.root)
-
-        self.assertEqual(contract.state, shared_paths.STALE)
-        self.assertIn("pubspec.yaml", " ".join(contract.evidence))
-        self.assertIn("no longer Git-tracked", " ".join(contract.evidence))
-        self.assertIn("assent shared-paths review", shared_paths.review_clause(contract))
-        self.assertEqual((self.root / "pubspec.yaml").read_bytes(), before)
 
     def test_two_branch_fingerprints_reuse_their_own_profiles_without_oscillation(
             self):
@@ -525,21 +377,6 @@ class TestNoIgnoredDirectoryCandidate(SharedPathsCase):
         with self.assertRaises(AssentError):
             shared_paths.classify(broken, broken)
 
-    def test_verifier_required_evidence_is_never_settled_as_no_candidate(self):
-        """A verifier that proved a directory is needed created a subject."""
-        bare = self._plain_repository()
-        (bare / ".gitignore").write_text("pkg/\n", encoding="utf-8")
-        _git(bare, "add", "-A")
-        _git(bare, "-c", "commit.gpgsign=false", "commit", "-m", "ignore pkg")
-        (bare / "pkg").mkdir()
-        (bare / "pkg" / "vendored.txt").write_text("v\n", encoding="utf-8")
-        # A directory the primary worktree can genuinely serve becomes a review
-        # naming it, never a settled "nothing to declare".
-        contract = shared_paths.classify(bare, bare, required_evidence=("pkg",))
-        self.assertEqual(contract.state, shared_paths.UNKNOWN)
-        self.assertIn("pkg is required by complete-verifier evidence",
-                      " ".join(contract.evidence))
-        self.assertIn("pkg", shared_paths.review_clause(contract))
 
     def test_required_evidence_without_a_primary_target_refuses_precisely(self):
         bare = self._plain_repository()
@@ -547,7 +384,7 @@ class TestNoIgnoredDirectoryCandidate(SharedPathsCase):
             shared_paths.classify(bare, bare, required_evidence=("pkg",))
         self.assertIn("does not exist in the primary worktree",
                       str(missing.exception))
-        self.assertIn("shared-paths review", str(missing.exception))
+        self.assertIn("shared-paths declare", str(missing.exception))
 
         # Present but not ignored is the other half: a link there would change
         # what the worktree tracks, so it is refused with that exact problem.
@@ -626,11 +463,11 @@ class TestReviewOperation(SharedPathsCase):
 
     def test_an_omitted_inventory_entry_cannot_be_recorded(self):
         with self.assertRaisesRegex(AssentError, "unclassified: assets"):
-            shared_paths.validate_review_decision(
+            shared_paths.validate_declaration(
                 self.root, self.worktree, ("pkg",), ("pubspec.yaml",))
 
         dispositions = excluded_inventory(self.root, ("pkg",))
-        contract = shared_paths.review(
+        contract = shared_paths.declare(
             self.root, self.worktree, paths=("pkg",),
             watch=("pubspec.yaml",), dispositions=dispositions)
         reread = shared_paths.read_manifest(self.root).profiles[-1]
@@ -678,7 +515,8 @@ class TestReviewOperation(SharedPathsCase):
         shared_paths.manifest_path(self.root).parent.mkdir(
             parents=True, exist_ok=True)
         shared_paths.manifest_path(self.root).write_text(
-            'version = 1\n\n[future]\nkept = "yes"\n', encoding="utf-8")
+            f'version = {shared_paths.SCHEMA_VERSION}\n\n'
+            '[future]\nkept = "yes"\n', encoding="utf-8")
         self._review("pkg")
         text = shared_paths.manifest_path(self.root).read_text(encoding="utf-8")
         self.assertIn("[future]", text)
@@ -688,7 +526,7 @@ class TestReviewOperation(SharedPathsCase):
         path = shared_paths.manifest_path(self.root)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            'version = 1\n\n["a.b"]\n'
+            f'version = {shared_paths.SCHEMA_VERSION}\n\n["a.b"]\n'
             'day = 2026-08-01\nclock = 12:34:56\n'
             'stamp = 2026-08-01T12:34:56+08:00\n'
             '["a.b"."nested space"]\n"key.with.dot" = "kept"\n'
@@ -821,7 +659,7 @@ class TestProvisioning(SharedPathsCase):
             shared_paths.reconcile(self.root, self.worktree, contract)
 
     def test_running_the_review_in_the_primary_worktree_links_nothing(self):
-        contract = shared_paths.review(
+        contract = shared_paths.declare(
             self.root, self.root, paths=("pkg",), watch=("pubspec.yaml",),
             dispositions=excluded_inventory(self.root, ("pkg",)))
         self.assertEqual(contract.state, shared_paths.REVIEWED_PATHS)
@@ -939,6 +777,20 @@ class TestSharedInputEvidence(SharedPathsCase):
         self.assertEqual(
             first,
             shared_paths.shared_inputs_digest(self.root, [("plan測試", contract)]))
+
+
+class TestDeclarationClause(unittest.TestCase):
+    def test_unknown_contract_gets_one_validated_cli_instruction(self):
+        contract = shared_paths.Contract(
+            shared_paths.UNKNOWN, needs_review=True,
+            inventory=("assets", "build"))
+
+        clause = shared_paths.declaration_clause(contract)
+
+        self.assertIn("assent shared-paths declare", clause)
+        self.assertIn("--classify PATH REASON", clause)
+        self.assertIn("  - assets", clause)
+        self.assertNotIn("assent.auto_fix_review", clause)
 
 
 if __name__ == "__main__":              # pragma: no cover - manual runs

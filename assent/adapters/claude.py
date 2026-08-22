@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -329,12 +328,9 @@ def parse_output_for_usage(output: str) -> tuple[TokenUsage, ...] | None:
 def _extract_result_text(output: str) -> tuple[str | None, str | None]:
     """Pull the model's final response text out of a stream-json transcript.
 
-    stream-json has no native last-message transport like Codex's --output-last-message: the
-    final text lives inside the terminal ``result`` event's ``result`` field, one JSON value
-    nested in a line among system/assistant/rate_limit_event events -- never a standalone
-    top-level line by itself. The provider-neutral fallback in Adapter.run_structured_task
-    assumes ``output`` is already plain response text, which holds for adapters that print it
-    directly but not for this one, so it must be overridden here.
+    The final text lives inside the terminal ``result`` event's ``result``
+    field. It is used to recognize the exact checkpoint-resume record without
+    treating the surrounding stream transcript as model output.
     """
     result_text: str | None = None
     for raw in output.splitlines():
@@ -404,20 +400,6 @@ class ClaudeAdapter(Adapter):
                           stalled=False, checkpoint_resume=checkpoint_resume,
                           failure_kind=failure_kind,
                           usage=parse_output_for_usage(output))
-
-    def run_structured_task(self, prompt: str, requested_model: str,
-                            requested_effort: str | None,
-                            cwd: Path) -> TaskResult:
-        """Extract the terminal ``result`` event's text instead of the raw stream-json.
-
-        The base fallback would otherwise hand the whole event transcript to the strict
-        review parser, which never contains a standalone terminal-record line and always
-        fails closed.
-        """
-        result = self.run_task(prompt, requested_model, requested_effort, cwd)
-        structured_output, structured_output_error = _extract_result_text(result.output)
-        return replace(result, structured_output=structured_output,
-                       structured_output_error=structured_output_error)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

@@ -116,15 +116,11 @@ class AdapterSettings:
 
 @dataclass(frozen=True)
 class WorkflowPlanStep:
-    """One resolved post-completion workflow step."""
+    """One resolved plan or integration role step."""
 
     role: str
     adapters: tuple[str, ...]
     resolved_role: ResolvedRole
-    command: str | None = None
-    extra_args: tuple[str, ...] = ()
-    requested_model: str | None = None
-    requested_effort: str | None = None
 
     @property
     def model(self) -> str | None:
@@ -133,20 +129,6 @@ class WorkflowPlanStep:
     @property
     def writes(self) -> bool:
         return self.resolved_role.writes
-
-    @property
-    def produces_verdict(self) -> bool:
-        return self.resolved_role.produces_verdict
-
-    @property
-    def adapter_name(self) -> str:
-        """Compatibility with call sites that name adapter selections explicitly."""
-        return self.adapter
-
-    @property
-    def adapter(self) -> str:
-        """Return the first configured candidate for legacy identity surfaces."""
-        return self.adapters[0]
 
 
 @dataclass(frozen=True)
@@ -160,10 +142,6 @@ class WorkflowTaskStep:
     @property
     def writes(self) -> bool:
         return self.resolved_role.writes
-
-    @property
-    def produces_verdict(self) -> bool:
-        return self.resolved_role.produces_verdict
 
 
 @dataclass(frozen=True)
@@ -187,11 +165,10 @@ class Config:
     assent_dir: Path               # .assent directory (= where the config file lives)
     tasks_dir: Path                # Plan directory (.assent/<tasks>)
     tasks_name: str                # Plan name (= git branch prefix stem)
+    workflow_task: tuple[WorkflowTaskStep | WorkflowActionStep, ...]
     stall_minutes: int = 0         # 0 = watchdog disabled
-    retry_per_task: int = 1
     quota_poll_minutes: int = 30
     rotation_poll_minutes: int = 1
-    adapter_name: str = "claude"
     adapter_names: tuple[str, ...] = field(default_factory=tuple)
     claude_command: str = "claude"
     claude_extra_args: list[str] = field(
@@ -209,8 +186,6 @@ class Config:
     # adapter always states one instead of inheriting the CLI default.
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
     workflow_plan: tuple[WorkflowPlanStep | WorkflowActionStep, ...] = ()
-    # None means today's implicit task session; an explicit empty tuple is distinct.
-    workflow_task: tuple[WorkflowTaskStep | WorkflowActionStep, ...] | None = None
     workflow_integration: tuple[WorkflowPlanStep | WorkflowActionStep, ...] = ()
     abilities: dict[str, Ability] = field(default_factory=dict)
     roles: dict[str, Role] = field(default_factory=dict)
@@ -221,12 +196,13 @@ class Config:
     provenance: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Keep the legacy adapter name and the normalized rotation list aligned."""
+        """Normalize the one adapter-candidate sequence."""
+        if not self.workflow_task:
+            raise AssentError("Effective [workflow].task must not be empty")
         if not self.adapter_names:
-            self.adapter_names = (self.adapter_name,)
+            self.adapter_names = ("claude",)
         else:
             self.adapter_names = tuple(self.adapter_names)
-            self.adapter_name = self.adapter_names[0]
         if not self.sources:
             self.sources = (ConfigSource(BUILTIN_LAYER, None),)
 
@@ -314,11 +290,6 @@ class Config:
         return self.git_rel(self.tasks_dir / "_verification.toml")
 
     @property
-    def auto_fix_state_rel(self) -> str:
-        """The plan-local, derived auto-fix review state."""
-        return self.git_rel(self.tasks_dir / "_auto_fix.toml")
-
-    @property
     def workflow_state_rel(self) -> str:
         """The plan-local, derived workflow execution cursor."""
         return self.git_rel(self.tasks_dir / "_workflow.toml")
@@ -341,7 +312,7 @@ class Config:
     def git_excludes(self) -> tuple[str, ...]:
         """Runtime artifacts: excluded from the clean check, scope check, and checkpoint commit."""
         return (self.runtime_log_rel, self.report_rel, self.lockfile_rel,
-                self.verification_receipt_rel, self.auto_fix_state_rel,
+                self.verification_receipt_rel,
                 self.workflow_state_rel, self.selection_workflow_state_rel,
                 self.shared_paths_manifest_rel, self.shared_paths_lock_rel)
 
@@ -414,7 +385,7 @@ def _parse_abilities(section: dict) -> dict[str, Ability]:
     """Parse atomic ability definitions from the effective config layer."""
     abilities: dict[str, Ability] = {}
     required = ("prompt", "writes")
-    allowed = {*required, "produces_verdict"}
+    allowed = set(required)
     for name, value in section.items():
         owner = f"abilities.{name}"
         if not isinstance(value, dict):
@@ -427,8 +398,6 @@ def _parse_abilities(section: dict) -> dict[str, Ability]:
         abilities[name] = Ability(
             prompt=_typed(value, f"[{owner}]", "prompt", str, None),
             writes=_typed(value, f"[{owner}]", "writes", bool, None),
-            produces_verdict=_typed(
-                value, f"[{owner}]", "produces_verdict", bool, False),
         )
     return abilities
 
@@ -585,14 +554,10 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
             raise AssentError(
                 f"Config {owner} role {role!r} must state model")
         entries.append((role, adapters, resolved))
-    if key == "task" and entries and not any(
-            isinstance(entry, WorkflowTaskStep) for entry in entries):
-        raise AssentError(
-            "Config [workflow].task must include at least one role")
     return entries
 
 
-def _resolve_accountability_steps(
+def _resolve_plan_steps(
         cfg: Config, raw_steps, owner: str
 ) -> tuple[WorkflowPlanStep | WorkflowActionStep, ...]:
     """Resolve plan/integration roles while preserving action positions."""
@@ -605,151 +570,8 @@ def _resolve_accountability_steps(
         names = configured_names or cfg.adapter_names
         _require_single_literal_adapter(
             resolved.model, names, f"[workflow].{owner} role {role!r}")
-        name = names[0]
-        adapter_settings = cfg.adapter_settings(name)
-        if resolved.model is None:
-            steps.append(WorkflowPlanStep(
-                role, names, resolved, adapter_settings.command,
-                adapter_settings.extra_args))
-            continue
-        requested_model, requested_effort = adapter_settings.resolve(resolved.model)
-        steps.append(WorkflowPlanStep(
-            role, names, resolved, adapter_settings.command,
-            adapter_settings.extra_args, requested_model, requested_effort))
+        steps.append(WorkflowPlanStep(role, names, resolved))
     return tuple(steps)
-
-
-def _validate_repair_steps(
-        owner: str, action: str,
-        steps: tuple[WorkflowPlanStep | WorkflowActionStep, ...], *,
-        allow_initial_review: bool = False) -> None:
-    """Validate one action/failure-repair/action workflow."""
-    if not steps:
-        return
-    if (not isinstance(steps[-1], WorkflowActionStep)
-            or steps[-1].action != action):
-        raise AssentError(
-            f"Config [workflow].{owner} must end with {action}")
-    actions = [index for index, step in enumerate(steps)
-               if isinstance(step, WorkflowActionStep)]
-    first_action = actions[0]
-    if first_action:
-        if not allow_initial_review:
-            raise AssentError(
-                f"Config [workflow].{owner} must start with {action}")
-        initial_roles = steps[:first_action]
-        reviewer = initial_roles[0]
-        assert isinstance(reviewer, WorkflowPlanStep)
-        if not reviewer.produces_verdict:
-            raise AssentError(
-                f"Config [workflow].{owner}[0] is the first role before "
-                f"{action} and must produce a verdict")
-        if len(initial_roles) > 2:
-            raise AssentError(
-                f"Config [workflow].{owner} may place only one initial verdict "
-                f"role and one optional fixer before {action}")
-        if len(initial_roles) == 2:
-            if reviewer.writes:
-                raise AssentError(
-                    f"Config [workflow].{owner}[0] is a writable initial "
-                    "verdict role and must be the only role before "
-                    f"{action}")
-            fixer = initial_roles[1]
-            assert isinstance(fixer, WorkflowPlanStep)
-            if not fixer.writes or fixer.produces_verdict:
-                raise AssentError(
-                    f"Config [workflow].{owner}[1] is the optional initial "
-                    "fixer and must write without producing a verdict")
-    elif (not isinstance(steps[0], WorkflowActionStep)
-          or steps[0].action != action):
-        raise AssentError(
-            f"Config [workflow].{owner} must start with {action}")
-    for left, right in zip(actions, actions[1:]):
-        roles = steps[left + 1:right]
-        if not roles:
-            continue
-        reviewer = roles[0]
-        assert isinstance(reviewer, WorkflowPlanStep)
-        if not reviewer.produces_verdict:
-            raise AssentError(
-                f"Config [workflow].{owner}[{left + 1}] is the first role "
-                f"after {action} and must produce a verdict")
-        if len(roles) > 2:
-            raise AssentError(
-                f"Config [workflow].{owner} may place only one verdict role "
-                f"and one optional fixer between {action} actions")
-        if len(roles) == 2:
-            if reviewer.writes:
-                raise AssentError(
-                    f"Config [workflow].{owner}[{left + 1}] is a writable "
-                    "verdict role and must be the only role between "
-                    f"{action} actions")
-            fixer = roles[1]
-            assert isinstance(fixer, WorkflowPlanStep)
-            if not fixer.writes or fixer.produces_verdict:
-                raise AssentError(
-                    f"Config [workflow].{owner}[{left + 2}] is the optional "
-                    "fixer after a verdict role and must write without producing "
-                    "a verdict")
-
-
-def validate_task_workflow_steps(
-        steps: (list[WorkflowTaskStep | WorkflowActionStep]
-                | tuple[WorkflowTaskStep | WorkflowActionStep, ...]
-                | None)) -> None:
-    """Validate the conditional failure handlers in an explicit task workflow."""
-    if not steps:
-        return
-    actions = [index for index, step in enumerate(steps)
-               if isinstance(step, WorkflowActionStep)]
-    if not actions:
-        verdicts = [index for index, step in enumerate(steps)
-                    if isinstance(step, WorkflowTaskStep)
-                    and step.produces_verdict]
-        if verdicts:
-            raise AssentError(
-                "Config [workflow].task verdict roles require a preceding "
-                "focused_test failure and a later focused_test")
-        return
-    if actions[-1] != len(steps) - 1:
-        raise AssentError(
-            "Config [workflow].task must end with focused_test when it contains "
-            "a focused_test action")
-    for left, right in zip(actions, actions[1:]):
-        roles = steps[left + 1:right]
-        if not roles:
-            raise AssentError(
-                "Config [workflow].task must place a verdict role between "
-                "focused_test actions")
-        reviewer = roles[0]
-        assert isinstance(reviewer, WorkflowTaskStep)
-        if not reviewer.produces_verdict:
-            raise AssentError(
-                f"Config [workflow].task[{left + 1}] is the first role after "
-                "focused_test and must produce a verdict")
-        if len(roles) > 2:
-            raise AssentError(
-                "Config [workflow].task may place only one verdict role and one "
-                "optional fixer between focused_test actions")
-        if len(roles) == 2:
-            if reviewer.writes:
-                raise AssentError(
-                    f"Config [workflow].task[{left + 1}] is a writable verdict "
-                    "role and must be the only role between focused_test actions")
-            fixer = roles[1]
-            assert isinstance(fixer, WorkflowTaskStep)
-            if not fixer.writes or fixer.produces_verdict:
-                raise AssentError(
-                    f"Config [workflow].task[{left + 2}] is the optional fixer "
-                    "after a verdict role and must write without producing a verdict")
-    allowed_verdicts = {left + 1 for left, _right in zip(actions, actions[1:])}
-    misplaced = [index for index, step in enumerate(steps)
-                 if isinstance(step, WorkflowTaskStep)
-                 and step.produces_verdict and index not in allowed_verdicts]
-    if misplaced:
-        raise AssentError(
-            f"Config [workflow].task[{misplaced[0]}] verdict role is not the "
-            "first failure handler between focused_test actions")
 
 
 def _workflow_bound_adapters(*raw_entry_lists) -> set[str]:
@@ -816,8 +638,7 @@ def _parse_adapter_names(section: dict, guard: "_BlankGuard") -> tuple[str, ...]
     else:
         raw = section["name"]
         if isinstance(raw, str):
-            # Preserve the legacy scalar path; adapter_settings() remains the
-            # fail-closed validator for an unknown single adapter name.
+            # A scalar is the concise spelling of a one-adapter rotation.
             names = (guard.text(raw, "adapter.name"),)
         elif isinstance(raw, list):
             if not raw:
@@ -902,11 +723,6 @@ def _read_layer(path: Path, label: str) -> dict:
             f"{label} config file ({path}) has unknown top-level keys:"
             f" {', '.join(unknown)}"
             f" (valid keys: {', '.join(sorted(_TOP_LEVEL_KEYS))})")
-    auto_fix = data.get("auto_fix")
-    if isinstance(auto_fix, dict) and "review" in auto_fix:
-        raise AssentError(
-            f"Config table [auto_fix.review] was removed; edit the layer file"
-            f" that states it ({path}) and use [workflow].plan")
     return data
 
 
@@ -1047,6 +863,7 @@ def load_config(path: str | Path, plan_name: str) -> Config:
 
     watchdog = _section(data, "watchdog")
     run = _section(data, "run")
+    _known_keys(run, "run", {"quota_poll_minutes", "rotation_poll_minutes"})
     adapter = _section(data, "adapter")
     claude = _section(adapter, "claude") if "claude" in adapter else {}
     codex = _section(adapter, "codex") if "codex" in adapter else {}
@@ -1064,16 +881,24 @@ def load_config(path: str | Path, plan_name: str) -> Config:
         workflow, "task", guard, roles, abilities)
     raw_workflow_integration = _parse_workflow_entries(
         workflow, "integration", guard, roles, abilities)
+    if raw_workflow_task is None:
+        raise AssentError(
+            "Config [workflow].task is required in the effective settings; "
+            "an omitted project override may inherit it only when a lower "
+            "configuration layer defines it")
+    if not raw_workflow_task:
+        raise AssentError(
+            "Config [workflow].task must not be empty; state at least one "
+            "role or { action = \"focused_test\" }")
     cfg = Config(
         root=root,
         assent_dir=assent_dir,
         tasks_dir=assent_dir / tasks_name,
         tasks_name=tasks_name,
+        workflow_task=tuple(raw_workflow_task),
         stall_minutes=_typed(watchdog, "[watchdog]", "stall_minutes", int, 0),
-        retry_per_task=_typed(run, "[run]", "retry_per_task", int, 1),
         quota_poll_minutes=_typed(run, "[run]", "quota_poll_minutes", int, 30),
         rotation_poll_minutes=_typed(run, "[run]", "rotation_poll_minutes", int, 1),
-        adapter_name=adapter_names[0],
         adapter_names=adapter_names,
         claude_command=guard.text(
             _typed(claude, "[adapter.claude]", "command", str, "claude"),
@@ -1106,8 +931,6 @@ def load_config(path: str | Path, plan_name: str) -> Config:
 
     if cfg.stall_minutes < 0:
         raise AssentError("[watchdog] stall_minutes must not be negative (0 = disabled)")
-    if cfg.retry_per_task < 0:
-        raise AssentError("[run] retry_per_task must not be negative")
     if cfg.quota_poll_minutes < 1:
         raise AssentError("[run] quota_poll_minutes must be at least 1")
     if cfg.rotation_poll_minutes < 1:
@@ -1117,26 +940,10 @@ def load_config(path: str | Path, plan_name: str) -> Config:
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
     _require_complete_models(cfg, _workflow_bound_adapters(
         raw_workflow_task, raw_workflow_plan, raw_workflow_integration))
-    plan_steps = _resolve_accountability_steps(cfg, raw_workflow_plan, "plan")
-    integration_steps = _resolve_accountability_steps(
+    plan_steps = _resolve_plan_steps(cfg, raw_workflow_plan, "plan")
+    integration_steps = _resolve_plan_steps(
         cfg, raw_workflow_integration, "integration")
-    if raw_workflow_task != []:
-        _validate_repair_steps(
-            "plan", "focused_sweep", plan_steps,
-            allow_initial_review=True)
-    _validate_repair_steps("integration", "full_verify", integration_steps)
-    plan_roles = [step for step in plan_steps
-                  if isinstance(step, WorkflowPlanStep)]
-    plan_has_action = len(plan_roles) != len(plan_steps)
-    if (plan_roles and not plan_has_action
-            and not any(step.produces_verdict for step in plan_roles)
-            and raw_workflow_task != []):
-        raise AssentError(
-            "Config [workflow].plan cannot open any session: no step's role produces a verdict")
     cfg.workflow_plan = plan_steps
     _validate_task_literal_adapters(cfg, raw_workflow_task)
-    validate_task_workflow_steps(raw_workflow_task)
-    cfg.workflow_task = (None if raw_workflow_task is None
-                          else tuple(raw_workflow_task))
     cfg.workflow_integration = integration_steps
     return cfg

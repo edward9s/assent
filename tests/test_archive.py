@@ -33,7 +33,6 @@ def _task_text(status: str = "DONE") -> str:
         "deps = []",
         'model = "lite"',
         f"status = {json.dumps(status)}",
-        'scope = ["src/"]',
         f"verify = {json.dumps(_VERIFY)}",
         'goal = "Keep archival safe."',
         'acceptance = "Archival preserves the plan."',
@@ -76,7 +75,9 @@ class TestArchive(unittest.TestCase):
         self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.assent_dir / "assent.toml"
-        self.config_path.write_text(models_block(), encoding="utf-8")
+        self.config_path.write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         (self.tasks_dir / "t001_task.e.toml").write_text(
             _task_text(), encoding="utf-8")
         (self.tasks_dir / "t001_task.r.toml").write_text(

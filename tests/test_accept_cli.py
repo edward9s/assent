@@ -17,7 +17,7 @@ from tests.engine_support import models_block
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import auto_fix, gitops
+from assent import gitops
 from assent.accept import accept_plan
 from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
@@ -35,7 +35,7 @@ class AcceptCliCase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.parent = Path(tempfile.mkdtemp(prefix="assent accept cli "))
-        self.root = self.parent / "repository with spaces and Unicode 測試"
+        self.root = self.parent / "repository with spaces and Unicode ����"
         self.root.mkdir()
         self.addCleanup(self._cleanup)
         self.env = dict(os.environ)
@@ -57,12 +57,14 @@ class AcceptCliCase(unittest.TestCase):
         self._git("add", "-A")
         self._git("commit", "-m", "baseline")
 
-        self.plan_name = "計畫01"
+        self.plan_name = "�p�e01"
         self.assent_dir = self.root / ".assent"
         self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config = self.assent_dir / "assent.toml"
-        self.config.write_text(models_block(), encoding="utf-8", newline="\n")
+        self.config.write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8", newline="\n")
         self._write_verify("raise SystemExit(0)\n")
         self._write_task()
 
@@ -94,13 +96,12 @@ class AcceptCliCase(unittest.TestCase):
         name = plan_name or self.plan_name
         tasks_dir = self.assent_dir / name
         tasks_dir.mkdir(parents=True, exist_ok=True)
-        path = tasks_dir / "t001_任務.e.toml"
+        path = tasks_dir / "t001_����.e.toml"
         path.write_text(
             'title = "CLI acceptance task"\n'
             'deps = []\n'
             'model = "core"\n'
             f'status = "{status}"\n'
-            'scope = ["src/"]\n'
             f'verify = "{_VERIFY}"\n'
             'goal = "Verify local acceptance."\n'
             'acceptance = "The verification command passes."\n',
@@ -126,7 +127,7 @@ class AcceptCliCase(unittest.TestCase):
             input=stdin, stdin=None if stdin is not None else subprocess.DEVNULL)
 
     def _make_source(self, *, plan_name: str | None = None,
-                     filename: str = "result with space 空白.txt",
+                     filename: str = "result with space �ť�.txt",
                      content: str = "accepted\n") -> tuple[Path, str, str]:
         name = plan_name or self.plan_name
         branch = f"{name}/run"
@@ -163,7 +164,7 @@ class AcceptCliLineEndingTests:
         self._git("checkout", "-b", "release")
         self._write_verify(
             "from pathlib import Path\n"
-            "raise SystemExit(0 if Path('result with space 空白.txt').is_file() else 1)\n")
+            "raise SystemExit(0 if Path('result with space �ť�.txt').is_file() else 1)\n")
         source, branch, tip = self._make_source()
         before = self._head()
         verified = self._cli("verify", self.plan_name)
@@ -371,96 +372,7 @@ class TestAcceptCliFailures(AcceptCliCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no source worktree", result.stdout)
 
-    def test_self_fixed_plan_needs_a_real_typed_confirmation(self) -> None:
-        source, branch, tip = self._make_source()
-        before = self._head()
-        verified = self._cli("verify", self.plan_name)
-        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
-        cfg = load_config(self.config, self.plan_name)
-        state = auto_fix.state_for_review(
-            auto_fix.ReviewRecord("FIXED", (auto_fix.ReviewFinding(
-                "t001", "src/main.py", "Blocking implementation issue",
-                "The round repaired the task's own declared scope."),)),
-            source_tree=gitops.tree_of(self.root, "HEAD"),
-            task_plan_sha256=auto_fix.sha256_files(
-                [self.tasks_dir / "t001_任務.e.toml"]),
-            review_prompt_sha256="5" * 64,
-            reviewer_adapter="codex", reviewer_model="prime",
-            reviewer_effort="heavy", workflow_step_index=1)
-        auto_fix.write_auto_fix_state(
-            auto_fix.auto_fix_state_path(cfg),
-            auto_fix.with_self_fixed_unreviewed(state))
 
-        # Closed stdin: it must decline immediately rather than hang or default
-        # to publishing.
-        closed = self._cli("accept", self.plan_name)
-        self.assertEqual(closed.returncode, 1, closed.stdout + closed.stderr)
-        self.assertIn("SELF-FIXED, UNREVIEWED", closed.stdout)
-        self.assertIn("self-fixed round: 1 of 1 (codex/prime/heavy)", closed.stdout)
-        self.assertIn("was not confirmed", closed.stdout)
-        self._assert_failed_preserves(before, source, branch, tip)
-
-        declined = self._cli("accept", self.plan_name, stdin="n\n")
-        self.assertEqual(declined.returncode, 1, declined.stdout + declined.stderr)
-        self.assertIn("was not confirmed", declined.stdout)
-        self._assert_failed_preserves(before, source, branch, tip)
-
-        confirmed = self._cli("accept", self.plan_name, stdin="y\n")
-        self.assertEqual(confirmed.returncode, 0,
-                         confirmed.stdout + confirmed.stderr)
-        after = self._head()
-        parents = self._git("rev-list", "--parents", "-n", "1", after).split()
-        self.assertEqual(parents[1:], [before, tip])
-        self.assertNotIn(
-            "SELF-FIXED", self._git("log", "-1", "--format=%B", "trunk"))
-
-    def test_unresolved_review_plan_needs_a_real_typed_confirmation(self) -> None:
-        source, branch, tip = self._make_source()
-        before = self._head()
-        verified = self._cli("verify", self.plan_name)
-        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
-        cfg = load_config(self.config, self.plan_name)
-        state = auto_fix.state_for_review(
-            auto_fix.ReviewRecord("FAIL", (auto_fix.ReviewFinding(
-                "t001", "src/main.py", "The entry point still crashes on start",
-                "No configured round repaired it."),)),
-            source_tree=gitops.tree_of(self.root, "HEAD"),
-            task_plan_sha256=auto_fix.sha256_files(
-                [self.tasks_dir / "t001_任務.e.toml"]),
-            review_prompt_sha256="5" * 64,
-            reviewer_adapter="codex", reviewer_model="prime",
-            reviewer_effort="heavy", workflow_step_index=1)
-        auto_fix.write_auto_fix_state(
-            auto_fix.auto_fix_state_path(cfg),
-            auto_fix.with_unresolved_review(state))
-
-        # Piping no input at all: it must decline immediately rather than hang
-        # or default to publishing.
-        closed = self._cli("accept", self.plan_name)
-        self.assertEqual(closed.returncode, 1, closed.stdout + closed.stderr)
-        self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", closed.stdout)
-        self.assertIn("unresolved review round: 1 of 1 (codex/prime/heavy)",
-                      closed.stdout)
-        # The findings themselves, not a count, are what a human overrules.
-        self.assertIn(
-            "- t001 src/main.py: The entry point still crashes on start",
-            closed.stdout)
-        self.assertIn("was not confirmed", closed.stdout)
-        self._assert_failed_preserves(before, source, branch, tip)
-
-        declined = self._cli("accept", self.plan_name, stdin="n\n")
-        self.assertEqual(declined.returncode, 1, declined.stdout + declined.stderr)
-        self.assertIn("was not confirmed", declined.stdout)
-        self._assert_failed_preserves(before, source, branch, tip)
-
-        confirmed = self._cli("accept", self.plan_name, stdin="y\n")
-        self.assertEqual(confirmed.returncode, 0,
-                         confirmed.stdout + confirmed.stderr)
-        after = self._head()
-        parents = self._git("rev-list", "--parents", "-n", "1", after).split()
-        self.assertEqual(parents[1:], [before, tip])
-        self.assertNotIn(
-            "UNRESOLVED", self._git("log", "-1", "--format=%B", "trunk"))
 
     def test_last_gate_branch_head_and_cleanliness_changes_refuse(self) -> None:
         source, branch, tip = self._make_source()

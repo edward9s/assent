@@ -1,4 +1,4 @@
-"""Compatibility facade over the verification modules.
+"""Public facade over the verification modules.
 
 The receipts written by the modules below are a derived runtime cache.  They
 record facts about explicit source snapshots, the resulting integration trees,
@@ -57,12 +57,6 @@ from assent.verification_common import (
                                         diagnosed_ignored_directories,
                                         mentioned_ordinary_ignored_directories,
                                         run_full_verifier, verifier_digest)
-
-# The full verifier used to be private to this module, and callers outside the
-# verification modules still name it that way when they assert that a command
-# never starts it.  Keeping the old name bound here costs nothing and saves
-# every such caller from depending on which module now owns the runner.
-_run_full_verifier = run_full_verifier
 
 __all__ = [
     "BATCH_RECEIPT_NAME",

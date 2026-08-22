@@ -14,11 +14,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import AssentError, auto_fix, gitops, shared_paths, verification
+from assent import AssentError, gitops, shared_paths, verification
 from assent import accept as accept_mod
 from assent.accept import accept_plan
 from assent.config import load_config
 from assent.lockfile import hold_integration_lock, hold_lock
+from assent.plan import WorkflowState, write_workflow_state
 from tests.link_support import make_directory_link
 from tests.test_shared_paths import excluded_inventory
 
@@ -52,7 +53,9 @@ class AcceptRepositoryCase(unittest.TestCase):
         self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.assent_dir / "assent.toml"
-        self.config_path.write_text(models_block(), encoding="utf-8")
+        self.config_path.write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         (self.assent_dir / "verify.py").write_text(
             "raise SystemExit('accept must not run the full verifier')\n",
             encoding="utf-8")
@@ -83,7 +86,6 @@ class AcceptRepositoryCase(unittest.TestCase):
             'deps = []\n'
             'model = "prime"\n'
             f'status = "{status}"\n'
-            'scope = ["assent/"]\n'
             f'verify = {verify!r}\n'
             'goal = "Complete the task."\n'
             'acceptance = "Verification passes."\n',
@@ -104,11 +106,10 @@ class AcceptRepositoryCase(unittest.TestCase):
     def _config(self, plan_name: str | None = None):
         return load_config(self.config_path, plan_name or self.plan_name)
 
-    def _accept(self, plan_name: str | None = None,
-                confirm=None) -> tuple[int, str]:
+    def _accept(self, plan_name: str | None = None) -> tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = accept_plan(self._config(plan_name), confirm)
+            code = accept_plan(self._config(plan_name))
         return code, output.getvalue()
 
     def _head(self, ref: str = "HEAD") -> str:
@@ -185,8 +186,8 @@ class TestAcceptSuccess(AcceptRepositoryCase):
         before = self._head()
         receipt = self._write_receipt()
 
-        with patch.object(
-                verification, "_run_full_verifier",
+        with patch(
+                "assent.plan_verification.run_full_verifier",
                 side_effect=AssertionError("accept ran the full verifier")) as verifier:
             with patch.object(
                     gitops, "fast_forward", wraps=gitops.fast_forward) as publish:
@@ -321,6 +322,20 @@ class TestAcceptPrechecks(AcceptRepositoryCase):
         self._write_receipt()
         code, output = self._accept()
         self.assertEqual(code, 0, output)
+
+    def test_explicit_accept_is_the_human_plan_workflow_decision(self) -> None:
+        self._write_task(status="DONE")
+        self._make_source()
+        self._write_receipt()
+        write_workflow_state(self.tasks_dir, WorkflowState(
+            "plan", "", 1, False, "HEAD", action="focused_sweep",
+            action_status="FAILED", action_source_tree="tree:commands",
+            action_exit_code=1, action_evidence=("check", "failed")))
+
+        code, output = self._accept()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("accept plan01: done", output)
 
     def test_lock_order_busy_refusal_and_release(self) -> None:
         self._write_task()
@@ -464,7 +479,7 @@ class TestReceiptRefusals(AcceptRepositoryCase):
         pkg = self.root / "pkg"
         pkg.mkdir()
         (pkg / "primary.txt").write_text("primary\n", encoding="utf-8")
-        shared_paths.review(
+        shared_paths.declare(
             self.root, self.worktree, none=True, watch=("README.md",),
             dispositions=excluded_inventory(self.root))
         self._write_receipt()
@@ -644,293 +659,8 @@ class TestDependencyGate(AcceptRepositoryCase):
         self.assertEqual(gitops.tree_of(self.root, "HEAD"), receipt.integration_tree)
 
 
-class TestSelfFixedConfirmation(AcceptRepositoryCase):
-    """The one interactive gate: receipt evidence is complete, review is not."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.task_path = self._write_task()
-        self.worktree, self.branch, self.source_tip = self._make_source()
-        self.receipt = self._write_receipt()
-
-    def _write_auto_fix_state(self, verdict: str, *, self_fixed: bool) -> None:
-        cfg = self._config()
-        state = auto_fix.state_for_review(
-            auto_fix.ReviewRecord(verdict, () if verdict == "PASS" else (
-                auto_fix.ReviewFinding(
-                    "t001", "assent/accept.py", "Blocking implementation issue",
-                    "The round repaired the task's own declared scope."),)),
-            source_tree=gitops.tree_of(self.root, "HEAD"),
-            task_plan_sha256=auto_fix.sha256_files([self.task_path]),
-            review_prompt_sha256="7" * 64,
-            reviewer_adapter="claude", reviewer_model="prime",
-            reviewer_effort="heavy", workflow_step_index=2)
-        if self_fixed:
-            state = auto_fix.with_self_fixed_unreviewed(state)
-        auto_fix.write_auto_fix_state(auto_fix.auto_fix_state_path(cfg), state)
-
-    def _must_not_ask(self, prompt: str) -> str:
-        raise AssertionError(f"accept asked for confirmation: {prompt}")
-
-    def test_ordinary_and_passed_plans_are_never_asked_to_confirm(self) -> None:
-        before = self._head()
-
-        code, output = self._accept(confirm=self._must_not_ask)
-
-        self.assertEqual(code, 0, output)
-        self.assertNotEqual(self._head(), before)
-        self.assertNotIn("SELF-FIXED", output)
-
-        _git(self.root, "reset", "--hard", before)
-        self._write_auto_fix_state("PASS", self_fixed=False)
-
-        code, output = self._accept(confirm=self._must_not_ask)
-
-        self.assertEqual(code, 0, output)
-        self.assertEqual(
-            gitops.tree_of(self.root, "HEAD"), self.receipt.integration_tree)
-        self.assertNotIn("SELF-FIXED", output)
-
-    def test_confirmed_self_fixed_plan_publishes_an_ordinary_accept(self) -> None:
-        before = self._head()
-        self._write_auto_fix_state("FIXED", self_fixed=True)
-        asked: list[str] = []
-
-        code, output = self._accept(confirm=lambda prompt: asked.append(prompt) or "y")
-
-        self.assertEqual(code, 0, output)
-        self.assertEqual(len(asked), 1)
-        self.assertIn("[y/N]", asked[0])
-        self.assertIn("SELF-FIXED, UNREVIEWED", output)
-        self.assertIn("self-fixed round: 2 of 2 (claude/prime/heavy)", output)
-        after = self._head()
-        # Publication is byte-for-byte the ordinary accept: the same two-parent
-        # receipt-backed merge, and no marker of the confirmation path.
-        self.assertEqual(
-            gitops.commit_parents(self.root, after), (before, self.source_tip))
-        self.assertEqual(
-            gitops.tree_of(self.root, after), self.receipt.integration_tree)
-        message = gitops.commit_message(self.root, after)
-        self.assertEqual(message.strip(), accept_mod.accept_merge_message(
-            "trunk", self.plan_name, self.branch, self.source_tip,
-            self.receipt.integration_tree,
-            self.receipt.verify_script_sha256).strip())
-        for marker in ("SELF-FIXED", "UNREVIEWED", "confirm"):
-            self.assertNotIn(marker, message)
-
-    def test_every_other_answer_declines_without_touching_git(self) -> None:
-        before = self._head()
-        self._write_auto_fix_state("FIXED", self_fixed=True)
-
-        def raise_eof(prompt: str) -> str:
-            raise EOFError()
-
-        for answer in ("", "n", "N", "no", "yes please", " ", "Y E S"):
-            with self.subTest(answer=answer):
-                output = self._assert_refused_unchanged(
-                    before, self._accept(confirm=lambda prompt: answer))
-                self.assertIn("SELF-FIXED, UNREVIEWED", output)
-                self.assertIn("was not confirmed", output)
-                self.assertIn(f"assent accept {self.plan_name}", output)
-                # Distinct from the ordinary stale-receipt refusal.
-                self.assertNotIn("refresh the verification receipt", output)
-
-        output = self._assert_refused_unchanged(
-            before, self._accept(confirm=raise_eof))
-        self.assertIn("was not confirmed", output)
-        self.assertEqual(
-            gitops.branch_tip(self.root, self.branch), self.source_tip)
-
-        # Only the answer changed: the same plan still publishes.
-        code, output = self._accept(confirm=lambda prompt: "Y")
-        self.assertEqual(code, 0, output)
-        self.assertNotEqual(self._head(), before)
-
-    def test_unreadable_state_is_not_a_second_refusal_path(self) -> None:
-        before = self._head()
-        auto_fix.auto_fix_state_path(self._config()).write_text(
-            "not valid toml = [\n", encoding="utf-8")
-
-        code, output = self._accept(confirm=self._must_not_ask)
-
-        self.assertEqual(code, 0, output)
-        self.assertNotEqual(self._head(), before)
 
 
-class TestUnresolvedReviewConfirmation(AcceptRepositoryCase):
-    """The same one gate for the other outcome the finite loop cannot settle."""
-
-    findings = (
-        auto_fix.ReviewFinding(
-            "t001", "assent/accept.py", "The receipt check can be bypassed",
-            "The round could not repair it inside the declared scope."),
-        auto_fix.ReviewFinding(
-            "t001", "tests/test_accept.py", "The new gate has no focused test",
-            "No test exercises the declined answer."),
-    )
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.task_path = self._write_task()
-        self.worktree, self.branch, self.source_tip = self._make_source()
-        self.receipt = self._write_receipt()
-
-    def _state(self) -> auto_fix.AutoFixState:
-        return auto_fix.state_for_review(
-            auto_fix.ReviewRecord("FAIL", self.findings),
-            source_tree=gitops.tree_of(self.root, "HEAD"),
-            task_plan_sha256=auto_fix.sha256_files([self.task_path]),
-            review_prompt_sha256="7" * 64,
-            reviewer_adapter="codex", reviewer_model="prime",
-            reviewer_effort="heavy", workflow_step_index=3)
-
-    def _write_state(self, state: auto_fix.AutoFixState) -> None:
-        auto_fix.write_auto_fix_state(
-            auto_fix.auto_fix_state_path(self._config()), state)
-
-    def _write_unresolved(self) -> auto_fix.AutoFixState:
-        state = auto_fix.with_unresolved_review(self._state())
-        self._write_state(state)
-        return state
-
-    def _must_not_ask(self, prompt: str) -> str:
-        raise AssertionError(f"accept asked for confirmation: {prompt}")
-
-    def test_an_unsettled_failing_review_is_not_a_gate(self) -> None:
-        # Only the settled terminal record gates; a FAIL the loop may still
-        # repair is not a decision a human is asked to overrule here.
-        before = self._head()
-        self._write_state(self._state())
-
-        code, output = self._accept(confirm=self._must_not_ask)
-
-        self.assertEqual(code, 0, output)
-        self.assertNotEqual(self._head(), before)
-        self.assertNotIn("REVIEW UNRESOLVED", output)
-
-    def test_confirmed_unresolved_plan_publishes_an_ordinary_accept(self) -> None:
-        before = self._head()
-        self._write_unresolved()
-        asked: list[str] = []
-
-        code, output = self._accept(
-            confirm=lambda prompt: asked.append(prompt) or "y")
-
-        self.assertEqual(code, 0, output)
-        self.assertEqual(len(asked), 1)
-        self.assertIn("[y/N]", asked[0])
-        self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", output)
-        self.assertIn("unresolved review round: 3 of 3 (codex/prime/heavy)",
-                      output)
-        after = self._head()
-        # Publication is byte-for-byte the ordinary accept: the same two-parent
-        # receipt-backed merge, and no marker of the confirmation path.
-        self.assertEqual(
-            gitops.commit_parents(self.root, after), (before, self.source_tip))
-        self.assertEqual(
-            gitops.tree_of(self.root, after), self.receipt.integration_tree)
-        message = gitops.commit_message(self.root, after)
-        self.assertEqual(message.strip(), accept_mod.accept_merge_message(
-            "trunk", self.plan_name, self.branch, self.source_tip,
-            self.receipt.integration_tree,
-            self.receipt.verify_script_sha256).strip())
-        for marker in ("UNRESOLVED", "HUMAN DECISION", "confirm"):
-            self.assertNotIn(marker, message)
-
-    def test_the_prompt_names_every_finding_rather_than_a_count(self) -> None:
-        # A human cannot consent to a decision they cannot see, so the findings
-        # themselves must be on screen, not just how many there are.
-        self._write_unresolved()
-
-        code, output = self._accept(confirm=lambda prompt: "y")
-
-        self.assertEqual(code, 0, output)
-        for finding in self.findings:
-            self.assertIn(
-                f"- {finding.task_id} {finding.path}: {finding.summary}",
-                output)
-
-    def test_every_other_answer_declines_without_touching_git(self) -> None:
-        before = self._head()
-        self._write_unresolved()
-
-        def raise_eof(prompt: str) -> str:
-            raise EOFError()
-
-        for answer in ("", "n", "N", "no", "yes please", " ", "Y E S"):
-            with self.subTest(answer=answer):
-                output = self._assert_refused_unchanged(
-                    before, self._accept(confirm=lambda prompt: answer))
-                self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", output)
-                self.assertIn("was not confirmed", output)
-                self.assertIn(f"assent accept {self.plan_name}", output)
-                # Distinct from the ordinary stale-receipt refusal and from the
-                # self-fixed decline alike.
-                self.assertNotIn("refresh the verification receipt", output)
-                self.assertNotIn("SELF-FIXED", output)
-
-        output = self._assert_refused_unchanged(
-            before, self._accept(confirm=raise_eof))
-        self.assertIn("was not confirmed", output)
-        self.assertEqual(
-            gitops.branch_tip(self.root, self.branch), self.source_tip)
-
-        # Only the answer changed: the same plan still publishes.
-        code, output = self._accept(confirm=lambda prompt: "Y")
-        self.assertEqual(code, 0, output)
-        self.assertNotEqual(self._head(), before)
-
-    def test_both_settled_outcomes_ask_once_and_name_both_reasons(self) -> None:
-        # A state carrying both outcomes cannot be written or read back -- one
-        # plan settles exactly once -- so the state is injected directly to
-        # prove the gate asks one question per accept rather than one per
-        # reason.  Two prompts for one decision train a human to answer without
-        # reading.
-        state = self._write_unresolved()
-        unresolved = state.unresolved_review
-        assert unresolved is not None
-        both = replace(state, self_fixed_unreviewed=auto_fix.SelfFixedOutcome(
-            round_index=unresolved.round_index,
-            rounds_used=unresolved.rounds_used,
-            adapter=unresolved.adapter, model=unresolved.model,
-            effort=unresolved.effort,
-            finding_fingerprints=unresolved.finding_fingerprints[:1]))
-        asked: list[str] = []
-
-        with patch.object(auto_fix, "read_auto_fix_state", return_value=both):
-            code, output = self._accept(
-                confirm=lambda prompt: asked.append(prompt) or "y")
-
-        self.assertEqual(code, 0, output)
-        self.assertEqual(len(asked), 1)
-        self.assertIn(
-            "SELF-FIXED, UNREVIEWED and REVIEW UNRESOLVED, HUMAN DECISION",
-            output)
-        self.assertIn("self-fixed round: 3 of 3 (codex/prime/heavy)", output)
-        self.assertIn("unresolved review round: 3 of 3 (codex/prime/heavy)",
-                      output)
-
-    def test_a_declined_double_outcome_names_both_reasons(self) -> None:
-        before = self._head()
-        state = self._write_unresolved()
-        unresolved = state.unresolved_review
-        assert unresolved is not None
-        both = replace(state, self_fixed_unreviewed=auto_fix.SelfFixedOutcome(
-            round_index=unresolved.round_index,
-            rounds_used=unresolved.rounds_used,
-            adapter=unresolved.adapter, model=unresolved.model,
-            effort=unresolved.effort,
-            finding_fingerprints=unresolved.finding_fingerprints[:1]))
-        asked: list[str] = []
-
-        with patch.object(auto_fix, "read_auto_fix_state", return_value=both):
-            output = self._assert_refused_unchanged(before, self._accept(
-                confirm=lambda prompt: asked.append(prompt) or "n"))
-
-        self.assertEqual(len(asked), 1)
-        self.assertIn(
-            "publishing a SELF-FIXED, UNREVIEWED and REVIEW UNRESOLVED, "
-            "HUMAN DECISION plan was not confirmed", output)
 
 
 class TestAcceptTransactionalFailures(AcceptRepositoryCase):

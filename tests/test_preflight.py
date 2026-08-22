@@ -1,357 +1,56 @@
-"""preflight tests: the decisions that must be settled before an AI session exists.
-
-Which concrete CLI model and effort a task's tier becomes, which adapter resolves at all,
-and whether that adapter would accept every invocation the plan could still issue. Both surfaces that consume those decisions are exercised, because `run` and `check`
-must answer them identically and neither may spend a token to find out.  Both surfaces also
-fail closed without current global contracts, so every case here mixes in
-GlobalContractsMixin for a temporary user home.
-
-Chinese literals that remain are deliberate user/upstream passthrough data."""
-import contextlib
-import io
+"""Preflight proves the concrete sessions in the linear arrays."""
+import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from assent import AssentError, engine, gitops, inspection, preflight
-from assent.adapters import get_adapter
+from assent.adapters import Adapter
 from assent.config import load_config
-from assent.plan import journal_path_for, parse_task_file, set_status
-from tests.engine_support import (EngineTestCase, ScriptedAdapter,
-                                  models_block, ok_result)
-from tests.test_contracts import GlobalContractsMixin
+from assent.plan import Plan
+from assent.preflight import capability_errors
+from tests.engine_support import models_block, task_text
 
 
-class TestInvocationResolution(GlobalContractsMixin, EngineTestCase):
-    def test_a_task_file_cannot_name_a_vendor_model_at_all(self):
-        # The capability lives in assent.toml only, so a plan artifact stays free of
-        # ids that expire with the release they name.
-        for value in ("Exact-Model/XHigh", "[Exact-Model]"):
-            with self.subTest(value=value):
-                task_path = self.write_task(1, model=value)
-                with self.assertRaisesRegex(
-                        AssentError, "vendor model ids belong in"):
-                    parse_task_file(task_path)
+class RecordingAdapter(Adapter):
+    def __init__(self):
+        self.requests = ()
 
-    def test_a_role_vendor_selection_resolves_without_touching_adapter_maps(self):
-        text = ('[abilities.fix]\nprompt = "Repair."\nwrites = true\n'
-            '[roles.pinned_fixer]\nability = ["fix"]\n'
-                'model = "Exact-Model/XHigh"\n'
-                '[workflow]\ntask = [{ role = "pinned_fixer", adapter = "codex" }]\n')
-        cfg = self.build(adapter_name="codex", extra_config=text)
-        step = cfg.workflow_task[0]
-
-        requested_model, requested_effort = preflight.resolve_selection(
-            cfg, step.resolved_role.model, "codex")
-        self.assertEqual(requested_model, "Exact-Model")
-        self.assertEqual(requested_effort, "XHigh")
-
-    def test_a_role_vendor_selection_refuses_adapter_rotation(self):
-        text = ('[adapter]\nname = ["claude", "codex"]\n'
-                + '[abilities.fix]\nprompt = "Repair."\nwrites = true\n'
-            '[roles.pinned_fixer]\nability = ["fix"]\n'
-                'model = "Exact-Model"\n'
-                '[workflow]\ntask = [{ role = "pinned_fixer" }]\n')
-        config_path = self.root / ".assent" / "assent.toml"
-        config_path.write_text(text + models_block(text), encoding="utf-8")
-
-        with self.assertRaisesRegex(AssentError, "exactly one adapter"):
-            load_config(config_path, "plan01")
-
-    def test_resolved_selection_is_consistent_across_prompt_call_label_journal(self):
-        # One resolved invocation must appear identically in the prompt placeholders,
-        # the adapter call, the terminal label, and the scheduler journal.
-        p1 = self.write_task(1, model="lite")
-        cfg = self.build(extra_config=
-            '[adapter.claude.models]\n'
-            'prime = "fable/high"\ncore = "opus/high"\n'
-            'lite = "sonnet/max"\n')
-        self.commit_all()
-        adapter = ScriptedAdapter(
-            [self.ai_done(p1, requested_model="sonnet")])
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            engine.run(cfg, once=True, adapter=adapter)
-
-        prompt, requested_model, requested_effort = adapter.calls[0]
-        self.assertEqual(requested_model, "sonnet")
-        self.assertEqual(requested_effort, "max")            # concrete CLI value
-        self.assertIn('requested_effort = "max"', prompt)
-        # the prompt no longer offers "no value = the CLI default" as a session contract
-        self.assertNotIn("CLI default", prompt)
-        self.assertIn("lite->sonnet/max", out.getvalue())
-
-        from assent.plan import read_entries
-        done = next(e for e in read_entries(journal_path_for(p1))
-                    if e["by"] == "claude")
-        self.assertEqual(done["requested_model"], "sonnet")
-
-    def test_unknown_adapter_run_is_rejected_without_claude_fallback(self):
-        self.write_task(1)
-        cfg = self.build(adapter_name="nowhere")
-        self.commit_all()
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            rc = engine.run(cfg)   # no injected adapter -> get_adapter must refuse
-        self.assertEqual(rc, 1)
-        self.assertIn("unknown adapter: 'nowhere'", out.getvalue())
-        self.assertFalse(gitops.worktree_path(self.root, "plan01").exists())
-
-    def test_unknown_adapter_check_reports_fail_and_skips_cli_probe(self):
-        self.write_task(1)
-        cfg = self.build(adapter_name="nowhere")
-        self.commit_all()
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            rc = inspection.check(cfg)
-        self.assertEqual(rc, 1)
-        self.assertIn("adapter: FAIL", out.getvalue())
-        self.assertIn("unknown adapter: 'nowhere'", out.getvalue())
-        # the CLI probe is adapter-provided, so an unresolved adapter emits no CLI line
-        self.assertNotIn("CLI:", out.getvalue())
-        self.assertNotIn("capability preflight", out.getvalue())
-
-    def test_check_cli_probe_uses_current_adapter_command(self):
-        # codex adapter with a runnable command (python) must be probed as codex, not claude
-        self.write_task(1)
-        cfg = self.build(adapter_name="codex", extra_config=
-            '[adapter.codex]\ncommand = "python"\n')
-        self.commit_all()
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(inspection.check(cfg), 0)
-        self.assertIn("codex CLI: OK", out.getvalue())
-
-    def test_check_cli_probe_reports_missing_executable(self):
-        self.write_task(1)
-        cfg = self.build(adapter_name="codex", extra_config=
-            '[adapter.codex]\ncommand = "definitely-not-a-real-cli-xyz"\n')
-        self.commit_all()
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(inspection.check(cfg), 1)
-        self.assertIn("codex CLI: FAIL (executable not found", out.getvalue())
-
-    def test_every_configured_adapter_and_tier_resolves_a_concrete_invocation(self):
-        # No supported invocation may plan an unmapped tier or a missing effort.
-        cfg = self.build(extra_config=models_block(
-            '"claude" "codex" "antigravity"'))
-        for tier in ("prime", "core", "lite"):
-            for name in ("claude", "codex", "antigravity"):
-                with self.subTest(adapter=name, tier=tier):
-                    model, effort = cfg.adapter_settings(name).resolve(tier)
-                    self.assertTrue(model)
-                    self.assertIsNotNone(effort)
-
-    def test_selection_resolves_through_the_adapter_models_table(self):
-        cfg = self.build(extra_config=
-            '[adapter.claude.models]\n'
-            'prime = "p/tiny"\ncore = "c/balanced"\nlite = "l"\n')
-        self.assertEqual(preflight.resolve_selection(cfg, "prime"),
-                         ("p", "tiny"))
-        self.assertEqual(preflight.resolve_selection(cfg, "core"),
-                         ("c", "balanced"))
-        # no separator: no effort argument is passed for that tier
-        self.assertEqual(preflight.resolve_selection(cfg, "lite"), ("l", None))
-        # a non-tier value bypasses the table entirely, on the same grammar
-        self.assertEqual(preflight.resolve_selection(cfg, "Exact/Max"),
-                         ("Exact", "Max"))
+    def preflight(self, requests):
+        self.requests = tuple(requests)
+        return []
 
 
-class TestAntigravityCapabilityPreflight(GlobalContractsMixin, EngineTestCase):
-    """The active adapter proves every planned invocation before anything is spent.
-
-    Antigravity is the adapter that actually publishes a capability catalog, so it is the one
-    that exercises the shared gate; the adapters without one keep passing it trivially.
-    """
-
-    BAD_PRO_NORMAL = ('[adapter]\nname = "antigravity"\n'
-                      '[adapter.antigravity.models]\n'
-                      'prime = "gemini-3.1-pro/medium"\n'
-                      'core = "gemini-3.6-flash/high"\n'
-                      'lite = "gemini-3.5-flash/medium"\n')
-
-    def setUp(self):
-        super().setUp()
-        from assent.adapters import antigravity
-        self.catalog = antigravity.parse_models_catalog(
-            (Path(__file__).resolve().parent / "fixtures"
-             / "agy_models_1.1.5.txt").read_text(encoding="utf-8"))
-        # Listing models costs nothing, but no test may reach a real installation.
-        catalog_patch = mock.patch.object(
-            antigravity, "load_catalog", return_value=self.catalog)
-        catalog_patch.start()
-        self.addCleanup(catalog_patch.stop)
-        # Any attempt to open an actual AGY session is a test failure.
-        session_patch = mock.patch.object(
-            antigravity, "run_subprocess",
-            side_effect=AssertionError("no AGY session may be started"))
-        self.session = session_patch.start()
-        self.addCleanup(session_patch.stop)
-
-    def antigravity_cfg(self, extra_config=BAD_PRO_NORMAL):
-        extra_config = extra_config + models_block(extra_config)
-        (self.root / ".assent" / "assent.toml").write_text(
-            extra_config, encoding="utf-8")
-        return load_config(self.root / ".assent" / "assent.toml", "plan01")
-
-    def test_run_refuses_pro_normal_before_session_status_or_git_change(self):
-        path = self.write_task(1, model="prime")
-        cfg = self.antigravity_cfg()
-        self.commit_all()
-        commits_before = self._git("log", "--pretty=%H")
-
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(engine.run(cfg, once=True), 1)
-
-        text = out.getvalue()
-        self.assertIn("antigravity capability preflight: FAIL", text)
-        self.assertIn("--model gemini-3.1-pro --effort medium", text)
-        self.assertIn("available: low, high", text)
-        self.assertIn('[adapter.antigravity.models] prime = "gemini-3.1-pro/high"', text)
-        # nothing was started, marked, journalled or committed
-        self.session.assert_not_called()
-        self.assertEqual(parse_task_file(path).status, "TODO")
-        self.assertFalse(journal_path_for(path).exists())
-        self.assertEqual(self._git("log", "--pretty=%H"), commits_before)
-        self.assertFalse(gitops.worktree_path(self.root, "plan01").exists())
-        self.assertEqual(gitops.branches_with_prefix(self.root, "plan01/"), [])
-
-    def test_check_refuses_the_same_mapping_with_the_same_diagnostic(self):
-        self.write_task(1, model="prime")
-        cfg = self.antigravity_cfg()
-        self.commit_all()
-
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(inspection.check(cfg), 1)
-
-        text = out.getvalue()
-        self.assertIn("antigravity capability preflight: FAIL", text)
-        self.assertIn('[adapter.antigravity.models] prime = "gemini-3.1-pro/high"', text)
-        self.session.assert_not_called()
-
-    def test_shipped_mapping_passes_the_preflight_for_every_tier(self):
-        for num, tier in enumerate(("prime", "core", "lite"), start=1):
-            self.write_task(num, model=tier)
-        cfg = self.antigravity_cfg('[adapter]\nname = "antigravity"\n')
-        self.commit_all()
-
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            inspection.check(cfg)
-        self.assertIn("antigravity capability preflight: OK", out.getvalue())
-
-    def test_settled_tasks_do_not_gate_a_run_they_cannot_join(self):
-        self.write_task(1, model="prime", status="DONE")
-        path = self.write_task(2, model="core")
-        cfg = self.antigravity_cfg()
-        self.commit_all()
-
-        from assent.adapters.antigravity import AntigravityAdapter
-        adapter = AntigravityAdapter(cfg, catalog=self.catalog)
-        adapter.run_task = lambda prompt, model, effort, cwd: (
-            set_status(path, "DONE") or ok_result())
-
-        self.assertEqual(self.run_quiet(cfg, once=True, adapter=adapter), 0)
-        self.assertEqual(parse_task_file(path).status, "DONE")
-
-
-class TestAutoFixReviewRoundPreflight(GlobalContractsMixin, EngineTestCase):
-    """A reviewer list is proven whole before a run, not one round at a time.
-
-    Antigravity is the adapter with a real capability catalog, so it plays the listed
-    round whose mapping the vendor would refuse.
-    """
-
-    BAD_PRIME_HEAVY = ('[adapter.antigravity.models]\n'
-                       'prime = "gemini-3.1-pro/medium"\n'
-                       'core = "gemini-3.6-flash/high"\n'
-                       'lite = "gemini-3.5-flash/medium"\n')
-    ROLES = '''
-[abilities.review]
-prompt = "Review."
-writes = false
-produces_verdict = true
-[roles.prime_review]
-ability = ["review"]
-model = "prime"
-[roles.core_review]
-ability = ["review"]
+class TestPreflight(unittest.TestCase):
+    def test_every_configured_task_role_is_preflighted(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        plan_dir = root / ".assent" / "plan01"
+        plan_dir.mkdir(parents=True)
+        (plan_dir / "t001_task.e.toml").write_text(
+            task_text(), encoding="utf-8")
+        text = """
+[abilities.work]
+prompt = "Work."
+writes = true
+[roles.first]
+ability = ["work"]
+model = "lite"
+[roles.second]
+ability = ["work"]
 model = "core"
-'''
-
-    def setUp(self):
-        super().setUp()
-        from assent.adapters import antigravity
-        catalog = antigravity.parse_models_catalog(
-            (Path(__file__).resolve().parent / "fixtures"
-             / "agy_models_1.1.5.txt").read_text(encoding="utf-8"))
-        catalog_patch = mock.patch.object(
-            antigravity, "load_catalog", return_value=catalog)
-        catalog_patch.start()
-        self.addCleanup(catalog_patch.stop)
-        session_patch = mock.patch.object(
-            antigravity, "run_subprocess",
-            side_effect=AssertionError("no AGY session may be started"))
-        self.session = session_patch.start()
-        self.addCleanup(session_patch.stop)
-
-    def review_errors(self, extra_config, adapter_name):
-        from assent.adapters import get_adapter
-        (self.root / ".assent" / "assent.toml").write_text(
-            extra_config + models_block(extra_config), encoding="utf-8")
-        cfg = load_config(self.root / ".assent" / "assent.toml", "plan01")
-        return preflight.auto_fix_review_capability_errors(
-            cfg, get_adapter(adapter_name, cfg))
-
-    def test_a_later_listed_round_fails_the_preflight_before_the_run(self):
-        session, errors = self.review_errors(
-            self.ROLES +
-            '[adapter]\nname = "claude"\n'
-            '[workflow]\nplan = [{ action = "focused_sweep" }, '
-            '{ role = "prime_review", adapter = "claude" }, '
-            '{ action = "focused_sweep" }, '
-            '{ role = "prime_review", adapter = "antigravity" }, '
-            '{ action = "focused_sweep" }]\n'
-            + self.BAD_PRIME_HEAVY, "claude")
-        self.assertEqual(session.agent, "claude")   # round 1 still drives the call
-        self.assertTrue(errors)
-        # Each diagnostic names the round's adapter, which is not the one the
-        # caller resolved and would otherwise print.
-        self.assertTrue(all(message.startswith("antigravity: ")
-                            for message in errors), errors)
-        self.session.assert_not_called()
-
-    def test_one_round_keeps_todays_unprefixed_diagnostics(self):
-        session, errors = self.review_errors(
-            self.ROLES + '[adapter]\nname = "antigravity"\n'
-            '[workflow]\nplan = [{ action = "focused_sweep" }, '
-            '{ role = "prime_review", adapter = "antigravity" }, '
-            '{ action = "focused_sweep" }]\n'
-            + self.BAD_PRIME_HEAVY,
-            "antigravity")
-        self.assertEqual(session.agent, "antigravity")
-        self.assertTrue(errors)
-        self.assertFalse(any(message.startswith("antigravity: ")
-                             for message in errors), errors)
-
-    def test_distinct_identities_on_one_adapter_are_each_preflighted(self):
-        session, errors = self.review_errors(
-            self.ROLES +
-            '[adapter]\nname = "claude"\n'
-            '[workflow]\nplan = [{ action = "focused_sweep" }, '
-            '{ role = "prime_review", adapter = "antigravity" }, '
-            '{ action = "focused_sweep" }, '
-            '{ role = "core_review", adapter = "antigravity" }, '
-            '{ action = "focused_sweep" }, '
-            '{ role = "prime_review", adapter = "antigravity" }, '
-            '{ action = "focused_sweep" }]\n'
-            + self.BAD_PRIME_HEAVY, "antigravity")
-        self.assertEqual(session.agent, "antigravity")
-        self.assertTrue(errors)
-        self.assertEqual(len(errors), len(set(errors)))
+[workflow]
+task = [{ role = "first" }, { role = "second" },
+        { action = "focused_test" }]
+"""
+        config_path = root / ".assent" / "assent.toml"
+        config_path.write_text(text + models_block(text), encoding="utf-8")
+        cfg = load_config(config_path, "plan01")
+        adapter = RecordingAdapter()
+        self.assertEqual(capability_errors(
+            cfg, adapter, Plan.parse(plan_dir), adapter_name="claude"), [])
+        self.assertEqual(len(adapter.requests), 2)
+        self.assertEqual([item.model for item in adapter.requests],
+                         ["lite", "core"])
 
 
 if __name__ == "__main__":

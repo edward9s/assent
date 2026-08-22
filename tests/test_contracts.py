@@ -11,11 +11,10 @@ import sys
 import tempfile
 import tomllib
 import unittest
-from dataclasses import fields
 from pathlib import Path
 from unittest import mock
 
-from assent import AssentError, auto_fix, contracts
+from assent import AssentError, contracts
 from assent.config import load_config
 from assent.plan import _KNOWN_KEYS
 from assent.user_home import ASSENT_HOME_ENV
@@ -50,7 +49,9 @@ with tempfile.TemporaryDirectory() as directory:
     config.parent.mkdir()
     config.write_text(
         'adapter.claude.models = { prime = "p/high", core = "c/high", '
-        'lite = "l/low" }',
+        'lite = "l/low" }\\n'
+        '[workflow]\\n'
+        'task = [{ action = "focused_test" }]\\n',
         encoding="utf-8")
     loaded = load_config(config, "empty")
     if loaded.root != root.resolve():
@@ -117,247 +118,6 @@ class TestContractPaths(unittest.TestCase):
                     (packaged / name).read_text(encoding="utf-8"))
 
 
-class TestContractContent(unittest.TestCase):
-    """Check durable behavior, not incidental prose or internal field lists."""
-
-    @staticmethod
-    def _compact(name: str) -> str:
-        return " ".join(contracts.installed_contract_text(name).split())
-
-    def test_task_skeleton_matches_all_parser_fields(self):
-        format_text = contracts.installed_contract_text("format.md")
-        match = re.search(
-            r'```toml\n(title = "Skeleton and test infrastructure".*?\n)```',
-            format_text, re.DOTALL)
-        self.assertIsNotNone(match)
-        assert match is not None
-        skeleton = tomllib.loads(match.group(1))
-        self.assertEqual(len(_KNOWN_KEYS), 11)
-        self.assertEqual(set(skeleton), _KNOWN_KEYS)
-
-    def test_contracts_assign_one_owner_and_minimal_reading_scope(self):
-        instructions = self._compact("instructions.md")
-        for phrase in (
-                "repository-specific development constraints belong in `AGENTS.md`",
-                "scheduled-session procedure belongs in `instructions.md`",
-                "persisted artifact schemas, filename rules, and state meanings belong in `format.md`",
-                "CLI, report, and receipt contracts belong in `workflow.md`",
-                "An **assent-scheduled task session** reads only"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, instructions)
-        scheduled = instructions.split(
-            "An **assent-scheduled task session** reads only:", 1)[1].split(
-                "## Scheduled-session rules", 1)[0]
-        self.assertIn("its one task file", scheduled)
-        self.assertNotIn("format.md", scheduled)
-        self.assertNotIn("workflow.md", scheduled)
-
-    def test_plan_format_requires_complete_scope_and_narrow_verification(self):
-        format_text = self._compact("format.md")
-        for phrase in (
-                "audit every `goal`, `behavior`, and `acceptance` clause item by item",
-                "Cover every possible write with an exact `scope` entry",
-                "smallest module, class, case, or command",
-                "leave no non-ignored worktree change",
-                "Audit every `verify` command against the clean-worktree rule",
-                "Never name `.assent/verify.py` or the full suite",
-                "A task must be executable by a fresh AI"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, format_text)
-
-    def test_shipped_template_omits_combined_repair_shortcuts(self):
-        configuration = tomllib.loads(
-            (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
-                encoding="utf-8"))
-        for role in (
-                "task_reviewer_fixer", "plan_quality_reviewer_fixer",
-                "plan_reviewer_fixer", "integration_reviewer_fixer"):
-            with self.subTest(role=role):
-                self.assertNotIn(role, configuration["roles"])
-
-    def test_workflow_layers_match_the_default_configuration(self):
-        workflow = self._compact("workflow.md")
-        for phrase in (
-                "`[workflow]` has exactly three ordered arrays",
-                "`focused_test` is legal only at task positions",
-                "`focused_sweep` is legal only at plan positions",
-                "`full_verify` is legal only at integration positions",
-                "exit 0 with any non-ignored worktree change is `STALE` evidence",
-                "The engine never infers behavior from a role or ability name"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, workflow)
-
-        configuration = tomllib.loads(
-            (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
-                encoding="utf-8"))
-        self.assertEqual(
-            [step.get("action", "role")
-             for step in configuration["workflow"]["task"]],
-            ["role", "focused_test", "role", "role", "focused_test"])
-        plan_shape = [
-            {"action": step["action"]} if "action" in step else {"role": "role"}
-            for step in configuration["workflow"]["plan"]]
-        self.assertEqual(
-            plan_shape,
-            [{"role": "role"}, {"role": "role"},
-             {"action": "focused_sweep"},
-             {"role": "role"}, {"role": "role"},
-             {"action": "focused_sweep"},
-             {"role": "role"}, {"role": "role"},
-             {"action": "focused_sweep"}])
-        integration_shape = [
-            {"action": step["action"]} if "action" in step else {"role": "role"}
-            for step in configuration["workflow"]["integration"]]
-        self.assertEqual(
-            integration_shape,
-            [{"action": "full_verify"}, {"role": "role"}, {"role": "role"},
-             {"action": "full_verify"}])
-        self.assertIn("current task",
-                      configuration["abilities"]["task_review"]["prompt"])
-        self.assertIn("cumulative worktree",
-                      configuration["abilities"]["plan_review"]["prompt"])
-        self.assertIn(
-            "exact selection",
-            configuration["abilities"]["integration_review"]["prompt"])
-
-    def test_scheduled_session_contract_owns_command_side_effects(self):
-        instructions = self._compact("instructions.md")
-        self.assertIn("Command side effects count as writes", instructions)
-        self.assertIn(
-            "never run a scheduler-owned `focused_test` action", instructions)
-        self.assertIn(
-            "Uncommitted primary-tree changes to files such as `AGENTS.md` and `.gitignore` are not inherited",
-            instructions)
-
-    def test_default_write_abilities_resist_representation_coupled_tests(self):
-        configuration = tomllib.loads(
-            (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
-                encoding="utf-8"))
-        writable_prompts = [
-            ability["prompt"]
-            for ability in configuration["abilities"].values()
-            if ability["writes"]]
-
-        # Prompt text is the shipped behavior under test here. Ability names are
-        # deliberately irrelevant: all default writers share the safety floor.
-        for prompt in writable_prompts:
-            with self.subTest(prompt=prompt):
-                self.assertIn("do not weaken", prompt.lower())
-
-        verdict_prompts = [
-            ability["prompt"]
-            for ability in configuration["abilities"].values()
-            if ability.get("produces_verdict", False)]
-        for prompt in verdict_prompts:
-            with self.subTest(prompt=prompt):
-                self.assertIn(
-                    "do not accept tests that merely mirror", prompt.lower())
-                self.assertIn("proving the cited requirement", prompt.lower())
-
-        semantic_test_prompts = [
-            prompt for prompt in writable_prompts
-            if "tests that prove" in prompt]
-        self.assertEqual(len(semantic_test_prompts), 1)
-        test_prompt = semantic_test_prompts[0]
-        for evidence in (
-                "observable semantics and invariants",
-                "unless a requirement explicitly makes them public",
-                "an alternate valid combination",
-                "a semantics-preserving input transformation",
-                "rejection of an invalid combination",
-                "rather than a packaged example"):
-            with self.subTest(evidence=evidence):
-                self.assertIn(evidence, test_prompt)
-
-    def test_task_plan_and_integration_responsibilities_are_distinct(self):
-        workflow = self._compact("workflow.md")
-        for phrase in (
-                "If its first `focused_test` passes, the layer completes and skips repair",
-                "A role that self-marks `BLOCKED` advances to the next task verdict role",
-                "repairs that path in the same session",
-                "Task failure never consumes a plan review position",
-                "The plan workflow is considered only after every task is `DONE` or `SKIP`",
-                "cumulative implementation conforms to the plan",
-                "reconstructs the same exact snapshotted selection",
-                "never asks to skip, silently removes a plan, accepts a compatible prefix"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, workflow)
-
-    def test_verification_and_acceptance_boundaries_are_explicit(self):
-        instructions = self._compact("instructions.md")
-        workflow = self._compact("workflow.md")
-        common_instructions = instructions.split(
-            "## Scheduled-session rules", 1)[0]
-        self.assertIn(
-            "An AI session never initiates the full suite or "
-            "`.assent/verify.py`",
-            common_instructions)
-        self.assertIn(
-            "the scheduler owns any workflow `full_verify` action and runs it "
-            "outside the AI session",
-            common_instructions)
-        for phrase in (
-                "Only the explicit human `assent accept` command publishes work",
-                "Focused verification runs task commands in source worktrees, writes no receipt",
-                "Complete verification builds a temporary integration candidate",
-                "Direct `accept PLAN` and selected `accept A B` never start verification"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, workflow)
-
-    def test_unresolved_review_and_recovery_preserve_work(self):
-        workflow = self._compact("workflow.md")
-        for phrase in (
-                "Failure, interruption, and repair never revert the workspace automatically",
-                "REVIEW UNRESOLVED, HUMAN DECISION",
-                "exits zero so unrelated queued plans continue",
-                "`NEEDS_REPAIR`, `REPAIRING`, `AWAITING_REVIEW`, or `COMPLETE`",
-                "resets only the orchestration cursor",
-                "re-adjudicates them from the first position of the current workflow"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, workflow)
-        self.assertEqual(auto_fix.AUTO_FIX_STATE_VERSION, 7)
-        self.assertEqual({field.name for field in fields(auto_fix.AutoFixState)},
-                         auto_fix._STATE_KEYS)
-
-    def test_manual_rework_and_reject_have_distinct_boundaries(self):
-        workflow = self._compact("workflow.md")
-        self.assertIn("`reject` is an explicitly confirmed destructive reset",
-                      workflow)
-        self.assertIn("resets `DONE`, `WIP`, and `BLOCKED` tasks to `TODO`",
-                      workflow)
-        self.assertIn("`rework` reopens existing tasks while preserving code",
-                      workflow)
-
-    def test_shared_input_and_cleanup_rules_are_available_to_sessions(self):
-        instructions = self._compact("instructions.md")
-        workflow = self._compact("workflow.md")
-        for phrase in (
-                "runs the injected `assent shared-paths review` command",
-                "Cover every listed ordinary ignored directory once",
-                "Never hand-create a source-worktree link",
-                "Never copy an ignored tree",
-                "modify a linked target"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, instructions)
-        for phrase in (
-                "`NO-IGNORED-DIRECTORY-CANDIDATE`",
-                "undeclared manual links refuse verification",
-                "never traverses its resolved target"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, workflow)
-
-    def test_reader_recovery_never_recommends_raw_worktree_removal(self):
-        paths = (
-            _PROJECT_ROOT / "AGENTS.md",
-            _PROJECT_ROOT / "assent/templates/format.md",
-            _PROJECT_ROOT / "README.md",
-            _PROJECT_ROOT / "README.zh-TW.md",
-        )
-        for path in paths:
-            with self.subTest(path=path):
-                text = path.read_text(encoding="utf-8")
-                self.assertNotIn("git worktree remove", text)
-                self.assertNotIn("Remove residue manually", text)
 
 
 class TestContractValidation(unittest.TestCase):
@@ -416,6 +176,56 @@ class TestContractValidation(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn(str(home / "instructions.md"), message)
         self.assertIn("assent init", message)
+
+
+class TestContractContent(unittest.TestCase):
+    def test_workflow_contract_states_the_two_top_principles(self):
+        text = (_PROJECT_ROOT / "assent/templates/workflow.md").read_text(
+            encoding="utf-8")
+        self.assertIn("architecture simple enough", text)
+        self.assertIn("Names describe real mechanisms exactly", text)
+        self.assertIn("one finite linear interpreter", text)
+        self.assertIn("There is no finding ledger", text)
+
+    def test_task_contract_has_no_scope_or_verdict_protocol(self):
+        format_text = (_PROJECT_ROOT / "assent/templates/format.md").read_text(
+            encoding="utf-8")
+        workflow = (_PROJECT_ROOT / "assent/templates/workflow.md").read_text(
+            encoding="utf-8")
+        config = (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
+            encoding="utf-8")
+        self.assertNotIn("scope =", format_text)
+        self.assertNotIn("produces_verdict", config)
+        self.assertNotIn("_auto_fix.toml", workflow)
+
+    def test_session_contract_keeps_control_state_scheduler_owned(self):
+        text = (_PROJECT_ROOT / "assent/templates/instructions.md").read_text(
+            encoding="utf-8")
+        self.assertIn("scheduler owns", text.lower())
+        self.assertIn("task contracts, journals,", text)
+        self.assertIn("scheduler state", text)
+        self.assertIn("smallest architecture and fewest states", text)
+
+    def test_every_writable_repair_ability_fixes_tests_or_implementation(self):
+        data = tomllib.loads(
+            (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
+                encoding="utf-8"))
+        for name in ("task_fix", "plan_fix", "integration_fix"):
+            with self.subTest(ability=name):
+                prompt = data["abilities"][name]["prompt"]
+                self.assertIn("authoritative requirements", prompt)
+                self.assertIn("tests or the implementation", prompt)
+                self.assertIn("Preserve correct tests", prompt)
+                self.assertIn("never weaken", prompt)
+
+    def test_integration_contract_automates_typed_conflicts(self):
+        text = " ".join(
+            (_PROJECT_ROOT / "assent/templates/workflow.md").read_text(
+                encoding="utf-8").split())
+        self.assertIn("managed reconcile worktree", text)
+        self.assertIn("persistent source worktree", text)
+        self.assertIn("candidate reconstruction, and recheck", text)
+        self.assertIn("without mechanically identified source attribution", text)
 
 
 if __name__ == "__main__":

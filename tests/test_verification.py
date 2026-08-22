@@ -70,12 +70,14 @@ class VerificationRepositoryCase(unittest.TestCase):
         self.assent_dir = self.root / ".assent"
         self.tasks_dir = self.assent_dir / "plan測試"
         self.tasks_dir.mkdir(parents=True)
-        (self.assent_dir / "assent.toml").write_text(models_block(), encoding="utf-8")
+        (self.assent_dir / "assent.toml").write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         self._write_verifier(exit_code=0)
         (self.tasks_dir / "t001_complete.e.toml").write_text(
             'title = "Complete"\n'
             'deps = []\nmodel = "core"\nstatus = "DONE"\n'
-            'scope = ["result.txt"]\nverify = "python --version"\n'
+            'verify = "python --version"\n'
             'goal = "done"\nacceptance = "verified"\n',
             encoding="utf-8")
         (self.root / "README.md").write_text("initial\n", encoding="utf-8")
@@ -139,7 +141,7 @@ class VerificationRepositoryCase(unittest.TestCase):
         declared = set(getattr(self, "declared", ()))
         declared.add(name)
         self.declared = tuple(sorted(declared))
-        shared_paths.review(
+        shared_paths.declare(
             self.root, worktree, paths=self.declared, watch=("README.md",),
             dispositions=excluded_inventory(self.root, self.declared))
         return target
@@ -431,7 +433,7 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
         (upstream / "t001_base.e.toml").write_text(
             'title = "Base"\n'
             'deps = []\nmodel = "core"\nstatus = "DONE"\n'
-            'scope = ["result.txt"]\nverify = "python --version"\n'
+            'verify = "python --version"\n'
             'goal = "done"\nacceptance = "verified"\n',
             encoding="utf-8")
         (self.tasks_dir / "_plan_deps.toml").write_text(
@@ -469,7 +471,6 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
             (upstream / f"t001_{plan_name.lower()}.e.toml").write_text(
                 f'title = "{plan_name}"\n'
                 'deps = []\nmodel = "core"\nstatus = "DONE"\n'
-                f'scope = ["{plan_name.lower()}.txt"]\n'
                 'verify = "python --version"\n'
                 'goal = "done"\nacceptance = "verified"\n',
                 encoding="utf-8")
@@ -507,7 +508,6 @@ class TestArchivedUpstreamStack(VerificationRepositoryCase):
             (upstream / f"t001_{plan_name.lower()}.e.toml").write_text(
                 f'title = "{plan_name}"\n'
                 'deps = []\nmodel = "core"\nstatus = "DONE"\n'
-                f'scope = ["{plan_name.lower()}.txt"]\n'
                 'verify = "python --version"\n'
                 'goal = "done"\nacceptance = "verified"\n',
                 encoding="utf-8")
@@ -760,7 +760,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
                       receipt.failure_summary)
         for phrase in ("Ignored input diagnosis: pkg/",
                        "intentionally omitted from the integration candidate",
-                       "record it with `assent shared-paths review`",
+                       "record it with `assent shared-paths declare`",
                        "Do not copy the tree or hand-create"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, receipt.failure_summary)
@@ -821,7 +821,7 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
         target.mkdir(parents=True)
         (target / "app_localizations.dart").write_text(
             "// generated localizations\n", encoding="utf-8")
-        shared_paths.review(
+        shared_paths.declare(
             self.root, self.source_worktree, paths=("lib/l10n/arb",),
             watch=("README.md",),
             dispositions=excluded_inventory(self.root, ("lib/l10n/arb",)))
@@ -972,13 +972,13 @@ class TestSharedPathGate(VerificationRepositoryCase):
         with contextlib.redirect_stdout(output):
             self.assertEqual(verify_plan(self.cfg), 1)
         self.assertIn("UNKNOWN", output.getvalue())
-        self.assertIn("assent shared-paths review", output.getvalue())
+        self.assertIn("assent shared-paths declare", output.getvalue())
         # No verifier ran and no receipt was written.
         self.assertFalse(self.counter.exists())
         self.assertFalse(receipt_path(self.cfg).exists())
 
     def test_a_reviewed_profile_provisions_the_source_and_binds_the_digest(self):
-        shared_paths.review(self.root, self.source_worktree,
+        shared_paths.declare(self.root, self.source_worktree,
                             paths=("pkg",), watch=("README.md",),
                             dispositions=excluded_inventory(
                                 self.root, ("pkg",)))
@@ -1000,7 +1000,7 @@ class TestSharedPathGate(VerificationRepositoryCase):
             receipt_report_lines(self.cfg)[0])
 
     def test_reviewed_none_refuses_an_external_ignored_directory_link(self):
-        shared_paths.review(self.root, self.source_worktree,
+        shared_paths.declare(self.root, self.source_worktree,
                             none=True, watch=("README.md",),
                             dispositions=excluded_inventory(self.root))
         external = self.parent / "external pkg"
@@ -1017,13 +1017,13 @@ class TestSharedPathGate(VerificationRepositoryCase):
         diagnostic = output.getvalue()
         self.assertIn("outside its active REVIEWED-NONE profile", diagnostic)
         self.assertIn("Remove the link if it is irrelevant", diagnostic)
-        self.assertIn("assent shared-paths review", diagnostic)
+        self.assertIn("assent shared-paths declare", diagnostic)
         self.assertFalse(self.counter.exists())
         self.assertFalse(receipt_path(self.cfg).exists())
         self.assertEqual(marker.read_text(encoding="utf-8"), "external\n")
 
     def test_a_missing_link_is_recreated_rather_than_depended_on(self):
-        shared_paths.review(self.root, self.source_worktree,
+        shared_paths.declare(self.root, self.source_worktree,
                             paths=("pkg",), watch=("README.md",),
                             dispositions=excluded_inventory(
                                 self.root, ("pkg",)))
@@ -1034,7 +1034,7 @@ class TestSharedPathGate(VerificationRepositoryCase):
         self.assertTrue(pathops.is_link(self.source_worktree / "pkg"))
 
     def test_a_target_changing_during_the_verifier_cannot_pass(self):
-        shared_paths.review(self.root, self.source_worktree,
+        shared_paths.declare(self.root, self.source_worktree,
                             paths=("pkg",), watch=("README.md",),
                             dispositions=excluded_inventory(
                                 self.root, ("pkg",)))

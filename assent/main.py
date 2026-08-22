@@ -1,6 +1,6 @@
-"""Inspect or review the project's shared ignored directories.
+"""Inspect or declare the project's shared ignored directories.
 
-``assent shared-paths review`` is a deliberately narrow operation.  It takes
+``assent shared-paths declare`` is a deliberately narrow operation.  It takes
 either repeated ``--path`` values or an explicit ``--none``, plus the exact
 ``--watch`` files that say when the decision must be reconsidered, validates
 every one of them against the primary worktree and the source snapshot, and only
@@ -16,7 +16,7 @@ A scheduled AI session may not write into the primary worktree by hand; running
 this validated operation is the one way it can settle the shared-path contract.
 
 The parser is built here so the surrounding CLI can attach it, and the module
-also runs standalone (``python -m assent.main shared-paths review ...``).
+also runs standalone (``python -m assent.main shared-paths declare ...``).
 """
 from __future__ import annotations
 
@@ -27,15 +27,15 @@ from pathlib import Path
 from assent import AssentError, gitops, shared_paths
 
 COMMAND = "shared-paths"
-_REVIEW_HELP = """\
-Normally the active Assent AI session runs this after the scheduler reports an
-UNKNOWN or STALE shared-path decision. Run it in the managed source worktree
-whose snapshot is being reviewed. Running it in the primary worktree records a
-profile for that primary snapshot but creates no links there.
+_DECLARE_HELP = """\
+Normally the active Assent AI session runs this after reviewing an UNKNOWN or
+STALE shared-path decision. Run it in the managed source worktree whose snapshot
+the declaration describes. Running it in the primary worktree records a profile
+for that primary snapshot but creates no links there.
 
 Examples:
-  assent shared-paths review --path assets --classify build "build output" --watch package.lock
-  assent shared-paths review --none --classify build "build output" --watch package.lock
+  assent shared-paths declare --path assets --classify build "build output" --watch package.lock
+  assent shared-paths declare --none --classify build "build output" --watch package.lock
 
 --path is a repeatable project-relative ignored directory that compilation or
 testing requires. --classify accounts for every inventory directory that is not
@@ -48,34 +48,34 @@ decision stale. Every inventory directory must be covered exactly once by --path
 
 
 def add_shared_paths_command(sub: argparse._SubParsersAction) -> None:
-    """Attach the read-only status and controlled review operations to a CLI."""
+    """Attach the read-only status and controlled declaration operations."""
     parser = sub.add_parser(
         COMMAND,
-        help="inspect or review the shared ignored directories this project needs")
+        help="inspect or declare the shared ignored directories this project needs")
     operations = parser.add_subparsers(dest="operation", required=True)
     operations.add_parser(
         "status",
         help="show this worktree's shared-path decision and link state",
         description="Inspect this worktree's shared-path state without changing it.")
-    review = operations.add_parser(
-        "review",
-        help="record the reviewed shared directories for this source snapshot",
-        description="Validate and record one shared-directory decision.",
-        epilog=_REVIEW_HELP,
+    declare = operations.add_parser(
+        "declare",
+        help="declare the shared directories required by this source snapshot",
+        description="Validate, record, and apply one shared-directory declaration.",
+        epilog=_DECLARE_HELP,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    review.add_argument(
+    declare.add_argument(
         "--path", action="append", default=[], metavar="DIR",
         help="a project-relative ignored directory this project needs shared "
              "(repeatable)")
-    review.add_argument(
+    declare.add_argument(
         "--none", action="store_true",
         help="record that this snapshot needs no shared directory at all")
-    review.add_argument(
+    declare.add_argument(
         "--classify", action="append", nargs=2, default=[],
         metavar=("PATH", "REASON"),
         help="record why one ignored inventory directory is not shared "
              "(repeatable)")
-    review.add_argument(
+    declare.add_argument(
         "--watch", action="append", default=[], metavar="FILE",
         help="a tracked dependency or build file whose change makes this "
              "decision worth reconsidering (repeatable, required)")
@@ -95,10 +95,10 @@ def _primary_worktree(cwd: Path) -> Path:
     return gitops.main_worktree(cwd)
 
 
-def shared_paths_review(paths: list[str], watch: list[str], none: bool,
-                        classifications: list[list[str]] | None = None,
-                        cwd: Path | None = None) -> int:
-    """Run one validated review from the current working tree.
+def shared_paths_declare(paths: list[str], watch: list[str], none: bool,
+                         classifications: list[list[str]] | None = None,
+                         cwd: Path | None = None) -> int:
+    """Submit one validated declaration from the current working tree.
 
     The worktree the command runs in supplies the source snapshot the profile is
     fingerprinted against and is the tree whose links are reconciled; the primary
@@ -107,7 +107,7 @@ def shared_paths_review(paths: list[str], watch: list[str], none: bool,
     """
     here = Path.cwd() if cwd is None else Path(cwd)
     main = _primary_worktree(here)
-    contract = shared_paths.review(
+    contract = shared_paths.declare(
         main, here, paths=paths, watch=watch, none=none,
         dispositions=tuple(
             shared_paths.PathDisposition(path, reason)
@@ -147,7 +147,7 @@ def shared_paths_status(cwd: Path | None = None) -> int:
         print("Links: not applicable (the primary worktree contains the targets)")
         return 0
     if not contract.settled:
-        print("Links: not evaluated until review settles this decision")
+        print("Links: not evaluated until a declaration settles this decision")
         return 0
     try:
         shared_paths.require_directory_link_agreement(main, here, contract)
@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.operation == "status":
             return shared_paths_status()
-        return shared_paths_review(
+        return shared_paths_declare(
             args.path, args.watch, args.none, args.classify)
     except AssentError as e:
         print(f"Error: {e}", file=sys.stderr)

@@ -483,7 +483,7 @@ def ignored_input_diagnosis(output: str,
         "links and ignored leaf files, never a physical ignored tree.\n"
         "For a required input, place its ordinary Git-ignored target at the "
         "same relative path in the primary worktree, then record it with "
-        "`assent shared-paths review` -- naming the dependency or build file "
+        "`assent shared-paths declare` -- naming the dependency or build file "
         "that made it necessary as a `--watch` value. Assent provisions the "
         "exact junction or directory symlink for later sessions. Do not copy "
         "the tree or hand-create a source-worktree link; neither is reviewed "

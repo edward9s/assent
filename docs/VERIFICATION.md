@@ -70,25 +70,31 @@ receipt is refused rather than ignored.
 ## Automatic repair
 
 Mechanical PASS ends its workflow layer without opening an AI reviewer. Failure
-may enter the next configured reviewer/fixer; the following action rechecks its
-work. The configured arrays are finite.
+may enter the next configured repair role; the following action rechecks its
+work. The default repair roles combine review and repair in one session, while
+custom workflows may separate them. The configured arrays are finite.
 
-Task repair handles one task's failed check or `BLOCKED` evidence. Plan repair
-handles a failed cumulative focused sweep. Integration repair handles a failed
-complete verifier or candidate conflict. These responsibilities do not borrow
-one another's budget.
+Task roles handle one task's failed check. Plan roles handle a failed cumulative
+focused sweep. Integration roles handle exact-selection evidence. Conflict
+evidence already names the conflicting plan and paths, so it does not require
+guessed ownership. A multi-plan verifier failure without mechanical source
+attribution remains a human decision.
 
-If the finite positions end with an unresolved finding, Assent keeps all edits
+If the finite positions end without a pass, Assent keeps all edits
 and evidence and reports `REVIEW UNRESOLVED, HUMAN DECISION`. Failed mechanical
 evidence still blocks acceptance.
 
 ## Conflicts and reconcile
 
 Candidate conflicts happen before the verifier and produce no PASS receipt.
-Automatic integration can repair them inside the configured finite workflow,
-then rebuild and verify the same exact selection.
+During `run`, the configured integration workflow receives the exact conflict
+evidence. For a target-only conflict, Assent prepares a managed source-first
+reconcile worktree. For a peer-only conflict, it identifies the conflicting
+plan's persistent source worktree and supplies the compatible-prefix evidence.
+The AI role edits content; Assent owns Git staging, commits, source transitions,
+candidate reconstruction, and the next `full_verify` action.
 
-For manual repair:
+The explicit manual alternative is:
 
 ```text
 assent reconcile <PLAN>
@@ -103,10 +109,9 @@ refuses unresolved paths, conflict markers, whitespace errors, or unrelated
 edits. It advances the source, not the target, so fresh verification is still
 required. `--abort` removes only clean, re-proven resources.
 
-A single-plan reconcile handles conflict with the current target. A peer-only
-conflict between selected plans needs the compatible predecessors accepted
-first, an explicit rework/reject decision, or the automatic integration repair
-path.
+A manual single-plan reconcile handles conflict with the current target. The
+integration workflow can also repair peer-only conflicts without accepting a
+prefix or changing the exact selection.
 
 ## Shared ignored inputs
 
@@ -121,15 +126,16 @@ The locations have separate responsibilities:
   `.assent/manifest.toml` review cache.
 - A managed source worktree receives same-relative Windows junctions or POSIX
   directory symlinks to those primary targets.
-- `shared-paths review` uses the worktree where it is run as the source snapshot
-  being reviewed and as the destination whose links are reconciled.
+- `shared-paths declare` uses the worktree where it is run as the source snapshot
+  described by the declaration and as the destination whose links are reconciled.
 
 Normally this is automatic. If a matching reviewed profile exists, `run`
 creates the links before starting the AI session. For an `UNKNOWN` or `STALE`
-decision, the session runs `review` inside its managed source worktree. That one
-operation records the profile in the primary manifest and creates the links in
-the source worktree, so its focused test can continue.
-Running `review` in the primary worktree is also valid, but only caches a
+decision, the session reviews the complete inventory and runs `declare` inside
+its managed source worktree. That one operation validates and records the
+declaration in the primary manifest and creates the links in the source
+worktree, so its focused test can continue.
+Running `declare` in the primary worktree is also valid, but only caches a
 profile for that primary snapshot; it creates no link to itself.
 Verification and reconcile apply the same profile to their managed workspaces;
 they never depend on a link left behind by an earlier `run`.
@@ -146,14 +152,15 @@ reported as not applicable because its ordinary directories are the targets.
 It never repairs anything; an unreadable contract or a broken settled link
 returns a nonzero status.
 
-When review is required, run it in the managed source worktree and name the
-tracked dependency or build files whose changes should invalidate the decision:
+After reviewing the listed inventory, submit the declaration from the managed
+source worktree and name the tracked dependency or build files whose changes
+should invalidate the decision:
 
 ```text
-assent shared-paths review --path assets --path pkg --classify build "generated output" --watch package.lock
+assent shared-paths declare --path assets --path pkg --classify build "generated output" --watch package.lock
 ```
 
-Every ordinary ignored directory listed by the review prompt must be covered
+Every ordinary ignored directory listed by the declaration instruction must be covered
 once by a shared `--path` or a non-shared `--classify PATH REASON`; either may
 cover a subtree. Use `--none` when no directory is shared. Ignored leaf files
 remain automatic verifier inputs and do not require classification.
@@ -174,7 +181,7 @@ detaches each provisioned link object without traversing or deleting its target.
 
 If verifier output names a missing path inside an existing ignored directory,
 Assent appends an `Ignored input diagnosis:` note pointing to the
-`shared-paths review` remedy without changing the original exit code.
+`shared-paths declare` remedy without changing the original exit code.
 
 See [Commands](COMMANDS.md) for selection syntax and
 [Operations](OPERATIONS.md) for recovery safety.

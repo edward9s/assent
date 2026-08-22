@@ -6,7 +6,7 @@ This page explains why Assent is structured as it is. It is not an executable
 contract; current behavior belongs to the installed `format.md` and
 `workflow.md` contracts and the source code.
 
-## Minimal context, explicit ownership
+## Minimal context, explicit control boundaries
 
 Each AI should receive the smallest context that lets it act correctly:
 
@@ -22,17 +22,18 @@ AI execution.
 
 ## Mechanical gates before judgment
 
-Scope, dependency, Git ownership, focused tests, candidate construction, and
-complete verification are checked mechanically. AI judgment is used only after
-a configured failure, within a finite workflow. A passing check never spends a
-reviewer session merely to confirm the machine result.
+Task contracts, dependencies, protected control files, Git state, focused
+tests, candidate construction, and complete verification are checked
+mechanically. AI judgment is used only at configured role positions within a
+finite workflow. A passing check never spends a reviewer session merely to
+confirm the machine result.
 
 ## Preserve work, fail closed
 
 Assent keeps edits and evidence across failure and interruption. When it cannot
-prove scope, ownership, or a safe state transition, it stops instead of guessing
-or reverting. Questions that genuinely require human judgment are reported as
-such and do not cancel unrelated queued work.
+prove a control boundary, Git identity, or safe state transition, it stops
+instead of guessing or reverting. Questions that genuinely require human
+judgment are reported as such and do not cancel unrelated queued work.
 
 ## Human acceptance
 

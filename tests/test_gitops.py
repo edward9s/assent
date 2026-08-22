@@ -12,7 +12,7 @@ from unittest import mock
 
 from assent import AssentError, gitops, lockfile, pathops, reconcile
 from assent.gitops import (
-    branches_with_prefix, changes_outside_scope, commit_all, commit_empty,
+    branches_with_prefix, commit_all, commit_empty,
     commit_if_dirty, dirty_paths,
     cleanup_unstarted_worktree, ensure_branch,
     ensure_clean, ensure_worktree, head_ref, resolve_plan_source, restore, tracked_paths,
@@ -489,96 +489,6 @@ class TestTrackedPaths(GitTestCase):
         self.assertEqual(tracked_paths(
             self.root, ".assent/plan01", ref="HEAD"),
             [".assent/plan01/t001_task.e.toml"])
-
-
-class TestChangesOutsideScope(GitTestCase):
-    def test_excluded_paths_are_never_a_scope_violation(self):
-        (self.root / "assent.log").write_text("AI output", encoding="utf-8")
-        self.assertEqual(
-            changes_outside_scope(self.root, [], excludes=("assent.log",)), [])
-
-    def test_new_file_in_scope_not_flagged(self):
-        (self.root / "tests").mkdir()
-        (self.root / "tests" / "t.py").write_text("x", encoding="utf-8")
-        outside = changes_outside_scope(self.root, ["tests/"])
-        self.assertEqual(outside, [])
-
-    def test_exact_new_files_in_wholly_untracked_directory_not_flagged(self):
-        (self.root / "package").mkdir()
-        (self.root / "package" / "one.py").write_text("1", encoding="utf-8")
-        (self.root / "package" / "two.py").write_text("2", encoding="utf-8")
-
-        outside = changes_outside_scope(
-            self.root, ["package/one.py", "package/two.py"])
-
-        self.assertEqual(outside, [])
-        self.assertEqual(
-            dirty_paths(self.root), {"package/one.py", "package/two.py"})
-
-    def test_unscoped_sibling_in_wholly_untracked_directory_is_flagged(self):
-        (self.root / "package").mkdir()
-        (self.root / "package" / "allowed.py").write_text(
-            "ok", encoding="utf-8")
-        (self.root / "package" / "rogue.py").write_text(
-            "no", encoding="utf-8")
-
-        outside = changes_outside_scope(self.root, ["package/allowed.py"])
-
-        self.assertEqual(outside, ["package/rogue.py"])
-
-    def test_new_file_outside_scope_flagged(self):
-        (self.root / "secret.py").write_text("x", encoding="utf-8")
-        outside = changes_outside_scope(self.root, ["tests/"])
-        self.assertIn("secret.py", outside)
-
-    def test_modified_file_outside_scope_flagged(self):
-        (self.root / "README.md").write_text("changed\n", encoding="utf-8")
-        outside = changes_outside_scope(self.root, ["tests/"])
-        self.assertIn("README.md", outside)
-
-    def test_modified_file_inside_scope_not_flagged(self):
-        (self.root / "README.md").write_text("changed\n", encoding="utf-8")
-        outside = changes_outside_scope(self.root, ["README.md"])
-        self.assertEqual(outside, [])
-
-    def test_windows_backslash_scope_normalized(self):
-        (self.root / "workflow").mkdir()
-        (self.root / "workflow" / "gitops.py").write_text("x", encoding="utf-8")
-        outside = changes_outside_scope(self.root, ["workflow\\"])
-        self.assertEqual(outside, [])
-
-    def test_empty_scope_denies_all(self):
-        # Task file has no workflow: scope entry -> scope=[] -> fail-closed, every change
-        # counts as out of scope
-        (self.root / "anything.py").write_text("x", encoding="utf-8")
-        outside = changes_outside_scope(self.root, [])
-        self.assertIn("anything.py", outside)
-
-    def test_non_ascii_filename_not_octal_escaped(self):
-        # core.quotepath=false: Chinese filenames should show directly as UTF-8, not \NNN
-        # octal-escaped
-        (self.root / "測試.py").write_text("x", encoding="utf-8")
-        outside = changes_outside_scope(self.root, ["tests/"])
-        self.assertIn("測試.py", outside)
-
-    def test_since_ref_covers_committed_wip_changes(self):
-        # After a quota-interruption wip checkpoint commits the out-of-scope file, the
-        # working tree is clean; only since_ref lets committed out-of-scope changes "since
-        # the task started" be caught too.
-        start = head_ref(self.root)
-        (self.root / "secret.py").write_text("x", encoding="utf-8")
-        commit_all(self.root, "wip(T1): quota interrupted, progress preserved")
-        self.assertEqual(changes_outside_scope(self.root, ["tests/"]), [])
-        outside = changes_outside_scope(self.root, ["tests/"], since_ref=start)
-        self.assertIn("secret.py", outside)
-
-    def test_since_ref_deduplicates_with_working_tree(self):
-        start = head_ref(self.root)
-        (self.root / "secret.py").write_text("x", encoding="utf-8")
-        commit_all(self.root, "wip: preserved")
-        (self.root / "secret.py").write_text("y", encoding="utf-8")  # changed the same file again
-        outside = changes_outside_scope(self.root, ["tests/"], since_ref=start)
-        self.assertEqual(outside.count("secret.py"), 1)
 
 
 class TestCommitAll(GitTestCase):

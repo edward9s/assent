@@ -76,18 +76,20 @@ assent archive --all
 - `plan` 等所有任務完成或略過後，以 `focused_sweep` 檢查整體成果；
 - `integration` 重建本次明確選取的結果，再執行 `full_verify`。
 
-檢查一通過，該層就立即結束，不會再開 reviewer。失敗時，才會進入下一個
-已設定的 reviewer/fixer，修復後由下一個 action 重新檢查。設定陣列就是全部
+檢查一通過，該層就立即結束，不會再開 repair role。失敗時，才會進入下一個
+已設定的 repair role，並由後續 action 重新檢查。預設 repair role 會在一個
+session 內合併審查與修復；自訂 workflow 仍可使用分離的 role。設定陣列就是全部
 修復次數；Assent 不會自行追加回合。若自動流程無法安全判斷，會保留所有成果，
 並回報 `REVIEW UNRESOLVED, HUMAN DECISION`，交給驗收會議決定。
 
-Task 回報 `BLOCKED` 時仍留在 task 層。Task reviewer 可以在同一個 session
-修正漏列單一路徑之類的小型規劃疏漏，不會消耗 plan review。Plan reviewer 的
-工作不同：它負責確認累積實作是否符合整份計畫。
+Task action 失敗時仍留在 task 層，並依設定的有限 steps 前進。Plan role 的工作
+不同：它負責確認累積實作是否符合整份計畫。
 
-Integration 會維持原本選取的完整計畫集合。遇到 Git 衝突時，它在受管理的
-reconcile worktree 修復，再重新建立並驗證同一組結果；不會偷偷移除某個計畫、
-先接受已通過的前半段，也不會自行執行 `accept`。
+Integration 會維持原本選取的完整計畫集合。Typed Git conflict evidence 會指出
+衝突的 plan 與 paths，因此已設定的 integration role 可以在 scheduler 提供的
+reconcile 或 source worktree 中修復，再由 `full_verify` 重建 candidate。沒有機械式
+source attribution 的 multi-plan verifier failure 才交由人類決定。Assent 不會移除
+某個 plan、先接受已通過的前半段，也不會自行執行 `accept`。
 
 ## 文件
 
@@ -104,7 +106,8 @@ reconcile worktree 修復，再重新建立並驗證同一組結果；不會偷�
 ## 安全邊界
 
 - Assent 會保留失敗或中斷的成果，不會自動還原。
-- Scope 與 ownership 無法證明時會拒絕繼續。
+- AI role 不得修改 task contract、scheduler state、Git state、receipt 或
+  acceptance state。
 - 完整驗證使用臨時 integration candidate，不會變更 target ref。
 - 清理 junction 或 directory symlink 時，絕不穿越外部 target。
 - Worktree 用來隔離與記錄變更，不是安全 sandbox。

@@ -48,7 +48,6 @@ def task_text(status: str) -> str:
         'deps = []\n'
         'model = "lite"\n'
         f'status = "{status}"\n'
-        'scope = ["assent/"]\n'
         'verify = "python -m unittest"\n'
         'goal = "完成任務"\n'
         'acceptance = "驗證通過"\n'
@@ -93,7 +92,9 @@ class PlanSchedulerTestCase(unittest.TestCase):
         self.git_marker = self.root / ".git"
         self.git_marker.mkdir()
         self.config = self.assent_dir / "assent.toml"
-        self.config.write_text(models_block(), encoding="utf-8")
+        self.config.write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def make_plan(self, name: str, status: str = "TODO",

@@ -3,107 +3,80 @@
 *[README](../README.md) · [Traditional Chinese](zh-TW/WORKFLOW.md)*
 
 Assent has three human-facing stages: agree on a plan, run it unattended, and
-review the finished result. The AI reads different material at each stage so it
-does not carry the whole system manual into every task.
+review the result. Each AI session reads only the material needed for its stage.
 
 ## 1. Planning meeting
 
-Start in the primary worktree. The AI reads:
+Start in the primary worktree. Read `AGENTS.md`,
+`~/.assent/instructions.md`, and `~/.assent/format.md`. Read
+`~/.assent/workflow.md` only when changing workflow settings or checking exact
+scheduler behavior. Inspect relevant source and tests as needed.
 
-1. the project's `AGENTS.md`;
-2. `~/.assent/instructions.md` for shared session rules; and
-3. `~/.assent/format.md` for the plan-file format.
+Confirm requirements before writing plan files. After explicit human agreement,
+create `.assent/<PLAN>/tNNN_name.e.toml` tasks. Each task states behavior and a
+focused verification command; it does not predict a write scope.
 
-It reads `~/.assent/workflow.md` only when the meeting changes workflow roles or
-needs exact scheduler behavior. Source and tests are inspected as needed to
-find real ownership and write a complete scope.
-
-First confirm the requirements with the AI; create no files during that
-discussion. After explicit human agreement, ask the AI: “Turn the consensus
-above into an Assent-format plan under `.assent/<PLAN>/`.” The plan consists of
-`tNNN_name.e.toml` tasks. Each task should tell a fresh AI what to change, what
-it may write, and how focused verification decides completion.
-
-Finish with:
-
-```text
-assent check
-```
-
-The plan is ready only when this passes.
-
-### Planning prompt
+Planning prompt:
 
 ```text
 Let's plan this change together. Read AGENTS.md,
 ~/.assent/instructions.md, and ~/.assent/format.md. Answer concisely and do
-not use subagents. Inspect relevant source and tests, and report any source bug,
-bad structure, or documentation/runtime mismatch. Do not overengineer. Confirm
-the requirements with me first; create no files before I explicitly agree.
-After I agree, turn the consensus above into an Assent-format plan under
+not use subagents. Inspect relevant source and tests. Report source bugs, bad
+structure, and documentation/runtime mismatches. Do not overengineer. Confirm
+the requirements first; create no files before I explicitly agree. After I
+agree, turn the consensus above into an Assent-format plan under
 .assent/<PLAN>/ and run assent check.
 ```
 
+The plan is runnable only after `assent check` passes.
+
 ## 2. Unattended execution
 
-`assent run` opens only the AI sessions required by the configured workflow.
-An ordinary task session reads project rules, short shared instructions, and
-its assigned `.e.toml`; it then inspects the relevant source itself. The
-scheduler supplies each role's responsibility and current evidence. The AI does
-not read raw `assent.toml` to guess its job.
+`assent run` executes three finite workflow arrays:
 
-The three workflow layers have separate responsibilities:
+- `task` works on one task; `focused_test` runs that task's command.
+- `plan` works on the cumulative candidate; `focused_sweep` runs the distinct
+  task commands.
+- `integration` reconstructs the exact selection; `full_verify` runs the full
+  project verifier outside AI sessions.
 
-- **Task:** implement one task. A failing focused test or a worker's `BLOCKED`
-  result can enter the task reviewer/fixer. A passing first test skips repair.
-- **Plan:** after every task is `DONE` or `SKIP`, check the cumulative worktree
-  against the whole plan, including interactions between tasks.
-- **Integration:** rebuild the exact selected result and run complete
-  verification. If construction conflicts, repair those conflicts and rebuild
-  the same selection.
+A role session that exits successfully advances one step. A passing action
+completes its layer and skips later roles. A failing action records evidence and
+advances. The configured arrays are the entire automation budget; Assent never
+invents another review or repair round.
 
-Mechanical checks are decision points, not AI opinions. A pass completes the
-layer. A failure may use the next configured repair role and is then rechecked.
-The configured arrays are finite; Assent never creates extra repair rounds.
+Role and ability names have no scheduler meaning. Abilities supply prompt text
+and write authority. A writable role may repair any ordinary candidate file
+needed by the stated requirements. Task contracts, journals, scheduler state,
+Git, receipts, and acceptance remain scheduler-owned.
 
-If shared ignored-directory evidence is unknown or stale, the same plan
-reviewer includes exact shared paths, non-shared dispositions with reasons, and
-watched files in its verdict. Assent validates and applies that decision before
-accepting the verdict; no separate human command or AI session is required.
-Existing same-primary directory links are included in the review evidence, and
-an omitted link is corrected by the same bounded reviewer before the manifest
-changes.
+Sessions run sequentially and do not converse. The scheduler gives each session
+bounded output from earlier roles and exact mechanical action evidence. There
+is no structured verdict, finding ledger, owner routing, path-scope amendment,
+or second repair engine.
 
-Worktree preparation retains an application-recorded link when another cached
-profile omits it and marks the contract stale. During integration repair, the
-configured integration verdict role settles that evidence in one read-only
-shared-input recovery before focused checks run. If an already-damaged profile
-is exposed only when focused output names a file below an omitted ordinary
-ignored directory, the same recovery is the fallback; the scheduler applies
-the validated paths/dispositions/watch decision and retries once. General
-focused failures remain ordinary failures and do not create an extra
-source-repair round.
+Unknown or stale shared ignored-directory evidence adds one bounded declaration
+instruction to a source role. The session reviews the complete inventory and
+submits its decision through `assent shared-paths declare`; Assent validates,
+records, and applies it. This operation is the only writer of the local manifest.
+The following action does not start until the decision is settled; no directory
+is copied or linked by hand.
 
-Task `BLOCKED` evidence remains at the task layer and never spends plan review.
-If a task reviewer finds one omitted scope path, a write-capable reviewer fixes
-that path in the same session; the scheduler validates the edits and updates
-the `.e.toml` task file. Role names are user-defined—permissions and verdict
-behavior come from abilities, not names.
+Integration failures may advance to a configured integration role. Typed Git
+conflict evidence names the conflicting plan and paths; Assent supplies a
+managed reconcile worktree for a target-only conflict or that plan's persistent
+source worktree for a peer-only conflict, then rebuilds the exact candidate. A
+multi-plan verifier failure without mechanical source attribution remains a
+human decision.
 
-If a mechanical check still fails when the budget ends, work and evidence are
-kept. An undecidable review becomes `REVIEW UNRESOLVED, HUMAN DECISION` so other
-queued plans can continue. Infrastructure or safety failures still stop with a
-nonzero result.
+If a finite array ends without a pass, all edits and evidence remain. The
+result is `REVIEW UNRESOLVED, HUMAN DECISION` with exit zero, so unrelated queued
+plans may continue. Infrastructure failure, a refused precondition, or a broken
+safety gate remains nonzero.
 
-Interrupted sessions become resumable WIP checkpoints when ownership is clear.
-A clean legacy `DONE` task is left as history; Assent does not retroactively
-synthesize a terminal auto checkpoint.
-
-An unfinished plan review resumes under the current workflow configuration. If
-its stored reviewer moved to another position or its identity changed, Assent
-keeps the commits and durable findings, resets only the workflow cursor, and
-sends that evidence through the current sequence again. It refuses only when no
-plan-review sequence remains to adjudicate the pending evidence.
+Interruptions and quota waits checkpoint dirty candidate work. A later run
+resumes the persisted cursor and worktree; it does not discard token-burned
+output.
 
 ## 3. Acceptance review
 
@@ -113,47 +86,39 @@ Start with:
 assent report <PLAN>
 ```
 
-Then inspect `_report.md`, the task files and relevant journal entries, the
-checkpoint diff, implementation, and focused/full verification evidence. If
-the report says `TECHNICAL DEBT REVIEW REQUIRED`, read `_technical_debt.md` and
-decide every listed item before accepting.
+Inspect `_report.md`, task requirements, relevant journals, the source diff,
+and verification evidence. Use an independent AI when a second opinion helps,
+but keep the decision human-owned.
 
-Use an independent AI when a second opinion is useful. It should read
-`AGENTS.md`, the three installed contracts, and the evidence above, then inspect
-only the relevant source. The review does not modify or accept anything until
-the human chooses an action.
-
-### Acceptance-review prompt
+Acceptance-review prompt:
 
 ```text
 Act as an independent acceptance reviewer. Answer concisely and do not use
 subagents. Read AGENTS.md and the Assent contracts, then inspect this plan's
-_report.md, relevant task and journal files, checkpoint diff, implementation,
-and verification evidence. Report evidence-based bugs, unmet requirements,
-missing tests, harmful complexity, and documentation/runtime mismatches first.
-If technical debt is flagged, list every item and ask for a disposition. This
-review is human-driven: do not accept, rework, or edit anything. Wait for the
-human decision.
+_report.md, relevant task and journal files, source diff, implementation, and
+verification evidence. Report evidence-based bugs, unmet requirements, missing
+tests, harmful complexity, and documentation/runtime mismatches first. This is
+human-driven: do not accept, rework, or edit anything. Wait for the human
+decision.
 ```
 
 The human then chooses one explicit action:
 
-- `assent accept <PLAN>` publishes receipt-backed work;
-- `assent rework <PLAN> <TASK>` reopens an existing task while preserving code;
+- `assent accept <PLAN>` publishes receipt-backed work.
+- `assent rework <PLAN> <TASK>` reopens an existing task while preserving code.
 - `assent reject <PLAN>` is a confirmed destructive reset: it checkpoints dirty
-  edits, records branch tips, removes the managed worktree and same-prefix
-  branches, then resets started tasks to `TODO`.
+  edits, records branch tips, removes managed worktrees and same-prefix branches,
+  then resets started tasks to `TODO`.
 
-No workflow step accepts a plan. Verification supplies evidence; acceptance is
-the decision.
+No workflow step accepts a plan. Verification supplies evidence; `accept` is
+the human publication decision.
 
 ## Dependencies and stacked work
 
-`after` controls readiness only. `base` alone says that a downstream worktree
-starts from one unaccepted upstream commit. Without `base`, it starts from the
-current integration target. If an upstream changes after downstream work was
-built on it, preserve the downstream result and use rework, rejection, or a new
-plan instead of rewriting history.
+`after` controls readiness. Only `base` allows one unaccepted upstream tip in a
+downstream stack. Without `base`, the plan starts from the current integration
+target. If an upstream changes, preserve downstream work and use rework,
+rejection, or a new plan instead of rewriting history.
 
-See [Commands](COMMANDS.md), [Verification](VERIFICATION.md), and
-[Operations](OPERATIONS.md) for the decisions made around this lifecycle.
+See [Commands](COMMANDS.md), [Configuration](CONFIGURATION.md),
+[Verification](VERIFICATION.md), and [Operations](OPERATIONS.md).

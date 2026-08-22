@@ -149,7 +149,8 @@ class TestHoldLock(unittest.TestCase):
     def test_git_excludes_contains_lockfile(self):
         """Config.git_excludes contains the lock file's relative path (not tracked by git, not part of clean/scope checks)."""
         (self.root / ".assent" / "assent.toml").write_text(
-            models_block(), encoding="utf-8")
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         cfg = load_config(
             self.root / ".assent" / "assent.toml", "parallel01")
         self.assertEqual(cfg.lockfile_rel, ".assent/parallel01/assent.lock")

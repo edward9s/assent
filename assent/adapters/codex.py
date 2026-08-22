@@ -3,12 +3,9 @@ from __future__ import annotations
 
 import json
 import re
-import stat
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from assent import AssentError, auto_fix
 from assent.adapters import (Adapter, TaskResult, TokenUsage,
                              is_authentication_failure_text,
                              is_checkpoint_resume_line, normalize_token_usage,
@@ -34,19 +31,13 @@ _BILLING_TEXT_RE = re.compile(
 
 
 def build_command(cfg: "Config", prompt: str, requested_model: str,
-                  requested_effort: str | None, *,
-                  output_schema: Path | None = None,
-                  output_last_message: Path | None = None) -> list[str]:
+                  requested_effort: str | None) -> list[str]:
     """Build a Codex command whose prompt is supplied through stdin."""
     cmd = [cfg.codex_command, "exec", "--json", "--color", "never",
            "--model", requested_model]
     if requested_effort:
         cmd += ["-c", f'model_reasoning_effort="{requested_effort}"']
     cmd += list(cfg.codex_extra_args)
-    if output_schema is not None:
-        cmd += ["--output-schema", str(output_schema)]
-    if output_last_message is not None:
-        cmd += ["--output-last-message", str(output_last_message)]
     cmd.append("-")
     return cmd
 
@@ -278,58 +269,6 @@ def _extract_last_agent_message(output: str) -> str | None:
     return response
 
 
-def _path_is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-    except ValueError:
-        return False
-    return True
-
-
-def _transport_is_external(directory: Path, cwd: Path,
-                           cfg: "Config") -> bool:
-    """Keep provider-owned transport files outside every project tree in this run."""
-    candidates = [Path(cwd), Path(cfg.root), Path(cfg.assent_dir)]
-    source_root = getattr(cfg, "source_root", None)
-    if source_root is not None:
-        candidates.append(Path(source_root))
-    resolved = directory.resolve()
-    return all(
-        not _path_is_within(resolved, candidate.resolve())
-        for candidate in candidates
-    )
-
-
-def _read_last_message(path: Path) -> tuple[str | None, str | None]:
-    """Read one bounded UTF-8 Codex final-message file without following a link object."""
-    try:
-        info = path.stat(follow_symlinks=False)
-    except FileNotFoundError:
-        return None, (
-            "Codex structured output is missing: --output-last-message did not "
-            f"create {path}")
-    except OSError as e:
-        return None, f"Codex structured output is unreadable: {path}: {e}"
-    if path.is_symlink() or not stat.S_ISREG(info.st_mode):
-        return None, f"Codex structured output is not a regular file: {path}"
-    try:
-        with path.open("rb") as handle:
-            data = handle.read(auto_fix.MAX_REVIEW_OUTPUT_BYTES + 1)
-    except OSError as e:
-        return None, f"Codex structured output is unreadable: {path}: {e}"
-    if len(data) > auto_fix.MAX_REVIEW_OUTPUT_BYTES:
-        return None, (
-            "Codex structured output exceeds the "
-            f"{auto_fix.MAX_REVIEW_OUTPUT_BYTES}-byte limit: {path}")
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as e:
-        return None, f"Codex structured output is not valid UTF-8: {path}: {e}"
-    if not text.strip():
-        return None, f"Codex structured output is empty: {path}"
-    return text, None
-
-
 class CodexAdapter(Adapter):
     def __init__(self, cfg: "Config") -> None:
         self.cfg = cfg
@@ -344,37 +283,6 @@ class CodexAdapter(Adapter):
             self.cfg, prompt, requested_model, requested_effort)
         return self._run_command(command, prompt, cwd)
 
-    def run_structured_task(self, prompt: str, requested_model: str,
-                            requested_effort: str | None,
-                            cwd: Path) -> TaskResult:
-        """Run a Codex-only native transport; Assent still owns parsing and validation."""
-        with tempfile.TemporaryDirectory(prefix="as-") as temporary:
-            transport = Path(temporary)
-            if not _transport_is_external(transport, cwd, self.cfg):
-                raise AssentError(
-                    "Codex structured-output transport directory must be outside "
-                    f"the project and worktree: {transport}")
-            schema_path = transport / "s.json"
-            last_message_path = transport / "m.txt"
-            schema_path.write_text(
-                json.dumps(auto_fix.review_record_schema(),
-                           ensure_ascii=True, separators=(",", ":")),
-                encoding="utf-8", newline="\n")
-            command = build_command(
-                self.cfg, prompt, requested_model, requested_effort,
-                output_schema=schema_path,
-                output_last_message=last_message_path)
-            returncode, output, stalled = run_subprocess(
-                command, cwd,
-                self.cfg.stall_minutes * 60 if self.cfg.stall_minutes else 0,
-                echo=self._echo_line, input_text=prompt)
-            structured_output, structured_error = _read_last_message(
-                last_message_path)
-            return self._make_result(
-                returncode, output, stalled,
-                structured_output=structured_output,
-                structured_output_error=structured_error)
-
     def _run_command(self, command: list[str], prompt: str,
                      cwd: Path) -> TaskResult:
         stall_seconds = self.cfg.stall_minutes * 60 if self.cfg.stall_minutes else 0
@@ -383,9 +291,8 @@ class CodexAdapter(Adapter):
             input_text=prompt)
         return self._make_result(returncode, output, stalled)
 
-    def _make_result(self, returncode: int, output: str, stalled: bool, *,
-                     structured_output: str | None = None,
-                     structured_output_error: str | None = None) -> TaskResult:
+    def _make_result(self, returncode: int, output: str,
+                     stalled: bool) -> TaskResult:
         exhausted = (
             not stalled and returncode != 0 and parse_output_for_quota(output))
         billing = (not stalled and not exhausted and returncode != 0
@@ -393,7 +300,7 @@ class CodexAdapter(Adapter):
         authentication = (not stalled and not exhausted and not billing
                           and returncode != 0
                           and parse_output_for_authentication(output))
-        response = structured_output or _extract_last_agent_message(output)
+        response = _extract_last_agent_message(output)
         terminal_record = (
             parse_checkpoint_resume_output(output, returncode, stalled)
             or (response is not None and parse_checkpoint_resume_output(
@@ -412,8 +319,6 @@ class CodexAdapter(Adapter):
                           quota_exhausted=exhausted, reset_at=None,
                           stalled=stalled, checkpoint_resume=checkpoint_resume,
                           failure_kind=failure_kind,
-                          structured_output=structured_output,
-                          structured_output_error=structured_output_error,
                           usage=parse_output_for_usage(output))
 
     @staticmethod

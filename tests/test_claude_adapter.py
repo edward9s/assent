@@ -1,7 +1,7 @@
 """claude adapter tests: command construction, the watchdog, quota detection, tier resolution.
 
 Everything uses a fake subprocess (sys.executable -c ...) or feeds strings directly to pure
-functions — never a real claude CLI, never the network (ground rule 4). The real CLI was
+functions �X never a real claude CLI, never the network (ground rule 4). The real CLI was
 probed once to record a fixture; see stream_json_ok.txt.
 """
 import hashlib
@@ -22,7 +22,7 @@ from assent.adapters.claude import (
     ClaudeAdapter, build_command, format_stream_event, parse_output_for_billing,
     parse_output_for_quota, parse_output_for_usage, run_subprocess)
 from assent.adapters.process import clear_stop_wake, wake_stop_waiters
-from assent.config import Config
+from assent.config import Config, WorkflowActionStep
 from tests.engine_support import TEST_MODEL_TIERS
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -33,6 +33,7 @@ def make_cfg(**overrides) -> Config:
     the fixture's own; assertions below name their values directly."""
     base = dict(root=Path("."), assent_dir=Path("./.assent"),
                 tasks_dir=Path("./.assent/plan01"), tasks_name="plan01",
+                workflow_task=(WorkflowActionStep("focused_test"),),
                 claude_models=dict(TEST_MODEL_TIERS["claude"]))
     base.update(overrides)
     return Config(**base)
@@ -116,7 +117,7 @@ class TestParseQuota(unittest.TestCase):
         # the older regex used to miss
         line = json.dumps({"type": "assistant", "message": {"content": [
             {"type": "text",
-             "text": "You've hit your session limit · resets 4am (Asia/Taipei)"}]}})
+             "text": "You've hit your session limit �P resets 4am (Asia/Taipei)"}]}})
         exhausted, _ = parse_output_for_quota(line + "\n")
         self.assertTrue(exhausted)
 
@@ -250,7 +251,7 @@ class TestRunSubprocess(unittest.TestCase):
         self.assertIn("still here", out)
 
     def test_large_utf8_input_is_delivered_exactly_while_output_streams(self):
-        payload = ("ASCII line\n臺灣 mixed\r\n" * 12_000)
+        payload = ("ASCII line\n�O�W mixed\r\n" * 12_000)
         expected = payload.encode("utf-8")
         script = (
             "import hashlib, sys\n"
@@ -357,11 +358,11 @@ class TestFormatStreamEvent(unittest.TestCase):
         # The assistant text is opaque upstream fixture data (Chinese kept on purpose to
         # prove Unicode passthrough); it must render verbatim, never translated.
         line = json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "我先讀計畫檔"},
+            {"type": "text", "text": "�ڥ�Ū�p�e��"},
             {"type": "tool_use", "name": "Read",
              "input": {"file_path": "C:\\plans\\TEST_PLAN.md"}}]}})
         rendered = format_stream_event(line)
-        self.assertIn("AI| 我先讀計畫檔", rendered)
+        self.assertIn("AI| �ڥ�Ū�p�e��", rendered)
         self.assertIn("Tool| Read C:\\plans\\TEST_PLAN.md", rendered)
 
     def test_result_shows_output_tokens(self):
@@ -572,38 +573,8 @@ class TestRunTask(unittest.TestCase):
         self.assertFalse(result.quota_exhausted)
         self.assertIsNone(result.failure_kind)
 
-    def test_structured_task_extracts_result_event_text_not_raw_stream(self):
-        final = '{"type":"assent.auto_fix_review","verdict":"PASS","findings":[]}'
-        stream = (
-            json.dumps({"type": "system", "subtype": "init"}) + "\n"
-            + json.dumps({"type": "assistant", "message": {"content": [
-                {"type": "text", "text": final}]}}) + "\n"
-            + json.dumps({"type": "result", "subtype": "success",
-                         "result": final}) + "\n")
-        self.patch_run(lambda *args, **kwargs: (0, stream, False))
-        result = ClaudeAdapter(make_cfg()).run_structured_task(
-            "p", "opus", "medium", Path("."))
-        self.assertEqual(result.output, stream)
-        self.assertEqual(result.structured_output, final)
-        self.assertIsNone(result.structured_output_error)
 
-    def test_structured_task_errors_when_no_result_event_is_present(self):
-        stream = json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "no terminal result event here"}]}}) + "\n"
-        self.patch_run(lambda *args, **kwargs: (0, stream, False))
-        result = ClaudeAdapter(make_cfg()).run_structured_task(
-            "p", "opus", "medium", Path("."))
-        self.assertIsNone(result.structured_output)
-        self.assertIsNotNone(result.structured_output_error)
 
-    def test_structured_task_errors_when_result_field_is_blank(self):
-        stream = json.dumps({"type": "result", "subtype": "success",
-                             "result": "   "}) + "\n"
-        self.patch_run(lambda *args, **kwargs: (0, stream, False))
-        result = ClaudeAdapter(make_cfg()).run_structured_task(
-            "p", "opus", "medium", Path("."))
-        self.assertIsNone(result.structured_output)
-        self.assertIsNotNone(result.structured_output_error)
 
 
 class TestGetAdapter(unittest.TestCase):

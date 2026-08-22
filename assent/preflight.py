@@ -25,8 +25,7 @@ from pathlib import Path
 
 from assent import AssentError, gitops
 from assent.adapters import Adapter, InvocationRequest, get_adapter
-from assent.config import (Config, WorkflowActionStep, WorkflowPlanStep,
-                           WorkflowTaskStep)
+from assent.config import Config, WorkflowActionStep, WorkflowTaskStep
 from assent.plandeps import PlanBaseResolution, resolve_plan_base
 from assent.modeling import effort_identity, has_literal
 from assent.plan import Plan, Task, TaskWorkflowAction
@@ -59,14 +58,14 @@ def resolve_selection(cfg: Config, model: str,
     the selection stated none and the vendor CLI default applies.
     """
     return cfg.adapter_settings(
-        adapter_name or cfg.adapter_name).resolve(model)
+        adapter_name or cfg.adapter_names[0]).resolve(model)
 
 
 def resolve_session(cfg: Config, adapter: Adapter, task: Task,
                     adapter_name: str | None = None) -> SessionIdentity:
     """Resolve the identity before starting the adapter; the same result feeds the prompt,
     journal, and CLI command."""
-    name = adapter_name or cfg.adapter_name
+    name = adapter_name or cfg.adapter_names[0]
     requested_model, requested_effort = resolve_selection(cfg, task.model, name)
     return SessionIdentity(
         agent=name,
@@ -83,15 +82,7 @@ def literal_adapter_errors(cfg: Config, task: Task) -> list[str]:
         profiles.append((label, role.model or task.model, adapters))
 
     workflow = task.workflow if task.workflow is not None else cfg.workflow_task
-    if workflow is None:
-        profiles.append(("task profile", task.model, cfg.adapter_names))
-    elif not workflow:
-        for index, step in enumerate(cfg.workflow_plan):
-            if isinstance(step, WorkflowActionStep):
-                continue
-            add(f"workflow.plan[{index}] role {step.role!r}",
-                step.resolved_role, step.adapters)
-    elif task.workflow is None:
+    if task.workflow is None:
         for index, step in enumerate(workflow):
             if isinstance(step, WorkflowActionStep):
                 continue
@@ -131,7 +122,7 @@ def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
     Only tasks that can still run are resolved: a settled task will not open a session, and
     refusing a run because of a mapping a finished task once used would be noise.
     """
-    name = adapter_name or cfg.adapter_name
+    name = adapter_name or cfg.adapter_names[0]
     requests: list[InvocationRequest] = []
     for task in plan.tasks:
         if task_id is not None and task.id != task_id:
@@ -141,12 +132,33 @@ def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
         literal_errors = literal_adapter_errors(cfg, task)
         if literal_errors:
             raise AssentError("; ".join(literal_errors))
-        requested_model, requested_effort = resolve_selection(
-            cfg, task.model, name)
-        requests.append(InvocationRequest(
-            task_id=task.id, model=task.model,
-            requested_model=requested_model,
-            requested_effort=requested_effort))
+        workflow = (cfg.workflow_task if task.workflow is None
+                    else task.workflow)
+        profiles: list[tuple[str, str, tuple[str, ...]]] = []
+        if task.workflow is None:
+            profiles.extend(
+                (f"{task.id} workflow.task[{index}]",
+                 step.resolved_role.model or task.model,
+                 step.adapters or cfg.adapter_names)
+                for index, step in enumerate(workflow)
+                if not isinstance(step, WorkflowActionStep))
+        else:
+            for index, entry in enumerate(workflow):
+                if isinstance(entry, TaskWorkflowAction):
+                    continue
+                role = cfg.resolve_role(str(entry))
+                profiles.append((
+                    f"{task.id} workflow[{index}]",
+                    role.model or task.model, cfg.adapter_names))
+        for label, model, candidates in profiles:
+            if name not in candidates:
+                continue
+            requested_model, requested_effort = resolve_selection(
+                cfg, model, name)
+            requests.append(InvocationRequest(
+                task_id=label, model=model,
+                requested_model=requested_model,
+                requested_effort=requested_effort))
     return requests
 
 
@@ -165,101 +177,6 @@ def capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
     except AssentError as e:
         return [str(e)]
     return adapter.preflight(requests)
-
-
-def _review_round_session(cfg: Config, review, adapter: Adapter,
-                          adapter_name: str) -> SessionIdentity:
-    """Resolve one reviewer candidate through its adapter-specific mappings."""
-    requested_model, requested_effort = resolve_selection(
-        cfg, review.model, adapter_name)
-    return SessionIdentity(
-        agent=adapter_name,
-        requested_model=requested_model,
-        requested_effort=requested_effort,
-    )
-
-
-def resolve_auto_fix_review_session(cfg: Config,
-                                    adapter: Adapter) -> SessionIdentity:
-    """Resolve the first verdict-producing plan review step."""
-    steps = [step for step in cfg.workflow_plan
-             if isinstance(step, WorkflowPlanStep) and step.produces_verdict]
-    if not steps:
-        raise AssentError("Auto-fix plan review is not configured")
-    return _review_round_session(cfg, steps[0], adapter, steps[0].adapter)
-
-
-def auto_fix_review_capability_errors(
-        cfg: Config, adapter: Adapter) -> tuple[SessionIdentity | None, list[str]]:
-    """Preflight every distinct configured reviewer adapter, not only the first round's.
-
-    A later round naming an adapter this machine cannot invoke is then caught before the
-    run starts, instead of only when that round is finally reached.
-    """
-    rounds = [step for step in cfg.workflow_plan
-              if isinstance(step, WorkflowPlanStep) and step.produces_verdict]
-    if not rounds:
-        return None, []
-    try:
-        by_identity: dict[tuple[str, str, str], tuple[object, Adapter]] = {}
-        for review in rounds:
-            for name in review.adapters:
-                round_adapter = (adapter if name == rounds[0].adapter
-                                 else get_adapter(name, cfg))
-                identity = _review_round_session(
-                    cfg, review, round_adapter, name)
-                by_identity.setdefault(
-                    (name, identity.requested_model,
-                     identity.requested_effort or ""),
-                    (review, round_adapter))
-        errors: list[str] = []
-        session = resolve_auto_fix_review_session(cfg, adapter)
-        for (name, _model, _effort), (review, round_adapter) in by_identity.items():
-            identity = _review_round_session(
-                cfg, review, round_adapter, name)
-            request = InvocationRequest(
-                task_id=f"{cfg.tasks_name}/plan-review",
-                model=review.model,
-                requested_model=identity.requested_model,
-                requested_effort=identity.requested_effort,
-            )
-            for message in round_adapter.preflight([request]):
-                errors.append(message if len(by_identity) == 1
-                              else f"{name}: {message}")
-    except AssentError as e:
-        return None, [str(e)]
-    return session, errors
-
-
-def resolve_auto_fix_fixer_session(
-        cfg: Config, adapter: Adapter, adapter_name: str,
-        model: str) -> SessionIdentity:
-    """Resolve one bounded fixer profile through the normal settings tables."""
-    requested_model, requested_effort = resolve_selection(
-        cfg, model, adapter_name)
-    return SessionIdentity(
-        agent=adapter_name,
-        requested_model=requested_model,
-        requested_effort=requested_effort,
-    )
-
-
-def auto_fix_fixer_capability_errors(
-        cfg: Config, adapter: Adapter, adapter_name: str, model: str
-        ) -> tuple[SessionIdentity | None, list[str]]:
-    """Resolve and preflight one write-capable bounded repair invocation."""
-    try:
-        session = resolve_auto_fix_fixer_session(
-            cfg, adapter, adapter_name, model)
-        request = InvocationRequest(
-            task_id=f"{cfg.tasks_name}/auto-fix",
-            model=model,
-            requested_model=session.requested_model,
-            requested_effort=session.requested_effort,
-        )
-    except AssentError as e:
-        return None, [str(e)]
-    return session, adapter.preflight([request])
 
 
 # --------------------------------------------------------------------------- #

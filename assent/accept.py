@@ -11,19 +11,25 @@ paths -- the explicit selected ``accept A B``, the batch release, and
 dependency runs that way only, so either safety-sensitive path can be read and
 changed without loading the other.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Sequence
 
-from assent import AssentError, auto_fix, gitops, verification
+from typing import Sequence
+
+from assent import AssentError, gitops, verification
+
 from assent.config import Config
+
 from assent.plan_source import COMPLETE_STATUSES, resolve_source_snapshot
+
 from assent.plandeps import (infer_plan_completion, live_upstreams,
                                parse_plan_dependencies)
-from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
-from assent.plan import Plan
 
+from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
+
+from assent.plan import Plan
 
 def dependency_tip(main: Path, plan_name: str,
                    excludes: Sequence[str] = ()) -> tuple[str | None, str | None]:
@@ -49,12 +55,10 @@ def dependency_tip(main: Path, plan_name: str,
         return None, f"its current source is ambiguous ({', '.join(branches)})"
     return gitops.branch_tip(main, branches[0]), None
 
-
 def _refresh_message(plan_name: str, reason: str) -> str:
     return (f"accept {plan_name}: refused, {reason}. Run `assent verify {plan_name}` "
             "to refresh the verification receipt unattended; accept never runs "
             "the full verifier")
-
 
 def accept_merge_message(target_branch: str, plan_name: str, source_branch: str,
                          source_tip: str, verified_tree: str,
@@ -71,112 +75,20 @@ def accept_merge_message(target_branch: str, plan_name: str, source_branch: str,
         subject, plan_name, source_branch, source_tip, verified_tree,
         verifier_sha256)
 
-
 def cleanup_warning(path: Path, branch: str, error: AssentError) -> None:
     print(f"warning: {error}")
     print("warning: acceptance cleanup may require manual recovery:")
     print(f"  temporary ref:  refs/heads/{branch}")
     print(f"  temporary path: {path}")
 
-
-def _self_fixed_reason(plan_name: str, outcome: auto_fix.SelfFixedOutcome
-                       ) -> tuple[str, list[str]]:
-    """Describe the missing independent confirmation a human is asked to supply."""
-    return "SELF-FIXED, UNREVIEWED", [
-        f"  self-fixed round: {outcome.round_index + 1} of "
-        f"{outcome.rounds_used} "
-        f"({outcome.adapter}/{outcome.model}/{outcome.effort}); "
-        "no later configured round confirmed the repair",
-        "  Every task passed its own focused gate and the PASSED receipt "
-        f"matches, but no independent review confirmed the last repair. See "
-        f".assent/{plan_name}/_report.md for the findings it repaired."]
-
-
-def _unresolved_reason(plan_name: str, state: auto_fix.AutoFixState,
-                       outcome: auto_fix.UnresolvedReviewOutcome
-                       ) -> tuple[str, list[str]]:
-    """Describe every finding the human is being asked to overrule, not a count.
-
-    The round list ended on blockers no round repaired, so the decision is the
-    findings themselves.  A human cannot consent to a decision they cannot see,
-    so each one is printed with its task, path and summary.
-    """
-    ledger = {item.fingerprint: item for item in state.findings}
-    lines = [f"  unresolved review round: {outcome.round_index + 1} of "
-             f"{outcome.rounds_used} "
-             f"({outcome.adapter}/{outcome.model}/{outcome.effort}); "
-             f"{len(outcome.finding_fingerprints)} finding(s) no configured "
-             "round resolved:"]
-    for fingerprint in outcome.finding_fingerprints:
-        finding = ledger[fingerprint]
-        lines.append(f"    - {finding.task_id or 'unassigned'} "
-                     f"{finding.path}: {finding.summary}")
-    lines.append(
-        "  Every task keeps the status its own closeout gave it and the PASSED "
-        "receipt matches, but the findings above were never resolved. See "
-        f".assent/{plan_name}/_report.md.")
-    return "REVIEW UNRESOLVED, HUMAN DECISION", lines
-
-
-def _settled_reasons(plan_name: str, state: auto_fix.AutoFixState
-                     ) -> tuple[list[str], list[str]]:
-    """Collect every settled outcome a human must overrule, as one decision."""
-    reasons: list[tuple[str, list[str]]] = []
-    if state.self_fixed_unreviewed is not None:
-        reasons.append(_self_fixed_reason(plan_name, state.self_fixed_unreviewed))
-    if state.unresolved_review is not None:
-        reasons.append(
-            _unresolved_reason(plan_name, state, state.unresolved_review))
-    labels = [label for label, _lines in reasons]
-    lines = [line for _label, reason in reasons for line in reason]
-    return labels, lines
-
-
-def _confirm_settled(plan_name: str, labels: list[str], lines: list[str],
-                     confirm: Callable[[str], str] | None) -> bool:
-    """Ask once before publishing a plan the finite review loop never settled.
-
-    The receipt-based evidence is complete, so this is not a refusal: what is
-    missing is a decision only a human can make, whether that is the
-    confirmation the round list ran out of, findings no round resolved, or
-    both.  Two prompts for one decision train a human to answer without
-    reading, so every reason is named in one prompt.  Anything other than
-    exactly "y"/"Y", including EOF (no TTY or closed stdin), declines.
-    """
-    print(f"accept {plan_name}: the plan auto-fix state is "
-          f"{' and '.join(labels)}.")
-    for line in lines:
-        print(line)
-    ask = confirm if confirm is not None else input
-    try:
-        answer = ask("Publish it anyway? [y/N]: ")
-    except EOFError:
-        answer = ""
-    return answer.strip().lower() == "y"
-
-
-def _settled_state(cfg: Config) -> auto_fix.AutoFixState | None:
-    """Read the settled auto-fix outcome from deletable plan runtime memory."""
-    path = auto_fix.auto_fix_state_path(cfg)
-    if not path.is_file():
-        return None
-    try:
-        return auto_fix.read_auto_fix_state(path)
-    except AssentError:
-        # The state file is derived, deletable memory, never acceptance
-        # evidence: a malformed record cannot manufacture a second gate on a
-        # plan whose receipt evidence is complete.
-        return None
-
-
-def accept_plan(cfg: Config, confirm: Callable[[str], str] | None = None) -> int:
+def accept_plan(cfg: Config) -> int:
     """Accept exactly ``cfg.tasks_name``; return zero only on proven success."""
     plan_name = cfg.tasks_name
     try:
         # This order is part of the concurrency contract and must remain fixed.
         with hold_integration_lock(cfg.assent_dir):
             with hold_lock(cfg.tasks_dir, plan_name):
-                return _accept_locked(cfg, confirm)
+                return _accept_locked(cfg)
     except LockBusy as e:
         print(f"accept {plan_name}: refused ({e})")
         return 1
@@ -184,9 +96,7 @@ def accept_plan(cfg: Config, confirm: Callable[[str], str] | None = None) -> int
         print(f"accept {plan_name}: failed ({e})")
         return 1
 
-
-def _accept_locked(cfg: Config,
-                   confirm: Callable[[str], str] | None = None) -> int:
+def _accept_locked(cfg: Config) -> int:
     """Rebuild and publish an exact receipt-backed integration candidate."""
     plan_name = cfg.tasks_name
 
@@ -293,19 +203,6 @@ def _accept_locked(cfg: Config,
         print(_refresh_message(
             plan_name, "the reviewed shared inputs changed since verification"))
         return 1
-
-    # The last gate before the merge, and the only one a human can answer: every
-    # receipt-based check above already passed, so a decline here is a human
-    # withholding the confirmation the finite review loop never produced.
-    settled = _settled_state(cfg)
-    if settled is not None:
-        labels, lines = _settled_reasons(plan_name, settled)
-        if labels and not _confirm_settled(plan_name, labels, lines, confirm):
-            print(f"accept {plan_name}: refused, publishing a "
-                  f"{' and '.join(labels)} plan was not confirmed; nothing "
-                  "was merged and no Git state changed. Review it, then run "
-                  f"`assent accept {plan_name}` again and answer y to publish it")
-            return 1
 
     message = accept_merge_message(
         target_branch, plan_name, source_branch, source_tip,

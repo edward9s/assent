@@ -28,17 +28,14 @@ external Git process.
 
 ## Interruption and recovery
 
-Assent preserves work after retryable failure, quota interruption, Ctrl+C, or a
-crash. Before a writable plan reviewer starts, Assent records its exact plan
-scope. The next run gathers interrupted output inside that boundary into a
-`WIP` checkpoint and continues without a recovery AI session. Task-session
-output receives the same treatment when it is attributable to one resumable
-task. If ownership is ambiguous or out of scope, the dirty worktree remains for
-human inspection and the run refuses.
+Assent preserves work after adapter failure, quota interruption, Ctrl+C, or a
+crash. Before a role or scheduler action starts, it checkpoints dirty candidate
+work. A later run gathers a dirty managed plan worktree into a `WIP` checkpoint
+and resumes the persisted workflow cursor without a recovery AI session.
 
-If an AI writes into the primary worktree by mistake, Assent ports the edits
-back only when every path is in scope and the transfer is unambiguous. Otherwise
-it preserves both trees and asks for human recovery.
+If an AI writes into the primary worktree, the before/after boundary check
+refuses the role. Assent preserves both trees for human recovery and never
+guesses how to transfer or discard those edits.
 
 Journals retain structured events and bounded summaries, not the full raw
 adapter stream. The terminal log keeps rendered session output without adding a

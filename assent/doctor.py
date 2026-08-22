@@ -16,7 +16,7 @@ from pathlib import Path
 
 from assent import AssentError, gitops
 from assent.adapters import get_adapter
-from assent.config import Config
+from assent.config import Config, WorkflowActionStep
 from assent.lockfile import LockBusy, hold_integration_lock
 
 _MIN_PYTHON = (3, 11)
@@ -108,6 +108,7 @@ def _placeholder_config() -> Config:
         assent_dir=assent_dir,
         tasks_dir=assent_dir / "doctor",
         tasks_name="doctor",
+        workflow_task=(WorkflowActionStep("focused_test"),),
     )
 
 

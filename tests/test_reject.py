@@ -46,7 +46,9 @@ class TestReject(unittest.TestCase):
         self.tasks_dir = self.root / ".assent" / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.root / ".assent" / "assent.toml"
-        self.config_path.write_text(models_block(), encoding="utf-8")
+        self.config_path.write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         (self.tasks_dir / "assent.lock").write_text(
             'plan = "plan01"\n', encoding="utf-8")
         self.cfg = load_config(self.config_path, self.plan_name)
@@ -65,7 +67,6 @@ class TestReject(unittest.TestCase):
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
-            'scope = ["assent/"]\n'
             'verify = "python -m unittest"\n'
             'goal = "finish task"\n'
             'acceptance = "verification passes"\n',
@@ -137,7 +138,6 @@ class TestReject(unittest.TestCase):
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
-            'scope = ["assent/"]\n'
             'verify = "python -m unittest"\n'
             'goal = "finish task"\n'
             'acceptance = "verification passes"\n',

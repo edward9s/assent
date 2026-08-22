@@ -5,7 +5,7 @@
 assent — an AI plan format plus an automatic scheduler. Pure Python 3.11+
 (standard library only, tomllib), Windows-first and cross-platform. CLI
 subcommands: run / status / check / report / verify / clean / accept /
-reconcile / reject / rework / archive / init / doctor.
+reconcile / reject / rework / archive / init / doctor / shared-paths.
 Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
 
 This file governs development of the assent project itself. Rules followed
@@ -14,6 +14,14 @@ while operating an assent-managed session live in
 
 ## Permanent constraints
 
+- Reliability by construction is the highest architectural principle: use the
+  smallest architecture and fewest states that make invalid behavior difficult
+  to form. Prefer removing a failure mode over detecting, tracking, routing, or
+  recovering from it. Tests protect necessary behavior; they do not justify
+  avoidable control paths.
+- Semantic precision shares that priority: one term names one actual mechanism,
+  and no name implies a capability Assent does not provide. Prefer the domain's
+  existing concrete term over a synonym, alias, metaphor, or historical name.
 - Unattended completion, human adjudication: the scheduler decides everything
   it can decide without a human, and routes what it cannot decide to the human
   acceptance meeting as `_report.md` evidence. A question the scheduler cannot
@@ -71,8 +79,16 @@ while operating an assent-managed session live in
   External link targets survive success, refusal, failure, interruption, and
   retry. If inventory, ownership, or detachment cannot be proven, cleanup
   refuses and retains the managed path for an Assent-owned retry.
-- The fail-closed scope check is a safety floor; its meaning must not be
-  relaxed.
+- AI workflow sessions may edit ordinary candidate source, tests,
+  configuration, and documentation when writable. They never edit task
+  contracts, journals, scheduler state, receipts, Git state, or acceptance
+  state. Protect this small control surface directly; do not recreate task
+  path scopes or inferred ownership.
+- Every writable repair role treats the authoritative requirements as the
+  source of truth, determines whether each defect is in the tests or the
+  implementation, and corrects whichever is wrong. It preserves correct tests
+  and never weakens, narrows, deletes, rewrites, bypasses, or mocks them merely
+  to make a check pass.
 - Every explicitly named live plan selection is audited in full before
   dispatch: each stated name, including a prefix before `...`, must resolve to
   an existing `.assent/` directory containing a formal `tNNN_name.e.toml` task
@@ -91,33 +107,29 @@ while operating an assent-managed session live in
 - During `assent run`, the configured `task`, `plan`, and `integration`
   workflow arrays are always active. An explicit `assent verify` instead runs
   only the requested mechanical verification and never enters a workflow role
-  or automatic repair. The scheduler actions are `focused_test`, `focused_sweep` (the
-  distinct union of task verify commands without a receipt), and `full_verify`
-  (the reconstructed candidate and receipt). A passing action completes that
-  layer without an AI reviewer; a failing action advances to the next configured
-  reviewer/fixer and then rechecks. A writable verdict role completes review and
-  repair in its one session, including an exact mechanically valid scope omission:
-  it repairs that exact path and returns `FIXED` plus the amendment, then the
-  scheduler validates the pre-session path state and complete write set before
-  mutating the task contract at closeout. A read-only verdict role may instead
-  return the exact amendment for its separately configured fixer. Only the
-  scheduler may mutate task state, task contracts, or Git state. A task role
-  that self-marks `BLOCKED` stays within `workflow.task` and advances to its
-  configured verdict/repair role; an incomplete task never consumes
-  `workflow.plan`. Task-review abilities handle one task's local failure, while
-  plan-review abilities check the completed cumulative worktree against the
-  plan. The engine derives behavior from workflow position and abilities, never
-  from role or ability names. Repair may reopen only existing implicated tasks.
-  Eligible pre-existing technical debt may
-  originate only in the initial completed-plan review, must stay visible for the
-  later human acceptance agenda, and may not be introduced by task BLOCKED handling
-  or recheck. Each repair round carries its reason, selects its finite fixer-profile
-  assignments against the pre-round history, and persists every assignment before
-  its first write-capable session. The finite arrays are the only convergence
-  bound; exhaustion terminates automation as `REVIEW UNRESOLVED, HUMAN DECISION`,
-  exit zero, with durable findings and edits for a human. Workflow repair never creates
-  tasks, reverts or deletes source, accepts a plan, or changes the explicit human
-  `accept` boundary.
+  or automatic repair. The scheduler actions are `focused_test`,
+  `focused_sweep` (distinct task verify commands without a receipt), and
+  `full_verify` (the reconstructed candidate and receipt). One finite linear
+  interpreter executes every layer: a successful role session advances once;
+  a passing action completes the layer and skips later roles; a failing action
+  records evidence and advances; exhaustion becomes `REVIEW UNRESOLVED, HUMAN
+  DECISION`, exit zero. Workflow position and abilities define responsibility;
+  names do not. Sessions are sequential and exchange only bounded evidence,
+  never dialogue. There is no structured verdict, finding ledger, owner
+  routing, cascade, repair phase, disposition protocol, scope amendment, or
+  second review engine. Only the scheduler mutates task status, journals, Git,
+  actions, or receipts. Integration conflict evidence mechanically names each
+  conflicting plan and path. A configured integration role repairs a
+  target-only conflict in its scheduler-owned reconcile worktree and a
+  peer-only conflict in that plan's persistent source worktree; the scheduler
+  alone stages, commits, advances the source, rebuilds the exact candidate, and
+  rechecks. A multi-plan verifier failure without mechanically identified
+  source attribution remains a human decision. Workflow repair never accepts
+  a plan or changes the explicit human `accept` boundary.
+  The effective `workflow.task` array is required and nonempty; task-local
+  workflow omission inherits it, while an empty task-local array is refused.
+  No empty or omitted task workflow delegates work to another layer, and every
+  AI session comes from an explicitly configured role.
 - The default adapter permissions remain `danger-full-access` where configured:
   the read-only reviewer's prompt plus before/after write detection is a
   cooperative rule, not a security sandbox and not a preventive permission
@@ -212,7 +224,7 @@ while operating an assent-managed session live in
   overlay, or copies of ignored directory contents into Git.
 - The ignored-input handoff is documented where each reader actually looks: the
   packaged scheduled-task instructions tell an executing session to record a
-  required ignored directory through `assent shared-paths review`, which
+  required ignored directory through `assent shared-paths declare`, which
   provisions the same-relative junction or directory symlink, and never to copy
   the tree or hand-create a source link; a full verifier that fails on a
   path inside a physically ignored source directory gets one appended
@@ -225,7 +237,7 @@ while operating an assent-managed session live in
 - Which ignored directories a project shares is a reviewed decision cached in
   the primary worktree's untracked, never-committed `.assent/manifest.toml`;
   it is Assent-owned local execution memory, not project source, and its only
-  writer is the validated `assent shared-paths review` operation. Under
+  writer is the validated `assent shared-paths declare` operation. Under
   `[shared_paths]` it retains whole profiles by fingerprint -- normalized
   project-relative `paths`, a complete collapsed ordinary ignored-directory inventory,
   explicit non-shared dispositions with reasons, exact tracked `watch` files,
@@ -242,8 +254,9 @@ while operating an assent-managed session live in
   input is semantically unnecessary. Discovery failure refuses; a new directory
   makes the next classification UNKNOWN. Complete-verifier `required_evidence`
   requires a provisionable primary directory or refuses with the exact target
-  problem. UNKNOWN and STALE add one bounded review clause and block closeout
-  until settled. Inventory comes from the primary worktree before the session;
+  problem. UNKNOWN and STALE add one bounded `assent shared-paths declare`
+  clause to a source role; the following scheduler action refuses to run until
+  the validated operation settles the decision. Inventory comes from the primary worktree;
   ignored leaf files remain on their separate automatic verifier path.
   Every verification entry point and `assent reconcile` classify and reconcile
   before any candidate, verifier, or managed worktree exists, and plan and
@@ -291,8 +304,8 @@ while operating an assent-managed session live in
   wait/adapter-rotation behavior.
 - An adapter authentication failure is candidate-local availability evidence,
   never a task failure: preserve progress, skip that adapter for the current
-  workflow step, and try the next declared candidate without consuming a task
-  retry. If every candidate requires authentication, stop with nonzero
+  workflow step, and try the next declared candidate without changing task
+  status. If every candidate requires authentication, stop with nonzero
   `AUTHENTICATION REQUIRED`, keep the task resumable rather than `BLOCKED`, and
   do not wait; when authentication and quota failures are mixed, wait only for
   a quota-exhausted candidate that can recover.
@@ -305,22 +318,16 @@ while operating an assent-managed session live in
 - Media inputs (image, PDF, audio, and the like) are ordinary project context,
   not a schema feature. The fixed task fields stay as they are: a task names an
   existing media file by project-relative path and purpose in `behavior` or
-  `notes`, and lists in `scope` only the media it may create or modify.
+  `notes`.
   Do not add `inputs`, image, audio, or video fields, an adapter attachment
   protocol, media-capability inference, or a second review state; `verify`
   keeps the machine-checkable requirements and perceptual judgment stays part
   of the explicit `accept`.
 ## Functional categories
 
-Planning meetings talk about assent in three functional categories: unattended
-running, in-flight review, and the git-based workflow. Only the third is also a
-physical file boundary. The first two are one recursively-coupled state machine
-on purpose -- the review-and-repair loop calls back into the same task-processing
-and run-locking functions it is itself called from, including a direct recursive
-call into the top-level run-lock function for a `RECHECK` review -- so they are
-distinguished by function name inside `engine.py` and `auto_fix.py` rather than
-by file. No split of those two files is pending or expected. The lists below are
-orientation only; the behavioral contracts stay where they already are.
+Assent has two implementation categories: the linear unattended workflow and
+the Git-based publication workflow. They share configuration and verification
+foundations but no recursive review engine.
 
 Git-based workflow: `gitops.py`, `accept.py`, `archive.py`, `reconcile.py`,
 `reject.py`, `rework.py`, `clean.py`, `init.py`, `plan.py`, `batch_accept.py`,
@@ -328,13 +335,9 @@ Git-based workflow: `gitops.py`, `accept.py`, `archive.py`, `reconcile.py`,
 `plan_verification_closeout.py`, `batch_verification.py`, `verification.py`,
 `verification_common.py`, `shared_paths.py`.
 
-Unattended running: `plan_scheduler.py`, plus the scheduling, session, and
-resume surface inside `engine.py` -- `_run_locked`, `_process_task`,
-`_evaluate`, adapter rotation, and quota/resume handling.
-
-In-flight review: `auto_fix.py`, plus the review-and-repair surface inside
-`engine.py` -- `_run_auto_fix_review_once`, `_run_auto_fix_repairs`,
-`_FocusedGateLedger`, `_AutoFixBlockerEvidence`.
+Unattended workflow: `plan_scheduler.py` and the linear task, plan, and
+integration interpreter in `engine.py`, including adapter rotation and
+quota/resume handling.
 
 Shared foundation used by more than one category: `config.py`, `contracts.py`,
 `lockfile.py`, `pathops.py`, `user_home.py`, `preflight.py`, `plandeps.py`,

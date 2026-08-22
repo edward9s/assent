@@ -756,7 +756,7 @@ def init(path: str | Path = ".",
     print("  2. Add the selected project's tests and keep the generated "
           ".assent/verify.py check enabled")
     print("  3. Fill in AGENTS.md's project description and hard constraints")
-    print(f"  4. Start an AI meeting: read {contracts.instructions_path()} and "
-          "begin an assent planning meeting")
+    print(f"  4. Start an interactive planning session: read "
+          f"{contracts.instructions_path()}")
     print("  5. Once assent check passes, run assent run")
     return 0

@@ -7,7 +7,7 @@
 本文說明 Assent 為何採用目前的結構，不是可執行契約。實際行為以安裝的
 `format.md`、`workflow.md`、原始碼與測試為準。
 
-## 最少脈絡，明確責任
+## 最少脈絡，明確控制邊界
 
 每個 AI 只應取得足以正確工作的最少資料：
 
@@ -22,15 +22,15 @@
 
 ## 先做機械檢查，再使用判斷
 
-Scope、dependency、Git ownership、focused test、candidate construction 與完整驗證
-都由程式檢查。只有設定好的機械失敗才交給 AI 判斷，而且回合有限。檢查通過後，
-不會再浪費 reviewer session 重複確認。
+Task contract、dependency、受保護 control file、Git state、focused test、candidate
+construction 與完整驗證都由程式檢查。AI 只在有限 workflow 中已設定的 role 位置
+進行判斷；檢查通過後，不會再浪費 reviewer session 重複確認。
 
 ## 保留成果，無法證明就停止
 
-Assent 在失敗或中斷後保留修改與證據。無法證明 scope、ownership 或安全 transition
-時，會停止，不猜測，也不自動還原。真正需要人類判斷的問題會明確回報，而且不會
-取消其他無關的排隊工作。
+Assent 在失敗或中斷後保留修改與證據。無法證明 control boundary、Git identity
+或安全 transition 時，會停止，不猜測，也不自動還原。真正需要人類判斷的問題
+會明確回報，而且不會取消其他無關的排隊工作。
 
 ## 由人接受
 

@@ -42,7 +42,6 @@ class TestTerminalLogging(unittest.TestCase):
             'deps = []\n'
             'model = "lite"\n'
             f'status = "{status}"\n'
-            'scope = ["assent/"]\n'
             'verify = "python -m unittest"\n'
             'goal = "done"\n'
             'acceptance = "passed"\n', encoding="utf-8")
@@ -123,7 +122,9 @@ class TestTerminalLogging(unittest.TestCase):
         self.addCleanup(shutil.rmtree, other, ignore_errors=True)
         config = other / ".assent" / "assent.toml"
         config.parent.mkdir(parents=True)
-        config.write_text(models_block(), encoding="utf-8")
+        config.write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         (other / ".assent" / "plan09").mkdir()
         (other / ".assent" / "plan09" / "t001_task.e.toml").write_text(
             (self.write_task()).read_text(encoding="utf-8"), encoding="utf-8")

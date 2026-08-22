@@ -80,20 +80,23 @@ The configured `[workflow]` has three layers:
 - `integration` reconstructs the exact selected result and runs `full_verify`.
 
 A passing action completes its layer immediately. A failure may open the next
-configured reviewer/fixer, whose repair is checked by the following action.
-The arrays are the complete repair budget: Assent never invents extra rounds.
+configured repair role, whose work is checked by the following action. The
+default repair roles combine review and repair in one session; custom workflows
+may keep those abilities in separate roles. The arrays are the complete repair
+budget: Assent never invents extra rounds.
 If automation cannot decide safely, it preserves all work and reports `REVIEW
 UNRESOLVED, HUMAN DECISION` for the acceptance meeting.
 
-A task that reports `BLOCKED` remains in the task layer. Its task reviewer may
-repair a small planning omission, such as one missing scope path, in the same
-session. It does not spend the plan review budget. Plan review has a different
-job: checking whether the cumulative implementation matches the agreed plan.
+A failed task action stays in the task layer and advances through the remaining
+configured steps. Plan review has a different job: checking whether the
+cumulative implementation matches the agreed plan.
 
-Integration keeps the exact selected plans. On a Git conflict it repairs the
-conflict through a managed reconcile worktree, then rebuilds and verifies the
-same selection. It never quietly drops a plan, accepts a passing prefix, or
-calls `accept`.
+Integration keeps the exact selected plans. Typed Git conflict evidence names
+the conflicting plan and paths, so a configured integration role may repair it
+in the scheduler-provided reconcile or source worktree before `full_verify`
+rebuilds the candidate. A multi-plan verifier failure without mechanical source
+attribution remains a human decision. Assent never drops a plan, accepts a
+passing prefix, or calls `accept`.
 
 ## Documentation
 
@@ -115,7 +118,8 @@ The installed AI contracts are deliberately separate from these human guides:
 ## Safety boundaries
 
 - Assent preserves failed and interrupted work instead of reverting it.
-- Scope and ownership checks fail closed.
+- AI roles cannot change task contracts, scheduler state, Git state, receipts,
+  or acceptance state.
 - Complete verification uses a temporary integration candidate and changes no
   target ref.
 - Cleanup never traverses a junction or directory symlink target.

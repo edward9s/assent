@@ -37,7 +37,7 @@ import json
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
@@ -549,14 +549,6 @@ class AntigravityAdapter(Adapter):
                           checkpoint_resume=checkpoint_resume,
                           failure_kind=None if checkpoint_resume else kind,
                           usage=parse_output_for_usage(output))
-
-    def run_structured_task(self, prompt: str, requested_model: str,
-                            requested_effort: str | None,
-                            cwd: Path) -> TaskResult:
-        result = self.run_task(prompt, requested_model, requested_effort, cwd)
-        structured_output, error = _extract_result_text(result.output)
-        return replace(result, structured_output=structured_output,
-                       structured_output_error=error)
 
     @staticmethod
     def _echo_line(raw_line: str) -> None:

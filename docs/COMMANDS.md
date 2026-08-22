@@ -51,7 +51,7 @@ project-location rules.
 | `archive` | Retire completed management records after safe cleanup. |
 | `doctor` | Diagnose installation and recover orphaned temporary branches. |
 | `shared-paths status` | Inspect the current worktree's shared-path decision and links without changing them. |
-| `shared-paths review` | Record the complete shared-directory decision for the current source snapshot. |
+| `shared-paths declare` | Validate, record, and apply the complete shared-directory declaration for the current source snapshot. |
 
 ## Common choices
 

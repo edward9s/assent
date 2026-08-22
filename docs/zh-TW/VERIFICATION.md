@@ -63,22 +63,27 @@ Focused 與 batch verification 不刷新個別 plan report。
 
 ## 自動修復
 
-機械檢查通過，就完成該 workflow 層，不會再啟動 AI reviewer。失敗才會進入下一個
-reviewer/fixer，並由後續 action 重新檢查。設定陣列就是有限的全部次數。
+機械檢查通過，就完成該 workflow 層，不會再啟動 repair role。失敗才會進入下一個
+已設定的 repair role，並由後續 action 重新檢查。預設 repair role 在一個 session
+內合併審查與修復；自訂 workflow 仍可將兩者分離。設定陣列就是有限的全部次數。
 
-Task repair 處理單一 task 的失敗或 `BLOCKED` 證據；plan repair 處理累積
-focused sweep 失敗；integration repair 處理完整 verifier 失敗或 candidate 衝突。
-三者不會互相借用預算。
+Task role 處理單一 task 的失敗；plan role 處理累積 focused sweep 失敗；
+integration role 處理 exact-selection evidence。Conflict evidence 已經指出衝突的
+plan 與 path，因此不需要猜測 ownership。沒有機械式 source attribution 的 multi-plan
+verifier failure 才交由人類決定。
 
-若有限次數用完仍有 finding，Assent 會保留修改與證據，回報
+若有限次數用完仍未通過，Assent 會保留修改與證據，回報
 `REVIEW UNRESOLVED, HUMAN DECISION`。未通過的機械證據仍會阻擋 acceptance。
 
 ## 衝突與 reconcile
 
-Candidate conflict 發生在 verifier 之前，不會產生 PASS receipt。自動 integration
-可在設定的有限 workflow 內修復，然後重建並驗證原本同一組選取。
+Candidate conflict 發生在 verifier 之前，不會產生 PASS receipt。`run` 會把精確
+conflict evidence 交給設定的 integration workflow。Target-only conflict 使用受管理的
+source-first reconcile worktree；peer-only conflict 使用衝突 plan 的 persistent source
+worktree，並提供 compatible-prefix evidence。AI role 只修改內容；Git staging、commit、
+source transition、candidate 重建與下一次 `full_verify` 都由 Assent 負責。
 
-手動處理方式：
+明確的手動替代方式是：
 
 ```text
 assent reconcile <PLAN>
@@ -92,9 +97,8 @@ ref 更新、驗證與清理由 Assent 負責。`--continue` 會拒絕尚未解�
 marker、whitespace error 或無關修改。它只推進 source，不改 target，所以仍要重新
 完整驗證。`--abort` 只移除乾淨且重新證明 ownership 的資源。
 
-單一 plan reconcile 處理 source 與目前 target 的衝突。若是 selected plans 之間
-才出現的 peer-only conflict，需要先接受相容的前置計畫、明確 rework/reject，或交給
-自動 integration repair。
+手動的單一 plan reconcile 處理 source 與目前 target 的衝突。Integration workflow
+也能修復 peer-only conflict，不會接受 prefix 或改變 exact selection。
 
 ## 共用 ignored input
 
@@ -108,14 +112,15 @@ marker、whitespace error 或無關修改。它只推進 source，不改 target�
   `.assent/manifest.toml`。
 - 受管理的 source worktree 在相同相對路徑建立 Windows junction 或 POSIX
   directory symlink，指向主要 worktree 的真實目錄。
-- `shared-paths review` 把執行位置當成要審查的 source snapshot，也只同步該
-  worktree 的鏈結。
+- `shared-paths declare` 把執行位置當成宣告所描述的 source snapshot，也只同步
+  該 worktree 的鏈結。
 
 一般流程不需要人介入。`run` 找到匹配的審查結果時，會在 AI session 開始前自動
-建立鏈結。若狀態是 `UNKNOWN` 或 `STALE`，AI 會在自己的受管理 source worktree
-執行 `review`。這個操作會把 profile 寫入主要 worktree 的 manifest，同時在 source
-worktree 建立鏈結，讓同一個 session 可以繼續跑 focused test。在主要 worktree
-執行 `review` 也是合法的，但只會快取該主要 snapshot 的 profile，不會建立指向
+建立鏈結。若狀態是 `UNKNOWN` 或 `STALE`，AI 會審查完整 inventory，再於自己的
+受管理 source worktree 執行 `declare`。這個操作會驗證宣告、把 profile 寫入主要
+worktree 的 manifest，同時在 source worktree 建立鏈結，讓同一個 session 可以
+繼續跑 focused test。在主要 worktree 執行 `declare` 也是合法的，但只會快取該
+主要 snapshot 的 profile，不會建立指向
 自己的鏈結。Verification 與 reconcile 也會把同一份 profile 套用到各自的受管理
 worktree，不會依賴先前 `run` 遺留下來的鏈結。
 
@@ -130,14 +135,14 @@ files，以及鏈結是否一致。在主要 worktree 中，鏈結會顯示為�
 目錄就是 target。這個指令不會修復任何東西；無法讀取契約或已確定 profile 的鏈結
 損壞時，會回傳非零狀態。
 
-需要 review 時，應在受管理的 source worktree 執行，並指定哪些 tracked dependency
-或 build file 改變後，原決定應該失效：
+審查列出的 inventory 後，應在受管理的 source worktree 提交宣告，並指定哪些
+tracked dependency 或 build file 改變後，原決定應該失效：
 
 ```text
-assent shared-paths review --path assets --path pkg --classify build "generated output" --watch package.lock
+assent shared-paths declare --path assets --path pkg --classify build "generated output" --watch package.lock
 ```
 
-Review prompt 列出的每個 ordinary ignored directory，都必須由 shared `--path`
+宣告指示列出的每個 ordinary ignored directory，都必須由 shared `--path`
 或 non-shared `--classify PATH REASON` 覆蓋一次；兩者都可以涵蓋 subtree。沒有目錄
 需要分享時使用 `--none`。Ignored leaf file 仍由 verifier 自動處理，不需要分類。
 
@@ -154,7 +159,7 @@ verification、report、reconcile 與 acceptance 失效。清理時 Assent 只�
 本身，不會進入或刪除 target。
 
 若 verifier output 指向既有 ignored directory 內的遺漏路徑，Assent 會附加
-`Ignored input diagnosis:`，指出 `shared-paths review` 的處理方式，但保留原始 exit
+`Ignored input diagnosis:`，指出 `shared-paths declare` 的處理方式，但保留原始 exit
 code。
 
 選取方式請看[指令](COMMANDS.md)，復原安全請看[作業](OPERATIONS.md)。

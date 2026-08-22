@@ -38,7 +38,6 @@ def _task(status: str) -> str:
         'deps = []\n'
         'model = "lite"\n'
         f'status = "{status}"\n'
-        'scope = ["src/"]\n'
         'verify = "python -m unittest tests.test_main"\n'
         'goal = "Finish"\n'
         'acceptance = "Focused tests pass"\n'
@@ -56,7 +55,11 @@ class VerificationEngineCase(GlobalContractsMixin, unittest.TestCase):
         self.tasks_dir = self.assent_dir / "work"
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.assent_dir / "assent.toml"
-        self.config_path.write_text(models_block(), encoding="utf-8")
+        self.config_path.write_text(
+            "[workflow]\n"
+            'task = [{ action = "focused_test" }]\n'
+            + models_block(),
+            encoding="utf-8")
         self.task_path = self.tasks_dir / "t001_task.e.toml"
         self.cfg = load_config(self.config_path, "work")
 
@@ -291,18 +294,19 @@ class TestConditionalPlanVerification(VerificationEngineCase):
         candidate.assert_not_called()
 
 
-class TestVerificationPrompt(VerificationEngineCase):
+class TestScheduledSessionInstructions(unittest.TestCase):
     def test_timeout_is_not_defined_as_sufficient_for_blocked(self):
-        self.write_status("TODO")
-        task = engine.Plan.parse(self.tasks_dir).tasks[0]
-        session = engine.SessionIdentity(
-            agent="codex", requested_model="model",
-            requested_effort="high")
-        prompt = engine._build_prompt(self.cfg, task, None, session)
-        self.assertIn("focused task gate", prompt)
-        self.assertIn("do not start a concurrent duplicate", prompt)
-        self.assertIn("do not mark the task BLOCKED solely", prompt)
-        self.assertIn("scheduler runs the\nsame command", prompt)
+        instructions = (
+            Path(__file__).resolve().parents[1]
+            / "assent" / "templates" / "instructions.md"
+        ).read_text(encoding="utf-8")
+        instructions = " ".join(instructions.split())
+
+        self.assertIn("On timeout, extend or batch the command", instructions)
+        self.assertIn(
+            "do not launch a possibly still-running command again", instructions)
+        self.assertIn("mark a task `BLOCKED` solely", instructions)
+        self.assertIn("because an outer tool timed out", instructions)
 
 
 class TestFullVerifierProcess(unittest.TestCase):

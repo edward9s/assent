@@ -22,7 +22,7 @@ This module owns that answer and everything around it:
   concrete evidence has invalidated, and NO-IGNORED-DIRECTORY-CANDIDATE, the
   deterministic fast path for a primary worktree a successful Git query proves
   holds no ordinary ignored directory to declare at all.
-* The controlled review operation, the only writer of the manifest, and the
+* The controlled declaration operation, the only writer of the manifest, and the
   provisioning that turns a reviewed profile into real directory links using
   ``pathops.create_directory_link`` -- the same primitive candidate mirroring
   uses.
@@ -73,7 +73,7 @@ ABSENT = "absent"                       # a watched path that is not there at al
 _UNTRACKED = "untracked"                # internal snapshot-only watch state
 _EXCLUDED_ROOTS = (".git", ".assent")
 _IGNORE_RULE_PATHSPEC = "*.gitignore"
-REVIEW_COMMAND = "assent shared-paths review"
+DECLARE_COMMAND = "assent shared-paths declare"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -89,8 +89,8 @@ class PathDisposition:
 
 
 @dataclass(frozen=True)
-class ValidatedReview:
-    """One complete, non-mutating review decision ready to record."""
+class ValidatedDeclaration:
+    """One complete, non-mutating declaration ready to record."""
 
     paths: tuple[str, ...]
     watch: tuple[str, ...]
@@ -232,8 +232,8 @@ else:                                   # pragma: no cover - platform specific
 def hold_manifest_lock(main: Path) -> Iterator[None]:
     """Serialize manifest writers on one project-local lock file.
 
-    A second review attempt that cannot take the lock is refused rather than
-    queued: the caller learns that another review is in flight and no update is
+    A second declaration attempt that cannot take the lock is refused rather than
+    queued: the caller learns that another declaration is in flight and no update is
     silently lost.  The lock file itself lives beside the manifest in the
     primary worktree's ``.assent``, so it shares the manifest's untracked,
     Assent-owned status.
@@ -250,7 +250,7 @@ def hold_manifest_lock(main: Path) -> Iterator[None]:
     try:
         if not _try_lock(handle):
             raise AssentError(
-                "Another shared-path review is already updating "
+                "Another shared-path declaration is already updating "
                 f"{manifest_path(main)}; only one may write at a time")
         try:
             handle.seek(0)
@@ -312,41 +312,25 @@ def _canonical_list(values: tuple[str, ...], label: str, path: Path
     return values
 
 
-def _inventory_from(value: object, path: Path, *, legacy: bool = False
-                    ) -> tuple[str, ...]:
-    if legacy and isinstance(value, list) and all(
-            isinstance(item, dict) for item in value):
-        raw_inventory_list: list[str] = []
-        for index, item in enumerate(value):
-            if set(item) != {"path", "kind"} or not isinstance(item["kind"], str):
-                raise AssentError(
-                    f"{path}: legacy profile inventory[{index}] must contain "
-                    "exactly path and kind")
-            raw_inventory_list.append(item["path"])
-        raw_inventory = tuple(raw_inventory_list)
-    else:
-        raw_inventory = _string_list(value, f"{path}: profile inventory")
+def _inventory_from(value: object, path: Path) -> tuple[str, ...]:
+    raw_inventory = _string_list(value, f"{path}: profile inventory")
     return _canonical_list(tuple(
         _stored_relative(value, "profile inventory", path)
         for value in raw_inventory), "profile inventory", path)
 
 
-def _dispositions_from(value: object, path: Path, *, legacy: bool = False
-                       ) -> tuple[PathDisposition, ...]:
+def _dispositions_from(value: object, path: Path) -> tuple[PathDisposition, ...]:
     if not isinstance(value, list):
         raise AssentError(
             f"{path}: profile dispositions must be an array of tables")
     dispositions: list[PathDisposition] = []
     for index, raw in enumerate(value):
         fields = set(raw) if isinstance(raw, dict) else set()
-        valid_fields = ({"path", "reason"}, {"path", "kind", "reason"})
         if (not isinstance(raw, dict)
-                or fields not in (valid_fields if legacy else valid_fields[:1])
-                or ("kind" in raw and not isinstance(raw["kind"], str))):
+                or fields != {"path", "reason"}):
             raise AssentError(
                 f"{path}: profile dispositions[{index}] must contain exactly "
-                + ("path and reason, with an optional legacy kind"
-                   if legacy else "path and reason"))
+                "path and reason")
         relative = _stored_relative(
             raw["path"], f"profile dispositions[{index}].path", path)
         reason = raw["reason"]
@@ -412,8 +396,7 @@ def _validate_profile_coverage(profile: Profile, path: Path) -> None:
             + "; ".join(details) + ")")
 
 
-def _profile_from(data: object, path: Path, *, schema_version: int = SCHEMA_VERSION
-                  ) -> Profile:
+def _profile_from(data: object, path: Path) -> Profile:
     if not isinstance(data, dict):
         raise AssentError(f"{path}: each [{SECTION}] profile must be a table")
     fingerprint = data.get("fingerprint")
@@ -428,13 +411,10 @@ def _profile_from(data: object, path: Path, *, schema_version: int = SCHEMA_VERS
             or review_version < 1):
         raise AssentError(
             f"{path}: profile review_version must be a positive integer")
-    if (schema_version >= SCHEMA_VERSION
-            and review_version > REVIEW_CONTEXT_VERSION):
+    if review_version > REVIEW_CONTEXT_VERSION:
         raise AssentError(
             f"{path}: profile review_version {review_version} was written by a "
             "newer assent")
-    if schema_version < SCHEMA_VERSION:
-        review_version = min(review_version, REVIEW_CONTEXT_VERSION - 1)
     if not raw_watch:
         raise AssentError(
             f"{path}: a shared-path profile needs at least one watch file")
@@ -465,10 +445,8 @@ def _profile_from(data: object, path: Path, *, schema_version: int = SCHEMA_VERS
     if fingerprint != fingerprint_of(normalized_digests):
         raise AssentError(
             f"{path}: profile fingerprint does not match its digest evidence")
-    legacy = schema_version < SCHEMA_VERSION
-    inventory = _inventory_from(data.get("inventory", []), path, legacy=legacy)
-    dispositions = _dispositions_from(
-        data.get("dispositions", []), path, legacy=legacy)
+    inventory = _inventory_from(data.get("inventory", []), path)
+    dispositions = _dispositions_from(data.get("dispositions", []), path)
     profile = Profile(
         fingerprint, paths, watch, normalized_digests, review_version,
         inventory, dispositions)
@@ -523,6 +501,11 @@ def read_manifest(main: Path) -> Manifest:
         raise AssentError(
             f"{path}: schema version {version} was written by a newer assent "
             f"(this one understands {SCHEMA_VERSION})")
+    if version < SCHEMA_VERSION:
+        raise AssentError(
+            f"{path}: schema version {version} is retired; remove this "
+            "deletable local manifest and run `assent shared-paths declare` "
+            "again")
 
     section = data.get(SECTION, {})
     if not isinstance(section, dict):
@@ -534,8 +517,7 @@ def read_manifest(main: Path) -> Manifest:
     if not isinstance(raw_applications, list):
         raise AssentError(
             f"{path}: [{SECTION}].application must be an array of tables")
-    profiles = tuple(_profile_from(entry, path, schema_version=version)
-                     for entry in raw_profiles)
+    profiles = tuple(_profile_from(entry, path) for entry in raw_profiles)
     applications = tuple(_application_from(entry, path)
                          for entry in raw_applications)
     other = {key: value for key, value in data.items()
@@ -811,7 +793,7 @@ def changed_watch_evidence(profile: Profile,
         if now == _UNTRACKED:
             changes.append(
                 f"{relative} (no longer Git-tracked; choose a currently "
-                f"tracked file with `{REVIEW_COMMAND}`)")
+                f"tracked file with `{DECLARE_COMMAND}`)")
         elif recorded == ABSENT:
             changes.append(f"{relative} (appeared)")
         elif now == ABSENT:
@@ -1117,7 +1099,7 @@ def _required_evidence_paths(main: Path,
             "complete-verifier evidence requires a shared ignored directory "
             f"that cannot be provisioned: {'; '.join(problems)}. Create the "
             f"directory in the primary worktree and keep it Git-ignored, then "
-            f"run `{REVIEW_COMMAND}`")
+            f"run `{DECLARE_COMMAND}`")
     return tuple(sorted(normalized))
 
 
@@ -1167,7 +1149,7 @@ def classify(main: Path, worktree: Path,
         raise AssentError(
             f"the shared-path manifest {manifest_path(main)} holds conflicting "
             f"matching profiles ({listed}); resolve them with "
-            f"`{REVIEW_COMMAND}` before any session runs")
+            f"`{DECLARE_COMMAND}` before any session runs")
 
     if not matches:
         # Inventory drift can be caused by a previously declared target itself
@@ -1331,7 +1313,7 @@ def require_directory_link_agreement(
             f"outside its active {contract.state} profile. Remove the link if "
             "it is irrelevant. If it is required, place its ordinary "
             f"Git-ignored target at {Path(main) / relative} and record "
-            f"{relative} with `{REVIEW_COMMAND}`; an external hand-provisioned "
+            f"{relative} with `{DECLARE_COMMAND}`; an external hand-provisioned "
             "link is not reviewed evidence")
     if Path(main).resolve() == root.resolve():
         # A vanished source falls back to the primary snapshot. Its declared
@@ -1355,7 +1337,7 @@ def require_directory_link_agreement(
                 f"directory link to the reviewed primary target {target}. "
                 "Remove an irrelevant link; otherwise place the required "
                 "ordinary Git-ignored target at that primary path and record "
-                f"it with `{REVIEW_COMMAND}`")
+                f"it with `{DECLARE_COMMAND}`")
 
 
 def _validate_destination(main: Path, worktree: Path,
@@ -1674,7 +1656,7 @@ def prepare_sources(main: Path,
                 raise AssentError(
                     f"refusing to verify: the shared-path contract for "
                     f"{plan_name} ({worktree}) is {contract.state}. "
-                    f"{closeout_refusal(contract) or 'Run `' + REVIEW_COMMAND + '`'}")
+                    f"{closeout_refusal(contract) or 'Run `' + DECLARE_COMMAND + '`'}")
             require_directory_link_agreement(
                 main, worktree or main, contract, plan_name=plan_name,
                 allow_missing=True)
@@ -1715,7 +1697,7 @@ def prepare_worktree(main: Path, worktree: Path, *,
 
 
 # --------------------------------------------------------------------------- #
-# The controlled review operation
+# The controlled declaration operation
 # --------------------------------------------------------------------------- #
 def _validate_paths(main: Path, paths: Sequence[str]) -> tuple[str, ...]:
     normalized: list[str] = []
@@ -1741,7 +1723,7 @@ def _validate_paths(main: Path, paths: Sequence[str]) -> tuple[str, ...]:
 def _validate_watch(worktree: Path, watch: Sequence[str]) -> tuple[str, ...]:
     if not watch:
         raise AssentError(
-            "a shared-path review must state at least one --watch file: without "
+            "a shared-path declaration must state at least one --watch file: without "
             "it nothing could ever make the decision worth reconsidering")
     normalized: list[str] = []
     for raw in watch:
@@ -1751,7 +1733,7 @@ def _validate_watch(worktree: Path, watch: Sequence[str]) -> tuple[str, ...]:
         if not gitops.tracked_paths(Path(worktree), relative):
             raise AssentError(
                 f"watch file {relative} is not tracked in {worktree}; only a "
-                "tracked dependency or build file can justify a review")
+                "tracked dependency or build file can invalidate the declaration")
         path = Path(worktree) / relative
         if not path.is_file():
             raise AssentError(
@@ -1783,11 +1765,11 @@ def _validate_dispositions(
     return tuple(sorted(normalized, key=lambda item: item.path))
 
 
-def validate_review_decision(
+def validate_declaration(
         main: Path, worktree: Path, paths: Sequence[str],
         watch: Sequence[str],
-        dispositions: Sequence[PathDisposition] = ()) -> ValidatedReview:
-    """Validate one structured reviewer decision without mutating anything."""
+        dispositions: Sequence[PathDisposition] = ()) -> ValidatedDeclaration:
+    """Validate one caller-supplied declaration without mutating anything."""
     declared = _validate_paths(Path(main), paths) if paths else ()
     watched = _validate_watch(Path(worktree), watch)
     inventory = ignored_inventory(Path(main))
@@ -1827,7 +1809,7 @@ def validate_review_decision(
             details.append("disposition covers no inventory directory: "
                            + ", ".join(empty_dispositions))
         raise AssentError(
-            "shared-path review must cover the complete primary ignored-directory "
+            "shared-path declaration must cover the complete primary ignored-directory "
             "inventory (" + "; ".join(details) + ")")
     unexpected = sorted(
         set(ignored_directory_links(Path(worktree))) - set(declared))
@@ -1840,22 +1822,22 @@ def validate_review_decision(
             Path(worktree) / relative, _link_target(Path(main), relative))]
     if foreign:
         raise AssentError(
-            "shared_paths.paths omits existing ignored directory link(s): "
+            "the declaration omitted existing ignored directory link(s): "
             + ", ".join(foreign)
-            + ". Inspect their tracked build declarations and return a corrected "
-              "shared_paths object that includes every required link; do not run "
-              "the shared-paths CLI")
+            + ". Rerun the validated command with --path for each required "
+              "same-primary link; a foreign link requires human decision. "
+              "Assent will neither traverse nor claim an omitted link")
     if Path(main).resolve() != Path(worktree).resolve():
         for relative in declared:
             _validate_destination(Path(main), Path(worktree), relative)
-    return ValidatedReview(declared, watched, inventory, classified)
+    return ValidatedDeclaration(declared, watched, inventory, classified)
 
 
-def review(main: Path, worktree: Path, *,
-           paths: Sequence[str] = (), watch: Sequence[str] = (),
-           none: bool = False,
-           dispositions: Sequence[PathDisposition] = ()) -> Contract:
-    """Record one reviewed shared-path profile, then reconcile this worktree.
+def declare(main: Path, worktree: Path, *,
+            paths: Sequence[str] = (), watch: Sequence[str] = (),
+            none: bool = False,
+            dispositions: Sequence[PathDisposition] = ()) -> Contract:
+    """Validate and apply one shared-path declaration.
 
     Every value is validated before anything is mutated: a path must be an
     existing ordinary Git-ignored directory at the same relative place in the
@@ -1872,14 +1854,14 @@ def review(main: Path, worktree: Path, *,
     worktree = Path(worktree)
     if none and paths:
         raise AssentError(
-            "a shared-path review states either --path values or --none, not both")
+            "a shared-path declaration states either --path values or --none, not both")
     if not none and not paths:
         raise AssentError(
-            "a shared-path review must state at least one --path, or --none to "
+            "a shared-path declaration must state at least one --path, or --none to "
             "record that this snapshot needs no shared directory")
 
     with hold_manifest_lock(main):
-        decision = validate_review_decision(
+        decision = validate_declaration(
             main, worktree, () if none else paths, watch, dispositions)
         declared = decision.paths
         watched = decision.watch
@@ -1909,81 +1891,31 @@ def review(main: Path, worktree: Path, *,
     return contract
 
 
-# --------------------------------------------------------------------------- #
-# What a session and the scheduler are told
-# --------------------------------------------------------------------------- #
-_REVIEW_CLAUSE = (
-    "\nShared ignored directories for this repository are {state}. Before you "
-    "close this task out you must run, in this worktree:\n"
-    "  {command} --path DIR --classify PATH REASON --watch FILE\n"
-    "  {command} --none --classify PATH REASON --watch FILE\n"
-    "Repeat --path, --classify, and --watch as needed. Every inventory directory "
-    "must be covered exactly once by either --path or --classify; a disposition "
-    "may cover its subtree and needs a concrete reason.\n"
-    "Decide from the repository's Git-ignore rules, its dependency/build "
-    "declarations and this task's verifier evidence alone -- do not audit the "
-    "whole repository. Name as --watch exactly the tracked dependency or build "
-    "files that would make this decision worth reconsidering.{prior}{evidence}\n"
-    "{candidates}\n"
-    "The scheduler refuses this task's completion while the shared-path "
-    "contract is still unreviewed.")
-
-_REVIEW_RECORD_CLAUSE = (
-    "\nShared ignored directories for this repository are {state}. Decide from "
-    "the repository's Git-ignore rules, its dependency/build declarations and "
-    "this review's verifier evidence alone -- do not audit the whole repository. "
-    "Do not run `{command}` in this plan-review session. Instead, the terminal "
-    "assent.auto_fix_review JSON must set `shared_paths` to an object with exact "
-    "`paths`, `dispositions`, and `watch` lists. Each disposition object has "
-    "exact `path` and non-empty `reason` fields. Every inventory directory must "
-    "be covered exactly once by paths or dispositions; a disposition may cover "
-    "its subtree. Use an empty `paths` list "
-    "when no shared directory is required. Name in `watch` exactly the tracked dependency or "
-    "build files that would make this decision worth reconsidering. The scheduler "
-    "validates and applies the decision before accepting the verdict.{prior}{evidence}\n"
-    "{candidates}")
-
-
 def _candidate_inventory(contract: Contract) -> str:
-    """Format the complete primary inventory without claiming it is required."""
-    heading = (
-        "Complete primary worktree ignored-directory inventory (presence alone "
-        "does not mean a directory should be shared):")
+    heading = "Complete primary ignored-directory inventory:"
     if not contract.inventory:
         return heading + "\n  (none)"
     return heading + "\n" + "\n".join(
         f"  - {relative}" for relative in contract.inventory)
 
 
-def review_clause(contract: Contract) -> str:
-    """The bounded review instruction appended to an UNKNOWN or STALE session.
-
-    A settled contract adds nothing at all: a reviewed answer, the empty one
-    included, must not spend a session's attention on rediscovering it.
-    """
+def declaration_clause(contract: Contract) -> str:
+    """Return one bounded declaration instruction for an unsettled session."""
     if contract.settled or not contract.needs_review:
         return ""
-    prior = ("\nPreviously reviewed shared paths: "
-             + ", ".join(contract.prior_paths) if contract.prior_paths else "")
+    prior = ("\nPreviously reviewed paths: " + ", ".join(contract.prior_paths)
+             if contract.prior_paths else "")
     evidence = ("\nWhat changed: " + "; ".join(contract.evidence)
                 if contract.evidence else "")
-    return _REVIEW_CLAUSE.format(state=contract.state, command=REVIEW_COMMAND,
-                                 prior=prior, evidence=evidence,
-                                 candidates=_candidate_inventory(contract))
-
-
-def review_record_clause(contract: Contract) -> str:
-    """Require a structured decision from a plan reviewer when needed."""
-    if contract.settled or not contract.needs_review:
-        return ""
-    prior = ("\nPreviously reviewed shared paths: "
-             + ", ".join(contract.prior_paths) if contract.prior_paths else "")
-    evidence = ("\nWhat changed: " + "; ".join(contract.evidence)
-                if contract.evidence else "")
-    return _REVIEW_RECORD_CLAUSE.format(
-        state=contract.state, command=REVIEW_COMMAND,
-        prior=prior, evidence=evidence,
-        candidates=_candidate_inventory(contract))
+    return (
+        f"\nSHARED IGNORED DIRECTORY REVIEW ({contract.state})\n"
+        "Before this role ends, run the validated command in this worktree:\n"
+        f"  {DECLARE_COMMAND} --path DIR --classify PATH REASON --watch FILE\n"
+        "or use --none instead of --path. Repeat the options as needed. Cover "
+        "every listed directory exactly once as shared or non-shared, and watch "
+        "only tracked dependency or build files. Do not copy a directory, create "
+        "a link by hand, or edit the manifest directly."
+        f"{prior}{evidence}\n{_candidate_inventory(contract)}\n")
 
 
 def closeout_refusal(contract: Contract) -> str:
@@ -1992,8 +1924,8 @@ def closeout_refusal(contract: Contract) -> str:
         return ""
     evidence = f" ({'; '.join(contract.evidence)})" if contract.evidence else ""
     return (f"the shared-path contract for this source is still "
-            f"{contract.state}{evidence}; run `{REVIEW_COMMAND}` with the "
-            "reviewed --path/--none, --classify, and --watch values before "
+            f"{contract.state}{evidence}; run `{DECLARE_COMMAND}` with the "
+            "declared --path/--none, --classify, and --watch values before "
             "closing out")
 
 

@@ -58,7 +58,9 @@ class ReconcileRepositoryCase(unittest.TestCase):
         self.tasks_dir = self.assent_dir / self.plan_name
         self.tasks_dir.mkdir(parents=True)
         self.config_path = self.assent_dir / "assent.toml"
-        self.config_path.write_text(models_block(), encoding="utf-8")
+        self.config_path.write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         (self.assent_dir / "verify.py").write_text(
             "raise SystemExit('reconcile must never run the verifier')\n",
             encoding="utf-8")
@@ -86,7 +88,6 @@ class ReconcileRepositoryCase(unittest.TestCase):
             'deps = []\n'
             'model = "prime"\n'
             f'status = "{status}"\n'
-            'scope = ["shared.txt"]\n'
             'verify = "python --version"\n'
             'goal = "Complete the task."\n'
             'acceptance = "Verification passes."\n',
@@ -339,7 +340,7 @@ class SharedPathContractTest(ReconcileRepositoryCase):
 
         self.assertEqual(code, 1)
         self.assertIn("UNKNOWN", output)
-        self.assertIn("assent shared-paths review", output)
+        self.assertIn("assent shared-paths declare", output)
         self.assertFalse(self._managed_path().exists())
         self.assertFalse(
             gitops.branch_exists(self.root, self._managed_branch()))
@@ -350,7 +351,7 @@ class SharedPathContractTest(ReconcileRepositoryCase):
             self) -> None:
         self._ignored_targets()
         self._conflicting_repository()
-        shared_paths.review(
+        shared_paths.declare(
             self.root, self.source_worktree,
             paths=("pkg", "lib/l10n/arb"), watch=(".gitignore",),
             dispositions=excluded_inventory(
@@ -377,7 +378,7 @@ class SharedPathContractTest(ReconcileRepositoryCase):
     def test_resume_revalidates_rather_than_repairing_an_altered_link(self) -> None:
         self._ignored_targets()
         self._conflicting_repository()
-        shared_paths.review(self.root, self.source_worktree,
+        shared_paths.declare(self.root, self.source_worktree,
                             paths=("pkg",), watch=(".gitignore",),
                             dispositions=excluded_inventory(
                                 self.root, ("pkg",)))
@@ -400,7 +401,7 @@ class SharedPathContractTest(ReconcileRepositoryCase):
     def test_a_reviewed_empty_answer_creates_no_links_at_all(self) -> None:
         self._ignored_targets()
         self._conflicting_repository()
-        shared_paths.review(self.root, self.source_worktree, none=True,
+        shared_paths.declare(self.root, self.source_worktree, none=True,
                             watch=(".gitignore",),
                             dispositions=excluded_inventory(self.root))
 
@@ -591,7 +592,7 @@ class ContinueTest(ReconcileRepositoryCase):
             (self.root / directory / "sentinel.txt").write_text(
                 f"{directory} sentinel\n", encoding="utf-8")
         self._conflicting_repository()
-        shared_paths.review(self.root, self.source_worktree,
+        shared_paths.declare(self.root, self.source_worktree,
                             paths=("pkg",), watch=(".gitignore",),
                             dispositions=excluded_inventory(
                                 self.root, ("pkg",)))
@@ -601,9 +602,10 @@ class ContinueTest(ReconcileRepositoryCase):
         source_tip = self.source_tip
         target_tip = self.target_tip
 
-        # The watch and ignore rules are unchanged, so this review deliberately
-        # reuses the same fingerprint while replacing the reviewed answer.
-        shared_paths.review(self.root, self.source_worktree,
+        # The watch and ignore rules are unchanged, so this declaration
+        # deliberately reuses the same fingerprint while replacing the reviewed
+        # answer.
+        shared_paths.declare(self.root, self.source_worktree,
                             paths=("assets",), watch=(".gitignore",),
                             dispositions=excluded_inventory(
                                 self.root, ("assets",)))
@@ -1130,13 +1132,12 @@ class LifecycleBoundaryTest(ReconcileRepositoryCase):
 
         with patch.object(verification, "verify_plan", _forbidden), \
                 patch.object(verification, "verify_plan_if_needed", _forbidden), \
-                patch.object(verification, "_run_full_verifier", _forbidden), \
                 patch.object(verification, "verify_batch", _forbidden), \
+                patch("assent.plan_verification.run_full_verifier", _forbidden), \
+                patch("assent.batch_verification.run_full_verifier", _forbidden), \
                 patch.object(accept_mod, "accept_plan", _forbidden), \
                 patch.object(batch_accept_mod, "accept_all", _forbidden), \
                 patch.object(engine, "run", _forbidden), \
-                patch.object(engine, "_run_verify", _forbidden), \
-                patch.object(engine, "_run_verify_quiet", _forbidden), \
                 patch.object(plan_mod, "set_status", _forbidden):
             self.assertEqual(self._run(reconcile_start)[0], 0)
             self._resolve()

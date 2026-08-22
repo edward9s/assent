@@ -49,7 +49,7 @@ assent run urgent01 ...
 | `archive` | 安全清理後封存完成的管理紀錄。 |
 | `doctor` | 診斷安裝並復原孤兒暫存 branch。 |
 | `shared-paths status` | 查看目前 worktree 的 shared-path 決定與鏈結，不做任何變更。 |
-| `shared-paths review` | 記錄目前 source snapshot 完整的 shared-directory 決定。 |
+| `shared-paths declare` | 驗證、記錄並套用目前 source snapshot 完整的 shared-directory 宣告。 |
 
 ## 常見用法
 

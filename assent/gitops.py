@@ -672,50 +672,6 @@ def is_path_ignored(root: Path, relative: str,
         f"{result.stderr.strip() or result.stdout.strip() or 'unknown error'}")
 
 
-def changes_outside_scope(root: Path, scope: list[str],
-                          since_ref: str | None = None,
-                          excludes: Sequence[str] = ()) -> list[str]:
-    """Return paths changed outside scope (current working tree + optionally committed changes).
-
-    - When since_ref is given, committed changes between since_ref..HEAD (wip checkpoints
-      created during quota interruption/retry) are also checked, so that after "keep progress,
-      never restore" the scope check still covers every change made since the task's start.
-    - An empty scope list fails closed: every change counts as out of scope. This is deliberate —
-      scope exists to contain an unsupervised executing AI, and "unwritten = unrestricted" would
-      let that protection quietly disappear. (Task-file parsing already forces scope to be
-      non-empty; this fail-closed behavior here is the last line of defense.)
-    """
-    excluded = {_normalize(e) for e in excludes}
-    paths: list[str] = []
-    # Scope is enforced against leaf paths.  Plain porcelain collapses a wholly
-    # untracked directory to ``?? directory/``, which can falsely reject exact
-    # file scopes below it and makes a broad directory scope look necessary.
-    out = _git(root, "status", "--porcelain", "--untracked-files=all")
-    for line in out.splitlines():
-        if not line.strip():
-            continue
-        path_part = _status_path(line)
-        if path_part not in excluded:
-            paths.append(path_part)
-    if since_ref:
-        diff = _git(root, "diff", "--name-only", since_ref, "HEAD")
-        paths += [p.strip().strip('"') for p in diff.splitlines()
-                  if p.strip() and _normalize(p.strip().strip('"')) not in excluded]
-
-    normalized_scope = [_normalize(s) for s in scope]
-    outside: list[str] = []
-    seen: set[str] = set()
-    for path_part in paths:
-        path_norm = _normalize(path_part)
-        if path_norm in seen:
-            continue
-        seen.add(path_norm)
-        if not any(path_norm == s or path_norm.startswith(s.rstrip("/") + "/")
-                   for s in normalized_scope):
-            outside.append(path_part)
-    return outside
-
-
 def _pathspec_excludes(root: Path, excludes: Sequence[str]) -> list[str]:
     """Filter the exclude list down to entries safe to write into a :(exclude) pathspec.
 

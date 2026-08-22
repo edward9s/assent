@@ -15,11 +15,12 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.engine_support import models_block
+from tests.engine_support import ScriptedAdapter, models_block
 from pathlib import Path
 from unittest import mock
 
-from assent import gitops, shared_paths
+from assent import engine, gitops, shared_paths
+from assent.adapters import TaskResult
 from assent.__main__ import _dispatch
 from assent.batch_accept import accept_all
 from assent.batch_receipt import (BatchVerificationReceipt, batch_receipt_path,
@@ -80,7 +81,9 @@ class BatchVerifyRepositoryCase(unittest.TestCase):
         self.assent_dir = self.root / ".assent"
         self.assent_dir.mkdir()
         self.config_path = self.assent_dir / "assent.toml"
-        self.config_path.write_text(models_block(), encoding="utf-8")
+        self.config_path.write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         self.write_verify(_VERIFY_OK)
 
     def _cleanup(self) -> None:
@@ -110,7 +113,6 @@ class BatchVerifyRepositoryCase(unittest.TestCase):
             'deps = []\n'
             'model = "core"\n'
             f'status = "{status}"\n'
-            'scope = ["assent/"]\n'
             'verify = "python --version"\n'
             'goal = "Complete the task."\n'
             'acceptance = "Verification passes."\n',
@@ -399,6 +401,55 @@ class TestExplicitBatchSelection(BatchVerifyRepositoryCase):
                   in result.conflicts[1].prefix_sources), ("aa", "cc"))
         verifier.assert_not_called()
         self.assertFalse(self.receipt_path().exists())
+
+    def test_integration_role_repairs_a_peer_conflict_then_rebuilds_selection(
+            self) -> None:
+        workflow = """
+[adapter]
+name = "claude"
+[abilities.repair]
+prompt = "Repair the exact selection conflict from the requirements."
+writes = true
+[roles.repairer]
+ability = ["repair"]
+model = "lite"
+[workflow]
+task = [{ action = "focused_test" }]
+plan = []
+integration = [{ action = "full_verify" }, { role = "repairer" },
+               { action = "full_verify" }]
+"""
+        self.config_path.write_text(
+            workflow + models_block(workflow), encoding="utf-8")
+        self.make_source("aa", filename="README.md", content="shared\n")
+        bb_before = self.make_source(
+            "bb", filename="README.md", content="from bb\n")
+        bb_worktree = gitops.plan_worktree(self.root, "bb")
+        self.assertIsNotNone(bb_worktree)
+        assert bb_worktree is not None
+
+        def repair(prompt):
+            self.assertIn(str(bb_worktree), prompt)
+            self.assertIn("bb: peer_only", prompt)
+            (bb_worktree / "README.md").write_text(
+                "shared\n", encoding="utf-8")
+            return TaskResult(0, "made bb compatible with the exact selection",
+                              False, None)
+
+        adapter = ScriptedAdapter([repair])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), \
+                mock.patch("assent.engine.get_adapter", return_value=adapter):
+            code = engine.run_selection_workflow(
+                str(self.config_path), self.assent_dir, ("aa", "bb"))
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertNotEqual(gitops.commit_of(bb_worktree, "HEAD"), bb_before)
+        self.assertEqual(
+            (bb_worktree / "README.md").read_text(encoding="utf-8"),
+            "shared\n")
+        self.assertEqual(self.read_batch_receipt().plan_names, ("aa", "bb"))
 
     def test_selected_names_are_normalized_and_receipt_is_exact(self) -> None:
         parent = self.make_source("parent")
@@ -1070,7 +1121,7 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         declared = set(getattr(self, "declared", ()))
         declared.add(name)
         self.declared = tuple(sorted(declared))
-        shared_paths.review(
+        shared_paths.declare(
             self.root, worktree, paths=self.declared, watch=("README.md",),
             dispositions=excluded_inventory(self.root, self.declared))
         return target
@@ -1118,7 +1169,7 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         arb = self.root / "lib/l10n/arb"
         arb.mkdir(parents=True)
         (arb / "app_localizations.dart").write_text("// l10n\n", encoding="utf-8")
-        shared_paths.review(
+        shared_paths.declare(
             self.root, gitops.worktree_path(self.root, "aa"),
             paths=("lib/l10n/arb",), watch=("README.md",),
             dispositions=excluded_inventory(self.root, ("lib/l10n/arb",)))
@@ -1264,7 +1315,7 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
     def test_reviewed_none_refuses_an_external_link_before_batch_verify(self) -> None:
         self.make_source("aa")
         worktree = gitops.worktree_path(self.root, "aa")
-        shared_paths.review(
+        shared_paths.declare(
             self.root, worktree, none=True, watch=("README.md",),
             dispositions=excluded_inventory(self.root))
         target = self.link_target("pkg")

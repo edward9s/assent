@@ -31,9 +31,9 @@ from assent.plandeps import (find_unfinished_prerequisites,
 from assent.plan_source import resolve_source_snapshot
 from assent.plan_scheduler import run_all
 from assent.init import init as run_init
-from assent.main import (add_shared_paths_command, shared_paths_review,
+from assent.main import (add_shared_paths_command, shared_paths_declare,
                          shared_paths_status)
-from assent.plan import Plan
+from assent.plan import Plan, plan_workflow_requires_human
 from assent.reconcile import (reconcile_abort, reconcile_continue,
                               reconcile_start)
 from assent.reject import reject_plan
@@ -587,7 +587,8 @@ def _close_run(result: int, *, config_path: str,
             except AssentError as e:
                 print(f"Config error: {e}")
                 return 1
-            if not infer_plan_completion(cfg.tasks_dir).complete:
+            if (not infer_plan_completion(cfg.tasks_dir).complete
+                    or plan_workflow_requires_human(cfg.tasks_dir)):
                 incomplete.append(plan_name)
         if incomplete:
             print("Integration workflow deferred: selected plan execution "
@@ -714,7 +715,7 @@ def _dispatch(argv: list[str]) -> int:
         try:
             if args.operation == "status":
                 return shared_paths_status()
-            return shared_paths_review(
+            return shared_paths_declare(
                 args.path, args.watch, args.none, args.classify)
         except AssentError as e:
             print(f"shared-paths {args.operation}: failed ({e})")

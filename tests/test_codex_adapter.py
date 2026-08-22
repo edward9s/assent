@@ -9,7 +9,7 @@ from assent.adapters.codex import (
     CodexAdapter, build_command, format_stream_event, parse_output_for_billing,
     parse_output_for_quota, parse_output_for_usage,
 )
-from assent.config import Config
+from assent.config import Config, WorkflowActionStep
 from tests.engine_support import TEST_MODEL_TIERS
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -20,7 +20,8 @@ def make_cfg(**overrides) -> Config:
     the fixture's own; assertions below name their values directly."""
     values = dict(root=Path("."), assent_dir=Path("./.assent"),
                   tasks_dir=Path("./.assent/plan01"), tasks_name="plan01",
-                  adapter_name="codex",
+                  workflow_task=(WorkflowActionStep("focused_test"),),
+                  adapter_names=("codex",),
                   codex_models=dict(TEST_MODEL_TIERS["codex"]))
     values.update(overrides)
     return Config(**values)
@@ -37,7 +38,7 @@ class TestBuildCommand(unittest.TestCase):
         self.assertNotIn("the prompt", cmd)
 
     def test_large_prompt_is_not_in_command_arguments(self):
-        prompt = "mixed ASCII and Unicode\n臺灣" * 100_000
+        prompt = "mixed ASCII and Unicode\n�O�W" * 100_000
         cmd = build_command(make_cfg(), prompt, "gpt-5.6-sol", "max")
         self.assertEqual(cmd[-1], "-")
         self.assertNotIn(prompt, cmd)
@@ -67,10 +68,10 @@ class TestFormatStreamEvent(unittest.TestCase):
         # The agent_message text is opaque upstream fixture data (Chinese kept on purpose to
         # prove multiline Unicode passthrough); it must render verbatim, never translated.
         event = {"type": "item.completed", "item": {
-            "id": "i1", "type": "agent_message", "text": "第一行\n第二行"}}
+            "id": "i1", "type": "agent_message", "text": "�Ĥ@��\n�ĤG��"}}
         rendered = format_stream_event(json.dumps(event, ensure_ascii=False))
-        self.assertIn("AI| 第一行", rendered)
-        self.assertIn("AI| 第二行", rendered)
+        self.assertIn("AI| �Ĥ@��", rendered)
+        self.assertIn("AI| �ĤG��", rendered)
 
     def test_tool_and_usage_events_are_displayed(self):
         tool = {"type": "item.started", "item": {
@@ -199,7 +200,7 @@ class TestRunTask(unittest.TestCase):
         self.patch_run(fake)
         adapter = CodexAdapter(make_cfg())
         requested_model = adapter.resolve("prime")[0]
-        prompt = "prompt\n臺灣"
+        prompt = "prompt\n�O�W"
         result = adapter.run_task(prompt, requested_model, "high", Path("/p"))
         self.assertIsInstance(result, TaskResult)
         self.assertEqual(captured["command"][captured["command"].index("--model") + 1],
@@ -306,55 +307,7 @@ class TestRunTask(unittest.TestCase):
         self.assertFalse(result.quota_exhausted)
         self.assertIsNone(result.failure_kind)
 
-    def test_structured_task_keeps_raw_stream_and_reads_native_last_message(self):
-        final = '{"type":"assent.auto_fix_review","verdict":"PASS","findings":[]}'
-        stream = (json.dumps({"type": "item.completed", "item": {
-            "type": "agent_message", "text": final}})
-                  + "\n" + json.dumps({"type": "turn.completed"}) + "\n")
-        captured = {}
 
-        def fake(command, cwd, stall_seconds, echo=None, input_text=None):
-            captured.update(command=command, cwd=cwd, input_text=input_text)
-            schema = Path(command[command.index("--output-schema") + 1])
-            last_message = Path(
-                command[command.index("--output-last-message") + 1])
-            captured.update(schema=schema, last_message=last_message,
-                            transport=schema.parent)
-            self.assertTrue(schema.is_file())
-            schema_data = json.loads(schema.read_text(encoding="utf-8"))
-            self.assertEqual(schema_data["properties"]["type"]["enum"],
-                             ["assent.auto_fix_review"])
-            last_message.write_text(final, encoding="utf-8")
-            return 0, stream, False
-
-        self.patch_run(fake)
-        prompt = "large prompt\n臺灣" * 1000
-        result = CodexAdapter(make_cfg()).run_structured_task(
-            prompt, "gpt-5.6-sol", "max", Path.cwd())
-
-        self.assertEqual(result.output, stream)
-        self.assertEqual(result.structured_output, final)
-        self.assertIsNone(result.structured_output_error)
-        self.assertEqual(captured["input_text"], prompt)
-        self.assertIn("--json", captured["command"])
-        self.assertIn("--output-schema", captured["command"])
-        self.assertIn("--output-last-message", captured["command"])
-        self.assertNotIn(prompt, captured["command"])
-        self.assertFalse(captured["transport"].exists())
-
-    def test_structured_transport_is_removed_when_subprocess_is_interrupted(self):
-        captured = {}
-
-        def interrupted(command, cwd, stall_seconds, echo=None, input_text=None):
-            schema = Path(command[command.index("--output-schema") + 1])
-            captured["transport"] = schema.parent
-            raise KeyboardInterrupt
-
-        self.patch_run(interrupted)
-        with self.assertRaises(KeyboardInterrupt):
-            CodexAdapter(make_cfg()).run_structured_task(
-                "p", "gpt-5.6-sol", "max", Path.cwd())
-        self.assertFalse(captured["transport"].exists())
 
     def test_unknown_tier_raises(self):
         with self.assertRaises(AssentError):

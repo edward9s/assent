@@ -32,7 +32,7 @@ _NEEDS_OK_TXT = ('python -c "import pathlib,sys;'
 
 
 def task_text(*, title="任務", deps=(), model="lite",
-              status="TODO", scope=("src/",), verify=_OK,
+              status="TODO", verify=_OK,
               goal="做一件事。", acceptance="- 完成", notes="") -> str:
     lines = [
         f"title = {json.dumps(title, ensure_ascii=False)}",
@@ -41,7 +41,6 @@ def task_text(*, title="任務", deps=(), model="lite",
     ]
     lines += [
         f"status = {json.dumps(status)}",
-        "scope = [" + ", ".join(json.dumps(s) for s in scope) + "]",
         f"verify = {json.dumps(verify, ensure_ascii=False)}",
         f'goal = """\n{goal}\n"""',
         f'acceptance = """\n{acceptance}\n"""',
@@ -155,12 +154,15 @@ class EngineTestCase(unittest.TestCase):
             ["git", *args], cwd=self.execution_root(), capture_output=True,
             encoding="utf-8", check=True).stdout
 
-    def build(self, retry=1, adapter_name="claude", extra_config=""):
+    def build(self, adapter_name="claude", extra_config=""):
+        task_workflow = (
+            "" if "[workflow]" in extra_config else
+            '[workflow]\ntask = [{ action = "focused_test" }]\n')
         (self.root / ".assent" / "assent.toml").write_text(
-            f"[run]\nretry_per_task = {retry}\n"
             f'[adapter]\nname = "{adapter_name}"\n'
             '[adapter.claude]\ncommand = "python"\n'
             + extra_config
+            + task_workflow
             + models_block(f'name = "{adapter_name}"\n' + extra_config),
             encoding="utf-8")
         return load_config(self.root / ".assent" / "assent.toml", "plan01")
@@ -180,18 +182,3 @@ class EngineTestCase(unittest.TestCase):
 
     def subjects(self) -> list[str]:
         return self._git_execution("log", "--pretty=%s").splitlines()
-
-    # AI behavior simulation
-    def ai_done(self, task_path, files=None, *, by="claude",
-                requested_model="lite"):
-        def step(prompt):
-            for rel, content in (files or {}).items():
-                p = self.execution_root() / rel
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(content, encoding="utf-8")
-            set_status(task_path, "DONE")
-            append_entry(journal_path_for(task_path), by=by,
-                         requested_model=requested_model, event="done",
-                         summary="完成")
-            return ok_result()
-        return step

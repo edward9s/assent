@@ -28,7 +28,7 @@ from assent.adapters.antigravity import (
     reserved_argument_errors,
 )
 from assent.adapters.process import run_subprocess
-from assent.config import Config
+from assent.config import Config, WorkflowActionStep
 from tests.engine_support import TEST_MODEL_TIERS
 from assent.plan import append_entry, read_entries
 
@@ -64,7 +64,8 @@ def make_cfg(**overrides) -> Config:
     the fixture's own; assertions below name their values directly."""
     values = dict(root=Path("."), assent_dir=Path("./.assent"),
                   tasks_dir=Path("./.assent/plan01"), tasks_name="plan01",
-                  adapter_name=NAME,
+                  workflow_task=(WorkflowActionStep("focused_test"),),
+                  adapter_names=(NAME,),
                   antigravity_models=dict(TEST_MODEL_TIERS["antigravity"]))
     values.update(overrides)
     return Config(**values)
@@ -441,18 +442,6 @@ class TestOutputContract(unittest.TestCase):
             "event": "result", "result": {"usage": {
                 "input_tokens": -2, "output_tokens": False}}})))
 
-    def test_structured_task_exposes_terminal_response_and_usage(self):
-        output = json.dumps({"event": "result", "result": {
-            "status": "SUCCESS", "response": '{"verdict":"PASS"}',
-            "usage": {"output_tokens": 7}}}) + "\n"
-        adapter = make_adapter()
-        with mock.patch("assent.adapters.antigravity.run_subprocess",
-                        return_value=(0, output, False)):
-            result = adapter.run_structured_task(
-                "prompt", "gemini-3.1-pro", "high", Path("."))
-        self.assertEqual(result.structured_output, '{"verdict":"PASS"}')
-        self.assertIsNone(result.structured_output_error)
-        self.assertEqual(result.usage[0].output_tokens, 7)
 
     def test_checkpoint_resume_record_is_hidden_from_live_output(self):
         self.assertIsNone(format_output_line(CHECKPOINT_RESUME_RECORD + "\n"))
@@ -801,11 +790,11 @@ class TestFakeCLIClassification(RealSubprocessTestCase):
 
 class TestFakeCLIUnicodeAndPrompt(RealSubprocessTestCase):
     def test_unicode_whitespace_path_and_multiline_prompt_round_trip(self):
-        odd_dir = self.tmp / "工作 目錄 with spaces"
+        odd_dir = self.tmp / "�u�@ �ؿ� with spaces"
         odd_dir.mkdir()
-        prompt = ("多行 prompt 第一行\n"
+        prompt = ("�h�� prompt �Ĥ@��\n"
                   'Second line with "quotes" and a tab\there\n'
-                  "第三行:percent %PATH%, amp &, pipe |, caret ^\n")
+                  "�ĤT��:percent %PATH%, amp &, pipe |, caret ^\n")
         with mock.patch.dict(os.environ, {"FAKE_AGY_SCENARIO": "echo_roundtrip"}):
             command = _fake_agy_command(prompt, extra=["--add-dir", str(odd_dir)])
             rc, out, stalled = run_subprocess(command, odd_dir, stall_seconds=10)

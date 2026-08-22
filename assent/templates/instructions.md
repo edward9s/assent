@@ -21,6 +21,21 @@ reader-oriented. Keep only text needed to act or understand; do not add
 development chronology, meeting narrative, or changelog entries unless the
 file explicitly owns historical records.
 
+Reliability by construction is the highest architectural principle: use the
+smallest architecture and fewest states that make invalid behavior difficult
+to form. Prefer removing a failure mode over detecting, tracking, routing, or
+recovering from it. Semantic precision shares that priority: one term names one
+actual mechanism, and no name implies a capability the system does not provide.
+
+Implementation uses the smallest coherent structure that satisfies the stated
+behavior. Review treats avoidable state, branching, indirection, compatibility,
+and recovery machinery as substantive defects. Repair removes the failure
+mechanism instead of surrounding it with another guard when a direct invariant
+can make the failure impossible. Repair uses the authoritative requirements to
+decide whether a defect is in the tests or the implementation and corrects
+whichever is wrong. Preserve correct tests; never weaken, narrow, delete,
+rewrite, bypass, or mock them merely to make a check pass.
+
 Git commit messages must contain no AI attribution or advertising text such as
 `Co-Authored-By` or `Generated with`.
 
@@ -61,10 +76,10 @@ full verification for the human.
 
 ## Scheduled-session rules
 
-- Edit source only below the session cwd (the isolated worktree) and only
-  within the scheduler-authorized scope. Confirm paths before writing. The main
-  tree is read-only except that an ordinary task session may change its own
-  task status line and append its own journal. `~/.assent` is always read-only.
+- Edit project source only below the session cwd and any additional absolute
+  conflict workspaces explicitly named by the runtime prompt. Confirm paths
+  before writing. The main tree, task contracts, journals, scheduler state,
+  and `~/.assent` are always read-only; the scheduler owns their transitions.
 - Command side effects count as writes. A check, compiler, importer, formatter,
   generator, or test must leave no non-ignored generated artifact in the
   project worktree; use a non-writing check or project-approved temporary output
@@ -88,17 +103,16 @@ full verification for the human.
 
 The adapter result defines the session boundary. A nonzero adapter exit or
 watchdog stall is an adapter failure: Assent preserves work and applies its
-retry policy. A terminal task result is usable only after tamper and fail-closed
-scope checks pass. A task's `BLOCKED` result then stays inside
-`[workflow].task`, where a later configured verdict/repair role may resolve it;
-the role-specific prompt defines that responsibility.
+retry policy. A successful role session advances to the next configured step;
+only a scheduler action changes task completion state.
 
 ## Shared ignored directories
 
-If an injected clause says `UNKNOWN` or `STALE`, settle it before closeout.
-A plan reviewer returns the requested `shared_paths` record and does not run
-the CLI; any other session runs the injected `assent shared-paths review`
-command from its worktree. Cover every listed ordinary ignored directory once
+If an injected clause says `UNKNOWN` or `STALE`, inspect the complete listed
+inventory and submit the decision with `assent shared-paths declare` from the
+source worktree before closeout. Assent validates, records, and applies the
+declaration.
+Cover every listed ordinary ignored directory once
 as shared or non-shared, and watch only the tracked dependency or build files
 that invalidate the decision.
 
@@ -109,27 +123,17 @@ or modify a linked target.
 
 ## Review and acceptance meetings
 
-Read `_report.md` first. If it says `TECHNICAL DEBT REVIEW REQUIRED`, read
-`_technical_debt.md`, tell the human before recommending `accept`, and obtain
-one disposition per finding: the local repair is sufficient; append or rework
-a task for concrete follow-up; or promote a durable rule to `AGENTS.md`. Write
-requested changes to their canonical owner. No-change dispositions remain part
-of the existing human `accept` decision, not a second approval state.
+Read `_report.md` first, then inspect the relevant requirements, source diff,
+and verification evidence. Verification is evidence; only the human's explicit
+`assent accept` publishes work.
 
 ## Task-session closeout
 
-Complete closeout synchronously in this turn:
-
-1. Check every acceptance item. Run the focused command to completion only when
-   the runtime prompt assigns it to this session; never run a scheduler-owned
-   `focused_test` action. Do not run the full suite.
-2. Change only this task's status line to `DONE` or `BLOCKED`.
-3. Append one `[[entry]]` to the scheduler-provided journal path with `time`,
-   prompt-specified `by`, actual `requested_model`, actual
-   `requested_effort` when the prompt states one, `event`, a one-sentence
-   verifiable `summary`, and
-   optional process `detail`.
-4. Do not commit; the scheduler owns the checkpoint.
+Complete closeout synchronously in this turn. Check every acceptance item and
+run a focused command only when the runtime prompt assigns it to this session;
+never run a scheduler-owned action or the full suite. Return a concise result
+for the next configured step. Do not edit task contracts or journals and do not
+commit; the scheduler owns status, evidence, and checkpoints.
 
 ## Meeting closeout
 

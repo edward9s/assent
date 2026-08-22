@@ -60,7 +60,9 @@ class AcceptAllRepositoryCase(unittest.TestCase):
         self.assent_dir = self.root / ".assent"
         self.assent_dir.mkdir()
         self.config_path = self.assent_dir / "assent.toml"
-        self.config_path.write_text(models_block(), encoding="utf-8")
+        self.config_path.write_text(
+            '[workflow]\ntask = [{ action = "focused_test" }]\n'
+            + models_block(), encoding="utf-8")
         self._write_verify(_VERIFY_OK)
 
     def _cleanup(self) -> None:
@@ -91,7 +93,6 @@ class AcceptAllRepositoryCase(unittest.TestCase):
             'deps = []\n'
             'model = "core"\n'
             f'status = "{status}"\n'
-            'scope = ["assent/"]\n'
             'verify = "python --version"\n'
             'goal = "Complete the task."\n'
             'acceptance = "Verification passes."\n',

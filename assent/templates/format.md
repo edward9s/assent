@@ -88,7 +88,7 @@ lexicographic filename order.
 Only `.e.toml` is active. A legacy `tNNN_name.toml` in a live plan makes
 `check` and `run` refuse rather than ignore or move it.
 
-Use this 11-field skeleton; no other field is allowed:
+Use this 10-field skeleton; no other field is allowed:
 
 ```toml
 title = "Skeleton and test infrastructure"
@@ -96,7 +96,6 @@ deps = []                        # upstream task ids; always write the array
 model = "core"                   # prime | core | lite -- nothing else
 workflow = [{ role = "implementer" }]  # optional task-local override
 status = "TODO"                  # TODO | WIP | DONE | BLOCKED | SKIP
-scope = ["src/thing.py", "tests/test_thing.py"]
 verify = "python -m unittest tests.test_thing"
 
 goal = """
@@ -116,7 +115,7 @@ Known facts, file/symbol references, dependencies, and risks.
 """                              # optional
 ```
 
-Required fields are `title`, `deps`, `model`, `status`, `scope`, `verify`,
+Required fields are `title`, `deps`, `model`, `status`, `verify`,
 `goal`, and `acceptance`. `workflow`, `behavior`, and `notes` are
 optional. Put structural fields before multiline prose; `status` must precede
 all multiline strings so the scheduler can replace exactly that line.
@@ -124,9 +123,6 @@ all multiline strings so the scheduler can replace exactly that line.
 ### Field rules
 
 - `deps` lists earlier task ids in this plan. Write `[]` when empty.
-- `scope` is a nonempty list of project-relative path prefixes the task may
-  change. It is fail-closed. The task's own status line and paired journal are
-  scheduler exceptions and need not appear.
 - `verify` is the narrow deterministic focused gate for this task. Use the
   smallest module, class, case, or command that covers its behavior. Keep the
   smallest representative integration test when filesystem, Git, or process
@@ -134,14 +130,13 @@ all multiline strings so the scheduler can replace exactly that line.
   a scheduler-owned focused action treats exit 0 that creates or modifies one
   as stale evidence, not a pass. Account for predictable caches and generated
   output in the starting Git snapshot's ignore rules or direct them outside the
-  project rather than adding them to task scope. Every other exit fails. Never
+  project. Every other exit fails. Never
   name `.assent/verify.py` or the full suite.
 - `workflow` is an ordered task-local override. Each item contains exactly one
   `{ role = "..." }` or `{ action = "focused_test" }`. Roles come from effective
-  settings. Omission inherits `[workflow].task`; omission at both levels gives
-  one implicit task session. `workflow = []` disables per-task sessions for
-  this task and assigns it to plan-wide execution. Exact workflow semantics are
-  in `workflow.md`.
+  settings. Omission inherits the required effective `[workflow].task` array.
+  An empty array is invalid; use an explicit action-only array to request only
+  mechanical verification. Exact workflow semantics are in `workflow.md`.
 - A task must be executable by a fresh AI from project `AGENTS.md`,
   `instructions.md`, and this task file alone. A role prompt adds responsibility
   at runtime but does not replace missing requirements.
@@ -177,25 +172,22 @@ adapter.
 Before closeout, audit every `goal`, `behavior`, and `acceptance` clause item by
 item:
 
-1. Locate the owning implementation, focused-test, and contract files. Inspect
-   the repository when ownership is not already known; paths mentioned in prose
-   are not a completeness proof.
-2. Classify each located file as read-only context or a possible write.
-3. Cover every possible write with an exact `scope` entry. Read-only context
-   does not belong in scope.
-4. Audit every `verify` command against the clean-worktree rule above,
+1. Locate relevant implementation, focused-test, and contract files. Inspect
+   the repository when they are not already known; paths mentioned in prose are
+   context, not a write boundary.
+2. Audit every `verify` command against the clean-worktree rule above,
    including predictable cache, coverage, compiler, and generator output.
-5. Name known files and symbols in `behavior` or `notes`; do not make the
+3. Name known files and symbols in `behavior` or `notes`; do not make the
    executing AI rediscover facts the meeting already knows.
-6. Make each acceptance item decidable without another human question.
-7. Default ordinary work to `core` or `lite`; reserve `prime` for the cases in
+4. Make each acceptance item decidable without another human question.
+5. Default ordinary work to `core` or `lite`; reserve `prime` for the cases in
    the table above.
 
 ### Media
 
 Images, PDFs, audio, and video are ordinary project context, not schema fields.
 Name an existing input and its purpose in `behavior` or `notes`; include it in
-`scope` only when the task may create or modify it. Prefer versioned inputs.
+the task requirements when the result must create or modify it. Prefer versioned inputs.
 `verify` covers machine-checkable facts such as existence, dimensions, and
 format; perceptual judgment remains with the human acceptance decision.
 
@@ -205,14 +197,12 @@ format; perceptual judgment remains with the human acceptance decision.
 | --- | --- |
 | `TODO` | not started or explicitly reopened |
 | `WIP` | progress exists and should resume; not completion evidence |
-| `DONE` | executing AI claims completion; still requires scheduler gates and human acceptance |
+| `DONE` | the scheduler's focused gate passed; human acceptance is still required |
 | `BLOCKED` | the task workflow could not settle the task; evidence is retained |
 | `SKIP` | intentionally omitted from this plan run |
 
-During an ordinary task session, the AI may change only its own `status` line.
-The scheduler may additionally append one exact, mechanically validated scope
-omission returned by an authorized workflow repair; no AI edits `.e.toml` task
-files or Git state directly.
+AI sessions never edit `.e.toml` task files or Git state. The scheduler alone
+changes status after a workflow action or a human command.
 
 ## Journal file: `tNNN_name.r.toml`
 
@@ -239,12 +229,12 @@ entries and older entries missing newer fields remain readable and are not
 migrated. Scheduler entries may additionally name `agent` and event-specific
 fields.
 
-The exact event lifecycle, generated `_report.md`, verification receipts, and
-derived `_auto_fix.toml` state belong to `workflow.md`.
+The exact event lifecycle, generated `_report.md`, and verification receipts
+belong to `workflow.md`.
 
 ## Cold-start gate
 
 A fresh AI given only project `AGENTS.md`, `instructions.md`, and one `TODO`
-task file must be able to state the goal, writable scope, acceptance conditions,
-and next action without asking a question. If not, the plan is incomplete.
+task file must be able to state the goal, acceptance conditions, and next action
+without asking a question. If not, the plan is incomplete.
 `assent check` is the final mechanical gate for the planning meeting.
