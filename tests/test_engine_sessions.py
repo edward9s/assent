@@ -53,6 +53,145 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
             "never invent a new acceptance criterion",
             engine._AUTO_FIX_REVIEW_PROMPT.replace("\n", " "))
 
+    def test_repair_briefs_name_only_finding_owners_and_owned_findings(self):
+        first = self.write_task(1, status="DONE", scope=("src/one.py",))
+        second = self.write_task(
+            2, status="DONE", deps=("t001",), scope=("src/two.py",))
+        self.write_task(
+            3, status="DONE", deps=("t002",), scope=("src/three.py",))
+        cfg = self.build()
+        self.commit_all()
+        plan = Plan.parse(cfg.tasks_dir)
+        findings = (
+            auto_fix.ReviewFinding(
+                "t001", "src/one.py", "First owner finding",
+                "Only the first task owns this evidence."),
+            auto_fix.ReviewFinding(
+                "t002", "src/two.py", "Second owner finding",
+                "Only the second task owns this evidence."),
+        )
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", findings),
+            source_tree=gitops.tree_of(cfg.root, "HEAD"),
+            task_plan_sha256=auto_fix.sha256_files(
+                task.path for task in plan.tasks),
+            review_prompt_sha256="a" * 64,
+            reviewer_adapter="claude", reviewer_model="opus",
+            reviewer_effort="high")
+
+        briefs = engine._auto_fix_repair_briefs(
+            cfg, plan, state, blocker_evidence="none",
+            focused_evidence="all focused checks passed")
+        state = auto_fix.with_repair_briefs(state, briefs)
+
+        self.assertEqual([brief.task_id for brief in briefs], ["t001", "t002"])
+        first_fingerprint = auto_fix.finding_fingerprint(findings[0])
+        second_fingerprint = auto_fix.finding_fingerprint(findings[1])
+        self.assertEqual(briefs[0].finding_fingerprints, (first_fingerprint,))
+        self.assertEqual(briefs[1].finding_fingerprints, (second_fingerprint,))
+        self.assertIn("First owner finding", briefs[0].brief)
+        self.assertNotIn("Second owner finding", briefs[0].brief)
+        self.assertIn("Second owner finding", briefs[1].brief)
+        self.assertNotIn("First owner finding", briefs[1].brief)
+        self.assertIn(
+            first_fingerprint,
+            engine._auto_fix_repair_context(parse_task_file(first), state))
+        self.assertIn(
+            second_fingerprint,
+            engine._auto_fix_repair_context(parse_task_file(second), state))
+
+        regression = auto_fix.ReviewFinding(
+            "t001", "src/one.py", "The repair introduced a new contract mismatch",
+            "The changed implementation no longer matches its declared protocol.",
+            recommendation="Align the implementation and protocol.",
+            transition="repair_regression",
+            transition_evidence="The repair changed src/one.py.")
+        rechecked = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (regression,)),
+            source_tree="4" * 40,
+            task_plan_sha256=state.task_plan_sha256,
+            review_prompt_sha256="b" * 64,
+            reviewer_adapter="claude", reviewer_model="opus",
+            reviewer_effort="high", previous=state,
+            review_stage="recheck")
+        self.assertEqual(rechecked.repair_briefs, briefs)
+
+        refreshed = engine._auto_fix_attach_repair_briefs(
+            cfg, plan, rechecked, blocker_evidence="none",
+            focused_evidence="all focused checks passed")
+
+        self.assertEqual(len(refreshed.repair_briefs), 1)
+        self.assertEqual(refreshed.repair_briefs[0].task_id, "t001")
+        self.assertEqual(
+            refreshed.repair_briefs[0].finding_fingerprints,
+            (auto_fix.finding_fingerprint(regression),))
+        self.assertIn(
+            "new contract mismatch", refreshed.repair_briefs[0].brief)
+        self.assertNotIn(
+            "Second owner finding", refreshed.repair_briefs[0].brief)
+
+    def test_legacy_cross_task_recovery_restores_only_proven_non_owner(self):
+        owner = self.write_task(1, status="BLOCKED", scope=("src/one.py",))
+        innocent = self.write_task(
+            2, status="BLOCKED", deps=("t001",), scope=("src/two.py",))
+        unproven = self.write_task(
+            3, status="BLOCKED", deps=("t002",), scope=("src/three.py",))
+        append_entry(
+            journal_path_for(innocent), by="scheduler", event="done",
+            summary="Focused test passed", detail="Exit code: 0")
+        append_entry(
+            journal_path_for(innocent), by="scheduler",
+            event="rework_requested", summary="Automatic repair rework",
+            detail=(
+                "original status: DONE\n"
+                "reason: Automatic repair of durable plan-review findings"))
+        append_entry(
+            journal_path_for(innocent), by="scheduler", event="blocked",
+            summary=("Task verdict closeout failed: finding path is outside "
+                     "t002's declared scope"), detail="No focused test ran.")
+        finding = auto_fix.ReviewFinding(
+            "t001", "src/one.py", "Owner finding",
+            "Only the first task owns this repair.")
+        resolved_finding = auto_fix.ReviewFinding(
+            "t002", "src/two.py", "Resolved owner finding",
+            "The second task originally owned this repair.")
+        previous = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (finding, resolved_finding)),
+            source_tree="1" * 40, task_plan_sha256="2" * 64,
+            review_prompt_sha256="3" * 64,
+            reviewer_adapter="claude", reviewer_model="opus",
+            reviewer_effort="high")
+        fingerprint = auto_fix.finding_fingerprint(finding)
+        retained = auto_fix.ReviewFinding(
+            finding.task_id, finding.path, finding.summary, finding.evidence,
+            kind=finding.kind, recommendation=finding.recommendation,
+            transition="still_present", prior_fingerprint=fingerprint,
+            transition_evidence="The first task's blocker remains.")
+        state = auto_fix.state_for_review(
+            auto_fix.ReviewRecord("FAIL", (retained,)),
+            source_tree="4" * 40, task_plan_sha256="2" * 64,
+            review_prompt_sha256="3" * 64,
+            reviewer_adapter="claude", reviewer_model="opus",
+            reviewer_effort="high", previous=previous,
+            review_stage="recheck")
+
+        restored = engine._recover_legacy_cross_task_blocks(
+            Plan.parse(owner.parent), state,
+            lambda: datetime(2026, 8, 22, tzinfo=timezone.utc))
+
+        self.assertEqual(restored, ("t002",))
+        self.assertIn(
+            auto_fix.finding_fingerprint(resolved_finding),
+            {item.fingerprint for item in state.findings})
+        self.assertNotIn(
+            auto_fix.finding_fingerprint(resolved_finding),
+            state.current_finding_fingerprints)
+        self.assertEqual(parse_task_file(innocent).status, "DONE")
+        self.assertEqual(parse_task_file(unproven).status, "BLOCKED")
+        self.assertEqual(
+            read_entries(journal_path_for(innocent))[-1]["event"],
+            "auto_fix_recovery")
+
     @staticmethod
     def review_rounds(count, *names):
         """A workflow with exactly ``count`` verdict-producing review steps.

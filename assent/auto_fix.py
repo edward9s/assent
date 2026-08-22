@@ -1324,36 +1324,43 @@ def validate_review_transitions(
     if repair_changed_paths is not None:
         changed_paths = tuple(
             normalize_finding_path(path) for path in repair_changed_paths)
+    validated_findings: list[ReviewFinding] = []
     for index, item in enumerate(record.findings):
         label = f"Review findings[{index}]"
-        fingerprint = finding_fingerprint(item)
         if item.transition == "initial":
             raise AssentError("An auto-fix recheck cannot contain an initial finding")
-        if (item.kind == "eligible_technical_debt"
-                and item.transition != "still_present"):
-            raise AssentError(
-                f"{label} cannot introduce eligible technical debt during recheck")
         if item.transition == "still_present":
             if item.prior_fingerprint not in current:
                 raise AssentError(
                     f"{label} still_present must cite a current scheduler fingerprint")
-            if fingerprint != item.prior_fingerprint:
+            prior = ledger[item.prior_fingerprint].finding
+            if (item.task_id, item.path) != (prior.task_id, prior.path):
                 raise AssentError(
-                    f"{label} still_present changed immutable substantive fields")
-        elif fingerprint in ledger:
+                    f"{label} still_present must retain its current task and path")
+            validated_findings.append(replace(
+                prior, transition="still_present",
+                prior_fingerprint=item.prior_fingerprint,
+                transition_evidence=item.transition_evidence))
+            continue
+        if item.kind == "eligible_technical_debt":
+            raise AssentError(
+                f"{label} cannot introduce eligible technical debt during recheck")
+        fingerprint = finding_fingerprint(item)
+        if fingerprint in ledger:
             raise AssentError(
                 f"{label} {item.transition} must identify a genuinely new blocker")
+        elif item.transition == "repair_regression":
+            if changed_paths is not None:
+                path = item.path.rstrip("/")
+                if not any(
+                        changed == path or changed.startswith(path + "/")
+                        or path.startswith(changed.rstrip("/") + "/")
+                        for changed in changed_paths):
+                    raise AssentError(
+                        f"{label} repair_regression is not tied to the repair delta")
         elif (item.task_id, item.path, item.kind) in current_locations:
             raise AssentError(
                 f"{label} is an unsupported wording variant of a current finding")
-        elif item.transition == "repair_regression" and changed_paths is not None:
-            path = item.path.rstrip("/")
-            if not any(
-                    changed == path or changed.startswith(path + "/")
-                    or path.startswith(changed.rstrip("/") + "/")
-                    for changed in changed_paths):
-                raise AssentError(
-                    f"{label} repair_regression is not tied to the repair delta")
         elif (item.transition == "newly_exposed"
               and repair_changed_paths is not None):
             origin = (item.transition_evidence or "").lower()
@@ -1363,7 +1370,8 @@ def validate_review_transitions(
                         "requirement", "acceptance", "behavior", "goal"))):
                 raise AssentError(
                     f"{label} newly_exposed does not identify an existing requirement")
-    return record
+        validated_findings.append(item)
+    return replace(record, findings=tuple(validated_findings))
 
 
 def current_review_record(state: AutoFixState) -> ReviewRecord:
@@ -1883,6 +1891,9 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
         _require_digest(item.fingerprint, "Worker disposition fingerprint")
         if item.fingerprint not in ledger:
             raise AssentError("Worker disposition finding is absent from the ledger")
+        if ledger[item.fingerprint].task_id != item.task_id:
+            raise AssentError(
+                "Worker disposition task_id must own its finding")
         if item.disposition not in REPAIR_DISPOSITIONS:
             raise AssentError("Worker disposition value is invalid")
         _require_text(item.detail, "Worker disposition detail", MAX_EVIDENCE_LENGTH)
@@ -1910,6 +1921,9 @@ def _validate_state(state: AutoFixState) -> AutoFixState:
             _require_digest(fingerprint, "Repair-brief finding fingerprint")
             if fingerprint not in ledger:
                 raise AssentError("Repair brief cites a finding absent from the ledger")
+            if ledger[fingerprint].task_id != item.task_id:
+                raise AssentError(
+                    "Repair brief task_id must own every cited finding")
 
     for index, item in enumerate(state.plan_digest_transitions):
         if not isinstance(item, PlanDigestTransition):
@@ -2132,8 +2146,10 @@ def _table_list(data: dict, key: str, label: str) -> list[dict]:
     return value
 
 
-def read_auto_fix_state(path: str | Path) -> AutoFixState:
-    """Read the state fail-closed; malformed derived memory is never ignored."""
+def _read_auto_fix_state(
+        path: str | Path, *, recover_cross_task_evidence: bool,
+        ) -> tuple[AutoFixState, tuple[str, ...]]:
+    """Read state and optionally discard only legacy cross-task assignments."""
     path = Path(path)
     try:
         with open(path, "rb") as handle:
@@ -2253,7 +2269,77 @@ def read_auto_fix_state(path: str | Path) -> AutoFixState:
             **scalar)
     except TypeError as e:
         raise AssentError(f"Auto-fix state has an invalid structure: {e}") from e
-    return _validate_state(state)
+    ledger = {item.fingerprint: item for item in state.findings}
+    legacy_tasks: list[str] = []
+    for item in state.worker_dispositions:
+        finding = ledger.get(item.fingerprint)
+        if finding is not None and finding.task_id != item.task_id:
+            legacy_tasks.append(item.task_id)
+    for item in state.repair_briefs:
+        if any(
+                ledger.get(fingerprint) is not None
+                and ledger[fingerprint].task_id != item.task_id
+                for fingerprint in item.finding_fingerprints):
+            legacy_tasks.append(item.task_id)
+    legacy_task_ids = tuple(dict.fromkeys(legacy_tasks))
+    if legacy_task_ids and recover_cross_task_evidence:
+        if (state.verdict != "FAIL"
+                or state.self_fixed_unreviewed is not None
+                or state.unresolved_review is not None):
+            raise AssentError(
+                "Terminal auto-fix state has cross-task repair evidence")
+        state = replace(
+            state, phase="NEEDS_REPAIR", worker_dispositions=(),
+            repair_briefs=())
+    return _validate_state(state), legacy_task_ids
+
+
+def read_auto_fix_state(path: str | Path) -> AutoFixState:
+    """Read the state fail-closed; malformed derived memory is never ignored."""
+    state, _legacy_tasks = _read_auto_fix_state(
+        path, recover_cross_task_evidence=False)
+    return state
+
+
+def read_auto_fix_state_for_recovery(
+        path: str | Path) -> tuple[AutoFixState, tuple[str, ...]]:
+    """Read a pending FAIL while dropping legacy cross-task repair evidence.
+
+    Findings remain authoritative.  The returned task ids identify sessions
+    that received at least one finding owned by another task; callers must
+    preserve the original artifact before writing the normalized state.
+    """
+    return _read_auto_fix_state(path, recover_cross_task_evidence=True)
+
+
+def preserve_auto_fix_state_for_recovery(path: str | Path) -> Path:
+    """Keep the exact legacy derived state before recovery replaces it."""
+    source = Path(path)
+    try:
+        data = source.read_bytes()
+    except OSError as e:
+        raise AssentError(
+            f"Unable to preserve auto-fix recovery evidence {source}: {e}") from e
+    digest = hashlib.sha256(data).hexdigest()
+    destination = source.with_name(f"_auto_fix.legacy-{digest}.toml")
+    try:
+        if destination.exists():
+            if destination.read_bytes() != data:
+                raise AssentError(
+                    "Auto-fix recovery evidence path contains different bytes: "
+                    f"{destination}")
+            return destination
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        with os.fdopen(os.open(str(destination), flags, 0o600), "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except AssentError:
+        raise
+    except OSError as e:
+        raise AssentError(
+            f"Unable to preserve auto-fix recovery evidence {destination}: {e}") from e
+    return destination
 
 
 def auto_fix_state_is_fresh(

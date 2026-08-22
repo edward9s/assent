@@ -61,6 +61,14 @@ Run one unambiguous ready plan:
 assent run
 ```
 
+Omitting `PLAN` is automatic selection, not `--all`. It succeeds only when
+every formal plan can be parsed and exactly one plan is runnable. A plan is
+runnable when it has a `TODO` or `WIP` task and no unfinished plan
+prerequisite, or when every task is `DONE`/`SKIP` but its source has not been
+accepted. A plan with only `BLOCKED` work is not auto-selected; name it
+explicitly to resume its durable review or recovery. Zero or multiple runnable
+plans are refused.
+
 Run a named plan, one task only, or every incomplete plan:
 
 ```text

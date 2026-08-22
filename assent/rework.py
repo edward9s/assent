@@ -77,10 +77,10 @@ def rework_task(cfg: Config, task_id: str, cascade: bool = False,
 def rework_tasks_locked(cfg: Config, task_ids: list[str], reason: str) -> int:
     """Reopen an exact automatic finding set while the caller holds the plan lock.
 
-    The existing single-task transaction remains the only mutation path.  This
-    coordinator merely removes selected descendants whose required cascade is
-    already covered by another selected task, then invokes that transaction in
-    plan order with code preservation forced on.
+    The existing single-task transaction remains the only mutation path.  An
+    automatic repair reopens only tasks that own current findings; downstream
+    tasks keep their completed evidence and the later cumulative sweep checks
+    the repaired tree.  Manual rework keeps its explicit cascade contract.
     """
     if (not isinstance(task_ids, list) or not task_ids
             or not all(isinstance(item, str) and item for item in task_ids)):
@@ -103,20 +103,12 @@ def rework_tasks_locked(cfg: Config, task_ids: list[str], reason: str) -> int:
         print(f"{cfg.tasks_name}: automatic rework aborted "
               f"(exact task ids not found: {', '.join(unknown)})")
         return 1
-    covered: set[str] = set()
-    roots: list[str] = []
-    for task in plan.tasks:
-        if task.id not in selected or task.id in covered:
-            continue
-        roots.append(task.id)
-        covered.update(item.id for item in _downstream_tasks(plan, task.id))
-
-    for task_id in roots:
+    for task_id in (task.id for task in plan.tasks if task.id in selected):
         current = Plan.parse(cfg.tasks_dir).get(task_id)
         if current is not None and current.status == "TODO":
             continue
         if _rework_locked(
-                cfg, task_id, True, reason, False, automatic=True) != 0:
+                cfg, task_id, False, reason, False, automatic=True) != 0:
             return 1
     try:
         write_report(cfg, Plan.parse(cfg.tasks_dir))
@@ -516,7 +508,7 @@ def _resolve_request(cfg: Config, task_id: object, cascade: object,
     downstream = _downstream_tasks(plan, task_id)
     blockers = [task.id for task in downstream
                 if task.status in _CASCADE_STATUSES]
-    if target.status != "TODO" and blockers and not cascade:
+    if target.status != "TODO" and blockers and not cascade and not automatic:
         print(f"{name}: {task_id} has downstream tasks that must be reopened "
               f"together; specify cascade: {', '.join(blockers)}")
         return None
@@ -620,7 +612,7 @@ def _prepare_management_plane(request: _ReworkRequest,
     if target.status == "TODO":
         print(f"{name}: {request.task_id} is already TODO, no rework needed")
         return False
-    if request.blockers and not request.cascade:
+    if request.blockers and not request.cascade and not request.automatic:
         print(f"{name}: {request.task_id} has downstream tasks that must be reopened "
               f"together; specify cascade: {', '.join(request.blockers)}")
         return False

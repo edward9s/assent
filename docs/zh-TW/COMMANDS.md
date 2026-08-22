@@ -59,6 +59,13 @@ assent run urgent01 ...
 assent run
 ```
 
+省略 `PLAN` 代表自動選取，不等於 `--all`。只有在每一份正式 plan 都能解析，
+而且恰好只有一份 runnable plan 時才會成功。Plan 在沒有未完成的 plan
+前置需求，且含有 `TODO` 或 `WIP` task 時屬於 runnable；全部 task 都是
+`DONE`／`SKIP`、但 source 尚未 accept 時也屬於 runnable。只有 `BLOCKED`
+工作時不會被自動選取；要繼續其持久化 review 或 recovery，必須明確指定
+plan。Runnable plan 為零份或多份時都會拒絕執行。
+
 執行指定 plan、只跑一個 task，或平行處理所有未完成 plan：
 
 ```text

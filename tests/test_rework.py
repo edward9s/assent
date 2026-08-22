@@ -115,7 +115,7 @@ class TestRework(unittest.TestCase):
         # The coordinator only sequences the phases; it must not absorb their bodies again.
         self.assertLess(len(coordinator.splitlines()), 40)
 
-    def test_locked_automatic_rework_reuses_cascade_and_records_authorization(self):
+    def test_locked_automatic_rework_reopens_only_finding_owners(self):
         first = self._write_task(1, "DONE")
         second = self._write_task(2, "DONE", deps=(1,))
         worktree, _branch = self._worktree()
@@ -125,11 +125,28 @@ class TestRework(unittest.TestCase):
                 cfg, ["t001"], "review finding needs repair")
         self.assertEqual(code, 0)
         self.assertEqual(self._status(first), "TODO")
-        self.assertEqual(self._status(second), "TODO")
+        self.assertEqual(self._status(second), "DONE")
         entry = read_entries(first.with_name("t001_task.r.toml"))[-1]
         self.assertIn("Automatic repair rework", entry["summary"])
         self.assertIn("authorization: configured workflow repair",
                       entry["detail"])
+        self.assertIn("cascade scope: disabled", entry["detail"])
+
+    def test_locked_automatic_rework_keeps_exact_dependent_owners(self):
+        first = self._write_task(1, "DONE")
+        second = self._write_task(2, "DONE", deps=(1,))
+        third = self._write_task(3, "DONE", deps=(2,))
+        worktree, _branch = self._worktree()
+        cfg = self.cfg.for_worktree(worktree)
+
+        with hold_lock(self.tasks_dir, self.plan_name):
+            code = rework_tasks_locked(
+                cfg, ["t001", "t002"], "two findings need repair")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self._status(first), "TODO")
+        self.assertEqual(self._status(second), "TODO")
+        self.assertEqual(self._status(third), "DONE")
 
     def test_all_non_todo_target_statuses_can_reopen(self) -> None:
         task = self._write_task(1, "DONE")

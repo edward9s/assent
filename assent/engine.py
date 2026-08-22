@@ -2529,7 +2529,7 @@ def _selection_assignment_detail(
         f"selection candidate: {selection.action_candidate_tree}\n"
         f"task: {task.id}\n"
         "finding fingerprints: "
-        + json.dumps(list(state.current_finding_fingerprints),
+        + json.dumps(list(_auto_fix_task_fingerprints(state, task.id)),
                      separators=(",", ":")))
 
 
@@ -3281,7 +3281,7 @@ def _run_selection_repairs(
             item.task_id for item in review_state.findings
             if item.fingerprint in review_state.current_finding_fingerprints
             and item.task_id is not None))
-        for task in _auto_fix_cascade_tasks(plan, implicated):
+        for task in _auto_fix_implicated_tasks(plan, implicated):
             profile = (_workflow_fixer_profile(cfg, task, fixer_step)
                        if fixer_step is not None
                        else _auto_fix_profile_for_task(cfg, task))
@@ -3393,7 +3393,7 @@ def _run_selection_repairs(
                     + _selection_peer_context(cfg, conflicts)),
                 retry_limit=0, billing_is_failure=True,
                 auto_fix_fingerprints=(
-                    review_state.current_finding_fingerprints),
+                    _auto_fix_task_fingerprints(review_state, task.id)),
                 repair_dispositions=task_dispositions,
                 usage_context_kind="selection",
                 usage_context_id=f"workflow.selection.repair:{task.id}",
@@ -3841,7 +3841,36 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
         # limited progress, but a complete plan must not silently close over
         # unresolved review evidence just because the invocation omitted the
         # repair authorization.
-        existing_auto_fix = _auto_fix_existing_state(cfg)
+        existing_auto_fix, legacy_cross_task_ids = (
+            _auto_fix_existing_state_for_recovery(cfg))
+        if existing_auto_fix is not None:
+            try:
+                preserved = None
+                if legacy_cross_task_ids:
+                    preserved = auto_fix.preserve_auto_fix_state_for_recovery(
+                        auto_fix.auto_fix_state_path(cfg))
+                    auto_fix.write_auto_fix_state(
+                        auto_fix.auto_fix_state_path(cfg), existing_auto_fix)
+                restored = _recover_legacy_cross_task_blocks(
+                    plan, existing_auto_fix, now)
+                if legacy_cross_task_ids or restored:
+                    plan = Plan.parse(cfg.tasks_dir)
+                    trusted_plan = _authoritative_status_plan(
+                        trusted_plan, plan)
+                    messages = []
+                    if preserved is not None:
+                        messages.append(
+                            "replaced legacy cross-task repair assignments "
+                            "with exact finding owners; original evidence "
+                            f"preserved at {preserved}")
+                    if restored:
+                        messages.append(
+                            "restored prior DONE status for "
+                            + ", ".join(restored))
+                    print("Auto-fix recovery: " + "; ".join(messages))
+            except (AssentError, OSError) as e:
+                print(f"Auto-fix recovery refused: {e}.")
+                return 1
         # Selection-verification repair is coordinated only after every plan
         # run lock has exited.  A restarted invocation therefore leaves its
         # reopened TODO/WIP tasks untouched here and lets the exact selection
@@ -4398,11 +4427,82 @@ def _auto_fix_review_identity(
     return source_tree, plan_digest, prompt, prompt_digest
 
 
-def _auto_fix_existing_state(cfg: Config) -> auto_fix.AutoFixState | None:
+def _auto_fix_existing_state(
+        cfg: Config) -> auto_fix.AutoFixState | None:
     path = auto_fix.auto_fix_state_path(cfg)
     if not path.exists():
         return None
     return auto_fix.read_auto_fix_state(path)
+
+
+def _auto_fix_existing_state_for_recovery(
+        cfg: Config,
+        ) -> tuple[auto_fix.AutoFixState | None, tuple[str, ...]]:
+    path = auto_fix.auto_fix_state_path(cfg)
+    if not path.exists():
+        return None, ()
+    return auto_fix.read_auto_fix_state_for_recovery(path)
+
+
+def _legacy_cross_task_block_is_proven(task: Task) -> bool:
+    """Prove DONE was lost only through the obsolete cross-task repair wave."""
+    entries = read_entries(task.journal_path)
+    done_index = -1
+    cascade_index = -1
+    blocked_index = -1
+    for index, entry in enumerate(entries):
+        event = entry.get("event")
+        summary = entry.get("summary", "")
+        detail = entry.get("detail", "")
+        if entry.get("by") == "scheduler" and event == "done":
+            done_index = index
+        elif (done_index >= 0 and index > done_index
+              and entry.get("by") == "scheduler"
+              and event == "rework_requested"
+              and summary.startswith("Automatic repair rework")
+              and "original status: DONE" in detail
+              and "reason: Automatic repair of durable plan-review findings"
+              in detail):
+            cascade_index = index
+        elif (cascade_index >= 0 and index > cascade_index
+              and entry.get("by") == "scheduler" and event == "blocked"
+              and f"outside {task.id}'s declared scope" in summary):
+            blocked_index = index
+    if blocked_index < 0:
+        return False
+    return not any(
+        entry.get("by") != "scheduler"
+        or entry.get("event") in {"done", "blocked"}
+        for entry in entries[blocked_index + 1:])
+
+
+def _recover_legacy_cross_task_blocks(
+        plan: Plan, state: auto_fix.AutoFixState,
+        now: Callable[[], datetime]) -> tuple[str, ...]:
+    """Restore non-owner tasks mechanically blocked by legacy fan-out."""
+    owners = {
+        finding.task_id for finding in state.findings
+        if finding.fingerprint in state.current_finding_fingerprints
+        and finding.task_id is not None}
+    restored: list[str] = []
+    for task in plan.tasks:
+        if task.status != "BLOCKED" or task.id in owners:
+            continue
+        if not _legacy_cross_task_block_is_proven(task):
+            continue
+        set_status(task.path, "DONE")
+        append_entry(
+            task.journal_path, by="scheduler", event="auto_fix_recovery",
+            summary=("Restored DONE after legacy cross-task repair routing"),
+            detail=(
+                "The journal proves this task previously passed focused_test, "
+                "was reopened only by the obsolete downstream repair cascade, "
+                "and was then blocked only by a finding outside its declared "
+                "scope. Exact-owner repair will run the cumulative focused "
+                "sweep before review closeout."),
+            time_str=now().isoformat(timespec="seconds"))
+        restored.append(task.id)
+    return tuple(restored)
 
 
 def _reconcile_auto_fix_recovery_config(
@@ -5573,37 +5673,35 @@ def _auto_fix_repair_briefs(
         ) -> tuple[auto_fix.RepairBrief, ...]:
     """Build the exact durable reviewer-to-worker handoff for this decision."""
     current = set(state.current_finding_fingerprints)
-    finding_lines: list[str] = []
-    for finding in state.findings:
-        if finding.fingerprint not in current:
-            continue
-        addition = "none"
-        if finding.scope_addition_path is not None:
-            addition = (
-                f"{finding.scope_addition_path} "
-                f"({finding.scope_addition_path_state})")
-        finding_lines.append(
-            f"- fingerprint: {finding.fingerprint}\n"
-            f"  kind: {finding.kind}\n"
-            f"  owner: {finding.task_id or 'unassigned'}\n"
-            f"  path: {finding.path}\n"
-            f"  problem: {finding.summary}\n"
-            f"  evidence: {finding.evidence}\n"
-            f"  reviewer recommendation: {finding.recommendation}\n"
-            f"  approved scope addition: {addition}")
-    findings = "\n".join(finding_lines) or "- none"
-    additions = "\n".join(
-        f"- {item.fingerprint} {item.task_id}: {item.path} ({item.path_state})"
-        for item in state.approved_scope_additions) or "- none"
-    fingerprints = state.current_finding_fingerprints
     briefs = []
     implicated = list(dict.fromkeys(
         finding.task_id for finding in state.findings
         if finding.fingerprint in current and finding.task_id is not None))
-    for task in _auto_fix_cascade_tasks(plan, implicated):
+    for task in _auto_fix_implicated_tasks(plan, implicated):
+        fingerprints = _auto_fix_task_fingerprints(state, task.id)
+        findings = "\n".join(
+            f"- fingerprint: {finding.fingerprint}\n"
+            f"  kind: {finding.kind}\n"
+            f"  owner: {finding.task_id}\n"
+            f"  path: {finding.path}\n"
+            f"  problem: {finding.summary}\n"
+            f"  evidence: {finding.evidence}\n"
+            f"  reviewer recommendation: {finding.recommendation}\n"
+            "  approved scope addition: "
+            + (f"{finding.scope_addition_path} "
+               f"({finding.scope_addition_path_state})"
+               if finding.scope_addition_path is not None else "none")
+            for finding in state.findings
+            if finding.fingerprint in fingerprints)
+        additions = "\n".join(
+            f"- {item.fingerprint} {item.task_id}: "
+            f"{item.path} ({item.path_state})"
+            for item in state.approved_scope_additions
+            if item.task_id == task.id and item.fingerprint in fingerprints
+        ) or "- none"
         brief = (
             f"Task: {task.id}\n"
-            f"Current findings:\n{findings}\n\n"
+            f"Current findings:\n{findings or '- none'}\n\n"
             "Original blocker evidence:\n"
             f"{blocker_evidence or '(none)'}\n\n"
             "Focused command evidence:\n"
@@ -5614,6 +5712,15 @@ def _auto_fix_repair_briefs(
         )
         briefs.append(auto_fix.RepairBrief(task.id, fingerprints, brief))
     return tuple(briefs)
+
+
+def _auto_fix_task_fingerprints(
+        state: auto_fix.AutoFixState, task_id: str) -> tuple[str, ...]:
+    """Return the current finding identities owned by one exact task."""
+    ledger = {finding.fingerprint: finding for finding in state.findings}
+    return tuple(
+        fingerprint for fingerprint in state.current_finding_fingerprints
+        if ledger[fingerprint].task_id == task_id)
 
 
 def _auto_fix_prior_brief_evidence(
@@ -5677,7 +5784,7 @@ def _auto_fix_repair_context(
         raise AssentError(
             f"Auto-fix state has no exact durable repair brief for {task.id}")
     brief = matches[0]
-    if brief.finding_fingerprints != state.current_finding_fingerprints:
+    if brief.finding_fingerprints != _auto_fix_task_fingerprints(state, task.id):
         raise AssentError(
             f"Auto-fix durable repair brief for {task.id} is stale")
     return _AUTO_FIX_REPAIR_SUFFIX.format(repair_brief=brief.brief)
@@ -5998,17 +6105,9 @@ def _apply_reviewed_scope_amendments(
     return state, final_plan, _task_contract_snapshots(final_plan)
 
 
-def _auto_fix_cascade_tasks(plan: Plan, implicated: list[str]) -> list[Task]:
-    """Return the finite automatic-rework dependency closure in plan order."""
+def _auto_fix_implicated_tasks(plan: Plan, implicated: list[str]) -> list[Task]:
+    """Return only existing tasks that own current findings, in plan order."""
     selected = set(implicated)
-    changed = True
-    while changed:
-        changed = False
-        for task in plan.tasks:
-            if task.id in selected or not any(dep in selected for dep in task.deps):
-                continue
-            selected.add(task.id)
-            changed = True
     return [task for task in plan.tasks
             if task.id in selected and task.status != "SKIP"]
 
@@ -6259,7 +6358,7 @@ def _auto_fix_with_settling_gate_evidence(
             item.task_id, item.finding_fingerprints, brief))
     briefs.extend(
         auto_fix.RepairBrief(
-            task_id, state.current_finding_fingerprints, evidence)
+            task_id, _auto_fix_task_fingerprints(state, task_id), evidence)
         for task_id in task_ids if task_id not in carried)
     return auto_fix.with_repair_briefs(state, tuple(briefs))
 
@@ -6329,12 +6428,16 @@ def _auto_fix_journal_self_fixed(
 def _auto_fix_recover_dispositions(
         state: auto_fix.AutoFixState, plan: Plan) -> auto_fix.AutoFixState:
     """Rebuild valid post-checkpoint disposition evidence after a hard crash."""
-    expected = state.current_finding_fingerprints
+    expected_by_task = {
+        brief.task_id: brief.finding_fingerprints for brief in state.repair_briefs}
     dispositions = list(state.worker_dispositions)
     recorded = {(item.task_id, item.fingerprint) for item in dispositions}
     changed = False
     for task in plan.tasks:
         if task.status not in {"DONE", "BLOCKED"}:
+            continue
+        expected = expected_by_task.get(task.id)
+        if not expected:
             continue
         if all((task.id, fingerprint) in recorded for fingerprint in expected):
             continue
@@ -6390,14 +6493,19 @@ def _run_auto_fix_repairs(
     except (AssentError, OSError) as e:
         print(f"Auto-fix recovery refused: {e}.")
         return 1
-    if not state.repair_briefs:
-        recovery_plan = Plan.parse(cfg.tasks_dir)
-        state = _auto_fix_attach_repair_briefs(
-            cfg, recovery_plan, state,
-            blocker_evidence="Recovered from the durable finding ledger.",
-            focused_evidence=(
-                "Recovered focused or blocker evidence is embedded in each "
-                "current finding."))
+    recovery_plan = Plan.parse(cfg.tasks_dir)
+    had_repair_briefs = bool(state.repair_briefs)
+    refreshed_state = _auto_fix_attach_repair_briefs(
+        cfg, recovery_plan, state,
+        blocker_evidence=(
+            "(none; this is a completed-plan review)" if had_repair_briefs
+            else "Recovered from the durable finding ledger."),
+        focused_evidence=(
+            "" if had_repair_briefs else
+            "Recovered focused or blocker evidence is embedded in each "
+            "current finding."))
+    if refreshed_state != state:
+        state = refreshed_state
         auto_fix.write_auto_fix_state(state_path, state)
     # Reusable focused evidence belongs to one repair round: it is replaced when
     # the next round starts and is empty on a restart, so a RECHECK only ever
@@ -6588,7 +6696,8 @@ def _run_auto_fix_repairs(
                     auto_fix_context=_auto_fix_repair_context(task, state),
                     retry_limit=0, billing_is_failure=True,
                     blocker_evidence=round_blockers,
-                    auto_fix_fingerprints=state.current_finding_fingerprints,
+                    auto_fix_fingerprints=(
+                        _auto_fix_task_fingerprints(state, task.id)),
                     repair_dispositions=round_dispositions,
                     gate_passes=round_passes)
                 active.task = None

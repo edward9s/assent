@@ -20,7 +20,8 @@ from assent.auto_fix import (
     auto_fix_state_path, current_review_record,
     finding_fingerprint, normalize_finding_path,
     parse_repair_dispositions, parse_review_output, persisted_finding,
-    read_auto_fix_state,
+    preserve_auto_fix_state_for_recovery, read_auto_fix_state,
+    read_auto_fix_state_for_recovery,
     review_record_json, review_record_schema, scheduler_finding_path,
     snapshot_project_surface,
     state_for_review, validate_review_findings, validate_review_transitions,
@@ -209,9 +210,31 @@ class TestReviewRecord(unittest.TestCase):
             finding_fingerprint(replace(
                 self.finding, recommendation="Use a materially different repair.")))
 
+        rewritten = replace(
+            still_present, kind="unmet_requirement",
+            summary="Final focused verification still fails",
+            evidence="The reviewer summarized the same scheduler failure.",
+            recommendation="Repair the current focused failure.",
+            transition_evidence=(
+                "The scheduler-supplied recheck reports the same task and path."))
+        canonical = validate_review_transitions(
+            ReviewRecord("FAIL", (rewritten,)), review_stage="recheck",
+            previous=first)
+        self.assertEqual(
+            finding_fingerprint(canonical.findings[0]), fingerprint)
+        self.assertEqual(canonical.findings[0].kind, self.finding.kind)
+        self.assertEqual(canonical.findings[0].summary, self.finding.summary)
+        self.assertEqual(canonical.findings[0].evidence, self.finding.evidence)
+        self.assertEqual(
+            canonical.findings[0].recommendation,
+            self.finding.recommendation)
+        self.assertEqual(
+            canonical.findings[0].transition_evidence,
+            rewritten.transition_evidence)
+
         for invalid in (
-                replace(still_present, summary="Changed wording"),
                 replace(still_present, prior_fingerprint="f" * 64),
+                replace(still_present, path="assent/other.py"),
                 replace(self.finding, transition="repair_regression",
                         transition_evidence=" "),
                 self.finding):
@@ -229,6 +252,30 @@ class TestReviewRecord(unittest.TestCase):
             validate_review_transitions(
                 ReviewRecord("FAIL", (wording_variant,)),
                 review_stage="recheck", previous=first)
+
+        same_location_regression = replace(
+            self.finding,
+            summary="The repair changed the return contract",
+            evidence=(
+                "The repaired implementation now returns a wrapper that the "
+                "declared protocol and focused test do not accept."),
+            recommendation="Align the implementation, protocol, and focused test.",
+            transition="repair_regression", prior_fingerprint=None,
+            transition_evidence=(
+                "The repair changed assent/config.py and introduced the "
+                "incompatible return value."))
+        validated = validate_review_transitions(
+            ReviewRecord("FAIL", (same_location_regression,)),
+            review_stage="recheck", previous=first,
+            repair_changed_paths=("assent/config.py",))
+        self.assertEqual(validated.findings[0].path, "assent/config.py")
+        self.assertEqual(
+            validated.findings[0].summary, same_location_regression.summary)
+        with self.assertRaisesRegex(AssentError, "repair delta"):
+            validate_review_transitions(
+                ReviewRecord("FAIL", (same_location_regression,)),
+                review_stage="recheck", previous=first,
+                repair_changed_paths=("tests/test_config.py",))
 
         new_finding = replace(
             self.finding, path="assent/auto_fix.py",
@@ -551,6 +598,45 @@ class TestAutoFixState(unittest.TestCase):
         with self.assertRaises(AssentError):
             write_auto_fix_state(self.path, invalid)
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_repair_evidence_must_belong_to_its_named_task(self):
+        fingerprint = self.state.current_finding_fingerprints[0]
+        cases = (
+            replace(self.state, worker_dispositions=(WorkerDisposition(
+                "t002", fingerprint, "fixed", "Wrong owner."),)),
+            replace(self.state, repair_briefs=(RepairBrief(
+                "t002", (fingerprint,), "Wrong owner repair brief."),)),
+        )
+        for state in cases:
+            with self.subTest(field=(
+                    "disposition" if state.worker_dispositions[0].task_id == "t002"
+                    else "brief")):
+                with self.assertRaisesRegex(AssentError, "must own"):
+                    write_auto_fix_state(self.path, state)
+
+    def test_recovery_preserves_and_discards_legacy_cross_task_evidence(self):
+        write_auto_fix_state(self.path, self.state)
+        text = self.path.read_text(encoding="utf-8")
+        text = text.replace(
+            '[[worker_dispositions]]\ntask_id = "t001"',
+            '[[worker_dispositions]]\ntask_id = "t002"')
+        text = text.replace(
+            '[[repair_briefs]]\ntask_id = "t001"',
+            '[[repair_briefs]]\ntask_id = "t002"')
+        self.assertIn('[[repair_briefs]]\ntask_id = "t002"', text)
+        self.path.write_text(text, encoding="utf-8")
+        original = self.path.read_bytes()
+
+        with self.assertRaisesRegex(AssentError, "must own"):
+            read_auto_fix_state(self.path)
+        recovered, legacy_tasks = read_auto_fix_state_for_recovery(self.path)
+        evidence_path = preserve_auto_fix_state_for_recovery(self.path)
+
+        self.assertEqual(legacy_tasks, ("t002",))
+        self.assertEqual(recovered.phase, "NEEDS_REPAIR")
+        self.assertEqual(recovered.worker_dispositions, ())
+        self.assertEqual(recovered.repair_briefs, ())
+        self.assertEqual(evidence_path.read_bytes(), original)
 
     def test_state_path_is_plan_local(self):
         self.assertEqual(auto_fix_state_path(self.root / ".assent" / "plan01"),
