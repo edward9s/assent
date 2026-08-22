@@ -128,10 +128,10 @@ Integration workflow 只負責驗證與修復，不負責人類驗收。發布�
 
 ### 預設 workflow
 
-內建設定讓每個 task 先由一個實作 session 處理，三個修復層級各自使用專責的
-reviewer/fixer。下方引用的 ability prompt 已經精簡，完整內容在
-`~/.assent/assent.toml`；該檔也定義了每一層唯讀的 reviewer 與只寫入的
-fixer，並在內建 workflow array 旁以註解附上對應的拆分版本：
+內建設定讓每個 task 先由一個實作 session 處理，並在每個修復層級分開 reviewer
+與 fixer，先驗證歸屬與 scope，fixer 才能寫入。下方引用的 ability prompt 已經
+精簡，完整內容在 `~/.assent/assent.toml`；預設模板只定義建議的分離式 role。
+前文所述的混合式仍可用於自訂設定：
 
 ```toml
 [abilities.write_tests]
@@ -148,7 +148,7 @@ writes = false
 produces_verdict = true
 
 [abilities.task_fix]
-prompt = "In the same session, repair every authorized task-local finding, including an exact omitted scope path. Do not create tasks or requirements."
+prompt = "Repair every authorized task-local finding, including an exact omitted scope path. Do not create tasks or requirements."
 writes = true
 
 [abilities.plan_quality_review]
@@ -177,47 +177,69 @@ writes = true
 [roles.implementer]
 ability = ["write_tests", "implement_source"]
 
-[roles.task_reviewer_fixer]
-ability = ["task_review", "task_fix"]
+[roles.task_reviewer]
+ability = ["task_review"]
 model = "prime"
 
-[roles.plan_quality_reviewer_fixer]
-ability = ["plan_quality_review", "plan_fix"]
+[roles.task_fixer]
+ability = ["task_fix"]
+model = "lite"
+
+[roles.plan_quality_reviewer]
+ability = ["plan_quality_review"]
 model = "prime"
 
-[roles.plan_reviewer_fixer]
-ability = ["plan_review", "plan_fix"]
+[roles.plan_reviewer]
+ability = ["plan_review"]
 model = "prime"
 
-[roles.integration_reviewer_fixer]
-ability = ["integration_review", "integration_fix"]
+[roles.plan_fixer]
+ability = ["plan_fix"]
+model = "prime"
+
+[roles.integration_reviewer]
+ability = ["integration_review"]
+model = "prime"
+
+[roles.integration_fixer]
+ability = ["integration_fix"]
 model = "prime"
 
 [workflow]
 task = [
   { role = "implementer" },
   { action = "focused_test" },
-  { role = "task_reviewer_fixer" },
+  { role = "task_reviewer" },
+  { role = "task_fixer" },
   { action = "focused_test" },
 ]
 plan = [
-  { role = "plan_quality_reviewer_fixer", adapter = "codex" },
+  { role = "plan_quality_reviewer", adapter = "codex" },
+  { role = "plan_fixer", adapter = "codex" },
   { action = "focused_sweep" },
-  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer", adapter = "codex" },
+  { role = "plan_fixer", adapter = "codex" },
   { action = "focused_sweep" },
-  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer", adapter = "codex" },
+  { role = "plan_fixer", adapter = "codex" },
   { action = "focused_sweep" },
 ]
 integration = [
   { action = "full_verify" },
-  { role = "integration_reviewer_fixer", adapter = "codex" },
+  { role = "integration_reviewer", adapter = "codex" },
+  { role = "integration_fixer", adapter = "codex" },
   { action = "full_verify" },
 ]
 ```
 
-第一次 action 前的 plan role 是唯一無條件執行的累積品質審查。它通過或完成修復後，
-第一個通過的 `focused_test`、`focused_sweep` 或 `full_verify` 會略過自己 array 中剩餘的
-失敗處理者。後續重複列出的 plan review 是不同修復回合，不是額外的常態審查。
+所有 reviewer 都使用 `prime`。task fixer 使用 `lite`，因為它只修復一個已驗證的
+task-local finding，隨後立刻由 `focused_test` 重查。plan 與 integration fixer
+維持 `prime`，負責跨 task 與跨 plan 的工作。
+
+第一次 action 前的 plan reviewer 是唯一無條件執行的累積品質審查。PASS 會略過配對的
+fixer；有效 finding 才會授權該 fixer。第一個通過的 `focused_test`、`focused_sweep` 或
+`full_verify` 會略過自己 array 中剩餘的失敗處理者。後續重複列出的 plan reviewer/fixer
+配對是不同修復回合，不是額外的常態審查。
 
 ## 省略設定與 task override
 

@@ -868,16 +868,16 @@ class TestLayeredConfig(ConfigTestCase):
         self.assertEqual(
             [step.action if isinstance(step, WorkflowActionStep) else "role"
              for step in cfg.workflow_task],
-            ["role", "focused_test", "role", "focused_test"])
+            ["role", "focused_test", "role", "role", "focused_test"])
         self.assertEqual(
             [step.action if isinstance(step, WorkflowActionStep) else "role"
              for step in cfg.workflow_plan],
-            ["role", "focused_sweep", "role", "focused_sweep", "role",
-             "focused_sweep"])
+            ["role", "role", "focused_sweep", "role", "role",
+             "focused_sweep", "role", "role", "focused_sweep"])
         self.assertEqual(
             [step.action if isinstance(step, WorkflowActionStep) else "role"
              for step in cfg.workflow_integration],
-            ["full_verify", "role", "full_verify"])
+            ["full_verify", "role", "role", "full_verify"])
 
     def test_init_preserves_existing_inline_adapter_layout(self):
         templates = Path(__file__).resolve().parents[1] / "assent" / "templates"

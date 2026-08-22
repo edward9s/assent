@@ -114,27 +114,38 @@ ability = ["review"]
         self.assertEqual(
             [step.action if hasattr(step, "action") else "role"
              for step in cfg.workflow_task],
-            ["role", "focused_test", "role", "focused_test"])
+            ["role", "focused_test", "role", "role", "focused_test"])
         self.assertEqual(
             [step.action if hasattr(step, "action") else "role"
              for step in cfg.workflow_plan],
-            ["role", "focused_sweep", "role", "focused_sweep", "role",
-             "focused_sweep"])
+            ["role", "role", "focused_sweep", "role", "role",
+             "focused_sweep", "role", "role", "focused_sweep"])
+        task_roles = [
+            step for step in cfg.workflow_task
+            if not hasattr(step, "action")]
         self.assertEqual(
             [(step.writes, step.produces_verdict)
-             for step in cfg.workflow_task if not hasattr(step, "action")],
-            [(True, False), (True, True)])
+             for step in task_roles],
+            [(True, False), (False, True), (True, False)])
+        self.assertEqual(
+            [step.resolved_role.model for step in task_roles],
+            [None, "prime", "lite"])
         self.assertEqual(
             [(step.writes, step.produces_verdict)
              for step in cfg.workflow_plan if not hasattr(step, "action")],
-            [(True, True), (True, True), (True, True)])
+            [(False, True), (True, False)] * 3)
         self.assertEqual(
             [step.action if hasattr(step, "action") else "role"
              for step in cfg.workflow_integration],
-            ["full_verify", "role", "full_verify"])
-        integration_role = cfg.workflow_integration[1]
-        self.assertTrue(integration_role.writes)
-        self.assertTrue(integration_role.produces_verdict)
+            ["full_verify", "role", "role", "full_verify"])
+        integration_roles = cfg.workflow_integration[1:3]
+        self.assertEqual(
+            [(step.writes, step.produces_verdict)
+             for step in integration_roles],
+            [(False, True), (True, False)])
+        self.assertEqual(
+            [step.model for step in integration_roles],
+            ["prime", "prime"])
 
 
 if __name__ == "__main__":

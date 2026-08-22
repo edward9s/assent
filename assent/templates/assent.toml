@@ -22,7 +22,7 @@ prompt = "Resolve only the current task's BLOCKED or focused_test evidence. Diag
 writes = false
 produces_verdict = true
 [abilities.task_fix]
-prompt = "In the same session, repair every authorized task-local finding, including an exact omitted scope path. Fix production behavior; do not weaken, narrow, delete, or rewrite tests merely to make a check pass. Do not create tasks or requirements."
+prompt = "Repair every authorized task-local finding, including an exact omitted scope path. Fix production behavior; do not weaken, narrow, delete, or rewrite tests merely to make a check pass. Do not create tasks or requirements."
 writes = true
 [abilities.plan_quality_review]
 prompt = "Review the completed cumulative worktree once for conformance to the existing plan before focused_sweep. Inspect cross-task interactions and whether changed tests prove cited requirements through observable semantics. Do not accept tests that merely mirror implementation constants, template examples, or incidental representation instead of proving the cited requirement. Report only blocking correctness, safety, unmet-requirement, or focused-test-gap findings tied to an existing task. Do not invent requirements or conduct a repository-wide debt search."
@@ -43,13 +43,13 @@ produces_verdict = true
 prompt = "Repair every authorized integration finding in the scheduler-provided workspaces while preserving the exact selection. Fix production behavior; do not weaken, narrow, delete, or rewrite tests merely to make a check pass. Do not run Git, Assent, focused tests, full verification, or accept."
 writes = true
 
-# Roles compose abilities and may select an abstract model tier. A role that no
-# workflow entry names is inert, so both the combined and the split forms below
-# stay defined and either can be selected by editing [workflow] alone.
+# Roles compose abilities and may select an abstract model tier. The template
+# defines only its recommended split repair roles; custom settings may still
+# compose a writable verdict role when the combined form is intentional.
 #
 # Every verdict role is prime: a wrong verdict either passes broken work or blocks
 # good work, and the strict output it must return is what weaker models miss first.
-# task_fixer is the one repair role set lower. It repairs one task against an
+# task_fixer is the one repair role set to lite. It repairs one task against an
 # authorized finding list -- the same class of work implement_source does at
 # whatever tier the task itself states -- and a cheap focused_test rechecks it.
 # plan_fixer stays prime because it reasons across tasks, and integration_fixer
@@ -60,32 +60,20 @@ ability = ["write_tests", "implement_source"]
 ability = ["write_tests"]
 [roles.source_implementer]
 ability = ["implement_source"]
-[roles.task_reviewer_fixer]
-ability = ["task_review", "task_fix"]
-model = "prime"
 [roles.task_reviewer]
 ability = ["task_review"]
 model = "prime"
 [roles.task_fixer]
 ability = ["task_fix"]
-model = "core"
-[roles.plan_quality_reviewer_fixer]
-ability = ["plan_quality_review", "plan_fix"]
-model = "prime"
+model = "lite"
 [roles.plan_quality_reviewer]
 ability = ["plan_quality_review"]
-model = "prime"
-[roles.plan_reviewer_fixer]
-ability = ["plan_review", "plan_fix"]
 model = "prime"
 [roles.plan_reviewer]
 ability = ["plan_review"]
 model = "prime"
 [roles.plan_fixer]
 ability = ["plan_fix"]
-model = "prime"
-[roles.integration_reviewer_fixer]
-ability = ["integration_review", "integration_fix"]
 model = "prime"
 [roles.integration_reviewer]
 ability = ["integration_review"]
@@ -99,53 +87,30 @@ model = "prime"
 # action ends its layer. Failure advances to the next configured repair role,
 # then the next action rechecks the result.
 #
-# Each layer below ships the combined form, and the commented block after it is
-# the split alternative: swap one for the other by editing these arrays only.
-# Splitting costs one extra session per step and buys two things -- the tests are
-# authored before the implementation that has to satisfy them, and the verdict is
-# reached by a session with no write authority, so nothing judges its own repair.
+# Every repair layer ships split so ownership and scope are validated before a
+# fixer writes. The task implementer remains one session.
 [workflow]
 task = [
   { role = "implementer"},
   { action = "focused_test" },
-  { role = "task_reviewer_fixer"},
+  { role = "task_reviewer"},
+  { role = "task_fixer"},
   { action = "focused_test" },
 ]
-# task = [
-#   { role = "tests_writer" },
-#   { role = "source_implementer" },
-#   { action = "focused_test" },
-#   { role = "task_reviewer" },
-#   { role = "task_fixer" },
-#   { action = "focused_test" },
-# ]
 plan = [
-  { role = "plan_quality_reviewer_fixer", adapter = "codex" },
+  { role = "plan_quality_reviewer", adapter = "codex" },
+  { role = "plan_fixer", adapter = "codex" },
   { action = "focused_sweep" },
-  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer", adapter = "codex" },
+  { role = "plan_fixer", adapter = "codex" },
   { action = "focused_sweep" },
-  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer", adapter = "codex" },
+  { role = "plan_fixer", adapter = "codex" },
   { action = "focused_sweep" },
 ]
-# plan = [
-#   { role = "plan_quality_reviewer", adapter = "codex" },
-#   { role = "plan_fixer", adapter = "codex" },
-#   { action = "focused_sweep" },
-#   { role = "plan_reviewer", adapter = "codex" },
-#   { role = "plan_fixer", adapter = "codex" },
-#   { action = "focused_sweep" },
-#   { role = "plan_reviewer", adapter = "codex" },
-#   { role = "plan_fixer", adapter = "codex" },
-#   { action = "focused_sweep" },
-# ]
 integration = [
   { action = "full_verify" },
-  { role = "integration_reviewer_fixer", adapter = "codex" },
+  { role = "integration_reviewer", adapter = "codex" },
+  { role = "integration_fixer", adapter = "codex" },
   { action = "full_verify" },
 ]
-# integration = [
-#   { action = "full_verify" },
-#   { role = "integration_reviewer", adapter = "codex" },
-#   { role = "integration_fixer", adapter = "codex" },
-#   { action = "full_verify" },
-# ]

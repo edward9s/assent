@@ -341,6 +341,17 @@ class TestQueries(GlobalContractsMixin, EngineTestCase):
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("Plan auto-fix: NOT RUN", text)
 
+        auto_fix.write_auto_fix_review_session(cfg, ("src/",))
+        source = self.root / "src"
+        source.mkdir(exist_ok=True)
+        (source / "review.py").write_text("preserved\n", encoding="utf-8")
+        text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
+        self.assertIn("Plan auto-fix: RECOVERY REQUIRED", text)
+        self.assertIn("Preserved source changes: 1 path(s)", text)
+        self.assertIn("Recovery: rerun assent run plan01", text)
+
+        auto_fix.clear_auto_fix_review_session(cfg)
+        self.commit_all("review recovery fixture")
         state_path.write_text("not valid toml = [\n", encoding="utf-8")
         text = inspection.render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("Plan auto-fix: STALE (malformed review state:", text)

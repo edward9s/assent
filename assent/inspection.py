@@ -251,6 +251,33 @@ def auto_fix_report_lines(cfg: Config, plan: Plan) -> list[str]:
     """
     path = auto_fix.auto_fix_state_path(cfg)
     if not path.exists():
+        review_session = auto_fix.auto_fix_review_session_path(cfg)
+        if review_session.exists():
+            try:
+                status = gitops.working_tree_status(
+                    _query_git_root(cfg), cfg.git_excludes)
+            except (AssentError, OSError) as e:
+                return [
+                    "Plan auto-fix: RECOVERY REQUIRED "
+                    f"(writable review source status unavailable: {e})"]
+            if not status.is_clean:
+                try:
+                    scope = auto_fix.read_auto_fix_review_session(cfg)
+                except AssentError as e:
+                    return [
+                        "Plan auto-fix: RECOVERY REQUIRED "
+                        f"(malformed writable review session: {e})"]
+                if scope is not None:
+                    changed = set(
+                        status.staged + status.unstaged + status.untracked)
+                    return [
+                        "Plan auto-fix: RECOVERY REQUIRED "
+                        "(writable review output was preserved)",
+                        f"  Preserved source changes: {len(changed)} path(s)",
+                        f"  Recorded review scope: {len(scope)} path(s)",
+                        f"  Recovery: rerun assent run {cfg.tasks_name}; "
+                        "startup validates the recorded scope before checkpointing",
+                    ]
         return ["Plan auto-fix: NOT RUN (no review state)"]
 
     try:

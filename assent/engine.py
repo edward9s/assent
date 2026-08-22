@@ -5299,7 +5299,9 @@ def _run_auto_fix_review_once(
                 if changed:
                     outcome = _recover_invalid_reviewer_writes(
                         cfg, plan, outcome, now)
-                return finish(outcome)
+                outcome = finish(outcome)
+                try_write_report(cfg)
+                return outcome
             # Preserve the reviewer's concrete output even though it cannot
             # authorize a write-capable task session.
             try:

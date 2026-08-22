@@ -273,10 +273,13 @@ class TestBoundedAutoFixSession(GlobalContractsMixin, EngineTestCase):
                     auto_fix.ReviewRecord("PASS", ())), False, None)
 
         output = io.StringIO()
-        with contextlib.redirect_stdout(output):
+        with contextlib.redirect_stdout(output), mock.patch.object(
+                engine, "try_write_report") as report:
             rc = engine.run(cfg, auto_fix_adapter=ScriptedAdapter([invalid_pass]))
 
         self.assertEqual(rc, 1)
+        report.assert_called_once()
+        self.assertEqual(report.call_args.args[0].tasks_name, cfg.tasks_name)
         self.assertFalse(auto_fix.auto_fix_state_path(cfg).exists())
         self.assertIn("Auto-fix reviewer verdict rejected", output.getvalue())
         self.assertIn("source:src/value.txt", output.getvalue())

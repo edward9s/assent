@@ -135,12 +135,11 @@ acceptance. Publication remains the later explicit `assent accept` decision.
 
 ### Default workflow
 
-The packaged configuration uses one implementation session per task and a
-dedicated reviewer/fixer responsibility at each repair layer. The abilities
-below are quoted with their prompts shortened; `~/.assent/assent.toml` holds
-the full text and also defines the read-only reviewer and the write-only fixer
-of each layer, with the matching split workflow arrays commented out beside the
-ones it ships:
+The packaged configuration uses one implementation session per task and splits
+the reviewer and fixer at every repair layer. This validates ownership and scope
+before a fixer writes. The abilities below are quoted with their prompts shortened;
+`~/.assent/assent.toml` holds the full text and defines only the recommended
+split roles. The combined form described above remains valid for custom settings:
 
 ```toml
 [abilities.write_tests]
@@ -157,7 +156,7 @@ writes = false
 produces_verdict = true
 
 [abilities.task_fix]
-prompt = "In the same session, repair every authorized task-local finding, including an exact omitted scope path. Do not create tasks or requirements."
+prompt = "Repair every authorized task-local finding, including an exact omitted scope path. Do not create tasks or requirements."
 writes = true
 
 [abilities.plan_quality_review]
@@ -186,49 +185,70 @@ writes = true
 [roles.implementer]
 ability = ["write_tests", "implement_source"]
 
-[roles.task_reviewer_fixer]
-ability = ["task_review", "task_fix"]
+[roles.task_reviewer]
+ability = ["task_review"]
 model = "prime"
 
-[roles.plan_quality_reviewer_fixer]
-ability = ["plan_quality_review", "plan_fix"]
+[roles.task_fixer]
+ability = ["task_fix"]
+model = "lite"
+
+[roles.plan_quality_reviewer]
+ability = ["plan_quality_review"]
 model = "prime"
 
-[roles.plan_reviewer_fixer]
-ability = ["plan_review", "plan_fix"]
+[roles.plan_reviewer]
+ability = ["plan_review"]
 model = "prime"
 
-[roles.integration_reviewer_fixer]
-ability = ["integration_review", "integration_fix"]
+[roles.plan_fixer]
+ability = ["plan_fix"]
+model = "prime"
+
+[roles.integration_reviewer]
+ability = ["integration_review"]
+model = "prime"
+
+[roles.integration_fixer]
+ability = ["integration_fix"]
 model = "prime"
 
 [workflow]
 task = [
   { role = "implementer" },
   { action = "focused_test" },
-  { role = "task_reviewer_fixer" },
+  { role = "task_reviewer" },
+  { role = "task_fixer" },
   { action = "focused_test" },
 ]
 plan = [
-  { role = "plan_quality_reviewer_fixer", adapter = "codex" },
+  { role = "plan_quality_reviewer", adapter = "codex" },
+  { role = "plan_fixer", adapter = "codex" },
   { action = "focused_sweep" },
-  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer", adapter = "codex" },
+  { role = "plan_fixer", adapter = "codex" },
   { action = "focused_sweep" },
-  { role = "plan_reviewer_fixer", adapter = "codex" },
+  { role = "plan_reviewer", adapter = "codex" },
+  { role = "plan_fixer", adapter = "codex" },
   { action = "focused_sweep" },
 ]
 integration = [
   { action = "full_verify" },
-  { role = "integration_reviewer_fixer", adapter = "codex" },
+  { role = "integration_reviewer", adapter = "codex" },
+  { role = "integration_fixer", adapter = "codex" },
   { action = "full_verify" },
 ]
 ```
 
-The plan role before the first action is the one unconditional cumulative
-quality review. After it passes or repairs its findings, the first passing
-`focused_test`, `focused_sweep`, or `full_verify` skips the remaining failure
-handlers in its own array. Later repeated plan review positions are separate
-repair rounds, not additional normal reviews.
+Every reviewer uses `prime`. The task fixer uses `lite` because it repairs one
+validated task-local finding and is immediately rechecked by `focused_test`.
+Plan and integration fixers stay `prime` for cross-task and cross-plan work.
+
+The plan reviewer before the first action is the one unconditional cumulative
+quality review. A PASS skips its paired fixer; a valid finding authorizes that
+fixer. The first passing `focused_test`, `focused_sweep`, or `full_verify` skips
+the remaining failure handlers in its own array. Later repeated plan reviewer/
+fixer pairs are separate repair rounds, not additional normal reviews.
 
 ## Omissions and task overrides
 

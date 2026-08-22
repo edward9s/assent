@@ -122,7 +122,7 @@ class DocumentationTests(unittest.TestCase):
                 "ability: prompt + authority", "Names such as `reviewer`",
                 "A passing action completes its layer immediately",
                 "writable verdict role", "Three different repair responsibilities",
-                "integration_reviewer_fixer", "Omissions and task overrides"):
+                "integration_fixer", "Omissions and task overrides"):
             with self.subTest(language="English", phrase=phrase):
                 self.assertIn(phrase, english)
 
@@ -130,7 +130,7 @@ class DocumentationTests(unittest.TestCase):
         for phrase in (
                 "從 workflow 理解設定", "engine 不會從名稱推斷權限",
                 "Action 一旦通過", "可寫入的 verdict role",
-                "三層修復責任不同", "integration_reviewer_fixer",
+                "三層修復責任不同", "integration_fixer",
                 "省略設定與 task override"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(phrase, chinese)

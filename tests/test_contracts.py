@@ -165,58 +165,15 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, format_text)
 
-    def test_the_commented_split_workflow_still_loads_when_swapped_in(self):
-        """The shipped alternative is commented out, so nothing else would catch it rotting.
-
-        A commented example cannot be parsed, validated, or refactored with the rest of
-        the file, so a role rename or a workflow rule change would leave it quietly
-        wrong for whoever pastes it in.  Uncommenting it here keeps it honest: it has to
-        name live roles and satisfy the same workflow validation as the active form.
-        """
-        templates = _PROJECT_ROOT / "assent" / "templates"
-        text = (templates / "assent.toml").read_text(encoding="utf-8")
-
-        swapped, dropping = [], False
-        for line in text.splitlines():
-            stripped = line.strip()
-            if re.match(r"^(task|plan|integration) = \[$", stripped):
-                dropping = True
-                continue
-            if dropping:
-                dropping = stripped != "]"
-                continue
-            if re.match(r"^# ((task|plan|integration) = \[|  \{|\])", stripped):
-                swapped.append(stripped[2:] if stripped.startswith("# ")
-                               else stripped[1:])
-                continue
-            swapped.append(line)
-        rebuilt = "\n".join(swapped) + "\n"
-        self.assertNotEqual(rebuilt, text)   # the swap actually changed something
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            assent_dir = root / ".assent"
-            (assent_dir / "plan01").mkdir(parents=True)
-            (assent_dir / "assent.toml").write_text(rebuilt, encoding="utf-8")
-            shutil.copy(templates / "adapter.toml", assent_dir / "adapter.toml")
-            with mock.patch.dict(os.environ, {ASSENT_HOME_ENV: str(root / "home")}):
-                cfg = load_config(assent_dir / "assent.toml", "plan01")
-
-        self.assertEqual(
-            [step.action if hasattr(step, "action") else step.role
-             for step in cfg.workflow_task],
-            ["tests_writer", "source_implementer", "focused_test",
-             "task_reviewer", "task_fixer", "focused_test"])
-        self.assertEqual(
-            [step.action if hasattr(step, "action") else step.role
-             for step in cfg.workflow_integration],
-            ["full_verify", "integration_reviewer", "integration_fixer",
-             "full_verify"])
-        # The split form is the one that keeps every verdict out of a writing session.
-        self.assertEqual(
-            [(step.writes, step.produces_verdict)
-             for step in cfg.workflow_plan if not hasattr(step, "action")],
-            [(False, True), (True, False)] * 3)
+    def test_shipped_template_omits_combined_repair_shortcuts(self):
+        configuration = tomllib.loads(
+            (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
+                encoding="utf-8"))
+        for role in (
+                "task_reviewer_fixer", "plan_quality_reviewer_fixer",
+                "plan_reviewer_fixer", "integration_reviewer_fixer"):
+            with self.subTest(role=role):
+                self.assertNotIn(role, configuration["roles"])
 
     def test_workflow_layers_match_the_default_configuration(self):
         workflow = self._compact("workflow.md")
@@ -236,22 +193,24 @@ class TestContractContent(unittest.TestCase):
         self.assertEqual(
             [step.get("action", "role")
              for step in configuration["workflow"]["task"]],
-            ["role", "focused_test", "role", "focused_test"])
+            ["role", "focused_test", "role", "role", "focused_test"])
         plan_shape = [
             {"action": step["action"]} if "action" in step else {"role": "role"}
             for step in configuration["workflow"]["plan"]]
         self.assertEqual(
             plan_shape,
-            [{"role": "role"},
-             {"action": "focused_sweep"}, {"role": "role"},
-             {"action": "focused_sweep"}, {"role": "role"},
+            [{"role": "role"}, {"role": "role"},
+             {"action": "focused_sweep"},
+             {"role": "role"}, {"role": "role"},
+             {"action": "focused_sweep"},
+             {"role": "role"}, {"role": "role"},
              {"action": "focused_sweep"}])
         integration_shape = [
             {"action": step["action"]} if "action" in step else {"role": "role"}
             for step in configuration["workflow"]["integration"]]
         self.assertEqual(
             integration_shape,
-            [{"action": "full_verify"}, {"role": "role"},
+            [{"action": "full_verify"}, {"role": "role"}, {"role": "role"},
              {"action": "full_verify"}])
         self.assertIn("current task",
                       configuration["abilities"]["task_review"]["prompt"])

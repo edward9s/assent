@@ -1683,12 +1683,12 @@ class TestInit(MainTestCase):
         self.assertEqual(
             [step.action if hasattr(step, "action") else "role"
              for step in task_steps],
-            ["role", "focused_test", "role", "focused_test"])
+            ["role", "focused_test", "role", "role", "focused_test"])
         task_roles = [step for step in task_steps
                       if not hasattr(step, "action")]
         self.assertEqual(
             [(step.writes, step.produces_verdict) for step in task_roles],
-            [(True, False), (True, True)])
+            [(True, False), (False, True), (True, False)])
         self.assertEqual(config["workflow"]["integration"][0],
                          {"action": "full_verify"})
         self.assertEqual(config["workflow"]["integration"][-1],
