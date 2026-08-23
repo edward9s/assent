@@ -625,7 +625,7 @@ def accept_all(config_path: str, assent_dir: Path) -> int:
     Per-plan path: verify-then-accept every finished plan, serially,
     fail-closed.
 
-    Selection and ordering reuse ``plandeps`` exactly as ``run --all``
+    Selection and ordering reuse ``plandeps`` exactly as whole-project ``run``
     does. Each plan refreshes its verification receipt only when stale
     (``verify_plan_if_needed``, the same unattended full verification as
     ``assent verify PLAN``); that shared plan-verification entry point also

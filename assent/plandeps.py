@@ -290,7 +290,7 @@ def order_plans_by_dependency(
 
     ``graph`` keys are already lexicographically sorted (parsed from
     ``list_task_plans``), so repeatedly picking the smallest ready name
-    reproduces ``run --all``'s dependency-then-lexicographic ordering, just
+    reproduces whole-project ``run`` dependency-then-lexicographic ordering, just
     serialized instead of concurrency-scheduled.  Edges to plans outside
     ``selected`` are dropped: a prerequisite that is not part of this subset is
     either already integrated or deliberately excluded, and either way it

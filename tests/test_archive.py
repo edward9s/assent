@@ -724,11 +724,9 @@ class TestArchive(unittest.TestCase):
         with self.assertRaises(SystemExit):
             _dispatch(["archive", "--restore"])
 
-    def test_restore_stays_single_plan_even_with_a_remainder(self) -> None:
-        for argv in (["archive", "plan01", "plan02", "--restore"],
-                     ["archive", "plan01", "...", "--restore"]):
-            with self.subTest(argv=argv), self.assertRaises(SystemExit):
-                _dispatch(argv)
+    def test_restore_rejects_multiple_plans(self) -> None:
+        with self.assertRaises(SystemExit):
+            _dispatch(["archive", "plan01", "plan02", "--restore"])
 
 
 if __name__ == "__main__":

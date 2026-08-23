@@ -154,14 +154,13 @@ Every explicitly named live plan is audited before dispatch. Each name must
 resolve to an existing plan directory containing a formal `tNNN_name.e.toml`
 task. Any unresolved name prevents the whole selected operation.
 
-The final literal token `...` appends the remaining plans discovered by that
-command. It is not `--all`; it may appear once and last. Expansion is
-snapshotted before mutation, then the command applies its native dependency
-ordering. Selection cardinality chooses the single or exact-batch path.
+With no `PLAN`, `assent run` schedules every discovered plan in dependency
+order; `--jobs N` sets the concurrency cap. One or more named plans form an
+exact selection and run in the stated order. `--jobs` is valid only when no
+plan is named.
 
 `run` executes task and plan workflows, then the integration workflow for the
-same completed selection. `--once` and `--task` defer integration while the
-selection remains incomplete. No run accepts.
+same completed selection. No run accepts.
 
 `status`, `check`, and `report` are read-only. `check` validates configuration,
 task files, dependencies, adapters, Git layering, and global contracts.

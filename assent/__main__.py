@@ -12,7 +12,6 @@ import signal
 import sys
 import threading
 import time
-from collections import Counter
 from pathlib import Path
 
 from assent import AssentError, contracts, engine, gitops, inspection
@@ -24,16 +23,13 @@ from assent.batch_accept import accept_all, accept_selected_batch
 from assent.clean import clean_plans, validate_live_plan_selection
 from assent.config import list_task_plans, load_config, validate_config
 from assent.doctor import doctor as run_doctor
-from assent.plandeps import (find_unfinished_prerequisites,
-                               infer_plan_completion,
-                               order_plans_by_dependency,
-                               parse_plan_dependency_graph)
+from assent.plandeps import infer_plan_completion, parse_plan_dependency_graph
 from assent.plan_source import resolve_source_snapshot
 from assent.plan_scheduler import run_all
 from assent.init import init as run_init
 from assent.main import (add_shared_paths_command, shared_paths_declare,
                          shared_paths_status)
-from assent.plan import Plan, plan_workflow_requires_human
+from assent.plan import plan_workflow_requires_human
 from assent.reconcile import (reconcile_abort, reconcile_continue,
                               reconcile_start)
 from assent.reject import reject_plan
@@ -66,16 +62,6 @@ _TIMED_COMMANDS = ("run", "verify")
 # Named so tests can inject a deterministic clock; production always reads the
 # monotonic clock, which no wall-clock or timezone change can move backwards.
 _monotonic = time.monotonic
-# The literal ASCII token `...` is remainder syntax, never a plan name:
-# `A B ...` means "A, then B, then every other discovered plan".  Plan
-# validation already rejects any name containing `..`, so the token cannot
-# collide with a real plan, and it is stripped here so it never reaches
-# configuration loading.  It is a remainder operator, not an alias for `--all`:
-# the expanded plan set is snapshotted once, before anything is mutated,
-# while `--all` keeps its own dynamic whole-project scheduling.
-_REMAINDER = "..."
-_REMAINDER_HELP = ("; the literal token `...` as the last argument adds every "
-                   "remaining discovered plan")
 _PLAN_NAME_HELP = (" Each PLAN names a directory directly under the project's "
                    "`.assent/` (for example, `demo` means `.assent/demo/`); "
                    "pass the name, not a path.")
@@ -144,20 +130,15 @@ def _build_parser() -> argparse.ArgumentParser:
                  "rework,archive,init,doctor,shared-paths}"))
 
     run_p = sub.add_parser(
-        "run", help="Run one or more plans in order until all tasks are "
-                    "DONE/BLOCKED/SKIP")
+        "run", help="Run every discovered plan, or the exact named plans, "
+                    "through task, plan, and integration workflows")
     run_p.add_argument(
         "plan_names", nargs="*", metavar="PLAN",
-        help="Plans to run in the stated order; omit to select one "
-             "automatically" + _REMAINDER_HELP + "." + _PLAN_NAME_HELP)
-    run_p.add_argument("--once", action="store_true",
-                       help="Run only the next task, then stop")
-    run_p.add_argument("--task", metavar="ID",
-                       help="Run one specific task (prerequisites still checked)")
-    run_p.add_argument("--all", action="store_true", dest="all_plans",
-                       help="Run all unfinished plans in dependency order")
+        help="Exact plans to run in the stated order; omit to schedule every "
+             "discovered plan in dependency order." + _PLAN_NAME_HELP)
     run_p.add_argument("--jobs", type=_positive_int, metavar="N",
-                       help="Max plans to run concurrently with --all (default: 1)")
+                       help="Maximum concurrent plans for a whole-project run "
+                            "(default: 1; cannot be used with PLAN)")
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
@@ -175,8 +156,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "plan_name", nargs="*", metavar="PLAN",
         help="One plan with --focus; otherwise one completed plan or two or "
              "more exact plans to verify as one dependency-ordered candidate "
-             "(omit with --batch)"
-             + _REMAINDER_HELP + " that is finished." + _PLAN_NAME_HELP)
+             "(omit with --batch)." + _PLAN_NAME_HELP)
     verify_p.add_argument(
         "--batch", action="store_true",
         help="Merge every finished, not-yet-integrated plan in "
@@ -196,8 +176,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "clean", help="Remove worktrees and merged branches that are provably redundant")
     clean_p.add_argument(
         "plan_name", nargs="*", metavar="PLAN",
-        help="The plans to clean upstream-first; omit to act on all plans"
-             + _REMAINDER_HELP + "." + _PLAN_NAME_HELP)
+        help="The plans to clean upstream-first; omit to act on all plans."
+             + _PLAN_NAME_HELP)
     clean_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                          help=_CONFIG_HELP)
 
@@ -208,7 +188,7 @@ def _build_parser() -> argparse.ArgumentParser:
     archive_p.add_argument(
         "plan_name", nargs="*", metavar="PLAN",
         help="The finished plans to archive, or the one plan to restore "
-             "(omit only with --all)" + _REMAINDER_HELP + "." + _PLAN_NAME_HELP)
+             "(omit only with --all)." + _PLAN_NAME_HELP)
     archive_p.add_argument(
         "--all", action="store_true", dest="all_plans",
         help="Archive every eligible finished plan in lexicographic order; "
@@ -228,8 +208,7 @@ def _build_parser() -> argparse.ArgumentParser:
     accept_p.add_argument(
         "plan_name", nargs="*", metavar="PLAN",
         help="One reviewed plan, or two or more exact plans to accept "
-             "as a verified batch (omit only with --all)" + _REMAINDER_HELP
-             + " that is finished." + _PLAN_NAME_HELP)
+             "as a verified batch (omit only with --all)." + _PLAN_NAME_HELP)
     accept_p.add_argument(
         "--all", action="store_true", dest="all_plans",
         help="Accept every finished plan in dependency order: a "
@@ -343,135 +322,11 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _split_remainder(parser: argparse.ArgumentParser, command: str,
-                     names: list[str]) -> tuple[list[str], bool]:
-    """Strip the literal `...` remainder marker from one positional list.
-
-    Every command that accepts plan names parses the marker here, so the five
-    dispatch branches share one syntax rather than five near-identical ones.  A
-    misplaced or repeated marker is a usage error, and the marker never survives
-    into the returned names, so it can never be loaded as a plan.
-    """
-    occurrences = names.count(_REMAINDER)
-    if occurrences == 0:
-        return list(names), False
-    if occurrences > 1:
-        parser.error(f"{command}'s `...` may be given at most once")
-    if names[-1] != _REMAINDER:
-        parser.error(f"{command}'s `...` must be the last argument")
-    return list(names[:-1]), True
-
-
-def _remainder_pool(command: str, assent_dir: Path) -> list[str]:
-    """List the plans `...` may add, by the command's own discovery rule.
-
-    ``verify`` and ``accept`` only ever work on finished plans -- that is what
-    their whole-project ``--batch`` / ``--all`` paths discover -- so an
-    unfinished plan is not part of their remainder.  ``run``, ``clean`` and
-    ``archive`` consider every plan and make their own per-plan
-    decision afterwards.
-    """
-    plan_names = list_task_plans(assent_dir)
-    if command in ("verify", "accept"):
-        return [plan_name for plan_name in plan_names
-                if infer_plan_completion(assent_dir / plan_name).complete]
-    return plan_names
-
-
-def _expand_remainder(command: str, explicit: list[str], assent_dir: Path, *,
-                      order_remainder: bool = False) -> list[str] | None:
-    """Snapshot the explicit prefix plus every remaining discovered plan.
-
-    The whole selection is resolved once, before anything is mutated, so a
-    plan appearing during the operation cannot silently broaden it.  ``None``
-    means the expansion is unusable and the caller returns 1.
-
-    ``order_remainder`` sorts the added plans with the shared dependency
-    ordering, for ``run``, which walks the selection itself instead of handing
-    it to a command that normalizes the order later.  The explicit prefix keeps
-    the order the human stated in either case.
-    """
-    try:
-        pool = _remainder_pool(command, assent_dir)
-    except AssentError as e:
-        print(f"Config error: {e}")
-        return None
-    chosen = set(explicit)
-    remainder = [f for f in pool if f not in chosen]
-    if order_remainder and remainder:
-        try:
-            graph = parse_plan_dependency_graph(assent_dir)
-            remainder = order_plans_by_dependency(graph, set(remainder))
-        except AssentError as e:
-            print(f"Plan dependency graph: FAIL ({e})")
-            return None
-    expanded = list(explicit) + remainder
-    if not expanded:
-        print(f"{command}: `...` selected no plan.")
-        return None
-    print(f"{command}: `...` selects {', '.join(expanded)}")
-    return expanded
-
-
 def _validate_explicit_plans(assent_dir: Path, plan_names: list[str], *,
                                recognized: list[str] | set[str] = ()) -> bool:
     """Run the shared identity gate for a non-empty explicit plan prefix."""
     return (not plan_names or validate_live_plan_selection(
         assent_dir, plan_names, recognized=recognized))
-
-
-def _status_summary(plan: Plan) -> str:
-    counts = Counter(task.status for task in plan.tasks)
-    return (f"DONE {counts.get('DONE', 0)} / "
-            f"BLOCKED {counts.get('BLOCKED', 0)} / "
-            f"SKIP {counts.get('SKIP', 0)} / "
-            f"WIP {counts.get('WIP', 0)} / "
-            f"TODO {counts.get('TODO', 0)} ({len(plan.tasks)} total)")
-
-
-def _select_run_plan(config_path: str, plan_names: list[str]) -> str | None:
-    """Pick one runnable plan, including completed work not yet accepted."""
-    plans: list[tuple[str, Plan, list[str], bool]] = []
-    errors: list[tuple[str, str]] = []
-    for plan_name in plan_names:
-        try:
-            cfg = load_config(config_path, plan_name)
-            plan = Plan.parse(cfg.tasks_dir)
-            waiting = [item.name for item in
-                       find_unfinished_prerequisites(cfg.tasks_dir)]
-            complete = all(
-                task.status in ("DONE", "SKIP") for task in plan.tasks)
-            accepted = bool(
-                complete and _accepted_run_source(cfg) is not None)
-            plans.append((plan_name, plan, waiting, accepted))
-        except AssentError as e:
-            errors.append((plan_name, str(e)))
-
-    runnable = [plan_name for plan_name, plan, waiting, accepted in plans
-                if ((any(task.status in ("TODO", "WIP") for task in plan.tasks)
-                     or (all(task.status in ("DONE", "SKIP")
-                             for task in plan.tasks) and not accepted))
-                    and not waiting)]
-    if len(runnable) == 1 and not errors:
-        selected = runnable[0]
-        print(f"Plan: {selected} (the only runnable one, "
-              f"selected automatically)")
-        return selected
-
-    print(f"Cannot auto-select a plan: {len(runnable)} runnable "
-          f"plan(s) found.")
-    print("Plan status:")
-    if not plans and not errors:
-        print("  (no plan with a task file found)")
-    for plan_name, plan, waiting, accepted in plans:
-        reason = " (already accepted)" if accepted else (
-            f" (waiting on {', '.join(waiting)})" if waiting and any(
-                task.status in ("TODO", "WIP") for task in plan.tasks) else "")
-        print(f"  {plan_name}: {_status_summary(plan)}{reason}")
-    for plan_name, error in errors:
-        print(f"  {plan_name}: cannot be parsed ({error})")
-    print("State the plan explicitly: assent run <PLAN>")
-    return None
 
 
 def _dispatch_all(command: str, config_path: str, plan_names: list[str]) -> int:
@@ -511,9 +366,7 @@ def _dispatch_check_all(config_path: str, assent_dir, plan_names: list[str]) -> 
     return 0 if graph_ok and checks_ok else 1
 
 
-def _dispatch_run_plans(
-        config_path: str, plan_names: list[str], *, once: bool,
-        task_id: str | None) -> int:
+def _dispatch_run_plans(config_path: str, plan_names: list[str]) -> int:
     """Run explicitly named plans in order, stopping on the first failure."""
     for plan_name in plan_names:
         try:
@@ -521,7 +374,7 @@ def _dispatch_run_plans(
         except AssentError as e:
             print(f"Config error: {e}")
             return 1
-        result = engine.run(cfg, once=once, task_id=task_id)
+        result = engine.run(cfg)
         if result != 0:
             return result
     return 0
@@ -569,10 +422,9 @@ def _close_run(result: int, *, config_path: str,
                assent_dir: Path, selection: list[str] | None) -> int:
     """Complete a successful run with its matching integration workflow.
 
-    ``selection`` is the exact plan set the run covered; ``None`` keeps the
-    whole-project dynamic discovery used by ``--all`` or a bare ``...``. A
-    limited run that leaves an explicit plan incomplete defers integration.
-    A nonzero task run starts no integration work.
+    ``selection`` is the exact named plan set the run covered; ``None`` keeps
+    whole-project dynamic discovery. An unresolved selected plan defers
+    integration. A nonzero task run starts no integration work.
     """
     if result != 0 or os.environ.get("ASSENT_PLAN_RUN") == "1":
         return result
@@ -630,43 +482,20 @@ def _dispatch(argv: list[str]) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    # One parse of the remainder marker for every plan-taking command; the
-    # attribute is left holding only real plan names afterwards.
-    remainder = False
-    if args.command in ("run", "verify", "accept", "clean", "archive"):
-        field = "plan_names" if args.command == "run" else "plan_name"
-        names, remainder = _split_remainder(
-            parser, args.command, getattr(args, field))
-        setattr(args, field, names)
-
     if args.command == "run":
         if len(args.plan_names) != len(set(args.plan_names)):
             parser.error("run does not allow duplicate PLAN names")
-        if args.all_plans and (args.once or args.task is not None):
-            parser.error("run's --all cannot be used with --once or --task")
-        if remainder and args.all_plans:
-            parser.error("run's `...` and --all cannot be used together")
-        if remainder and (args.once or args.task is not None):
-            parser.error("run's --once and --task cannot be used with `...`")
-        if len(args.plan_names) > 1 and (args.once or args.task is not None):
-            parser.error("run's --once and --task each require at most one PLAN")
-        if not args.all_plans and args.jobs is not None:
-            parser.error("run's --jobs can only be used with --all")
+        if args.plan_names and args.jobs is not None:
+            parser.error("run's --jobs cannot be used with PLAN")
     if args.command == "accept":
-        if remainder and args.all_plans:
-            parser.error("accept's `...` and --all cannot be used together")
         if args.all_plans and args.plan_name:
             parser.error("accept's --all and PLAN cannot be used together")
-        if not args.all_plans and not args.plan_name and not remainder:
+        if not args.all_plans and not args.plan_name:
             parser.error("accept requires PLAN or --all")
         if len(args.plan_name) > 1 and len(args.plan_name) != len(set(args.plan_name)):
             parser.error("accept does not allow duplicate PLAN names")
 
     if args.command == "verify":
-        if remainder and args.batch:
-            parser.error("verify's `...` and --batch cannot be used together")
-        if remainder and args.focus is not None:
-            parser.error("verify's `...` and --focus cannot be used together")
         if args.batch and args.plan_name:
             parser.error("verify's --batch and PLAN cannot be used together")
         if args.focus is not None:
@@ -675,7 +504,7 @@ def _dispatch(argv: list[str]) -> int:
             if len(args.plan_name) != 1:
                 parser.error("verify's --focus requires exactly one PLAN")
         elif not args.batch:
-            if not args.plan_name and not remainder:
+            if not args.plan_name:
                 parser.error("verify requires PLAN, a selected batch, or --batch")
             if len(args.plan_name) > 1 and len(args.plan_name) != len(set(args.plan_name)):
                 parser.error("verify does not allow duplicate PLAN names")
@@ -690,16 +519,13 @@ def _dispatch(argv: list[str]) -> int:
         if args.restore:
             if args.all_plans:
                 parser.error("archive's --restore and --all cannot be used together")
-            if remainder:
-                parser.error("archive's --restore and `...` cannot be used "
-                             "together; restore takes exactly one PLAN")
             if not args.plan_name:
                 parser.error("archive --restore requires PLAN")
             if len(args.plan_name) > 1:
                 parser.error("archive --restore takes exactly one PLAN")
-        elif args.all_plans and (args.plan_name or remainder):
+        elif args.all_plans and args.plan_name:
             parser.error("archive's --all and PLAN cannot be used together")
-        elif not args.all_plans and not args.plan_name and not remainder:
+        elif not args.all_plans and not args.plan_name:
             parser.error("archive requires PLAN or --all")
 
     if args.command == "init":
@@ -754,63 +580,20 @@ def _dispatch(argv: list[str]) -> int:
         except AssentError as e:
             print(f"Global contracts: FAIL ({e})")
             return 1
-        # The remainder is snapshotted before the explicit prefix starts, so a
-        # plan that appears while the prefix runs cannot join this invocation.
-        # The same snapshot is what the integration workflow verifies
-        # afterwards, so an explicit prefix plus `...` certifies exactly the
-        # set it ran, while a bare `...` stays a whole-project request like
-        # --all.
-        had_explicit_plans = bool(args.plan_names)
-        scheduled: list[str] | None = None
         selection: list[str] | None = None
-        if remainder:
-            expanded = _expand_remainder("run", args.plan_names, assent_dir,
-                                         order_remainder=True)
-            if expanded is None:
-                return 1
-            scheduled = expanded[len(args.plan_names):]
-            selection = expanded if args.plan_names else None
-        elif not args.all_plans:
-            selection = list(args.plan_names)
-        if selection is not None and (had_explicit_plans or remainder):
-            pending_prefix = _filter_accepted_run_plans(
+        if args.plan_names:
+            selection = _filter_accepted_run_plans(
                 args.config, list(args.plan_names))
-            pending_remainder = _filter_accepted_run_plans(
-                args.config, scheduled or [])
-            args.plan_names = pending_prefix
-            scheduled = (pending_remainder if scheduled is not None else None)
-            selection = pending_prefix + pending_remainder
         closeout = functools.partial(
             _close_run, config_path=args.config,
             assent_dir=assent_dir, selection=selection)
-        if args.plan_names:
-            result = _dispatch_run_plans(
-                args.config, args.plan_names, once=args.once, task_id=args.task)
-            if result != 0:
-                return result
-        if scheduled is not None:
-            if not scheduled:
-                print("No remaining plan to run.")
-                return closeout(0)
-            # The remainder is run through the same explicit-plan path, in
-            # dependency order: `...` selects plans, it does not switch the
-            # command over to the whole-project scheduler.
-            return closeout(_dispatch_run_plans(
-                args.config, scheduled, once=False, task_id=None))
-        if args.all_plans:
-            return closeout(run_all(
-                args.config, assent_dir, args.jobs or 1))
-        if had_explicit_plans:
-            return closeout(0)
+        if selection is not None:
+            return closeout(_dispatch_run_plans(args.config, selection))
+        return closeout(run_all(args.config, assent_dir, args.jobs or 1))
     if args.command == "accept":
         if args.all_plans:
             return accept_all(args.config, assent_dir)
         selected = args.plan_name
-        if remainder:
-            expanded = _expand_remainder("accept", selected, assent_dir)
-            if expanded is None:
-                return 1
-            selected = expanded
         if len(selected) >= 2:
             return accept_selected_batch(args.config, assent_dir, selected)
         try:
@@ -823,11 +606,6 @@ def _dispatch(argv: list[str]) -> int:
         if args.all_plans:
             return archive_all(args.config, assent_dir)
         selected = args.plan_name
-        if remainder:
-            expanded = _expand_remainder("archive", selected, assent_dir)
-            if expanded is None:
-                return 1
-            selected = expanded
         if len(selected) > 1:
             return archive_selected(args.config, selected)
         try:
@@ -838,11 +616,6 @@ def _dispatch(argv: list[str]) -> int:
         return restore_plan(cfg) if args.restore else archive_plan(cfg)
     if args.command == "verify":
         selected = args.plan_name
-        if remainder:
-            expanded = _expand_remainder("verify", selected, assent_dir)
-            if expanded is None:
-                return 1
-            selected = expanded
         if not args.batch:
             try:
                 cfg = load_config(args.config, selected[0])
@@ -890,13 +663,7 @@ def _dispatch(argv: list[str]) -> int:
             reason=args.reason, revert_code=args.revert_code)
     plan_names = list_task_plans(assent_dir)
     if args.command == "clean":
-        if remainder:
-            expanded = _expand_remainder("clean", args.plan_name, assent_dir)
-            if expanded is None:
-                return 1
-            selected = expanded
-        else:
-            selected = args.plan_name or plan_names
+        selected = args.plan_name or plan_names
         if not selected:
             print("No plan with a task file found.")
             return 1
@@ -908,11 +675,7 @@ def _dispatch(argv: list[str]) -> int:
                 print(f"Config error: {e}")
                 return 1
         return clean_plans(configs)
-    if args.command == "run":
-        plan_name = _select_run_plan(args.config, plan_names)
-        if plan_name is None:
-            return 1
-    elif args.plan_name is None:
+    if args.plan_name is None:
         if args.command == "check":
             return _dispatch_check_all(args.config, assent_dir, plan_names)
         else:
@@ -926,11 +689,6 @@ def _dispatch(argv: list[str]) -> int:
         print(f"Config error: {e}")
         return 1
 
-    if args.command == "run":
-        return _close_run(
-            engine.run(cfg, once=args.once, task_id=args.task),
-            config_path=args.config, assent_dir=assent_dir,
-            selection=[plan_name])
     if args.command == "status":
         return inspection.status(cfg)
     if args.command == "check":
@@ -943,7 +701,8 @@ def _dispatch(argv: list[str]) -> int:
 def _install_break_handler() -> None:
     """Windows-only: turn CTRL_BREAK_EVENT into KeyboardInterrupt.
 
-    ``run --all`` starts its child process with CREATE_NEW_PROCESS_GROUP, so an
+    A whole-project ``run`` starts its child process with
+    CREATE_NEW_PROCESS_GROUP, so an
     interrupt can only be sent as CTRL_BREAK_EVENT (mapped to SIGBREAK). If the
     child has not registered a handler, the OS terminates it directly on
     receiving the signal (exit code 3221225786), and engine's interrupt
@@ -960,7 +719,7 @@ def _install_break_handler() -> None:
 def _start_stdin_stop_watcher() -> threading.Thread | None:
     """Opt-in stop channel: treat the parent closing our stdin as Ctrl+C.
 
-    ``run --all`` cannot rely on console signals to stop a child. Under tmux or
+    A whole-project ``run`` cannot rely on console signals to stop a child. Under tmux or
     mintty the child's pty is not a Win32 console, so
     ``GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT)`` never reaches it and the
     parent waits forever. A stdin pipe is platform-independent and always

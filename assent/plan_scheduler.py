@@ -1,4 +1,4 @@
-"""Plan-level scheduling for ``run --all``.
+"""Plan-level scheduling for a whole-project ``run``.
 
 A single plan is still handled by a spawned ``assent run <plan>``
 child process; this module is only responsible for dependency unlocking, the
@@ -526,7 +526,7 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
                 attempted.add(plan_name)
                 # The stop-channel pipe outlives the exited child until the
                 # Popen object is collected; release it as each plan ends so
-                # a long --all run does not accumulate handles.
+                # a long whole-project run does not accumulate handles.
                 with contextlib.suppress(OSError, ValueError):
                     _close_stop_channel(process)
                 _finish_plan_output(plan_name, readers, output)

@@ -600,63 +600,6 @@ integration = [{ action = "full_verify" }, { role = "repairer" },
         self.assertEqual(self.read_batch_receipt().plan_names, ("aa", "bb"))
 
 
-class TestRemainderSelection(BatchVerifyRepositoryCase):
-    """``verify A ...`` resolves to exactly one verification of one exact set."""
-
-    def run_cli(self, *plan_names: str) -> tuple[int, str]:
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            code = _dispatch(
-                ["verify", *plan_names, "--config", str(self.config_path)])
-        return code, output.getvalue()
-
-    def test_remainder_writes_one_receipt_for_the_expanded_set(self) -> None:
-        tips = {name: self.make_source(name) for name in ("aa", "bb", "cc")}
-        self.write_task("ongoing", status="TODO")  # unfinished: not discovered
-
-        with mock.patch("assent.__main__.verify_plan",
-                        side_effect=AssertionError("ran the plan path too")):
-            code, output = self.run_cli("cc", "...")
-
-        self.assertEqual(code, 0, output)
-        self.assertIn("verify: `...` selects cc, aa, bb", output)
-        self.assertNotIn("ongoing", output)
-        receipt = self.read_batch_receipt()
-        self.assertEqual(receipt.plan_names, ("aa", "bb", "cc"))
-        self.assertEqual(
-            [(source.plan, source.source_tip) for source in receipt.sources],
-            [(name, tips[name]) for name in ("aa", "bb", "cc")])
-
-    def test_remainder_conflict_is_refused_rather_than_skipped(self) -> None:
-        self.make_source("aa", filename="shared.txt", content="from aa\n")
-        self.make_source("bb", filename="shared.txt", content="from bb\n")
-
-        with mock.patch("assent.batch_verification.confirm_on_terminal") as ask, \
-                mock.patch("assent.batch_verification.run_full_verifier") as verifier:
-            code, output = self.run_cli("aa", "...")
-
-        self.assertEqual(code, 1)
-        self.assertNotIn("REVIEW UNRESOLVED, HUMAN DECISION", output)
-        self.assertIn("candidate construction encountered merge conflicts", output)
-        self.assertIn("complete exact selection remains required", output)
-        ask.assert_not_called()
-        verifier.assert_not_called()
-        self.assertFalse(self.receipt_path().exists())
-
-    def test_a_one_plan_expansion_uses_the_ordinary_plan_path(self) -> None:
-        self.make_source("aa")
-        self.write_task("ongoing", status="TODO")
-
-        with mock.patch("assent.__main__.verify_selected_batch",
-                        side_effect=AssertionError("used the batch path")):
-            code, output = self.run_cli("...")
-
-        self.assertEqual(code, 0, output)
-        self.assertFalse(self.receipt_path().exists())
-        self.assertTrue(receipt_path(
-            load_config(str(self.config_path), "aa")).exists())
-
-
 class TestSkipConfirmation(unittest.TestCase):
     """The one interactive question in the whole batch path."""
 

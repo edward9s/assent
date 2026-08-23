@@ -1555,12 +1555,10 @@ def run_dynamic_selection_workflow(config_path: str, assent_dir) -> int:
         return 0
     return run_selection_workflow(config_path, assent_dir, plan_names)
 
-def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
-        adapter: Adapter | None = None,
+def run(cfg: Config, *, adapter: Adapter | None = None,
         sleep: Callable[[float], None] | None = None,
         now: Callable[[], datetime] | None = None) -> int:
-    """Run tasks until all are DONE/BLOCKED/SKIP (or only one with once/task_id). Returns the
-    process exit code.
+    """Run tasks until all are DONE/BLOCKED/SKIP. Return the process exit code.
 
     First check plan prerequisites, then take the plan's file lock; the lock covers
     the whole run (including the long sleeps of quota waiting); if another run is already
@@ -1603,8 +1601,7 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
     result: int
     try:
         with lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name):
-            result = _run_locked(
-                cfg, once, task_id, adapter, sleep, now)
+            result = _run_locked(cfg, adapter, sleep, now)
     except lockfile.LockBusy as e:
         print(str(e))
         return 1
@@ -1625,8 +1622,7 @@ def run(cfg: Config, once: bool = False, task_id: str | None = None, *,
         try_write_report(cfg)
     return result
 
-def _run_locked(cfg: Config, once: bool, task_id: str | None,
-                adapter: Adapter | None,
+def _run_locked(cfg: Config, adapter: Adapter | None,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
     """The actual run body, after the plan lock is held."""
@@ -1672,8 +1668,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                     task_adapter_names.append(name)
     for name in task_adapter_names:
         current_adapter = adapters[name]
-        errors = capability_errors(
-            cfg, current_adapter, plan, task_id, name)
+        errors = capability_errors(cfg, current_adapter, plan, name)
         if errors:
             preflight_failures.append((name, errors))
     if preflight_failures:
@@ -1710,27 +1705,10 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
 
         while True:
             plan = Plan.parse(cfg.tasks_dir)
-            if task_id is not None:
-                task = plan.get(task_id)
-                if task is None:
-                    print(f"Task {task_id} not found in plan")
-                    return 1
-                status_by_id = {item.id: item.status for item in plan.tasks}
-                unmet = [dep for dep in task.deps
-                         if status_by_id.get(dep) not in ("DONE", "SKIP")]
-                if unmet:
-                    print(f"Task {task_id} has unfinished prerequisites: "
-                          + ", ".join(unmet))
-                    return 1
-                if task.status not in ("TODO", "WIP"):
-                    print(f"Task {task_id} is currently {task.status}, "
-                          "not TODO/WIP; skipping")
-                    break
-            else:
-                selected = plan.next_task()
-                if selected is None:
-                    break
-                task, _resumed = selected
+            selected = plan.next_task()
+            if selected is None:
+                break
+            task, _resumed = selected
 
             if task.status == "TODO":
                 set_status(task.path, "WIP")
@@ -1747,8 +1725,6 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                 sleep, now, active)
             if code != 0:
                 return code
-            if once or task_id is not None:
-                break
 
         final_plan = Plan.parse(cfg.tasks_dir)
         if all(task.status in ("DONE", "SKIP") for task in final_plan.tasks):

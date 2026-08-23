@@ -13,18 +13,8 @@ plan selection 的重要規則。
 `.assent/demo/`。其中必須至少包含一份正式 `.e.toml` task。Assent 會在任何動作
 開始前檢查所有 plan 名稱；若有錯，會一次列出完整清單，不會執行其中一部分。
 
-多數接受 plan 的指令也支援最後一個 `...`：
-
-```text
-assent run urgent01 ...
-```
-
-意思是「先處理 `urgent01`，再加上這個指令原本會找到的其餘 plan」。它不是
-`--all` 的別名。Assent 會在修改任何東西之前固定這份清單。`run` 保留明示前綴
-順序；`verify` 與 `accept` 會依相依順序整理整份清單；`clean` 從上游開始。
-
-選到一個 plan 就走單一 plan 流程；兩個以上就是一組精確 batch。即使清單
-來自 `...` 也不例外：accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
+選到一個 plan 就走單一 plan 流程；兩個以上就是一組精確 batch。明確選取的
+accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 
 `run`、`status`、`check`、`report`、`verify`、`clean`、`archive`、`accept`、
 `reconcile`、`reject`、`rework` 支援各自的 `--config PATH` option。它會選擇專案
@@ -53,29 +43,25 @@ assent run urgent01 ...
 
 ## 常見用法
 
-執行唯一可判定的 ready plan：
+排程所有找到的 plan：
 
 ```text
 assent run
+assent run --jobs 2
 ```
 
-省略 `PLAN` 代表自動選取，不等於 `--all`。只有在每一份正式 plan 都能解析，
-而且恰好只有一份 runnable plan 時才會成功。Plan 在沒有未完成的 plan
-前置需求，且含有 `TODO` 或 `WIP` task 時屬於 runnable；全部 task 都是
-`DONE`／`SKIP`、但 source 尚未 accept 時也屬於 runnable。只有 `BLOCKED`
-工作時不會被自動選取；要繼續其持久化 review 或 recovery，必須明確指定
-plan。Runnable plan 為零份或多份時都會拒絕執行。
+省略 `PLAN` 時，`run` 使用整個專案的 dependency scheduler。`--jobs` 設定並行
+上限，而且只能用於這種 whole-project 執行方式。
 
-執行指定 plan、只跑一個 task，或平行處理所有未完成 plan：
+執行精確指定的 plans：
 
 ```text
 assent run <PLAN>
-assent run <PLAN> --once
-assent run --all --jobs 2
+assent run A B
 ```
 
-若 `--once` 或 `--task` 執行後 plan 尚未完成，就會延後 integration。一般 `run`
-成功後會繼續 plan 與 integration 驗證，但仍不會 accept。
+具名 plans 依輸入順序執行。每次成功的 `run` 都會針對其完成 selection 繼續設定的
+plan 與 integration workflow，但不會 accept。
 
 更新單一 receipt 或驗證明確選取：
 
@@ -118,6 +104,7 @@ receipt；若沒有可用 batch 證據，則逐一驗證並接受，遇到第一
 需要時才清理或封存：
 
 ```text
+assent clean
 assent clean <PLAN>
 assent archive <PLAN>
 assent archive --all

@@ -168,7 +168,7 @@ class DocumentationTests(unittest.TestCase):
         english = (_read(Path("docs/COMMANDS.md"))
                    + _read(Path("docs/VERIFICATION.md")))
         for phrase in (
-                "final `...`", "not an alias for `--all`",
+                "assent run --jobs 2",
                 "One selected plan", "one exact batch",
                 "assent verify <PLAN> --focus", "Direct and selected acceptance",
                 "assent shared-paths status",
@@ -180,7 +180,7 @@ class DocumentationTests(unittest.TestCase):
         chinese = _flat(_read(Path("docs/zh-TW/COMMANDS.md"))
                         + _read(Path("docs/zh-TW/VERIFICATION.md")))
         for phrase in (
-                "最後一個 `...`", "不是 `--all`", "一個 plan",
+                "assent run --jobs 2", "一個 plan",
                 "精確 batch", "assent verify <PLAN> --focus",
                 "assent shared-paths status",
                 "在主要 worktree 執行 `declare`",

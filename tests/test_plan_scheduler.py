@@ -372,7 +372,8 @@ class TestRunAll(PlanSchedulerTestCase):
     def test_after_referencing_archived_upstream_schedules_downstream(self):
         # Reproduces the incident: the live upstream was archived, so its name
         # survives only in the roster while a live downstream still depends on
-        # it.  run --all's inline runnable check used to do plans[name] and
+        # it. The whole-project scheduler's inline runnable check used to do
+        # plans[name] and
         # raise KeyError; the roster-aware predicate must instead treat the
         # archived upstream as complete and schedule the downstream.
         downstream = self.make_plan("downstream", after=("upstream_archived",))
@@ -725,7 +726,7 @@ class TestStopChannelAndEscalation(PlanSchedulerTestCase):
 
         Returning from a mid-run refusal while a plan is still going
         would orphan it -- and the orphan keeps its plan lock, so the
-        next ``run --all`` is refused by a run nobody is watching any more.
+        next whole-project ``run`` is refused by a run nobody is watching any more.
         """
         alpha = self.make_plan("alpha")
         self.make_plan("beta")
@@ -881,10 +882,10 @@ class TestStdinStopChannelChild(unittest.TestCase):
 
 class TestStopRequestEndsRealProcessTrees(unittest.TestCase):
     """Real processes holding real plan locks, stopped the way
-    ``run --all`` stops them.
+    A whole-project ``run`` stops them.
 
     A plan child that is still alive legitimately still owns its plan
-    lock, so the next ``run --all`` is refused even though the previous command
+    lock, so the next whole-project ``run`` is refused even though the previous command
     looked finished. Every case here therefore proves the lock is free again --
     the only portable evidence that a process really is gone -- instead of
     trusting terminal output or the PID recorded in ``assent.lock``.
@@ -950,7 +951,7 @@ class TestStopRequestEndsRealProcessTrees(unittest.TestCase):
         """
     )
 
-    # Stands in for the ``run --all`` parent itself dying: it holds the only
+    # Stands in for the whole-project ``run`` parent itself dying: it holds the only
     # write end of the child's stop pipe, so killing it is what closes the pipe.
     _LAUNCHER = textwrap.dedent(
         """

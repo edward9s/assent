@@ -30,8 +30,8 @@ while operating an assent-managed session live in
   acceptance meeting as `_report.md` evidence. A question the scheduler cannot
   settle is not a run failure. Design such an outcome as exit 0 plus a
   distinctly named report state plus an explicit gate at `accept` — never as a
-  nonzero exit, because `run --all` stops launching further plans once any
-  plan exits nonzero, so nonzero silently cancels unrelated queued work.
+  nonzero exit, because a whole-project `run` stops launching further plans
+  once any plan exits nonzero, so nonzero silently cancels unrelated queued work.
   Reserve nonzero for genuine failure: infrastructure, a refused precondition,
   or a broken gate, where continuing would be unsafe rather than undecided.
 - Standard library only; introduce no third-party dependencies.
@@ -93,8 +93,8 @@ while operating an assent-managed session live in
   and never weakens, narrows, deletes, rewrites, bypasses, or mocks them merely
   to make a check pass.
 - Every explicitly named live plan selection is audited in full before
-  dispatch: each stated name, including a prefix before `...`, must resolve to
-  an existing `.assent/` directory containing a formal `tNNN_name.e.toml` task
+  dispatch: each stated name must resolve to an existing `.assent/` directory
+  containing a formal `tNNN_name.e.toml` task
   file. Any unresolved name reports with the complete unresolved set and
   prevents every selected operation from starting; dynamic discovery modes keep
   their own contracts, and archive restore/recovery remains allowed to resume
@@ -137,31 +137,18 @@ while operating an assent-managed session live in
   the read-only reviewer's prompt plus before/after write detection is a
   cooperative rule, not a security sandbox and not a preventive permission
   boundary.
-- The literal ASCII token `...` is remainder syntax shared by every
-  plan-taking command (`run`, `verify`, `accept`, `clean`, `archive`): given
-  once, as the last positional argument, it means "and every remaining plan
-  the command itself would discover". It is not an alias for `--all` and may
-  not be combined with it (nor with `verify --batch`/`--focus`, `run --once`/
-  `--task`, or `archive --restore`, which takes exactly one plan). The
-  expansion is snapshotted once, before anything is mutated, and each command
-  keeps its own discovery rule: `verify` and `accept` add only finished plans,
-  `run`, `clean` and `archive` add every plan and decide per plan
-  afterwards. The remainder is appended after the explicit prefix, and each
-  command then applies its own native ordering: `run` keeps the stated prefix
-  order and takes the remainder in plan-dependency order, `verify` and
-  `accept` normalize the whole selection to dependency order, and `clean`
-  normalizes it upstream-first.
-- Selection cardinality is what picks a command's path, not the presence of
-  `...`: one plan is the single-plan path (plan receipt, direct accept,
-  `archive_plan`), two or more is the exact selected batch. A
-  remainder-expanded selection is an ordinary exact selection, so selected
-  acceptance still requires evidence for exactly the expanded set and still
-  never verifies.
+- With no `PLAN`, `assent run` dynamically schedules every discovered plan in
+  dependency order and `--jobs N` sets its concurrency cap. Named plans form
+  one exact selection and run in the stated order; `--jobs` is not valid with
+  a named selection. There is no `run --all`, `--once`, `--task`, or remainder
+  selection syntax.
+- Selection cardinality picks a command's path: one plan is the single-plan
+  path (plan receipt, direct accept, `archive_plan`), while two or more is the
+  exact selected batch.
 - A successful `run` automatically follows the configured integration workflow
-  for the same exact selection until `full_verify` passes or the finite array is
-  exhausted. `--once` and `--task` defer integration when they leave the selected
-  plan incomplete. No run path accepts; publication remains the later human
-  `assent accept` action.
+  for its completed selection until `full_verify` passes or the finite array is
+  exhausted. No run path accepts; publication remains the later human `assent
+  accept` action.
 - A multi-plan `archive A B` keeps `archive PLAN`'s contract, not `--all`'s:
   the human named those plans, so an ineligible one is a refusal that exits
   nonzero after every named plan has been attempted, while `--all` skips an

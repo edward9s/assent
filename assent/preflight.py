@@ -115,7 +115,6 @@ def literal_adapter_errors(cfg: Config, task: Task) -> list[str]:
 # adapter capability gate
 # --------------------------------------------------------------------------- #
 def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
-                         task_id: str | None = None,
                          adapter_name: str | None = None) -> list[InvocationRequest]:
     """Resolve every invocation this run could still issue, without starting anything.
 
@@ -125,8 +124,6 @@ def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
     name = adapter_name or cfg.adapter_names[0]
     requests: list[InvocationRequest] = []
     for task in plan.tasks:
-        if task_id is not None and task.id != task_id:
-            continue
         if task.status not in ("TODO", "WIP"):
             continue
         literal_errors = literal_adapter_errors(cfg, task)
@@ -163,7 +160,6 @@ def _planned_invocations(cfg: Config, adapter: Adapter, plan: Plan,
 
 
 def capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
-                      task_id: str | None = None,
                       adapter_name: str | None = None) -> list[str]:
     """Ask the active adapter to prove every planned model/effort before anything starts.
 
@@ -172,8 +168,7 @@ def capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
     resolution error (an unmapped tier, say) is itself a preflight failure.
     """
     try:
-        requests = _planned_invocations(
-            cfg, adapter, plan, task_id, adapter_name)
+        requests = _planned_invocations(cfg, adapter, plan, adapter_name)
     except AssentError as e:
         return [str(e)]
     return adapter.preflight(requests)

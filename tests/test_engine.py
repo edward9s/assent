@@ -82,8 +82,7 @@ integration = []
 class TestLinearEngine(EngineTestCase):
     def run_with_contracts(self, cfg, adapter, **kwargs):
         with mock.patch.object(engine.contracts, "require_contracts"):
-            return self.run_quiet(
-                cfg, once=True, adapter=adapter, **kwargs)
+            return self.run_quiet(cfg, adapter=adapter, **kwargs)
 
     def test_role_edits_source_and_scheduler_completes_task(self):
         path = self.write_task(1, verify=_NEEDS_OK_TXT)
@@ -101,6 +100,17 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertTrue((self.execution_root() / "src" / "ok.txt").is_file())
 
+    def test_run_processes_every_task(self):
+        first = self.write_task(1)
+        second = self.write_task(2, deps=("t001",))
+        cfg = self.build(extra_config=WORKFLOW)
+        self.commit_all()
+
+        self.assertEqual(self.run_with_contracts(
+            cfg, ScriptedAdapter([result(), result()])), 0)
+        self.assertEqual(parse_task_file(first).status, "DONE")
+        self.assertEqual(parse_task_file(second).status, "DONE")
+
     def test_ai_session_names_the_task_and_resolved_invocation(self):
         self.write_task(1, title="Visible task")
         cfg = self.build(extra_config=WORKFLOW)
@@ -111,7 +121,7 @@ class TestLinearEngine(EngineTestCase):
         with mock.patch.object(engine.contracts, "require_contracts"), \
                 contextlib.redirect_stdout(output):
             self.assertEqual(engine.run(
-                cfg, once=True, adapter=adapter), 0)
+                cfg, adapter=adapter), 0)
 
         text = output.getvalue()
         self.assertIn("Task t001: Visible task", text)

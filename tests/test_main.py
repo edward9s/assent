@@ -248,7 +248,7 @@ class TestDispatch(MainTestCase):
         cases = {"missing": lambda p: p.unlink(),
                  "stale": lambda p: p.write_text("older\n", encoding="utf-8")}
         for state, break_contract in cases.items():
-            for argv in (["run"], ["run", "plan01"], ["run", "--all"]):
+            for argv in (["run"], ["run", "plan01"]):
                 with self.subTest(state=state, argv=argv):
                     home = install_global_contracts(self)
                     break_contract(home / "instructions.md")
@@ -283,41 +283,34 @@ class TestDispatch(MainTestCase):
         self.assertIn("Optional project settings file", text)
         self.assertIn("~/.assent/assent.toml", text)
 
-    def test_run_all_accepts_an_explicit_prefix(self):
-        config = self.write_config()
-        self.write_task("work")
-        with patch("assent.__main__.engine.run", return_value=0), patch(
-                "assent.__main__.run_all", return_value=0) as mocked, patch(
-                "assent.__main__.verify_batch",
-                return_value=0):
-            code, _ = self.run_main(
-                ["run", "work", "--all", "--config", str(config)])
-        self.assertEqual(code, 0)
-        mocked.assert_called_once()
-
-    def test_run_jobs_requires_all_and_positive_number(self):
-        for argv in (["run", "--jobs", "2"],
-                     ["run", "--all", "--jobs", "0"]):
+    def test_run_jobs_rejects_named_selection_and_nonpositive_number(self):
+        for argv in (["run", "work", "--jobs", "2"],
+                     ["run", "--jobs", "0"]):
             with self.subTest(argv=argv), self.assertRaises(
                     SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
                 main(argv)
             self.assertEqual(ctx.exception.code, 2)
 
-    def test_run_all_dispatches_with_default_jobs(self):
+    def test_whole_project_run_dispatches_jobs(self):
         config = self.write_config()
-        with patch("assent.__main__.run_all", return_value=0) as mocked, \
-                patch("assent.__main__.verify_batch", return_value=0):
-            code, _ = self.run_main(["run", "--all", "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(mocked.call_args.args[2], 1)
+        for options, expected in (([], 1), (["--jobs", "3"], 3)):
+            with self.subTest(options=options), \
+                    patch("assent.__main__.run_all", return_value=0) as mocked, \
+                    patch("assent.__main__.verify_batch", return_value=0):
+                code, _ = self.run_main([
+                    "run", *options, "--config", str(config)])
+            self.assertEqual(code, 0)
+            self.assertEqual(mocked.call_args.args[2], expected)
 
     def test_removed_run_options_are_usage_errors(self):
         config = self.write_config()
         self.write_task("work")
-        for option in ("--auto-fix", "--verify"):
-            with self.subTest(option=option), self.assertRaises(
+        cases = (["--auto-fix"], ["--verify"], ["--all"], ["--once"],
+                 ["--task", "t001"])
+        for options in cases:
+            with self.subTest(options=options), self.assertRaises(
                     SystemExit) as ctx, contextlib.redirect_stderr(io.StringIO()):
-                main(["run", "work", option, "--config", str(config)])
+                main(["run", "work", *options, "--config", str(config)])
             self.assertEqual(ctx.exception.code, 2)
 
     def test_run_named_plans_dispatch_in_given_order(self):
@@ -344,37 +337,16 @@ class TestDispatch(MainTestCase):
             [call.args[0].tasks_name for call in mocked.call_args_list],
             ["first"])
 
-    def test_run_named_plans_with_all_runs_remainder_once(self):
-        config = self.write_config()
-        self.write_task("first")
-        self.write_task("second")
-        with patch("assent.__main__.engine.run", return_value=0) as run_mock, \
-                patch("assent.__main__.run_all", return_value=0) as all_mock, \
-                patch("assent.__main__.verify_batch",
-                      return_value=0):
-            code, _ = self.run_main([
-                "run", "first", "second", "--all", "--jobs", "3",
-                "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(
-            [call.args[0].tasks_name for call in run_mock.call_args_list],
-            ["first", "second"])
-        all_mock.assert_called_once_with(str(config), config.parent.resolve(), 3)
-
     def test_run_named_plans_rejects_duplicates(self):
         with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
                 io.StringIO()):
             main(["run", "first", "first"])
         self.assertEqual(ctx.exception.code, 2)
 
-    def test_run_named_plans_rejects_single_plan_options(self):
+    def test_run_named_plans_reject_jobs(self):
         cases = (
-            ["run", "first", "second", "--once"],
-            ["run", "first", "second", "--task", "t001"],
             ["run", "first", "--jobs", "2"],
             ["run", "first", "second", "--jobs", "2"],
-            ["run", "first", "--all", "--once"],
-            ["run", "first", "--all", "--task", "t001"],
         )
         for argv in cases:
             with self.subTest(argv=argv), self.assertRaises(
@@ -676,96 +648,6 @@ class TestDispatch(MainTestCase):
         self.assertEqual(code, 1)
         self.assertIn("unknown top-level keys", out)
 
-    def test_run_without_plan_selects_unique_runnable_task_plan(self):
-        config = self.write_config()
-        self.write_task("active", "TODO")
-        self.write_task("blocked", "BLOCKED")
-        with patch("assent.__main__.engine.run", return_value=0) as mocked:
-            code, out = self.run_main(["run", "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertIn(
-            "Plan: active (the only runnable one, "
-            "selected automatically)", out)
-        self.assertEqual(mocked.call_args.args[0].tasks_name, "active")
-
-    def test_run_without_plan_selects_unique_unaccepted_completed_plan(self):
-        config = self.write_config()
-        self.write_task("completed", "DONE")
-        with patch("assent.__main__._accepted_run_source", return_value=None), \
-                patch("assent.__main__.engine.run", return_value=0) as run, \
-                patch("assent.__main__._close_run", return_value=0):
-            code, out = self.run_main(["run", "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertIn("Plan: completed (the only runnable one", out)
-        self.assertEqual(run.call_args.args[0].tasks_name, "completed")
-
-    def test_run_without_plan_excludes_accepted_completed_plan(self):
-        config = self.write_config()
-        self.write_task("accepted", "DONE")
-        with patch("assent.__main__._accepted_run_source",
-                   return_value=("accepted/source", "a" * 40, "master")), \
-                patch("assent.__main__.engine.run") as run:
-            code, out = self.run_main(["run", "--config", str(config)])
-        self.assertEqual(code, 1)
-        self.assertIn("0 runnable plan(s) found", out)
-        self.assertIn("(already accepted)", out)
-        run.assert_not_called()
-
-    def test_run_without_plan_excludes_waiting_plan(self):
-        config = self.write_config()
-        self.write_task("base", "BLOCKED")
-        self.write_task("waiting", "TODO")
-        (config.parent / "waiting" / "_plan_deps.toml").write_text(
-            'after = ["base"]\n', encoding="utf-8")
-        self.write_task("ready", "TODO")
-
-        with patch("assent.__main__.engine.run", return_value=0) as mocked:
-            code, out = self.run_main(["run", "--config", str(config)])
-
-        self.assertEqual(code, 0)
-        self.assertIn("Plan: ready", out)
-        self.assertEqual(mocked.call_args.args[0].tasks_name, "ready")
-
-    def test_run_without_plan_lists_waiting_reason(self):
-        config = self.write_config()
-        self.write_task("base", "BLOCKED")
-        self.write_task("waiting", "TODO")
-        (config.parent / "waiting" / "_plan_deps.toml").write_text(
-            'after = ["base"]\n', encoding="utf-8")
-
-        with patch("assent.__main__.engine.run") as mocked:
-            code, out = self.run_main(["run", "--config", str(config)])
-
-        self.assertEqual(code, 1)
-        self.assertIn("0 runnable plan(s) found", out)
-        self.assertIn("waiting:", out)
-        self.assertIn("(waiting on base)", out)
-        mocked.assert_not_called()
-
-    def test_run_without_plan_refuses_zero_or_multiple_runnable(self):
-        for case, statuses in (("zero", [("blocked", "BLOCKED")]),
-                               ("multiple", [("one", "TODO"),
-                                             ("two", "WIP")])):
-            with self.subTest(case=case):
-                shutil.rmtree(self.root / ".assent", ignore_errors=True)
-                config = self.write_config()
-                for plan_name, status in statuses:
-                    self.write_task(plan_name, status)
-                with patch("assent.__main__.engine.run") as mocked:
-                    code, out = self.run_main(
-                        ["run", "--config", str(config)])
-                self.assertEqual(code, 1)
-                self.assertIn("State the plan explicitly", out)
-                for plan_name, _ in statuses:
-                    self.assertIn(plan_name, out)
-                mocked.assert_not_called()
-
-    def test_run_without_plan_refuses_when_no_task_plan_exists(self):
-        config = self.write_config()
-        code, out = self.run_main(["run", "--config", str(config)])
-        self.assertEqual(code, 1)
-        self.assertIn("no plan with a task file found", out)
-
     def test_read_only_commands_without_plan_run_all_plans(self):
         config = self.write_config()
         self.write_task("beta")
@@ -924,13 +806,13 @@ class TestAutomaticIntegrationChaining(MainTestCase):
         run.assert_not_called()
         integration.assert_not_called()
 
-    def test_all_runs_dynamic_integration_after_success(self):
+    def test_whole_project_run_uses_dynamic_integration_after_success(self):
         self.write_task("alpha", "DONE")
         with patch("assent.__main__.run_all", return_value=0), \
                 patch("assent.__main__.engine.run_dynamic_selection_workflow",
                       return_value=0) as integration:
             code, _ = self.run_main([
-                "run", "--all", "--config", str(self.config)])
+                "run", "--config", str(self.config)])
         self.assertEqual(code, 0)
         integration.assert_called_once_with(str(self.config), self.assent_dir)
 
@@ -945,12 +827,12 @@ class TestAutomaticIntegrationChaining(MainTestCase):
         exact.assert_not_called()
         dynamic.assert_not_called()
 
-    def test_limited_incomplete_run_defers_integration(self):
+    def test_incomplete_named_run_defers_integration(self):
         self.write_task("alpha", "TODO")
         with patch("assent.__main__.engine.run", return_value=0), \
                 patch("assent.__main__.engine.run_selection_workflow") as integration:
             code, out = self.run_main([
-                "run", "alpha", "--once", "--config", str(self.config)])
+                "run", "alpha", "--config", str(self.config)])
         self.assertEqual(code, 0)
         self.assertIn("Integration workflow deferred", out)
         integration.assert_not_called()
@@ -992,16 +874,12 @@ class TestCommandElapsed(MainTestCase):
         cases = {
             "direct": ["run", "alpha"],
             "selected": ["run", "alpha", "beta"],
-            "remainder": ["run", "alpha", "..."],
-            "automatic": ["run"],
         }
         for name, argv in cases.items():
             for result in (0, 1):
                 with self.subTest(case=name, result=result):
                     self.write_task("alpha")
-                    # The automatic selection needs exactly one runnable plan.
-                    self.write_task(
-                        "beta", "BLOCKED" if name == "automatic" else "TODO")
+                    self.write_task("beta", "TODO")
                     with self.injected_clock(), patch(
                             "assent.__main__.engine.run", return_value=result):
                         code, out = self.run_main(
@@ -1016,7 +894,7 @@ class TestCommandElapsed(MainTestCase):
                                           return_value=0), patch(
                 "assent.__main__.verify_batch",
                 return_value=0):
-            code, out = self.run_main(["run", "--all", "--config", str(config)])
+            code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(
             self.total_lines(out),
@@ -1207,14 +1085,14 @@ class TestHelpPalette(MainTestCase):
                               "project's `.assent/`", help_text)
                 self.assertIn("pass the name, not a path", help_text)
 
-    def test_help_states_the_remainder_syntax_and_accept_receipt_paths(self):
+    def test_help_states_run_scope_and_accept_receipt_paths(self):
         run_help = " ".join(self.help_output(["run"], {}).split())
-        self.assertIn("the literal token `...` as the last argument adds every "
-                      "remaining discovered plan", run_help)
+        self.assertIn("omit to schedule every discovered plan", run_help)
         self.assertIn("Each PLAN names a directory directly under the project's "
                       "`.assent/`", run_help)
         self.assertIn("pass the name, not a path", run_help)
-        self.assertNotIn("--verify", run_help)
+        for removed in ("--all", "--once", "--task", "--verify"):
+            self.assertNotIn(removed, run_help)
 
         accept_help = " ".join(self.help_output(["accept"], {}).split())
         self.assertIn("a fresh PASSED batch receipt is replayed and released "
@@ -1224,180 +1102,20 @@ class TestHelpPalette(MainTestCase):
         self.assertNotIn("(sequential only)", accept_help)
 
 
-class TestRemainderSelection(MainTestCase):
-    """The literal `...` token as a remainder selector across the workflow.
-
-    `A B ...` is A and B plus the plans that command would otherwise discover
-    for the whole project.  These tests patch the operation each branch calls,
-    so they prove what the CLI selects rather than re-testing the operations.
-    """
-
-    def usage_error(self, argv) -> str:
-        errors = io.StringIO()
-        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stderr(
-                errors), contextlib.redirect_stdout(io.StringIO()):
-            main(argv)
-        self.assertEqual(ctx.exception.code, 2)
-        return errors.getvalue()
-
-    def test_marker_is_rejected_when_repeated_misplaced_or_incompatible(self):
-        cases = (
-            ["run", "...", "..."],
-            ["run", "...", "first"],
-            ["run", "first", "...", "--all"],
-            ["run", "first", "...", "--once"],
-            ["run", "first", "...", "--task", "t001"],
-            ["accept", "first", "...", "--all"],
-            ["accept", "...", "first"],
-            ["verify", "first", "...", "--batch"],
-            ["verify", "first", "...", "--focus"],
-            ["verify", "...", "..."],
-            ["clean", "...", "first"],
-            ["clean", "first", "first"],
-            ["archive", "first", "...", "--all"],
-            ["archive", "first", "...", "--restore"],
-            ["archive", "...", "--restore"],
-            ["archive", "first", "second", "--restore"],
-            ["archive", "first", "first"],
-        )
-        for argv in cases:
-            with self.subTest(argv=argv):
-                self.usage_error(argv)
-
-    def test_marker_never_reaches_configuration_loading_as_a_plan_name(self):
+class TestRemovedRemainderSyntax(MainTestCase):
+    def test_remainder_token_is_an_invalid_plan_name(self):
         config = self.write_config()
         self.write_task("alpha", "DONE")
-        real_load = load_config
-        seen: list[str] = []
-
-        def record(path, plan_name):
-            seen.append(plan_name)
-            return real_load(path, plan_name)
-
         commands = (["run", "..."], ["clean", "..."], ["archive", "..."],
                     ["verify", "..."], ["accept", "..."])
         for argv in commands:
-            with self.subTest(argv=argv), \
-                    patch("assent.__main__.load_config", side_effect=record), \
-                    patch("assent.__main__.engine.run", return_value=0), \
-                    patch("assent.__main__.verify_plan", return_value=0), \
-                    patch("assent.__main__.verify_batch", return_value=0), \
-                    patch("assent.__main__.clean_plans", return_value=0), \
-                    patch("assent.__main__.archive_plan", return_value=0), \
-                    patch("assent.__main__.accept_plan", return_value=0):
-                code, _ = self.run_main([*argv, "--config", str(config)])
-                self.assertEqual(code, 0)
-        self.assertEqual(set(seen), {"alpha"})
+            with self.subTest(argv=argv):
+                code, output = self.run_main(
+                    [*argv, "--config", str(config)])
+                self.assertEqual(code, 1)
+                self.assertIn("Plan selection refused", output)
 
-    def test_run_completes_the_explicit_prefix_before_the_remainder(self):
-        config = self.write_config()
-        for plan_name in ("alpha", "beta", "delta", "gamma"):
-            self.write_task(plan_name)
-        # delta must wait for beta, so the remainder is dependency-ordered
-        # rather than merely lexicographic.
-        (self.root / ".assent" / "delta" / "_plan_deps.toml").write_text(
-            'after = ["beta"]\n', encoding="utf-8")
-        order: list[str] = []
-        with patch("assent.__main__.engine.run",
-                   side_effect=lambda cfg, **_: order.append(cfg.tasks_name)
-                   or 0), \
-                patch("assent.__main__.run_all",
-                      side_effect=AssertionError("used the --all scheduler")):
-            code, out = self.run_main(
-                ["run", "gamma", "alpha", "...", "--config", str(config)])
-
-        self.assertEqual(code, 0)
-        self.assertIn("run: `...` selects gamma, alpha, beta, delta", out)
-        self.assertEqual(order, ["gamma", "alpha", "beta", "delta"])
-
-    def test_run_explicit_prefix_failure_prevents_remainder_scheduling(self):
-        config = self.write_config()
-        for plan_name in ("alpha", "beta"):
-            self.write_task(plan_name)
-        with patch("assent.__main__.engine.run", return_value=1) as engine_run, \
-                patch("assent.__main__.run_all",
-                      side_effect=AssertionError("remainder was scheduled")):
-            code, _ = self.run_main(
-                ["run", "alpha", "...", "--config", str(config)])
-        self.assertEqual(code, 1)
-        self.assertEqual([call.args[0].tasks_name
-                          for call in engine_run.call_args_list], ["alpha"])
-
-    def test_run_remainder_is_a_snapshot_taken_before_the_prefix_runs(self):
-        config = self.write_config()
-        self.write_task("alpha")
-        started: list[str] = []
-
-        def create_a_plan_mid_run(cfg, **_):
-            started.append(cfg.tasks_name)
-            self.write_task("appeared")
-            return 0
-
-        with patch("assent.__main__.engine.run",
-                   side_effect=create_a_plan_mid_run):
-            code, out = self.run_main(
-                ["run", "alpha", "...", "--config", str(config)])
-
-        self.assertEqual(code, 0)
-        self.assertIn("No remaining plan to run.", out)
-        self.assertEqual(started, ["alpha"])
-
-    def test_verify_remainder_expands_to_finished_plans_only(self):
-        config = self.write_config()
-        self.write_task("alpha", "DONE")
-        self.write_task("beta", "DONE")
-        self.write_task("ongoing", "TODO")
-        with patch("assent.__main__.verify_selected_batch",
-                   return_value=0) as batch:
-            code, out = self.run_main(
-                ["verify", "beta", "...", "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(batch.call_args.args[2], ["beta", "alpha"])
-        self.assertNotIn("ongoing", out)
-
-    def test_verify_remainder_of_one_plan_uses_the_plan_path(self):
-        config = self.write_config()
-        self.write_task("alpha", "DONE")
-        self.write_task("ongoing", "TODO")
-        with patch("assent.__main__.verify_plan",
-                   return_value=0) as plan_name:
-            code, _ = self.run_main(["verify", "...", "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(plan_name.call_args.args[0].tasks_name, "alpha")
-
-        # A one-plan expansion is not a batch, so --no-bisect is a usage error
-        # exactly as it is for a single named plan.
-        self.usage_error(["verify", "...", "--no-bisect", "--config",
-                          str(config)])
-
-    def test_accept_remainder_never_falls_back_to_accept_all(self):
-        config = self.write_config()
-        self.write_task("alpha", "DONE")
-        self.write_task("beta", "DONE")
-        self.write_task("ongoing", "TODO")
-        with patch("assent.__main__.accept_selected_batch",
-                   return_value=0) as batch, \
-                patch("assent.__main__.accept_all",
-                      side_effect=AssertionError("fell back to accept --all")), \
-                patch("assent.__main__.verify_plan",
-                      side_effect=AssertionError("accept verified")):
-            code, _ = self.run_main(
-                ["accept", "beta", "...", "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(batch.call_args.args[2], ["beta", "alpha"])
-
-    def test_accept_remainder_of_one_plan_uses_the_direct_gate(self):
-        config = self.write_config()
-        self.write_task("alpha", "DONE")
-        self.write_task("ongoing", "TODO")
-        with patch("assent.__main__.accept_plan", return_value=0) as direct, \
-                patch("assent.__main__.accept_selected_batch",
-                      side_effect=AssertionError("used the batch path")):
-            code, _ = self.run_main(["accept", "...", "--config", str(config)])
-        self.assertEqual(code, 0)
-        self.assertEqual(direct.call_args.args[0].tasks_name, "alpha")
-
-    def test_clean_accepts_an_exact_set_and_a_remainder(self):
+    def test_clean_accepts_an_exact_set(self):
         config = self.write_config()
         for plan_name in ("alpha", "beta", "gamma"):
             self.write_task(plan_name)
@@ -1408,25 +1126,10 @@ class TestRemainderSelection(MainTestCase):
         self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]],
                          ["gamma", "alpha"])
 
-        with patch("assent.__main__.clean_plans", return_value=1) as mocked:
-            code, _ = self.run_main(
-                ["clean", "gamma", "...", "--config", str(config)])
-        self.assertEqual(code, 1)
-        self.assertEqual([cfg.tasks_name for cfg in mocked.call_args.args[0]],
-                         ["gamma", "alpha", "beta"])
-
-    def test_archive_selection_and_remainder_use_the_explicit_policy(self):
+    def test_archive_single_selection_uses_the_explicit_policy(self):
         config = self.write_config()
         for plan_name in ("alpha", "beta", "gamma"):
             self.write_task(plan_name, "DONE")
-        with patch("assent.__main__.archive_selected", return_value=1) as mocked, \
-                patch("assent.__main__.archive_all",
-                      side_effect=AssertionError("used the --all policy")):
-            code, _ = self.run_main(
-                ["archive", "gamma", "...", "--config", str(config)])
-        self.assertEqual(code, 1)
-        self.assertEqual(mocked.call_args.args[1], ["gamma", "alpha", "beta"])
-
         with patch("assent.__main__.archive_plan", return_value=0) as one:
             code, _ = self.run_main(
                 ["archive", "beta", "--config", str(config)])
@@ -1441,27 +1144,6 @@ class TestRemainderSelection(MainTestCase):
                 ["archive", "alpha", "--restore", "--config", str(config)])
         self.assertEqual(code, 0)
         self.assertEqual(mocked.call_args.args[0].tasks_name, "alpha")
-
-    def test_remainder_without_any_selectable_plan_refuses(self):
-        config = self.write_config()
-        commands = ("run", "clean", "verify", "accept", "archive")
-        for command in commands:
-            with self.subTest(command=command, project="empty"):
-                code, out = self.run_main([command, "...", "--config",
-                                           str(config)])
-                self.assertEqual(code, 1)
-                self.assertIn(f"{command}: `...` selected no plan.", out)
-
-        # verify and accept only ever select finished plans, so an entirely
-        # unfinished project leaves their remainder empty too.
-        self.write_task("ongoing", "TODO")
-        for command in ("verify", "accept"):
-            with self.subTest(command=command, project="unfinished"):
-                code, out = self.run_main([command, "...", "--config",
-                                           str(config)])
-                self.assertEqual(code, 1)
-                self.assertIn(f"{command}: `...` selected no plan.", out)
-
 
 class TestStdinStopWatcher(unittest.TestCase):
     """The stdin stop channel is opt-in: only a scheduler-spawned child gets

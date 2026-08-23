@@ -51,8 +51,7 @@ assent init --test unittest
 # .assent/<PLAN>/ 下的 Assent 格式計畫。
 assent check
 
-# 先試跑一個任務，再自動完成整個計畫。
-assent run --once
+# 自動執行所有找到的計畫。
 assent run
 
 # 閱讀證據後，再由人決定是否接受。

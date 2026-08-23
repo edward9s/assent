@@ -401,8 +401,8 @@ def clean_plans(configs: list[Config]) -> int:
     # named plan, so whether this invocation owns the repository-global
     # temporary namespace is decided from the selection itself, before anything
     # is cleaned: it owns it when the selection covers every live plan (bare
-    # ``clean``, a ``...`` expansion, or an explicit selection that happens to
-    # be the whole project), and it does not when a human named a subset.
+    # ``clean`` or an explicit selection that happens to be the whole project),
+    # and it does not when a human named a subset.
     try:
         whole_project = set(list_task_plans(configs[0].assent_dir)) <= set(by_name)
     except (AssentError, OSError) as e:

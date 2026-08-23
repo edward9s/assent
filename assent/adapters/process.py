@@ -26,14 +26,14 @@ _WAKE = object()
 # --------------------------------------------------------------------------- #
 # Stop wake
 # --------------------------------------------------------------------------- #
-# ``run --all`` stops a plan child by closing its stdin, and the child's
+# A whole-project ``run`` stops a plan child by closing its stdin, and the child's
 # watcher turns that EOF into ``_thread.interrupt_main()``.  That call only marks
 # a KeyboardInterrupt *pending*: it is delivered when the main thread next runs
 # bytecode.  A main thread parked in ``time.sleep`` (the quota countdown) or in a
 # blocking ``queue.get`` (the output collection below) therefore keeps waiting --
 # for a whole countdown segment, for the watchdog duration, or forever when the
 # watchdog is disabled.  All that time the child legitimately still owns the
-# plan lock, so the next ``run --all`` is refused even though the command
+# plan lock, so the next whole-project ``run`` is refused even though the command
 # looked finished.
 #
 # The fix is one wake mechanism shared by every such wait: an Event the sleeps

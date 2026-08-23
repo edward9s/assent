@@ -47,10 +47,10 @@ class TestTerminalLogging(unittest.TestCase):
             'acceptance = "passed"\n', encoding="utf-8")
         return task
 
-    def test_unique_ongoing_plan_selects_log_path(self):
+    def test_whole_project_run_uses_project_log(self):
         config = self.write_config()
         self.write_task()
-        expected = self.root.resolve() / ".assent" / "plan01" / "_assent.log"
+        expected = self.root.resolve() / ".assent" / "_assent.log"
         self.assertEqual(log_path_for_argv(
             ["run", "--config", str(config)]),
             expected)
@@ -60,15 +60,15 @@ class TestTerminalLogging(unittest.TestCase):
         self.write_task("parallel02")
         expected = self.root.resolve() / ".assent" / "parallel02" / "_assent.log"
         self.assertEqual(log_path_for_argv(
-            ["run", "--task", "t001", "parallel02", f"--config={config}"]),
+            ["run", "parallel02", f"--config={config}"]),
             expected)
 
-    def test_run_all_uses_parent_log_instead_of_a_plan_log(self):
+    def test_parallel_run_uses_parent_log_instead_of_a_plan_log(self):
         config = self.write_config()
         self.write_task("only")
         expected = self.root.resolve() / ".assent" / "_assent.log"
         self.assertEqual(log_path_for_argv(
-            ["run", "--all", "--jobs", "2", "--config", str(config)]),
+            ["run", "--jobs", "2", "--config", str(config)]),
             expected)
 
     def test_unresolved_explicit_plan_uses_management_log(self):
@@ -98,7 +98,7 @@ class TestTerminalLogging(unittest.TestCase):
 
     def test_log_stays_in_the_project_when_only_the_user_config_exists(self):
         # Settings may come entirely from ~/.assent, but a run's log is project
-        # evidence: it belongs beside the plan it was produced for.
+        # evidence: a whole-project run belongs in the project's .assent.
         user_home = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, user_home, ignore_errors=True)
         (user_home / "assent.toml").write_text(
@@ -114,8 +114,8 @@ class TestTerminalLogging(unittest.TestCase):
 
         path = log_path_for_argv(["run"])
         self.assertEqual(
-            path, self.root.resolve() / ".assent" / "plan01" / "_assent.log")
-        self.assertNotEqual(path.parent.parent, user_home)
+            path, self.root.resolve() / ".assent" / "_assent.log")
+        self.assertNotEqual(path.parent, user_home)
 
     def test_explicit_config_still_selects_another_projects_management_dir(self):
         other = Path(tempfile.mkdtemp())
@@ -134,7 +134,7 @@ class TestTerminalLogging(unittest.TestCase):
 
         self.assertEqual(
             log_path_for_argv(["run", "--config", str(config)]),
-            other.resolve() / ".assent" / "plan09" / "_assent.log")
+            other.resolve() / ".assent" / "_assent.log")
 
     def test_stdout_stderr_are_flushed_incrementally_with_start_header(self):
         terminal_out = io.StringIO()

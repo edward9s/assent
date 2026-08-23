@@ -1,4 +1,4 @@
-"""Mirror ``assent run``'s terminal output into the current plan.
+"""Mirror ``assent run`` terminal output into the project or named plan.
 
 The terminal keeps native output (colors and cursor repositioning included), while the
 plan's ``_assent.log`` keeps portable, immediately-flushed plain text. Errors can
@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Iterator, TextIO
 
 from assent.config import list_task_plans
-from assent.plan import Plan
 
 _ANSI_RE = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])")
@@ -105,34 +104,19 @@ def _valid_plan(value: object) -> str | None:
     return value
 
 
-def _plan_from_tasks(assent_dir: Path) -> str | None:
-    """Best-effort derive the single ongoing plan; any error is treated as unknown."""
-    try:
-        ongoing = []
-        for plan_name in list_task_plans(assent_dir):
-            plan = Plan.parse(assent_dir / plan_name)
-            if any(task.status in ("TODO", "WIP") for task in plan.tasks):
-                ongoing.append(plan_name)
-        return ongoing[0] if len(ongoing) == 1 else None
-    # Logging runs before real config is loaded; even unexpected bad files (e.g. encoding
-    # errors) must not block the original command.
-    except Exception:
-        return None
-
-
 def _plan_from_argv(argv: list[str], assent_dir: Path) -> str | None:
     """Find a discovered run/verify plan argument, skipping options and values."""
     if not argv or argv[0] not in ("run", "verify"):
         return None
-    if "--all" in argv or "--batch" in argv:
+    if "--batch" in argv:
         return None
     idx = 1
     while idx < len(argv):
         arg = argv[idx]
-        if arg in ("--config", "--task", "--jobs"):
+        if arg in ("--config", "--jobs"):
             idx += 2
             continue
-        if arg == "--once" or arg.startswith(("--config=", "--task=")):
+        if arg.startswith("--config="):
             idx += 1
             continue
         if not arg.startswith("-"):
@@ -145,26 +129,6 @@ def _plan_from_argv(argv: list[str], assent_dir: Path) -> str | None:
                 return None
         idx += 1
     return None
-
-
-def _has_plan_argument(argv: list[str]) -> bool:
-    """Whether run/verify contains a positional value that could name a plan."""
-    if not argv or argv[0] not in ("run", "verify"):
-        return False
-    idx = 1
-    while idx < len(argv):
-        arg = argv[idx]
-        if arg in ("--config", "--task", "--jobs"):
-            idx += 2
-            continue
-        if arg in ("--once", "--batch") or arg.startswith(
-                ("--config=", "--task=")):
-            idx += 1
-            continue
-        if not arg.startswith("-"):
-            return True
-        idx += 1
-    return False
 
 
 def _config_path_for_argv(argv: list[str]) -> Path:
@@ -188,12 +152,7 @@ def _config_path_for_argv(argv: list[str]) -> Path:
 def log_path_for_argv(argv: list[str]) -> Path:
     """Best-effort determine the plan log path, falling back to beside the config file on failure."""
     path = _config_path_for_argv(argv)
-    explicit = _has_plan_argument(argv)
     plan_name = _plan_from_argv(argv, path.parent)
-    if (plan_name is None and not explicit
-            and "--all" not in argv and "--batch" not in argv
-            and "..." not in argv):
-        plan_name = _plan_from_tasks(path.parent)
     parent = path.parent / plan_name if plan_name is not None else path.parent
     return parent / "_assent.log"
 

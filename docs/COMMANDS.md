@@ -12,20 +12,9 @@ for example, `demo` means `.assent/demo/`. It must contain at least one formal
 `.e.toml` task. Assent checks every stated plan name before starting any selected
 operation and reports the whole unresolved set at once.
 
-Most plan-taking commands also accept a final `...`:
-
-```text
-assent run urgent01 ...
-```
-
-This means “`urgent01`, then every remaining plan this command would normally
-discover.” It is not an alias for `--all`. Expansion is snapshotted before any
-change begins. `run` keeps the explicit prefix order; `verify` and `accept`
-dependency-order the complete selection; `clean` works upstream-first.
-
-One selected plan uses the single-plan path. Two or more form one exact
-batch. `...` does not weaken that rule: an expanded acceptance still needs
-evidence for exactly the expanded set and never starts verification.
+One selected plan uses the single-plan path. Two or more form one exact batch.
+Selected acceptance needs evidence for exactly the stated set and never starts
+verification.
 
 `run`, `status`, `check`, `report`, `verify`, `clean`, `archive`, `accept`,
 `reconcile`, `reject`, and `rework` accept `--config PATH` as an option on that
@@ -55,31 +44,26 @@ project-location rules.
 
 ## Common choices
 
-Run one unambiguous ready plan:
+Schedule every discovered plan:
 
 ```text
 assent run
+assent run --jobs 2
 ```
 
-Omitting `PLAN` is automatic selection, not `--all`. It succeeds only when
-every formal plan can be parsed and exactly one plan is runnable. A plan is
-runnable when it has a `TODO` or `WIP` task and no unfinished plan
-prerequisite, or when every task is `DONE`/`SKIP` but its source has not been
-accepted. A plan with only `BLOCKED` work is not auto-selected; name it
-explicitly to resume its durable review or recovery. Zero or multiple runnable
-plans are refused.
+With no `PLAN`, `run` uses the whole-project dependency scheduler. `--jobs`
+sets its concurrency cap and is valid only for this whole-project form.
 
-Run a named plan, one task only, or every incomplete plan:
+Run an exact named selection:
 
 ```text
 assent run <PLAN>
-assent run <PLAN> --once
-assent run --all --jobs 2
+assent run A B
 ```
 
-`--once` and `--task` defer integration if the limited run leaves the plan
-incomplete. A normal successful run continues through configured plan and
-integration verification; it still never accepts.
+Named plans run in the stated order. Every successful run continues through
+the configured plan and integration workflows for its completed selection; it
+never accepts.
 
 Refresh one complete receipt or verify an exact selection:
 
@@ -123,6 +107,7 @@ eligible plans sequentially until the first failure.
 Clean or archive only when wanted:
 
 ```text
+assent clean
 assent clean <PLAN>
 assent archive <PLAN>
 assent archive --all

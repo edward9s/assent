@@ -52,8 +52,7 @@ assent init --test unittest
 # consensus into an Assent-format plan under .assent/<PLAN>/.
 assent check
 
-# Try one task, then finish the plan unattended.
-assent run --once
+# Run every discovered plan unattended.
 assent run
 
 # Review before making the human decision.
