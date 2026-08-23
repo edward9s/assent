@@ -714,9 +714,17 @@ def _integration_steps(cfg: Config) -> tuple[
         steps.append(WorkflowActionStep("full_verify"))
     return tuple(steps)
 
+def _session_progress(steps, step_index: int) -> tuple[int, int]:
+    """Count only configured role sessions, excluding scheduler actions."""
+    return (
+        sum(isinstance(step, _RoleStep)
+            for step in steps[:step_index + 1]),
+        sum(isinstance(step, _RoleStep) for step in steps),
+    )
+
 def _integration_prompt(
         cfg: Config, plan: Plan, step: _RoleStep,
-        state: SelectionWorkflowState, total: int) -> str:
+        state: SelectionWorkflowState, position: int, total: int) -> str:
     contracts_text = "\n\n".join(
         f"--- {task.id}: {task.path} ---\n"
         + task.path.read_text(encoding="utf-8").rstrip()
@@ -735,7 +743,7 @@ def _integration_prompt(
 Read the project rules {_agents_md_path_for_prompt(cfg)} and the Assent session
 rules {contracts.instructions_path()} before acting.
 
-Step: {state.step_index + 1} of {total}
+Configured AI session: {position} of {total}
 Role: {step.role}
 Role responsibility:
 {step.prompt}
@@ -879,7 +887,7 @@ def _prepare_integration_conflict_workspaces(
 
 def _integration_conflict_prompt(
         configs: tuple[Config, ...], state: SelectionWorkflowState,
-        step: _RoleStep, total: int,
+        step: _RoleStep, position: int, total: int,
         conflicts: tuple[SelectionCandidateConflict, ...],
         contexts: dict[str, reconcile.AutomaticReconcile],
         source_configs: dict[str, Config]) -> str:
@@ -928,7 +936,7 @@ def _integration_conflict_prompt(
 Read the project rules {_agents_md_path_for_prompt(configs[0])} and the Assent
 session rules {contracts.instructions_path()} before acting.
 
-Step: {state.step_index + 1} of {total}
+Configured AI session: {position} of {total}
 Role: {step.role}
 Role responsibility:
 {step.prompt}
@@ -1044,7 +1052,8 @@ def _persist_peer_conflict_edits(
 
 def _run_integration_conflict_role(
         configs: tuple[Config, ...], state: SelectionWorkflowState,
-        step: _RoleStep, total: int, sleep: Callable[[float], None],
+        step: _RoleStep, position: int, total: int,
+        sleep: Callable[[float], None],
         now: Callable[[], datetime]) -> tuple[int, SelectionWorkflowState]:
     """Run one linear integration role against typed conflict workspaces."""
     conflicts = _selection_conflicts(state)
@@ -1089,7 +1098,9 @@ def _run_integration_conflict_role(
         adapter = rotation.adapter
         session = _role_session_identity(configs[0], step, adapter_name)
         prompt = _integration_conflict_prompt(
-            configs, state, step, total, conflicts, contexts, source_configs)
+            configs, state, step, position, total, conflicts, contexts,
+            source_configs)
+        print(_session_line(adapter_name, step.model, session))
         try:
             result = _invoke_adapter(
                 configs[0], adapter, adapter_name, prompt,
@@ -1158,7 +1169,7 @@ def _run_integration_conflict_role(
 
 def _run_integration_role(
         cfg: Config, state: SelectionWorkflowState, step: _RoleStep,
-        total: int, sleep: Callable[[float], None],
+        position: int, total: int, sleep: Callable[[float], None],
         now: Callable[[], datetime]) -> tuple[int, SelectionWorkflowState]:
     """Run one integration role against its single source worktree."""
     work_cfg = _selection_worktree_configs((cfg,))[0]
@@ -1183,9 +1194,11 @@ def _run_integration_role(
         management = _management_snapshot(work_cfg, plan)
         source_head = gitops.head_ref(work_cfg.root)
         primary_baseline = gitops.dirty_paths(cfg.root)
+        print(_session_line(adapter_name, step.model, session))
         result = _invoke_adapter(
             cfg, adapter, adapter_name,
-            _integration_prompt(work_cfg, plan, step, state, total),
+            _integration_prompt(
+                work_cfg, plan, step, state, position, total),
             session.requested_model, session.requested_effort,
             work_cfg.root, context_kind="integration",
             context_id=f"workflow.integration[{state.step_index}]",
@@ -1379,6 +1392,8 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
     while state.step_index < len(steps):
         step = steps[state.step_index]
         if isinstance(step, _RoleStep):
+            session_position, session_total = _session_progress(
+                steps, state.step_index)
             try:
                 conflicts = _selection_conflicts(state)
             except AssentError as error:
@@ -1391,10 +1406,12 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
             try:
                 if conflicts:
                     code, state = _run_integration_conflict_role(
-                        configs, state, step, len(steps), sleep, now)
+                        configs, state, step, session_position, session_total,
+                        sleep, now)
                 else:
                     code, state = _run_integration_role(
-                        configs[0], state, step, len(steps), sleep, now)
+                        configs[0], state, step, session_position,
+                        session_total, sleep, now)
             except KeyboardInterrupt:
                 print("Integration role interrupted; edits were preserved.")
                 return 130
@@ -1723,6 +1740,7 @@ def _run_locked(cfg: Config, once: bool, task_id: str | None,
                     time_str=now().isoformat(timespec="seconds"))
                 task = parse_task_file(task.path)
 
+            print(f"\nTask {task.id}: {task.title}")
             task_steps = _task_source_steps(cfg, task)
             code = _process_source_workflow(
                 cfg, plan, task, task_steps, rotation,
@@ -1950,7 +1968,7 @@ def _management_changes(before: dict[Path, bytes | None]) -> list[str]:
 
 def _source_workflow_prompt(
         cfg: Config, plan: Plan, task: Task | None, step: _RoleStep,
-        state: WorkflowState, total: int) -> str:
+        state: WorkflowState, position: int, total: int) -> str:
     unit = f"task {task.id}" if task is not None else f"plan {cfg.tasks_name}"
     contracts_text = "\n\n".join(
         f"--- {item.id}: {item.path} ---\n"
@@ -1979,7 +1997,7 @@ Read the project rules {_agents_md_path_for_prompt(cfg)} and the Assent session
 rules {contracts.instructions_path()} before acting.
 
 Workflow unit: {unit}
-Step: {state.step_index + 1} of {total}
+Configured AI session: {position} of {total}
 Role: {step.role}
 
 Role responsibility:
@@ -2013,9 +2031,17 @@ def _role_session_identity(
     return SessionIdentity(
         adapter_name, requested_model, requested_effort)
 
+def _session_line(
+        adapter_name: str, model: str, session: SessionIdentity) -> str:
+    """State the selected tier or literal and the exact provider invocation."""
+    return (f"  Session: {adapter_name} | {model}->"
+            f"{session.requested_model}/{effort_identity(session.requested_effort)}")
+
 def _run_source_role(
         cfg: Config, plan: Plan, task: Task | None, step: _RoleStep,
-        state: WorkflowState, total: int, rotation: _AdapterRotation,
+        state: WorkflowState, workflow_total: int,
+        session_position: int, session_total: int,
+        rotation: _AdapterRotation,
         sleep: Callable[[float], None], now: Callable[[], datetime],
         active: _ActiveTask) -> tuple[int, WorkflowState]:
     """Run one role session; only adapter availability may repeat the step."""
@@ -2037,9 +2063,10 @@ def _run_source_role(
             gitops.dirty_paths(cfg.source_root)
             if cfg.source_root is not None else set())
         prompt = _source_workflow_prompt(
-            cfg, plan, task, step, state, total)
+            cfg, plan, task, step, state, session_position, session_total)
         print(f"\n{state.unit.title()} workflow step "
-              f"{state.step_index + 1}/{total}: {step.role}")
+              f"{state.step_index + 1}/{workflow_total}: {step.role}")
+        print(_session_line(adapter_name, step.model, session))
         active.task = task
         active.session = session
         result = _invoke_adapter(
@@ -2210,9 +2237,11 @@ def _process_source_workflow(
     while state.step_index < len(steps):
         step = steps[state.step_index]
         if isinstance(step, _RoleStep):
+            session_position, session_total = _session_progress(
+                steps, state.step_index)
             code, state = _run_source_role(
-                cfg, plan, task, step, state, len(steps), rotation,
-                sleep, now, active)
+                cfg, plan, task, step, state, len(steps),
+                session_position, session_total, rotation, sleep, now, active)
             if code != 0:
                 return code
             continue

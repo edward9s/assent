@@ -60,6 +60,15 @@ selection belongs to the workflow entry: `adapter = "codex"` selects one, and
 `adapter = [...]` is an ordered availability list. Omitting it uses the global
 adapter rotation.
 
+For a task session, model precedence is workflow entry model > role model > task file model. A task-local workflow entry contains only a role or action, so its
+named role falls back directly to the task tier. Plan and integration sessions
+have no task fallback; their role or workflow entry must state a model.
+
+When a workflow entry states a portable tier but omits `adapter`, every adapter
+in the global rotation maps that tier independently. A vendor `model/effort`
+selection with no `adapter` is valid only when the global rotation contains
+exactly one adapter; otherwise configuration loading refuses it as ambiguous.
+
 ## Workflows
 
 `[workflow]` contains three arbitrary finite step arrays:

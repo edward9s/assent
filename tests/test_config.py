@@ -117,14 +117,26 @@ plan = [{ role = "bare" }]
         template = (Path(__file__).resolve().parents[1]
                     / "assent" / "templates" / "assent.toml")
         cfg = self.load(template.read_text(encoding="utf-8"))
-        self.assertEqual(
-            [step.action if isinstance(step, WorkflowActionStep) else step.role
-             for step in cfg.workflow_task],
-            ["implementer", "focused_test", "task_repairer", "focused_test"])
-        self.assertEqual(
-            [step.action if isinstance(step, WorkflowActionStep) else step.role
-             for step in cfg.workflow_integration],
-            ["full_verify", "integration_repairer", "full_verify"])
+        task_roles = cfg.workflow_task[::2]
+        task_actions = cfg.workflow_task[1::2]
+        self.assertTrue(task_roles)
+        self.assertEqual(task_roles[0].role, "implementer")
+        self.assertTrue(all(step.role == "task_repairer"
+                            for step in task_roles[1:]))
+        self.assertEqual(len(task_roles), len(task_actions))
+        self.assertTrue(all(isinstance(step, WorkflowActionStep)
+                            and step.action == "focused_test"
+                            for step in task_actions))
+
+        integration_actions = cfg.workflow_integration[::2]
+        integration_roles = cfg.workflow_integration[1::2]
+        self.assertTrue(integration_roles)
+        self.assertEqual(len(integration_actions), len(integration_roles) + 1)
+        self.assertTrue(all(isinstance(step, WorkflowActionStep)
+                            and step.action == "full_verify"
+                            for step in integration_actions))
+        self.assertTrue(all(step.role == "integration_repairer"
+                            for step in integration_roles))
 
 
 if __name__ == "__main__":

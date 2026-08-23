@@ -236,12 +236,12 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise AssentError(f"Integration workflow state {path.name} is unreadable: {error}") from error
     expected = {
-        "version", "plans", "target_ref", "target_commit", "source_commits",
-        "step_index", "evidence", "action", "action_status", "action_candidate_tree",
+        "plans", "target_ref", "target_commit", "source_commits", "step_index",
+        "evidence", "action", "action_status", "action_candidate_tree",
         "action_exit_code", "action_evidence", "verification_script_sha256",
         "shared_inputs_sha256",
     }
-    if set(data) != expected or data.get("version") != 2:
+    if set(data) != expected:
         raise AssentError(f"Integration workflow state {path.name} has an invalid schema")
     plan_names = data.get("plans")
     target_ref = data.get("target_ref")
@@ -287,7 +287,6 @@ def write_selection_workflow_state(
         assent_dir: Path, state: SelectionWorkflowState) -> None:
     """Atomically persist one exact selection and its recovery boundary."""
     text = "\n".join((
-        "version = 2",
         "plans = [" + ", ".join(json.dumps(item) for item in state.plan_names) + "]",
         f"target_ref = {json.dumps(state.target_ref)}",
         f"target_commit = {json.dumps(state.target_commit)}",

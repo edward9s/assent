@@ -56,6 +56,15 @@ model = "core"
 屬於 workflow entry：`adapter = "codex"` 指定單一 adapter，`adapter = [...]`
 指定依序嘗試的可用性清單；省略時使用全域 adapter rotation。
 
+Task session 的 model 優先序是 workflow entry model > role model > task file model。Task-local
+workflow entry 只能包含 role 或 action，因此其具名 role 會直接 fallback 到 task
+tier。Plan 與 integration session 沒有 task fallback；role 或 workflow entry 必須
+指定 model。
+
+Workflow entry 指定可攜 tier 但省略 `adapter` 時，全域 rotation 中的每個 adapter
+會各自解析該 tier。若指定供應商 `model/effort` 卻省略 `adapter`，只有全域 rotation
+恰好包含一個 adapter 時才有效；否則設定載入會因語意不明而拒絕。
+
 ## Workflow
 
 `[workflow]` 包含三個可任意排列、但長度有限的 step array：

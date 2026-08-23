@@ -1,4 +1,6 @@
 """The workflow engine is one finite role/action interpreter."""
+import contextlib
+import io
 import unittest
 from unittest import mock
 
@@ -99,6 +101,23 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertTrue((self.execution_root() / "src" / "ok.txt").is_file())
 
+    def test_ai_session_names_the_task_and_resolved_invocation(self):
+        self.write_task(1, title="Visible task")
+        cfg = self.build(extra_config=WORKFLOW)
+        self.commit_all()
+        output = io.StringIO()
+        adapter = ScriptedAdapter([result()])
+
+        with mock.patch.object(engine.contracts, "require_contracts"), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(engine.run(
+                cfg, once=True, adapter=adapter), 0)
+
+        text = output.getvalue()
+        self.assertIn("Task t001: Visible task", text)
+        self.assertIn("Session: claude | lite->sonnet/medium", text)
+        self.assertIn("Configured AI session: 1 of 2", adapter.calls[0][0])
+
     def test_action_only_task_workflow_starts_no_ai_session(self):
         path = self.write_task(1)
         cfg = self.build(extra_config=ACTION_ONLY_WORKFLOW)
@@ -129,6 +148,8 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(self.run_with_contracts(cfg, adapter), 0)
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertEqual(len(adapter.calls), 2)
+        self.assertIn("Configured AI session: 1 of 2", adapter.calls[0][0])
+        self.assertIn("Configured AI session: 2 of 2", adapter.calls[1][0])
 
     def test_separate_reviewer_evidence_reaches_the_fixer(self):
         path = self.write_task(1, verify=_NEEDS_OK_TXT)
@@ -365,6 +386,7 @@ class TestLinearEngine(EngineTestCase):
             [False, True])
         self.assertEqual(len(repair.calls), 1)
         self.assertIn("full verifier failed", repair.calls[0][0])
+        self.assertIn("Configured AI session: 1 of 1", repair.calls[0][0])
         state = read_selection_workflow_state(cfg.assent_dir)
         self.assertEqual(state.action_status, "PASSED")
         self.assertIn("repair session completed", state.evidence[0])

@@ -89,6 +89,14 @@ next candidate. Quota preserves progress and rotates or waits. A role process
 failure is an infrastructure failure; review findings are ordinary session
 evidence for later writable roles.
 
+For a task role session, a workflow entry's `model` overrides the role's
+`model`, which overrides the task file's `model`. Plan and integration sessions
+have no task fallback, so the role or workflow entry must state a model. When a
+workflow entry omits `adapter`, it uses the global adapter rotation. A portable
+tier is mapped independently by each candidate adapter; a vendor
+`model/effort` selection is valid only when that rotation contains exactly one
+adapter.
+
 Actions accept no role, adapter, model, prompt, or arbitrary command. AI
 sessions never run them.
 

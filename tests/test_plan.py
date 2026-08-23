@@ -106,6 +106,9 @@ class TestPlan(unittest.TestCase):
             ("repair evidence",), "full_verify", "FAILED", "candidate", 1,
             ("VERIFIER_FAILED",), "verify-digest", "shared-digest")
         write_selection_workflow_state(self.directory, state)
+        self.assertNotIn(
+            "version =", (self.directory / "_integration_workflow.toml").read_text(
+                encoding="utf-8"))
         self.assertEqual(read_selection_workflow_state(self.directory), state)
 
 

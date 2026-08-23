@@ -22,6 +22,9 @@ while operating an assent-managed session live in
 - Semantic precision shares that priority: one term names one actual mechanism,
   and no name implies a capability Assent does not provide. Prefer the domain's
   existing concrete term over a synonym, alias, metaphor, or historical name.
+- Unless a request explicitly requires backward compatibility, replace obsolete
+  semantics directly. Do not add aliases, fallbacks, migrations, compatibility
+  modes, or parallel legacy paths merely to preserve prior behavior.
 - Unattended completion, human adjudication: the scheduler decides everything
   it can decide without a human, and routes what it cannot decide to the human
   acceptance meeting as `_report.md` evidence. A question the scheduler cannot

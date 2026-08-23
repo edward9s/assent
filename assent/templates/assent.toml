@@ -44,16 +44,16 @@ writes = true
 # is correct.
 [roles.implementer]
 ability = ["write_tests", "implement_source"]
-model = "lite"
+#model = "lite"
 [roles.tests_writer]
 ability = ["write_tests"]
-model = "lite"
+#model = "lite"
 [roles.source_implementer]
 ability = ["implement_source"]
-model = "lite"
+#model = "lite"
 [roles.task_repairer]
 ability = ["task_review", "task_fix"]
-model = "core"
+#model = "core"
 [roles.plan_quality_repairer]
 ability = ["plan_quality_review", "plan_fix"]
 model = "prime"
@@ -77,6 +77,10 @@ task = [
   { action = "focused_test" },
   { role = "task_repairer", adapter = ["claude", "codex"] },
   { action = "focused_test" },
+  { role = "task_repairer", adapter = ["claude", "codex"] },
+  { action = "focused_test" },
+  { role = "task_repairer", adapter = ["claude", "codex"] },
+  { action = "focused_test" },
 ]
 plan = [
   { role = "plan_quality_repairer", adapter = ["claude", "codex"] },
@@ -85,8 +89,14 @@ plan = [
   { action = "focused_sweep" },
   { role = "plan_repairer", adapter = ["claude", "codex"] },
   { action = "focused_sweep" },
+  { role = "plan_repairer", adapter = ["claude", "codex"] },
+  { action = "focused_sweep" },
 ]
 integration = [
+  { action = "full_verify" },
+  { role = "integration_repairer", adapter = ["claude", "codex"] },
+  { action = "full_verify" },
+  { role = "integration_repairer", adapter = ["claude", "codex"] },
   { action = "full_verify" },
   { role = "integration_repairer", adapter = ["claude", "codex"] },
   { action = "full_verify" },
