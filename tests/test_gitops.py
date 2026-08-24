@@ -667,6 +667,27 @@ class TestRestore(GitTestCase):
         self.assertEqual(status.strip(), "")
 
 
+class TestConflictMarkerProblem(GitTestCase):
+    def test_staged_formatting_is_not_a_conflict_marker(self):
+        (self.root / "README.md").write_text("init\n\n", encoding="utf-8")
+        gitops.stage_paths(self.root, ("README.md",))
+
+        self.assertIsNone(
+            gitops.conflict_marker_problem(self.root, cached=True))
+
+    def test_staged_conflict_marker_is_reported(self):
+        (self.root / "README.md").write_text(
+            "<<<<<<< ours\nleft\n=======\nright\n>>>>>>> theirs\n",
+            encoding="utf-8")
+        gitops.stage_paths(self.root, ("README.md",))
+
+        problem = gitops.conflict_marker_problem(self.root, cached=True)
+
+        self.assertIsNotNone(problem)
+        assert problem is not None
+        self.assertIn("leftover conflict marker", problem)
+
+
 class TemporaryBranchTestCase(GitTestCase):
     """A repo whose temporary branches, worktrees and refs are easy to build and read."""
 

@@ -215,10 +215,10 @@ def _stage_resolution(worktree: Path) -> str | None:
     if remaining:
         return ("path(s) are still unmerged after staging: "
                 + ", ".join(remaining))
-    problem = gitops.diff_cached_check(worktree)
+    problem = gitops.conflict_marker_problem(worktree, cached=True)
     if problem is not None:
-        return ("`git diff --cached --check` refused the staged resolution "
-                f"(a leftover conflict marker or whitespace error):\n{problem}")
+        return ("the staged resolution contains a leftover conflict marker:\n"
+                + problem)
     status = gitops.working_tree_status(worktree)
     unexpected = sorted(set(status.unstaged) | set(status.untracked))
     if unexpected:

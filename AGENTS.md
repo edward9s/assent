@@ -12,19 +12,25 @@ This file governs development of the assent project itself. Rules followed
 while operating an assent-managed session live in
 `assent/templates/instructions.md`.
 
+## Governing design principles
+
+These principles jointly govern every design and implementation decision:
+
+1. Reliability by construction: use the smallest architecture and fewest states
+   that make invalid behavior difficult to form. Prefer removing a failure mode
+   over detecting, tracking, routing, or recovering from it. Tests protect
+   necessary behavior; they do not justify avoidable control paths.
+2. Semantic precision: one term names one actual mechanism, and no name implies
+   a capability Assent does not provide. Prefer the domain's existing concrete
+   term over a synonym, alias, metaphor, or historical name.
+3. Fail invalid input, state, and preconditions at the first authoritative
+   boundary. Do not mask obsolete or incorrect behavior with defaults, aliases,
+   fallbacks, retries, migrations, compatibility modes, or parallel legacy
+   paths. Existing code, behavior, or records do not create a backward-
+   compatibility requirement; add compatibility only when explicitly requested.
+
 ## Permanent constraints
 
-- Reliability by construction is the highest architectural principle: use the
-  smallest architecture and fewest states that make invalid behavior difficult
-  to form. Prefer removing a failure mode over detecting, tracking, routing, or
-  recovering from it. Tests protect necessary behavior; they do not justify
-  avoidable control paths.
-- Semantic precision shares that priority: one term names one actual mechanism,
-  and no name implies a capability Assent does not provide. Prefer the domain's
-  existing concrete term over a synonym, alias, metaphor, or historical name.
-- Unless a request explicitly requires backward compatibility, replace obsolete
-  semantics directly. Do not add aliases, fallbacks, migrations, compatibility
-  modes, or parallel legacy paths merely to preserve prior behavior.
 - Unattended completion, human adjudication: the scheduler decides everything
   it can decide without a human, and routes what it cannot decide to the human
   acceptance meeting as `_report.md` evidence. A question the scheduler cannot

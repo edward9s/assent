@@ -1364,17 +1364,37 @@ def stage_paths(worktree: Path, paths: Sequence[str]) -> None:
     _git(worktree, "add", "-A", "--", *[_normalize(path) for path in paths])
 
 
-def diff_cached_check(worktree: Path) -> str | None:
-    """Return git's complaint about the staged content, or ``None`` when it is clean.
+def restore_paths_from_commit(worktree: Path, commit: str,
+                              paths: Sequence[str]) -> None:
+    """Restore exact paths from one commit into both the index and worktree."""
+    if not paths:
+        return
+    snapshot = _commit_snapshot(worktree, commit)
+    _git(worktree, "restore", f"--source={snapshot}", "--staged", "--worktree",
+         "--", *[_normalize(path) for path in paths])
 
-    ``git diff --cached --check`` is what catches a leftover conflict marker, so a
-    "resolution" that still contains one never reaches a commit.
-    """
-    result = _run_git(worktree, "diff", "--cached", "--check")
+
+_CONFLICT_MARKER_WHITESPACE = (
+    "core.whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,"
+    "-indent-with-non-tab,-tab-in-indent"
+)
+
+
+def conflict_marker_problem(
+        worktree: Path, *, cached: bool = False,
+        paths: Sequence[str] = ()) -> str | None:
+    """Return Git's conflict-marker complaint without enforcing formatting."""
+    args = ["-c", _CONFLICT_MARKER_WHITESPACE, "diff"]
+    if cached:
+        args.append("--cached")
+    args.append("--check")
+    if paths:
+        args.extend(("--", *[_normalize(path) for path in paths]))
+    result = _run_git(worktree, *args)
     if result.returncode == 0:
         return None
     return (result.stdout.strip() or result.stderr.strip()
-            or f"git diff --cached --check exited {result.returncode}")
+            or f"git diff --check exited {result.returncode}")
 
 
 def commit_merge(worktree: Path, message: str) -> str:

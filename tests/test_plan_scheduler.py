@@ -352,6 +352,31 @@ class TestRunAll(PlanSchedulerTestCase):
         parse.assert_not_called()
         start.assert_not_called()
 
+    def test_completed_dirty_plan_runs_once_to_recover_before_completion(self):
+        task = self.make_plan("done", "DONE")
+        dirty = True
+        started = []
+
+        def fake_start(_config, plan_name):
+            nonlocal dirty
+            started.append(plan_name)
+
+            def recover():
+                nonlocal dirty
+                dirty = False
+
+            return FinishedProcess(task, recover)
+
+        with patch(
+                "assent.plan_scheduler._plan_worktree_needs_recovery",
+                side_effect=lambda _config, _plan: dirty), patch(
+                    "assent.plan_scheduler._start_plan",
+                    side_effect=fake_start):
+            code = run_all(str(self.config), self.assent_dir)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(started, ["done"])
+
     def test_completion_unlocks_downstream_in_topological_order(self):
         first = self.make_plan("first")
         second = self.make_plan("second", after=("first",))

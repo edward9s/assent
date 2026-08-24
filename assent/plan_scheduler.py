@@ -224,6 +224,15 @@ def _has_usable_git(root: Path) -> bool:
     return result.returncode == 0
 
 
+def _plan_worktree_needs_recovery(config_path: str, plan_name: str) -> bool:
+    """Return whether the plan child must gather a surviving dirty worktree."""
+    cfg = load_config(config_path, plan_name)
+    worktree = gitops.worktree_path(cfg.root, cfg.tasks_name)
+    return (worktree.exists()
+            and not gitops.working_tree_status(
+                worktree, cfg.git_excludes).is_clean)
+
+
 def _stack_launch_decision(config_path: str, plan_name: str) -> tuple[str | None, str | None]:
     """Return an auditable launch decision or a fail-closed refusal reason."""
     try:
@@ -458,6 +467,11 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
                 # Another child process may be writing its own task file;
                 # only reparse plans that are not currently running.
                 plans = _plan_plans(assent_dir, inactive)
+                needs_recovery = {
+                    plan_name: _plan_worktree_needs_recovery(
+                        config_path, plan_name)
+                    for plan_name in inactive
+                }
                 # An archived upstream is gone from the live plans but still
                 # resolvable through the roster; read it once per iteration and
                 # judge every after-name through the shared completion
@@ -466,7 +480,8 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
                 archived = archived_plan_names(assent_dir)
 
                 if not active and all(
-                        _is_complete(plan) for plan in plans.values()):
+                        _is_complete(plan) for plan in plans.values()
+                ) and not any(needs_recovery.values()):
                     print("All plans are complete (DONE/SKIP).")
                     return 0
 
@@ -474,7 +489,8 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
                     plan_name for plan_name, dependencies in graph.items()
                     if plan_name not in active
                     and plan_name not in attempted
-                    and _has_ongoing(plans[plan_name])
+                    and (_has_ongoing(plans[plan_name])
+                         or needs_recovery[plan_name])
                     and all(name not in active
                             and is_upstream_complete(name, plans, archived)
                             for name in dependencies.after)

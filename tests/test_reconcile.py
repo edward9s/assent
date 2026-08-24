@@ -702,7 +702,7 @@ class ContinueTest(ReconcileRepositoryCase):
         code, output = self._run(reconcile_continue)
 
         self.assertEqual(code, 1)
-        self.assertIn("--check", output)
+        self.assertIn("leftover conflict marker", output)
         # No commit was made and the merge state, with the edit, is preserved.
         path = self._managed_path()
         self.assertEqual(gitops.merge_head(path), self.target_tip)

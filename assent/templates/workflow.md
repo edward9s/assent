@@ -5,12 +5,17 @@
 
 ## Invariants
 
-- Reliability comes from architecture simple enough that failure is difficult
-  to form. Prefer one direct invariant over tracking, routing, compatibility,
-  recovery, or inferred state.
-- Names describe real mechanisms exactly. A workflow is an ordered step array,
+- Reliability by construction uses the smallest architecture and fewest states
+  that make invalid behavior difficult to form. Prefer one direct invariant
+  over tracking, routing, compatibility, recovery, or inferred state.
+- Semantic precision requires names to describe real mechanisms exactly. A
+  workflow is an ordered step array,
   a step is one configured role or scheduler action, and a session is one role
   invocation. Assent does not call a sequence of sessions a meeting.
+- Invalid input, state, and preconditions fail at the first authoritative
+  boundary. Obsolete or incorrect behavior is never masked with defaults,
+  aliases, fallbacks, retries, migrations, compatibility modes, or parallel
+  legacy paths unless backward compatibility is explicitly required.
 - Git is mandatory. Every plan is explicit or derived without ambiguity.
 - Preserve every token-burned edit and diagnostic. Failure and interruption do
   not revert the candidate automatically.

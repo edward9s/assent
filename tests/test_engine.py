@@ -345,7 +345,7 @@ class TestLinearEngine(EngineTestCase):
         self.assertTrue(all("assent shared-paths declare" in call[0]
                             for call in adapter.calls))
 
-    def test_integration_pass_is_one_scheduler_action(self):
+    def test_repeated_integration_pass_rechecks_only_the_scheduler_action(self):
         self.write_task(1)
         cfg = self.build(extra_config=WORKFLOW)
         self.commit_all()
@@ -357,13 +357,20 @@ class TestLinearEngine(EngineTestCase):
             "v" * 64, "s" * 64, 0)
 
         with mock.patch("assent.engine.verify_plan_action",
-                        return_value=evidence) as verify:
-            code = engine.run_selection_workflow(
+                        return_value=evidence) as verify, \
+                mock.patch("assent.engine.get_adapter") as get_adapter:
+            first_code = engine.run_selection_workflow(
+                str(cfg.assent_dir / "assent.toml"), cfg.assent_dir,
+                ["plan01"])
+            second_code = engine.run_selection_workflow(
                 str(cfg.assent_dir / "assent.toml"), cfg.assent_dir,
                 ["plan01"])
 
-        self.assertEqual(code, 0)
-        verify.assert_called_once_with(mock.ANY, recheck=False)
+        self.assertEqual((first_code, second_code), (0, 0))
+        self.assertEqual(
+            [call.kwargs["recheck"] for call in verify.call_args_list],
+            [False, False])
+        get_adapter.assert_not_called()
         state = read_selection_workflow_state(cfg.assent_dir)
         self.assertEqual(state.action_status, "PASSED")
         self.assertEqual(state.evidence, ())
@@ -400,6 +407,41 @@ class TestLinearEngine(EngineTestCase):
         state = read_selection_workflow_state(cfg.assent_dir)
         self.assertEqual(state.action_status, "PASSED")
         self.assertIn("repair session completed", state.evidence[0])
+
+    def test_integration_exhaustion_reports_the_human_next_step(self):
+        self.write_task(1)
+        cfg = self.build(extra_config=WORKFLOW)
+        self.commit_all()
+        self.assertEqual(self.run_with_contracts(
+            cfg, ScriptedAdapter([result()])), 0)
+        _target_ref, target, sources = engine._selection_snapshot((cfg,))
+        failed = FullVerifyEvidence(
+            "VERIFIER_FAILED", ("plan01",), target, sources, "candidate",
+            "v" * 64, "s" * 64, 1, ("full verifier failed",))
+
+        output = io.StringIO()
+        with mock.patch("assent.engine.verify_plan_action",
+                        return_value=failed), \
+                mock.patch("assent.engine.get_adapter",
+                           return_value=ScriptedAdapter([result()])), \
+                contextlib.redirect_stdout(output):
+            code = engine.run_selection_workflow(
+                str(cfg.assent_dir / "assent.toml"), cfg.assent_dir,
+                ["plan01"])
+
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "Assent completed all configured automated work, but full "
+            "verification did not pass.", output.getvalue())
+        self.assertIn("rework before `assent accept`", output.getvalue())
+        self.assertNotIn("REVIEW UNRESOLVED", output.getvalue())
+
+        conflict_output = io.StringIO()
+        with contextlib.redirect_stdout(conflict_output):
+            engine._integration_automated_work_complete("PEER_CONFLICT")
+        self.assertIn(
+            "cross-plan conflicts still prevent full verification",
+            conflict_output.getvalue())
 
     def test_target_conflict_is_repaired_then_full_verify_is_rebuilt(self):
         self.write_task(1)

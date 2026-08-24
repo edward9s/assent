@@ -179,11 +179,13 @@ class TestContractValidation(unittest.TestCase):
 
 
 class TestContractContent(unittest.TestCase):
-    def test_workflow_contract_states_the_two_top_principles(self):
+    def test_workflow_contract_states_the_three_governing_principles(self):
         text = (_PROJECT_ROOT / "assent/templates/workflow.md").read_text(
             encoding="utf-8")
-        self.assertIn("architecture simple enough", text)
-        self.assertIn("Names describe real mechanisms exactly", text)
+        self.assertIn("Reliability by construction", text)
+        self.assertIn("Semantic precision", text)
+        self.assertIn("first authoritative", text)
+        self.assertIn("never masked", text)
         self.assertIn("one finite linear interpreter", text)
         self.assertIn("There is no finding ledger", text)
 
@@ -205,6 +207,9 @@ class TestContractContent(unittest.TestCase):
         self.assertIn("task contracts, journals,", text)
         self.assertIn("scheduler state", text)
         self.assertIn("smallest architecture and fewest states", text)
+        self.assertIn("one actual mechanism", text)
+        self.assertIn("first authoritative", text)
+        self.assertIn("do not create a backward-", text)
 
     def test_every_writable_repair_ability_fixes_tests_or_implementation(self):
         data = tomllib.loads(
@@ -217,6 +222,28 @@ class TestContractContent(unittest.TestCase):
                 self.assertIn("tests or the implementation", prompt)
                 self.assertIn("Preserve correct tests", prompt)
                 self.assertIn("never weaken", prompt)
+
+    def test_source_and_repair_abilities_apply_governing_principles(self):
+        data = tomllib.loads(
+            (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
+                encoding="utf-8"))
+        names = (
+            "implement_source",
+            "task_review",
+            "task_fix",
+            "plan_quality_review",
+            "plan_review",
+            "plan_fix",
+            "integration_review",
+            "integration_fix",
+        )
+        for name in names:
+            with self.subTest(ability=name):
+                prompt = data["abilities"][name]["prompt"]
+                self.assertIn("smallest architecture and fewest states", prompt)
+                self.assertIn("one term per actual mechanism", prompt)
+                self.assertIn("first authoritative boundary", prompt)
+                self.assertIn("compatibility or masking", prompt)
 
     def test_integration_contract_automates_typed_conflicts(self):
         text = " ".join(

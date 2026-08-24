@@ -945,8 +945,8 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                 and not batch_receipt_staleness(
                     configs[selection.plan_names[0]], existing)
                 and (existing.status == "PASSED" or not recheck)):
-            print(f"{label}: existing {existing.status} receipt is fresh; "
-                  "full suite skipped")
+            print(f"{label}: existing {existing.status} receipt matches the "
+                  "current candidate; full suite skipped")
             if action_results is not None:
                 action_results.append(_batch_evidence(existing, reused=True))
             return 0 if existing.status == "PASSED" else 1

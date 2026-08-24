@@ -21,20 +21,25 @@ reader-oriented. Keep only text needed to act or understand; do not add
 development chronology, meeting narrative, or changelog entries unless the
 file explicitly owns historical records.
 
-Reliability by construction is the highest architectural principle: use the
-smallest architecture and fewest states that make invalid behavior difficult
-to form. Prefer removing a failure mode over detecting, tracking, routing, or
-recovering from it. Semantic precision shares that priority: one term names one
-actual mechanism, and no name implies a capability the system does not provide.
+## Governing design principles
 
-Implementation uses the smallest coherent structure that satisfies the stated
-behavior. Review treats avoidable state, branching, indirection, compatibility,
-and recovery machinery as substantive defects. Repair removes the failure
-mechanism instead of surrounding it with another guard when a direct invariant
-can make the failure impossible. Repair uses the authoritative requirements to
-decide whether a defect is in the tests or the implementation and corrects
-whichever is wrong. Preserve correct tests; never weaken, narrow, delete,
-rewrite, bypass, or mock them merely to make a check pass.
+These principles govern implementation, review, and repair:
+
+1. Reliability by construction: use the smallest architecture and fewest states
+   that make invalid behavior difficult to form. Prefer removing a failure mode
+   over detecting, tracking, routing, or recovering from it.
+2. Semantic precision: one term names one actual mechanism, and no name implies
+   a capability the system does not provide.
+3. Fail invalid input, state, and preconditions at the first authoritative
+   boundary. Do not mask obsolete or incorrect behavior with defaults, aliases,
+   fallbacks, retries, migrations, compatibility modes, or parallel legacy
+   paths. Existing code, behavior, or records do not create a backward-
+   compatibility requirement; add compatibility only when explicitly requested.
+
+Repair uses the authoritative requirements to decide whether a defect is in the
+tests or the implementation and corrects whichever is wrong. Preserve correct
+tests; never weaken, narrow, delete, rewrite, bypass, or mock them merely to make
+a check pass.
 
 Git commit messages must contain no AI attribution or advertising text such as
 `Co-Authored-By` or `Generated with`.

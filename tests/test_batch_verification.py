@@ -421,7 +421,14 @@ integration = [{ action = "full_verify" }, { role = "repairer" },
 """
         self.config_path.write_text(
             workflow + models_block(workflow), encoding="utf-8")
-        self.make_source("aa", filename="README.md", content="shared\n")
+        self.make_source("aa", filename="README.md", content="from aa\n")
+        aa_worktree = gitops.plan_worktree(self.root, "aa")
+        self.assertIsNotNone(aa_worktree)
+        assert aa_worktree is not None
+        (aa_worktree / "allowed-whitespace.txt").write_text(
+            "prefix content\n\n", encoding="utf-8")
+        gitops.commit_all(aa_worktree, "add permitted prefix whitespace")
+        aa_tip = gitops.commit_of(aa_worktree, "HEAD")
         bb_before = self.make_source(
             "bb", filename="README.md", content="from bb\n")
         bb_worktree = gitops.plan_worktree(self.root, "bb")
@@ -432,7 +439,7 @@ integration = [{ action = "full_verify" }, { role = "repairer" },
             self.assertIn(str(bb_worktree), prompt)
             self.assertIn("bb: peer_only", prompt)
             (bb_worktree / "README.md").write_text(
-                "shared\n", encoding="utf-8")
+                "from aa\nfrom bb\n", encoding="utf-8")
             return TaskResult(0, "made bb compatible with the exact selection",
                               False, None)
 
@@ -448,7 +455,9 @@ integration = [{ action = "full_verify" }, { role = "repairer" },
         self.assertNotEqual(gitops.commit_of(bb_worktree, "HEAD"), bb_before)
         self.assertEqual(
             (bb_worktree / "README.md").read_text(encoding="utf-8"),
-            "shared\n")
+            "from aa\nfrom bb\n")
+        self.assertTrue(gitops.is_ancestor(
+            self.root, aa_tip, gitops.commit_of(bb_worktree, "HEAD")))
         self.assertEqual(self.read_batch_receipt().plan_names, ("aa", "bb"))
 
     def test_selected_names_are_normalized_and_receipt_is_exact(self) -> None:

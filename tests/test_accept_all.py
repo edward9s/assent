@@ -243,7 +243,8 @@ class TestOrderingAndPublication(AcceptAllRepositoryCase):
 
         self.assertEqual(code, 0, output)
         self.assertEqual(counter.read_text(encoding="utf-8").count("run\n"), 1)
-        self.assertIn("existing PASSED receipt is fresh", output)
+        self.assertIn(
+            "existing PASSED receipt matches the current candidate", output)
         self.assertEqual(self._accept_subjects(), [
             "accept(fresh): integrate into trunk",
             "accept(stale): integrate into trunk",

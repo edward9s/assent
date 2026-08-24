@@ -503,8 +503,9 @@ def verify_plan_action(cfg: Config, *, recheck: bool = False,
                     receipt = read_receipt(path, gitops.main_worktree(cfg.root))
                     if (_receipt_matches_current_candidate_locked(cfg)
                             and (receipt.status == "PASSED" or not recheck)):
-                        print(f"verify {plan_name}: existing {receipt.status} receipt "
-                              "is fresh; full suite skipped")
+                        print(f"verify {plan_name}: existing {receipt.status} "
+                              "receipt matches the current candidate; full "
+                              "suite skipped")
                         return _evidence_from_receipt(cfg, receipt, reused=True)
                 receipt = _verify_locked(
                     cfg, record_conflict_receipt=_record_conflict_receipt)
@@ -598,7 +599,7 @@ def verify_plan_receipt_if_needed(cfg: Config) -> int:
                     if fresh:
                         receipt = read_receipt(path, gitops.main_worktree(cfg.root))
                         print("verify " + plan_name + f": existing {receipt.status} "
-                              "receipt is fresh "
+                              "receipt matches the current candidate "
                               f"({receipt.integration_tree}); full suite skipped")
                         return 0 if receipt.status == "PASSED" else 1
                     print(f"verify {plan_name}: existing receipt is stale; refreshing")

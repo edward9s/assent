@@ -1286,15 +1286,103 @@ def _reconcile_closeout_problem(
     if gitops.merge_scene_is_unedited(
             context.worktree, conflict.source_tip, conflict.target_tip):
         return f"{conflict.plan} conflict paths were not repaired"
-    result = subprocess.run(
-        ["git", "diff", "--check", "--", *conflict.paths],
-        cwd=str(context.worktree), capture_output=True,
-        encoding="utf-8", errors="replace")
-    if result.returncode != 0:
-        detail = result.stdout.strip() or result.stderr.strip()
+    detail = gitops.conflict_marker_problem(
+        context.worktree, paths=conflict.paths)
+    if detail is not None:
         return (f"{conflict.plan} conflict repair is not mechanically valid: "
                 + _bounded_adapter_diagnostic(detail))
     return None
+
+
+def _closeout_peer_conflict(
+        configs: tuple[Config, ...], state: SelectionWorkflowState,
+        conflict: SelectionCandidateConflict) -> str:
+    """Record the repaired exact prefix in one peer source's ancestry."""
+    index = state.plan_names.index(conflict.plan)
+    repaired_tip = state.source_commits[index]
+    if repaired_tip == conflict.source_tip:
+        raise AssentError(
+            f"{conflict.plan} source was not repaired for its peer conflict")
+    if not conflict.prefix_sources:
+        raise AssentError(
+            f"{conflict.plan} peer conflict has no exact selection prefix")
+
+    by_plan = {cfg.tasks_name: cfg for cfg in configs}
+    cfg = by_plan[conflict.plan]
+    main = gitops.main_worktree(cfg.root)
+    _branch, current_tip, worktree = source_snapshot(cfg, main)
+    if worktree is None or current_tip != repaired_tip:
+        raise AssentError(
+            f"{conflict.plan} repaired source worktree identity changed")
+    work_cfg = cfg.for_worktree(worktree)
+    if not gitops.working_tree_status(
+            worktree, work_cfg.git_excludes).is_clean:
+        raise AssentError(
+            f"{conflict.plan} repaired source worktree is not clean")
+
+    with gitops.temporary_integration_worktree(
+            main, f"peer-{conflict.plan}",
+            conflict.target_tip) as (prefix, _branch):
+        for plan_name, source_tip in conflict.prefix_sources:
+            outcome = gitops.merge_no_ff(
+                prefix, source_tip,
+                f"rebuild(peer/{conflict.plan}/{plan_name}): exact prefix")
+            if not outcome.ok:
+                raise AssentError(
+                    f"unable to reconstruct {conflict.plan}'s exact peer "
+                    f"prefix at {plan_name}")
+        if gitops.tree_of(prefix, "HEAD") != conflict.prefix_tree:
+            raise AssentError(
+                f"{conflict.plan} exact peer prefix tree changed")
+        prefix_commit = gitops.commit_of(prefix, "HEAD")
+
+        outcome = gitops.merge_no_commit(worktree, prefix_commit)
+        unexpected = sorted(
+            set(outcome.conflicts) - set(conflict.paths))
+        if unexpected:
+            gitops.abort_merge(worktree)
+            raise AssentError(
+                f"{conflict.plan} peer closeout found unexpected conflict "
+                f"paths: {', '.join(unexpected)}")
+        if gitops.merge_head(worktree) is None:
+            if not gitops.is_ancestor(main, prefix_commit, repaired_tip):
+                raise AssentError(
+                    f"{conflict.plan} peer closeout produced no merge")
+            return repaired_tip
+
+        try:
+            gitops.restore_paths_from_commit(
+                worktree, repaired_tip, conflict.paths)
+            remaining = gitops.conflict_paths(worktree)
+            if remaining:
+                raise AssentError(
+                    f"{conflict.plan} peer closeout left unmerged paths: "
+                    + ", ".join(remaining))
+            problem = gitops.conflict_marker_problem(worktree, cached=True)
+            if problem is not None:
+                raise AssentError(
+                    f"{conflict.plan} peer closeout is not mechanically "
+                    f"valid: {problem}")
+            status = gitops.working_tree_status(
+                worktree, work_cfg.git_excludes)
+            if status.unstaged or status.untracked:
+                unexpected_edits = sorted(
+                    set(status.unstaged) | set(status.untracked))
+                raise AssentError(
+                    f"{conflict.plan} peer closeout left unstaged edits: "
+                    + ", ".join(unexpected_edits))
+            merge_commit = gitops.commit_merge(
+                worktree,
+                f"auto({conflict.plan}): integration peer conflict repair")
+        except (AssentError, OSError):
+            if gitops.merge_head(worktree) is not None:
+                gitops.abort_merge(worktree)
+            raise
+        if gitops.commit_parents(worktree, merge_commit) != (
+                repaired_tip, prefix_commit):
+            raise AssentError(
+                f"{conflict.plan} peer closeout created the wrong ancestry")
+        return merge_commit
 
 
 def _closeout_integration_conflicts(
@@ -1338,11 +1426,31 @@ def _closeout_integration_conflicts(
             source_commits[state.plan_names.index(conflict.plan)] = merge_commit
             state = replace(state, source_commits=tuple(source_commits))
             write_selection_workflow_state(configs[0].assent_dir, state)
+        for conflict in conflicts:
+            if conflict.kind != "peer_only":
+                continue
+            merge_commit = _closeout_peer_conflict(configs, state, conflict)
+            source_commits = list(state.source_commits)
+            source_commits[state.plan_names.index(conflict.plan)] = merge_commit
+            state = replace(state, source_commits=tuple(source_commits))
+            write_selection_workflow_state(configs[0].assent_dir, state)
     return state, None
 
 
 def _integration_human_decision(reason: str) -> int:
     print("Integration workflow: REVIEW UNRESOLVED, HUMAN DECISION; " + reason)
+    return 0
+
+def _integration_automated_work_complete(outcome: str) -> int:
+    if outcome == "PEER_CONFLICT":
+        result = "cross-plan conflicts still prevent full verification"
+    elif outcome == "TARGET_CONFLICT":
+        result = "source-target conflicts still prevent full verification"
+    else:
+        result = "full verification did not pass"
+    print("Integration workflow finished: Assent completed all configured "
+          f"automated work, but {result}. Review the integration evidence "
+          "and rework before `assent accept`.")
     return 0
 
 def run_selection_workflow(config_path: str, assent_dir, plan_names,
@@ -1375,16 +1483,16 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
             state = SelectionWorkflowState(
                 ordered, target_ref, target_commit, source_commits, 0)
             write_selection_workflow_state(configs[0].assent_dir, state)
-        elif state.step_index >= len(steps):
-            if state.action_status != "PASSED":
-                return _integration_human_decision(
-                    "the configured steps were exhausted; evidence and edits "
-                    "were preserved.")
+        elif state.action_status == "PASSED":
             first_action = next(
                 index for index, step in enumerate(steps)
                 if isinstance(step, WorkflowActionStep))
             state = replace(state, step_index=first_action)
             write_selection_workflow_state(configs[0].assent_dir, state)
+        elif state.step_index >= len(steps):
+            outcome = (state.action_evidence[0]
+                       if state.action_evidence else "")
+            return _integration_automated_work_complete(outcome)
     except (AssentError, OSError) as error:
         print(f"Selection full_verify: failed ({error})")
         return 1
@@ -1441,17 +1549,19 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
                     write_selection_workflow_state(
                         configs[0].assent_dir, state)
                     if state.step_index >= len(steps):
-                        return _integration_human_decision(
-                            "the configured steps were exhausted while the "
-                            "conflict remained unresolved; evidence and edits "
-                            "were preserved.")
+                        outcome = (state.action_evidence[0]
+                                   if state.action_evidence else "")
+                        return _integration_automated_work_complete(outcome)
                     continue
         except (AssentError, lockfile.LockBusy, OSError) as error:
             print(f"Integration conflict closeout failed: {error}")
             return 1
 
-        print(f"Integration workflow step {state.step_index + 1}/"
-              f"{len(steps)}: full_verify")
+        if state.action_status == "PASSED":
+            print("Integration verification: checking existing PASSED receipt.")
+        else:
+            print(f"Integration workflow step {state.step_index + 1}/"
+                  f"{len(steps)}: full_verify")
         recheck = state.action_status == "FAILED"
         result = (verify_plan_action(configs[0], recheck=recheck)
                   if len(configs) == 1 else
@@ -1522,11 +1632,9 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
             print("Integration full_verify: PASS; no role session started.")
             return 0
         if state.step_index >= len(steps):
-            return _integration_human_decision(
-                "the configured steps were exhausted while full_verify still "
-                "failed; evidence and edits were preserved.")
-    return _integration_human_decision(
-        "the configured steps ended without a passing full_verify.")
+            return _integration_automated_work_complete(result.outcome)
+    outcome = state.action_evidence[0] if state.action_evidence else ""
+    return _integration_automated_work_complete(outcome)
 
 def run_dynamic_selection_workflow(config_path: str, assent_dir) -> int:
     """Snapshot a whole-project run's current verification selection once."""
