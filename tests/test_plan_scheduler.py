@@ -547,7 +547,8 @@ class TestRunAll(PlanSchedulerTestCase):
                 "assent.plan_scheduler._start_plan") as start:
             code = run_all(str(self.config), self.assent_dir)
 
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
+        self.assertIn("Human decision required", out.getvalue())
         self.assertIn("BLOCKED", out.getvalue())
         self.assertIn("leaf -> middle -> base -> t001(BLOCKED)", out.getvalue())
         start.assert_not_called()

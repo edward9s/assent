@@ -29,7 +29,7 @@ from assent.config import load_config
 from assent.init import init as run_init
 from assent.plan import Plan, WorkflowState, write_workflow_state
 from tests.test_contracts import install_global_contracts
-from tests.test_shared_paths import settle_shared_paths
+from tests.test_ignored_dirs import settle_ignored_dirs
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _HAN_CHAR_RE = re.compile(r"[一-鿿]")
@@ -136,7 +136,7 @@ class TestDispatch(MainTestCase):
                 self.assertEqual(result.returncode, 0)
                 self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
-    def test_shared_paths_operations_are_reachable_through_the_real_cli(self):
+    def test_ignored_dirs_operations_are_reachable_through_the_real_cli(self):
         """Both inspection and the only manifest writer are real subcommands.
 
         It also has to reach dispatch without a project `.assent`: it acts on
@@ -145,49 +145,52 @@ class TestDispatch(MainTestCase):
         env = dict(os.environ)
         env["PYTHONPATH"] = str(_PROJECT_ROOT)
         result = subprocess.run(
-            [sys.executable, "-m", "assent", "shared-paths", "declare", "--help"],
+            [sys.executable, "-m", "assent", "ignored-dirs", "declare", "--help"],
             cwd=self.root, capture_output=True, text=True,
             encoding="utf-8", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--classify PATH REASON", result.stdout)
+        self.assertIn("--not-required DIR REASON", result.stdout)
         self.assertIn("Every inventory directory must be covered exactly once",
                       result.stdout)
-        self.assertIn("--none --classify", result.stdout)
+        self.assertIn("--none-required", result.stdout)
         self.assertIn("--watch is a repeatable", result.stdout)
         self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
         retired = subprocess.run(
-            [sys.executable, "-m", "assent", "shared-paths", "review", "--help"],
+            [sys.executable, "-m", "assent", "ignored-dirs", "review", "--help"],
             cwd=self.root, capture_output=True, text=True,
             encoding="utf-8", env=env)
         self.assertNotEqual(retired.returncode, 0)
         self.assertIn("invalid choice", retired.stderr)
 
         result = subprocess.run(
-            [sys.executable, "-m", "assent", "shared-paths", "status", "--help"],
+            [sys.executable, "-m", "assent", "ignored-dirs", "status", "--help"],
             cwd=self.root, capture_output=True, text=True,
             encoding="utf-8", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("without changing it", result.stdout)
         self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
-        with patch("assent.__main__.shared_paths_declare",
+        with patch("assent.__main__.ignored_dirs_declare",
                    return_value=0) as declare:
             code, _out = self.run_main(
-                ["shared-paths", "declare", "--path", "pkg",
-                 "--classify", "build", "build output",
+                ["ignored-dirs", "declare", "--required", "pkg",
+                 "--not-required", "build", "build output",
                  "--watch", "pubspec.yaml"])
         self.assertEqual(code, 0)
         declare.assert_called_once_with(
             ["pkg"], ["pubspec.yaml"], False,
             [["build", "build output"]])
 
-        with patch("assent.__main__.shared_paths_status",
+        with patch("assent.__main__.ignored_dirs_status",
                    return_value=0) as status:
-            code, _out = self.run_main(["shared-paths", "status"])
+            code, _out = self.run_main(["ignored-dirs", "status"])
         self.assertEqual(code, 0)
         status.assert_called_once_with()
         self.assertFalse((self.root / ".assent").exists())
+
+        with self.assertRaises(SystemExit):
+            self.run_main(["shared-paths", "status"])
 
     def test_missing_config_reports_error(self):
         code, out = self.run_main(["status"])

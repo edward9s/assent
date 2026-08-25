@@ -19,7 +19,7 @@ verification.
 `run`, `status`, `check`, `report`, `verify`, `clean`, `archive`, `accept`,
 `reconcile`, `reject`, and `rework` accept `--config PATH` as an option on that
 subcommand. It selects the project override and locates the project; it is not a
-top-level global option. `init`, `doctor`, and `shared-paths` have their own
+top-level global option. `init`, `doctor`, and `ignored-dirs` have their own
 project-location rules.
 
 ## Command guide
@@ -39,8 +39,8 @@ project-location rules.
 | `clean` | Remove only worktrees/branches proven redundant. |
 | `archive` | Retire completed management records after safe cleanup. |
 | `doctor` | Diagnose installation and recover orphaned temporary branches. |
-| `shared-paths status` | Inspect the current worktree's shared-path decision and links without changing them. |
-| `shared-paths declare` | Validate, record, and apply the complete shared-directory declaration for the current source snapshot. |
+| `ignored-dirs status` | Inspect the current worktree's ignored-directory decision and links without changing them. |
+| `ignored-dirs declare` | AI source-role operation that records the reviewed decision and links only required directories. |
 
 ## Common choices
 

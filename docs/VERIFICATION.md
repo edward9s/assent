@@ -53,8 +53,8 @@ remainder. Any resulting receipt names only what was actually verified.
 
 A receipt is deletable evidence, not source truth. It records enough identity
 to reproduce the result: selected source commits, reconstructed trees, verifier
-digest, and reviewed shared-input digest. Any relevant source, candidate,
-verifier, or shared-input change makes it stale.
+digest, and reviewed ignored-directory input digest. Any relevant source, candidate,
+verifier, or ignored-directory input change makes it stale.
 
 Complete plan verification refreshes `_report.md` once after the receipt
 operation and all verification locks settle. The refresh is best-effort and
@@ -113,28 +113,29 @@ A manual single-plan reconcile handles conflict with the current target. The
 integration workflow can also repair peer-only conflicts without accepting a
 prefix or changing the exact selection.
 
-## Shared ignored inputs
+## Ignored-directory inputs
 
 A fresh Git worktree has no ignored directories, but a project may need a large
-local directory such as `assets/` or `pkg/` to compile or test. Assent exposes
-only reviewed directories instead of copying every ignored tree. Ordinary
+local directory such as `assets/` or `pkg/` to compile or test. `ignored-dirs`
+records which ignored directories are required source inputs. Assent links only
+those required directories instead of copying every ignored tree. Ordinary
 ignored leaf files beside tracked source are handled automatically.
 
 The locations have separate responsibilities:
 
 - The primary worktree contains the real directories and the untracked
-  `.assent/manifest.toml` review cache.
+  `.assent/_ignored-dirs.toml` decision cache.
 - A managed source worktree receives same-relative Windows junctions or POSIX
   directory symlinks to those primary targets.
-- `shared-paths declare` uses the worktree where it is run as the source snapshot
-  described by the declaration and as the destination whose links are reconciled.
+- The AI-only `ignored-dirs declare` operation uses its managed source worktree
+  as both the declared snapshot and the destination whose links are reconciled.
 
 Normally this is automatic. If a matching reviewed profile exists, `run`
 creates the links before starting the AI session. For an `UNKNOWN` or `STALE`
 decision, the session reviews the complete inventory and runs `declare` inside
 its managed source worktree. That one operation validates and records the
 declaration in the primary manifest and creates the links in the source
-worktree, so its focused test can continue.
+worktree, so the following focused action can start.
 Running `declare` in the primary worktree is also valid, but only caches a
 profile for that primary snapshot; it creates no link to itself.
 Verification and reconcile apply the same profile to their managed workspaces;
@@ -143,33 +144,38 @@ they never depend on a link left behind by an earlier `run`.
 Inspect either worktree without changing it:
 
 ```text
-assent shared-paths status
+assent ignored-dirs status
 ```
 
 The output identifies both worktrees, the manifest, state, matching profile,
-paths, watch files, and link agreement. In the primary worktree, links are
+required directories, watch files, and link agreement. In the primary worktree, links are
 reported as not applicable because its ordinary directories are the targets.
 It never repairs anything; an unreadable contract or a broken settled link
 returns a nonzero status.
 
-After reviewing the listed inventory, submit the declaration from the managed
-source worktree and name the tracked dependency or build files whose changes
-should invalidate the decision:
+After reviewing the listed inventory, the active source role submits the
+declaration from its managed worktree and names the tracked dependency or build
+files whose changes should invalidate the decision:
 
 ```text
-assent shared-paths declare --path assets --path pkg --classify build "generated output" --watch package.lock
+assent ignored-dirs declare --required assets --required pkg --not-required build "generated output" --watch package.lock
 ```
 
-Every ordinary ignored directory listed by the declaration instruction must be covered
-once by a shared `--path` or a non-shared `--classify PATH REASON`; either may
-cover a subtree. Use `--none` when no directory is shared. Ignored leaf files
-remain automatic verifier inputs and do not require classification.
+Every listed ordinary ignored directory must be covered once by `--required`
+or `--not-required DIR REASON`; either may cover a subtree. Use
+`--none-required` when none is a source input. Only `--required` directories
+receive worktree links. Ignored leaf files remain automatic verifier inputs and
+do not require classification. This command is not a general junction manager
+and never copies a directory. It is not a human recovery command: use
+`assent rework` and let the next `run` return the decision to the AI workflow.
 
 The decision is cached in the primary worktree's untracked
-`.assent/manifest.toml`. A changed watch file, directory inventory, or target
+`.assent/_ignored-dirs.toml`. A changed watch file, directory inventory, or target
 makes it stale. A successful query that finds no ordinary ignored directory is
 reported as `NO-IGNORED-DIRECTORY-CANDIDATE`; that describes current filesystem
-evidence, not a semantic promise that the project will never need shared input.
+evidence, not a semantic promise that the project will never need ignored-directory input.
+The leading underscore marks this as Assent-owned local state; edit it only
+through `ignored-dirs declare`.
 
 Assent cannot safely link everything ignored by Git: ignore rules also cover
 writable build output, caches, virtual environments, editor state, and
@@ -181,7 +187,7 @@ detaches each provisioned link object without traversing or deleting its target.
 
 If verifier output names a missing path inside an existing ignored directory,
 Assent appends an `Ignored input diagnosis:` note pointing to the
-`shared-paths declare` remedy without changing the original exit code.
+`ignored-dirs declare` remedy without changing the original exit code.
 
 See [Commands](COMMANDS.md) for selection syntax and
 [Operations](OPERATIONS.md) for recovery safety.

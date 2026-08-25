@@ -41,6 +41,10 @@ Role session 成功就前進一格。Action 通過就完成該層並略過後續
 記錄證據並前進。設定的 array 就是全部自動化預算，Assent 不會自行新增審查或
 修復回合。
 
+Ignored-directory 決定未完成時，action 並未啟動；Assent 會把這項 gate 證據與
+測試結果分開。FAILED 之後的下一個已設定 action 會重新執行；只有匹配的 PASSED
+證據可在中斷復原時重用。
+
 Role 與 ability 名稱對 scheduler 沒有特殊意義。Ability 提供 prompt 與寫入
 權限；可寫 role 能修改滿足既有需求所需的一般 candidate file。Task contract、
 journal、scheduler state、Git、receipt 與 acceptance 都由 scheduler 控制。
@@ -49,9 +53,9 @@ Sessions 依序執行，不互相對話。Scheduler 只把先前 role 的有限�
 機械 action 證據交給下一個 session。系統沒有 structured verdict、finding
 ledger、owner routing、path-scope amendment 或第二套修復引擎。
 
-Shared ignored-directory 證據為 unknown 或 stale 時，source role 會收到一項
+Ignored-directory 證據為 unknown 或 stale 時，source role 會收到一項
 有限的宣告指示。Session 審查完整 inventory，再透過
-`assent shared-paths declare` 提交決定；Assent 負責驗證、記錄並套用。只有這個
+`assent ignored-dirs declare` 提交決定；Assent 負責驗證、記錄並套用。只有這個
 operation 能寫入本機 manifest；決定完成前，下一個 action 不會開始。AI 不會
 複製目錄或手動建立 link。
 

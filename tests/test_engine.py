@@ -1,13 +1,15 @@
 """The workflow engine is one finite role/action interpreter."""
 import contextlib
 import io
+import subprocess
 import unittest
 from unittest import mock
 
-from assent import engine, gitops, shared_paths
+from assent import engine, gitops, ignored_dirs
 from assent.adapters import TaskResult
 from assent.plan import (parse_task_file, read_entries,
-                         read_selection_workflow_state)
+                         read_selection_workflow_state, read_workflow_state,
+                         WorkflowState, write_workflow_state)
 from assent.verification_common import FullVerifyEvidence
 from tests.engine_support import EngineTestCase, ScriptedAdapter, _NEEDS_OK_TXT
 
@@ -298,6 +300,22 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(self.run_with_contracts(cfg, adapter), 0)
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
 
+    def test_todo_starts_a_fresh_workflow_after_rework(self):
+        path = self.write_task(1)
+        cfg = self.build(extra_config=ACTION_ONLY_WORKFLOW)
+        self.commit_all()
+        write_workflow_state(cfg.tasks_dir, WorkflowState(
+            "task", "t001", 1, False, "old-source",
+            action="focused_test", action_status="FAILED",
+            action_source_tree="old-tree", action_exit_code=1,
+            action_evidence=("old command", "old failure")))
+
+        self.assertEqual(self.run_with_contracts(
+            cfg, ScriptedAdapter([])), 0)
+
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertIsNone(read_workflow_state(cfg.tasks_dir))
+
     def test_role_cannot_edit_task_contract(self):
         path = self.write_task(1)
         cfg = self.build(extra_config=WORKFLOW)
@@ -325,15 +343,15 @@ class TestLinearEngine(EngineTestCase):
             cfg, ScriptedAdapter([tamper])), 1)
         self.assertEqual(parse_task_file(path).status, "WIP")
 
-    def test_unsettled_shared_paths_advance_without_running_focused_test(self):
+    def test_unsettled_ignored_dirs_advance_without_running_focused_test(self):
         path = self.write_task(1)
         cfg = self.build(extra_config=WORKFLOW)
         self.commit_all()
         adapter = ScriptedAdapter([result(), result()])
-        unknown = shared_paths.Contract(
-            shared_paths.UNKNOWN, needs_review=True, inventory=("assets",))
+        unknown = ignored_dirs.Decision(
+            ignored_dirs.UNKNOWN, needs_review=True, inventory=("assets",))
 
-        with mock.patch("assent.engine._shared_path_contract",
+        with mock.patch("assent.engine._ignored_dir_decision",
                         return_value=unknown), \
                 mock.patch("assent.engine._verify_subprocess") as verify:
             code = self.run_with_contracts(cfg, adapter)
@@ -342,8 +360,53 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
         verify.assert_not_called()
         self.assertEqual(len(adapter.calls), 2)
-        self.assertTrue(all("assent shared-paths declare" in call[0]
+        self.assertTrue(all("assent ignored-dirs declare" in call[0]
                             for call in adapter.calls))
+        state = read_workflow_state(cfg.tasks_dir)
+        self.assertIsNotNone(state)
+        self.assertEqual(state.action, "")
+        self.assertEqual(state.action_status, "")
+        self.assertIn("focused_test not started", state.evidence[-1])
+
+    def test_settled_ignored_dirs_allow_the_next_focused_test_to_run(self):
+        path = self.write_task(1)
+        cfg = self.build(extra_config=WORKFLOW)
+        self.commit_all()
+        adapter = ScriptedAdapter([result(), result()])
+        reviewed = ignored_dirs.Decision(ignored_dirs.REVIEWED_NONE)
+        unknown = ignored_dirs.Decision(
+            ignored_dirs.UNKNOWN, needs_review=True, inventory=("assets",))
+        decisions = [reviewed, reviewed, unknown, unknown, reviewed]
+        passed = subprocess.CompletedProcess("verify", 0, "", "")
+
+        with mock.patch("assent.engine._ignored_dir_decision",
+                        side_effect=decisions), \
+                mock.patch("assent.engine._verify_subprocess",
+                           return_value=passed) as verify:
+            code = self.run_with_contracts(cfg, adapter)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        verify.assert_called_once()
+
+    def test_a_later_focused_action_does_not_reuse_failed_evidence(self):
+        path = self.write_task(1)
+        cfg = self.build(extra_config=WORKFLOW)
+        self.commit_all()
+        failed = subprocess.CompletedProcess("verify", 1, "failed", "")
+        passed = subprocess.CompletedProcess("verify", 0, "", "")
+
+        with mock.patch("assent.engine._ignored_dir_decision",
+                        return_value=ignored_dirs.Decision(
+                            ignored_dirs.REVIEWED_NONE)), \
+                mock.patch("assent.engine._verify_subprocess",
+                           side_effect=[failed, passed]) as verify:
+            code = self.run_with_contracts(
+                cfg, ScriptedAdapter([result(), result()]))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertEqual(verify.call_count, 2)
 
     def test_repeated_integration_pass_rechecks_only_the_scheduler_action(self):
         self.write_task(1)

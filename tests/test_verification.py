@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
-from assent import AssentError, pathops, shared_paths
+from assent import AssentError, pathops, ignored_dirs
 from assent.config import load_config
 from assent.plan_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         VerificationReceipt, read_receipt,
@@ -28,7 +28,7 @@ from assent.gitops import (branch_tip, commit_of, plan_branches, tree_of,
 from assent.verification_common import (ProvisionedLink, _require_no_overlap,
                                         provisioned_candidate_links, summary,
                                         union_worktree_links)
-from tests.test_shared_paths import excluded_inventory, settle_shared_paths
+from tests.test_ignored_dirs import excluded_inventory, settle_ignored_dirs
 
 
 def _git(root: Path, *args: str) -> str:
@@ -114,8 +114,8 @@ class VerificationRepositoryCase(unittest.TestCase):
         self.cfg = load_config(self.assent_dir / "assent.toml", "plan測試")
         # These fixtures hand-provision whatever links they need, so the honest
         # reviewed answer here is the empty one; recording it once gets every
-        # case past the shared-path gate without pretending a path is declared.
-        settle_shared_paths(self.root, self.source_worktree)
+        # case past the ignored-directory gate without pretending a path is declared.
+        settle_ignored_dirs(self.root, self.source_worktree)
         self.addCleanup(self._cleanup)
 
     def _link_target(self, name: str) -> Path:
@@ -141,9 +141,9 @@ class VerificationRepositoryCase(unittest.TestCase):
         declared = set(getattr(self, "declared", ()))
         declared.add(name)
         self.declared = tuple(sorted(declared))
-        shared_paths.declare(
-            self.root, worktree, paths=self.declared, watch=("README.md",),
-            dispositions=excluded_inventory(self.root, self.declared))
+        ignored_dirs.declare(
+            self.root, worktree, required=self.declared, watch=("README.md",),
+            not_required=excluded_inventory(self.root, self.declared))
         return target
 
     def _write_verifier(self, exit_code: int, output_size: int = 0,
@@ -363,7 +363,7 @@ class TestVerificationRun(VerificationRepositoryCase):
             version=RECEIPT_VERSION, status="FAILED", source_tip=self.source_tip,
             target_tip=self.target_tip,
             integration_tree=tree_of(self.root, self.source_tip),
-            verify_script_sha256="a" * 64, shared_inputs_sha256="b" * 64,
+            verify_script_sha256="a" * 64, ignored_directory_inputs_sha256="b" * 64,
             verify_command="python .assent/verify.py", exit_code=1,
             completed_at="2026-01-01T00:00:00+00:00",
             failure_summary=normalized)
@@ -600,7 +600,7 @@ class TestReceiptParsing(VerificationRepositoryCase):
             version=True, status="PASSED", source_tip=self.source_tip,
             target_tip=self.target_tip, integration_tree=tree_of(
                 self.root, self.source_tip), verify_script_sha256="a" * 64,
-            shared_inputs_sha256="b" * 64,
+            ignored_directory_inputs_sha256="b" * 64,
             verify_command="python .assent/verify.py", exit_code=0,
             completed_at="2026-01-01T00:00:00+00:00", failure_summary="")
         with self.assertRaises(AssentError):
@@ -760,7 +760,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
                       receipt.failure_summary)
         for phrase in ("Ignored input diagnosis: pkg/",
                        "intentionally omitted from the integration candidate",
-                       "record it with `assent shared-paths declare`",
+                       "AI source role records it with `assent ignored-dirs declare`",
                        "Do not copy the tree or hand-create"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, receipt.failure_summary)
@@ -821,10 +821,10 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
         target.mkdir(parents=True)
         (target / "app_localizations.dart").write_text(
             "// generated localizations\n", encoding="utf-8")
-        shared_paths.declare(
-            self.root, self.source_worktree, paths=("lib/l10n/arb",),
+        ignored_dirs.declare(
+            self.root, self.source_worktree, required=("lib/l10n/arb",),
             watch=("README.md",),
-            dispositions=excluded_inventory(self.root, ("lib/l10n/arb",)))
+            not_required=excluded_inventory(self.root, ("lib/l10n/arb",)))
         return target
 
     def _provision_generated_part(self) -> Path:
@@ -950,8 +950,8 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestSharedPathGate(VerificationRepositoryCase):
-    """Verification is a consumer of the reviewed shared-path cache.
+class TestIgnoredDirGate(VerificationRepositoryCase):
+    """Verification is a consumer of the reviewed ignored-directory cache.
 
     The fixture's own reviewed empty answer is deliberately discarded here, so
     each case starts from what a real project looks like the first time: real
@@ -960,7 +960,7 @@ class TestSharedPathGate(VerificationRepositoryCase):
 
     def setUp(self) -> None:
         super().setUp()
-        shared_paths.manifest_path(self.root).unlink()
+        ignored_dirs.manifest_path(self.root).unlink()
         for relative in ("pkg", "assets"):
             (self.root / relative).mkdir(parents=True, exist_ok=True)
             (self.root / relative / "marker.txt").write_text(
@@ -972,15 +972,15 @@ class TestSharedPathGate(VerificationRepositoryCase):
         with contextlib.redirect_stdout(output):
             self.assertEqual(verify_plan(self.cfg), 1)
         self.assertIn("UNKNOWN", output.getvalue())
-        self.assertIn("assent shared-paths declare", output.getvalue())
+        self.assertIn("assent ignored-dirs declare", output.getvalue())
         # No verifier ran and no receipt was written.
         self.assertFalse(self.counter.exists())
         self.assertFalse(receipt_path(self.cfg).exists())
 
     def test_a_reviewed_profile_provisions_the_source_and_binds_the_digest(self):
-        shared_paths.declare(self.root, self.source_worktree,
-                            paths=("pkg",), watch=("README.md",),
-                            dispositions=excluded_inventory(
+        ignored_dirs.declare(self.root, self.source_worktree,
+                            required=("pkg",), watch=("README.md",),
+                            not_required=excluded_inventory(
                                 self.root, ("pkg",)))
         self._commit_target_verifier(exit_code=0, probe=("pkg",))
 
@@ -988,7 +988,7 @@ class TestSharedPathGate(VerificationRepositoryCase):
 
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "PASSED")
-        self.assertRegex(receipt.shared_inputs_sha256, r"^[0-9a-f]{64}$")
+        self.assertRegex(receipt.ignored_directory_inputs_sha256, r"^[0-9a-f]{64}$")
         self.assertTrue(receipt_matches_current_candidate(self.cfg))
 
         # Changing the declared target's content makes that receipt stale.
@@ -996,13 +996,13 @@ class TestSharedPathGate(VerificationRepositoryCase):
             "changed marker\n", encoding="utf-8")
         self.assertFalse(receipt_matches_current_candidate(self.cfg))
         self.assertIn(
-            "stale: shared inputs changed",
+            "stale: ignored-directory inputs changed",
             receipt_report_lines(self.cfg)[0])
 
     def test_reviewed_none_refuses_an_external_ignored_directory_link(self):
-        shared_paths.declare(self.root, self.source_worktree,
-                            none=True, watch=("README.md",),
-                            dispositions=excluded_inventory(self.root))
+        ignored_dirs.declare(self.root, self.source_worktree,
+                            none_required=True, watch=("README.md",),
+                            not_required=excluded_inventory(self.root))
         external = self.parent / "external pkg"
         external.mkdir()
         marker = external / "marker.txt"
@@ -1017,15 +1017,15 @@ class TestSharedPathGate(VerificationRepositoryCase):
         diagnostic = output.getvalue()
         self.assertIn("outside its active REVIEWED-NONE profile", diagnostic)
         self.assertIn("Remove the link if it is irrelevant", diagnostic)
-        self.assertIn("assent shared-paths declare", diagnostic)
+        self.assertIn("assent ignored-dirs declare", diagnostic)
         self.assertFalse(self.counter.exists())
         self.assertFalse(receipt_path(self.cfg).exists())
         self.assertEqual(marker.read_text(encoding="utf-8"), "external\n")
 
     def test_a_missing_link_is_recreated_rather_than_depended_on(self):
-        shared_paths.declare(self.root, self.source_worktree,
-                            paths=("pkg",), watch=("README.md",),
-                            dispositions=excluded_inventory(
+        ignored_dirs.declare(self.root, self.source_worktree,
+                            required=("pkg",), watch=("README.md",),
+                            not_required=excluded_inventory(
                                 self.root, ("pkg",)))
         pathops.detach_directory_link(self.source_worktree / "pkg")
         self._commit_target_verifier(exit_code=0, probe=("pkg",))
@@ -1034,9 +1034,9 @@ class TestSharedPathGate(VerificationRepositoryCase):
         self.assertTrue(pathops.is_link(self.source_worktree / "pkg"))
 
     def test_a_target_changing_during_the_verifier_cannot_pass(self):
-        shared_paths.declare(self.root, self.source_worktree,
-                            paths=("pkg",), watch=("README.md",),
-                            dispositions=excluded_inventory(
+        ignored_dirs.declare(self.root, self.source_worktree,
+                            required=("pkg",), watch=("README.md",),
+                            not_required=excluded_inventory(
                                 self.root, ("pkg",)))
         # The stand-in verifier rewrites the declared target's content while it
         # is running, which is exactly the race the second snapshot exists for.
@@ -1054,4 +1054,4 @@ class TestSharedPathGate(VerificationRepositoryCase):
         self.assertEqual(verify_plan(self.cfg), 1)
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "FAILED")
-        self.assertIn("shared input changed", receipt.failure_summary)
+        self.assertIn("ignored-directory input changed", receipt.failure_summary)

@@ -96,7 +96,7 @@ class SelectionWorkflowState:
     action_exit_code: int = 0
     action_evidence: tuple[str, ...] = ()
     verification_script_sha256: str = ""
-    shared_inputs_sha256: str = ""
+    ignored_directory_inputs_sha256: str = ""
 
 
 @dataclass
@@ -239,7 +239,7 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
         "plans", "target_ref", "target_commit", "source_commits", "step_index",
         "evidence", "action", "action_status", "action_candidate_tree",
         "action_exit_code", "action_evidence", "verification_script_sha256",
-        "shared_inputs_sha256",
+        "ignored_directory_inputs_sha256",
     }
     if set(data) != expected:
         raise AssentError(f"Integration workflow state {path.name} has an invalid schema")
@@ -255,7 +255,7 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
     action_exit_code = data.get("action_exit_code")
     action_evidence = data.get("action_evidence")
     verification_script_sha256 = data.get("verification_script_sha256")
-    shared_inputs_sha256 = data.get("shared_inputs_sha256")
+    ignored_directory_inputs_sha256 = data.get("ignored_directory_inputs_sha256")
     action_valid = _valid_action_result(
         action, action_status, action_candidate_tree, action_exit_code,
         action_evidence, allowed_action="full_verify")
@@ -272,15 +272,15 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
             or not all(isinstance(item, str) for item in evidence)
             or not action_valid
             or not isinstance(verification_script_sha256, str)
-            or not isinstance(shared_inputs_sha256, str)
+            or not isinstance(ignored_directory_inputs_sha256, str)
             or (action_status and (not verification_script_sha256
-                                   or not shared_inputs_sha256))):
+                                   or not ignored_directory_inputs_sha256))):
         raise AssentError(f"Integration workflow state {path.name} has invalid values")
     return SelectionWorkflowState(
         tuple(plan_names), target_ref, target_commit, tuple(source_commits),
         step_index, tuple(evidence), action, action_status, action_candidate_tree,
         action_exit_code, tuple(action_evidence), verification_script_sha256,
-        shared_inputs_sha256)
+        ignored_directory_inputs_sha256)
 
 
 def write_selection_workflow_state(
@@ -304,7 +304,7 @@ def write_selection_workflow_state(
             json.dumps(item, ensure_ascii=False)
             for item in state.action_evidence) + "]",
         f"verification_script_sha256 = {json.dumps(state.verification_script_sha256)}",
-        f"shared_inputs_sha256 = {json.dumps(state.shared_inputs_sha256)}",
+        f"ignored_directory_inputs_sha256 = {json.dumps(state.ignored_directory_inputs_sha256)}",
         "",
     ))
     atomic_write_text(selection_workflow_state_path(assent_dir), text)

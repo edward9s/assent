@@ -9,7 +9,7 @@ class TestFullVerifyEvidence(unittest.TestCase):
             plan_names=("alpha",), target_commit="a" * 40,
             source_commits=("b" * 40,), candidate_tree="c" * 40,
             verification_script_sha256="d" * 64,
-            shared_inputs_sha256="e" * 64, exit_code=0)
+            ignored_directory_inputs_sha256="e" * 64, exit_code=0)
 
         self.assertTrue(FullVerifyEvidence("PASSED", **common).passed)
         self.assertFalse(FullVerifyEvidence(

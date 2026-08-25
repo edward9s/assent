@@ -97,7 +97,7 @@ class TestPlanVerificationReportCloseout(VerificationEngineCase):
                 receipt = SimpleNamespace(
                     status=status, source_tip="source", target_tip="target",
                     integration_tree="tree", verify_script_sha256="script",
-                    shared_inputs_sha256="shared", exit_code=(
+                    ignored_directory_inputs_sha256="shared", exit_code=(
                         0 if status == "PASSED" else 1), failure_summary="")
 
                 def verify(_cfg, *, record_conflict_receipt):
@@ -163,7 +163,7 @@ class TestPlanVerificationReportCloseout(VerificationEngineCase):
         receipt = SimpleNamespace(
             status="PASSED", source_tip="source", target_tip="target",
             integration_tree="tree", verify_script_sha256="script",
-            shared_inputs_sha256="shared", exit_code=0, failure_summary="")
+            ignored_directory_inputs_sha256="shared", exit_code=0, failure_summary="")
         with mock.patch("assent.plan_verification._verify_locked",
                         return_value=receipt) as full, \
                 mock.patch(

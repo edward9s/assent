@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from assent import AssentError, gitops, shared_paths
+from assent import AssentError, gitops, ignored_dirs
 from assent.batch_receipt import (BATCH_RECEIPT_VERSION, BatchSource,
                                   BatchVerificationReceipt, batch_receipt_path,
                                   batch_receipt_staleness, read_batch_receipt,
@@ -53,7 +53,7 @@ class BatchSelection:
 def _new_batch_receipt(*, status: str, target_tip: str,
                        sources: Sequence[tuple[str, str]],
                        step_trees: Sequence[str], digest: str,
-                       shared_inputs: str, exit_code: int,
+                       ignored_directory_inputs: str, exit_code: int,
                        failure_summary: str = "") -> BatchVerificationReceipt:
     entries = tuple(
         BatchSource(plan_name, source_tip, step_tree)
@@ -65,7 +65,7 @@ def _new_batch_receipt(*, status: str, target_tip: str,
         sources=entries,
         final_tree=step_trees[-1],
         verify_script_sha256=digest,
-        shared_inputs_sha256=shared_inputs,
+        ignored_directory_inputs_sha256=ignored_directory_inputs,
         verify_command=VERIFY_COMMAND,
         exit_code=exit_code,
         completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -82,14 +82,14 @@ def _batch_evidence(receipt: BatchVerificationReceipt, *,
                     "target worktree became dirty", "source tip changed",
                     "source worktree became dirty", "source for ",
                     "verification script changed",
-                    "a declared shared input changed",
-                    "shared inputs became unreadable")) else
+                    "a declared ignored-directory input changed",
+                    "ignored-directory inputs became unreadable")) else
                "VERIFIER_FAILED")
     return FullVerifyEvidence(
         outcome, receipt.plan_names, receipt.target_tip,
         tuple(source.source_tip for source in receipt.sources),
         receipt.final_tree, receipt.verify_script_sha256,
-        receipt.shared_inputs_sha256, receipt.exit_code,
+        receipt.ignored_directory_inputs_sha256, receipt.exit_code,
         tuple(item for item in (receipt.failure_summary,) if item), reused)
 
 
@@ -228,45 +228,46 @@ def select_explicit_batch_plans(
     return BatchSelection(tuple(sources)), configs
 
 
-def _shared_digest(main: Path, contracts: Mapping[str, shared_paths.Contract],
-                   sources: Sequence[tuple[str, str]]) -> str:
-    """The shared-input digest for exactly the plans a receipt will record.
+def _ignored_dir_digest(main: Path,
+                        decisions: Mapping[str, ignored_dirs.Decision],
+                        sources: Sequence[tuple[str, str]]) -> str:
+    """The ignored-directory input digest for exactly the plans a receipt will record.
 
     A batch may shrink -- a declined conflict, a skip, a bisected prefix -- so
     the digest is taken over the recorded merge order rather than over whatever
     was classified at the start; the receipt must describe the set it certifies.
     """
-    return shared_paths.shared_inputs_digest(
-        main, [(plan_name, contracts[plan_name])
-               for plan_name, _tip in sources if plan_name in contracts])
+    return ignored_dirs.ignored_directory_inputs_digest(
+        main, [(plan_name, decisions[plan_name])
+               for plan_name, _tip in sources if plan_name in decisions])
 
 
-def _current_shared_digest(
+def _current_ignored_dir_digest(
         main: Path, sources: Sequence[tuple[str, str]],
         source_worktrees: Mapping[str, Path]) -> str:
     """Reclassify one batch source set without repairing any worktree links."""
-    manifest = shared_paths.read_manifest(main)
-    contracts: list[tuple[str, shared_paths.Contract]] = []
+    manifest = ignored_dirs.read_manifest(main)
+    decisions: list[tuple[str, ignored_dirs.Decision]] = []
     for plan_name, _tip in sources:
-        contract = shared_paths.classify(
+        decision = ignored_dirs.classify(
             main, source_worktrees.get(plan_name) or main, manifest=manifest)
-        if not contract.settled:
+        if not decision.settled:
             raise AssentError(
-                f"the shared-path contract for {plan_name} is {contract.state}; "
-                "the batch's shared-input evidence can no longer be reproduced")
-        shared_paths.require_directory_link_agreement(
-            main, source_worktrees.get(plan_name) or main, contract,
+                f"the ignored-directory decision for {plan_name} is "
+                f"{decision.state}; "
+                "the batch's ignored-directory input evidence can no longer be reproduced")
+        ignored_dirs.require_directory_link_agreement(
+            main, source_worktrees.get(plan_name) or main, decision,
             plan_name=plan_name)
-        contracts.append((plan_name, contract))
-    return shared_paths.shared_inputs_digest(main, contracts)
+        decisions.append((plan_name, decision))
+    return ignored_dirs.ignored_directory_inputs_digest(main, decisions)
 
 
 def _batch_drift(configs: dict[str, Config], main: Path, excludes: Sequence[str],
                  target_branch: str, target_tip: str,
                  sources: Sequence[tuple[str, str]], script: Path,
-                 digest: str, contracts: Mapping[str, shared_paths.Contract],
-                 shared_sources: Sequence[tuple[str, str]],
-                 shared_inputs: str,
+                 digest: str, decision_sources: Sequence[tuple[str, str]],
+                 ignored_directory_inputs: str,
                  source_worktrees: Mapping[str, Path]) -> list[str]:
     """Re-observe every identity the batch receipt is about to certify."""
     changed: list[str] = []
@@ -286,17 +287,18 @@ def _batch_drift(configs: dict[str, Config], main: Path, excludes: Sequence[str]
                 changed.append(f"source tip for {plan_name} changed")
     if sha256_file(script) != digest:
         changed.append("verification script changed")
-    # Snapshotted again after the verifier: a declared shared target whose
+    # Snapshotted again after the verifier: a required ignored directory whose
     # content moved during the run turns an apparent pass into a failure, so no
     # PASSED batch receipt can describe inputs the verifier never saw.
     try:
-        if _current_shared_digest(
-                main, shared_sources, source_worktrees) != shared_inputs:
+        if _current_ignored_dir_digest(
+                main, decision_sources,
+                source_worktrees) != ignored_directory_inputs:
             changed.append(
-                "a declared shared input changed while the full verifier was "
+                "a declared ignored-directory input changed while the full verifier was "
                 "running, so the run certifies nothing")
     except AssentError as e:
-        changed.append(f"shared inputs became unreadable: {e}")
+        changed.append(f"ignored-directory inputs became unreadable: {e}")
     return changed
 
 
@@ -927,10 +929,11 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
         # links reconciled before a candidate exists, so a batch never depends
         # on an earlier `run` having left a junction behind and UNKNOWN or STALE
         # refuses here with the zero-AI review remedy.
-        contracts = dict(shared_paths.prepare_sources(
+        decisions = dict(ignored_dirs.prepare_sources(
             main, [(plan_name, source_worktrees.get(plan_name))
                    for plan_name in selection.plan_names]))
-        shared_before = _shared_digest(main, contracts, selection.sources)
+        ignored_dirs_before = _ignored_dir_digest(
+            main, decisions, selection.sources)
         script = (assent_dir / "verify.py").resolve()
         if not script.is_file():
             raise AssentError(f"Verification script not found: {script}")
@@ -941,7 +944,8 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                 and tuple(source.source_tip for source in existing.sources)
                 == tuple(tip for _plan_name, tip in selection.sources)
                 and existing.verify_script_sha256 == digest
-                and existing.shared_inputs_sha256 == shared_before
+                and existing.ignored_directory_inputs_sha256
+                == ignored_dirs_before
                 and not batch_receipt_staleness(
                     configs[selection.plan_names[0]], existing)
                 and (existing.status == "PASSED" or not recheck)):
@@ -990,7 +994,7 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                         tuple(tip for _plan_name, tip in selection.sources),
                         (reviewed.step_trees[-1] if reviewed.step_trees else
                          gitops.tree_of(main, target_tip)),
-                        digest, shared_before, 1, encoded, False,
+                        digest, ignored_dirs_before, 1, encoded, False,
                         reviewed.conflicts))
                     return 1
                 chain = (BatchCandidate(reviewed.step_trees)
@@ -1012,7 +1016,7 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
                             tuple(tip for _plan_name, tip in selection.sources),
                             (chain.step_trees[-1] if chain.step_trees else
                              gitops.tree_of(main, target_tip)),
-                            digest, shared_before, 1,
+                            digest, ignored_dirs_before, 1,
                             (f"Conflict while merging {chain.conflict_plan}",
                              *(f"{chain.conflict_plan}:{item}"
                                for item in chain.conflicts))))
@@ -1085,13 +1089,15 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
         receipt = _new_batch_receipt(
             status=status, target_tip=target_tip, sources=sources,
             step_trees=step_trees, digest=digest,
-            shared_inputs=_shared_digest(main, contracts, sources),
+            ignored_directory_inputs=_ignored_dir_digest(
+                main, decisions, sources),
             exit_code=exit_code, failure_summary=failure_summary)
 
         changed = _batch_drift(
             configs, main, excludes, target_branch, target_tip,
             batch_sources, script, digest,
-            contracts, selection.sources, shared_before, source_worktrees)
+            selection.sources, ignored_dirs_before,
+            source_worktrees)
         if changed:
             if localized:
                 print(f"{label}: the repository changed while the batch "
@@ -1100,7 +1106,7 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
             receipt = _new_batch_receipt(
                 status="FAILED", target_tip=target_tip, sources=batch_sources,
                 step_trees=batch_step_trees, digest=digest,
-                shared_inputs=shared_before,
+                ignored_directory_inputs=ignored_dirs_before,
                 exit_code=1, failure_summary="; ".join(changed))
 
         write_batch_receipt(path, receipt, main)

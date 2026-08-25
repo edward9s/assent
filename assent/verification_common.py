@@ -54,7 +54,7 @@ class FullVerifyEvidence:
     source_commits: tuple[str, ...]
     candidate_tree: str
     verification_script_sha256: str
-    shared_inputs_sha256: str
+    ignored_directory_inputs_sha256: str
     exit_code: int
     evidence: tuple[str, ...] = ()
     reused: bool = False
@@ -405,7 +405,7 @@ def discover_worktree_links(worktree: Path) -> tuple[ProvisionedLink, ...]:
 IGNORED_INPUT_PREFIX = "Ignored input diagnosis: "
 
 
-def ordinary_ignored_directories(worktree: Path) -> tuple[str, ...]:
+def ordinary_ignored_dirs(worktree: Path) -> tuple[str, ...]:
     """List the physical ignored directory trees a source worktree holds.
 
     These are exactly the trees ``discover_worktree_links`` deliberately does
@@ -441,7 +441,7 @@ def _mentions_path_below(text: str, relative: str) -> bool:
     return re.search(pattern, text) is not None
 
 
-def mentioned_ordinary_ignored_directories(
+def mentioned_ordinary_ignored_dirs(
         output: str, worktrees: Iterable[Path | None]) -> tuple[str, ...]:
     """Ignored directories whose descendant path the output actually names."""
     text = output.replace("\\", "/")
@@ -449,7 +449,7 @@ def mentioned_ordinary_ignored_directories(
     for worktree in worktrees:
         if worktree is None:
             continue
-        for relative in ordinary_ignored_directories(worktree):
+        for relative in ordinary_ignored_dirs(worktree):
             if _mentions_path_below(text, relative):
                 named.add(relative)
     return tuple(sorted(named))
@@ -470,7 +470,7 @@ def ignored_input_diagnosis(output: str,
     trees are neither listed nor traversed.  An empty string means the failure
     says nothing about an ignored input.
     """
-    named = mentioned_ordinary_ignored_directories(output, worktrees)
+    named = mentioned_ordinary_ignored_dirs(output, worktrees)
     if not named:
         return ""
     listed = ", ".join(f"{relative}/" for relative in sorted(named))
@@ -482,19 +482,20 @@ def ignored_input_diagnosis(output: str,
         "candidate; complete verification mirrors only provisioned directory "
         "links and ignored leaf files, never a physical ignored tree.\n"
         "For a required input, place its ordinary Git-ignored target at the "
-        "same relative path in the primary worktree, then record it with "
-        "`assent shared-paths declare` -- naming the dependency or build file "
-        "that made it necessary as a `--watch` value. Assent provisions the "
+        "same relative path in the primary worktree, then rework the affected "
+        "task. On the next run its AI source role records it with `assent "
+        "ignored-dirs declare`, naming the dependency or build file that made "
+        "it necessary as a `--watch` value. Assent provisions the "
         "exact junction or directory symlink for later sessions. Do not copy "
         "the tree or hand-create a source-worktree link; neither is reviewed "
         "candidate evidence.")
 
 
-def diagnosed_ignored_directories(failure_summary: str) -> tuple[str, ...]:
+def diagnosed_ignored_dirs(failure_summary: str) -> tuple[str, ...]:
     """The directories a stored ``Ignored input diagnosis:`` names, if any.
 
     This reads back exactly what ``ignored_input_diagnosis`` wrote, so a full
-    verifier's own output-backed evidence can invalidate a reviewed shared-path
+    verifier's own output-backed evidence can invalidate a reviewed ignored-directory
     profile that does not declare a directory the run proved necessary.  It
     parses one recorded line and never touches the filesystem.
     """

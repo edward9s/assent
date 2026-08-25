@@ -18,7 +18,7 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 
 `run`、`status`、`check`、`report`、`verify`、`clean`、`archive`、`accept`、
 `reconcile`、`reject`、`rework` 支援各自的 `--config PATH` option。它會選擇專案
-設定並定位專案，不是 top-level global option。`init`、`doctor` 與 `shared-paths`
+設定並定位專案，不是 top-level global option。`init`、`doctor` 與 `ignored-dirs`
 各有自己的專案位置規則。
 
 ## 指令用途
@@ -38,8 +38,8 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 | `clean` | 只移除已證明多餘的 worktree/branch。 |
 | `archive` | 安全清理後封存完成的管理紀錄。 |
 | `doctor` | 診斷安裝並復原孤兒暫存 branch。 |
-| `shared-paths status` | 查看目前 worktree 的 shared-path 決定與鏈結，不做任何變更。 |
-| `shared-paths declare` | 驗證、記錄並套用目前 source snapshot 完整的 shared-directory 宣告。 |
+| `ignored-dirs status` | 查看目前 worktree 的 ignored-directory 決定與鏈結，不做任何變更。 |
+| `ignored-dirs declare` | AI source role 記錄審查結果的 operation；只為必要目錄建立鏈結。 |
 
 ## 常見用法
 

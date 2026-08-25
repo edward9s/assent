@@ -28,7 +28,7 @@ from assent.agents import Ability, ResolvedRole, Role, resolve_role
 from assent.lockfile import LOCK_NAME
 from assent.modeling import (MODEL_TIERS, has_literal, literal_value,
                              parse_selection, split_selection)
-from assent.shared_paths import MANIFEST_LOCK_NAME, MANIFEST_NAME
+from assent.ignored_dirs import MANIFEST_LOCK_NAME, MANIFEST_NAME
 from assent.user_home import user_config_path
 
 _TOP_LEVEL_KEYS = {
@@ -300,12 +300,12 @@ class Config:
         return self.git_rel(self.assent_dir / "_integration_workflow.toml")
 
     @property
-    def shared_paths_manifest_rel(self) -> str:
-        """The local reviewed-shared-path cache; local memory, never project source."""
+    def ignored_dirs_manifest_rel(self) -> str:
+        """The local reviewed-ignored-directory cache; local memory, never project source."""
         return self.git_rel(self.assent_dir / MANIFEST_NAME)
 
     @property
-    def shared_paths_lock_rel(self) -> str:
+    def ignored_dirs_lock_rel(self) -> str:
         return self.git_rel(self.assent_dir / MANIFEST_LOCK_NAME)
 
     @property
@@ -314,7 +314,7 @@ class Config:
         return (self.runtime_log_rel, self.report_rel, self.lockfile_rel,
                 self.verification_receipt_rel,
                 self.workflow_state_rel, self.selection_workflow_state_rel,
-                self.shared_paths_manifest_rel, self.shared_paths_lock_rel)
+                self.ignored_dirs_manifest_rel, self.ignored_dirs_lock_rel)
 
 
 def _section(data: dict, name: str) -> dict:

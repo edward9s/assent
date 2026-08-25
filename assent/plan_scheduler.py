@@ -206,7 +206,7 @@ def _blocking_chains(
 
 def _print_stuck(graph, plans: dict[str, Plan], archived: set[str]) -> None:
     """List every unfinished plan and why it cannot be unlocked."""
-    print("Cannot continue: no remaining plan is runnable "
+    print("Human decision required: no remaining plan is runnable "
           "because of a BLOCKED task:")
     for plan_name in graph:
         if _is_complete(plans[plan_name]):
@@ -524,7 +524,7 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
                 if failure:
                     return 1
                 _print_stuck(graph, plans, archived)
-                return 1
+                return 0
 
             completed: list[tuple[str, int]] = []
             while not completed:

@@ -27,8 +27,9 @@ from assent.plandeps import infer_plan_completion, parse_plan_dependency_graph
 from assent.plan_source import resolve_source_snapshot
 from assent.plan_scheduler import run_all
 from assent.init import init as run_init
-from assent.main import (add_shared_paths_command, shared_paths_declare,
-                         shared_paths_status)
+from assent.ignored_dirs_cli import (add_ignored_dirs_command,
+                                     ignored_dirs_declare,
+                                     ignored_dirs_status)
 from assent.plan import plan_workflow_requires_human
 from assent.reconcile import (reconcile_abort, reconcile_continue,
                               reconcile_start)
@@ -127,7 +128,7 @@ def _build_parser() -> argparse.ArgumentParser:
         parser_class=functools.partial(argparse.ArgumentParser,
                                        formatter_class=_HelpFormatter),
         metavar=("{run,status,check,report,verify,clean,accept,reconcile,reject,"
-                 "rework,archive,init,doctor,shared-paths}"))
+                 "rework,archive,init,doctor,ignored-dirs}"))
 
     run_p = sub.add_parser(
         "run", help="Run every discovered plan, or the exact named plans, "
@@ -300,9 +301,9 @@ def _build_parser() -> argparse.ArgumentParser:
               "replace one; an explicit repeat choice backs up and replaces "
               "a differing verifier"))
 
-    # The only sanctioned writer of the local shared-path manifest.  It needs no
+    # The only sanctioned writer of the local ignored-directory manifest.  It needs no
     # .assent project config: it acts on the Git worktree it is run in.
-    add_shared_paths_command(sub)
+    add_ignored_dirs_command(sub)
 
     sub.add_parser(
         "doctor", help="Diagnose the machine environment (Python, git, "
@@ -534,17 +535,18 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "doctor":
         return run_doctor()
 
-    # `shared-paths` acts on the Git worktree it runs in and writes only the
+    # `ignored-dirs` acts on the Git worktree it runs in and writes only the
     # primary worktree's local manifest, so it deliberately skips the .assent
     # project config gate below: a source worktree carries no .assent at all.
-    if args.command == "shared-paths":
+    if args.command == "ignored-dirs":
         try:
             if args.operation == "status":
-                return shared_paths_status()
-            return shared_paths_declare(
-                args.path, args.watch, args.none, args.classify)
+                return ignored_dirs_status()
+            return ignored_dirs_declare(
+                args.required, args.watch, args.none_required,
+                args.not_required)
         except AssentError as e:
-            print(f"shared-paths {args.operation}: failed ({e})")
+            print(f"ignored-dirs {args.operation}: failed ({e})")
             return 1
 
     try:

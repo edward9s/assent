@@ -50,8 +50,8 @@ assent verify --batch    # 動態發現的 batch
 ## Receipt
 
 Receipt 是可刪除的證據，不是 source of truth。它記錄重現結果所需的身分：選取的
-source commit、重建過程的 tree、verifier digest 與 reviewed shared-input digest。
-任何相關 source、candidate、verifier 或 shared input 改變，都會讓 receipt 過期。
+source commit、重建過程的 tree、verifier digest 與 reviewed ignored-directory input digest。
+任何相關 source、candidate、verifier 或 ignored-directory input 改變，都會讓 receipt 過期。
 
 完整 plan verification 會在 receipt operation 與所有 verification lock 結束後，
 恰好刷新一次該 plan 的 `_report.md`。這是 best-effort 動作，不會改變驗證結果。
@@ -100,26 +100,27 @@ marker、whitespace error 或無關修改。它只推進 source，不改 target�
 手動的單一 plan reconcile 處理 source 與目前 target 的衝突。Integration workflow
 也能修復 peer-only conflict，不會接受 prefix 或改變 exact selection。
 
-## 共用 ignored input
+## Ignored-directory input
 
 新的 Git worktree 不會有 ignored directory，但專案可能需要大型本機目錄（例如
-`assets/` 或 `pkg/`）才能編譯或測試。Assent 不會複製所有 ignored tree，只提供
-經過審查的必要目錄。Tracked source 旁的一般 ignored leaf file 則會自動處理。
+`assets/` 或 `pkg/`）才能編譯或測試。`ignored-dirs` 記錄哪些 ignored directory
+是 source 必要輸入；Assent 只連結這些目錄，不會複製所有 ignored tree。Tracked
+source 旁的一般 ignored leaf file 則會自動處理。
 
 各位置的責任不同：
 
 - 主要 worktree 保存真實目錄，以及未納入 Git 的審查快取
-  `.assent/manifest.toml`。
+  `.assent/_ignored-dirs.toml`。
 - 受管理的 source worktree 在相同相對路徑建立 Windows junction 或 POSIX
   directory symlink，指向主要 worktree 的真實目錄。
-- `shared-paths declare` 把執行位置當成宣告所描述的 source snapshot，也只同步
-  該 worktree 的鏈結。
+- AI 專用的 `ignored-dirs declare` operation 把自己的受管理 source worktree 當成
+  宣告所描述的 snapshot，也只同步該 worktree 的鏈結。
 
 一般流程不需要人介入。`run` 找到匹配的審查結果時，會在 AI session 開始前自動
 建立鏈結。若狀態是 `UNKNOWN` 或 `STALE`，AI 會審查完整 inventory，再於自己的
 受管理 source worktree 執行 `declare`。這個操作會驗證宣告、把 profile 寫入主要
-worktree 的 manifest，同時在 source worktree 建立鏈結，讓同一個 session 可以
-繼續跑 focused test。在主要 worktree 執行 `declare` 也是合法的，但只會快取該
+worktree 的 manifest，同時在 source worktree 建立鏈結，讓下一個 focused action
+可以開始。在主要 worktree 執行 `declare` 也是合法的，但只會快取該
 主要 snapshot 的 profile，不會建立指向
 自己的鏈結。Verification 與 reconcile 也會把同一份 profile 套用到各自的受管理
 worktree，不會依賴先前 `run` 遺留下來的鏈結。
@@ -127,29 +128,33 @@ worktree，不會依賴先前 `run` 遺留下來的鏈結。
 可在任一 worktree 查看狀態，不做任何變更：
 
 ```text
-assent shared-paths status
+assent ignored-dirs status
 ```
 
-輸出會列出目前與主要 worktree、manifest、狀態、匹配的 profile、paths、watch
+輸出會列出目前與主要 worktree、manifest、狀態、匹配的 profile、必要目錄、watch
 files，以及鏈結是否一致。在主要 worktree 中，鏈結會顯示為不適用，因為其中的一般
 目錄就是 target。這個指令不會修復任何東西；無法讀取契約或已確定 profile 的鏈結
 損壞時，會回傳非零狀態。
 
-審查列出的 inventory 後，應在受管理的 source worktree 提交宣告，並指定哪些
-tracked dependency 或 build file 改變後，原決定應該失效：
+審查列出的 inventory 後，active source role 會在自己的受管理 worktree 提交宣告，
+並指定哪些 tracked dependency 或 build file 改變後，原決定應該失效：
 
 ```text
-assent shared-paths declare --path assets --path pkg --classify build "generated output" --watch package.lock
+assent ignored-dirs declare --required assets --required pkg --not-required build "generated output" --watch package.lock
 ```
 
-宣告指示列出的每個 ordinary ignored directory，都必須由 shared `--path`
-或 non-shared `--classify PATH REASON` 覆蓋一次；兩者都可以涵蓋 subtree。沒有目錄
-需要分享時使用 `--none`。Ignored leaf file 仍由 verifier 自動處理，不需要分類。
+宣告指示列出的每個 ordinary ignored directory，都必須由 `--required` 或
+`--not-required DIR REASON` 覆蓋一次；兩者都可以涵蓋 subtree。沒有目錄是 source
+必要輸入時使用 `--none-required`。只有 `--required` 目錄會在 worktree 建立鏈結。
+Ignored leaf file 仍由 verifier 自動處理，不需要分類。這不是一般 junction 管理
+指令，也不會複製目錄。它不是人類復原指令；人類使用 `assent rework`，讓下一次
+`run` 把決定重新交給 AI workflow。
 
-決定會快取在主要 worktree 未追蹤的 `.assent/manifest.toml`。Watch file、directory
+決定會快取在主要 worktree 未追蹤的 `.assent/_ignored-dirs.toml`。Watch file、directory
 inventory 或 target 改變後會過期。若成功查詢沒有發現 ordinary ignored directory，
 狀態是 `NO-IGNORED-DIRECTORY-CANDIDATE`；它只描述目前檔案系統，不是「專案永遠
-不需要 shared input」的語意保證。
+不需要 ignored-directory input」的語意保證。
+前導底線表示這是 Assent-owned 本機狀態；只能透過 `ignored-dirs declare` 修改。
 
 不能把所有 ignored directory 都建立成鏈結。Ignore rule 還可能包含可寫入的 build
 output、cache、virtual environment、editor state 與 credential；全部連結會共用
@@ -159,7 +164,7 @@ verification、report、reconcile 與 acceptance 失效。清理時 Assent 只�
 本身，不會進入或刪除 target。
 
 若 verifier output 指向既有 ignored directory 內的遺漏路徑，Assent 會附加
-`Ignored input diagnosis:`，指出 `shared-paths declare` 的處理方式，但保留原始 exit
+`Ignored input diagnosis:`，指出 `ignored-dirs declare` 的處理方式，但保留原始 exit
 code。
 
 選取方式請看[指令](COMMANDS.md)，復原安全請看[作業](OPERATIONS.md)。

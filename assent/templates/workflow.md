@@ -55,7 +55,7 @@ the stated requirements. Predicted paths and task ownership are not write
 boundaries. A read-only session may change no project file. All sessions are
 forbidden from Git, Assent commands, scheduler-owned actions, task contracts,
 journals, receipts, and `.git` or `.assent` state. For unknown or stale local
-input evidence, the bounded `assent shared-paths declare` operation is the only
+input evidence, the bounded `assent ignored-dirs declare` operation is the only
 Assent-command exception. The session supplies the reviewed declaration;
 Assent validates, records, and applies it.
 
@@ -130,7 +130,9 @@ Task and plan workflows use one finite linear interpreter:
 2. A passing action completes the layer immediately; later roles are skipped.
 3. A failing non-final action records its exact command/output and advances to
    the next configured step.
-4. If the array ends without a passing action, all edits and evidence remain and
+4. An unsettled ignored-directory decision records that the action did not
+   start; it never becomes test failure evidence.
+5. If the array ends without a passing action, all edits and evidence remain and
    the outcome is `REVIEW UNRESOLVED, HUMAN DECISION`.
 
 There is no finding ledger, ownership routing, cascade, repair phase, scope
@@ -176,8 +178,8 @@ task files, dependencies, adapters, Git layering, and global contracts.
 distinct task commands for the cumulative plan. They write no receipt.
 `full_verify` builds a temporary integration candidate and runs
 `.assent/verify.py` outside every AI session. Its receipt is deletable evidence
-bound to source commits, the reconstructed tree, verifier digest, and shared
-input digest.
+bound to source commits, the reconstructed tree, verifier digest, and
+ignored-directory input digest.
 
 An explicit `assent verify` performs only the requested mechanical check. It
 never enters a workflow role or repairs a failure.
@@ -191,20 +193,27 @@ never enters a workflow role or repairs a failure.
 Verification changes no source or target ref and never accepts. A candidate
 conflict is distinct from verifier failure.
 
-## Shared ignored inputs
+## Ignored-directory inputs
 
 Complete verification mirrors only reviewed ignored-directory links and
 ordinary ignored leaf files inside otherwise tracked directories. Nothing is
 copied. Build trees, caches, credentials, `.git`, `.assent`, and link-target
 contents are not enumerated.
 
-The primary worktree's untracked `.assent/manifest.toml` stores reviewed shared
-directory profiles. `assent shared-paths declare` is the only writer. A profile
-may classify as `UNKNOWN`, `REVIEWED-NONE`, `REVIEWED-PATHS`, `STALE`, or
+The primary worktree's untracked `.assent/_ignored-dirs.toml` stores reviewed
+ignored-directory profiles. `assent ignored-dirs declare` is the only writer.
+A profile may classify as `UNKNOWN`, `REVIEWED-NONE`, `REVIEWED-REQUIRED`,
+`STALE`, or
 `NO-IGNORED-DIRECTORY-CANDIDATE`. Unknown or stale evidence adds one bounded
 validated command to a source role. The following action refuses to start
 until that operation settles the decision; sessions never edit the manifest or
 create a link by hand.
+
+`declare --required DIR` records a required source input and provisions its
+same-relative junction or directory symlink. `--none-required` records that no
+inventory directory is required. `--not-required DIR REASON` accounts for
+caches, output, and every other inventory directory. The command is not a
+general junction manager and never copies a directory.
 
 Candidate cleanup detaches directory links before recursive cleanup and never
 traverses their targets. If inventory or detachment cannot be proven, cleanup

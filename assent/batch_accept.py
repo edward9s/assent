@@ -215,17 +215,17 @@ def _batch_gate_problem(main: Path, configs: dict[str, Config],
         return str(e)
     if current != receipt.verify_script_sha256:
         return "the verification script changed during the batch release"
-    # The shared inputs are evidence like the source, target, and verifier are,
+    # The ignored-directory inputs are evidence like the source, target, and verifier are,
     # so they are re-observed at the same two moments.  This only reads and
     # classifies: acceptance never provisions or repairs a link, and never
     # invokes AI, to make a stale receipt publishable.
     try:
-        if verification.current_batch_shared_inputs(
-                main, receipt) != receipt.shared_inputs_sha256:
-            return ("the reviewed shared inputs changed during the batch "
+        if verification.current_batch_ignored_directory_inputs(
+                main, receipt) != receipt.ignored_directory_inputs_sha256:
+            return ("the reviewed ignored-directory inputs changed during the batch "
                     "release")
     except AssentError as e:
-        return f"the reviewed shared inputs can no longer be proven: {e}"
+        return f"the reviewed ignored-directory inputs can no longer be proven: {e}"
     return None
 
 

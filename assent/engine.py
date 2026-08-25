@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 from assent import (AssentError, contracts, gitops, lockfile, reconcile,
-                    shared_paths, usage, verification)
+                    ignored_dirs, usage, verification)
 
 from assent.adapters import Adapter, InvocationRequest, get_adapter
 
@@ -267,7 +267,7 @@ def _adapter_availability_failed(result: TaskResult) -> bool:
                 "authentication", "billing", "interrupt", "permission",
                 "unsupported_model"})
 
-def _diagnosed_shared_inputs(cfg: Config) -> tuple[str, ...]:
+def _diagnosed_ignored_directory_inputs(cfg: Config) -> tuple[str, ...]:
     """Directories a stored full-verifier diagnosis proved this plan needs.
 
     No generic rule can infer that an ignored directory is semantically
@@ -280,13 +280,13 @@ def _diagnosed_shared_inputs(cfg: Config) -> tuple[str, ...]:
             verification.receipt_path(cfg), gitops.main_worktree(cfg.root))
     except AssentError:
         return ()
-    return verification.diagnosed_ignored_directories(receipt.failure_summary)
+    return verification.diagnosed_ignored_dirs(receipt.failure_summary)
 
-def _shared_path_contract(cfg: Config) -> shared_paths.Contract:
-    """Classify and provision the current source using reviewed local memory."""
-    return shared_paths.prepare_worktree(
+def _ignored_dir_decision(cfg: Config) -> ignored_dirs.Decision:
+    """Classify and provision required ignored directories for this source."""
+    return ignored_dirs.prepare_worktree(
         gitops.main_worktree(cfg.root), cfg.root,
-        required_evidence=_diagnosed_shared_inputs(cfg))
+        required_evidence=_diagnosed_ignored_directory_inputs(cfg))
 
 @dataclass(frozen=True)
 class _TestActionEvidence:
@@ -335,7 +335,7 @@ def _run_focused_sweep_action(
     identity = _focused_sweep_identity(cfg, plan)
     existing = _focused_sweep_record(state)
     if (existing is not None and existing.identity == identity
-            and existing.status in {"PASSED", "FAILED"}):
+            and existing.status == "PASSED"):
         print(f"  focused_sweep {existing.status.lower()} evidence reused "
               f"(exit {existing.exit_code})")
         return state, existing, True
@@ -428,7 +428,7 @@ def _run_focused_test_action(
     identity = _focused_test_identity(cfg, task)
     existing = _focused_test_record(state)
     if (existing is not None and existing.identity == identity
-            and existing.status in {"PASSED", "FAILED"}):
+            and existing.status == "PASSED"):
         print(f"  focused_test {existing.status.lower()} evidence reused "
               f"(exit {existing.exit_code})")
         return state, existing, True
@@ -631,8 +631,8 @@ def _prepare_worktree(cfg: Config) -> Config:
                 f"validation ({detail})")
         _require_stack_ancestry(cfg, state_after, downstream_tip)
 
-        contract = _shared_path_contract(worktree_cfg)
-        print(shared_paths.describe(contract))
+        decision = _ignored_dir_decision(worktree_cfg)
+        print(ignored_dirs.describe(decision))
         print(f"Isolated worktree: {root}")
         print(f"Target snapshot: {state_after.base.target_snapshot}")
         stacked = state_before.base.speculative_upstream
@@ -737,7 +737,7 @@ def _integration_prompt(
         if step.writes else
         "This is read-only. Do not create, edit, delete, rename, format, or "
         "generate project files.")
-    shared_clause = shared_paths.declaration_clause(_shared_path_contract(cfg))
+    ignored_dir_clause = ignored_dirs.declaration_clause(_ignored_dir_decision(cfg))
     return f"""You are one Assent integration role session.
 
 Read the project rules {_agents_md_path_for_prompt(cfg)} and the Assent session
@@ -752,9 +752,9 @@ Role responsibility:
 Treat the plan candidate as one result. Do not assign findings or files to task
 owners. Task contracts, journals, scheduler state, Git state, receipts, and
 files below .git or .assent are read-only. Do not run Git, Assent, or the full
-verifier; the scheduler owns them. The exact shared-paths command injected
+verifier; the scheduler owns them. The exact ignored-dirs command injected
 below is the sole exception.
-{shared_clause}
+{ignored_dir_clause}
 
 Authoritative task requirements:
 {contracts_text}
@@ -1580,7 +1580,7 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
         if (not result.target_commit or not result.source_commits
                 or not result.candidate_tree
                 or not result.verification_script_sha256
-                or not result.shared_inputs_sha256):
+                or not result.ignored_directory_inputs_sha256):
             print("Selection full_verify returned incomplete evidence")
             return 1
         if len(configs) == 1 and result.outcome == "TARGET_CONFLICT":
@@ -1622,7 +1622,7 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
                     action_evidence=(result.outcome,) + result.evidence,
                     verification_script_sha256=(
                         result.verification_script_sha256),
-                    shared_inputs_sha256=result.shared_inputs_sha256)
+                    ignored_directory_inputs_sha256=result.ignored_directory_inputs_sha256)
                 write_selection_workflow_state(
                     configs[0].assent_dir, state)
         except (AssentError, lockfile.LockBusy) as error:
@@ -1819,6 +1819,9 @@ def _run_locked(cfg: Config, adapter: Adapter | None,
             task, _resumed = selected
 
             if task.status == "TODO":
+                # TODO is a fresh workflow attempt. A cursor belongs only to
+                # the WIP or BLOCKED attempt that wrote it.
+                workflow_state_path(cfg.tasks_dir).unlink(missing_ok=True)
                 set_status(task.path, "WIP")
                 append_entry(
                     task.journal_path, by="scheduler", event="started",
@@ -2074,7 +2077,7 @@ def _source_workflow_prompt(
         if task is not None else
         "Review and repair the cumulative candidate as one plan result; do not "
         "assign findings or files to task owners.")
-    shared_clause = shared_paths.declaration_clause(_shared_path_contract(cfg))
+    ignored_dir_clause = ignored_dirs.declaration_clause(_ignored_dir_decision(cfg))
     return f"""You are one Assent role session.
 
 Read the project rules {_agents_md_path_for_prompt(cfg)} and the Assent session
@@ -2094,8 +2097,8 @@ Task contracts are read-only. Journals, scheduler state, Git state, receipts,
 and files below .git or .assent are also read-only. Do not run Git, Assent, a
 scheduler-owned focused action, or the full verifier. The scheduler owns every
 checkpoint, task status, journal entry, and action result.
-The exact shared-paths command injected below is the sole Assent exception.
-{shared_clause}
+The exact ignored-dirs command injected below is the sole Assent exception.
+{ignored_dir_clause}
 
 Authoritative task requirements:
 {contracts_text}
@@ -2294,6 +2297,24 @@ def _source_workflow_unresolved(
           "preserved.")
     return 0
 
+def _source_workflow_gate_unresolved(
+        cfg: Config, task: Task | None, state: WorkflowState,
+        action: str, summary: str, now: Callable[[], datetime]) -> int:
+    """Close an exhausted workflow whose final action never started."""
+    if task is not None:
+        set_status(task.path, "BLOCKED")
+        append_entry(
+            task.journal_path, by="scheduler", event="blocked",
+            summary=("Task workflow exhausted while the ignored-directory "
+                     "decision remained unsettled"),
+            detail=f"Action not started: {action}\nReason:\n{summary}",
+            time_str=now().isoformat(timespec="seconds"))
+    write_workflow_state(cfg.tasks_dir, state)
+    print(f"{state.unit.title()} workflow: REVIEW UNRESOLVED, HUMAN DECISION; "
+          "the configured steps were exhausted. Evidence and edits were "
+          "preserved.")
+    return 0
+
 def _process_source_workflow(
         cfg: Config, plan: Plan, task: Task | None,
         steps: tuple[_RoleStep | WorkflowActionStep, ...],
@@ -2336,22 +2357,24 @@ def _process_source_workflow(
             cfg.git_excludes)
         print(f"\n{unit.title()} workflow step {state.step_index + 1}/"
               f"{len(steps)}: {step.action}")
-        contract = _shared_path_contract(cfg)
-        if not contract.settled:
-            summary = (shared_paths.closeout_refusal(contract)
-                       or f"Run `{shared_paths.DECLARE_COMMAND}`")
-            if task is not None:
-                record = _TestActionEvidence(
-                    "FAILED", _focused_test_identity(cfg, task), 1,
-                    task.verify, summary)
-                state = _with_focused_test_record(state, record)
-            else:
-                record = _TestActionEvidence(
-                    "FAILED", _focused_sweep_identity(cfg, plan), 1,
-                    "\n".join(_plan_verify_commands(plan)), summary)
-                state = _with_focused_sweep_record(state, record)
+        decision = _ignored_dir_decision(cfg)
+        if not decision.settled:
+            summary = (ignored_dirs.closeout_refusal(decision)
+                       or f"Run `{ignored_dirs.DECLARE_COMMAND}`")
+            gate_evidence = f"{step.action} not started:\n{summary}"
+            state = replace(
+                state, evidence=state.evidence + (gate_evidence,),
+                action="", action_status="", action_source_tree="",
+                action_exit_code=0, action_evidence=())
             write_workflow_state(cfg.tasks_dir, state)
             print(f"  {step.action} not started: {summary}")
+            if state.step_index == len(steps) - 1:
+                return _source_workflow_gate_unresolved(
+                    cfg, task, state, step.action, summary, now)
+            state = replace(
+                state, step_index=state.step_index + 1, started=False)
+            write_workflow_state(cfg.tasks_dir, state)
+            continue
         elif task is not None:
             state, record, _reused = _run_focused_test_action(cfg, task, state)
         else:
@@ -2484,7 +2507,7 @@ def _verify_focused_locked(
 
     # --focus provisions the persistent source worktree like every other verify
     # entry point, and writes no receipt of any kind.
-    shared_paths.prepare_sources(main, [(plan_name, source.worktree)])
+    ignored_dirs.prepare_sources(main, [(plan_name, source.worktree)])
     print(f"{label}: source worktree {source.worktree}")
     print(f"{label}: {kind} cannot authorize `accept`; "
           "complete integration verification has not run")

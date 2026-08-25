@@ -111,18 +111,18 @@ watchdog stall is an adapter failure: Assent preserves work and applies its
 retry policy. A successful role session advances to the next configured step;
 only a scheduler action changes task completion state.
 
-## Shared ignored directories
+## Ignored directories
 
 If an injected clause says `UNKNOWN` or `STALE`, inspect the complete listed
-inventory and submit the decision with `assent shared-paths declare` from the
+inventory and submit the decision with `assent ignored-dirs declare` from the
 source worktree before closeout. Assent validates, records, and applies the
-declaration.
-Cover every listed ordinary ignored directory once
-as shared or non-shared, and watch only the tracked dependency or build files
-that invalidate the decision.
+declaration. Mark every listed ordinary ignored directory exactly once with
+`--required` or `--not-required`; use `--none-required` when none is an input.
+Watch only tracked dependency or build files that invalidate the decision.
 
-Share only a demonstrably required directory whose same-relative primary target
-is an ordinary Git-ignored directory. Never copy an ignored tree. Never
+Require only a directory that the task demonstrably needs and whose
+same-relative primary target is an ordinary Git-ignored directory. Assent then
+creates the worktree link. Never copy an ignored tree. Never
 hand-create a source-worktree link, provision unrelated caches or credentials,
 or modify a linked target.
 

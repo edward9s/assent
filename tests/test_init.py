@@ -65,9 +65,9 @@ class TestInitContractRefresh(unittest.TestCase):
             encoding="utf-8").split())
         self.assertIn("Never copy an ignored tree", text)
         self.assertIn(
-            "submit the decision with `assent shared-paths declare`",
+            "submit the decision with `assent ignored-dirs declare`",
             text)
-        self.assertIn("Cover every listed ordinary ignored directory once",
+        self.assertIn("Mark every listed ordinary ignored directory exactly once",
                       text)
         self.assertIn("Never hand-create a source-worktree link", text)
         self.assertFalse((self.root / ".assent/instructions.md").exists())

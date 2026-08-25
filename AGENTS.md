@@ -5,7 +5,7 @@
 assent — an AI plan format plus an automatic scheduler. Pure Python 3.11+
 (standard library only, tomllib), Windows-first and cross-platform. CLI
 subcommands: run / status / check / report / verify / clean / accept /
-reconcile / reject / rework / archive / init / doctor / shared-paths.
+reconcile / reject / rework / archive / init / doctor / ignored-dirs.
 Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
 
 This file governs development of the assent project itself. Rules followed
@@ -122,8 +122,12 @@ These principles jointly govern every design and implementation decision:
   interpreter executes every layer: a successful role session advances once;
   a passing action completes the layer and skips later roles; a failing action
   records evidence and advances; exhaustion becomes `REVIEW UNRESOLVED, HUMAN
-  DECISION`, exit zero. Workflow position and abilities define responsibility;
-  names do not. Sessions are sequential and exchange only bounded evidence,
+  DECISION`, exit zero. A refused action precondition records that the action
+  did not start and is never stored as test failure evidence; only matching
+  PASSED action evidence
+  may be reused for interruption recovery, while every later configured action
+  reruns after FAILED evidence. Workflow position and abilities define
+  responsibility; names do not. Sessions are sequential and exchange only bounded evidence,
   never dialogue. There is no structured verdict, finding ledger, owner
   routing, cascade, repair phase, disposition protocol, scope amendment, or
   second review engine. Only the scheduler mutates task status, journals, Git,
@@ -220,7 +224,7 @@ These principles jointly govern every design and implementation decision:
   overlay, or copies of ignored directory contents into Git.
 - The ignored-input handoff is documented where each reader actually looks: the
   packaged scheduled-task instructions tell an executing session to record a
-  required ignored directory through `assent shared-paths declare`, which
+  required ignored directory through `assent ignored-dirs declare`, which
   provisions the same-relative junction or directory symlink, and never to copy
   the tree or hand-create a source link; a full verifier that fails on a
   path inside a physically ignored source directory gets one appended
@@ -230,34 +234,39 @@ These principles jointly govern every design and implementation decision:
   exact selected, dynamic batch, and localization-prefix verification alike,
   normalizes separators, and reports only a directory the verifier output
   itself names; it never enumerates or traverses an ignored tree.
-- Which ignored directories a project shares is a reviewed decision cached in
-  the primary worktree's untracked, never-committed `.assent/manifest.toml`;
+- Which ignored directories a source requires is a reviewed decision cached in
+  the primary worktree's untracked, never-committed
+  `.assent/_ignored-dirs.toml`;
   it is Assent-owned local execution memory, not project source, and its only
-  writer is the validated `assent shared-paths declare` operation. Under
-  `[shared_paths]` it retains whole profiles by fingerprint -- normalized
-  project-relative `paths`, a complete collapsed ordinary ignored-directory inventory,
-  explicit non-shared dispositions with reasons, exact tracked `watch` files,
+  writer is the validated `assent ignored-dirs declare` operation. Under
+  `[ignored_dirs]` it has one exact schema with no version field, migration,
+  or legacy reader. It retains whole profiles by fingerprint -- normalized
+  project-relative `required` directories, a complete collapsed ordinary
+  ignored-directory inventory, explicit `not_required` entries with reasons,
+  exact tracked `watch` files,
   and a digest of those files plus the tracked Git-ignore rules -- so parallel
   branches never make the cache oscillate and an omitted directory cannot
   be accepted. A source snapshot is UNKNOWN, REVIEWED-NONE (a matching
-  `paths = []` profile is an answer and must never trigger another review),
-  REVIEWED-PATHS (Assent provisions the exact Windows junction or POSIX
+  `required = []` profile is an answer and must never trigger another review),
+  REVIEWED-REQUIRED (Assent provisions the exact Windows junction or POSIX
   directory symlink to the primary worktree's same relative path itself), or
   STALE; conflicting matching profiles fail closed. One further state,
   NO-IGNORED-DIRECTORY-CANDIDATE, is the deterministic zero-token fast path:
   a successful primary-worktree query found no existing ordinary ignored
-  directory. It is distinct from REVIEWED-NONE and never claims that shared
-  input is semantically unnecessary. Discovery failure refuses; a new directory
-  makes the next classification UNKNOWN. Complete-verifier `required_evidence`
+  directory. It is distinct from REVIEWED-NONE and never claims that an
+  ignored-directory input is semantically unnecessary. Discovery failure
+  refuses; a new directory makes the next classification UNKNOWN.
+  Complete-verifier `required_evidence`
   requires a provisionable primary directory or refuses with the exact target
-  problem. UNKNOWN and STALE add one bounded `assent shared-paths declare`
+  problem. UNKNOWN and STALE add one bounded `assent ignored-dirs declare`
   clause to a source role; the following scheduler action refuses to run until
-  the validated operation settles the decision. Inventory comes from the primary worktree;
-  ignored leaf files remain on their separate automatic verifier path.
+  the validated operation settles the decision. Inventory comes from the
+  primary worktree; ignored leaf files remain on their separate automatic
+  verifier path.
   Every verification entry point and `assent reconcile` classify and reconcile
   before any candidate, verifier, or managed worktree exists, and plan and
-  batch receipts bind one `shared_inputs_sha256` -- snapshotted immediately
-  before and after the full verifier -- that acceptance rechecks before
+  batch receipts bind one `ignored_directory_inputs_sha256` -- snapshotted
+  immediately before and after the full verifier -- that acceptance rechecks before
   publishing a ref without ever repairing a link or invoking AI. Do not add a
   copy fallback, glob, all-ignored mode, force flag, Git staging of the
   manifest, or any claim that semantic necessity can be inferred from
@@ -329,7 +338,7 @@ Git-based workflow: `gitops.py`, `accept.py`, `archive.py`, `reconcile.py`,
 `reject.py`, `rework.py`, `clean.py`, `init.py`, `plan.py`, `batch_accept.py`,
 `batch_receipt.py`, `plan_verification.py`,
 `plan_verification_closeout.py`, `batch_verification.py`, `verification.py`,
-`verification_common.py`, `shared_paths.py`.
+`verification_common.py`, `ignored_dirs.py`.
 
 Unattended workflow: `plan_scheduler.py` and the linear task, plan, and
 integration interpreter in `engine.py`, including adapter rotation and

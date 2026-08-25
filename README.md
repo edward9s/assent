@@ -105,7 +105,7 @@ passing prefix, or calls `accept`.
 - [Configuration](docs/CONFIGURATION.md): initialization, adapters, models, and
   workflow settings.
 - [Verification](docs/VERIFICATION.md): focused/full checks, receipts,
-  conflicts, and shared ignored inputs.
+  conflicts, and ignored-directory inputs.
 - [Operations](docs/OPERATIONS.md): worktrees, recovery, cleanup, and archive.
 
 English documentation is canonical. Matching

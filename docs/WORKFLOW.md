@@ -45,6 +45,11 @@ completes its layer and skips later roles. A failing action records evidence and
 advances. The configured arrays are the entire automation budget; Assent never
 invents another review or repair round.
 
+An unsettled ignored-directory decision means the action did not start; Assent
+records that gate evidence separately from test results. A later configured
+action runs again after FAILED evidence. Only matching PASSED evidence is reused
+to finish interruption recovery.
+
 Role and ability names have no scheduler meaning. Abilities supply prompt text
 and write authority. A writable role may repair any ordinary candidate file
 needed by the stated requirements. Task contracts, journals, scheduler state,
@@ -55,9 +60,9 @@ bounded output from earlier roles and exact mechanical action evidence. There
 is no structured verdict, finding ledger, owner routing, path-scope amendment,
 or second repair engine.
 
-Unknown or stale shared ignored-directory evidence adds one bounded declaration
+Unknown or stale ignored-directory evidence adds one bounded declaration
 instruction to a source role. The session reviews the complete inventory and
-submits its decision through `assent shared-paths declare`; Assent validates,
+submits its decision through `assent ignored-dirs declare`; Assent validates,
 records, and applies it. This operation is the only writer of the local manifest.
 The following action does not start until the decision is settled; no directory
 is copied or linked by hand.

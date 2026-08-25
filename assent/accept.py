@@ -190,18 +190,18 @@ def _accept_locked(cfg: Config) -> int:
     if receipt.verify_script_sha256 != current_digest:
         print(_refresh_message(plan_name, "the verification script changed"))
         return 1
-    # Shared inputs are evidence like the source, target, and verifier are: a
+    # Ignored-directory inputs are evidence like the source, target, and verifier are: a
     # changed profile, declared target, or target content means the receipt no
     # longer describes what would be tested.  Accept never repairs a link or
     # invokes AI to make this pass; it refuses and asks for a fresh verify.
     try:
-        current_shared = verification.current_shared_inputs(cfg)
+        current_ignored_dirs = verification.current_ignored_directory_inputs(cfg)
     except AssentError as e:
         print(_refresh_message(plan_name, str(e)))
         return 1
-    if receipt.shared_inputs_sha256 != current_shared:
+    if receipt.ignored_directory_inputs_sha256 != current_ignored_dirs:
         print(_refresh_message(
-            plan_name, "the reviewed shared inputs changed since verification"))
+            plan_name, "the reviewed ignored-directory inputs changed since verification"))
         return 1
 
     message = accept_merge_message(
@@ -276,13 +276,14 @@ def _accept_locked(cfg: Config) -> int:
                                 "the verification script changed during acceptance")
                         if gate_problem is None:
                             try:
-                                final_shared = verification.current_shared_inputs(cfg)
+                                final_ignored_dirs = (
+                                    verification.current_ignored_directory_inputs(cfg))
                             except AssentError as e:
                                 gate_problem = str(e)
                             else:
-                                if final_shared != current_shared:
+                                if final_ignored_dirs != current_ignored_dirs:
                                     gate_problem = (
-                                        "the reviewed shared inputs changed during "
+                                        "the reviewed ignored-directory inputs changed during "
                                         "acceptance")
                         if gate_problem is None:
                             gitops.fast_forward(main, integration_commit)
