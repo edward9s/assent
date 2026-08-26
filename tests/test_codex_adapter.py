@@ -1,6 +1,7 @@
 """Codex adapter tests; never use the network or a real Codex session."""
 import json
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from assent import AssentError
@@ -62,7 +63,7 @@ class TestFormatStreamEvent(unittest.TestCase):
         rendered = [format_stream_event(line) for line in lines]
         self.assertTrue(any(text and "AI| OK" in text for text in rendered))
         self.assertTrue(any(text and "5 tokens" in text for text in rendered))
-        self.assertFalse(parse_output_for_quota("\n".join(lines)))
+        self.assertFalse(parse_output_for_quota("\n".join(lines))[0])
 
     def test_agent_message_is_displayed(self):
         # The agent_message text is opaque upstream fixture data (Chinese kept on purpose to
@@ -126,14 +127,28 @@ class TestQuota(unittest.TestCase):
                 "type": "agent_message", "text": "You've hit your session limit"}},
         ):
             with self.subTest(event=event):
-                self.assertTrue(parse_output_for_quota(json.dumps(event)))
+                self.assertTrue(parse_output_for_quota(json.dumps(event))[0])
+
+    def test_real_usage_limit_message_supplies_the_local_reset_time(self):
+        observed = datetime(2026, 8, 26, 17, 57, tzinfo=timezone.utc)
+        message = (
+            "You've hit your usage limit. Upgrade to Pro, visit settings "
+            "to purchase more credits or try again at 6:00 PM.")
+        exhausted, reset_at = parse_output_for_quota(
+            json.dumps({"type": "turn.failed",
+                        "error": {"message": message}}),
+            now=observed)
+
+        self.assertTrue(exhausted)
+        self.assertEqual(
+            reset_at, datetime(2026, 8, 26, 18, 0, tzinfo=timezone.utc))
 
     def test_tool_text_and_normal_completion_do_not_false_positive(self):
         command = {"type": "item.completed", "item": {
             "type": "command_execution", "command": "fix rate limit parser"}}
         normal = {"type": "turn.completed", "usage": {"output_tokens": 1}}
         output = json.dumps(command) + "\n" + json.dumps(normal)
-        self.assertFalse(parse_output_for_quota(output))
+        self.assertFalse(parse_output_for_quota(output)[0])
 
 
 class TestCheckpointResume(unittest.TestCase):
@@ -172,7 +187,7 @@ class TestBilling(unittest.TestCase):
             with self.subTest(event=event):
                 self.assertTrue(parse_output_for_billing(json.dumps(event)))
                 # billing must not also register as quota (mutually exclusive verdicts)
-                self.assertFalse(parse_output_for_quota(json.dumps(event)))
+                self.assertFalse(parse_output_for_quota(json.dumps(event))[0])
 
     def test_tool_text_and_normal_completion_are_not_billing(self):
         command = {"type": "item.completed", "item": {
@@ -213,11 +228,18 @@ class TestRunTask(unittest.TestCase):
         self.assertFalse(result.stalled)
 
     def test_quota_and_stall_behavior(self):
-        quota = json.dumps({"type": "error", "message": "usage limit reached"})
+        quota = json.dumps({
+            "type": "error",
+            "message": "You've hit your usage limit; try again at 6:00 PM.",
+        })
         self.patch_run(lambda *args, **kwargs: (1, quota, False))
         adapter = CodexAdapter(make_cfg())
-        self.assertTrue(adapter.run_task(
-            "p", adapter.resolve("lite")[0], None, Path(".")).quota_exhausted)
+        result = adapter.run_task(
+            "p", adapter.resolve("lite")[0], None, Path("."))
+        self.assertTrue(result.quota_exhausted)
+        self.assertIsNotNone(result.reset_at)
+        self.assertEqual(
+            (result.reset_at.hour, result.reset_at.minute), (18, 0))
 
         self.patch_run(lambda *args, **kwargs: (1, quota, True))
         stalled = adapter.run_task(

@@ -14,6 +14,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 from assent import AssentError
 from assent.adapters import CHECKPOINT_RESUME_RECORD, TaskResult, get_adapter
@@ -118,8 +119,15 @@ class TestParseQuota(unittest.TestCase):
         line = json.dumps({"type": "assistant", "message": {"content": [
             {"type": "text",
              "text": "You've hit your session limit �P resets 4am (Asia/Taipei)"}]}})
-        exhausted, _ = parse_output_for_quota(line + "\n")
+        exhausted, reset_at = parse_output_for_quota(
+            line + "\n",
+            now=datetime(2026, 7, 15, 3, 30,
+                         tzinfo=ZoneInfo("Asia/Taipei")))
         self.assertTrue(exhausted)
+        self.assertEqual(
+            reset_at,
+            datetime(2026, 7, 15, 4, 0,
+                     tzinfo=ZoneInfo("Asia/Taipei")))
 
     def test_session_limit_variants_detected(self):
         for text in ("Session limit reached", "you've hit your weekly limit",

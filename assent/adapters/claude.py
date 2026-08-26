@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from assent.adapters import (Adapter, TaskResult, TokenUsage,
                              is_authentication_failure_text,
@@ -57,6 +58,10 @@ _QUOTA_TEXT_RE = re.compile(
     r"usage\s+limit|rate\s+limit|session\s+limit|limit\s+reached"
     r"|hit\s+your\s+[\w'’ ]{0,40}limit|quota\s+(?:exceeded|exhausted)"
     r"|out\s+of\s+\w*\s*credit",
+    re.IGNORECASE)
+_QUOTA_RESET_RE = re.compile(
+    r"\bresets?\s+(?:at\s+)?((?:1[0-2]|[1-9]))"
+    r"(?::([0-5]\d))?\s*([ap]m)\s*(?:\(([^()]+)\))?",
     re.IGNORECASE)
 # Account-level billing/insufficient-balance text: distinct from quota, because a prepaid
 # balance never refills on its own; the scheduler must fail fast, not wait for a reset that
@@ -156,7 +161,9 @@ def format_stream_event(raw_line: str) -> str | None:
     return None
 
 
-def parse_output_for_quota(output: str) -> tuple[bool, datetime | None]:
+def parse_output_for_quota(
+        output: str, *, now: datetime | None = None,
+        ) -> tuple[bool, datetime | None]:
     """Determine quota exhaustion and parse the reset time from stream-json output
     (the strategy from 2.5).
 
@@ -167,6 +174,7 @@ def parse_output_for_quota(output: str) -> tuple[bool, datetime | None]:
     """
     exhausted = False
     reset_ts: float | None = None
+    reset_match: re.Match[str] | None = None
     human_texts: list[str] = []
 
     for raw in output.splitlines():
@@ -203,15 +211,37 @@ def parse_output_for_quota(output: str) -> tuple[bool, datetime | None]:
         else:
             human_texts.append(s)  # Non-JSON line (e.g. stderr text)
 
-    if not exhausted:
-        for text in human_texts:
-            if _QUOTA_TEXT_RE.search(text):
-                exhausted = True
-                break
+    for text in human_texts:
+        if not _QUOTA_TEXT_RE.search(text):
+            continue
+        exhausted = True
+        reset_match = _QUOTA_RESET_RE.search(text)
+        if reset_match is not None:
+            break
 
     reset_at = None
     if exhausted and reset_ts is not None:
         reset_at = datetime.fromtimestamp(reset_ts, tz=timezone.utc)
+    elif exhausted and reset_match is not None:
+        observed = now or datetime.now().astimezone()
+        zone_name = reset_match.group(4)
+        if zone_name:
+            try:
+                zone = ZoneInfo(zone_name)
+            except ZoneInfoNotFoundError:
+                zone = None
+        else:
+            zone = observed.tzinfo
+        if zone is not None:
+            local_now = observed.astimezone(zone)
+            hour = int(reset_match.group(1)) % 12
+            if reset_match.group(3).lower() == "pm":
+                hour += 12
+            reset_at = local_now.replace(
+                hour=hour, minute=int(reset_match.group(2) or 0),
+                second=0, microsecond=0)
+            if reset_at < local_now:
+                reset_at += timedelta(days=1)
     return exhausted, reset_at
 
 

@@ -22,6 +22,8 @@ import subprocess
 
 import sys
 
+import time
+
 from collections import Counter
 
 from dataclasses import dataclass, field, replace
@@ -2578,7 +2580,8 @@ def _wait_for_rotation(cfg: Config, sleep: Callable[[float], None]) -> None:
 
 def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
                tick: float = _QUOTA_TICK, segment: float = _COUNTDOWN_SEGMENT,
-               stream: TextIO | None = None) -> None:
+               stream: TextIO | None = None,
+               monotonic: Callable[[], float] = time.monotonic) -> None:
     """Countdown wait. Terminal (tty) -> update one line in place with \\r, without stacking
     lines; non-tty (redirected to a file/pipe) -> print one message, then sleep in segments of
     at most ``segment`` seconds so a stop request lands within one segment on every platform
@@ -2588,7 +2591,9 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
     The segments remain the platform-independent backstop, but the production sleep is
     ``interruptible_sleep``, so a stop request ends the current segment immediately; both
     loops then stop counting down rather than sitting out the rest of a multi-hour wait
-    while a KeyboardInterrupt is already pending."""
+    while a KeyboardInterrupt is already pending. The terminal line is shortened to fit
+    before the last column, and its monotonic deadline prevents slow rendering from delaying
+    the rerun."""
     if seconds <= 0:
         return
     clear_stop_wake()   # an earlier run's stop request must not shorten this wait
@@ -2605,8 +2610,6 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
                 break   # the pending KeyboardInterrupt lands at the next bytecode
             left -= step
         return
-    remaining = seconds
-
     # terminal_log.TeeTextIO provides a terminal-only channel: the countdown is a transient
     # UI and should not be written to _assent.log every second. A test/plain TextIO falls
     # back to write.
@@ -2618,16 +2621,40 @@ def _countdown(seconds: float, label: str, sleep: Callable[[float], None], *,
         else:
             stream.write(text)
             stream.flush()
-    while remaining > 0:
+
+    try:
+        columns = os.get_terminal_size(stream.fileno()).columns
+    except (AttributeError, OSError, ValueError):
+        columns = 80
+    line_width = max(1, columns - 1)  # writing the last column can wrap immediately
+    deadline = monotonic() + seconds
+    last_line = ""
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            break
         h, rem = divmod(int(remaining + 0.999), 3600)
         m, s = divmod(rem, 60)
-        transient_write(f"\r  {label}: countdown {h:02d}:{m:02d}:{s:02d} before rerunning... ")
+        stamp = f"{h:02d}:{m:02d}:{s:02d}"
+        candidates = (
+            f"  {label}: countdown {stamp} before rerunning... ",
+            f"  {label}: {stamp}",
+            f"  Retry in {stamp}",
+        )
+        last_line = next(
+            (candidate for candidate in candidates
+             if len(candidate) <= line_width),
+            stamp[-line_width:],
+        )
+        transient_write("\r" + last_line)
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            break
         step = tick if tick < remaining else remaining
         sleep(step)
         if stop_wake_requested():
             break
-        remaining -= step
-    transient_write("\r" + " " * 48 + "\r")  # clear the countdown line and return the cursor
+    transient_write("\r" + " " * len(last_line) + "\r")
 
 def _print_summary(plan: Plan) -> None:
     counts = Counter(t.status for t in plan.tasks)

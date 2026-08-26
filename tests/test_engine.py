@@ -1,6 +1,7 @@
 """The workflow engine is one finite role/action interpreter."""
 import contextlib
 import io
+import os
 import subprocess
 import unittest
 from unittest import mock
@@ -252,6 +253,42 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertEqual(len(adapter.calls), 2)
         self.assertEqual(waits, [60.0])
+
+    def test_tty_countdown_fits_the_terminal_and_uses_a_real_deadline(self):
+        clock = [0.0]
+
+        class SlowTty(io.StringIO):
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return 1
+
+            def write(self, text):
+                written = super().write(text)
+                if text.startswith("\r") and text.strip("\r "):
+                    clock[0] += 0.6  # terminal rendering time is part of the wait
+                return written
+
+        stream = SlowTty()
+        sleeps: list[float] = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        with mock.patch(
+                "assent.engine.os.get_terminal_size",
+                return_value=os.terminal_size((48, 24))):
+            engine._countdown(
+                3, "Quota poll (every 30 minutes)", sleep,
+                stream=stream, monotonic=lambda: clock[0])
+
+        self.assertAlmostEqual(clock[0], 3.0)
+        self.assertLess(sum(sleeps), 3.0)
+        self.assertNotIn("\n", stream.getvalue())
+        self.assertTrue(all(
+            len(part) <= 47 for part in stream.getvalue().split("\r")))
 
     def test_interrupt_during_role_keeps_wip_and_journals_it(self):
         path = self.write_task(1)

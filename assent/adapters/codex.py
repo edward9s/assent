@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,11 @@ _QUOTA_TEXT_RE = re.compile(
     r"usage\s+limit|rate\s+limit|session\s+limit|limit\s+reached"
     r"|hit\s+your\s+[\w'’ ]{0,40}limit|quota\s+(?:exceeded|exhausted)"
     r"|out\s+of\s+\w*\s*credit|insufficient[_ ]quota",
+    re.IGNORECASE,
+)
+_QUOTA_RESET_RE = re.compile(
+    r"\btry\s+again\s+at\s+((?:1[0-2]|[1-9]))"
+    r"(?::([0-5]\d))?\s*([ap]m)\b",
     re.IGNORECASE,
 )
 # Account-level billing/insufficient-balance: distinct from quota because a prepaid balance
@@ -134,8 +140,12 @@ def _strings(value: Any):
             yield from _strings(child)
 
 
-def parse_output_for_quota(output: str) -> bool:
-    """Best-effort quota detection from Codex error/failure/agent events."""
+def parse_output_for_quota(
+        output: str, *, now: datetime | None = None,
+        ) -> tuple[bool, datetime | None]:
+    """Detect Codex quota exhaustion and its local reset time when stated."""
+    exhausted = False
+    reset_at: datetime | None = None
     for raw in output.splitlines():
         line = raw.strip()
         if not line:
@@ -143,20 +153,38 @@ def parse_output_for_quota(output: str) -> bool:
         try:
             event = json.loads(line)
         except (json.JSONDecodeError, ValueError):
-            if _QUOTA_TEXT_RE.search(line):
-                return True
-            continue
-        if not isinstance(event, dict):
-            continue
-        kind = event.get("type")
-        item = event.get("item") or {}
-        is_agent_message = (kind in ("item.started", "item.completed", "item.updated")
-                            and isinstance(item, dict)
-                            and item.get("type") == "agent_message")
-        if kind in ("error", "turn.failed") or is_agent_message:
-            if any(_QUOTA_TEXT_RE.search(text) for text in _strings(event)):
-                return True
-    return False
+            texts = (line,)
+        else:
+            if not isinstance(event, dict):
+                continue
+            kind = event.get("type")
+            item = event.get("item") or {}
+            is_agent_message = (
+                kind in ("item.started", "item.completed", "item.updated")
+                and isinstance(item, dict)
+                and item.get("type") == "agent_message")
+            if kind not in ("error", "turn.failed") and not is_agent_message:
+                continue
+            texts = tuple(_strings(event))
+
+        for text in texts:
+            if not _QUOTA_TEXT_RE.search(text):
+                continue
+            exhausted = True
+            match = _QUOTA_RESET_RE.search(text)
+            if match is None or reset_at is not None:
+                continue
+            observed = now or datetime.now().astimezone()
+            hour = int(match.group(1)) % 12
+            if match.group(3).lower() == "pm":
+                hour += 12
+            minute = int(match.group(2) or 0)
+            candidate = observed.replace(
+                hour=hour, minute=minute, second=0, microsecond=0)
+            if candidate < observed:
+                candidate += timedelta(days=1)
+            reset_at = candidate
+    return exhausted, reset_at
 
 
 def parse_output_for_billing(output: str) -> bool:
@@ -293,8 +321,9 @@ class CodexAdapter(Adapter):
 
     def _make_result(self, returncode: int, output: str,
                      stalled: bool) -> TaskResult:
-        exhausted = (
-            not stalled and returncode != 0 and parse_output_for_quota(output))
+        exhausted, reset_at = (
+            parse_output_for_quota(output)
+            if not stalled and returncode != 0 else (False, None))
         billing = (not stalled and not exhausted and returncode != 0
                    and parse_output_for_billing(output))
         authentication = (not stalled and not exhausted and not billing
@@ -316,7 +345,7 @@ class CodexAdapter(Adapter):
         failure_kind = ("billing" if billing else
                         "authentication" if authentication else None)
         return TaskResult(exit_code=returncode, output=output,
-                          quota_exhausted=exhausted, reset_at=None,
+                          quota_exhausted=exhausted, reset_at=reset_at,
                           stalled=stalled, checkpoint_resume=checkpoint_resume,
                           failure_kind=failure_kind,
                           usage=parse_output_for_usage(output))
