@@ -7,8 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from assent.init import (_BRIDGE_LINE, _EXPANDED_BRIDGE_LINE,
-                         init as run_init, recover_expanded_bridge_drift)
+from assent.init import _BRIDGE_LINE, _BRIDGE_MARKER, init as run_init
 from tests.test_contracts import install_global_contracts
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -82,37 +81,51 @@ class TestInitContractRefresh(unittest.TestCase):
 
         self.assertEqual(agents.read_text(encoding="utf-8"), original)
 
-    def test_full_verify_can_recover_the_known_generated_bridge_only_edit(self):
+    def test_existing_project_without_marker_gets_one_canonical_bridge(self):
         agents = self.root / "AGENTS.md"
-        agents.write_text("# Project\n\n" + _BRIDGE_LINE + "\n",
-                          encoding="utf-8")
-        subprocess.run(["git", "add", "AGENTS.md"], cwd=self.root,
-                       check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "project rules"],
-                       cwd=self.root, check=True, capture_output=True)
-        agents.write_text("# Project\n\n" + _EXPANDED_BRIDGE_LINE + "\n",
-                          encoding="utf-8")
+        original = "# Project\n\n- Keep this project rule.\n"
+        agents.write_text(original, encoding="utf-8")
 
-        self.assertTrue(recover_expanded_bridge_drift(self.root))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root, test="unittest"), 0)
+
+        updated = agents.read_text(encoding="utf-8")
         self.assertEqual(
-            subprocess.run(
-                ["git", "status", "--porcelain"], cwd=self.root,
-                check=True, capture_output=True, encoding="utf-8").stdout,
-            "")
+            updated,
+            original.rstrip() + "\n\n" + _BRIDGE_LINE + "\n")
+        self.assertEqual(updated.count(_BRIDGE_MARKER), 1)
 
-    def test_generated_bridge_recovery_never_discards_another_edit(self):
+    def test_noncanonical_marker_is_refused_without_migration(self):
         agents = self.root / "AGENTS.md"
-        agents.write_text("# Project\n\n" + _BRIDGE_LINE + "\n",
-                          encoding="utf-8")
-        subprocess.run(["git", "add", "AGENTS.md"], cwd=self.root,
-                       check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "project rules"],
-                       cwd=self.root, check=True, capture_output=True)
-        changed = "# User edit\n\n" + _EXPANDED_BRIDGE_LINE + "\n"
-        agents.write_text(changed, encoding="utf-8")
+        original = (
+            "# Project\n\n"
+            "- Read `.assent/instructions.md` before work. "
+            f"{_BRIDGE_MARKER}\n")
+        agents.write_text(original, encoding="utf-8")
+        output = io.StringIO()
 
-        self.assertFalse(recover_expanded_bridge_drift(self.root))
-        self.assertEqual(agents.read_text(encoding="utf-8"), changed)
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root, test="unittest"), 1)
+
+        self.assertEqual(agents.read_text(encoding="utf-8"), original)
+        self.assertIn(
+            "invalid or duplicate Assent instructions bridge",
+            output.getvalue())
+
+    def test_duplicate_canonical_bridge_is_refused_without_rewriting(self):
+        agents = self.root / "AGENTS.md"
+        original = (
+            "# Project\n\n" + _BRIDGE_LINE + "\n\n" + _BRIDGE_LINE + "\n")
+        agents.write_text(original, encoding="utf-8")
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root, test="unittest"), 1)
+
+        self.assertEqual(agents.read_text(encoding="utf-8"), original)
+        self.assertIn(
+            "invalid or duplicate Assent instructions bridge",
+            output.getvalue())
 
 
 if __name__ == "__main__":
