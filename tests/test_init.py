@@ -1,5 +1,6 @@
 """Focused tests for the normal shared-contract refresh performed by init."""
 import contextlib
+import importlib
 import io
 import shutil
 import subprocess
@@ -7,7 +8,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from assent.init import _BRIDGE_LINE, _BRIDGE_MARKER, init as run_init
+from assent.init import (
+    _BRIDGE_BEGIN,
+    _BRIDGE_BLOCK,
+    _BRIDGE_END,
+    init as run_init,
+)
 from tests.test_contracts import install_global_contracts
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +33,11 @@ class TestInitContractRefresh(unittest.TestCase):
         subprocess.run(
             ["git", "config", "user.email", "assent@example.invalid"],
             cwd=self.root, check=True, capture_output=True)
+
+    def test_cli_module_imports(self) -> None:
+        module = importlib.import_module("assent.__main__")
+
+        self.assertTrue(callable(module._dispatch))
 
     def test_repeat_init_refreshes_the_packaged_format_through_normal_flow(self):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -73,7 +84,7 @@ class TestInitContractRefresh(unittest.TestCase):
 
     def test_existing_global_bridge_is_stable_when_contract_wording_changes(self):
         agents = self.root / "AGENTS.md"
-        original = "# Project\n\n" + _BRIDGE_LINE + "\n"
+        original = "# Project\n\n" + _BRIDGE_BLOCK + "\n"
         agents.write_text(original, encoding="utf-8")
 
         with contextlib.redirect_stdout(io.StringIO()):
@@ -92,15 +103,17 @@ class TestInitContractRefresh(unittest.TestCase):
         updated = agents.read_text(encoding="utf-8")
         self.assertEqual(
             updated,
-            original.rstrip() + "\n\n" + _BRIDGE_LINE + "\n")
-        self.assertEqual(updated.count(_BRIDGE_MARKER), 1)
+            original.rstrip() + "\n\n" + _BRIDGE_BLOCK + "\n")
+        self.assertEqual(updated.count(_BRIDGE_BEGIN), 1)
+        self.assertEqual(updated.count(_BRIDGE_END), 1)
 
-    def test_noncanonical_marker_is_refused_without_migration(self):
+    def test_unmanaged_assent_marker_is_refused_without_rewriting(self):
         agents = self.root / "AGENTS.md"
         original = (
-            "# Project\n\n"
+            "# Project\n\n- Keep before.\n"
             "- Read `.assent/instructions.md` before work. "
-            f"{_BRIDGE_MARKER}\n")
+            "<!-- assent-instructions -->\n"
+            "- Keep after.\n")
         agents.write_text(original, encoding="utf-8")
         output = io.StringIO()
 
@@ -109,13 +122,30 @@ class TestInitContractRefresh(unittest.TestCase):
 
         self.assertEqual(agents.read_text(encoding="utf-8"), original)
         self.assertIn(
-            "invalid or duplicate Assent instructions bridge",
+            "invalid or duplicate Assent instructions bridge block",
             output.getvalue())
 
-    def test_duplicate_canonical_bridge_is_refused_without_rewriting(self):
+    def test_managed_bridge_content_is_refreshed_without_touching_other_rules(self):
         agents = self.root / "AGENTS.md"
         original = (
-            "# Project\n\n" + _BRIDGE_LINE + "\n\n" + _BRIDGE_LINE + "\n")
+            "# Project\n\n- Keep this project rule.\n"
+            f"{_BRIDGE_BEGIN}\n- Obsolete generated instruction.\n"
+            f"{_BRIDGE_END}\n- Keep this AI-added rule.\n")
+        agents.write_text(original, encoding="utf-8")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root, test="unittest"), 0)
+
+        updated = agents.read_text(encoding="utf-8")
+        self.assertIn("- Keep this project rule.\n", updated)
+        self.assertIn("- Keep this AI-added rule.\n", updated)
+        self.assertNotIn("Obsolete generated instruction", updated)
+        self.assertIn(_BRIDGE_BLOCK, updated)
+
+    def test_duplicate_bridge_block_is_refused_without_rewriting(self):
+        agents = self.root / "AGENTS.md"
+        original = (
+            "# Project\n\n" + _BRIDGE_BLOCK + "\n\n" + _BRIDGE_BLOCK + "\n")
         agents.write_text(original, encoding="utf-8")
         output = io.StringIO()
 
@@ -124,7 +154,7 @@ class TestInitContractRefresh(unittest.TestCase):
 
         self.assertEqual(agents.read_text(encoding="utf-8"), original)
         self.assertIn(
-            "invalid or duplicate Assent instructions bridge",
+            "invalid or duplicate Assent instructions bridge block",
             output.getvalue())
 
 

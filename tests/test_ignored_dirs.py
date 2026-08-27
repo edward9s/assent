@@ -525,6 +525,31 @@ class TestProvisioning(IgnoredDirsCase):
     def _link(self, relative: str) -> Path:
         return self.worktree / relative
 
+    def test_directory_symlink_is_ignored_as_a_link_object(self):
+        exclude = gitops.git_common_dir(self.root) / "info" / "exclude"
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write("# keep this user rule\n/local-only\n")
+        self._review("pkg")
+        link = self._link("pkg")
+        if not os.path.islink(link):
+            ignored_dirs.pathops.detach_directory_link(link)
+            try:
+                os.symlink(
+                    self.root / "pkg", link, target_is_directory=True)
+            except OSError as e:
+                self.skipTest(f"directory symlinks are unavailable: {e}")
+
+        self.assertTrue(gitops.is_path_ignored(self.worktree, "pkg"))
+        self.assertTrue(gitops.working_tree_status(self.worktree).is_clean)
+        ignored_dirs.require_directory_link_agreement(
+            self.root, self.worktree, self._classify())
+
+        ignored_dirs.release(self.root, self.worktree)
+        text = exclude.read_text(encoding="utf-8")
+        self.assertIn("# keep this user rule\n/local-only\n", text)
+        self.assertNotIn("# --- Assent directory links", text)
+        self.assertFalse(gitops.is_path_ignored(self.worktree, "pkg"))
+
     def test_declared_paths_are_provisioned_including_a_nested_one(self):
         contract = self._review("pkg", "assets", "lib/l10n/arb")
         for relative in ("pkg", "assets", "lib/l10n/arb"):

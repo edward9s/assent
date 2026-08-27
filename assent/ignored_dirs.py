@@ -71,6 +71,8 @@ _EXCLUDED_ROOTS = (".git", ".assent")
 _IGNORE_RULE_PATHSPEC = "*.gitignore"
 DECLARE_COMMAND = "assent ignored-dirs declare"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_EXCLUDE_BEGIN = "# --- Assent directory links begin ---"
+_GIT_EXCLUDE_END = "# --- Assent directory links end ---"
 
 
 # --------------------------------------------------------------------------- #
@@ -269,6 +271,87 @@ def _atomic_write(path: Path, text: str) -> None:
     except OSError as e:
         raise AssentError(
             f"Unable to atomically write the ignored-directory manifest {path}: {e}") from e
+    finally:
+        with contextlib.suppress(OSError):
+            temporary.unlink(missing_ok=True)
+
+
+def _gitignore_literal(relative: str) -> str:
+    """Return one root-anchored Git-ignore pattern for an exact link path."""
+    escaped = relative.replace("\\", "\\\\")
+    for character in "*?[]":
+        escaped = escaped.replace(character, f"\\{character}")
+    return f"/{escaped}"
+
+
+def _managed_git_exclude_text(existing: str,
+                              required: Sequence[str]) -> str:
+    """Replace Assent's one exact-path block without changing other lines."""
+    lines = existing.splitlines(keepends=True)
+    begins = [index for index, line in enumerate(lines)
+              if line.rstrip("\r\n") == _GIT_EXCLUDE_BEGIN]
+    ends = [index for index, line in enumerate(lines)
+            if line.rstrip("\r\n") == _GIT_EXCLUDE_END]
+    if bool(begins) != bool(ends) or len(begins) > 1 or len(ends) > 1:
+        raise AssentError(
+            "the repository Git exclude file contains an invalid or duplicate "
+            "Assent directory-link block")
+    if begins and begins[0] >= ends[0]:
+        raise AssentError(
+            "the repository Git exclude file contains an invalid Assent "
+            "directory-link block")
+
+    block = ""
+    if required:
+        block = "\n".join((
+            _GIT_EXCLUDE_BEGIN,
+            *(_gitignore_literal(relative) for relative in sorted(set(required))),
+            _GIT_EXCLUDE_END,
+            "",
+        ))
+    if begins:
+        start = sum(len(line) for line in lines[:begins[0]])
+        stop = sum(len(line) for line in lines[:ends[0] + 1])
+        return existing[:start] + block + existing[stop:]
+    if not block:
+        return existing
+    separator = "" if not existing or existing.endswith(("\n", "\r")) else "\n"
+    return existing + separator + block
+
+
+def _sync_managed_git_excludes(main: Path, manifest: Manifest) -> None:
+    """Make Git ignore each provisioned link object by its exact path.
+
+    A directory-only rule such as ``pkg/`` deliberately does not match a POSIX
+    symlink named ``pkg``.  The repository-local exclude file supplies the
+    exact companion pattern while an Assent application owns that link.
+    """
+    path = gitops.git_common_dir(Path(main)) / "info" / "exclude"
+    try:
+        existing = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        existing = ""
+    except (OSError, UnicodeDecodeError) as e:
+        raise AssentError(
+            f"Unable to read the repository Git exclude file {path}: {e}") from e
+    required = tuple(
+        relative
+        for application in manifest.applications
+        for relative in application.required)
+    updated = _managed_git_exclude_text(existing, required)
+    if updated == existing:
+        return
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(temporary, "w", encoding="utf-8", newline="") as handle:
+            handle.write(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError as e:
+        raise AssentError(
+            f"Unable to update the repository Git exclude file {path}: {e}") from e
     finally:
         with contextlib.suppress(OSError):
             temporary.unlink(missing_ok=True)
@@ -605,6 +688,7 @@ def write_manifest(main: Path, manifest: Manifest) -> None:
     except tomllib.TOMLDecodeError as e:  # pragma: no cover - defensive
         raise AssentError(
             f"refusing to write an unparseable ignored-directory manifest: {e}") from e
+    _sync_managed_git_excludes(Path(main), manifest)
     _atomic_write(manifest_path(main), text)
 
 
@@ -802,6 +886,8 @@ def _parent_problem(root: Path, relative: str) -> str:
 
 def _is_ignored_directory(root: Path, relative: str) -> bool:
     """True when Git treats the existing directory as one ignored tree."""
+    if pathops.is_link(Path(root) / relative):
+        return gitops.is_path_ignored(root, relative)
     if gitops.is_path_ignored(root, relative, directory=True):
         return True
     expected = relative.rstrip("/") + "/"
@@ -1201,17 +1287,18 @@ def _resolves_to(path: Path, target: Path) -> bool:
 
 
 def ignored_directory_links(worktree: Path) -> tuple[str, ...]:
-    """List ignored directory-link objects without entering their targets."""
+    """List untracked directory-link objects without entering their targets."""
     root = Path(worktree)
     found: list[str] = []
-    for entry in gitops.ignored_entries(root):
-        if not entry.endswith("/"):
-            continue
+    entries = set(gitops.ignored_entries(root))
+    entries.update(gitops.working_tree_status(root).untracked)
+    for entry in entries:
         relative = entry.rstrip("/")
         if relative.split("/")[0] in _EXCLUDED_ROOTS:
             continue
         require_safe_relative(relative, root)
-        if pathops.is_link(root / relative):
+        path = root / relative
+        if pathops.is_link(path) and path.is_dir():
             found.append(relative)
     return tuple(sorted(found))
 
@@ -1467,6 +1554,10 @@ def reconcile(main: Path, worktree: Path, decision: Decision, *,
     wanted = decision.required
     previous = applied_required_directories(manifest, worktree)
 
+    # Existing application records are the authority for the exact companion
+    # excludes.  Sync them before inspecting a link created by an earlier run.
+    _sync_managed_git_excludes(main, manifest)
+
     # Validate every destination before creating any link.  This is the
     # ownership boundary for review/provision: a later collision must not leave
     # an earlier new link behind while the old manifest still describes the old
@@ -1475,18 +1566,22 @@ def reconcile(main: Path, worktree: Path, decision: Decision, *,
         _validate_destination(main, worktree, relative)
 
     original_applications = manifest.applications
+    changed = _record_application(
+        manifest, worktree,
+        decision.profile.fingerprint if decision.profile else "", wanted)
     created: list[str] = []
     detached: list[str] = []
     try:
+        # Install exact link-path exclusions before creating a POSIX symlink;
+        # Git's directory-only pattern deliberately stops matching once the
+        # directory path becomes a symlink object.
+        _sync_managed_git_excludes(main, manifest)
         for relative in wanted:
             if _provision_one(main, worktree, relative):
                 created.append(relative)
         for relative in previous:
             if relative not in wanted and _detach_one(main, worktree, relative):
                 detached.append(relative)
-        changed = _record_application(
-            manifest, worktree,
-            decision.profile.fingerprint if decision.profile else "", wanted)
         if changed or force_write:
             write_manifest(main, manifest)
     except BaseException as primary_error:
@@ -1495,6 +1590,11 @@ def reconcile(main: Path, worktree: Path, decision: Decision, *,
         # back only links proven to belong to this invocation; foreign links,
         # ordinary directories, and uncertain targets are retained and named.
         rollback_problems: list[str] = []
+        manifest.applications = original_applications
+        try:
+            _sync_managed_git_excludes(main, manifest)
+        except AssentError as e:
+            rollback_problems.append(str(e))
         for relative in reversed(created):
             try:
                 _detach_one(main, worktree, relative)
@@ -1512,7 +1612,6 @@ def reconcile(main: Path, worktree: Path, decision: Decision, *,
             except (AssentError, OSError) as e:
                 rollback_problems.append(
                     f"unable to restore the prior ignored-directory link {destination}: {e}")
-        manifest.applications = original_applications
         if rollback_problems:
             primary_error.add_note(
                 "Ignored-directory link rollback was incomplete: "

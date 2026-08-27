@@ -14,13 +14,15 @@ from assent import AssentError, contracts
 from assent.user_home import user_assent_dir, user_config_path
 
 _TEMPLATES = Path(__file__).resolve().parent / "templates"
-_BRIDGE_MARKER = "<!-- assent-instructions -->"
+_BRIDGE_MARKER_PREFIX = "<!-- assent-instructions"
+_BRIDGE_BEGIN = "<!-- assent-instructions begin -->"
+_BRIDGE_END = "<!-- assent-instructions end -->"
 _BRIDGE_LINE = (
     "- When using assent, first read `~/.assent/instructions.md`, the global "
     "working instructions shared by every project; a scheduled worktree "
-    "session uses the absolute path the scheduler provides. "
-    f"{_BRIDGE_MARKER}"
+    "session uses the absolute path the scheduler provides."
 )
+_BRIDGE_BLOCK = "\n".join((_BRIDGE_BEGIN, _BRIDGE_LINE, _BRIDGE_END))
 _GITIGNORE_LINES = [".assent/"]
 _DIRECT_API_DEFAULT = object()
 _PROJECT_TESTS_BEGIN = "# --- Project test commands begin (project-owned) ---"
@@ -347,26 +349,48 @@ def _validate_planned_config(root: Path, user_config_content: str,
 
 
 def _agents_plan(root: Path) -> tuple[str, tuple[str, str]]:
-    """Return the AGENTS.md plan, accepting exactly one canonical bridge."""
+    """Return the AGENTS.md plan with one Assent-owned bridge block."""
     target = root / "AGENTS.md"
     if not target.exists():
-        content = _template("AGENTS.md").rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
+        content = _template("AGENTS.md").rstrip() + "\n\n" + _BRIDGE_BLOCK + "\n"
         return content, ("created", str(target))
 
     existing = _read_file(target, "AGENTS.md")
     lines = existing.splitlines()
-    marker_lines = [line for line in lines if _BRIDGE_MARKER in line]
-    bridge_lines = [line for line in lines if line == _BRIDGE_LINE]
+    marker_lines = [
+        index for index, line in enumerate(lines)
+        if _BRIDGE_MARKER_PREFIX in line]
+    begin_lines = [
+        index for index, line in enumerate(lines) if _BRIDGE_BEGIN in line]
+    end_lines = [
+        index for index, line in enumerate(lines) if _BRIDGE_END in line]
 
     if marker_lines:
-        if len(marker_lines) != 1 or len(bridge_lines) != 1:
+        valid_block = (
+            len(marker_lines) == 2
+            and len(begin_lines) == len(end_lines) == 1
+            and lines[begin_lines[0]] == _BRIDGE_BEGIN
+            and lines[end_lines[0]] == _BRIDGE_END
+            and begin_lines[0] < end_lines[0]
+        )
+        if not valid_block:
             raise AssentError(
                 f"{target} contains an invalid or duplicate Assent instructions "
-                "bridge; keep exactly one canonical bridge line")
-        return existing, (
-            "preserved", f"{target} (instructions bridge already current)")
+                "bridge block; keep exactly one begin/end pair")
+        updated_lines = (
+            lines[:begin_lines[0]]
+            + _BRIDGE_BLOCK.splitlines()
+            + lines[end_lines[0] + 1:]
+        )
+        updated = "\n".join(updated_lines)
+        if existing.endswith("\n"):
+            updated += "\n"
+        if updated == existing:
+            return existing, (
+                "preserved", f"{target} (instructions bridge already current)")
+        return updated, ("updated", str(target))
 
-    updated = existing.rstrip() + "\n\n" + _BRIDGE_LINE + "\n"
+    updated = existing.rstrip() + "\n\n" + _BRIDGE_BLOCK + "\n"
     return updated, ("updated", str(target))
 
 

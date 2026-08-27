@@ -349,4 +349,6 @@ Shared foundation used by more than one category: `config.py`, `contracts.py`,
 `plan_source.py`, `inspection.py`, `doctor.py`, `terminal_log.py`,
 `adapters/`, `__main__.py`, `main.py`.
 
-- When using assent, first read `~/.assent/instructions.md`, the global working instructions shared by every project; a scheduled worktree session uses the absolute path the scheduler provides. An AI session never initiates the full suite or `.assent/verify.py`; the scheduler owns workflow `full_verify`, and an interactive session runs complete verification only when the human explicitly requests it. <!-- assent-instructions -->
+<!-- assent-instructions begin -->
+- When using assent, first read `~/.assent/instructions.md`, the global working instructions shared by every project; a scheduled worktree session uses the absolute path the scheduler provides.
+<!-- assent-instructions end -->

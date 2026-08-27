@@ -22,7 +22,6 @@ from assent import AssentError, gitops, ignored_dirs
 from assent.config import Config
 from assent.plandeps import (infer_plan_completion, live_upstreams,
                                parse_plan_dependencies)
-from assent.init import recover_expanded_bridge_drift
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.plan import Plan
 from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
@@ -280,9 +279,6 @@ def _verify_locked(cfg: Config, *,
             f"({', '.join(unfinished)})")
 
     target_branch = gitops.require_current_branch(main)
-    if recover_expanded_bridge_drift(main):
-        print("Recovered an Assent-generated AGENTS.md bridge update in the "
-              "target worktree.")
     if not gitops.working_tree_status(main, cfg.git_excludes).is_clean:
         raise AssentError(f"target worktree {main} is not clean")
     target_tip = gitops.commit_of(main, target_branch)

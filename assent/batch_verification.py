@@ -25,7 +25,6 @@ from assent.config import Config, load_config
 from assent.plandeps import (infer_plan_completion, live_upstreams,
                                order_plans_by_dependency,
                                parse_plan_dependency_graph)
-from assent.init import recover_expanded_bridge_drift
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
 from assent.verification_common import (VERIFY_COMMAND, candidate_tree,
                                         BatchCandidate, FullVerifyEvidence,
@@ -903,9 +902,6 @@ def _verify_batch_locked(config_path: str, assent_dir: Path, bisect: bool,
             locks.enter_context(hold_lock(configs[plan_name].tasks_dir, plan_name))
 
         excludes = configs[selection.plan_names[0]].git_excludes
-        if recover_expanded_bridge_drift(main):
-            print("Recovered an Assent-generated AGENTS.md bridge update in "
-                  "the target worktree.")
         if not gitops.working_tree_status(main, excludes).is_clean:
             raise AssentError(f"target worktree {main} is not clean")
         # The source worktrees are kept, not discarded: each one may provision

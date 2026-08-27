@@ -1274,7 +1274,10 @@ class TestInit(MainTestCase):
         self.assertIn(".assent/", lines)
         self.assertNotIn("AGENTS.md", lines)
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertEqual(agents_md.count("<!-- assent-instructions -->"), 1)
+        self.assertEqual(
+            agents_md.count("<!-- assent-instructions begin -->"), 1)
+        self.assertEqual(
+            agents_md.count("<!-- assent-instructions end -->"), 1)
         self.assertIn("`~/.assent/instructions.md`", agents_md)
         self.assertNotIn("An AI session never initiates the full suite", agents_md)
         config = (self.user_home / "assent.toml").read_text(encoding="utf-8")
@@ -1418,7 +1421,10 @@ class TestInit(MainTestCase):
         self.assertEqual(gitignore.splitlines().count(".assent/"), 1)
         # The managed contracts refresh, while the AGENTS.md bridge is not duplicated.
         agents_md = (self.root / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertEqual(agents_md.count("<!-- assent-instructions -->"), 1)
+        self.assertEqual(
+            agents_md.count("<!-- assent-instructions begin -->"), 1)
+        self.assertEqual(
+            agents_md.count("<!-- assent-instructions end -->"), 1)
 
     def test_init_does_not_overwrite_existing_verifier(self):
         run_init(self.root, test="unittest")
@@ -1679,20 +1685,23 @@ class TestInit(MainTestCase):
             (assent_dir / "format.md").read_text(encoding="utf-8"),
             "an older project's plan format\n")
 
-    def test_an_older_bridge_line_is_replaced_in_place(self):
-        (self.root / "AGENTS.md").write_text(
+    def test_an_older_bridge_line_is_refused_without_rewriting(self):
+        agents = self.root / "AGENTS.md"
+        original = (
             "# 我的專案\n\n- 保留這行\n"
             "- When using assent, first read `.assent/instructions.md` in the "
             "project's main worktree. <!-- assent-instructions -->\n"
-            "- 也保留這行\n", encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()):
-            run_init(self.root, test="unittest")
-        text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertEqual(text.count("<!-- assent-instructions -->"), 1)
-        self.assertIn("- 保留這行\n", text)
-        self.assertIn("- 也保留這行", text)
-        self.assertIn("`~/.assent/instructions.md`", text)
-        self.assertNotIn("`.assent/instructions.md`", text)
+            "- 也保留這行\n")
+        agents.write_text(original, encoding="utf-8")
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root, test="unittest"), 1)
+
+        self.assertEqual(agents.read_text(encoding="utf-8"), original)
+        self.assertIn(
+            "invalid or duplicate Assent instructions bridge block",
+            output.getvalue())
 
     def test_adds_one_bridge_line_to_existing_agents_md(self):
         (self.root / "AGENTS.md").write_text(
@@ -1701,7 +1710,8 @@ class TestInit(MainTestCase):
         text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# 我的專案"))
         self.assertIn("既有規則。", text)
-        self.assertEqual(text.count("<!-- assent-instructions -->"), 1)
+        self.assertEqual(text.count("<!-- assent-instructions begin -->"), 1)
+        self.assertEqual(text.count("<!-- assent-instructions end -->"), 1)
 
     def test_new_agents_md_combines_template_with_managed_bridge(self):
         run_init(self.root, test="unittest")
@@ -1709,8 +1719,9 @@ class TestInit(MainTestCase):
         template = (_PROJECT_ROOT / "assent/templates/AGENTS.md").read_text(
             encoding="utf-8")
         self.assertIn(template.rstrip(), text)
-        self.assertEqual(text.count("<!-- assent-instructions -->"), 1)
-        self.assertNotIn("<!-- assent-instructions -->", template)
+        self.assertEqual(text.count("<!-- assent-instructions begin -->"), 1)
+        self.assertEqual(text.count("<!-- assent-instructions end -->"), 1)
+        self.assertNotIn("<!-- assent-instructions begin -->", template)
 
     def test_preserves_existing_ignore_lines_and_agents_md_ignore_choice(self):
         (self.root / ".gitignore").write_text(
