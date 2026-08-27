@@ -20,7 +20,7 @@ extra_args = ["--permission-mode", "bypassPermissions"]
 # directly instead, which bypasses this table)
 [adapter.claude.models]
 prime = "opus/high"
-core  = "opus/high"
+core  = "opus/medium"
 lite  = "sonnet/high"
 
 [adapter.codex]
@@ -59,5 +59,5 @@ print_timeout_minutes = 120
 # rather than a value the CLI would refuse.
 [adapter.antigravity.models]
 prime = "gemini-3.1-pro/high"     # Gemini 3.1 Pro (low, high only)
-core  = "gemini-3.6-flash/high"   # Gemini 3.6 Flash (low, medium, high)
-lite  = "gemini-3.5-flash/medium" # Gemini 3.5 Flash (low, medium; no high)
+core  = "gemini-3.7-flash/high"   # Gemini 3.7 Flash (low, medium, high)
+lite  = "gemini-3.6-flash/high"   # Gemini 3.6 Flash (low, medium, high)
