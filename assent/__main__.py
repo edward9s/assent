@@ -441,7 +441,8 @@ def _close_run(result: int, *, config_path: str,
                 print(f"Config error: {e}")
                 return 1
             if (not infer_plan_completion(cfg.tasks_dir).complete
-                    or plan_workflow_requires_human(cfg.tasks_dir)):
+                    or plan_workflow_requires_human(
+                        cfg.tasks_dir, cfg.plan_workflow_step_count)):
                 incomplete.append(plan_name)
         if incomplete:
             print("Integration workflow deferred: selected plan execution "

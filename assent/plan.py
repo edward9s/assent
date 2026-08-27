@@ -159,10 +159,10 @@ def read_workflow_state(tasks_dir: Path) -> WorkflowState | None:
             data = tomllib.load(source)
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise AssentError(f"Workflow state {path.name} is unreadable: {error}") from error
-    expected = {"version", "unit", "task_id", "step_index", "started",
+    expected = {"unit", "task_id", "step_index", "started",
                 "base_ref", "evidence", "action", "action_status",
                 "action_source_tree", "action_exit_code", "action_evidence"}
-    if set(data) != expected or data.get("version") != 3:
+    if set(data) != expected:
         raise AssentError(f"Workflow state {path.name} has an invalid schema")
     unit = data.get("unit")
     task_id = data.get("task_id")
@@ -194,17 +194,26 @@ def read_workflow_state(tasks_dir: Path) -> WorkflowState | None:
         tuple(action_evidence))
 
 
-def plan_workflow_requires_human(tasks_dir: Path) -> bool:
-    """Whether automatic plan closeout stopped for human adjudication."""
+def plan_workflow_needs_resume(tasks_dir: Path, step_count: int) -> bool:
+    """Whether a configured plan workflow has not reached its end cursor."""
+    state = read_workflow_state(Path(tasks_dir))
+    if step_count == 0:
+        return False
+    return bool(state is None or state.unit != "plan"
+                or state.step_index < step_count)
+
+
+def plan_workflow_requires_human(tasks_dir: Path, step_count: int) -> bool:
+    """Whether an exhausted plan workflow stopped without passing its action."""
     state = read_workflow_state(Path(tasks_dir))
     return bool(state is not None and state.unit == "plan"
+                and state.step_index >= step_count
                 and state.action_status != "PASSED")
 
 
 def write_workflow_state(tasks_dir: Path, state: WorkflowState) -> None:
     """Atomically persist the next workflow position and its start boundary."""
     text = "\n".join((
-        "version = 3",
         f"unit = {json.dumps(state.unit)}",
         f"task_id = {json.dumps(state.task_id)}",
         f"step_index = {state.step_index}",

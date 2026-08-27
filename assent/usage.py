@@ -17,7 +17,10 @@ from assent.adapters import TokenUsage
 
 USAGE_NAME = "_usage.jsonl"
 USAGE_LOCK_NAME = "_usage.lock"
-USAGE_VERSION = 1
+_USAGE_RECORD_KEYS = {
+    "invocation_id", "time", "adapter", "requested_model", "context",
+    "plans", "models",
+}
 TOKEN_CATEGORIES = (
     "input_tokens",
     "cached_input_tokens",
@@ -98,7 +101,8 @@ def _existing_ids(path: Path) -> set[str]:
                 item = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
-            if isinstance(item, dict) and isinstance(item.get("invocation_id"), str):
+            if (isinstance(item, dict) and set(item) == _USAGE_RECORD_KEYS
+                    and isinstance(item.get("invocation_id"), str)):
                 identities.add(item["invocation_id"])
     return identities
 
@@ -114,7 +118,6 @@ def record_invocation(
         directory.mkdir(parents=True, exist_ok=True)
         plan_list = list(dict.fromkeys(str(plan_name) for plan_name in plan_names))
         record = {
-            "version": USAGE_VERSION,
             "invocation_id": invocation_id,
             "time": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
             "adapter": adapter,
@@ -151,7 +154,7 @@ def _valid_counter(value: object) -> int | None:
 
 
 def read_records(assent_dir: Path) -> tuple[list[dict], int]:
-    """Read valid version-1 records, deduplicated by invocation identity."""
+    """Read current-schema records, deduplicated by invocation identity."""
     path = Path(assent_dir) / USAGE_NAME
     if not path.exists():
         return [], 0
@@ -168,7 +171,7 @@ def read_records(assent_dir: Path) -> tuple[list[dict], int]:
         except (json.JSONDecodeError, ValueError):
             invalid += 1
             continue
-        if not isinstance(item, dict) or item.get("version") != USAGE_VERSION:
+        if not isinstance(item, dict) or set(item) != _USAGE_RECORD_KEYS:
             invalid += 1
             continue
         identity = item.get("invocation_id")

@@ -767,8 +767,9 @@ Latest full_verify evidence:
 Prior role-session evidence:
 {prior}
 
-Return a concise account of what you inspected and, when writable, what you
-changed. Sessions run sequentially and do not converse with each other.
+Do not narrate plans, internal deliberation, or rhetorical questions. Complete
+the work, then return only a concise account of what you inspected and, when
+writable, what you changed. Sessions run sequentially and do not converse.
 """
 
 
@@ -958,8 +959,9 @@ Conflict workspaces and evidence:
 Prior role-session evidence:
 {prior}
 
-Return a concise account of what you inspected and, when writable, what you
-changed. Sessions run sequentially and do not converse with each other.
+Do not narrate plans, internal deliberation, or rhetorical questions. Complete
+the work, then return only a concise account of what you inspected and, when
+writable, what you changed. Sessions run sequentially and do not converse.
 """
 
 def _with_integration_evidence(
@@ -1470,7 +1472,8 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
         configs = tuple(load_config(config_path, name) for name in ordered)
         pending = tuple(
             cfg.tasks_name for cfg in configs
-            if plan_workflow_requires_human(cfg.tasks_dir))
+            if plan_workflow_requires_human(
+                cfg.tasks_dir, cfg.plan_workflow_step_count))
         if pending:
             return _integration_human_decision(
                 "plan workflow adjudication is still pending for "
@@ -1646,7 +1649,7 @@ def run_dynamic_selection_workflow(config_path: str, assent_dir) -> int:
         main = gitops.main_worktree(root)
         target = gitops.commit_of(
             main, gitops.require_current_branch(main))
-        selection, _configs = verification.select_batch_plans(
+        selection, configs = verification.select_batch_plans(
             config_path, assent_dir, main, target)
     except AssentError as error:
         print(f"Selection full_verify: failed ({error})")
@@ -1655,7 +1658,8 @@ def run_dynamic_selection_workflow(config_path: str, assent_dir) -> int:
         print(f"Selection full_verify: skip {plan_name} ({reason})")
     plan_names = tuple(
         name for name in selection.plan_names
-        if not plan_workflow_requires_human(assent_dir / name))
+        if not plan_workflow_requires_human(
+            assent_dir / name, configs[name].plan_workflow_step_count))
     for name in selection.plan_names:
         if name not in plan_names:
             print(f"Selection full_verify: skip {name} "
@@ -2108,9 +2112,10 @@ Authoritative task requirements:
 Prior session evidence:
 {prior}
 {action}
-Return a concise account of what you inspected and, when writable, what you
-changed. This session does not converse with another session; its output is
-evidence for the next configured step.
+Do not narrate plans, internal deliberation, or rhetorical questions. Complete
+the work, then return only a concise account of what you inspected and, when
+writable, what you changed. This output is evidence for the next configured
+step, not a conversation with another session.
 """
 
 def _role_session_identity(
@@ -2371,6 +2376,8 @@ def _process_source_workflow(
             write_workflow_state(cfg.tasks_dir, state)
             print(f"  {step.action} not started: {summary}")
             if state.step_index == len(steps) - 1:
+                state = replace(
+                    state, step_index=len(steps), started=False)
                 return _source_workflow_gate_unresolved(
                     cfg, task, state, step.action, summary, now)
             state = replace(
@@ -2390,6 +2397,8 @@ def _process_source_workflow(
             try_write_report(cfg)
             return 0
         if state.step_index == len(steps) - 1:
+            state = replace(
+                state, step_index=len(steps), started=False)
             return _source_workflow_unresolved(
                 cfg, task, state, record, now)
         state = replace(

@@ -30,7 +30,7 @@ from assent.plan_scheduler import (_INTERRUPT_GRACE_SECONDS,
                                      _send_interrupt, _start_plan, run_all)
 from assent.plandeps import parse_plan_dependency_graph
 from assent.lockfile import LockBusy, hold_lock
-from assent.plan import set_status
+from assent.plan import WorkflowState, set_status, write_workflow_state
 from assent.terminal_log import terminal_logging
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -372,6 +372,41 @@ class TestRunAll(PlanSchedulerTestCase):
                 side_effect=lambda _config, _plan: dirty), patch(
                     "assent.plan_scheduler._start_plan",
                     side_effect=fake_start):
+            code = run_all(str(self.config), self.assent_dir)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(started, ["done"])
+
+    def test_completed_plan_with_interrupted_plan_workflow_is_rescheduled(self):
+        task = self.make_plan("done", "DONE")
+        self.config.write_text(
+            '[abilities.review]\n'
+            'prompt = "Review the completed plan."\n'
+            'writes = false\n'
+            '[roles.reviewer]\n'
+            'ability = ["review"]\n'
+            'model = "lite"\n'
+            '[workflow]\n'
+            'task = [{ action = "focused_test" }]\n'
+            'plan = [{ role = "reviewer" }]\n'
+            + models_block(), encoding="utf-8")
+        write_workflow_state(task.parent, WorkflowState(
+            "plan", "", 0, True, "base"))
+        started = []
+
+        def fake_start(_config, plan_name):
+            started.append(plan_name)
+
+            def finish_plan_workflow():
+                write_workflow_state(task.parent, WorkflowState(
+                    "plan", "", 2, False, "base", action="focused_sweep",
+                    action_status="PASSED", action_source_tree="tree",
+                    action_evidence=("command", "summary")))
+
+            return FinishedProcess(task, finish_plan_workflow)
+
+        with patch("assent.plan_scheduler._start_plan",
+                   side_effect=fake_start):
             code = run_all(str(self.config), self.assent_dir)
 
         self.assertEqual(code, 0)

@@ -9,6 +9,7 @@ from unittest import mock
 from assent import engine, gitops, ignored_dirs
 from assent.adapters import TaskResult
 from assent.plan import (parse_task_file, read_entries,
+                         plan_workflow_requires_human,
                          read_selection_workflow_state, read_workflow_state,
                          WorkflowState, write_workflow_state)
 from assent.verification_common import FullVerifyEvidence
@@ -44,6 +45,13 @@ ACTION_ONLY_WORKFLOW = """
 [workflow]
 task = [{ action = "focused_test" }]
 plan = []
+integration = []
+"""
+
+PLAN_ACTION_WORKFLOW = """
+[workflow]
+task = [{ action = "focused_test" }]
+plan = [{ action = "focused_sweep" }]
 integration = []
 """
 
@@ -130,6 +138,8 @@ class TestLinearEngine(EngineTestCase):
         self.assertIn("Task t001: Visible task", text)
         self.assertIn("Session: claude | lite->sonnet/medium", text)
         self.assertIn("Configured AI session: 1 of 2", adapter.calls[0][0])
+        self.assertIn("Do not narrate plans, internal deliberation, or rhetorical "
+                      "questions.", adapter.calls[0][0])
 
     def test_action_only_task_workflow_starts_no_ai_session(self):
         path = self.write_task(1)
@@ -337,6 +347,20 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(self.run_with_contracts(cfg, adapter), 0)
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
 
+    def test_exhausted_plan_workflow_persists_the_end_cursor(self):
+        self.write_task(1, status="DONE", verify=_NEEDS_OK_TXT)
+        cfg = self.build(extra_config=PLAN_ACTION_WORKFLOW)
+        self.commit_all()
+
+        self.assertEqual(self.run_with_contracts(
+            cfg, ScriptedAdapter([])), 0)
+
+        state = read_workflow_state(cfg.tasks_dir)
+        self.assertIsNotNone(state)
+        self.assertEqual(state.step_index, cfg.plan_workflow_step_count)
+        self.assertTrue(plan_workflow_requires_human(
+            cfg.tasks_dir, cfg.plan_workflow_step_count))
+
     def test_todo_starts_a_fresh_workflow_after_rework(self):
         path = self.write_task(1)
         cfg = self.build(extra_config=ACTION_ONLY_WORKFLOW)
@@ -504,6 +528,8 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(len(repair.calls), 1)
         self.assertIn("full verifier failed", repair.calls[0][0])
         self.assertIn("Configured AI session: 1 of 1", repair.calls[0][0])
+        self.assertIn("Do not narrate plans, internal deliberation, or rhetorical "
+                      "questions.", repair.calls[0][0])
         state = read_selection_workflow_state(cfg.assent_dir)
         self.assertEqual(state.action_status, "PASSED")
         self.assertIn("repair session completed", state.evidence[0])
@@ -585,6 +611,8 @@ class TestLinearEngine(EngineTestCase):
             managed = gitops.reconcile_worktree_path(self.root, "plan01")
             self.assertIn(str(managed), prompt)
             self.assertIn("Exact conflict paths:\n- conflict.txt", prompt)
+            self.assertIn("Do not narrate plans, internal deliberation, or "
+                          "rhetorical questions.", prompt)
             (managed / "conflict.txt").write_text(
                 "resolved\n", encoding="utf-8")
             return result("resolved the source-target conflict")

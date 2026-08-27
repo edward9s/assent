@@ -22,7 +22,7 @@ from assent.config import load_config
 from assent.plandeps import (archived_plan_names, is_upstream_complete,
                                parse_plan_dependency_graph,
                                resolve_plan_base)
-from assent.plan import Plan
+from assent.plan import Plan, plan_workflow_needs_resume
 
 _POLL_SECONDS = 0.05
 _GIT_REQUIRED_MESSAGE = "This project has no git repository yet; run git init first"
@@ -231,6 +231,13 @@ def _plan_worktree_needs_recovery(config_path: str, plan_name: str) -> bool:
     return (worktree.exists()
             and not gitops.working_tree_status(
                 worktree, cfg.git_excludes).is_clean)
+
+
+def _plan_workflow_needs_resume(config_path: str, plan_name: str) -> bool:
+    """Return whether a completed task set still has plan steps to execute."""
+    cfg = load_config(config_path, plan_name)
+    return plan_workflow_needs_resume(
+        cfg.tasks_dir, cfg.plan_workflow_step_count)
 
 
 def _stack_launch_decision(config_path: str, plan_name: str) -> tuple[str | None, str | None]:
@@ -472,6 +479,13 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
                         config_path, plan_name)
                     for plan_name in inactive
                 }
+                needs_plan_workflow = {
+                    plan_name: (
+                        _is_complete(plans[plan_name])
+                        and _plan_workflow_needs_resume(
+                            config_path, plan_name))
+                    for plan_name in inactive
+                }
                 # An archived upstream is gone from the live plans but still
                 # resolvable through the roster; read it once per iteration and
                 # judge every after-name through the shared completion
@@ -479,9 +493,10 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
                 # KeyError, and an unresolved name fails closed here.
                 archived = archived_plan_names(assent_dir)
 
-                if not active and all(
-                        _is_complete(plan) for plan in plans.values()
-                ) and not any(needs_recovery.values()):
+                if (not active
+                        and all(_is_complete(plan) for plan in plans.values())
+                        and not any(needs_recovery.values())
+                        and not any(needs_plan_workflow.values())):
                     print("All plans are complete (DONE/SKIP).")
                     return 0
 
@@ -490,7 +505,8 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
                     if plan_name not in active
                     and plan_name not in attempted
                     and (_has_ongoing(plans[plan_name])
-                         or needs_recovery[plan_name])
+                         or needs_recovery[plan_name]
+                         or needs_plan_workflow[plan_name])
                     and all(name not in active
                             and is_upstream_complete(name, plans, archived)
                             for name in dependencies.after)

@@ -300,6 +300,14 @@ class Config:
         return self.git_rel(self.assent_dir / "_integration_workflow.toml")
 
     @property
+    def plan_workflow_step_count(self) -> int:
+        """Count the effective plan steps, including its implied final action."""
+        if not self.workflow_plan:
+            return 0
+        return len(self.workflow_plan) + (
+            0 if isinstance(self.workflow_plan[-1], WorkflowActionStep) else 1)
+
+    @property
     def ignored_dirs_manifest_rel(self) -> str:
         """The local reviewed-ignored-directory cache; local memory, never project source."""
         return self.git_rel(self.assent_dir / MANIFEST_NAME)

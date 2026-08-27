@@ -8,7 +8,7 @@ from pathlib import Path
 from assent import AssentError
 from assent.plan import (
     Plan, SelectionWorkflowState, WorkflowState, parse_task_file,
-    plan_workflow_requires_human,
+    plan_workflow_needs_resume, plan_workflow_requires_human,
     read_selection_workflow_state, read_workflow_state,
     set_status, write_selection_workflow_state, write_workflow_state,
 )
@@ -90,15 +90,26 @@ class TestPlan(unittest.TestCase):
             "task", "t001", 2, False, "base", ("role evidence",),
             "focused_test", "FAILED", "tree", 1, ("command", "summary"))
         write_workflow_state(self.directory, state)
+        self.assertNotIn(
+            "version =", (self.directory / "_workflow.toml").read_text(
+                encoding="utf-8"))
         self.assertEqual(read_workflow_state(self.directory), state)
 
     def test_failed_plan_workflow_requires_human(self):
         state = WorkflowState(
-            "plan", "", 1, False, "base", action="focused_sweep",
+            "plan", "", 2, False, "base", action="focused_sweep",
             action_status="FAILED", action_source_tree="tree", action_exit_code=1,
             action_evidence=("command", "summary"))
         write_workflow_state(self.directory, state)
-        self.assertTrue(plan_workflow_requires_human(self.directory))
+        self.assertTrue(plan_workflow_requires_human(self.directory, 2))
+        self.assertFalse(plan_workflow_needs_resume(self.directory, 2))
+
+    def test_interrupted_plan_workflow_needs_resume(self):
+        write_workflow_state(self.directory, WorkflowState(
+            "plan", "", 0, True, "base"))
+
+        self.assertTrue(plan_workflow_needs_resume(self.directory, 2))
+        self.assertFalse(plan_workflow_requires_human(self.directory, 2))
 
     def test_selection_state_round_trip(self):
         state = SelectionWorkflowState(
