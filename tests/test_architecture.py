@@ -316,6 +316,8 @@ class ExecutionAndInspectionBoundaries(unittest.TestCase):
                             (inspection, "try_write_report"),
                             (preflight, "resolve_session"),
                             (preflight, "capability_errors"),
+                            (preflight, "runtime_test_adapter_names"),
+                            (preflight, "runtime_test_capability_errors"),
                             (preflight, "resolve_stack_state")):
             with self.subTest(symbol=f"{owner.__name__}.{name}"):
                 function = getattr(owner, name)

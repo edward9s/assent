@@ -99,7 +99,7 @@ class MainRuntimeTestTests(EngineTestCase):
 
         code, output = self.run_main(cfg, ScriptedAdapter([repair]))
 
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
         self.assertEqual(gitops.head_ref(self.root), base)
         self.assertEqual((self.root / "value.txt").read_text(), "bad\n")
         self.assertEqual((self.candidate / "value.txt").read_text(), "good\n")

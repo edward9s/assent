@@ -83,6 +83,8 @@ from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               StackState, capability_errors, has_git_marker,
                               literal_adapter_errors,
                               resolve_session, resolve_stack_state,
+                              runtime_test_adapter_names,
+                              runtime_test_capability_errors,
                               worktree_configuration_errors)
 
 from assent.verification_common import (source_snapshot,
@@ -2036,6 +2038,18 @@ def _runtime_test_source_steps(
     return tuple(steps)
 
 
+def _runtime_test_capability_preflight(
+        cfg: Config, adapters: dict[str, Adapter]) -> bool:
+    """Refuse runtime execution when a resolved role is not sendable."""
+    failures = runtime_test_capability_errors(cfg, adapters)
+    for name, errors in failures.items():
+        print(f"{name} runtime-test capability preflight: FAIL "
+              "(refusing before any runtime workflow)")
+        for message in errors:
+            print(f"  - {message}")
+    return not failures
+
+
 def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
                      sleep: Callable[[float], None] | None = None,
                      now: Callable[[], datetime] | None = None) -> int:
@@ -2053,11 +2067,9 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
         steps = _runtime_test_source_steps(cfg)
 
         adapter_names = list(cfg.adapter_names)
-        for step in cfg.workflow_runtime_test or ():
-            if isinstance(step, WorkflowRoleStep):
-                for name in step.adapters:
-                    if name not in adapter_names:
-                        adapter_names.append(name)
+        for name in runtime_test_adapter_names(cfg):
+            if name not in adapter_names:
+                adapter_names.append(name)
         adapters = {
             name: (adapter if name == cfg.adapter_names[0]
                    and adapter is not None else get_adapter(name, cfg))
@@ -2066,6 +2078,8 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
         rotation = _AdapterRotation(
             cfg.adapter_names,
             tuple(adapters[name] for name in cfg.adapter_names), pool=adapters)
+        if not _runtime_test_capability_preflight(cfg, adapters):
+            return 1
         sleep = sleep or interruptible_sleep
         now = now or (lambda: datetime.now(timezone.utc))
         with lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name):
@@ -2085,6 +2099,9 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
     except KeyboardInterrupt:
         print("Interrupted; runtime workflow state and worktree were preserved.")
         return 130
+    except _BillingAbort as error:
+        print(f"Runtime test stopped for billing: {error}")
+        return 1
     except (AssentError, OSError) as error:
         print(f"Runtime test refused: {error}")
         return 1
@@ -2148,11 +2165,9 @@ def run_main_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
             raise AssentError("assent test must use the primary worktree config")
 
         adapter_names = list(cfg.adapter_names)
-        for step in cfg.workflow_runtime_test or ():
-            if isinstance(step, WorkflowRoleStep):
-                for name in step.adapters:
-                    if name not in adapter_names:
-                        adapter_names.append(name)
+        for name in runtime_test_adapter_names(cfg):
+            if name not in adapter_names:
+                adapter_names.append(name)
         adapters = {
             name: (adapter if name == cfg.adapter_names[0]
                    and adapter is not None else get_adapter(name, cfg))
@@ -2161,6 +2176,8 @@ def run_main_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
         rotation = _AdapterRotation(
             cfg.adapter_names,
             tuple(adapters[name] for name in cfg.adapter_names), pool=adapters)
+        if not _runtime_test_capability_preflight(cfg, adapters):
+            return 1
         sleep = sleep or interruptible_sleep
         now = now or (lambda: datetime.now(timezone.utc))
         owner = cfg.assent_dir
@@ -2234,7 +2251,7 @@ def run_main_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
                 _print_main_runtime_candidate(
                     work_cfg, base,
                     "passed with repairs pending human integration")
-                return 0
+                return 1
             gitops.ensure_clean(work_cfg.root, work_cfg.git_excludes)
             gitops.remove_worktree(primary, path)
             gitops.delete_branch(primary, branch)
