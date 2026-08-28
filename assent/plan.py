@@ -46,6 +46,8 @@ _WORKFLOW_ACTIONS = {"focused_test"}
 _ACTION_STATUS_VALUES = {"PASSED", "FAILED", "STALE"}
 _MAX_ACTION_EVIDENCE_ITEMS = 20
 _MAX_ACTION_EVIDENCE_CHARS = 4096
+RUNTIME_TEST_CONTRACT_NAME = "_runtime_test.toml"
+_RUNTIME_TEST_EXECUTIONS = {"disabled", "explicit", "after_plan"}
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,14 @@ class TaskWorkflowRole(str):
     @property
     def role(self) -> str:
         return str(self)
+
+
+@dataclass(frozen=True)
+class RuntimeTestContract:
+    """The exact runtime-test decision declared by one plan."""
+
+    execution: str
+    command: str | None
 
 
 @dataclass(frozen=True)
@@ -397,6 +407,62 @@ def _task_workflow(
                 f"Task file {path.name} {owner} has unknown action {action!r}")
         entries.append(TaskWorkflowAction(action))
     return tuple(entries)
+
+
+def parse_runtime_test_contract(plan_dir: Path) -> RuntimeTestContract:
+    """Read and validate the runtime-test contract at a plan root."""
+    path = Path(plan_dir) / RUNTIME_TEST_CONTRACT_NAME
+    try:
+        with open(path, "rb") as source:
+            data = tomllib.load(source)
+    except FileNotFoundError as error:
+        raise AssentError(
+            f"Runtime-test contract {path.name} is missing") from error
+    except OSError as error:
+        raise AssentError(
+            f"Cannot read runtime-test contract {path.name}: {error}") from error
+    except tomllib.TOMLDecodeError as error:
+        raise AssentError(
+            f"Runtime-test contract {path.name} is not valid TOML: {error}") from error
+
+    unknown = sorted(set(data) - {"execution", "command"})
+    if unknown:
+        raise AssentError(
+            f"Runtime-test contract {path.name} has undefined fields: "
+            f"{', '.join(unknown)} (valid fields: command, execution)")
+
+    if "execution" not in data:
+        raise AssentError(
+            f"Runtime-test contract {path.name} is missing required field: execution")
+    execution = data["execution"]
+    if not isinstance(execution, str):
+        raise AssentError(
+            f"Runtime-test contract {path.name} field execution must be a string")
+    if execution not in _RUNTIME_TEST_EXECUTIONS:
+        raise AssentError(
+            f"Runtime-test contract {path.name} has unknown execution {execution!r}"
+            " (valid values: after_plan, disabled, explicit)")
+
+    if execution == "disabled":
+        if "command" in data:
+            raise AssentError(
+                f"Runtime-test contract {path.name} with execution = "
+                '"disabled" must not define command')
+        return RuntimeTestContract(execution, None)
+
+    if "command" not in data:
+        raise AssentError(
+            f"Runtime-test contract {path.name} is missing required field: command"
+            f" for execution = {execution!r}")
+    command = data["command"]
+    if not isinstance(command, str):
+        raise AssentError(
+            f"Runtime-test contract {path.name} field command must be a string")
+    if not command.strip():
+        raise AssentError(
+            f"Runtime-test contract {path.name} field command must not be empty "
+            "or whitespace")
+    return RuntimeTestContract(execution, command)
 
 
 def journal_path_for(task_path: Path) -> Path:
