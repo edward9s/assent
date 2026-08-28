@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 from assent import (AssentError, contracts, gitops, lockfile, reconcile,
-                    ignored_dirs, usage, verification)
+                    ignored_dirs, runtime_test, usage, verification)
 
 from assent.adapters import Adapter, InvocationRequest, get_adapter
 
@@ -64,7 +64,8 @@ from assent.inspection import try_write_report
 
 from assent.modeling import effort_identity
 
-from assent.plan import (Plan, RuntimeQuotaWait, Task, TaskWorkflowAction, append_entry,
+from assent.plan import (Plan, RUNTIME_TEST_CONTRACT_NAME, RuntimeQuotaWait,
+                         Task, TaskWorkflowAction, append_entry,
                          parse_runtime_test_contract, parse_task_file,
                          plan_workflow_requires_human,
                          read_runtime_test_workflow_state,
@@ -308,11 +309,11 @@ _RUNTIME_SUMMARY_LIMIT = 4096
 
 
 def _runtime_test_identity(cfg: Config, command: str) -> str:
-    """Bind runtime evidence to one clean source tree and exact command."""
+    """Bind runtime evidence to one clean source commit and exact command."""
     if not gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
         raise AssentError("source worktree is dirty at the runtime_test boundary")
-    command_sha256 = hashlib.sha256(command.encode("utf-8")).hexdigest()
-    return f"{gitops.tree_of(cfg.root, 'HEAD')}:{command_sha256}"
+    return runtime_test.evidence_identity(
+        gitops.commit_of(cfg.root, "HEAD"), command)
 
 
 def _runtime_test_record(state: WorkflowState) -> _TestActionEvidence | None:
@@ -857,6 +858,39 @@ def _selection_snapshot(configs: tuple[Config, ...]) -> tuple[
         _branch, tip, _worktree = source_snapshot(cfg, main)
         sources.append(tip)
     return target_ref, target_commit, tuple(sources)
+
+
+def ensure_selection_runtime_tests(
+        configs: tuple[Config, ...],
+        sleep: Callable[[float], None] | None = None,
+        now: Callable[[], datetime] | None = None) -> tuple[int, str | None]:
+    """Satisfy each selected after-plan gate against its own current source."""
+    sleep = sleep or interruptible_sleep
+    now = now or (lambda: datetime.now(timezone.utc))
+    main = gitops.main_worktree(configs[0].root)
+    for cfg in configs:
+        _branch, source_tip, _worktree = source_snapshot(cfg, main)
+        problem = runtime_test.after_plan_gate_problem(
+            cfg.tasks_dir, source_tip)
+        if problem is None:
+            contract_path = cfg.tasks_dir / RUNTIME_TEST_CONTRACT_NAME
+            if (contract_path.is_file()
+                    and parse_runtime_test_contract(
+                        cfg.tasks_dir).execution == "after_plan"):
+                print(f"Runtime-test layer {cfg.tasks_name}: current PASSED "
+                      "evidence reused.")
+            continue
+        print(f"Runtime-test layer {cfg.tasks_name}: {problem}; running the "
+              "plan runtime workflow before integration.")
+        code = run_runtime_test(cfg, sleep=sleep, now=now)
+        if code != 0:
+            return code, None
+        _branch, source_tip, _worktree = source_snapshot(cfg, main)
+        problem = runtime_test.after_plan_gate_problem(
+            cfg.tasks_dir, source_tip)
+        if problem is not None:
+            return 0, f"{cfg.tasks_name} {problem}"
+    return 0, None
 
 @contextlib.contextmanager
 def _selection_locks(configs: tuple[Config, ...]):
@@ -1660,6 +1694,27 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
             return _integration_human_decision(
                 "plan workflow adjudication is still pending for "
                 + ", ".join(pending) + ".")
+        code, runtime_problem = ensure_selection_runtime_tests(
+            configs, sleep, now)
+        if code != 0:
+            return code
+        with _selection_locks(configs):
+            locked_snapshot = _selection_snapshot(configs)
+            prior_state = read_selection_workflow_state(
+                configs[0].assent_dir)
+            if (prior_state is not None
+                    and prior_state.plan_names == ordered
+                    and (prior_state.target_ref, prior_state.target_commit)
+                    == locked_snapshot[:2]
+                    and prior_state.source_commits != locked_snapshot[2]):
+                prior_state = replace(
+                    prior_state, source_commits=locked_snapshot[2], action="",
+                    action_status="", action_candidate_tree="",
+                    action_exit_code=0, action_evidence=(),
+                    verification_script_sha256="",
+                    ignored_directory_inputs_sha256="")
+                write_selection_workflow_state(
+                    configs[0].assent_dir, prior_state)
         target_ref, target_commit, source_commits = _selection_snapshot(configs)
         steps = _integration_steps(configs[0])
         identity = (ordered, target_ref, target_commit, source_commits)
@@ -1677,9 +1732,16 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
             state = replace(state, step_index=first_action)
             write_selection_workflow_state(configs[0].assent_dir, state)
         elif state.step_index >= len(steps):
+            if runtime_problem is not None:
+                return _integration_human_decision(
+                    "runtime-test gate is unresolved: "
+                    + runtime_problem + ".")
             outcome = (state.action_evidence[0]
                        if state.action_evidence else "")
             return _integration_automated_work_complete(outcome)
+        if runtime_problem is not None:
+            return _integration_human_decision(
+                "runtime-test gate is unresolved: " + runtime_problem + ".")
     except (AssentError, OSError) as error:
         print(f"Selection full_verify: failed ({error})")
         return 1
@@ -1743,6 +1805,39 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
         except (AssentError, lockfile.LockBusy, OSError) as error:
             print(f"Integration conflict closeout failed: {error}")
             return 1
+
+        try:
+            code, runtime_problem = ensure_selection_runtime_tests(
+                configs, sleep, now)
+            if code != 0:
+                return code
+            with _selection_locks(configs):
+                current = _selection_snapshot(configs)
+                if current[:2] != (state.target_ref, state.target_commit):
+                    raise AssentError(
+                        "integration target changed before full verification")
+                if current[2] != state.source_commits:
+                    state = replace(
+                        state, source_commits=current[2], action="",
+                        action_status="", action_candidate_tree="",
+                        action_exit_code=0, action_evidence=(),
+                        verification_script_sha256="",
+                        ignored_directory_inputs_sha256="")
+                    write_selection_workflow_state(
+                        configs[0].assent_dir, state)
+                for cfg, source_tip in zip(configs, current[2]):
+                    problem = runtime_test.after_plan_gate_problem(
+                        cfg.tasks_dir, source_tip)
+                    if problem is not None:
+                        runtime_problem = f"{cfg.tasks_name} {problem}"
+                        break
+        except (AssentError, lockfile.LockBusy, OSError) as error:
+            print(f"Runtime-test gate failed: {error}")
+            return 1
+        if runtime_problem is not None:
+            return _integration_human_decision(
+                "runtime-test gate is unresolved: "
+                + runtime_problem + ".")
 
         if state.action_status == "PASSED":
             print("Integration verification: checking existing PASSED receipt.")

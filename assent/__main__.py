@@ -472,6 +472,15 @@ def _close_run(result: int, *, config_path: str,
         if selection_cfg.workflow_integration:
             return engine.run_selection_workflow(
                 config_path, assent_dir, selection)
+        configs = tuple(load_config(config_path, name) for name in selection)
+        runtime_code, runtime_problem = engine.ensure_selection_runtime_tests(
+            configs)
+        if runtime_code != 0:
+            return runtime_code
+        if runtime_problem is not None:
+            print("Integration workflow deferred: runtime-test gate is "
+                  "unresolved (" + runtime_problem + ")")
+            return 0
     if selection is None:
         plan_names = list_task_plans(assent_dir)
         if plan_names:
