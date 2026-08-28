@@ -1,4 +1,4 @@
-"""CLI entry point: argparse subcommands run/runtime-test/status/check/report/verify/clean/
+"""CLI entry point: argparse subcommands run/test/runtime-test/status/check/report/verify/clean/
 accept/reconcile/reject/rework/archive/init."""
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ from assent.archive import (archive_all, archive_plan, archive_recovery_names,
                             archive_selected, restore_plan)
 from assent.batch_accept import accept_all, accept_selected_batch
 from assent.clean import clean_plans, validate_live_plan_selection
-from assent.config import list_task_plans, load_config, validate_config
+from assent.config import (list_task_plans, load_config,
+                           load_main_runtime_config, validate_config)
 from assent.doctor import doctor as run_doctor
 from assent.plandeps import infer_plan_completion, parse_plan_dependency_graph
 from assent.plan_source import resolve_source_snapshot
@@ -127,7 +128,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="command", required=True,
         parser_class=functools.partial(argparse.ArgumentParser,
                                        formatter_class=_HelpFormatter),
-        metavar=("{run,runtime-test,status,check,report,verify,clean,accept,reconcile,reject,"
+        metavar=("{run,test,runtime-test,status,check,report,verify,clean,accept,reconcile,reject,"
                  "rework,archive,init,doctor,ignored-dirs}"))
 
     run_p = sub.add_parser(
@@ -150,6 +151,11 @@ def _build_parser() -> argparse.ArgumentParser:
              + _PLAN_NAME_HELP)
     runtime_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
                            help=_CONFIG_HELP)
+
+    test_p = sub.add_parser(
+        "test", help="Test main in an isolated repair candidate")
+    test_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
+                        help=_CONFIG_HELP)
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
@@ -610,6 +616,13 @@ def _dispatch(argv: list[str]) -> int:
             print(f"Config error: {e}")
             return 1
         return engine.run_runtime_test(cfg)
+    if args.command == "test":
+        try:
+            cfg = load_main_runtime_config(args.config)
+        except AssentError as e:
+            print(f"Config error: {e}")
+            return 1
+        return engine.run_main_runtime_test(cfg)
     if args.command == "accept":
         if args.all_plans:
             return accept_all(args.config, assent_dir)

@@ -98,6 +98,7 @@ class WorkflowState:
     action_exit_code: int = 0
     action_evidence: tuple[str, ...] = ()
     quota_waits: tuple[RuntimeQuotaWait, ...] = ()
+    candidate_head: str = ""
 
 
 @dataclass(frozen=True)
@@ -303,7 +304,7 @@ def read_runtime_test_workflow_state(owner_dir: Path) -> WorkflowState | None:
         "action", "action_status", "action_source_tree", "action_exit_code",
         "action_evidence", "quota_waits",
     }
-    if set(data) != expected:
+    if set(data) not in (expected, expected | {"candidate_head"}):
         raise AssentError(f"Runtime workflow state {path.name} has an invalid schema")
     waits = _runtime_quota_waits(data["quota_waits"], path)
     if (data["unit"] != "runtime_test" or data["task_id"] != ""
@@ -311,6 +312,7 @@ def read_runtime_test_workflow_state(owner_dir: Path) -> WorkflowState | None:
             or isinstance(data["step_index"], bool) or data["step_index"] < 0
             or not isinstance(data["started"], bool)
             or not isinstance(data["base_ref"], str)
+            or not isinstance(data.get("candidate_head", ""), str)
             or not isinstance(data["evidence"], list)
             or not all(isinstance(item, str) for item in data["evidence"])
             or not _valid_action_result(
@@ -322,7 +324,8 @@ def read_runtime_test_workflow_state(owner_dir: Path) -> WorkflowState | None:
         data["unit"], data["task_id"], data["step_index"], data["started"],
         data["base_ref"], tuple(data["evidence"]), data["action"],
         data["action_status"], data["action_source_tree"],
-        data["action_exit_code"], tuple(data["action_evidence"]), waits)
+        data["action_exit_code"], tuple(data["action_evidence"]), waits,
+        data.get("candidate_head", ""))
 
 
 def write_runtime_test_workflow_state(
@@ -340,6 +343,7 @@ def write_runtime_test_workflow_state(
             or isinstance(state.step_index, bool) or state.step_index < 0
             or not isinstance(state.started, bool)
             or not isinstance(state.base_ref, str)
+            or not isinstance(state.candidate_head, str)
             or not all(isinstance(item, str) for item in state.evidence)):
         raise AssentError("Runtime workflow state has invalid values")
     quota_items = []
@@ -374,6 +378,8 @@ def write_runtime_test_workflow_state(
             json.dumps(item, ensure_ascii=False)
             for item in state.action_evidence) + "]",
         "quota_waits = [" + ", ".join(quota_items) + "]",
+        *((f"candidate_head = {json.dumps(state.candidate_head)}",)
+          if state.candidate_head else ()),
         "",
     ))
     atomic_write_text(runtime_test_workflow_state_path(owner_dir), text)

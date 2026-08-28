@@ -45,7 +45,7 @@ from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess as _adapter_run_subprocess,
                                      stop_wake_requested)
 
-from assent.config import (Config, WorkflowActionStep, WorkflowRoleStep,
+from assent.config import (PROJECT_LAYER, Config, WorkflowActionStep, WorkflowRoleStep,
                            WorkflowTaskStep, load_config)
 
 from assent.batch_verification import (SelectionCandidateConflict,
@@ -1989,6 +1989,172 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
         print(f"Runtime test refused: {error}")
         return 1
 
+
+def _main_runtime_candidate(cfg: Config, base: str) -> Config:
+    """Create or validate the one main runtime-test candidate identity."""
+    primary = gitops.main_worktree(cfg.root)
+    path = gitops.runtime_test_worktree_path(primary)
+    branch = gitops.RUNTIME_TEST_BRANCH_PREFIX + "main"
+    path_exists = os.path.lexists(path)
+    branch_exists = gitops.branch_exists(primary, branch)
+    if not path_exists and not branch_exists:
+        gitops.add_worktree_branch(primary, branch, path, base)
+    elif path_exists != branch_exists:
+        raise AssentError(
+            "main runtime-test candidate identity is incomplete; retained "
+            f"branch={branch} path={path}")
+    if not gitops.is_repo_worktree(primary, path):
+        raise AssentError(
+            f"main runtime-test path is not the managed repository worktree: {path}")
+    attached = gitops.current_branch(path)
+    if attached != branch:
+        raise AssentError(
+            f"main runtime-test worktree is on {attached or '(detached)'}, "
+            f"expected {branch}; retained {path}")
+    tip = gitops.commit_of(path, "HEAD")
+    if not gitops.is_ancestor(primary, base, tip):
+        raise AssentError(
+            f"main runtime-test candidate no longer contains exact base {base}; "
+            f"retained branch={branch} path={path}")
+    return cfg.for_worktree(path)
+
+
+def _print_main_runtime_candidate(cfg: Config, base: str, status: str) -> None:
+    primary = cfg.source_root or cfg.root
+    print(f"Main runtime test {status}.")
+    print(f"Exact base: {base}")
+    print(f"Candidate branch: {gitops.RUNTIME_TEST_BRANCH_PREFIX}main")
+    print(f"Candidate worktree: {gitops.runtime_test_worktree_path(primary)}")
+
+
+def run_main_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
+                          sleep: Callable[[float], None] | None = None,
+                          now: Callable[[], datetime] | None = None) -> int:
+    """Test main and preserve every non-redundant repair candidate for review."""
+    try:
+        contracts.require_contracts()
+        if cfg.source_of("runtime_test.command") != PROJECT_LAYER:
+            raise AssentError(
+                "[runtime_test].command must be stated in the project config")
+        command = cfg.runtime_test_command
+        if command is None:
+            raise AssentError(
+                "Project config is missing [runtime_test].command")
+        steps = _runtime_test_source_steps(cfg)
+        if not has_git_marker(cfg.root):
+            raise AssentError(GIT_REQUIRED_MESSAGE)
+        primary = gitops.main_worktree(cfg.root)
+        if primary.resolve() != cfg.root.resolve():
+            raise AssentError("assent test must use the primary worktree config")
+
+        adapter_names = list(cfg.adapter_names)
+        for step in cfg.workflow_runtime_test or ():
+            if isinstance(step, WorkflowRoleStep):
+                for name in step.adapters:
+                    if name not in adapter_names:
+                        adapter_names.append(name)
+        adapters = {
+            name: (adapter if name == cfg.adapter_names[0]
+                   and adapter is not None else get_adapter(name, cfg))
+            for name in adapter_names
+        }
+        rotation = _AdapterRotation(
+            cfg.adapter_names,
+            tuple(adapters[name] for name in cfg.adapter_names), pool=adapters)
+        sleep = sleep or interruptible_sleep
+        now = now or (lambda: datetime.now(timezone.utc))
+        owner = cfg.assent_dir
+        state_path = runtime_test_workflow_state_path(owner)
+        path = gitops.runtime_test_worktree_path(primary)
+        branch = gitops.RUNTIME_TEST_BRANCH_PREFIX + "main"
+
+        with lockfile.hold_integration_lock(cfg.assent_dir):
+            state = read_runtime_test_workflow_state(owner)
+            if (state is not None and not os.path.lexists(path)
+                    and not gitops.branch_exists(primary, branch)):
+                state_path.unlink(missing_ok=True)
+                state = None
+            if state is None:
+                if os.path.lexists(path) or gitops.branch_exists(primary, branch):
+                    raise AssentError(
+                        "main runtime-test artifacts exist without their state; "
+                        f"retained branch={branch} path={path}")
+                gitops.ensure_clean(primary, cfg.git_excludes)
+                gitops.require_current_branch(primary)
+                base = gitops.commit_of(primary, "HEAD")
+                state = WorkflowState(
+                    "runtime_test", "", 0, False, base,
+                    action="runtime_test", candidate_head=base)
+                write_runtime_test_workflow_state(owner, state)
+            else:
+                base = state.base_ref
+
+            work_cfg = _main_runtime_candidate(cfg, base)
+            if not state.candidate_head:
+                raise AssentError(
+                    "main runtime-test state has no candidate HEAD identity; "
+                    f"retained branch={branch} path={path}")
+            candidate_head = gitops.commit_of(work_cfg.root, "HEAD")
+            if candidate_head != state.candidate_head:
+                raise AssentError(
+                    "main runtime-test candidate HEAD changed outside its "
+                    f"workflow ({state.candidate_head} -> {candidate_head}); "
+                    f"retained branch={branch} path={path}")
+            gitops.ensure_clean(primary, cfg.git_excludes)
+            _recover_or_ensure_clean(work_cfg, now)
+            recovered_head = gitops.commit_of(work_cfg.root, "HEAD")
+            if recovered_head != state.candidate_head:
+                state = replace(state, candidate_head=recovered_head)
+                write_runtime_test_workflow_state(owner, state)
+
+            state = read_runtime_test_workflow_state(owner)
+            assert state is not None
+            if state.step_index >= len(steps) and state.action_status == "PASSED":
+                if gitops.commit_of(work_cfg.root, "HEAD") != base:
+                    _print_main_runtime_candidate(
+                        work_cfg, base,
+                        "has a repaired candidate pending human integration")
+                    return 1
+            else:
+                code = _process_source_workflow(
+                    work_cfg, Plan([], cfg.assent_dir), None, steps, rotation,
+                    sleep, now, _ActiveTask(), unit="runtime_test",
+                    runtime_command=command, state_owner=owner)
+                if code != 0:
+                    _print_main_runtime_candidate(work_cfg, base, "failed")
+                    return code
+
+            state = read_runtime_test_workflow_state(owner)
+            assert state is not None
+            head = gitops.commit_of(work_cfg.root, "HEAD")
+            if state.action_status != "PASSED":
+                _print_main_runtime_candidate(work_cfg, base, "is unresolved")
+                return 1
+            if head != base:
+                _print_main_runtime_candidate(
+                    work_cfg, base,
+                    "passed with repairs pending human integration")
+                return 0
+            gitops.ensure_clean(work_cfg.root, work_cfg.git_excludes)
+            gitops.remove_worktree(primary, path)
+            gitops.delete_branch(primary, branch)
+            state_path.unlink(missing_ok=True)
+            print(f"Main runtime test passed unchanged at exact base {base}; "
+                  "redundant candidate artifacts were removed.")
+            return 0
+    except lockfile.LockBusy as error:
+        print(str(error))
+        return 1
+    except KeyboardInterrupt:
+        print("Interrupted; main runtime-test state and candidate were preserved.")
+        return 130
+    except _BillingAbort as error:
+        print(f"Main runtime test stopped for billing: {error}; candidate preserved.")
+        return 1
+    except (AssentError, OSError) as error:
+        print(f"Main runtime test refused: {error}")
+        return 1
+
 def _run_locked(cfg: Config, adapter: Adapter | None,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
@@ -2321,12 +2487,20 @@ def _source_workflow_prompt(
         cfg: Config, plan: Plan, task: Task | None, step: _RoleStep,
         state: WorkflowState, position: int, total: int) -> str:
     runtime_test = state.unit == "runtime_test"
-    unit = (f"runtime_test for plan {cfg.tasks_name}" if runtime_test else
+    main_runtime_test = runtime_test and cfg.tasks_dir == cfg.assent_dir
+    unit = ("runtime_test for main" if main_runtime_test else
+            (f"runtime_test for plan {cfg.tasks_name}" if runtime_test else
             (f"task {task.id}" if task is not None else f"plan {cfg.tasks_name}"))
+            )
     contracts_text = "\n\n".join(
         f"--- {item.id}: {item.path} ---\n"
         + item.path.read_text(encoding="utf-8").rstrip()
         for item in (plan.tasks if task is None else [task]))
+    if main_runtime_test:
+        contracts_text = (
+            "Repair the project source so the configured main runtime-test "
+            "command passes. Preserve the primary worktree unchanged; all edits "
+            "belong in this candidate worktree.")
     prior = "\n\n".join(state.evidence) or "(none)"
     action = (_runtime_test_prompt(state) if runtime_test else
               (_focused_test_prompt(state) if task is not None
@@ -2419,7 +2593,10 @@ def _run_source_role(
         adapter = step_rotation.adapter
         adapter_name = step_rotation.name
         session = _role_session_identity(cfg, step, adapter_name)
-        state = replace(state, started=True)
+        state = replace(
+            state, started=True,
+            candidate_head=(gitops.head_ref(cfg.root) or "")
+            if state.candidate_head else "")
         _write_source_workflow_state(state_owner or cfg.tasks_dir, state)
         management = _management_snapshot(cfg, plan)
         source_head = gitops.head_ref(cfg.root)
@@ -2447,6 +2624,11 @@ def _run_source_role(
                 _mark_billing_task(task, session, reason, now)
             active.task = None
             active.session = None
+            if state.candidate_head:
+                state = replace(
+                    state, candidate_head=gitops.head_ref(cfg.root) or "")
+                _write_source_workflow_state(
+                    state_owner or cfg.tasks_dir, state)
             raise _BillingAbort(reason)
         active.task = None
         active.session = None
@@ -2498,6 +2680,11 @@ def _run_source_role(
             gitops.commit_if_dirty(
                 cfg.root, f"wip({cfg.tasks_name}): {step.role} failed",
                 cfg.git_excludes)
+            if state.candidate_head:
+                state = replace(
+                    state, candidate_head=gitops.head_ref(cfg.root) or "")
+                _write_source_workflow_state(
+                    state_owner or cfg.tasks_dir, state)
             print(f"Role session failed: {reason}")
             return result.exit_code or 1, state
 
@@ -2527,7 +2714,9 @@ def _run_source_role(
             cfg.git_excludes)
         state = _with_session_evidence(state, step.role, result.output)
         state = replace(
-            state, step_index=state.step_index + 1, started=False)
+            state, step_index=state.step_index + 1, started=False,
+            candidate_head=(gitops.head_ref(cfg.root) or "")
+            if state.candidate_head else "")
         _write_source_workflow_state(state_owner or cfg.tasks_dir, state)
         if task is not None:
             append_entry(

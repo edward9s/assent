@@ -1015,3 +1015,10 @@ def load_config(path: str | Path, plan_name: str) -> Config:
         None if raw_workflow_runtime_test is None else
         _resolve_plan_steps(cfg, raw_workflow_runtime_test, "runtime_test"))
     return cfg
+
+
+def load_main_runtime_config(path: str | Path) -> Config:
+    """Load project settings for the main runtime-test candidate."""
+    cfg = load_config(path, "main")
+    cfg.tasks_dir = cfg.assent_dir
+    return cfg
