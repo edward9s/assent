@@ -78,6 +78,8 @@ class AcceptReceiptCase(unittest.TestCase):
     def _write_task(self, plan_name: str) -> Path:
         tasks = self.assent_dir / plan_name
         tasks.mkdir(parents=True, exist_ok=True)
+        (tasks / "_runtime_test.toml").write_text(
+            'execution = "disabled"\n', encoding="utf-8")
         path = tasks / "t001_task.e.toml"
         path.write_text(
             'title = "Task"\n'

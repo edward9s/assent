@@ -2745,8 +2745,6 @@ def _run_source_role(
                 session.requested_effort, cfg.root, context_kind=state.unit,
                 context_id=f"workflow.{state.unit}[{state.step_index}]")
         except KeyboardInterrupt:
-            active.task = None
-            active.session = None
             gitops.commit_if_dirty(
                 cfg.root, f"wip({cfg.tasks_name}): {step.role} interrupted",
                 cfg.git_excludes)
