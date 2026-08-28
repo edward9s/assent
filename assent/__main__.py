@@ -1,4 +1,4 @@
-"""CLI entry point: argparse subcommands run/status/check/report/verify/clean/
+"""CLI entry point: argparse subcommands run/runtime-test/status/check/report/verify/clean/
 accept/reconcile/reject/rework/archive/init."""
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="command", required=True,
         parser_class=functools.partial(argparse.ArgumentParser,
                                        formatter_class=_HelpFormatter),
-        metavar=("{run,status,check,report,verify,clean,accept,reconcile,reject,"
+        metavar=("{run,runtime-test,status,check,report,verify,clean,accept,reconcile,reject,"
                  "rework,archive,init,doctor,ignored-dirs}"))
 
     run_p = sub.add_parser(
@@ -140,6 +140,16 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--jobs", type=_positive_int, metavar="N",
                        help="Maximum concurrent plans for a whole-project run "
                             "(default: 1; cannot be used with PLAN)")
+
+    runtime_p = sub.add_parser(
+        "runtime-test", help="Run one live plan's declared runtime command and "
+                             "finite repair workflow")
+    runtime_p.add_argument(
+        "plan_name", metavar="PLAN",
+        help="The exact live plan whose _runtime_test.toml command runs."
+             + _PLAN_NAME_HELP)
+    runtime_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
+                           help=_CONFIG_HELP)
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
@@ -564,7 +574,7 @@ def _dispatch(argv: list[str]) -> int:
         explicit = args.plan_names
     elif args.command in ("accept", "verify", "clean"):
         explicit = args.plan_name
-    elif args.command in ("status", "check", "report",
+    elif args.command in ("runtime-test", "status", "check", "report",
                           "reconcile", "reject", "rework"):
         explicit = [args.plan_name] if args.plan_name is not None else []
     elif args.command == "archive" and not args.restore:
@@ -593,6 +603,13 @@ def _dispatch(argv: list[str]) -> int:
         if selection is not None:
             return closeout(_dispatch_run_plans(args.config, selection))
         return closeout(run_all(args.config, assent_dir, args.jobs or 1))
+    if args.command == "runtime-test":
+        try:
+            cfg = load_config(args.config, args.plan_name)
+        except AssentError as e:
+            print(f"Config error: {e}")
+            return 1
+        return engine.run_runtime_test(cfg)
     if args.command == "accept":
         if args.all_plans:
             return accept_all(args.config, assent_dir)

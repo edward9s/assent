@@ -65,13 +65,15 @@ from assent.inspection import try_write_report
 from assent.modeling import effort_identity
 
 from assent.plan import (Plan, Task, TaskWorkflowAction, append_entry,
-                         parse_task_file,
+                         parse_runtime_test_contract, parse_task_file,
                          plan_workflow_requires_human,
+                         read_runtime_test_workflow_state,
                          read_selection_workflow_state,
                          read_workflow_state,
                          selection_workflow_state_path,
                          set_status, WorkflowState,
                          SelectionWorkflowState,
+                         runtime_test_workflow_state_path,
                          workflow_state_path, write_selection_workflow_state,
                          write_runtime_test_workflow_state,
                          write_workflow_state)
@@ -458,6 +460,25 @@ def _run_runtime_test_action(
     write_runtime_test_workflow_state(owner_dir, state)
     print(f"  runtime_test evidence: {record.status} (exit {record.exit_code})")
     return state, record, False
+
+
+def _runtime_test_prompt(state: WorkflowState) -> str:
+    record = _runtime_test_record(state)
+    if record is None:
+        return ""
+    return (
+        "\nRUNTIME TEST EVIDENCE\n"
+        f"Status: {record.status}\n"
+        f"Command: {record.command}\n"
+        f"Exit code: {record.exit_code}\n"
+        f"Bounded output:\n{record.summary}\n")
+
+
+def _write_source_workflow_state(owner: Path, state: WorkflowState) -> None:
+    if state.unit == "runtime_test":
+        write_runtime_test_workflow_state(owner, state)
+    else:
+        write_workflow_state(owner, state)
 
 def _focused_sweep_identity(cfg: Config, plan: Plan) -> str:
     """Bind a plan sweep to the source tree and its distinct commands."""
@@ -1897,6 +1918,77 @@ def run(cfg: Config, *, adapter: Adapter | None = None,
         try_write_report(cfg)
     return result
 
+
+def _runtime_test_source_steps(
+        cfg: Config) -> tuple[_RoleStep | WorkflowActionStep, ...]:
+    workflow = cfg.workflow_runtime_test
+    if workflow is None:
+        raise AssentError("Effective [workflow].runtime_test is not configured")
+    steps: list[_RoleStep | WorkflowActionStep] = []
+    for step in workflow:
+        if isinstance(step, WorkflowActionStep):
+            steps.append(step)
+            continue
+        assert step.model is not None
+        steps.append(_RoleStep(
+            step.role, step.adapters, step.model, step.writes,
+            _role_policy(step)))
+    return tuple(steps)
+
+
+def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
+                     sleep: Callable[[float], None] | None = None,
+                     now: Callable[[], datetime] | None = None) -> int:
+    """Run one plan contract's runtime command and finite repair workflow."""
+    try:
+        contracts.require_contracts()
+        if not has_git_marker(cfg.root):
+            raise AssentError(GIT_REQUIRED_MESSAGE)
+        plan = Plan.parse(cfg.tasks_dir)
+        contract = parse_runtime_test_contract(cfg.tasks_dir)
+        if contract.execution == "disabled":
+            raise AssentError(
+                f"Runtime testing is disabled for plan {cfg.tasks_name}")
+        assert contract.command is not None
+        steps = _runtime_test_source_steps(cfg)
+
+        adapter_names = list(cfg.adapter_names)
+        for step in cfg.workflow_runtime_test or ():
+            if isinstance(step, WorkflowRoleStep):
+                for name in step.adapters:
+                    if name not in adapter_names:
+                        adapter_names.append(name)
+        adapters = {
+            name: (adapter if name == cfg.adapter_names[0]
+                   and adapter is not None else get_adapter(name, cfg))
+            for name in adapter_names
+        }
+        rotation = _AdapterRotation(
+            cfg.adapter_names,
+            tuple(adapters[name] for name in cfg.adapter_names), pool=adapters)
+        sleep = sleep or interruptible_sleep
+        now = now or (lambda: datetime.now(timezone.utc))
+        with lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name):
+            prior = read_runtime_test_workflow_state(cfg.tasks_dir)
+            if prior is not None and prior.step_index >= len(steps):
+                runtime_test_workflow_state_path(cfg.tasks_dir).unlink(
+                    missing_ok=True)
+            work_cfg = _prepare_worktree(cfg) if cfg.source_root is None else cfg
+            _recover_or_ensure_clean(work_cfg, now)
+            return _process_source_workflow(
+                work_cfg, plan, None, steps, rotation, sleep, now,
+                _ActiveTask(), unit="runtime_test",
+                runtime_command=contract.command, state_owner=cfg.tasks_dir)
+    except lockfile.LockBusy as error:
+        print(str(error))
+        return 1
+    except KeyboardInterrupt:
+        print("Interrupted; runtime workflow state and worktree were preserved.")
+        return 130
+    except (AssentError, OSError) as error:
+        print(f"Runtime test refused: {error}")
+        return 1
+
 def _run_locked(cfg: Config, adapter: Adapter | None,
                 sleep: Callable[[float], None],
                 now: Callable[[], datetime]) -> int:
@@ -2197,6 +2289,11 @@ def _management_snapshot(cfg: Config, plan: Plan) -> dict[Path, bytes | None]:
         cfg.assent_dir / "_plan_deps.toml",
         cfg.assent_dir / "assent.toml",
         cfg.assent_dir / "verify.py",
+        cfg.assent_dir / "_batch_verification.toml",
+        cfg.assent_dir / "_runtime_test_workflow.toml",
+        cfg.tasks_dir / "_runtime_test.toml",
+        cfg.tasks_dir / "_runtime_test_workflow.toml",
+        cfg.tasks_dir / "_verification.toml",
         selection_workflow_state_path(cfg.assent_dir),
         workflow_state_path(cfg.tasks_dir),
     }
@@ -2223,14 +2320,17 @@ def _management_changes(before: dict[Path, bytes | None]) -> list[str]:
 def _source_workflow_prompt(
         cfg: Config, plan: Plan, task: Task | None, step: _RoleStep,
         state: WorkflowState, position: int, total: int) -> str:
-    unit = f"task {task.id}" if task is not None else f"plan {cfg.tasks_name}"
+    runtime_test = state.unit == "runtime_test"
+    unit = (f"runtime_test for plan {cfg.tasks_name}" if runtime_test else
+            (f"task {task.id}" if task is not None else f"plan {cfg.tasks_name}"))
     contracts_text = "\n\n".join(
         f"--- {item.id}: {item.path} ---\n"
         + item.path.read_text(encoding="utf-8").rstrip()
         for item in (plan.tasks if task is None else [task]))
     prior = "\n\n".join(state.evidence) or "(none)"
-    action = (_focused_test_prompt(state) if task is not None
-              else _focused_sweep_prompt(state))
+    action = (_runtime_test_prompt(state) if runtime_test else
+              (_focused_test_prompt(state) if task is not None
+               else _focused_sweep_prompt(state)))
     write_policy = (
         "You may edit any ordinary project source, test, configuration, or "
         "documentation file in this candidate worktree that is needed to "
@@ -2244,6 +2344,13 @@ def _source_workflow_prompt(
         if task is not None else
         "Review and repair the cumulative candidate as one plan result; do not "
         "assign findings or files to task owners.")
+    runtime_policy = (
+        "\nThe runtime command is scheduler-owned. Do not run Git, Assent, or "
+        "the runtime command. AI text cannot declare the runtime test passed. "
+        "A writable role may repair the root cause across ordinary source, "
+        "tests, fixtures, project configuration, and documentation in this "
+        "candidate worktree.\n"
+        if runtime_test else "")
     ignored_dir_clause = ignored_dirs.declaration_clause(_ignored_dir_decision(cfg))
     return f"""You are one Assent role session.
 
@@ -2259,6 +2366,7 @@ Role responsibility:
 
 {write_policy}
 {task_focus}
+{runtime_policy}
 
 Task contracts are read-only. Journals, scheduler state, Git state, receipts,
 and files below .git or .assent are also read-only. Do not run Git, Assent, a
@@ -2298,7 +2406,8 @@ def _run_source_role(
         session_position: int, session_total: int,
         rotation: _AdapterRotation,
         sleep: Callable[[float], None], now: Callable[[], datetime],
-        active: _ActiveTask) -> tuple[int, WorkflowState]:
+        active: _ActiveTask, *, state_owner: Path | None = None
+        ) -> tuple[int, WorkflowState]:
     """Run one role session; only adapter availability may repeat the step."""
     step_rotation = rotation.subset(step.adapters)
     failed_adapters: set[str] = set()
@@ -2311,9 +2420,11 @@ def _run_source_role(
         adapter_name = step_rotation.name
         session = _role_session_identity(cfg, step, adapter_name)
         state = replace(state, started=True)
-        write_workflow_state(cfg.tasks_dir, state)
+        _write_source_workflow_state(state_owner or cfg.tasks_dir, state)
         management = _management_snapshot(cfg, plan)
         source_head = gitops.head_ref(cfg.root)
+        primary_head = (gitops.head_ref(cfg.source_root)
+                        if cfg.source_root is not None else source_head)
         primary_baseline = (
             gitops.dirty_paths(cfg.source_root)
             if cfg.source_root is not None else set())
@@ -2398,6 +2509,9 @@ def _run_source_role(
                 for path in sorted(primary_after - primary_baseline))
         if gitops.head_ref(cfg.root) != source_head:
             violations.append("Git HEAD")
+        if (cfg.source_root is not None
+                and gitops.head_ref(cfg.source_root) != primary_head):
+            violations.append("primary worktree:Git HEAD")
         if not step.writes and not gitops.working_tree_status(
                 cfg.root, cfg.git_excludes).is_clean:
             violations.append("read-only session changed project files")
@@ -2414,7 +2528,7 @@ def _run_source_role(
         state = _with_session_evidence(state, step.role, result.output)
         state = replace(
             state, step_index=state.step_index + 1, started=False)
-        write_workflow_state(cfg.tasks_dir, state)
+        _write_source_workflow_state(state_owner or cfg.tasks_dir, state)
         if task is not None:
             append_entry(
                 task.journal_path, by="scheduler", event="session",
@@ -2444,13 +2558,16 @@ def _finish_task_workflow(
 
 def _finish_plan_workflow(
         cfg: Config, state: WorkflowState,
-        steps: tuple[_RoleStep | WorkflowActionStep, ...]) -> None:
+        steps: tuple[_RoleStep | WorkflowActionStep, ...], *,
+        state_owner: Path | None = None) -> None:
     state = replace(state, step_index=len(steps), started=False)
-    write_workflow_state(cfg.tasks_dir, state)
+    _write_source_workflow_state(state_owner or cfg.tasks_dir, state)
 
 def _source_workflow_unresolved(
         cfg: Config, task: Task | None, state: WorkflowState,
-        record: _TestActionEvidence, now: Callable[[], datetime]) -> int:
+        record: _TestActionEvidence, now: Callable[[], datetime], *,
+        state_owner: Path | None = None,
+        reason: str = "the configured steps were exhausted") -> int:
     if task is not None:
         set_status(task.path, "BLOCKED")
         append_entry(
@@ -2459,15 +2576,16 @@ def _source_workflow_unresolved(
             detail=(f"Command: {record.command}\nExit code: {record.exit_code}\n"
                     f"Summary:\n{record.summary}"),
             time_str=now().isoformat(timespec="seconds"))
-    write_workflow_state(cfg.tasks_dir, state)
+    _write_source_workflow_state(state_owner or cfg.tasks_dir, state)
     print(f"{state.unit.title()} workflow: REVIEW UNRESOLVED, HUMAN DECISION; "
-          "the configured steps were exhausted. Evidence and edits were "
+          f"{reason}. Evidence and edits were "
           "preserved.")
     return 0
 
 def _source_workflow_gate_unresolved(
         cfg: Config, task: Task | None, state: WorkflowState,
-        action: str, summary: str, now: Callable[[], datetime]) -> int:
+        action: str, summary: str, now: Callable[[], datetime], *,
+        state_owner: Path | None = None) -> int:
     """Close an exhausted workflow whose final action never started."""
     if task is not None:
         set_status(task.path, "BLOCKED")
@@ -2477,7 +2595,7 @@ def _source_workflow_gate_unresolved(
                      "decision remained unsettled"),
             detail=f"Action not started: {action}\nReason:\n{summary}",
             time_str=now().isoformat(timespec="seconds"))
-    write_workflow_state(cfg.tasks_dir, state)
+    _write_source_workflow_state(state_owner or cfg.tasks_dir, state)
     print(f"{state.unit.title()} workflow: REVIEW UNRESOLVED, HUMAN DECISION; "
           "the configured steps were exhausted. Evidence and edits were "
           "preserved.")
@@ -2487,36 +2605,54 @@ def _process_source_workflow(
         cfg: Config, plan: Plan, task: Task | None,
         steps: tuple[_RoleStep | WorkflowActionStep, ...],
         rotation: _AdapterRotation, sleep: Callable[[float], None],
-        now: Callable[[], datetime], active: _ActiveTask) -> int:
-    """Execute one task or plan workflow as a finite linear step array."""
+        now: Callable[[], datetime], active: _ActiveTask, *,
+        unit: str | None = None, runtime_command: str | None = None,
+        state_owner: Path | None = None) -> int:
+    """Execute one source workflow as a finite linear step array."""
     if not steps:
         return 0
-    unit = "task" if task is not None else "plan"
+    unit = unit or ("task" if task is not None else "plan")
     task_id = task.id if task is not None else ""
-    state = read_workflow_state(cfg.tasks_dir)
+    owner = state_owner or cfg.tasks_dir
+    state = (read_runtime_test_workflow_state(owner)
+             if unit == "runtime_test" else read_workflow_state(owner))
     if (state is None or state.unit != unit or state.task_id != task_id):
         state = WorkflowState(
-            unit, task_id, 0, False, gitops.head_ref(cfg.root) or "HEAD")
-        write_workflow_state(cfg.tasks_dir, state)
+            unit, task_id, 0, False, gitops.head_ref(cfg.root) or "HEAD",
+            action="runtime_test" if unit == "runtime_test" else "")
+        _write_source_workflow_state(owner, state)
     if state.step_index >= len(steps):
         if state.action_status == "PASSED":
             return 0
-        record = (_focused_test_record(state) if task is not None
-                  else _focused_sweep_record(state))
+        record = (_runtime_test_record(state) if unit == "runtime_test" else
+                  (_focused_test_record(state) if task is not None
+                   else _focused_sweep_record(state)))
         if record is None:
             raise AssentError("Workflow ended without a scheduler action")
-        return _source_workflow_unresolved(cfg, task, state, record, now)
+        return _source_workflow_unresolved(
+            cfg, task, state, record, now, state_owner=owner)
 
     while state.step_index < len(steps):
         step = steps[state.step_index]
         if isinstance(step, _RoleStep):
             session_position, session_total = _session_progress(
                 steps, state.step_index)
+            source_head = gitops.head_ref(cfg.root)
             code, state = _run_source_role(
                 cfg, plan, task, step, state, len(steps),
-                session_position, session_total, rotation, sleep, now, active)
+                session_position, session_total, rotation, sleep, now, active,
+                state_owner=owner)
             if code != 0:
                 return code
+            if unit == "runtime_test" and gitops.head_ref(cfg.root) == source_head:
+                record = _runtime_test_record(state)
+                if record is None:
+                    raise AssentError(
+                        "Runtime repair role completed without failed action evidence")
+                state = replace(state, step_index=len(steps), started=False)
+                return _source_workflow_unresolved(
+                    cfg, task, state, record, now, state_owner=owner,
+                    reason="the writable role made no source change")
             continue
 
         gitops.commit_if_dirty(
@@ -2532,39 +2668,50 @@ def _process_source_workflow(
             gate_evidence = f"{step.action} not started:\n{summary}"
             state = replace(
                 state, evidence=state.evidence + (gate_evidence,),
-                action="", action_status="", action_source_tree="",
+                action=("runtime_test" if unit == "runtime_test" else ""),
+                action_status="", action_source_tree="",
                 action_exit_code=0, action_evidence=())
-            write_workflow_state(cfg.tasks_dir, state)
+            _write_source_workflow_state(owner, state)
             print(f"  {step.action} not started: {summary}")
             if state.step_index == len(steps) - 1:
                 state = replace(
                     state, step_index=len(steps), started=False)
                 return _source_workflow_gate_unresolved(
-                    cfg, task, state, step.action, summary, now)
+                    cfg, task, state, step.action, summary, now,
+                    state_owner=owner)
             state = replace(
                 state, step_index=state.step_index + 1, started=False)
-            write_workflow_state(cfg.tasks_dir, state)
+            _write_source_workflow_state(owner, state)
             continue
+        elif unit == "runtime_test":
+            if runtime_command is None:
+                raise AssentError("Runtime workflow has no contract command")
+            state, record, _reused = _run_runtime_test_action(
+                cfg, owner, runtime_command, state)
         elif task is not None:
             state, record, _reused = _run_focused_test_action(cfg, task, state)
         else:
             state, record, _reused = _run_focused_sweep_action(
                 cfg, plan, state)
         if record.status == "PASSED":
-            if task is not None:
+            if unit == "runtime_test":
+                _finish_plan_workflow(
+                    cfg, state, steps, state_owner=owner)
+            elif task is not None:
                 _finish_task_workflow(cfg, task, record, now)
             else:
                 _finish_plan_workflow(cfg, state, steps)
-            try_write_report(cfg)
+            if unit != "runtime_test":
+                try_write_report(cfg)
             return 0
         if state.step_index == len(steps) - 1:
             state = replace(
                 state, step_index=len(steps), started=False)
             return _source_workflow_unresolved(
-                cfg, task, state, record, now)
+                cfg, task, state, record, now, state_owner=owner)
         state = replace(
             state, step_index=state.step_index + 1, started=False)
-        write_workflow_state(cfg.tasks_dir, state)
+        _write_source_workflow_state(owner, state)
     raise AssertionError("source workflow loop escaped its finite step array")
 
 def _verify_subprocess(cfg: Config, command: str) -> subprocess.CompletedProcess:
