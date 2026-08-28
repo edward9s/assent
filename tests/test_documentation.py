@@ -191,13 +191,13 @@ class DocumentationTests(unittest.TestCase):
                 self.assertIn(_flat(phrase), chinese)
 
     def test_runtime_test_command_and_configuration_are_discoverable(self):
-        english = " ".join((
+        english = " ".join(" ".join((
             _read(Path("README.md")),
             _read(Path("docs/COMMANDS.md")),
             _read(Path("docs/CONFIGURATION.md")),
             _read(Path("docs/WORKFLOW.md")),
             _read(Path("docs/OPERATIONS.md")),
-        ).split())
+        )).split())
         for phrase in (
                 "assent test [PLAN]", "assent test <PLAN>",
                 "_runtime_test.toml", "[runtime_test].command",
@@ -206,13 +206,13 @@ class DocumentationTests(unittest.TestCase):
             with self.subTest(language="English", phrase=phrase):
                 self.assertIn(" ".join(phrase.split()), english)
 
-        chinese = " ".join((
+        chinese = " ".join(" ".join((
             _read(Path("README.zh-TW.md")),
             _read(Path("docs/zh-TW/COMMANDS.md")),
             _read(Path("docs/zh-TW/CONFIGURATION.md")),
             _read(Path("docs/zh-TW/WORKFLOW.md")),
             _read(Path("docs/zh-TW/OPERATIONS.md")),
-        ).split())
+        )).split())
         for phrase in (
                 "assent test [PLAN]", "assent test <PLAN>",
                 "_runtime_test.toml", "[runtime_test].command",

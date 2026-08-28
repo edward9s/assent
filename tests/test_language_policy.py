@@ -237,18 +237,18 @@ class LanguagePolicyTests(unittest.TestCase):
                 )
 
     def test_runtime_test_literal_names_are_preserved_in_both_reader_languages(self):
-        english = " ".join((
+        english = " ".join(" ".join((
             _read(Path("README.md")),
             _read(Path("docs/COMMANDS.md")),
             _read(Path("docs/CONFIGURATION.md")),
             _read(Path("docs/WORKFLOW.md")),
-        ).split())
-        chinese = " ".join((
+        )).split())
+        chinese = " ".join(" ".join((
             _read(Path("README.zh-TW.md")),
             _read(Path("docs/zh-TW/COMMANDS.md")),
             _read(Path("docs/zh-TW/CONFIGURATION.md")),
             _read(Path("docs/zh-TW/WORKFLOW.md")),
-        ).split())
+        )).split())
         for language, text in (("English", english), ("Traditional Chinese", chinese)):
             for literal in ("assent test", "runtime_test", "execution", "command"):
                 with self.subTest(language=language, literal=literal):
