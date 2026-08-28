@@ -64,7 +64,7 @@ from assent.inspection import try_write_report
 
 from assent.modeling import effort_identity
 
-from assent.plan import (Plan, Task, TaskWorkflowAction, append_entry,
+from assent.plan import (Plan, RuntimeQuotaWait, Task, TaskWorkflowAction, append_entry,
                          parse_runtime_test_contract, parse_task_file,
                          plan_workflow_requires_human,
                          read_runtime_test_workflow_state,
@@ -2586,6 +2586,10 @@ def _run_source_role(
     step_rotation = rotation.subset(step.adapters)
     failed_adapters: set[str] = set()
     while True:
+        if state.unit == "runtime_test" and state.quota_waits:
+            state = _resume_runtime_quota_waits(
+                cfg, state_owner or cfg.tasks_dir, state, step_rotation,
+                failed_adapters, sleep, now)
         gitops.commit_if_dirty(
             cfg.root,
             f"wip({cfg.tasks_name}): before workflow step {state.step_index + 1}",
@@ -2612,10 +2616,23 @@ def _run_source_role(
         print(_session_line(adapter_name, step.model, session))
         active.task = task
         active.session = session
-        result = _invoke_adapter(
-            cfg, adapter, adapter_name, prompt, session.requested_model,
-            session.requested_effort, cfg.root, context_kind=state.unit,
-            context_id=f"workflow.{state.unit}[{state.step_index}]")
+        try:
+            result = _invoke_adapter(
+                cfg, adapter, adapter_name, prompt, session.requested_model,
+                session.requested_effort, cfg.root, context_kind=state.unit,
+                context_id=f"workflow.{state.unit}[{state.step_index}]")
+        except KeyboardInterrupt:
+            active.task = None
+            active.session = None
+            gitops.commit_if_dirty(
+                cfg.root, f"wip({cfg.tasks_name}): {step.role} interrupted",
+                cfg.git_excludes)
+            if state.candidate_head:
+                state = replace(
+                    state, candidate_head=gitops.head_ref(cfg.root) or "")
+            _write_source_workflow_state(
+                state_owner or cfg.tasks_dir, state)
+            raise
         if result.failure_kind == "billing":
             reason = _adapter_failure_reason(
                 result.exit_code, result.stalled, result.output,
@@ -2643,7 +2660,23 @@ def _run_source_role(
             gitops.commit_if_dirty(
                 cfg.root, f"wip({cfg.tasks_name}): {step.role} quota interrupt",
                 cfg.git_excludes)
-            if len(step_rotation.names) == 1:
+            if state.unit == "runtime_test":
+                reset_at = result.reset_at
+                if reset_at is not None:
+                    reset_at = (reset_at.astimezone(timezone.utc)
+                                if reset_at.tzinfo is not None else None)
+                waits = {wait.adapter: wait for wait in state.quota_waits}
+                waits[adapter_name] = RuntimeQuotaWait(adapter_name, reset_at)
+                state = replace(
+                    state,
+                    quota_waits=tuple(
+                        waits[name] for name in step_rotation.names
+                        if name in waits),
+                    candidate_head=(gitops.head_ref(cfg.root) or "")
+                    if state.candidate_head else "")
+                _write_source_workflow_state(
+                    state_owner or cfg.tasks_dir, state)
+            elif len(step_rotation.names) == 1:
                 _wait_for_quota(cfg, result.reset_at, sleep, now)
             elif step_rotation.advance_after_quota(failed_adapters):
                 _wait_for_rotation(cfg, sleep)
@@ -2715,6 +2748,7 @@ def _run_source_role(
         state = _with_session_evidence(state, step.role, result.output)
         state = replace(
             state, step_index=state.step_index + 1, started=False,
+            quota_waits=(),
             candidate_head=(gitops.head_ref(cfg.root) or "")
             if state.candidate_head else "")
         _write_source_workflow_state(state_owner or cfg.tasks_dir, state)
@@ -3065,6 +3099,71 @@ def _quota_wait_seconds(cfg: Config, reset_at: datetime | None,
     if reset_at is not None:
         return max(0.0, (reset_at + _QUOTA_BUFFER - now()).total_seconds())
     return float(cfg.quota_poll_minutes * 60)
+
+
+def _resume_runtime_quota_waits(
+        cfg: Config, owner: Path, state: WorkflowState,
+        rotation: _AdapterRotation, failed: set[str],
+        sleep: Callable[[float], None], now: Callable[[], datetime]
+        ) -> WorkflowState:
+    """Select an available runtime adapter or wait for the earliest retry."""
+    configured = set(rotation.names)
+    if any(wait.adapter not in configured for wait in state.quota_waits):
+        state = replace(
+            state, quota_waits=tuple(
+                wait for wait in state.quota_waits
+                if wait.adapter in configured))
+        _write_source_workflow_state(owner, state)
+    while state.quota_waits:
+        instant = now()
+        waits = {wait.adapter: wait for wait in state.quota_waits}
+        expired = {
+            name for name, wait in waits.items()
+            if wait.reset_at is not None
+            and wait.reset_at + _QUOTA_BUFFER <= instant
+        }
+        if expired:
+            state = replace(
+                state, quota_waits=tuple(
+                    wait for wait in state.quota_waits
+                    if wait.adapter not in expired))
+            _write_source_workflow_state(owner, state)
+            waits = {wait.adapter: wait for wait in state.quota_waits}
+
+        unavailable = set(waits) | rotation.auth_failed | failed
+        for offset in range(len(rotation.names)):
+            index = (rotation.index + offset) % len(rotation.names)
+            if rotation.names[index] not in unavailable:
+                rotation.index = index
+                return state
+
+        retry_waits = tuple(
+            wait for wait in state.quota_waits
+            if wait.adapter not in rotation.auth_failed)
+        if not retry_waits:
+            return state
+        known = [wait for wait in retry_waits if wait.reset_at is not None]
+        has_unknown = any(wait.reset_at is None for wait in retry_waits)
+        earliest = min(
+            (wait.reset_at for wait in known), default=None)
+        known_seconds = (_quota_wait_seconds(cfg, earliest, now)
+                         if earliest is not None else None)
+        poll_seconds = (float(cfg.quota_poll_minutes * 60)
+                        if has_unknown else None)
+        poll_unknown = (poll_seconds is not None
+                        and (known_seconds is None
+                             or poll_seconds <= known_seconds))
+        _wait_for_quota(
+            cfg, None if poll_unknown else earliest, sleep, now)
+        instant = now()
+        state = replace(
+            state, quota_waits=tuple(
+                wait for wait in state.quota_waits
+                if not ((poll_unknown and wait.reset_at is None)
+                        or (wait.reset_at is not None
+                            and wait.reset_at + _QUOTA_BUFFER <= instant))))
+        _write_source_workflow_state(owner, state)
+    return state
 
 def _wait_for_quota(cfg: Config, reset_at: datetime | None,
                     sleep: Callable[[float], None],
