@@ -67,7 +67,8 @@ Workflow entry 指定可攜 tier 但省略 `adapter` 時，全域 rotation 中�
 
 ## Workflow
 
-`[workflow]` 包含三個可任意排列、但長度有限的 step array：
+`[workflow]` 包含三個核心、可任意排列且長度有限的 step array，另有獨立的
+runtime-test array：
 
 ```toml
 [workflow]
@@ -88,6 +89,11 @@ integration = [
   { role = "integration_repairer" },
   { action = "full_verify" },
 ]
+runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+]
 ```
 
 每個 entry 只能包含一個 `role` 或 `action`：
@@ -97,6 +103,7 @@ integration = [
 | `task` | `focused_test` | 執行目前 task 的 `verify` command。 |
 | `plan` | `focused_sweep` | 在累積 candidate 上執行各個不重複的 task command。 |
 | `integration` | `full_verify` | 重建並驗證精確選集。 |
+| `runtime_test` | `runtime_test` | 在其 candidate 執行宣告的 runtime command。 |
 
 Role session 成功就前進一格。Action 通過就完成該層並略過後續 step；action
 失敗則前進。走完仍未通過時，結果是 `REVIEW UNRESOLVED, HUMAN DECISION`，
@@ -133,6 +140,31 @@ workflow = [
 
 省略欄位會繼承 `[workflow].task`；空 task workflow 無效。不需要 AI session 時，
 明確寫成 `workflow = [{ action = "focused_test" }]`。
+
+## Runtime-test 設定
+
+Runtime testing 有自己的 workflow layer，不會重用 task、plan 或 integration
+action。Shipped settings 提供可寫入的 `runtime_repairer` role，以及由
+`runtime_test` action 與 repair role 嚴格交替組成的 `[workflow].runtime_test`
+array。自訂 runtime role 必須可寫入並明確指定 model；array 頭尾都是 action。
+
+Main candidate 的 command 是 project-specific，必須寫在 project 的
+`.assent/assent.toml`：
+
+```toml
+[runtime_test]
+command = "python -m unittest tests.test_runtime"
+```
+
+這個 `[runtime_test].command` 只由不帶 `PLAN` 的 `assent test` 使用。每個 plan
+則自行寫入 `_runtime_test.toml` contract；精確的 `execution` mode 與 `command`
+存在規則見 `format.md`。Plan command 不會 fallback 到 `task.verify` 或 project
+command。
+
+Runtime repair ability 可以在 candidate 中修改為滿足需求所需的一般 source、test、
+fixture、project configuration 與 documentation；不能執行 command 或修改
+Assent/Git control state，文字也不能宣告 runtime pass。完整 runtime workflow 與
+candidate lifecycle 見[工作流程](WORKFLOW.md)。
 
 ## Usage limit
 

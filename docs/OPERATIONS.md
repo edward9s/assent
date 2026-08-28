@@ -26,6 +26,21 @@ Do not write the primary Git worktree while `accept` is running. Assent's
 integration lock serializes its own publication operations but cannot stop an
 external Git process.
 
+## Runtime-test state and restart
+
+`assent test PLAN` uses the plan candidate at
+`<project>.worktrees/<PLAN>/` and stores its scheduler-owned cursor at
+`.assent/<PLAN>/_runtime_test_workflow.toml`. `assent test` without `PLAN` uses
+the separate main candidate at `<project>.runtime-test/main`, with its cursor at
+`.assent/_runtime_test_workflow.toml`; the primary worktree stays unchanged.
+
+Runtime quota waits, role progress, and source-bound action evidence remain in
+the cursor. A restart resumes the same candidate and workflow position after a
+WIP checkpoint; it does not discard edits or invent another repair round. A
+candidate identity or source change outside the workflow is a refusal. A
+repaired main candidate remains for human review rather than being published by
+`assent test`.
+
 ## Interruption and recovery
 
 Assent preserves work after adapter failure, quota interruption, Ctrl+C, or a

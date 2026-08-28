@@ -26,6 +26,7 @@ project/
     ├── verify.py
     └── <plan>/
         ├── _plan_deps.toml              # optional dependency declaration
+        ├── _runtime_test.toml           # required runtime-test decision
         ├── t001_descriptive.e.toml      # task file
         └── t001_descriptive.r.toml      # append-only journal
 ```
@@ -75,6 +76,33 @@ base = "bootstrap01"
 A plan is complete exactly when every formal task is `DONE` or `SKIP`.
 Scheduler ordering, selection, verification, acceptance, rework, rejection,
 archive, and cleanup are defined in `~/.assent/workflow.md`.
+
+### Runtime-test contract: `_runtime_test.toml`
+
+Every live plan contains exactly one `_runtime_test.toml` plan-level formal
+file. It states the plan's runtime-test decision; omitting the file is not a
+decision. The file has no other fields or compatibility reader:
+
+```toml
+execution = "disabled"
+```
+
+```toml
+execution = "explicit"
+command = "python -m unittest tests.test_runtime"
+```
+
+```toml
+execution = "after_plan"
+command = "python -m unittest tests.test_runtime"
+```
+
+`execution` is required and is exactly one of `disabled`, `explicit`, or
+`after_plan`. `disabled` forbids `command`. `explicit` and `after_plan`
+require a non-empty string `command`. There is no fallback, alias, migration,
+or omitted-file meaning for any mode. A planning session creates this file
+from the start, including when it selects `disabled`. The runtime workflow and
+the timing of `after_plan` belong to `workflow.md`.
 
 ## Task file: `tNNN_name.e.toml`
 

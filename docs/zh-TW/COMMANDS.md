@@ -28,6 +28,7 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 | `init` | 安裝共用契約與設定，建立專案骨架。 |
 | `check` | 不開 AI，檢查計畫、設定與相依關係。 |
 | `run` | 執行 task、plan 與 integration workflow。 |
+| `test` | 執行 plan 宣告的 runtime command，或在目前 main candidate 執行 project command。 |
 | `status` | 查看一個或全部計畫的簡要狀態。 |
 | `report` | 重新產生人類驗收用的報告。 |
 | `verify` | 執行指定的機械驗證，不啟動 AI review、repair 或 accept。 |
@@ -62,6 +63,28 @@ assent run A B
 
 具名 plans 依輸入順序執行。每次成功的 `run` 都會針對其完成 selection 繼續設定的
 plan 與 integration workflow，但不會 accept。
+
+## Runtime test
+
+執行一個 live plan 的獨立 runtime-test workflow：
+
+```text
+assent test <PLAN>
+```
+
+Plan 形式讀取 `.assent/<PLAN>/_runtime_test.toml`，在 plan candidate worktree
+執行其中宣告的 `command`。`execution = "disabled"` 時，這個 plan command
+會被拒絕。省略 `PLAN` 時，則使用 `.assent/assent.toml` project layer 的
+`[runtime_test].command`，測試目前的 main repair candidate：
+
+```text
+assent test
+```
+
+`test` 只啟動獨立的 `runtime_test` workflow，不會執行 task、plan、integration、
+`full_verify` 或 `accept`。完整的 mode、state、repair、quota 與 source-bound
+evidence 規則見[工作流程](WORKFLOW.md)；main command 與 repair role 的設定見
+[設定](CONFIGURATION.md)。
 
 更新單一 receipt 或驗證明確選取：
 

@@ -25,6 +25,18 @@ Assent 使用 Git worktree 隔離修改，也讓失敗成果能被檢查與恢�
 `accept` 執行期間，不要讓其他 Git 程式修改主要 worktree。Assent 的 integration
 lock 只能序列化自己的發布動作，無法阻止外部 writer。
 
+## Runtime-test state 與 restart
+
+`assent test PLAN` 使用 `<project>.worktrees/<PLAN>/` 的 plan candidate，並把
+scheduler 擁有的 cursor 存在 `.assent/<PLAN>/_runtime_test_workflow.toml`。
+省略 `PLAN` 的 `assent test` 使用獨立的 `<project>.runtime-test/main` main candidate，
+cursor 在 `.assent/_runtime_test_workflow.toml`；主要 worktree 保持不變。
+
+Runtime quota wait、role progress 與 source-bound action evidence 都保留在 cursor。
+Restart 會在 WIP checkpoint 後，從同一個 candidate 與 workflow position 繼續；不會
+丟棄修改或自行新增 repair round。Candidate identity 或 workflow 外的 source 變更會
+被拒絕。修復過的 main candidate 留給人類檢查，不會由 `assent test` 發布。
+
 ## 中斷與復原
 
 Adapter failure、quota 中斷、Ctrl+C 或 crash 後，Assent 都會保留成果。Role 或

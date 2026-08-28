@@ -5,6 +5,7 @@ import io
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -81,6 +82,27 @@ class TestInitContractRefresh(unittest.TestCase):
                       text)
         self.assertIn("Never hand-create a source-worktree link", text)
         self.assertFalse((self.root / ".assent/instructions.md").exists())
+
+    def test_init_installs_runtime_defaults_without_a_plan_contract_or_command(self):
+        for name in ("instructions.md", "format.md", "workflow.md"):
+            (self.user_home / name).write_text("older contract\n",
+                                                encoding="utf-8")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root, test="unittest"), 0)
+
+        for name in ("instructions.md", "format.md", "workflow.md"):
+            with self.subTest(contract=name):
+                expected = (_PROJECT_ROOT / "assent/templates" / name).read_bytes()
+                self.assertEqual((self.user_home / name).read_bytes(), expected)
+
+        config_path = self.user_home / "assent.toml"
+        config_text = config_path.read_text(encoding="utf-8")
+        config = tomllib.loads(config_text)
+        self.assertEqual(config["roles"]["runtime_repairer"]["model"], "core")
+        self.assertIn("runtime_test", config["workflow"])
+        self.assertNotIn("[runtime_test]", config_text)
+        self.assertEqual(list(self.root.rglob("_runtime_test.toml")), [])
 
     def test_existing_global_bridge_is_stable_when_contract_wording_changes(self):
         agents = self.root / "AGENTS.md"

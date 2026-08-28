@@ -236,6 +236,24 @@ class LanguagePolicyTests(unittest.TestCase):
                     _case_sensitive_file(translation.parent / translation_target)
                 )
 
+    def test_runtime_test_literal_names_are_preserved_in_both_reader_languages(self):
+        english = " ".join((
+            _read(Path("README.md")),
+            _read(Path("docs/COMMANDS.md")),
+            _read(Path("docs/CONFIGURATION.md")),
+            _read(Path("docs/WORKFLOW.md")),
+        ).split())
+        chinese = " ".join((
+            _read(Path("README.zh-TW.md")),
+            _read(Path("docs/zh-TW/COMMANDS.md")),
+            _read(Path("docs/zh-TW/CONFIGURATION.md")),
+            _read(Path("docs/zh-TW/WORKFLOW.md")),
+        ).split())
+        for language, text in (("English", english), ("Traditional Chinese", chinese)):
+            for literal in ("assent test", "runtime_test", "execution", "command"):
+                with self.subTest(language=language, literal=literal):
+                    self.assertIn(literal, text)
+
 
     def test_session_rules_have_one_packaged_name_and_fresh_init_path(self):
         self.assertTrue((ROOT / "assent/templates/instructions.md").is_file())
