@@ -175,7 +175,7 @@ runtime_test = [{ action = "runtime_test" }]
              '{ role = "reader" }, { action = "runtime_test" }]',
              "must be writable"),
             ('runtime_test = [{ action = "not-runtime-test" }]',
-             r"not valid under \[workflow\].runtime_test"),
+             "unknown action"),
         )
         for entry, message in cases:
             with self.subTest(entry=entry), self.assertRaisesRegex(
