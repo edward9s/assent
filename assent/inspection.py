@@ -38,7 +38,7 @@ from assent import AssentError, contracts, gitops, usage
 
 from assent.adapters import Adapter, get_adapter
 
-from assent.config import PROJECT_LAYER, Config, WorkflowPlanStep
+from assent.config import PROJECT_LAYER, Config, WorkflowRoleStep
 
 from assent.plandeps import archived_plan_names, parse_plan_dependencies
 

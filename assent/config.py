@@ -33,6 +33,7 @@ from assent.user_home import user_config_path
 
 _TOP_LEVEL_KEYS = {
     "watchdog", "run", "adapter", "abilities", "roles", "workflow",
+    "runtime_test",
 }
 
 # The ordered settings layers, lowest priority first.  The built-in layer contributes no
@@ -115,8 +116,8 @@ class AdapterSettings:
 
 
 @dataclass(frozen=True)
-class WorkflowPlanStep:
-    """One resolved plan or integration role step."""
+class WorkflowRoleStep:
+    """One resolved plan, integration, or runtime-test role step."""
 
     role: str
     adapters: tuple[str, ...]
@@ -185,8 +186,11 @@ class Config:
     # Print mode has its own upstream wait limit, far shorter than a task session; the
     # adapter always states one instead of inheriting the CLI default.
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
-    workflow_plan: tuple[WorkflowPlanStep | WorkflowActionStep, ...] = ()
-    workflow_integration: tuple[WorkflowPlanStep | WorkflowActionStep, ...] = ()
+    workflow_plan: tuple[WorkflowRoleStep | WorkflowActionStep, ...] = ()
+    workflow_integration: tuple[WorkflowRoleStep | WorkflowActionStep, ...] = ()
+    runtime_test_command: str | None = None
+    workflow_runtime_test: tuple[
+        WorkflowRoleStep | WorkflowActionStep, ...] | None = None
     abilities: dict[str, Ability] = field(default_factory=dict)
     roles: dict[str, Role] = field(default_factory=dict)
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
@@ -530,8 +534,10 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
                 f"workflow.{key}.{index}.action")
             allowed_actions = {"task": {"focused_test"},
                                "plan": {"focused_sweep"},
-                               "integration": {"full_verify"}}[key]
-            if action not in {"focused_test", "focused_sweep", "full_verify"}:
+                               "integration": {"full_verify"},
+                               "runtime_test": {"runtime_test"}}[key]
+            if action not in {"focused_test", "focused_sweep", "full_verify",
+                              "runtime_test"}:
                 raise AssentError(f"Config {owner} has unknown action {action!r}")
             if action not in allowed_actions:
                 valid = "/".join(sorted(allowed_actions))
@@ -553,11 +559,10 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
         if key == "task":
             entries.append(WorkflowTaskStep(role, resolved, adapters))
             continue
-        # A plan or integration role answers for a whole unit, not for one task,
-        # so it has nothing to inherit a model from: an adapter only translates a
-        # tier it is given.  Requiring the model here keeps the omission a config
-        # error `check` reports rather than a silent inheritance from whichever
-        # task happened to sort first.
+        # A non-task role answers for a whole unit, not for one task, so it has
+        # nothing to inherit a model from: an adapter only translates a tier it
+        # is given.  Requiring the model here keeps the omission a config error
+        # `check` reports rather than a silent inheritance from a task.
         if resolved.model is None:
             raise AssentError(
                 f"Config {owner} role {role!r} must state model")
@@ -565,11 +570,41 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
     return entries
 
 
+def _validate_runtime_test_entries(entries) -> None:
+    """Require a runtime-test action before and after every writable role."""
+    if entries is None:
+        return
+    if not entries:
+        raise AssentError(
+            "Config [workflow].runtime_test must not be empty")
+    if not isinstance(entries[0], WorkflowActionStep):
+        raise AssentError(
+            "Config [workflow].runtime_test must start with an action")
+    if not isinstance(entries[-1], WorkflowActionStep):
+        raise AssentError(
+            "Config [workflow].runtime_test must end with an action")
+    for index, entry in enumerate(entries):
+        if index % 2 == 0:
+            if not isinstance(entry, WorkflowActionStep):
+                raise AssentError(
+                    "Config [workflow].runtime_test must strictly alternate"
+                    " runtime_test actions and writable roles")
+            continue
+        if isinstance(entry, WorkflowActionStep):
+            raise AssentError(
+                "Config [workflow].runtime_test must strictly alternate"
+                " runtime_test actions and writable roles")
+        if not entry[2].writes:
+            raise AssentError(
+                f"Config [workflow].runtime_test[{index}] role {entry[0]!r}"
+                " must be writable")
+
+
 def _resolve_plan_steps(
         cfg: Config, raw_steps, owner: str
-) -> tuple[WorkflowPlanStep | WorkflowActionStep, ...]:
-    """Resolve plan/integration roles while preserving action positions."""
-    steps: list[WorkflowPlanStep | WorkflowActionStep] = []
+) -> tuple[WorkflowRoleStep | WorkflowActionStep, ...]:
+    """Resolve one plan, integration, or runtime-test role layer."""
+    steps: list[WorkflowRoleStep | WorkflowActionStep] = []
     for raw in raw_steps or ():
         if isinstance(raw, WorkflowActionStep):
             steps.append(raw)
@@ -578,16 +613,16 @@ def _resolve_plan_steps(
         names = configured_names or cfg.adapter_names
         _require_single_literal_adapter(
             resolved.model, names, f"[workflow].{owner} role {role!r}")
-        steps.append(WorkflowPlanStep(role, names, resolved))
+        steps.append(WorkflowRoleStep(role, names, resolved))
     return tuple(steps)
 
 
 def _workflow_bound_adapters(*raw_entry_lists) -> set[str]:
-    """Every adapter a workflow entry binds itself to, across all three layers.
+    """Every adapter a workflow entry binds itself to, across all layers.
 
     Entries arrive in the two shapes ``_parse_workflow_entries`` produces: a task step
-    object, or a ``(role, adapters, resolved)`` tuple for the plan and integration
-    layers.  Scheduler actions bind nothing.
+    object, or a ``(role, adapters, resolved)`` tuple for non-task layers.  Scheduler
+    actions bind nothing.
     """
     names: set[str] = set()
     for entries in raw_entry_lists:
@@ -880,7 +915,10 @@ def load_config(path: str | Path, plan_name: str) -> Config:
     abilities = _parse_abilities(_section(data, "abilities"))
     roles = _parse_roles(_section(data, "roles"), abilities)
     workflow = _section(data, "workflow")
-    _known_keys(workflow, "workflow", {"plan", "integration", "task"})
+    _known_keys(workflow, "workflow",
+                {"plan", "integration", "task", "runtime_test"})
+    runtime_test = _section(data, "runtime_test")
+    _known_keys(runtime_test, "runtime_test", {"command"})
     guard = _BlankGuard(provenance, sources)
     adapter_names = _parse_adapter_names(adapter, guard)
     raw_workflow_plan = _parse_workflow_entries(
@@ -889,6 +927,9 @@ def load_config(path: str | Path, plan_name: str) -> Config:
         workflow, "task", guard, roles, abilities)
     raw_workflow_integration = _parse_workflow_entries(
         workflow, "integration", guard, roles, abilities)
+    raw_workflow_runtime_test = _parse_workflow_entries(
+        workflow, "runtime_test", guard, roles, abilities)
+    _validate_runtime_test_entries(raw_workflow_runtime_test)
     if raw_workflow_task is None:
         raise AssentError(
             "Config [workflow].task is required in the effective settings; "
@@ -931,6 +972,9 @@ def load_config(path: str | Path, plan_name: str) -> Config:
         antigravity_print_timeout_minutes=_typed(
             antigravity, "[adapter.antigravity]", "print_timeout_minutes", int,
             _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES),
+        runtime_test_command=guard.text(
+            _typed(runtime_test, "[runtime_test]", "command", str, None),
+            "runtime_test.command"),
         abilities=abilities,
         roles=roles,
         sources=sources,
@@ -947,11 +991,15 @@ def load_config(path: str | Path, plan_name: str) -> Config:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
     _require_complete_models(cfg, _workflow_bound_adapters(
-        raw_workflow_task, raw_workflow_plan, raw_workflow_integration))
+        raw_workflow_task, raw_workflow_plan, raw_workflow_integration,
+        raw_workflow_runtime_test))
     plan_steps = _resolve_plan_steps(cfg, raw_workflow_plan, "plan")
     integration_steps = _resolve_plan_steps(
         cfg, raw_workflow_integration, "integration")
     cfg.workflow_plan = plan_steps
     _validate_task_literal_adapters(cfg, raw_workflow_task)
     cfg.workflow_integration = integration_steps
+    cfg.workflow_runtime_test = (
+        None if raw_workflow_runtime_test is None else
+        _resolve_plan_steps(cfg, raw_workflow_runtime_test, "runtime_test"))
     return cfg

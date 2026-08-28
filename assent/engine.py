@@ -43,7 +43,7 @@ from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
                                      run_subprocess as _adapter_run_subprocess,
                                      stop_wake_requested)
 
-from assent.config import (Config, WorkflowActionStep, WorkflowPlanStep,
+from assent.config import (Config, WorkflowActionStep, WorkflowRoleStep,
                            WorkflowTaskStep, load_config)
 
 from assent.batch_verification import (SelectionCandidateConflict,
@@ -1756,7 +1756,7 @@ def _run_locked(cfg: Config, adapter: Adapter | None,
                      cfg.workflow_integration):
         for step in workflow:
             names = (step.adapters if isinstance(
-                step, (WorkflowTaskStep, WorkflowPlanStep)) else None)
+                step, (WorkflowTaskStep, WorkflowRoleStep)) else None)
             for name in names or ():
                 if name not in adapter_names:
                     adapter_names.append(name)
