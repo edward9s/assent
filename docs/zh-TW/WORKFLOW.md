@@ -71,7 +71,9 @@ configuration 與 documentation；不能執行 command，也不能修改 task co
 scheduler state、receipt、Git 或 acceptance state。Runtime state 保存 workflow cursor、
 有限 evidence、candidate identity 與 quota wait。Quota 中斷會 checkpoint candidate，
 restart 時恢復該 state，不會還原已消耗 token 的成果。Array 耗盡時回報
-`REVIEW UNRESOLVED, HUMAN DECISION`，exit 0 並保留 evidence。
+`REVIEW UNRESOLVED, HUMAN DECISION` 並保留 evidence。獨立執行的
+`assent test [PLAN]` 會回傳 1；unattended `run` 將這個需由人類裁決的結果回傳為 0，
+讓其他排隊 plan 繼續執行。
 
 Plan runtime state 是 plan contract 旁的 `.assent/<PLAN>/_runtime_test_workflow.toml`。
 Main runtime state 是 `.assent/_runtime_test_workflow.toml`，candidate 是以主要

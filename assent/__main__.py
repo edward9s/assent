@@ -523,45 +523,11 @@ def _close_run(result: int, *, config_path: str,
             print("Integration workflow deferred: selected plan execution "
                   "requires human adjudication (" + ", ".join(incomplete) + ")")
             return 0
-        try:
-            selection_cfg = load_config(config_path, selection[0])
-        except AssentError as e:
-            print(f"Config error: {e}")
-            return 1
-        if selection_cfg.workflow_integration:
-            return engine.run_selection_workflow(
-                config_path, assent_dir, selection)
-        configs = tuple(load_config(config_path, name) for name in selection)
-        runtime_code, runtime_problem = engine.ensure_selection_runtime_tests(
-            configs)
-        if runtime_code != 0:
-            return runtime_code
-        if runtime_problem is not None:
-            print("Integration workflow deferred: runtime-test gate is "
-                  "unresolved (" + runtime_problem + ")")
-            return 0
+        return engine.run_selection_workflow(
+            config_path, assent_dir, selection)
     if selection is None:
-        plan_names = list_task_plans(assent_dir)
-        if plan_names:
-            try:
-                selection_cfg = load_config(config_path, plan_names[0])
-            except AssentError as e:
-                print(f"Config error: {e}")
-                return 1
-            if selection_cfg.workflow_integration:
-                return engine.run_dynamic_selection_workflow(
-                    config_path, assent_dir)
-        return verify_batch(config_path, assent_dir)
-    if len(selection) > 1:
-        return verify_selected_batch(config_path, assent_dir, selection)
-    try:
-        cfg = load_config(config_path, selection[0])
-    except AssentError as e:
-        print(f"Config error: {e}")
-        return 1
-    if not infer_plan_completion(cfg.tasks_dir).complete:
-        return verify_plan(cfg)
-    return verify_plan_if_needed(cfg)
+        return engine.run_dynamic_selection_workflow(config_path, assent_dir)
+    raise AssertionError("run closeout selection is invalid")
 
 
 def _dispatch(argv: list[str]) -> int:

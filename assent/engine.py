@@ -64,7 +64,7 @@ from assent.inspection import try_write_report
 
 from assent.modeling import effort_identity
 
-from assent.plan import (Plan, RUNTIME_TEST_CONTRACT_NAME, RuntimeQuotaWait,
+from assent.plan import (Plan, RuntimeQuotaWait,
                          Task, TaskWorkflowAction, append_entry,
                          parse_runtime_test_contract, parse_task_file,
                          plan_workflow_requires_human,
@@ -388,9 +388,8 @@ def _run_runtime_test_action(
         print(f"  runtime_test passed evidence reused (exit {existing.exit_code})")
         return state, existing, True
 
-    persisted_command = command[:_RUNTIME_SUMMARY_LIMIT]
     armed = _TestActionEvidence(
-        "STALE", identity, 0, persisted_command,
+        "STALE", identity, 0, command,
         "Runtime command has not completed for this source identity.\n")
     state = _with_runtime_test_record(state, armed)
     write_runtime_test_workflow_state(owner_dir, state)
@@ -875,16 +874,15 @@ def ensure_selection_runtime_tests(
         problem = runtime_test.after_plan_gate_problem(
             cfg.tasks_dir, source_tip)
         if problem is None:
-            contract_path = cfg.tasks_dir / RUNTIME_TEST_CONTRACT_NAME
-            if (contract_path.is_file()
-                    and parse_runtime_test_contract(
-                        cfg.tasks_dir).execution == "after_plan"):
+            if parse_runtime_test_contract(
+                    cfg.tasks_dir).execution == "after_plan":
                 print(f"Runtime-test layer {cfg.tasks_name}: current PASSED "
                       "evidence reused.")
             continue
         print(f"Runtime-test layer {cfg.tasks_name}: {problem}; running the "
               "plan runtime workflow before integration.")
-        code = run_runtime_test(cfg, sleep=sleep, now=now)
+        code = run_runtime_test(
+            cfg, sleep=sleep, now=now, unresolved_exit_code=0)
         if code != 0:
             return code, None
         _branch, source_tip, _worktree = source_snapshot(cfg, main)
@@ -2052,7 +2050,8 @@ def _runtime_test_capability_preflight(
 
 def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
                      sleep: Callable[[float], None] | None = None,
-                     now: Callable[[], datetime] | None = None) -> int:
+                     now: Callable[[], datetime] | None = None,
+                     unresolved_exit_code: int = 1) -> int:
     """Run one plan contract's runtime command and finite repair workflow."""
     try:
         contracts.require_contracts()
@@ -2089,10 +2088,16 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
                     missing_ok=True)
             work_cfg = _prepare_worktree(cfg) if cfg.source_root is None else cfg
             _recover_or_ensure_clean(work_cfg, now)
-            return _process_source_workflow(
+            code = _process_source_workflow(
                 work_cfg, plan, None, steps, rotation, sleep, now,
                 _ActiveTask(), unit="runtime_test",
                 runtime_command=contract.command, state_owner=cfg.tasks_dir)
+            if code != 0:
+                return code
+            state = read_runtime_test_workflow_state(cfg.tasks_dir)
+            if state is None or state.action_status != "PASSED":
+                return unresolved_exit_code
+            return 0
     except lockfile.LockBusy as error:
         print(str(error))
         return 1
@@ -2280,6 +2285,7 @@ def _run_locked(cfg: Config, adapter: Adapter | None,
         # Validate the requested plan itself before stack discovery.  This
         # preserves the task-file error as the primary zero-token diagnostic.
         plan = Plan.parse(cfg.tasks_dir)
+        parse_runtime_test_contract(cfg.tasks_dir)
     except AssentError as e:
         print(f"Failed to parse plan directory: {e}")
         return 1
@@ -3225,12 +3231,13 @@ def _resume_runtime_quota_waits(
         ) -> WorkflowState:
     """Select an available runtime adapter or wait for the earliest retry."""
     configured = set(rotation.names)
-    if any(wait.adapter not in configured for wait in state.quota_waits):
-        state = replace(
-            state, quota_waits=tuple(
-                wait for wait in state.quota_waits
-                if wait.adapter in configured))
-        _write_source_workflow_state(owner, state)
+    unexpected = sorted(
+        wait.adapter for wait in state.quota_waits
+        if wait.adapter not in configured)
+    if unexpected:
+        raise AssentError(
+            "Runtime quota state does not match the current role adapters: "
+            + ", ".join(unexpected))
     while state.quota_waits:
         instant = now()
         waits = {wait.adapter: wait for wait in state.quota_waits}

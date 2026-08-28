@@ -80,7 +80,9 @@ change task contracts, journals, scheduler state, receipts, Git, or acceptance
 state. Runtime state records the workflow cursor, bounded evidence, candidate
 identity, and quota waits. Quota interruption checkpoints the candidate and
 resumes that state on restart; it never reverts token-burned work. Exhaustion
-reports `REVIEW UNRESOLVED, HUMAN DECISION` with exit 0 and preserved evidence.
+reports `REVIEW UNRESOLVED, HUMAN DECISION` with preserved evidence. A standalone
+`assent test [PLAN]` returns 1; an unattended `run` returns 0 for this human-
+decision outcome so unrelated queued plans continue.
 
 Plan runtime state is `.assent/<PLAN>/_runtime_test_workflow.toml` beside the
 plan contract. Main runtime state is `.assent/_runtime_test_workflow.toml` and

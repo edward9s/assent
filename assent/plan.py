@@ -203,6 +203,22 @@ def _valid_action_result(action: object, status: object, identity: object,
     return status in _ACTION_STATUS_VALUES and bool(identity)
 
 
+def _valid_runtime_action_result(
+        action: object, status: object, identity: object,
+        exit_code: object, evidence: object) -> bool:
+    if (action != "runtime_test" or not isinstance(status, str)
+            or not isinstance(identity, str)
+            or not isinstance(exit_code, int) or isinstance(exit_code, bool)
+            or not isinstance(evidence, list)):
+        return False
+    if not status:
+        return not identity and exit_code == 0 and not evidence
+    return (status in _ACTION_STATUS_VALUES and bool(identity)
+            and len(evidence) == 2
+            and all(isinstance(item, str) for item in evidence)
+            and len(evidence[1]) <= _MAX_ACTION_EVIDENCE_CHARS)
+
+
 def read_workflow_state(tasks_dir: Path) -> WorkflowState | None:
     """Read the plan workflow cursor; absence means no unit is in flight."""
     path = workflow_state_path(tasks_dir)
@@ -304,7 +320,8 @@ def read_runtime_test_workflow_state(owner_dir: Path) -> WorkflowState | None:
         "action", "action_status", "action_source_tree", "action_exit_code",
         "action_evidence", "quota_waits",
     }
-    if set(data) not in (expected, expected | {"candidate_head"}):
+    expected.add("candidate_head")
+    if set(data) != expected:
         raise AssentError(f"Runtime workflow state {path.name} has an invalid schema")
     waits = _runtime_quota_waits(data["quota_waits"], path)
     if (data["unit"] != "runtime_test" or data["task_id"] != ""
@@ -312,20 +329,20 @@ def read_runtime_test_workflow_state(owner_dir: Path) -> WorkflowState | None:
             or isinstance(data["step_index"], bool) or data["step_index"] < 0
             or not isinstance(data["started"], bool)
             or not isinstance(data["base_ref"], str)
-            or not isinstance(data.get("candidate_head", ""), str)
+            or not isinstance(data["candidate_head"], str)
             or not isinstance(data["evidence"], list)
             or not all(isinstance(item, str) for item in data["evidence"])
-            or not _valid_action_result(
+            or not _valid_runtime_action_result(
                 data["action"], data["action_status"],
                 data["action_source_tree"], data["action_exit_code"],
-                data["action_evidence"], allowed_action="runtime_test")):
+                data["action_evidence"])):
         raise AssentError(f"Runtime workflow state {path.name} has invalid values")
     return WorkflowState(
         data["unit"], data["task_id"], data["step_index"], data["started"],
         data["base_ref"], tuple(data["evidence"]), data["action"],
         data["action_status"], data["action_source_tree"],
         data["action_exit_code"], tuple(data["action_evidence"]), waits,
-        data.get("candidate_head", ""))
+        data["candidate_head"])
 
 
 def write_runtime_test_workflow_state(
@@ -334,10 +351,9 @@ def write_runtime_test_workflow_state(
     if state.unit != "runtime_test" or state.task_id or state.action != "runtime_test":
         raise AssentError(
             "Runtime workflow state requires unit and action = 'runtime_test'")
-    if not _valid_action_result(
+    if not _valid_runtime_action_result(
             state.action, state.action_status, state.action_source_tree,
-            state.action_exit_code, list(state.action_evidence),
-            allowed_action="runtime_test"):
+            state.action_exit_code, list(state.action_evidence)):
         raise AssentError("Runtime workflow state has invalid action evidence")
     if (not isinstance(state.step_index, int)
             or isinstance(state.step_index, bool) or state.step_index < 0
@@ -378,8 +394,7 @@ def write_runtime_test_workflow_state(
             json.dumps(item, ensure_ascii=False)
             for item in state.action_evidence) + "]",
         "quota_waits = [" + ", ".join(quota_items) + "]",
-        *((f"candidate_head = {json.dumps(state.candidate_head)}",)
-          if state.candidate_head else ()),
+        f"candidate_head = {json.dumps(state.candidate_head)}",
         "",
     ))
     atomic_write_text(runtime_test_workflow_state_path(owner_dir), text)

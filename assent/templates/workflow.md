@@ -122,10 +122,10 @@ identity or source change outside the workflow is a refusal. Token-burned work
 is never reverted. A repaired main candidate remains pending human integration.
 
 If the finite runtime array ends without a passing action, the result is
-`REVIEW UNRESOLVED, HUMAN DECISION` with exit 0 and preserved evidence. The
-standalone plan command reports a non-PASSED runtime state to its caller, while
-an unattended run preserves the unresolved result for the human and does not
-start integration verification. Runtime evidence is not a verification
+`REVIEW UNRESOLVED, HUMAN DECISION` with preserved evidence. A standalone
+`assent test [PLAN]` returns 1 because its candidate did not pass. An unattended
+`run` returns 0 for this human-decision outcome, preserves the evidence, and does
+not start integration verification. Runtime evidence is not a verification
 receipt: `full_verify` and its receipt remain separate source-bound evidence,
 and acceptance requires both fresh receipt evidence and every required current
 runtime gate.

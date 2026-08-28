@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 
 from assent import AssentError
-from assent.plan import (RUNTIME_TEST_CONTRACT_NAME, parse_runtime_test_contract,
+from assent.plan import (parse_runtime_test_contract,
                          read_runtime_test_workflow_state)
 
 
@@ -18,8 +18,6 @@ def evidence_identity(source_commit: str, command: str) -> str:
 
 def after_plan_gate_problem(plan_dir: Path, source_commit: str) -> str | None:
     """Return why an after-plan runtime gate is not currently satisfied."""
-    if not (Path(plan_dir) / RUNTIME_TEST_CONTRACT_NAME).is_file():
-        return None
     contract = parse_runtime_test_contract(plan_dir)
     if contract.execution != "after_plan":
         return None

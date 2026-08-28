@@ -87,6 +87,19 @@ class RuntimeTestRunTests(EngineTestCase):
                 self.assertEqual(self._run_selection(), 0)
                 self.assertEqual(self.events, expected)
 
+    def test_missing_contract_refuses_before_full_verify(self):
+        (self.plan_dir / "_runtime_test.toml").unlink()
+        with mock.patch.object(engine, "verify_plan_action") as verify:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = engine.run_selection_workflow(
+                    str(self.cfg.assent_dir / "assent.toml"),
+                    self.cfg.assent_dir, ["plan01"])
+
+        self.assertEqual(code, 1)
+        verify.assert_not_called()
+        self.assertIn("_runtime_test.toml is missing", output.getvalue())
+
     def test_unresolved_runtime_gate_prevents_full_verify(self):
         self._contract("after_plan")
 

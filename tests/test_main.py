@@ -299,7 +299,8 @@ class TestDispatch(MainTestCase):
         for options, expected in (([], 1), (["--jobs", "3"], 3)):
             with self.subTest(options=options), \
                     patch("assent.__main__.run_all", return_value=0) as mocked, \
-                    patch("assent.__main__.verify_batch", return_value=0):
+                    patch("assent.__main__.engine.run_dynamic_selection_workflow",
+                          return_value=0):
                 code, _ = self.run_main([
                     "run", *options, "--config", str(config)])
             self.assertEqual(code, 0)
@@ -895,7 +896,7 @@ class TestCommandElapsed(MainTestCase):
 
         with self.injected_clock(), patch("assent.__main__.run_all",
                                           return_value=0), patch(
-                "assent.__main__.verify_batch",
+                "assent.__main__.engine.run_dynamic_selection_workflow",
                 return_value=0):
             code, out = self.run_main(["run", "--config", str(config)])
         self.assertEqual(code, 0)

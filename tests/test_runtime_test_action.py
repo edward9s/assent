@@ -212,6 +212,24 @@ class TestRuntimeTestAction(unittest.TestCase):
         with self.assertRaisesRegex(AssentError, "invalid schema"):
             read_runtime_test_workflow_state(self.owner)
 
+        write_runtime_test_workflow_state(self.owner, plan_state)
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            'candidate_head = ""\n', ""), encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "invalid schema"):
+            read_runtime_test_workflow_state(self.owner)
+
+    def test_runtime_state_preserves_the_exact_command_while_bounding_output(self):
+        command = "python -c " + "x" * 5000
+        state = self.state(
+            action_status="FAILED", action_source_tree="source:command",
+            action_exit_code=1, action_evidence=(command, "failed"))
+
+        write_runtime_test_workflow_state(self.owner, state)
+
+        self.assertEqual(
+            read_runtime_test_workflow_state(self.owner).action_evidence[0],
+            command)
+
 
 if __name__ == "__main__":
     unittest.main()

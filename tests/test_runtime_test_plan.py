@@ -98,7 +98,7 @@ class RuntimeTestPlanTests(EngineTestCase):
 
         code, output = self.run_runtime(cfg, ScriptedAdapter([ok_result()]))
 
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
         self.assertIn("writable role made no source change", output)
         state = read_runtime_test_workflow_state(self.plan_dir)
         self.assertEqual(state.action_status, "FAILED")
@@ -114,7 +114,7 @@ class RuntimeTestPlanTests(EngineTestCase):
 
         code, output = self.run_runtime(cfg, ScriptedAdapter([change]))
 
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
         self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", output)
         self.assertTrue((self.execution_root() / "src" / "attempt.txt").is_file())
         state = read_runtime_test_workflow_state(self.plan_dir)
