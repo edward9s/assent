@@ -1694,6 +1694,7 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
             return _integration_human_decision(
                 "plan workflow adjudication is still pending for "
                 + ", ".join(pending) + ".")
+        steps = _integration_steps(configs[0])
         code, runtime_problem = ensure_selection_runtime_tests(
             configs, sleep, now)
         if code != 0:
@@ -1708,7 +1709,12 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
                     == locked_snapshot[:2]
                     and prior_state.source_commits != locked_snapshot[2]):
                 prior_state = replace(
-                    prior_state, source_commits=locked_snapshot[2], action="",
+                    prior_state,
+                    source_commits=locked_snapshot[2],
+                    step_index=next(
+                        index for index, step in enumerate(steps)
+                        if isinstance(step, WorkflowActionStep)),
+                    action="",
                     action_status="", action_candidate_tree="",
                     action_exit_code=0, action_evidence=(),
                     verification_script_sha256="",
@@ -1716,7 +1722,6 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
                 write_selection_workflow_state(
                     configs[0].assent_dir, prior_state)
         target_ref, target_commit, source_commits = _selection_snapshot(configs)
-        steps = _integration_steps(configs[0])
         identity = (ordered, target_ref, target_commit, source_commits)
         state = read_selection_workflow_state(configs[0].assent_dir)
         if (state is None
