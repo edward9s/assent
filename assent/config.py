@@ -304,6 +304,16 @@ class Config:
         return self.git_rel(self.assent_dir / "_integration_workflow.toml")
 
     @property
+    def runtime_test_workflow_state_rel(self) -> str:
+        """The plan-owned runtime workflow cursor."""
+        return self.git_rel(self.tasks_dir / "_runtime_test_workflow.toml")
+
+    @property
+    def main_runtime_test_workflow_state_rel(self) -> str:
+        """The main-owned runtime workflow cursor."""
+        return self.git_rel(self.assent_dir / "_runtime_test_workflow.toml")
+
+    @property
     def plan_workflow_step_count(self) -> int:
         """Count the effective plan steps, including its implied final action."""
         if not self.workflow_plan:
@@ -326,6 +336,8 @@ class Config:
         return (self.runtime_log_rel, self.report_rel, self.lockfile_rel,
                 self.verification_receipt_rel,
                 self.workflow_state_rel, self.selection_workflow_state_rel,
+                self.runtime_test_workflow_state_rel,
+                self.main_runtime_test_workflow_state_rel,
                 self.ignored_dirs_manifest_rel, self.ignored_dirs_lock_rel)
 
 

@@ -18,6 +18,8 @@ import os
 
 import re
 
+import signal
+
 import subprocess
 
 import sys
@@ -71,6 +73,7 @@ from assent.plan import (Plan, Task, TaskWorkflowAction, append_entry,
                          set_status, WorkflowState,
                          SelectionWorkflowState,
                          workflow_state_path, write_selection_workflow_state,
+                         write_runtime_test_workflow_state,
                          write_workflow_state)
 
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
@@ -297,6 +300,164 @@ class _TestActionEvidence:
     exit_code: int
     command: str
     summary: str
+
+
+_RUNTIME_SUMMARY_LIMIT = 4096
+
+
+def _runtime_test_identity(cfg: Config, command: str) -> str:
+    """Bind runtime evidence to one clean source tree and exact command."""
+    if not gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
+        raise AssentError("source worktree is dirty at the runtime_test boundary")
+    command_sha256 = hashlib.sha256(command.encode("utf-8")).hexdigest()
+    return f"{gitops.tree_of(cfg.root, 'HEAD')}:{command_sha256}"
+
+
+def _runtime_test_record(state: WorkflowState) -> _TestActionEvidence | None:
+    if state.unit != "runtime_test" or state.action != "runtime_test":
+        return None
+    if not state.action_status:
+        return None
+    if len(state.action_evidence) != 2:
+        raise AssentError("Runtime action evidence is unreadable")
+    record = _TestActionEvidence(
+        state.action_status, state.action_source_tree, state.action_exit_code,
+        state.action_evidence[0], state.action_evidence[1])
+    if record.status not in {"PASSED", "FAILED", "STALE"}:
+        raise AssentError("Runtime action evidence has invalid values")
+    return record
+
+
+def _with_runtime_test_record(
+        state: WorkflowState, record: _TestActionEvidence) -> WorkflowState:
+    return replace(
+        state, action="runtime_test", action_status=record.status,
+        action_source_tree=record.identity,
+        action_exit_code=record.exit_code,
+        action_evidence=(record.command, record.summary))
+
+
+def _bounded_runtime_summary(current: str, addition: str) -> str:
+    merged = current + addition
+    if len(merged) <= _RUNTIME_SUMMARY_LIMIT:
+        return merged
+    marker = "\n... runtime output truncated ...\n"
+    remaining = _RUNTIME_SUMMARY_LIMIT - len(marker)
+    start = remaining // 2
+    return merged[:start] + marker + merged[-(remaining - start):]
+
+
+def _terminate_runtime_process(process: subprocess.Popen) -> None:
+    """Terminate and reap the runtime command's whole process group."""
+    if process.poll() is not None:
+        process.wait()
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, check=False)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+
+
+def _run_runtime_test_action(
+        cfg: Config, owner_dir: Path, command: str,
+        state: WorkflowState) -> tuple[WorkflowState, _TestActionEvidence, bool]:
+    """Run or reuse one source-bound runtime command with durable live evidence."""
+    identity = _runtime_test_identity(cfg, command)
+    existing = _runtime_test_record(state)
+    if (existing is not None and existing.identity == identity
+            and existing.status == "PASSED"):
+        print(f"  runtime_test passed evidence reused (exit {existing.exit_code})")
+        return state, existing, True
+
+    persisted_command = command[:_RUNTIME_SUMMARY_LIMIT]
+    armed = _TestActionEvidence(
+        "STALE", identity, 0, persisted_command,
+        "Runtime command has not completed for this source identity.\n")
+    state = _with_runtime_test_record(state, armed)
+    write_runtime_test_workflow_state(owner_dir, state)
+    environment = os.environ.copy()
+    environment["PYTHONIOENCODING"] = "utf-8"
+    options = dict(
+        cwd=str(cfg.root), shell=True, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+        errors="replace", bufsize=1, env=environment)
+    if os.name == "nt":
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        options["start_new_session"] = True
+    try:
+        process = subprocess.Popen(command, **options)
+    except (OSError, ValueError) as error:
+        record = replace(
+            armed, status="FAILED", exit_code=1,
+            summary=_bounded_runtime_summary(
+                armed.summary, f"Unable to start runtime command: {error}\n"))
+        state = _with_runtime_test_record(state, record)
+        write_runtime_test_workflow_state(owner_dir, state)
+        return state, record, False
+
+    record = armed
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            record = replace(
+                record,
+                summary=_bounded_runtime_summary(record.summary, line))
+            state = _with_runtime_test_record(state, record)
+            write_runtime_test_workflow_state(owner_dir, state)
+        return_code = process.wait()
+    except KeyboardInterrupt:
+        _terminate_runtime_process(process)
+        record = replace(
+            record,
+            summary=_bounded_runtime_summary(
+                record.summary, "Runtime command interrupted.\n"))
+        state = _with_runtime_test_record(state, record)
+        write_runtime_test_workflow_state(owner_dir, state)
+        raise
+    except BaseException:
+        _terminate_runtime_process(process)
+        raise
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+
+    record = replace(
+        record, status="PASSED" if return_code == 0 else "FAILED",
+        exit_code=return_code,
+        summary=_bounded_runtime_summary(
+            record.summary,
+            ("Runtime command passed.\n" if return_code == 0 else
+             f"Runtime command failed (exit code {return_code}).\n")))
+    try:
+        unchanged = _runtime_test_identity(cfg, command) == identity
+    except AssentError:
+        unchanged = False
+    if not unchanged:
+        record = replace(
+            record, status="STALE",
+            summary=_bounded_runtime_summary(
+                record.summary,
+                "Source or runtime command changed during runtime_test.\n"))
+    state = _with_runtime_test_record(state, record)
+    write_runtime_test_workflow_state(owner_dir, state)
+    print(f"  runtime_test evidence: {record.status} (exit {record.exit_code})")
+    return state, record, False
 
 def _focused_sweep_identity(cfg: Config, plan: Plan) -> str:
     """Bind a plan sweep to the source tree and its distinct commands."""
