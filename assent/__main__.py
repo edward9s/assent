@@ -1,4 +1,4 @@
-"""CLI entry point: argparse subcommands run/status/check/report/verify/clean/
+"""CLI entry point: argparse subcommands run/test/status/check/report/verify/clean/
 accept/reconcile/reject/rework/archive/init."""
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ from assent.archive import (archive_all, archive_plan, archive_recovery_names,
                             archive_selected, restore_plan)
 from assent.batch_accept import accept_all, accept_selected_batch
 from assent.clean import clean_plans, validate_live_plan_selection
-from assent.config import list_task_plans, load_config, validate_config
+from assent.config import (list_task_plans, load_config,
+                           load_main_runtime_config, validate_config)
 from assent.doctor import doctor as run_doctor
 from assent.plandeps import infer_plan_completion, parse_plan_dependency_graph
 from assent.plan_source import resolve_source_snapshot
@@ -30,7 +31,8 @@ from assent.init import init as run_init
 from assent.ignored_dirs_cli import (add_ignored_dirs_command,
                                      ignored_dirs_declare,
                                      ignored_dirs_status)
-from assent.plan import plan_workflow_requires_human
+from assent.plan import (plan_workflow_requires_human,
+                         read_runtime_test_workflow_state)
 from assent.reconcile import (reconcile_abort, reconcile_continue,
                               reconcile_start)
 from assent.reject import reject_plan
@@ -127,7 +129,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="command", required=True,
         parser_class=functools.partial(argparse.ArgumentParser,
                                        formatter_class=_HelpFormatter),
-        metavar=("{run,status,check,report,verify,clean,accept,reconcile,reject,"
+        metavar=("{run,test,status,check,report,verify,clean,accept,reconcile,reject,"
                  "rework,archive,init,doctor,ignored-dirs}"))
 
     run_p = sub.add_parser(
@@ -140,6 +142,22 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--jobs", type=_positive_int, metavar="N",
                        help="Maximum concurrent plans for a whole-project run "
                             "(default: 1; cannot be used with PLAN)")
+
+    test_p = sub.add_parser(
+        "test", help="Test one live plan, or repair-test the current main",
+        description=(
+            "With PLAN, execute that exact live plan's declared runtime command "
+            "in its candidate worktree. Without PLAN, execute the project-layer "
+            "runtime command in the current main repair candidate. This command "
+            "never dispatches task, plan, integration, full verification, or "
+            "accept workflows. Startup output names the target, command source, "
+            "candidate worktree, and current workflow step."))
+    test_p.add_argument(
+        "plan_name", nargs="?", metavar="PLAN",
+        help="Exact live plan for the plan runtime workflow; omit PLAN to test "
+             "the current main candidate." + _PLAN_NAME_HELP)
+    test_p.add_argument("--config", default=_DEFAULT_CONFIG, metavar="PATH",
+                        help=_CONFIG_HELP)
 
     status_p = sub.add_parser(
         "status", help="Show progress counts and the next task for the given "
@@ -323,6 +341,63 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _runtime_workflow_step(cfg) -> str:
+    """Describe the current runtime workflow cursor without changing it."""
+    workflow = cfg.workflow_runtime_test
+    if workflow is None:
+        return "unconfigured"
+    try:
+        state = read_runtime_test_workflow_state(cfg.tasks_dir)
+    except AssentError as error:
+        return f"unavailable ({error})"
+    index = state.step_index if state is not None else 0
+    if index >= len(workflow):
+        if state is not None and state.action_status != "PASSED":
+            status = state.action_status or "unresolved"
+            return f"{len(workflow)}/{len(workflow)}: {status}"
+        return f"{len(workflow)}/{len(workflow)}: complete"
+    step = workflow[index]
+    label = getattr(step, "action", None) or getattr(step, "role", "role")
+    return f"{index + 1}/{len(workflow)}: {label}"
+
+
+def _print_runtime_test_start(cfg, *, plan_name: str | None) -> None:
+    """Show the one target and source selected by ``assent test``."""
+    if plan_name is None:
+        target = "current main"
+        command_source = ("project config [runtime_test].command ("
+                          f"{cfg.assent_dir / 'assent.toml'})")
+        candidate = gitops.runtime_test_worktree_path(cfg.root)
+    else:
+        target = f"live plan {plan_name}"
+        command_source = f"plan contract ({cfg.tasks_dir / '_runtime_test.toml'})"
+        candidate = gitops.worktree_path(cfg.root, plan_name)
+    print(f"Runtime test target: {target}")
+    print(f"Runtime test command source: {command_source}")
+    print(f"Runtime test candidate worktree: {candidate}")
+    print(f"Runtime test workflow step: {_runtime_workflow_step(cfg)}")
+
+
+def _runtime_test_cli_exit_code(result: int) -> int:
+    """Apply the runtime-test CLI contract to an engine result."""
+    return result if result in (0, 130) else 1
+
+
+def _run_plan_runtime_test(cfg) -> int:
+    """Expose a failed or unresolved plan runtime state as a CLI failure."""
+    result = _runtime_test_cli_exit_code(engine.run_runtime_test(cfg))
+    if result != 0:
+        return result
+    try:
+        state = read_runtime_test_workflow_state(cfg.tasks_dir)
+    except AssentError as error:
+        print(f"Runtime test failed: {error}")
+        return 1
+    if state is None or state.action_status != "PASSED":
+        return 1
+    return result
+
+
 def _validate_explicit_plans(assent_dir: Path, plan_names: list[str], *,
                                recognized: list[str] | set[str] = ()) -> bool:
     """Run the shared identity gate for a non-empty explicit plan prefix."""
@@ -448,36 +523,11 @@ def _close_run(result: int, *, config_path: str,
             print("Integration workflow deferred: selected plan execution "
                   "requires human adjudication (" + ", ".join(incomplete) + ")")
             return 0
-        try:
-            selection_cfg = load_config(config_path, selection[0])
-        except AssentError as e:
-            print(f"Config error: {e}")
-            return 1
-        if selection_cfg.workflow_integration:
-            return engine.run_selection_workflow(
-                config_path, assent_dir, selection)
+        return engine.run_selection_workflow(
+            config_path, assent_dir, selection)
     if selection is None:
-        plan_names = list_task_plans(assent_dir)
-        if plan_names:
-            try:
-                selection_cfg = load_config(config_path, plan_names[0])
-            except AssentError as e:
-                print(f"Config error: {e}")
-                return 1
-            if selection_cfg.workflow_integration:
-                return engine.run_dynamic_selection_workflow(
-                    config_path, assent_dir)
-        return verify_batch(config_path, assent_dir)
-    if len(selection) > 1:
-        return verify_selected_batch(config_path, assent_dir, selection)
-    try:
-        cfg = load_config(config_path, selection[0])
-    except AssentError as e:
-        print(f"Config error: {e}")
-        return 1
-    if not infer_plan_completion(cfg.tasks_dir).complete:
-        return verify_plan(cfg)
-    return verify_plan_if_needed(cfg)
+        return engine.run_dynamic_selection_workflow(config_path, assent_dir)
+    raise AssertionError("run closeout selection is invalid")
 
 
 def _dispatch(argv: list[str]) -> int:
@@ -564,7 +614,7 @@ def _dispatch(argv: list[str]) -> int:
         explicit = args.plan_names
     elif args.command in ("accept", "verify", "clean"):
         explicit = args.plan_name
-    elif args.command in ("status", "check", "report",
+    elif args.command in ("test", "status", "check", "report",
                           "reconcile", "reject", "rework"):
         explicit = [args.plan_name] if args.plan_name is not None else []
     elif args.command == "archive" and not args.restore:
@@ -593,6 +643,27 @@ def _dispatch(argv: list[str]) -> int:
         if selection is not None:
             return closeout(_dispatch_run_plans(args.config, selection))
         return closeout(run_all(args.config, assent_dir, args.jobs or 1))
+    if args.command == "test":
+        try:
+            try:
+                if args.plan_name is None:
+                    cfg = load_main_runtime_config(args.config)
+                else:
+                    cfg = load_config(args.config, args.plan_name)
+            except AssentError as e:
+                print(f"Config error: {e}")
+                return 1
+            _print_runtime_test_start(cfg, plan_name=args.plan_name)
+            return (_runtime_test_cli_exit_code(
+                        engine.run_main_runtime_test(cfg))
+                    if args.plan_name is None else
+                    _run_plan_runtime_test(cfg))
+        except KeyboardInterrupt:
+            print("Test interrupted; runtime workflow state and candidate were preserved.")
+            return 130
+        except (AssentError, OSError) as error:
+            print(f"Test refused: {error}")
+            return 1
     if args.command == "accept":
         if args.all_plans:
             return accept_all(args.config, assent_dir)

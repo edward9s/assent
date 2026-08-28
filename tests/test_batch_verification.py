@@ -106,6 +106,8 @@ class BatchVerifyRepositoryCase(unittest.TestCase):
     def write_task(self, plan_name: str, status: str = "DONE") -> Path:
         tasks_dir = self.assent_dir / plan_name
         tasks_dir.mkdir(parents=True, exist_ok=True)
+        (tasks_dir / "_runtime_test.toml").write_text(
+            'execution = "disabled"\n', encoding="utf-8")
         path = tasks_dir / "t001_task.e.toml"
         path.write_text(
             'title = "Task"\n'

@@ -20,12 +20,14 @@ neither.
 from __future__ import annotations
 
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from assent import AssentError, gitops
 from assent.adapters import Adapter, InvocationRequest, get_adapter
-from assent.config import Config, WorkflowActionStep, WorkflowTaskStep
+from assent.config import (Config, WorkflowActionStep, WorkflowRoleStep,
+                           WorkflowTaskStep)
 from assent.plandeps import PlanBaseResolution, resolve_plan_base
 from assent.modeling import effort_identity, has_literal
 from assent.plan import Plan, Task, TaskWorkflowAction
@@ -172,6 +174,61 @@ def capability_errors(cfg: Config, adapter: Adapter, plan: Plan,
     except AssentError as e:
         return [str(e)]
     return adapter.preflight(requests)
+
+
+def runtime_test_adapter_names(cfg: Config) -> tuple[str, ...]:
+    """Return the adapters named by the effective runtime-test role steps."""
+    names: list[str] = []
+    for step in cfg.workflow_runtime_test or ():
+        if not isinstance(step, WorkflowRoleStep):
+            continue
+        for name in step.adapters:
+            if name not in names:
+                names.append(name)
+    return tuple(names)
+
+
+def runtime_test_capability_errors(
+        cfg: Config, adapters: Mapping[str, Adapter]
+        ) -> dict[str, list[str]]:
+    """Preflight every resolved runtime-test role for each of its adapters."""
+    requests: dict[str, list[InvocationRequest]] = {}
+    errors: dict[str, list[str]] = {}
+    for index, step in enumerate(cfg.workflow_runtime_test or ()):
+        if not isinstance(step, WorkflowRoleStep):
+            continue
+        model = step.model
+        if model is None:
+            for name in step.adapters:
+                errors.setdefault(name, []).append(
+                    f"runtime-test[{index}] role {step.role!r} has no model")
+            continue
+        for name in step.adapters:
+            try:
+                requested_model, requested_effort = resolve_selection(
+                    cfg, model, name)
+            except AssentError as error:
+                errors.setdefault(name, []).append(
+                    f"runtime-test[{index}] role {step.role!r}: {error}")
+                continue
+            requests.setdefault(name, []).append(InvocationRequest(
+                task_id=f"runtime_test[{index}] role {step.role}",
+                model=model, requested_model=requested_model,
+                requested_effort=requested_effort))
+
+    for name, entries in requests.items():
+        adapter = adapters.get(name)
+        if adapter is None:
+            errors.setdefault(name, []).append(
+                f"runtime-test adapter {name!r} is not available")
+            continue
+        try:
+            failures = adapter.preflight(entries)
+        except (AssentError, OSError) as error:
+            failures = [str(error)]
+        if failures:
+            errors.setdefault(name, []).extend(failures)
+    return errors
 
 
 # --------------------------------------------------------------------------- #

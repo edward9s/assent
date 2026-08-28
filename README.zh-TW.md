@@ -17,6 +17,7 @@ AI 確認需求，再請 AI 將討論共識建立成 Assent 格式計畫。接�
 | --- | --- | --- |
 | 規劃 | 與 AI 確認需求後，明確要求：「將上述討論的共識，建立成 `.assent/<PLAN>/` 下的 Assent 格式計畫。」 | `assent check` |
 | 執行 | 讓 task、plan、integration 三層流程在有限次數內實作、測試與修復。 | `assent run` |
+| Runtime test | 執行 plan 宣告的 runtime contract，或測試目前的 main candidate。 | `assent test [PLAN]` |
 | 驗收 | 閱讀報告與 diff，再接受、重做或駁回。 | `assent report`、`assent accept` |
 
 `DONE` 只表示執行 AI 認為任務完成；通過的 receipt 只表示重建後的結果通過
@@ -54,6 +55,10 @@ assent check
 # 自動執行所有找到的計畫。
 assent run
 
+# 明確執行 plan runtime test，或測試目前的 main candidate。
+assent test <PLAN>
+assent test
+
 # 閱讀證據後，再由人決定是否接受。
 assent report <PLAN>
 assent accept <PLAN>
@@ -69,7 +74,7 @@ assent archive --all
 
 ## `run` 會做什麼
 
-`[workflow]` 分成三層：
+`[workflow]` 有三個核心 layer，另有獨立的 runtime-test workflow：
 
 - `task` 處理單一任務，並以 `focused_test` 作為機械檢查；
 - `plan` 等所有任務完成或略過後，以 `focused_sweep` 檢查整體成果；
@@ -83,6 +88,12 @@ session 內合併審查與修復；自訂 workflow 仍可使用分離的 role。
 
 Task action 失敗時仍留在 task 層，並依設定的有限 steps 前進。Plan role 的工作
 不同：它負責確認累積實作是否符合整份計畫。
+
+`assent test [PLAN]` 是獨立的 runtime-test workflow。有 `PLAN` 時，使用該 live
+plan 的 `_runtime_test.toml` command，在 plan candidate 中執行；省略 `PLAN` 時，
+使用 project layer 的 `[runtime_test].command`，在目前 main repair candidate 中執行。
+`execution = "after_plan"` 的 plan 會在 plan layer 完成後、integration `full_verify`
+前執行這個 workflow；`accept` 絕不執行 runtime testing。
 
 Integration 會維持原本選取的完整計畫集合。Typed Git conflict evidence 會指出
 衝突的 plan 與 paths，因此已設定的 integration role 可以在 scheduler 提供的

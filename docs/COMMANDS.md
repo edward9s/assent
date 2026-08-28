@@ -29,6 +29,7 @@ project-location rules.
 | `init` | Install shared contracts/settings and create the project skeleton. |
 | `check` | Validate plan files, configuration, and dependencies without AI. |
 | `run` | Execute task, plan, and integration workflows. |
+| `test` | Run a plan's declared runtime command, or the project command against the current main candidate. |
 | `status` | Show concise state for one or all plans. |
 | `report` | Regenerate the human review agenda. |
 | `verify` | Run a requested mechanical verification without AI review, repair, or acceptance. |
@@ -64,6 +65,29 @@ assent run A B
 Named plans run in the stated order. Every successful run continues through
 the configured plan and integration workflows for its completed selection; it
 never accepts.
+
+## Runtime test
+
+Run the independent runtime-test workflow for one live plan:
+
+```text
+assent test <PLAN>
+```
+
+The plan form reads `.assent/<PLAN>/_runtime_test.toml` and runs its declared
+`command` in the plan candidate worktree. `execution = "disabled"` refuses this
+plan command. The no-`PLAN` form tests the current main repair candidate with
+the project-layer `[runtime_test].command` from `.assent/assent.toml`:
+
+```text
+assent test
+```
+
+`test` starts only the independent `runtime_test` workflow. It does not run
+task, plan, integration, `full_verify`, or `accept`. The complete mode, state,
+repair, quota, and source-bound evidence rules are in [Workflow](WORKFLOW.md);
+the settings needed for the main command and repair role are in
+[Configuration](CONFIGURATION.md).
 
 Refresh one complete receipt or verify an exact selection:
 

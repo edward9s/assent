@@ -179,6 +179,65 @@ class TestContractValidation(unittest.TestCase):
 
 
 class TestContractContent(unittest.TestCase):
+    def test_plan_format_requires_an_explicit_runtime_contract(self):
+        text = (_PROJECT_ROOT / "assent/templates/format.md").read_text(
+            encoding="utf-8")
+        compact = " ".join(text.split())
+        for phrase in (
+                "_runtime_test.toml",
+                'execution = "disabled"',
+                'execution = "explicit"',
+                'execution = "after_plan"',
+                "Every live plan contains exactly one",
+                "There is no fallback, alias, migration",
+                "including when it selects `disabled`"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(" ".join(phrase.split()), compact)
+        self.assertNotIn("[runtime_test].command", text)
+        self.assertNotIn("project command", text)
+
+    def test_planning_instructions_choose_runtime_without_changing_task_schema(self):
+        text = (_PROJECT_ROOT / "assent/templates/instructions.md").read_text(
+            encoding="utf-8")
+        compact = " ".join(text.split())
+        for phrase in (
+                "When a planning session creates a live plan",
+                "chooses exactly one runtime execution mode",
+                "omission never means disabled",
+                "Keep the task file's ten-field schema",
+                "never become task fields"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(" ".join(phrase.split()), compact)
+
+    def test_runtime_repair_defaults_are_writable_and_strictly_alternating(self):
+        config_text = (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
+            encoding="utf-8")
+        data = tomllib.loads(config_text)
+        ability = data["abilities"]["runtime_repair"]
+        self.assertTrue(ability["writes"])
+        for phrase in (
+                "ordinary project source", "tests", "fixtures",
+                "project configuration", "documentation", "Do not run any command",
+                "task contracts", "Git state", "control state",
+                "declare the runtime test passed"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, ability["prompt"])
+
+        self.assertEqual(data["roles"]["runtime_repairer"]["ability"],
+                         ["runtime_repair"])
+        self.assertEqual(data["roles"]["runtime_repairer"]["model"], "core")
+        workflow = data["workflow"]["runtime_test"]
+        self.assertGreaterEqual(len(workflow), 3)
+        self.assertEqual(workflow[0], {"action": "runtime_test"})
+        self.assertEqual(workflow[-1], {"action": "runtime_test"})
+        for index, entry in enumerate(workflow):
+            with self.subTest(index=index):
+                if index % 2:
+                    self.assertEqual(entry["role"], "runtime_repairer")
+                else:
+                    self.assertEqual(entry, {"action": "runtime_test"})
+        self.assertNotIn("[runtime_test]", config_text)
+
     def test_workflow_contract_states_the_three_governing_principles(self):
         text = (_PROJECT_ROOT / "assent/templates/workflow.md").read_text(
             encoding="utf-8")
@@ -253,6 +312,21 @@ class TestContractContent(unittest.TestCase):
         self.assertIn("persistent source worktree", text)
         self.assertIn("candidate reconstruction, and recheck", text)
         self.assertIn("without mechanically identified source attribution", text)
+
+    def test_runtime_workflow_contract_covers_targets_boundaries_and_receipts(self):
+        text = " ".join(
+            (_PROJECT_ROOT / "assent/templates/workflow.md").read_text(
+                encoding="utf-8").split())
+        for phrase in (
+                "`assent test [PLAN]`", "project-layer `[runtime_test].command`",
+                "plan candidate worktree", "separate main repair candidate",
+                "after the plan workflow and before the selection's integration `full_verify`",
+                "exit 0 records `PASSED`", "source or command drift records `STALE`",
+                "makes no candidate source change", "quota waits", "on restart",
+                "REVIEW UNRESOLVED, HUMAN DECISION", "Runtime evidence is not a verification receipt",
+                "acceptance requires both fresh receipt evidence"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
 
 
 if __name__ == "__main__":

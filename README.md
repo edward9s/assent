@@ -16,6 +16,7 @@ the project's ignored `.assent/` directory.
 | --- | --- | --- |
 | Plan | Agree on requirements with an AI, then explicitly ask: “Turn the consensus above into an Assent-format plan under `.assent/<PLAN>/`.” | `assent check` |
 | Run | Let task, plan, and integration workflows implement, test, and repair within finite limits. | `assent run` |
+| Runtime test | Run a plan's declared runtime contract or test the current main candidate. | `assent test [PLAN]` |
 | Review | Read the report and diff, then accept, rework, or reject. | `assent report`, `assent accept` |
 
 `DONE` means the execution AI believes a task is finished. A passing receipt
@@ -55,6 +56,10 @@ assent check
 # Run every discovered plan unattended.
 assent run
 
+# Explicitly run a plan runtime test, or test the current main candidate.
+assent test <PLAN>
+assent test
+
 # Review before making the human decision.
 assent report <PLAN>
 assent accept <PLAN>
@@ -71,7 +76,8 @@ project uses. Review `~/.assent/assent.toml`, `AGENTS.md`, and
 
 ## What happens during `run`
 
-The configured `[workflow]` has three layers:
+The configured `[workflow]` has three core layers plus an independent runtime-
+test workflow:
 
 - `task` works on one task and uses `focused_test` as its mechanical gate;
 - `plan` runs a `focused_sweep` over the completed plan and reviews cumulative
@@ -89,6 +95,13 @@ UNRESOLVED, HUMAN DECISION` for the acceptance meeting.
 A failed task action stays in the task layer and advances through the remaining
 configured steps. Plan review has a different job: checking whether the
 cumulative implementation matches the agreed plan.
+
+`assent test [PLAN]` is an independent runtime-test workflow. With `PLAN`, it
+uses that live plan's `_runtime_test.toml` command in the plan candidate. Without
+`PLAN`, it uses the project-layer `[runtime_test].command` in the current main
+repair candidate. A plan using `execution = "after_plan"` runs this workflow
+after its plan layer and before integration `full_verify`; `accept` never runs
+runtime testing.
 
 Integration keeps the exact selected plans. Typed Git conflict evidence names
 the conflicting plan and paths, so a configured integration role may repair it

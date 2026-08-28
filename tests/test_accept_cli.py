@@ -96,6 +96,8 @@ class AcceptCliCase(unittest.TestCase):
         name = plan_name or self.plan_name
         tasks_dir = self.assent_dir / name
         tasks_dir.mkdir(parents=True, exist_ok=True)
+        (tasks_dir / "_runtime_test.toml").write_text(
+            'execution = "disabled"\n', encoding="utf-8", newline="\n")
         path = tasks_dir / "t001_����.e.toml"
         path.write_text(
             'title = "CLI acceptance task"\n'

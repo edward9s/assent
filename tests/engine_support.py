@@ -134,6 +134,8 @@ class EngineTestCase(unittest.TestCase):
         (self.root / "AGENTS.md").write_text("專案規則\n", encoding="utf-8")
         self.plan_dir = self.root / ".assent" / "plan01"
         self.plan_dir.mkdir(parents=True)
+        (self.plan_dir / "_runtime_test.toml").write_text(
+            'execution = "disabled"\n', encoding="utf-8", newline="\n")
         # These tests exercise task-session scheduling and focused checkpoint
         # gates.  Full candidate verification has its own engine handoff tests.
         verifier = mock.patch(

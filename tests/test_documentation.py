@@ -117,31 +117,33 @@ class DocumentationTests(unittest.TestCase):
                 self.assertIn(phrase, chinese)
 
     def test_configuration_guides_are_workflow_first_references(self):
-        english = _read(Path("docs/CONFIGURATION.md"))
+        english = " ".join(_read(Path("docs/CONFIGURATION.md")).split())
         for phrase in (
                 "An ability has a prompt and a write capability",
                 "Ability names have no engine meaning",
                 "A passing action completes the layer",
                 "There is no structured verdict setting",
-                "three arbitrary finite step arrays",
+                "three core finite step arrays plus an independent runtime-test array",
+                "runtime_test",
                 "integration_repairer", "Task workflow overrides",
                 '{ role = "tests_writer" }',
                 '{ action = "focused_test" }'):
             with self.subTest(language="English", phrase=phrase):
-                self.assertIn(phrase, english)
+                self.assertIn(" ".join(phrase.split()), english)
 
-        chinese = _read(Path("docs/zh-TW/CONFIGURATION.md"))
+        chinese = " ".join(_read(Path("docs/zh-TW/CONFIGURATION.md")).split())
         for phrase in (
                 "Ability 只有 prompt 與寫入能力",
                 "Ability 名稱\n對 engine 沒有特殊意義",
                 "Action 通過就完成該層",
                 "設定中沒有 structured verdict",
-                "三個可任意排列、但長度有限的 step array",
+                "三個核心、可任意排列且長度有限的 step array，另有獨立的 runtime-test array",
+                "runtime_test",
                 "integration_repairer", "Task workflow override",
                 '{ role = "tests_writer" }',
                 '{ action = "focused_test" }'):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
-                self.assertIn(phrase, chinese)
+                self.assertIn(" ".join(phrase.split()), chinese)
 
     def test_planning_and_acceptance_prompts_keep_human_boundaries(self):
         english = _flat(_read(Path("docs/WORKFLOW.md")))
@@ -187,6 +189,37 @@ class DocumentationTests(unittest.TestCase):
                 "不能把所有 ignored directory 都建立成鏈結"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(_flat(phrase), chinese)
+
+    def test_runtime_test_command_and_configuration_are_discoverable(self):
+        english = " ".join(" ".join((
+            _read(Path("README.md")),
+            _read(Path("docs/COMMANDS.md")),
+            _read(Path("docs/CONFIGURATION.md")),
+            _read(Path("docs/WORKFLOW.md")),
+            _read(Path("docs/OPERATIONS.md")),
+        )).split())
+        for phrase in (
+                "assent test [PLAN]", "assent test <PLAN>",
+                "_runtime_test.toml", "[runtime_test].command",
+                "execution = \"after_plan\"", "runtime_repairer",
+                "full_verify", "source-bound", "REVIEW UNRESOLVED, HUMAN DECISION"):
+            with self.subTest(language="English", phrase=phrase):
+                self.assertIn(" ".join(phrase.split()), english)
+
+        chinese = " ".join(" ".join((
+            _read(Path("README.zh-TW.md")),
+            _read(Path("docs/zh-TW/COMMANDS.md")),
+            _read(Path("docs/zh-TW/CONFIGURATION.md")),
+            _read(Path("docs/zh-TW/WORKFLOW.md")),
+            _read(Path("docs/zh-TW/OPERATIONS.md")),
+        )).split())
+        for phrase in (
+                "assent test [PLAN]", "assent test <PLAN>",
+                "_runtime_test.toml", "[runtime_test].command",
+                "execution = \"after_plan\"", "runtime_repairer",
+                "full_verify", "source-bound", "REVIEW UNRESOLVED, HUMAN DECISION"):
+            with self.subTest(language="Traditional Chinese", phrase=phrase):
+                self.assertIn(" ".join(phrase.split()), chinese)
 
 
     def test_reader_guides_distinguish_rework_from_destructive_reject(self):

@@ -42,10 +42,13 @@ _STATUS_LINE_RE = re.compile(
 _FULL_VERIFIER_RE = re.compile(r'\.assent[\\/]verify\.py\b')
 WORKFLOW_STATE_NAME = "_workflow.toml"
 INTEGRATION_WORKFLOW_STATE_NAME = "_integration_workflow.toml"
+RUNTIME_TEST_WORKFLOW_STATE_NAME = "_runtime_test_workflow.toml"
 _WORKFLOW_ACTIONS = {"focused_test"}
 _ACTION_STATUS_VALUES = {"PASSED", "FAILED", "STALE"}
 _MAX_ACTION_EVIDENCE_ITEMS = 20
 _MAX_ACTION_EVIDENCE_CHARS = 4096
+RUNTIME_TEST_CONTRACT_NAME = "_runtime_test.toml"
+_RUNTIME_TEST_EXECUTIONS = {"disabled", "explicit", "after_plan"}
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,22 @@ class TaskWorkflowRole(str):
 
 
 @dataclass(frozen=True)
+class RuntimeTestContract:
+    """The exact runtime-test decision declared by one plan."""
+
+    execution: str
+    command: str | None
+
+
+@dataclass(frozen=True)
+class RuntimeQuotaWait:
+    """One runtime role's resumable adapter quota wait."""
+
+    adapter: str
+    reset_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class WorkflowState:
     """Deletable cursor for one task or plan workflow."""
 
@@ -78,6 +97,8 @@ class WorkflowState:
     action_source_tree: str = ""
     action_exit_code: int = 0
     action_evidence: tuple[str, ...] = ()
+    quota_waits: tuple[RuntimeQuotaWait, ...] = ()
+    candidate_head: str = ""
 
 
 @dataclass(frozen=True)
@@ -124,6 +145,39 @@ def selection_workflow_state_path(assent_dir: Path) -> Path:
     return assent_dir / INTEGRATION_WORKFLOW_STATE_NAME
 
 
+def runtime_test_workflow_state_path(owner_dir: Path) -> Path:
+    """Return the independent runtime workflow cursor for one owner."""
+    return owner_dir / RUNTIME_TEST_WORKFLOW_STATE_NAME
+
+
+def _runtime_quota_waits(value: object, path: Path) -> tuple[RuntimeQuotaWait, ...]:
+    if not isinstance(value, list):
+        raise AssentError(f"Runtime workflow state {path.name} has invalid quota waits")
+    waits: list[RuntimeQuotaWait] = []
+    for item in value:
+        if not isinstance(item, dict) or not set(item) <= {"adapter", "reset_at"}:
+            raise AssentError(
+                f"Runtime workflow state {path.name} has invalid quota waits")
+        adapter = item.get("adapter")
+        reset_at = item.get("reset_at")
+        if not isinstance(adapter, str) or not adapter.strip():
+            raise AssentError(
+                f"Runtime workflow state {path.name} has invalid quota waits")
+        if reset_at is not None:
+            if not isinstance(reset_at, datetime):
+                raise AssentError(
+                    f"Runtime workflow state {path.name} has invalid quota waits")
+            if reset_at.tzinfo is None or reset_at.utcoffset() != timezone.utc.utcoffset(reset_at):
+                raise AssentError(
+                    f"Runtime workflow state {path.name} reset instant must be UTC")
+            reset_at = reset_at.astimezone(timezone.utc)
+        waits.append(RuntimeQuotaWait(adapter.strip(), reset_at))
+    if len({wait.adapter for wait in waits}) != len(waits):
+        raise AssentError(
+            f"Runtime workflow state {path.name} has duplicate quota adapters")
+    return tuple(waits)
+
+
 def _valid_action_evidence(evidence: object) -> bool:
     return (isinstance(evidence, list)
             and len(evidence) <= _MAX_ACTION_EVIDENCE_ITEMS
@@ -147,6 +201,22 @@ def _valid_action_result(action: object, status: object, identity: object,
     if not status:
         return not identity and exit_code == 0 and not evidence
     return status in _ACTION_STATUS_VALUES and bool(identity)
+
+
+def _valid_runtime_action_result(
+        action: object, status: object, identity: object,
+        exit_code: object, evidence: object) -> bool:
+    if (action != "runtime_test" or not isinstance(status, str)
+            or not isinstance(identity, str)
+            or not isinstance(exit_code, int) or isinstance(exit_code, bool)
+            or not isinstance(evidence, list)):
+        return False
+    if not status:
+        return not identity and exit_code == 0 and not evidence
+    return (status in _ACTION_STATUS_VALUES and bool(identity)
+            and len(evidence) == 2
+            and all(isinstance(item, str) for item in evidence)
+            and len(evidence[1]) <= _MAX_ACTION_EVIDENCE_CHARS)
 
 
 def read_workflow_state(tasks_dir: Path) -> WorkflowState | None:
@@ -232,6 +302,102 @@ def write_workflow_state(tasks_dir: Path, state: WorkflowState) -> None:
         "",
     ))
     atomic_write_text(workflow_state_path(tasks_dir), text)
+
+
+def read_runtime_test_workflow_state(owner_dir: Path) -> WorkflowState | None:
+    """Read one plan- or main-owned runtime workflow cursor."""
+    path = runtime_test_workflow_state_path(owner_dir)
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "rb") as source:
+            data = tomllib.load(source)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise AssentError(
+            f"Runtime workflow state {path.name} is unreadable: {error}") from error
+    expected = {
+        "unit", "task_id", "step_index", "started", "base_ref", "evidence",
+        "action", "action_status", "action_source_tree", "action_exit_code",
+        "action_evidence", "quota_waits",
+    }
+    expected.add("candidate_head")
+    if set(data) != expected:
+        raise AssentError(f"Runtime workflow state {path.name} has an invalid schema")
+    waits = _runtime_quota_waits(data["quota_waits"], path)
+    if (data["unit"] != "runtime_test" or data["task_id"] != ""
+            or not isinstance(data["step_index"], int)
+            or isinstance(data["step_index"], bool) or data["step_index"] < 0
+            or not isinstance(data["started"], bool)
+            or not isinstance(data["base_ref"], str)
+            or not isinstance(data["candidate_head"], str)
+            or not isinstance(data["evidence"], list)
+            or not all(isinstance(item, str) for item in data["evidence"])
+            or not _valid_runtime_action_result(
+                data["action"], data["action_status"],
+                data["action_source_tree"], data["action_exit_code"],
+                data["action_evidence"])):
+        raise AssentError(f"Runtime workflow state {path.name} has invalid values")
+    return WorkflowState(
+        data["unit"], data["task_id"], data["step_index"], data["started"],
+        data["base_ref"], tuple(data["evidence"]), data["action"],
+        data["action_status"], data["action_source_tree"],
+        data["action_exit_code"], tuple(data["action_evidence"]), waits,
+        data["candidate_head"])
+
+
+def write_runtime_test_workflow_state(
+        owner_dir: Path, state: WorkflowState) -> None:
+    """Atomically persist one independent runtime workflow cursor."""
+    if state.unit != "runtime_test" or state.task_id or state.action != "runtime_test":
+        raise AssentError(
+            "Runtime workflow state requires unit and action = 'runtime_test'")
+    if not _valid_runtime_action_result(
+            state.action, state.action_status, state.action_source_tree,
+            state.action_exit_code, list(state.action_evidence)):
+        raise AssentError("Runtime workflow state has invalid action evidence")
+    if (not isinstance(state.step_index, int)
+            or isinstance(state.step_index, bool) or state.step_index < 0
+            or not isinstance(state.started, bool)
+            or not isinstance(state.base_ref, str)
+            or not isinstance(state.candidate_head, str)
+            or not all(isinstance(item, str) for item in state.evidence)):
+        raise AssentError("Runtime workflow state has invalid values")
+    quota_items = []
+    seen: set[str] = set()
+    for wait in state.quota_waits:
+        if (not isinstance(wait, RuntimeQuotaWait) or not wait.adapter.strip()
+                or wait.adapter in seen):
+            raise AssentError("Runtime workflow state has invalid quota waits")
+        seen.add(wait.adapter)
+        fields = [f"adapter = {json.dumps(wait.adapter)}"]
+        if wait.reset_at is not None:
+            if (wait.reset_at.tzinfo is None
+                    or wait.reset_at.utcoffset() != timezone.utc.utcoffset(wait.reset_at)):
+                raise AssentError("Runtime workflow state reset instant must be UTC")
+            instant = wait.reset_at.astimezone(timezone.utc).isoformat().replace(
+                "+00:00", "Z")
+            fields.append(f"reset_at = {instant}")
+        quota_items.append("{ " + ", ".join(fields) + " }")
+    text = "\n".join((
+        'unit = "runtime_test"',
+        'task_id = ""',
+        f"step_index = {state.step_index}",
+        f"started = {'true' if state.started else 'false'}",
+        f"base_ref = {json.dumps(state.base_ref)}",
+        "evidence = [" + ", ".join(
+            json.dumps(item, ensure_ascii=False) for item in state.evidence) + "]",
+        'action = "runtime_test"',
+        f"action_status = {json.dumps(state.action_status)}",
+        f"action_source_tree = {json.dumps(state.action_source_tree)}",
+        f"action_exit_code = {state.action_exit_code}",
+        "action_evidence = [" + ", ".join(
+            json.dumps(item, ensure_ascii=False)
+            for item in state.action_evidence) + "]",
+        "quota_waits = [" + ", ".join(quota_items) + "]",
+        f"candidate_head = {json.dumps(state.candidate_head)}",
+        "",
+    ))
+    atomic_write_text(runtime_test_workflow_state_path(owner_dir), text)
 
 
 def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | None:
@@ -397,6 +563,62 @@ def _task_workflow(
                 f"Task file {path.name} {owner} has unknown action {action!r}")
         entries.append(TaskWorkflowAction(action))
     return tuple(entries)
+
+
+def parse_runtime_test_contract(plan_dir: Path) -> RuntimeTestContract:
+    """Read and validate the runtime-test contract at a plan root."""
+    path = Path(plan_dir) / RUNTIME_TEST_CONTRACT_NAME
+    try:
+        with open(path, "rb") as source:
+            data = tomllib.load(source)
+    except FileNotFoundError as error:
+        raise AssentError(
+            f"Runtime-test contract {path.name} is missing") from error
+    except OSError as error:
+        raise AssentError(
+            f"Cannot read runtime-test contract {path.name}: {error}") from error
+    except tomllib.TOMLDecodeError as error:
+        raise AssentError(
+            f"Runtime-test contract {path.name} is not valid TOML: {error}") from error
+
+    unknown = sorted(set(data) - {"execution", "command"})
+    if unknown:
+        raise AssentError(
+            f"Runtime-test contract {path.name} has undefined fields: "
+            f"{', '.join(unknown)} (valid fields: command, execution)")
+
+    if "execution" not in data:
+        raise AssentError(
+            f"Runtime-test contract {path.name} is missing required field: execution")
+    execution = data["execution"]
+    if not isinstance(execution, str):
+        raise AssentError(
+            f"Runtime-test contract {path.name} field execution must be a string")
+    if execution not in _RUNTIME_TEST_EXECUTIONS:
+        raise AssentError(
+            f"Runtime-test contract {path.name} has unknown execution {execution!r}"
+            " (valid values: after_plan, disabled, explicit)")
+
+    if execution == "disabled":
+        if "command" in data:
+            raise AssentError(
+                f"Runtime-test contract {path.name} with execution = "
+                '"disabled" must not define command')
+        return RuntimeTestContract(execution, None)
+
+    if "command" not in data:
+        raise AssentError(
+            f"Runtime-test contract {path.name} is missing required field: command"
+            f" for execution = {execution!r}")
+    command = data["command"]
+    if not isinstance(command, str):
+        raise AssentError(
+            f"Runtime-test contract {path.name} field command must be a string")
+    if not command.strip():
+        raise AssentError(
+            f"Runtime-test contract {path.name} field command must not be empty "
+            "or whitespace")
+    return RuntimeTestContract(execution, command)
 
 
 def journal_path_for(task_path: Path) -> Path:

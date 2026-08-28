@@ -71,7 +71,8 @@ exactly one adapter; otherwise configuration loading refuses it as ambiguous.
 
 ## Workflows
 
-`[workflow]` contains three arbitrary finite step arrays:
+`[workflow]` contains three core finite step arrays plus an independent
+runtime-test array:
 
 ```toml
 [workflow]
@@ -92,6 +93,11 @@ integration = [
   { role = "integration_repairer" },
   { action = "full_verify" },
 ]
+runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+]
 ```
 
 Each entry contains exactly one `role` or `action`. Legal actions are:
@@ -101,6 +107,7 @@ Each entry contains exactly one `role` or `action`. Legal actions are:
 | `task` | `focused_test` | Run the current task's `verify` command. |
 | `plan` | `focused_sweep` | Run each distinct task command on the cumulative candidate. |
 | `integration` | `full_verify` | Reconstruct and verify the exact selection. |
+| `runtime_test` | `runtime_test` | Run the declared runtime command in its candidate. |
 
 A role success advances one position. A passing action completes the layer and
 skips later positions. A failing action advances. Exhaustion without a pass is
@@ -141,6 +148,32 @@ workflow = [
 
 An omitted field inherits `[workflow].task`. An empty task workflow is invalid;
 use `workflow = [{ action = "focused_test" }]` when no AI session is wanted.
+
+## Runtime-test settings
+
+Runtime testing has its own workflow layer and does not reuse task, plan, or
+integration actions. The shipped settings define the writable
+`runtime_repairer` role and a strict alternating `[workflow].runtime_test`
+array of `runtime_test` actions and repair roles. A custom runtime role must be
+writable and state a model; the array begins and ends with an action.
+
+The main-candidate command is project-specific and must be stated in the
+project `.assent/assent.toml`:
+
+```toml
+[runtime_test]
+command = "python -m unittest tests.test_runtime"
+```
+
+This `[runtime_test].command` is used only by `assent test` without `PLAN`.
+Each plan instead writes its own `_runtime_test.toml` contract, whose exact
+`execution` modes and `command` presence rules are in `format.md`. A plan
+command never falls back to `task.verify` or the project command.
+
+The runtime repair ability may edit ordinary candidate source, tests, fixtures,
+project configuration, and documentation. It may not run a command or change
+Assent/Git control state, and its text cannot declare a runtime pass. The full
+runtime workflow and candidate lifecycle are in [Workflow](WORKFLOW.md).
 
 ## Usage limits
 

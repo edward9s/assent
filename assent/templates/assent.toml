@@ -16,6 +16,9 @@ writes = true
 [abilities.implement_source]
 prompt = "Implement the supplied requirements under the governing design principles: use the smallest architecture and fewest states that make invalid behavior difficult to form, one term per actual mechanism, and failure at the first authoritative boundary instead of compatibility or masking. Fix production behavior and satisfy the supplied focused checks; do not weaken, narrow, delete, or rewrite tests merely to make a check pass."
 writes = true
+[abilities.runtime_repair]
+prompt = "Repair the runtime-test failure in the candidate worktree. You may edit any ordinary project source, tests, fixtures, project configuration, or documentation needed to correct the root cause. Do not run any command, Git, or Assent operation; do not modify task contracts, journals, scheduler state, receipts, Git state, acceptance state, or other control state; and do not declare the runtime test passed."
+writes = true
 [abilities.task_review]
 prompt = "Review the current task against its stated behavior and focused_test evidence. Apply the governing design principles: require the smallest architecture and fewest states, one term per actual mechanism, and failure at the first authoritative boundary instead of compatibility or masking. Treat avoidable state, branching, indirection, tracking, and recovery machinery as substantive defects when a direct invariant can remove them. Do not invent requirements. When relevant test changes are part of the supplied evidence, do not accept tests that merely mirror implementation constants, template examples, or incidental representation instead of proving the cited requirement."
 writes = false
@@ -45,6 +48,9 @@ writes = true
 [roles.implementer]
 ability = ["write_tests", "implement_source"]
 #model = "lite"
+[roles.runtime_repairer]
+ability = ["runtime_repair"]
+model = "core"
 [roles.tests_writer]
 ability = ["write_tests"]
 #model = "lite"
@@ -100,4 +106,13 @@ integration = [
   { action = "full_verify" },
   { role = "integration_repairer", adapter = ["claude", "codex"] },
   { action = "full_verify" },
+]
+runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer", adapter = ["claude", "codex"] },
+  { action = "runtime_test" },
+  { role = "runtime_repairer", adapter = ["claude", "codex"] },
+  { action = "runtime_test" },
+  { role = "runtime_repairer", adapter = ["claude", "codex"] },
+  { action = "runtime_test" },
 ]

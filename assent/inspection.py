@@ -38,7 +38,7 @@ from assent import AssentError, contracts, gitops, usage
 
 from assent.adapters import Adapter, get_adapter
 
-from assent.config import PROJECT_LAYER, Config, WorkflowPlanStep
+from assent.config import PROJECT_LAYER, Config
 
 from assent.plandeps import archived_plan_names, parse_plan_dependencies
 
@@ -46,13 +46,17 @@ from assent.plan_verification import receipt_report_lines
 
 from assent.modeling import effort_identity, literal_value
 
-from assent.plan import Plan, Task, read_entries, read_workflow_state
+from assent.plan import (Plan, RuntimeTestContract, Task,
+                         parse_runtime_test_contract, read_entries,
+                         read_workflow_state)
 
 from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               capability_errors, has_git_marker,
                               print_task_assignments, resolve_selection,
                               resolve_stack_state,
                               resolve_task_assignments,
+                              runtime_test_adapter_names,
+                              runtime_test_capability_errors,
                               worktree_configuration_errors)
 
 def _git_read(root, *args: str) -> str | None:
@@ -259,6 +263,26 @@ def _contract_lines() -> tuple[bool, list[str]]:
                    *(f"  - {message}" for message in errors),
                    f"  {contracts.CONTRACT_REMEDY}"]
 
+
+def _runtime_test_contract_lines(
+        cfg: Config) -> tuple[bool, RuntimeTestContract | None]:
+    """Parse the required plan runtime-test contract and report its mode."""
+    try:
+        contract = parse_runtime_test_contract(cfg.tasks_dir)
+    except AssentError as error:
+        print(f"Runtime-test contract: FAIL ({error})")
+        return False, None
+    print(f"Runtime-test contract: OK (execution = {contract.execution})")
+    if contract.execution == "disabled":
+        print("Runtime-test workflow: not required (execution = disabled)")
+        return True, contract
+    if not cfg.workflow_runtime_test:
+        print("Runtime-test workflow: FAIL (effective [workflow].runtime_test "
+              "is missing or empty)")
+        return False, contract
+    print(f"Runtime-test workflow: OK ({len(cfg.workflow_runtime_test)} steps)")
+    return True, contract
+
 def _assignment_source_lines(
         cfg: Config,
         blocks: list[tuple[str, list[tuple[Task, SessionIdentity]]]]
@@ -282,16 +306,21 @@ def _assignment_source_lines(
     return lines
 
 def check(cfg: Config) -> int:
+    ok = True
     if not has_git_marker(cfg.root):
         print(GIT_REQUIRED_MESSAGE)
-        return 1
+        ok = False
 
     for line in _config_source_lines(cfg):
         print(line)
     # The same contracts `run` refuses to start a session without.
-    ok, contract_lines = _contract_lines()
+    contract_ok, contract_lines = _contract_lines()
+    ok = ok and contract_ok
     for line in contract_lines:
         print(line)
+
+    runtime_ok, runtime_contract = _runtime_test_contract_lines(cfg)
+    ok = ok and runtime_ok
 
     # Parsing proves the complete task-file schema.
     plan: Plan | None = None
@@ -344,6 +373,32 @@ def check(cfg: Config) -> int:
     except AssentError as e:
         ok = False
         print(f"adapter: FAIL ({e})")
+
+    if (runtime_contract is not None
+            and runtime_contract.execution != "disabled"
+            and cfg.workflow_runtime_test is not None):
+        runtime_adapters: dict[str, Adapter] = {}
+        runtime_adapter_errors: dict[str, str] = {}
+        for name in runtime_test_adapter_names(cfg):
+            if name == adapter_name and adapter is not None:
+                runtime_adapters[name] = adapter
+                continue
+            try:
+                runtime_adapters[name] = get_adapter(name, cfg)
+            except AssentError as error:
+                runtime_adapter_errors[name] = str(error)
+        runtime_failures = runtime_test_capability_errors(cfg, runtime_adapters)
+        for name, error in runtime_adapter_errors.items():
+            runtime_failures.setdefault(name, []).append(error)
+        for name in runtime_test_adapter_names(cfg):
+            failures = runtime_failures.get(name, [])
+            if failures:
+                ok = False
+                print(f"{name} runtime-test capability preflight: FAIL")
+                for message in failures:
+                    print(f"  - {message}")
+            else:
+                print(f"{name} runtime-test capability preflight: OK")
 
     # Every model/effort the plan could still send, proven against the active adapter's
     # capability contract; the same gate `run` applies before opening a session.

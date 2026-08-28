@@ -73,15 +73,73 @@ execution only in trusted environments.
 One plan folder permits one live `run`, enforced by an OS lock. Different plans
 may run concurrently in dedicated `<project>.worktrees/<plan>/` worktrees.
 
+## Runtime-test workflow
+
+`assent test [PLAN]` is the standalone runtime-test command. It is independent
+of task, plan, and integration workflows and never dispatches `full_verify`,
+writes a verification receipt, or accepts a plan.
+
+With `PLAN`, the command reads that live plan's `_runtime_test.toml` and runs
+its declared command in the plan candidate worktree. Without `PLAN`, it uses
+the project-layer `[runtime_test].command` from the project settings and a
+separate main repair candidate; the primary worktree remains unchanged. The
+main command is project-specific and is not supplied by the shared settings
+template.
+
+The plan contract selects one exact `execution` mode. `disabled` has no runtime
+gate. `explicit` runs only when `assent test PLAN` is requested. `after_plan`
+runs automatically during `run`, after the plan workflow and before
+the selection's integration `full_verify`. Every selected `after_plan` source
+must pass its own current runtime gate before that full verification starts.
+`assent accept` never runs runtime testing; it rechecks any required current
+runtime evidence before publication.
+
+`[workflow].runtime_test` is a separate finite linear array. Its legal action is
+`{ action = "runtime_test" }`; every role between actions is writable and has
+an explicit model, and the array strictly alternates action and role starting
+and ending with an action. The shipped settings use `runtime_repairer` for the
+repair roles. The runtime action is authoritative: exit 0 records `PASSED`, a
+nonzero exit records `FAILED`, and source or command drift records `STALE`.
+Role output never declares a pass. A successful writable runtime role that
+makes no candidate source change ends the workflow unresolved; no extra action
+is invented.
+
+A runtime repair role may edit ordinary project source, tests, fixtures, project
+configuration, and documentation in its candidate. It may not run commands or
+modify task contracts, journals, scheduler state, receipts, Git state,
+acceptance state, or other control state, and it cannot declare the runtime test
+passed. The scheduler alone runs the runtime action, records evidence, changes
+state, and owns Git transitions.
+
+Plan runtime state is `.assent/<PLAN>/_runtime_test_workflow.toml` beside the
+plan contract, and its candidate is `<project>.worktrees/<PLAN>/`. Main runtime
+state is `.assent/_runtime_test_workflow.toml`, and its candidate is
+`<project>.runtime-test/main` based on the exact primary `HEAD`. These state and
+worktree identities are scheduler-owned. Quota waits, role progress, bounded
+evidence, and candidate identity are persisted; quota interruption checkpoints
+the candidate and, on restart, resumes the same workflow position. A candidate
+identity or source change outside the workflow is a refusal. Token-burned work
+is never reverted. A repaired main candidate remains pending human integration.
+
+If the finite runtime array ends without a passing action, the result is
+`REVIEW UNRESOLVED, HUMAN DECISION` with preserved evidence. A standalone
+`assent test [PLAN]` returns 1 because its candidate did not pass. An unattended
+`run` returns 0 for this human-decision outcome, preserves the evidence, and does
+not start integration verification. Runtime evidence is not a verification
+receipt: `full_verify` and its receipt remain separate source-bound evidence,
+and acceptance requires both fresh receipt evidence and every required current
+runtime gate.
+
 ## Workflow configuration
 
-`[workflow]` has three ordered arrays:
+`[workflow]` has four ordered arrays:
 
 | Array | Role context | Legal scheduler action |
 | --- | --- | --- |
 | `task` | one task | `focused_test` |
 | `plan` | the cumulative plan candidate | `focused_sweep` |
 | `integration` | the exact selection and scheduler-named repair workspace(s) | `full_verify` |
+| `runtime_test` | one plan or the current main candidate | `runtime_test` |
 
 Each entry contains exactly one `role` or `action`. Arrays may contain any
 finite ordering of configured roles and the layer's legal action. Assent does
@@ -123,7 +181,7 @@ Task configuration is explicit:
 
 ## One interpreter
 
-Task and plan workflows use one finite linear interpreter:
+Task, plan, and runtime-test workflows use one finite linear interpreter:
 
 1. A role session completes successfully, its bounded output is persisted as
    evidence, and the cursor advances once.

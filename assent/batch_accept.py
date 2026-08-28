@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-from assent import AssentError, gitops, verification
+from assent import AssentError, gitops, runtime_test, verification
 from assent.accept import (accept_plan, accept_merge_message, cleanup_warning,
                            dependency_tip)
 from assent.config import Config, load_config
@@ -209,6 +209,15 @@ def _batch_gate_problem(main: Path, configs: dict[str, Config],
             return (f"{source.plan} ({source.tip[:12]}) is already contained in "
                     f"{target_branch}, so the recorded chain is not the chain "
                     "being published")
+        try:
+            runtime_problem = runtime_test.after_plan_gate_problem(
+                configs[source.plan].tasks_dir, source.tip)
+        except AssentError as e:
+            runtime_problem = str(e)
+        if runtime_problem is not None:
+            return (f"{source.plan}: {runtime_problem}. Run `assent test "
+                    f"{source.plan}` or `assent run` to earn current runtime "
+                    "PASSED evidence; accept never runs runtime testing")
     try:
         current = verification.verifier_digest(configs[sources[0].plan])
     except AssentError as e:
@@ -691,10 +700,25 @@ def accept_all(config_path: str, assent_dir: Path) -> int:
                   "already integrated and cleaned)")
             skipped.append(plan_name)
             continue
-        if (not _already_integrated(cfg)
-                and verification.verify_plan_if_needed(cfg) != 0):
-            failure = (plan_name, "verification refused or failed")
-            break
+        already_integrated = _already_integrated(cfg)
+        if not already_integrated:
+            try:
+                _branch, source_tip, _worktree = resolve_source_snapshot(
+                    main, plan_name, cfg.git_excludes)
+                runtime_problem = runtime_test.after_plan_gate_problem(
+                    cfg.tasks_dir, source_tip)
+            except AssentError as e:
+                runtime_problem = str(e)
+            if runtime_problem is not None:
+                print(f"accept --all: refused, {plan_name}: "
+                      f"{runtime_problem}. Run `assent test {plan_name}` or "
+                      "`assent run` to earn current runtime PASSED evidence; "
+                      "accept never runs runtime testing")
+                failure = (plan_name, "runtime-test gate refused")
+                break
+            if verification.verify_plan_if_needed(cfg) != 0:
+                failure = (plan_name, "verification refused or failed")
+                break
         if accept_plan(cfg) != 0:
             failure = (plan_name, "accept refused or failed")
             break

@@ -16,6 +16,15 @@
 Other documents may reference an owned rule, but must not duplicate it as a
 competing normative contract.
 
+## Planning runtime decision
+
+When a planning session creates a live plan, it chooses exactly one runtime
+execution mode and creates that plan's `_runtime_test.toml` immediately. Use
+`disabled` when runtime testing is unknown or not needed; omission never means
+disabled. Use `explicit` or `after_plan` only when the plan has its own command.
+The exact schema is in `format.md`. Keep the task file's ten-field schema:
+runtime execution and command never become task fields.
+
 Contract and reader documentation must be concise, present-tense, and
 reader-oriented. Keep only text needed to act or understand; do not add
 development chronology, meeting narrative, or changelog entries unless the

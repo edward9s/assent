@@ -31,7 +31,8 @@ verification command，不預測 write scope。
 
 ## 2. 自動執行
 
-`assent run` 執行三個長度有限的 workflow array：
+`assent run` 執行 task、plan 與 integration array；若 plan 需要，會在指定位置
+插入獨立的 runtime-test array：
 
 - `task` 處理一個 task；`focused_test` 執行該 task 的 command。
 - `plan` 處理累積 candidate；`focused_sweep` 執行不重複的 task commands。
@@ -40,6 +41,45 @@ verification command，不預測 write scope。
 Role session 成功就前進一格。Action 通過就完成該層並略過後續 roles；失敗則
 記錄證據並前進。設定的 array 就是全部自動化預算，Assent 不會自行新增審查或
 修復回合。
+
+### 獨立的 runtime-test workflow
+
+已安裝的 `~/.assent/workflow.md` 擁有這份 runtime-test contract；本指南摘要說明
+使用方式。
+
+`assent test [PLAN]` 與 task、plan、integration layer 分開。有 plan argument 時，
+讀取該 live plan 的 `_runtime_test.toml`，在 plan candidate worktree 執行其 command。
+沒有 plan argument 時，使用 project layer 的 `[runtime_test].command` 與獨立的 main
+repair candidate；不修改主要 worktree。它不會執行 `full_verify`、寫入 verification
+receipt 或接受任何成果。
+
+Plan contract 選擇一個精確的 `execution` mode：`disabled` 沒有 runtime gate；
+`explicit` 只有在明確執行 `assent test PLAN` 時才執行；`after_plan` 則在 `run` 的
+plan workflow 後、selection 的 integration `full_verify` 前自動執行。每個
+`after_plan` source 都必須通過自己的最新 runtime gate，full verification 才會開始。
+Acceptance 會重新檢查相同的 source-bound runtime evidence；`accept` 絕不執行 runtime
+testing。
+
+`[workflow].runtime_test` 是由 `{ action = "runtime_test" }` step 與可寫 repair role
+組成的有限 linear array。Shipped configuration 嚴格交替 action、`runtime_repairer`、
+action。Runtime action 才是裁決者：exit 0 記為 `PASSED`，非 0 記為 `FAILED`，
+source 或 command 漂移則記為 `STALE`。Role output 不能宣告 pass。可寫 role 若成功
+結束但沒有修改 candidate source，workflow 會成為 unresolved，不會自行增加 action。
+
+Runtime role session 可以在 candidate 中修改一般 source、test、fixture、project
+configuration 與 documentation；不能執行 command，也不能修改 task contract、journal、
+scheduler state、receipt、Git 或 acceptance state。Runtime state 保存 workflow cursor、
+有限 evidence、candidate identity 與 quota wait。Quota 中斷會 checkpoint candidate，
+restart 時恢復該 state，不會還原已消耗 token 的成果。Array 耗盡時回報
+`REVIEW UNRESOLVED, HUMAN DECISION` 並保留 evidence。獨立執行的
+`assent test [PLAN]` 會回傳 1；unattended `run` 將這個需由人類裁決的結果回傳為 0，
+讓其他排隊 plan 繼續執行。
+
+Plan runtime state 是 plan contract 旁的 `.assent/<PLAN>/_runtime_test_workflow.toml`。
+Main runtime state 是 `.assent/_runtime_test_workflow.toml`，candidate 是以主要
+`HEAD` 精確建立的 `<project>.runtime-test/main`。修復過的 main candidate 等待人類整合。
+Runtime evidence 不是 verification receipt：`full_verify` 與 receipt 仍是獨立證據，
+acceptance 需要新鮮的 receipt 與任何必需的 current runtime gate。
 
 Ignored-directory 決定未完成時，action 並未啟動；Assent 會把這項 gate 證據與
 測試結果分開。FAILED 之後的下一個已設定 action 會重新執行；只有匹配的 PASSED

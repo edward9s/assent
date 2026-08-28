@@ -64,6 +64,8 @@ class ReconcileRepositoryCase(unittest.TestCase):
         (self.assent_dir / "verify.py").write_text(
             "raise SystemExit('reconcile must never run the verifier')\n",
             encoding="utf-8")
+        (self.tasks_dir / "_runtime_test.toml").write_text(
+            'execution = "disabled"\n', encoding="utf-8")
         self._write_task()
 
     def _cleanup(self) -> None:

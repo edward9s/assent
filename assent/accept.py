@@ -18,7 +18,7 @@ from pathlib import Path
 
 from typing import Sequence
 
-from assent import AssentError, gitops, verification
+from assent import AssentError, gitops, runtime_test, verification
 
 from assent.config import Config
 
@@ -59,6 +59,12 @@ def _refresh_message(plan_name: str, reason: str) -> str:
     return (f"accept {plan_name}: refused, {reason}. Run `assent verify {plan_name}` "
             "to refresh the verification receipt unattended; accept never runs "
             "the full verifier")
+
+
+def _runtime_gate_message(plan_name: str, reason: str) -> str:
+    return (f"accept {plan_name}: refused, {reason}. Run `assent test "
+            f"{plan_name}` or `assent run` to earn current runtime PASSED "
+            "evidence; accept never runs runtime testing")
 
 def accept_merge_message(target_branch: str, plan_name: str, source_branch: str,
                          source_tip: str, verified_tree: str,
@@ -152,6 +158,16 @@ def _accept_locked(cfg: Config) -> int:
               f"({source_tip[:12]}) is fully contained in {target_branch}. "
               "Nothing to do.")
         return 0
+
+    try:
+        runtime_problem = runtime_test.after_plan_gate_problem(
+            cfg.tasks_dir, source_tip)
+    except AssentError as e:
+        print(_runtime_gate_message(plan_name, str(e)))
+        return 1
+    if runtime_problem is not None:
+        print(_runtime_gate_message(plan_name, runtime_problem))
+        return 1
 
     stale_dependencies = [
         f"{dependency} ({tip[:12]})"
@@ -254,7 +270,15 @@ def _accept_locked(cfg: Config) -> int:
                               or not gitops.working_tree_status(
                                   source_worktree, cfg.git_excludes).is_clean))):
                         gate_problem = "the source changed during acceptance"
-                    else:
+                    if gate_problem is None:
+                        try:
+                            runtime_problem = runtime_test.after_plan_gate_problem(
+                                cfg.tasks_dir, source_tip)
+                        except AssentError as e:
+                            runtime_problem = str(e)
+                        if runtime_problem is not None:
+                            gate_problem = "runtime-test gate: " + runtime_problem
+                    if gate_problem is None:
                         for dependency, accepted_tip in dependency_tips:
                             current_tip, problem = dependency_tip(
                                 main, dependency, cfg.git_excludes)
@@ -313,7 +337,11 @@ def _accept_locked(cfg: Config) -> int:
               f"{plan_name}` to earn a fresh receipt")
         return 1
     if gate_problem is not None:
-        print(_refresh_message(plan_name, gate_problem))
+        if gate_problem.startswith("runtime-test gate: "):
+            print(_runtime_gate_message(
+                plan_name, gate_problem.removeprefix("runtime-test gate: ")))
+        else:
+            print(_refresh_message(plan_name, gate_problem))
         print("accept did not publish; target refs/worktree remain as currently "
               "observed, and the source branch/worktree was kept")
         return 1
