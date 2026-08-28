@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from assent import engine, gitops
+from assent import AssentError, engine, gitops
 from assent.config import load_main_runtime_config
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
 from tests.test_runtime_test_action import python_command
@@ -151,7 +151,8 @@ class MainRuntimeTestTests(EngineTestCase):
         self.assertEqual(code, 1)
         self.assertIn("expected assent/runtime-test/main", output)
         self.assertEqual(gitops.head_ref(self.candidate), base)
-        self.assertIsNone(gitops.current_branch(self.candidate))
+        with self.assertRaisesRegex(AssentError, "detached HEAD"):
+            gitops.require_current_branch(self.candidate)
 
 
 if __name__ == "__main__":
