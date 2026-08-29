@@ -15,7 +15,7 @@ from pathlib import Path
 from assent import AssentError, gitops, verification
 from assent.config import Config
 from assent.inspection import write_report
-from assent.lockfile import LockBusy, LockMissing, probe_lock
+from assent.lockfile import LockBusy, hold_lock
 from assent.plan import Plan, Task, append_entry, read_entries, set_status
 
 _CASCADE_STATUSES = {"DONE", "WIP", "BLOCKED"}
@@ -56,7 +56,7 @@ def rework_task(cfg: Config, task_id: str, cascade: bool = False,
     """
     name = cfg.tasks_name
     try:
-        with probe_lock(cfg.tasks_dir, name):
+        with hold_lock(cfg.tasks_dir, name):
             result = _rework_locked(
                 cfg, task_id, cascade, reason, revert_code)
             if result != 0:
@@ -69,7 +69,7 @@ def rework_task(cfg: Config, task_id: str, cascade: bool = False,
             return 0
     except LockBusy as e:
         print(f"{name}: rework aborted (a run is in progress): {e}")
-    except (LockMissing, AssentError, OSError, ValueError) as e:
+    except (AssentError, OSError, ValueError) as e:
         print(f"{name}: rework aborted ({e})")
     return 1
 

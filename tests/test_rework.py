@@ -356,20 +356,23 @@ class TestRework(unittest.TestCase):
         self.assertTrue(dirty.is_file())
         self.assertIn("task files could not be parsed", bad_task_output)
 
-    def test_busy_and_missing_lock_fail_closed(self) -> None:
+    def test_busy_lock_blocks_but_missing_lock_is_created(self) -> None:
         task = self._write_task(1, "DONE")
         with hold_lock(self.tasks_dir, self.plan_name):
             busy_code, busy_output = self._run()
-        (self.tasks_dir / "assent.lock").unlink()
-
-        missing_code, missing_output = self._run()
-
         self.assertEqual(busy_code, 1)
-        self.assertEqual(missing_code, 1)
         self.assertEqual(self._status(task), "DONE")
         self.assertIn("a run is in progress", busy_output)
-        self.assertIn("has no existing assent.lock", missing_output)
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
+
+        (self.tasks_dir / "assent.lock").unlink()
+        missing_code, missing_output = self._run()
+
+        self.assertEqual(missing_code, 0, missing_output)
+        self.assertEqual(self._status(task), "TODO")
+        self.assertTrue((self.tasks_dir / "assent.lock").is_file())
+        self.assertIn("rework complete", missing_output)
+        self.assertTrue((self.tasks_dir / "t001_task.r.toml").is_file())
 
     def test_partial_journal_write_can_be_retried_without_duplicates(self) -> None:
         target = self._write_task(1, "DONE")
