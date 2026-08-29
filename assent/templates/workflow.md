@@ -274,6 +274,14 @@ validated command to a source role. The following action refuses to start
 until that operation settles the decision; sessions never edit the manifest or
 create a link by hand.
 
+Required directories are immutable role inputs. Before and after every AI role,
+Assent snapshots the required targets; during UNKNOWN or STALE review it
+snapshots the complete inventory instead. A changed target or a required path
+first declared after the role began is a control-boundary failure and cannot be
+checkpointed or laundered through another declaration. The failure remains in
+workflow state across restart until source rework changes the candidate
+identity. `_report.md` lists the required local inputs that Git does not deliver.
+
 `declare --required DIR` records a required source input and provisions its
 same-relative junction or directory symlink. `--none-required` records that no
 inventory directory is required. `--not-required DIR REASON` accounts for

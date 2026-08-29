@@ -177,6 +177,14 @@ evidence, not a semantic promise that the project will never need ignored-direct
 The leading underscore marks this as Assent-owned local state; edit it only
 through `ignored-dirs declare`.
 
+A required directory is immutable during every AI role. Assent snapshots its
+contents before and after the role; while the decision is unknown or stale it
+snapshots the complete review inventory. Modifying a linked target, or changing
+it and then declaring the new contents required, is a control-boundary failure
+and cannot become a candidate checkpoint. The failure blocks restart until
+source rework changes the candidate identity. The plan report lists every
+required local directory explicitly as content Git does not deliver.
+
 Assent cannot safely link everything ignored by Git: ignore rules also cover
 writable build output, caches, virtual environments, editor state, and
 credentials. Linking them all would share mutable state, expose unrelated local

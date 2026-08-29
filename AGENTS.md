@@ -276,6 +276,14 @@ These principles jointly govern every design and implementation decision:
   is unreviewed evidence under every state and refuses verification,
   reconciliation, receipt freshness, reporting, and acceptance; ordinary
   ignored leaf files keep their separate automatic candidate-link behavior.
+  Required ignored directories are immutable inputs to every AI role. The
+  scheduler snapshots their contents before and after each role; while a
+  decision is UNKNOWN or STALE it snapshots the complete review inventory so a
+  role cannot modify a directory and then legitimize that output by declaring
+  it required. Any change is a control-boundary failure, is never checkpointed
+  as candidate source, and remains a blocking workflow-state fact across
+  restart until source rework changes the candidate identity. Reports name
+  every required ignored directory as a local input that Git does not deliver.
 - Cross-plan speculative execution stacks only on an explicitly declared
   `base`, so at most one not-yet-accepted upstream tip is ever in a stack. A
   plan that declares no `base` is cut from the integration target; the

@@ -404,6 +404,71 @@ class TestLinearEngine(EngineTestCase):
             cfg, ScriptedAdapter([tamper])), 1)
         self.assertEqual(parse_task_file(path).status, "WIP")
 
+    def test_required_ignored_input_is_read_only_during_a_writable_role(self):
+        self.write_task(1, verify=_NEEDS_OK_TXT)
+        cfg = self.build(extra_config=WORKFLOW)
+        (self.root / ".gitignore").write_text(
+            ".assent/\nlocal-input/\n", encoding="utf-8")
+        self.commit_all()
+        local_input = self.root / "local-input"
+        local_input.mkdir()
+        marker = local_input / "research.py"
+        marker.write_text("original\n", encoding="utf-8")
+        ignored_dirs.declare(
+            self.root, self.root, required=("local-input",),
+            watch=(".gitignore",), not_required=())
+
+        def tamper_and_redeclare(_prompt):
+            linked_marker = self.execution_root() / "local-input" / "research.py"
+            linked_marker.write_text("changed by role\n", encoding="utf-8")
+            ignored_dirs.declare(
+                self.root, self.execution_root(), required=("local-input",),
+                watch=(".gitignore",), not_required=())
+            return result("changed and redeclared the ignored input")
+
+        code = self.run_with_contracts(
+            cfg, ScriptedAdapter([tamper_and_redeclare]))
+
+        self.assertEqual(code, 1)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "changed by role\n")
+        self.assertEqual(parse_task_file(
+            self.plan_dir / "t001_task.e.toml").status, "WIP")
+        state = read_workflow_state(cfg.tasks_dir)
+        self.assertIsNotNone(state)
+        self.assertTrue(any(item.startswith("ignored-input control violation: ")
+                            for item in state.evidence))
+
+        retry = ScriptedAdapter([])
+        self.assertEqual(self.run_with_contracts(cfg, retry), 1)
+        self.assertEqual(retry.calls, [])
+
+    def test_required_ignored_input_can_be_read_while_tracked_source_changes(self):
+        path = self.write_task(1, verify=_NEEDS_OK_TXT)
+        cfg = self.build(extra_config=WORKFLOW)
+        (self.root / ".gitignore").write_text(
+            ".assent/\nlocal-input/\n", encoding="utf-8")
+        self.commit_all()
+        local_input = self.root / "local-input"
+        local_input.mkdir()
+        (local_input / "fixture.txt").write_text("input\n", encoding="utf-8")
+        ignored_dirs.declare(
+            self.root, self.root, required=("local-input",),
+            watch=(".gitignore",), not_required=())
+
+        def use_input(_prompt):
+            value = (self.execution_root() / "local-input" / "fixture.txt").read_text(
+                encoding="utf-8")
+            target = self.execution_root() / "src" / "ok.txt"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(value, encoding="utf-8")
+            return result("used the ignored input without changing it")
+
+        self.assertEqual(self.run_with_contracts(
+            cfg, ScriptedAdapter([use_input])), 0)
+        self.assertEqual(parse_task_file(path).status, "DONE")
+        self.assertEqual(
+            (local_input / "fixture.txt").read_text(encoding="utf-8"), "input\n")
+
     def test_unsettled_ignored_dirs_advance_without_running_focused_test(self):
         path = self.write_task(1)
         cfg = self.build(extra_config=WORKFLOW)

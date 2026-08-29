@@ -34,7 +34,7 @@ from pathlib import Path
 
 from typing import Callable
 
-from assent import AssentError, contracts, gitops, usage
+from assent import AssentError, contracts, gitops, ignored_dirs, usage
 
 from assent.adapters import Adapter, get_adapter
 
@@ -97,6 +97,23 @@ def _stack_report_lines(cfg: Config, plan: Plan) -> list[str]:
     return [f"Stack base: {state.base.resolved_base}",
             f"Speculative upstream: {upstream.plan} @ {upstream.tip} (unaccepted)"]
 
+
+def _ignored_input_report_lines(cfg: Config) -> list[str]:
+    """Expose local directories used by verification but absent from Git."""
+    try:
+        worktree = _query_git_root(cfg)
+        main = gitops.main_worktree(worktree)
+        decision = ignored_dirs.classify(
+            main, worktree, ignored_dirs.read_manifest(main))
+    except AssentError as error:
+        return [f"Local ignored-directory inputs: unavailable ({error})"]
+    if decision.required:
+        return ["Local ignored-directory inputs (not delivered by Git): "
+                + ", ".join(decision.required)]
+    if not decision.settled:
+        return [f"Local ignored-directory inputs: {decision.state} (unresolved)"]
+    return ["Local ignored-directory inputs: none"]
+
 def render_report(cfg: Config, plan: Plan,
                   now: Callable[[], datetime] | None = None) -> str:
     """Aggregate the t/r files and git info into a one-page plain-text report. Aggregation is
@@ -129,6 +146,7 @@ def render_report(cfg: Config, plan: Plan,
         f"WIP {counts.get('WIP', 0)} / TODO {counts.get('TODO', 0)} / "
         f"SKIP {counts.get('SKIP', 0)} ({len(plan.tasks)} total)",
         *_stack_report_lines(cfg, plan),
+        *_ignored_input_report_lines(cfg),
         "",
     ]
     try:

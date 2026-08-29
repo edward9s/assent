@@ -1,6 +1,7 @@
 """Reports present mechanical workflow evidence without an auto-fix ledger."""
 import unittest
 
+from assent import ignored_dirs
 from assent.inspection import render_report
 from assent.plan import (Plan, WorkflowState, append_entry, set_status,
                          write_workflow_state)
@@ -36,6 +37,25 @@ class TestInspection(EngineTestCase):
         text = render_report(cfg, Plan.parse(cfg.tasks_dir))
         self.assertIn("REVIEW UNRESOLVED, HUMAN DECISION", text)
         self.assertIn("Last focused_sweep: FAILED", text)
+
+    def test_report_names_local_inputs_that_git_will_not_deliver(self):
+        self.write_task(1)
+        cfg = self.build()
+        (self.root / ".gitignore").write_text(
+            ".assent/\nlocal-input/\n", encoding="utf-8")
+        self.commit_all()
+        local_input = self.root / "local-input"
+        local_input.mkdir()
+        (local_input / "fixture.txt").write_text("input\n", encoding="utf-8")
+        ignored_dirs.declare(
+            self.root, self.root, required=("local-input",),
+            watch=(".gitignore",), not_required=())
+
+        text = render_report(cfg, Plan.parse(cfg.tasks_dir))
+
+        self.assertIn(
+            "Local ignored-directory inputs (not delivered by Git): local-input",
+            text)
 
 
 if __name__ == "__main__":

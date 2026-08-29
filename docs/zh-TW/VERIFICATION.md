@@ -156,6 +156,12 @@ inventory 或 target 改變後會過期。若成功查詢沒有發現 ordinary i
 不需要 ignored-directory input」的語意保證。
 前導底線表示這是 Assent-owned 本機狀態；只能透過 `ignored-dirs declare` 修改。
 
+Required directory 在每個 AI role 期間都是不可變的輸入。Assent 會在 role 前後比對
+內容；決定仍是 UNKNOWN 或 STALE 時，則比對完整 review inventory。修改 linked target，
+或先修改再把新內容重新宣告為 required，都屬於 control-boundary failure，不能成為
+candidate checkpoint。這項失敗會跨 restart 保留，直到 source rework 改變 candidate
+identity。Plan report 會明確列出每個 Git 不會交付的 required 本機目錄。
+
 不能把所有 ignored directory 都建立成鏈結。Ignore rule 還可能包含可寫入的 build
 output、cache、virtual environment、editor state 與 credential；全部連結會共用
 可變狀態、暴露無關的本機資料，也會讓驗證依賴過期產物。不要手動建立 source-

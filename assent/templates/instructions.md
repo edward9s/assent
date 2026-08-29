@@ -136,7 +136,9 @@ Require only a directory that the task demonstrably needs and whose
 same-relative primary target is an ordinary Git-ignored directory. Assent then
 creates the worktree link. Never copy an ignored tree. Never
 hand-create a source-worktree link, provision unrelated caches or credentials,
-or modify a linked target.
+or modify a linked target. Assent snapshots the relevant targets around every
+AI role; changing one and then redeclaring it is a control-boundary failure, not
+a way to turn task output into an ignored input.
 
 ## Review and acceptance meetings
 

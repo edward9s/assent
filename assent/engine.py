@@ -130,6 +130,8 @@ _BEARER_RE = re.compile(r"(?i)(\bbearer\s+)[^\s,;]+")
 _KNOWN_TOKEN_RE = re.compile(
     r"\b(?:sk(?:-ant)?|ghp|github_pat)-[A-Za-z0-9_-]{8,}\b")
 
+_IGNORED_INPUT_VIOLATION = "ignored-input control violation: "
+
 @dataclass
 class _ActiveTask:
     """Current task/session identity for interrupt and billing closeout."""
@@ -299,6 +301,90 @@ def _ignored_dir_decision(cfg: Config) -> ignored_dirs.Decision:
     return ignored_dirs.prepare_worktree(
         gitops.main_worktree(cfg.root), cfg.root,
         required_evidence=_diagnosed_ignored_directory_inputs(cfg))
+
+
+@dataclass(frozen=True)
+class _IgnoredInputGuard:
+    """Exact ignored-directory contents visible to one AI role."""
+
+    main: Path
+    paths: tuple[str, ...]
+    snapshots: tuple[tuple[str, str], ...]
+
+
+def _ignored_input_guards(configs: tuple[Config, ...]) -> tuple[_IgnoredInputGuard, ...]:
+    """Snapshot ignored inputs before an AI role can write through their links.
+
+    A settled profile needs only its required paths. An unsettled review can
+    declare any inventory path during the role, so that one session snapshots
+    the complete candidate inventory instead.
+    """
+    paths_by_main: dict[Path, set[str]] = {}
+    for cfg in configs:
+        if cfg.source_root is None and cfg.tasks_dir == cfg.assent_dir:
+            # Main runtime repair has no ignored-directory profile or links.
+            continue
+        main = gitops.main_worktree(cfg.root)
+        decision = ignored_dirs.classify(
+            main, cfg.root, ignored_dirs.read_manifest(main),
+            required_evidence=_diagnosed_ignored_directory_inputs(cfg))
+        paths = decision.required if decision.settled else decision.inventory
+        paths_by_main.setdefault(main.resolve(), set()).update(paths)
+    guards = []
+    for main, paths in sorted(paths_by_main.items(), key=lambda item: str(item[0])):
+        ordered = tuple(sorted(paths))
+        guards.append(_IgnoredInputGuard(
+            main, ordered,
+            tuple((path, ignored_dirs.snapshot_target(main, path))
+                  for path in ordered)))
+    return tuple(guards)
+
+
+def _ignored_input_violations(
+        guards: tuple[_IgnoredInputGuard, ...],
+        configs: tuple[Config, ...]) -> list[str]:
+    """Return mutations and post-hoc declarations that crossed the input boundary."""
+    violations: list[str] = []
+    guarded_by_main = {guard.main: set(guard.paths) for guard in guards}
+    for guard in guards:
+        for relative, before in guard.snapshots:
+            try:
+                after = ignored_dirs.snapshot_target(guard.main, relative)
+            except AssentError as error:
+                violations.append(f"ignored input {relative}: {error}")
+                continue
+            if after != before:
+                violations.append(f"ignored input changed: {relative}")
+    for cfg in configs:
+        if cfg.source_root is None and cfg.tasks_dir == cfg.assent_dir:
+            continue
+        main = gitops.main_worktree(cfg.root).resolve()
+        try:
+            decision = ignored_dirs.classify(
+                main, cfg.root, ignored_dirs.read_manifest(main),
+                required_evidence=_diagnosed_ignored_directory_inputs(cfg))
+        except AssentError as error:
+            violations.append(f"ignored input decision: {error}")
+            continue
+        added = sorted(set(decision.required) - guarded_by_main.get(main, set()))
+        violations.extend(
+            f"ignored input declared after the role started: {relative}"
+            for relative in added)
+    return violations
+
+
+def _ignored_input_violation(evidence: tuple[str, ...]) -> str:
+    """Return the durable ignored-input violation, if this source has one."""
+    return next((item for item in evidence
+                 if item.startswith(_IGNORED_INPUT_VIOLATION)), "")
+
+
+def _record_ignored_input_violation(
+        state: WorkflowState | SelectionWorkflowState,
+        violations: list[str]) -> WorkflowState | SelectionWorkflowState:
+    evidence = state.evidence + (
+        _IGNORED_INPUT_VIOLATION + ", ".join(violations[:8]),)
+    return replace(state, evidence=evidence[-_SESSION_EVIDENCE_ITEMS:])
 
 @dataclass(frozen=True)
 class _TestActionEvidence:
@@ -1393,6 +1479,8 @@ def _run_integration_conflict_role(
         prompt = _integration_conflict_prompt(
             configs, state, step, position, total, conflicts, contexts,
             source_configs)
+        ignored_input_guards = _ignored_input_guards(
+            tuple(source_configs.values()))
         print(_session_line(adapter_name, step.model, session))
         try:
             result = _invoke_adapter(
@@ -1402,6 +1490,16 @@ def _run_integration_conflict_role(
                 context_id=f"workflow.integration[{state.step_index}]",
                 plan_names=state.plan_names)
         except KeyboardInterrupt:
+            ignored_violations = _ignored_input_violations(
+                ignored_input_guards, tuple(source_configs.values()))
+            if ignored_violations:
+                state = _record_ignored_input_violation(
+                    state, ignored_violations)
+                assert isinstance(state, SelectionWorkflowState)
+                write_selection_workflow_state(configs[0].assent_dir, state)
+                raise AssentError(
+                    "integration conflict role changed ignored input: "
+                    + ", ".join(ignored_violations[:8]))
             violations = _integration_conflict_violations(
                 configs, step, conflicts, contexts, source_configs,
                 management, primary_baseline, source_heads,
@@ -1412,10 +1510,18 @@ def _run_integration_conflict_role(
                     "wip({plan}): interrupted integration conflict repair")
             raise
 
-        violations = _integration_conflict_violations(
+        ignored_violations = _ignored_input_violations(
+            ignored_input_guards, tuple(source_configs.values()))
+        violations = list(ignored_violations)
+        violations.extend(_integration_conflict_violations(
             configs, step, conflicts, contexts, source_configs,
-            management, primary_baseline, source_heads, reconcile_baselines)
+            management, primary_baseline, source_heads, reconcile_baselines))
         if violations:
+            if ignored_violations:
+                state = _record_ignored_input_violation(
+                    state, ignored_violations)
+                assert isinstance(state, SelectionWorkflowState)
+                write_selection_workflow_state(configs[0].assent_dir, state)
             print("Integration conflict role crossed its control boundary: "
                   + ", ".join(violations[:8]))
             return 1, state
@@ -1487,6 +1593,7 @@ def _run_integration_role(
         management = _management_snapshot(work_cfg, plan)
         source_head = gitops.head_ref(work_cfg.root)
         primary_baseline = gitops.dirty_paths(cfg.root)
+        ignored_input_guards = _ignored_input_guards((work_cfg,))
         print(_session_line(adapter_name, step.model, session))
         result = _invoke_adapter(
             cfg, adapter, adapter_name,
@@ -1496,6 +1603,15 @@ def _run_integration_role(
             work_cfg.root, context_kind="integration",
             context_id=f"workflow.integration[{state.step_index}]",
             plan_names=state.plan_names)
+        ignored_violations = _ignored_input_violations(
+            ignored_input_guards, (work_cfg,))
+        if ignored_violations:
+            state = _record_ignored_input_violation(state, ignored_violations)
+            assert isinstance(state, SelectionWorkflowState)
+            write_selection_workflow_state(cfg.assent_dir, state)
+            print("Integration role crossed its control boundary: "
+                  + ", ".join(ignored_violations[:8]))
+            return 1, state
         if result.checkpoint_resume and not result.quota_exhausted:
             gitops.commit_if_dirty(
                 work_cfg.root,
@@ -1784,6 +1900,9 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
                 prior_state = replace(
                     prior_state,
                     source_commits=locked_snapshot[2],
+                    evidence=tuple(
+                        item for item in prior_state.evidence
+                        if not item.startswith(_IGNORED_INPUT_VIOLATION)),
                     step_index=next(
                         index for index, step in enumerate(steps)
                         if isinstance(step, WorkflowActionStep)),
@@ -1803,6 +1922,10 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
             state = SelectionWorkflowState(
                 ordered, target_ref, target_commit, source_commits, 0)
             write_selection_workflow_state(configs[0].assent_dir, state)
+        elif violation := _ignored_input_violation(state.evidence):
+            print("Integration workflow cannot resume after an ignored-input "
+                  f"control violation without source rework: {violation}")
+            return 1
         elif state.action_status == "PASSED":
             first_action = next(
                 index for index, step in enumerate(steps)
@@ -2738,6 +2861,7 @@ def _run_source_role(
             if cfg.source_root is not None else set())
         prompt = _source_workflow_prompt(
             cfg, plan, task, step, state, session_position, session_total)
+        ignored_input_guards = _ignored_input_guards((cfg,))
         print(f"\n{state.unit.title()} workflow step "
               f"{state.step_index + 1}/{workflow_total}: {step.role}")
         print(_session_line(adapter_name, step.model, session))
@@ -2749,6 +2873,17 @@ def _run_source_role(
                 session.requested_effort, cfg.root, context_kind=state.unit,
                 context_id=f"workflow.{state.unit}[{state.step_index}]")
         except KeyboardInterrupt:
+            ignored_violations = _ignored_input_violations(
+                ignored_input_guards, (cfg,))
+            if ignored_violations:
+                state = _record_ignored_input_violation(
+                    state, ignored_violations)
+                assert isinstance(state, WorkflowState)
+                _write_source_workflow_state(
+                    state_owner or cfg.tasks_dir, state)
+                raise AssentError(
+                    "role changed ignored input: "
+                    + ", ".join(ignored_violations[:8]))
             checkpoint(f"wip({cfg.tasks_name}): {step.role} interrupted")
             if state.candidate_head:
                 state = replace(
@@ -2772,6 +2907,16 @@ def _run_source_role(
             raise _BillingAbort(reason)
         active.task = None
         active.session = None
+
+        ignored_violations = _ignored_input_violations(
+            ignored_input_guards, (cfg,))
+        if ignored_violations:
+            state = _record_ignored_input_violation(state, ignored_violations)
+            assert isinstance(state, WorkflowState)
+            _write_source_workflow_state(state_owner or cfg.tasks_dir, state)
+            print("Role session crossed its control boundary: "
+                  + ", ".join(ignored_violations[:8]))
+            return 1, state
 
         if result.checkpoint_resume and not result.quota_exhausted:
             checkpoint(f"wip({cfg.tasks_name}): {step.role} checkpoint resume")
@@ -2956,6 +3101,9 @@ def _process_source_workflow(
             unit, task_id, 0, False, gitops.head_ref(cfg.root) or "HEAD",
             action="runtime_test" if unit == "runtime_test" else "")
         _write_source_workflow_state(owner, state)
+    elif violation := _ignored_input_violation(state.evidence):
+        print(f"Workflow cannot resume without rework: {violation}")
+        return 1
     if state.step_index >= len(steps):
         if state.action_status == "PASSED":
             return 0
