@@ -71,7 +71,7 @@ class RuntimeTestContract:
     """The exact runtime-test decision declared by one plan."""
 
     execution: str
-    command: str | None
+    commands: tuple[str, ...] | None
 
 
 @dataclass(frozen=True)
@@ -213,10 +213,60 @@ def _valid_runtime_action_result(
         return False
     if not status:
         return not identity and exit_code == 0 and not evidence
-    return (status in _ACTION_STATUS_VALUES and bool(identity)
-            and len(evidence) == 2
-            and all(isinstance(item, str) for item in evidence)
-            and len(evidence[1]) <= _MAX_ACTION_EVIDENCE_CHARS)
+    if (status not in _ACTION_STATUS_VALUES or not identity
+            or len(evidence) != 2
+            or not all(isinstance(item, str) for item in evidence)
+            or len(evidence[1]) > _MAX_ACTION_EVIDENCE_CHARS):
+        return False
+    try:
+        results = parse_runtime_action_results(evidence[0])
+    except AssentError:
+        return False
+    if status == "PASSED":
+        return exit_code == 0 and all(code == 0 for _command, code in results)
+    if status == "FAILED":
+        codes = [code for _command, code in results]
+        failed = next(
+            (index for index, code in enumerate(codes)
+             if code is not None and code != 0), None)
+        return (exit_code != 0 and failed is not None
+                and all(code == 0 for code in codes[:failed])
+                and codes[failed] == exit_code
+                and all(code is None for code in codes[failed + 1:]))
+    return True
+
+
+def encode_runtime_action_results(
+        results: tuple[tuple[str, int | None], ...]) -> str:
+    """Encode the ordered command outcomes stored in runtime action evidence."""
+    return json.dumps(
+        [{"command": command, "exit_code": exit_code}
+         for command, exit_code in results],
+        ensure_ascii=False, separators=(",", ":"))
+
+
+def parse_runtime_action_results(
+        value: str) -> tuple[tuple[str, int | None], ...]:
+    """Decode and validate the ordered runtime command outcomes."""
+    try:
+        raw = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise AssentError("Runtime action command evidence is unreadable") from error
+    if not isinstance(raw, list) or not raw:
+        raise AssentError("Runtime action command evidence is invalid")
+    results: list[tuple[str, int | None]] = []
+    for item in raw:
+        if not isinstance(item, dict) or set(item) != {"command", "exit_code"}:
+            raise AssentError("Runtime action command evidence is invalid")
+        command = item["command"]
+        exit_code = item["exit_code"]
+        if (not isinstance(command, str) or not command.strip()
+                or (exit_code is not None
+                    and (not isinstance(exit_code, int)
+                         or isinstance(exit_code, bool)))):
+            raise AssentError("Runtime action command evidence is invalid")
+        results.append((command, exit_code))
+    return tuple(results)
 
 
 def read_workflow_state(tasks_dir: Path) -> WorkflowState | None:
@@ -611,14 +661,28 @@ def parse_runtime_test_contract(plan_dir: Path) -> RuntimeTestContract:
             f"Runtime-test contract {path.name} is missing required field: command"
             f" for execution = {execution!r}")
     command = data["command"]
-    if not isinstance(command, str):
+    if isinstance(command, str):
+        commands = (command,)
+    elif isinstance(command, list):
+        if not command:
+            raise AssentError(
+                f"Runtime-test contract {path.name} field command must not be empty")
+        if not all(isinstance(item, str) for item in command):
+            raise AssentError(
+                f"Runtime-test contract {path.name} field command array must contain "
+                "only strings")
+        commands = tuple(command)
+    else:
         raise AssentError(
-            f"Runtime-test contract {path.name} field command must be a string")
-    if not command.strip():
-        raise AssentError(
-            f"Runtime-test contract {path.name} field command must not be empty "
-            "or whitespace")
-    return RuntimeTestContract(execution, command)
+            f"Runtime-test contract {path.name} field command must be a string "
+            "or an array of strings")
+    for index, item in enumerate(commands):
+        if not item.strip():
+            suffix = f"[{index}]" if len(commands) > 1 else ""
+            raise AssentError(
+                f"Runtime-test contract {path.name} field command{suffix} must not "
+                "be empty or whitespace")
+    return RuntimeTestContract(execution, commands)
 
 
 def journal_path_for(task_path: Path) -> Path:

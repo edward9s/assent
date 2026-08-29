@@ -21,7 +21,8 @@ competing normative contract.
 When a planning session creates a live plan, it chooses exactly one runtime
 execution mode and creates that plan's `_runtime_test.toml` immediately. Use
 `disabled` when runtime testing is unknown or not needed; omission never means
-disabled. Use `explicit` or `after_plan` only when the plan has its own command.
+disabled. Use `explicit` or `after_plan` only when the plan has its own command
+or ordered commands under the singular `command` key.
 The exact schema is in `format.md`. Keep the task file's ten-field schema:
 runtime execution and command never become task fields.
 
@@ -92,8 +93,10 @@ full verification for the human.
 
 - Edit project source only below the session cwd and any additional absolute
   conflict workspaces explicitly named by the runtime prompt. Confirm paths
-  before writing. The main tree, task contracts, journals, scheduler state,
-  and `~/.assent` are always read-only; the scheduler owns their transitions.
+  before writing. The main tree is read-only except when a main runtime-test
+  prompt explicitly makes that primary working tree the writable session cwd.
+  That exception does not include task contracts, journals, scheduler state,
+  or `~/.assent`; the scheduler owns their transitions.
 - Command side effects count as writes. A check, compiler, importer, formatter,
   generator, or test must leave no non-ignored generated artifact in the
   project worktree; use a non-writing check or project-approved temporary output

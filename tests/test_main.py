@@ -1255,14 +1255,16 @@ class TestInit(MainTestCase):
                        capture_output=True)
 
     def test_creates_skeleton(self):
-        code, out = self.run_main(["init", "--test", "unittest"])
+        with patch("builtins.input", side_effect=(
+                "y", "python project_runtime.py", "n")):
+            code, out = self.run_main(["init", "--test", "unittest"])
         self.assertEqual(code, 0)
-        for rel in (".assent/verify.py", "AGENTS.md", ".gitignore"):
+        for rel in (".assent/verify.py", ".assent/assent.toml",
+                    "AGENTS.md", ".gitignore"):
             self.assertTrue((self.root / rel).is_file(), rel)
-        # Settings and contracts are the user home's; a fresh project carries
-        # no copy of either and works from the shared ones.
-        for rel in (".assent/assent.toml", ".assent/instructions.md",
-                    ".assent/format.md"):
+        # Shared settings and contracts stay in the user home. The project owns
+        # only its runtime-test override.
+        for rel in (".assent/instructions.md", ".assent/format.md"):
             self.assertFalse((self.root / rel).exists(), rel)
         for name in ("assent.toml", "instructions.md", "format.md"):
             self.assertTrue((self.user_home / name).is_file(), name)
@@ -1331,7 +1333,8 @@ class TestInit(MainTestCase):
                         self.assertIn(f"\n# {other}\n", verifier)
 
     def test_cli_without_test_shows_menu_and_uses_the_selected_choice(self):
-        with patch("builtins.input", return_value="2"):
+        with patch("builtins.input", side_effect=(
+                "2", "y", "python project_runtime.py", "n")):
             code, output = self.run_main(["init"])
         self.assertEqual(code, 0)
         self.assertIn("0. Custom command", output)
@@ -1624,7 +1627,7 @@ class TestInit(MainTestCase):
                                  f"{root}/{name}")
             self.assertTrue((root / ".assent/verify.py").is_file())
 
-    def test_existing_project_config_is_preserved_byte_for_byte_with_a_warning(self):
+    def test_existing_project_config_is_preserved_byte_for_byte_by_direct_api(self):
         with contextlib.redirect_stdout(io.StringIO()):
             run_init(self.root, test="unittest")
         project_config = self.root / ".assent" / "assent.toml"
@@ -1632,26 +1635,28 @@ class TestInit(MainTestCase):
             "[run]\nquota_poll_minutes = 3   # local override\n", encoding="utf-8")
         before = project_config.read_bytes()
         output = io.StringIO()
-        with patch("builtins.input", return_value="n"), \
-                contextlib.redirect_stdout(output):
+        with contextlib.redirect_stdout(output):
             self.assertEqual(run_init(self.root), 0)
         self.assertEqual(project_config.read_bytes(), before)
-        text = output.getvalue()
-        self.assertIn(f"Warning: {project_config}", text)
-        self.assertIn("shadow the current shared settings", text)
+        self.assertIn("local override, unchanged", output.getvalue())
 
-    def test_project_override_can_be_backed_up_and_removed(self):
+    def test_project_runtime_template_replacement_is_confirmed_and_backed_up(self):
         with contextlib.redirect_stdout(io.StringIO()):
             run_init(self.root, test="unittest")
         project_config = self.root / ".assent" / "assent.toml"
         content = b"[run]\nquota_poll_minutes = 3\n"
         project_config.write_bytes(content)
 
-        with patch("builtins.input", return_value="y"), \
+        with patch("builtins.input", side_effect=(
+                "y", "python project_runtime.py", "n")), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(self.root), 0)
+            self.assertEqual(
+                run_init(self.root, runtime_command=None), 0)
 
-        self.assertFalse(project_config.exists())
+        parsed = tomllib.loads(project_config.read_text(encoding="utf-8"))
+        self.assertEqual(
+            parsed["runtime_test"]["command"], "python project_runtime.py")
+        self.assertIn("runtime_test", parsed["workflow"])
         self.assertEqual(
             project_config.with_name(
                 "assent.toml.bak").read_bytes(),

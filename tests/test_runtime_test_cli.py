@@ -123,7 +123,7 @@ class RuntimeTestCliTests(unittest.TestCase):
         with self.assertRaises(SystemExit), contextlib.redirect_stdout(help_output):
             main(["test", "--help"])
         help_text = help_output.getvalue()
-        for phrase in ("live plan", "command source", "candidate worktree",
+        for phrase in ("live plan", "command source", "working tree",
                        "workflow step"):
             self.assertIn(phrase, help_text)
 
@@ -142,7 +142,7 @@ class RuntimeTestCliTests(unittest.TestCase):
         self.assertEqual(plan.call_args.args[0].tasks_name, "plan01")
         self.assertIn("Runtime test target: live plan plan01", output)
         self.assertIn("Runtime test command source:", output)
-        self.assertIn("Runtime test candidate worktree:", output)
+        self.assertIn("Runtime test working tree:", output)
         self.assertIn("Runtime test workflow step:", output)
 
         with patch("assent.__main__.engine.run_main_runtime_test",
@@ -155,6 +155,7 @@ class RuntimeTestCliTests(unittest.TestCase):
         self.assertEqual(main_test.call_args.args[0].tasks_name, "main")
         self.assertIn("Runtime test target: current main", output)
         self.assertIn("project config [runtime_test].command", output)
+        self.assertIn(f"Runtime test working tree: {self.root}", output)
 
     def test_plan_selection_is_exact_and_does_not_dispatch_fuzzy_names(self):
         config = self.write_config()

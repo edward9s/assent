@@ -94,13 +94,17 @@ command = "python -m unittest tests.test_runtime"
 
 ```toml
 execution = "after_plan"
-command = "python -m unittest tests.test_runtime"
+command = [
+  "python -m unittest tests.test_runtime",
+  "python tools/runtime_probe.py",
+]
 ```
 
 `execution` is required and is exactly one of `disabled`, `explicit`, or
 `after_plan`. `disabled` forbids `command`. `explicit` and `after_plan`
-require a non-empty string `command`. There is no fallback, alias, migration,
-or omitted-file meaning for any mode. A planning session creates this file
+require `command` as either one non-empty string or a non-empty array of
+non-empty strings. Array order is execution order. There is no fallback, alias,
+migration, or omitted-file meaning for any mode. A planning session creates this file
 from the start, including when it selects `disabled`. The runtime workflow and
 the timing of `after_plan` belong to `workflow.md`.
 

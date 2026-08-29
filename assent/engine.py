@@ -66,6 +66,8 @@ from assent.modeling import effort_identity
 
 from assent.plan import (Plan, RuntimeQuotaWait,
                          Task, TaskWorkflowAction, append_entry,
+                         encode_runtime_action_results,
+                         parse_runtime_action_results,
                          parse_runtime_test_contract, parse_task_file,
                          plan_workflow_requires_human,
                          read_runtime_test_workflow_state,
@@ -307,39 +309,81 @@ class _TestActionEvidence:
     summary: str
 
 
+@dataclass(frozen=True)
+class _RuntimeActionEvidence:
+    status: str
+    identity: str
+    exit_code: int
+    results: tuple[tuple[str, int | None], ...]
+    summary: str
+
+    @property
+    def command(self) -> str:
+        """Render the configured sequence for shared unresolved diagnostics."""
+        return "\n".join(command for command, _exit_code in self.results)
+
+
 _RUNTIME_SUMMARY_LIMIT = 4096
 
 
-def _runtime_test_identity(cfg: Config, command: str) -> str:
-    """Bind runtime evidence to one clean source commit and exact command."""
-    if not gitops.working_tree_status(cfg.root, cfg.git_excludes).is_clean:
+def _runtime_worktree_identity(cfg: Config) -> str:
+    """Hash the current HEAD plus every ordinary working-tree change."""
+    digest = hashlib.sha256()
+    digest.update(gitops.commit_of(cfg.root, "HEAD").encode("ascii"))
+    for relative in sorted(gitops.dirty_paths(cfg.root, cfg.git_excludes)):
+        path = cfg.root / relative
+        digest.update(b"\0" + relative.encode("utf-8") + b"\0")
+        if path.is_symlink():
+            digest.update(b"link\0" + os.readlink(path).encode("utf-8"))
+        elif path.is_file():
+            digest.update(b"file\0")
+            with path.open("rb") as source:
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(block)
+        elif path.exists():
+            digest.update(b"other")
+        else:
+            digest.update(b"missing")
+    return digest.hexdigest()
+
+
+def _runtime_test_identity(
+        cfg: Config, commands: tuple[str, ...], *, allow_dirty: bool = False
+        ) -> str:
+    """Bind runtime evidence to the exact source and ordered commands."""
+    if (not allow_dirty
+            and not gitops.working_tree_status(
+                cfg.root, cfg.git_excludes).is_clean):
         raise AssentError("source worktree is dirty at the runtime_test boundary")
-    return runtime_test.evidence_identity(
-        gitops.commit_of(cfg.root, "HEAD"), command)
+    source = (_runtime_worktree_identity(cfg) if allow_dirty else
+              gitops.commit_of(cfg.root, "HEAD"))
+    return runtime_test.evidence_identity(source, commands)
 
 
-def _runtime_test_record(state: WorkflowState) -> _TestActionEvidence | None:
+def _runtime_test_record(state: WorkflowState) -> _RuntimeActionEvidence | None:
     if state.unit != "runtime_test" or state.action != "runtime_test":
         return None
     if not state.action_status:
         return None
     if len(state.action_evidence) != 2:
         raise AssentError("Runtime action evidence is unreadable")
-    record = _TestActionEvidence(
+    record = _RuntimeActionEvidence(
         state.action_status, state.action_source_tree, state.action_exit_code,
-        state.action_evidence[0], state.action_evidence[1])
+        parse_runtime_action_results(state.action_evidence[0]),
+        state.action_evidence[1])
     if record.status not in {"PASSED", "FAILED", "STALE"}:
         raise AssentError("Runtime action evidence has invalid values")
     return record
 
 
 def _with_runtime_test_record(
-        state: WorkflowState, record: _TestActionEvidence) -> WorkflowState:
+        state: WorkflowState, record: _RuntimeActionEvidence) -> WorkflowState:
     return replace(
         state, action="runtime_test", action_status=record.status,
         action_source_tree=record.identity,
         action_exit_code=record.exit_code,
-        action_evidence=(record.command, record.summary))
+        action_evidence=(encode_runtime_action_results(record.results),
+                         record.summary))
 
 
 def _bounded_runtime_summary(current: str, addition: str) -> str:
@@ -378,19 +422,24 @@ def _terminate_runtime_process(process: subprocess.Popen) -> None:
 
 
 def _run_runtime_test_action(
-        cfg: Config, owner_dir: Path, command: str,
-        state: WorkflowState) -> tuple[WorkflowState, _TestActionEvidence, bool]:
-    """Run or reuse one source-bound runtime command with durable live evidence."""
-    identity = _runtime_test_identity(cfg, command)
+        cfg: Config, owner_dir: Path, commands: tuple[str, ...],
+        state: WorkflowState, *, allow_dirty: bool = False
+        ) -> tuple[WorkflowState, _RuntimeActionEvidence, bool]:
+    """Run ordered runtime commands, stopping at the first failure."""
+    identity = _runtime_test_identity(cfg, commands, allow_dirty=allow_dirty)
     existing = _runtime_test_record(state)
     if (existing is not None and existing.identity == identity
             and existing.status == "PASSED"):
+        if tuple(command for command, _exit_code in existing.results) != commands:
+            raise AssentError(
+                "Runtime PASSED evidence names different commands")
         print(f"  runtime_test passed evidence reused (exit {existing.exit_code})")
         return state, existing, True
 
-    armed = _TestActionEvidence(
-        "STALE", identity, 0, command,
-        "Runtime command has not completed for this source identity.\n")
+    armed = _RuntimeActionEvidence(
+        "STALE", identity, 0,
+        tuple((command, None) for command in commands),
+        "Runtime commands have not completed for this source identity.\n")
     state = _with_runtime_test_record(state, armed)
     write_runtime_test_workflow_state(owner_dir, state)
     environment = os.environ.copy()
@@ -403,53 +452,73 @@ def _run_runtime_test_action(
         options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
-    try:
-        process = subprocess.Popen(command, **options)
-    except (OSError, ValueError) as error:
+    record = armed
+    for index, command in enumerate(commands):
+        heading = f"\nCommand {index + 1}/{len(commands)}: {command}\n"
+        print(heading, end="", flush=True)
         record = replace(
-            armed, status="FAILED", exit_code=1,
-            summary=_bounded_runtime_summary(
-                armed.summary, f"Unable to start runtime command: {error}\n"))
+            record, summary=_bounded_runtime_summary(record.summary, heading))
         state = _with_runtime_test_record(state, record)
         write_runtime_test_workflow_state(owner_dir, state)
-        return state, record, False
-
-    record = armed
-    try:
-        assert process.stdout is not None
-        for line in process.stdout:
-            print(line, end="", flush=True)
+        try:
+            process = subprocess.Popen(command, **options)
+        except (OSError, ValueError) as error:
+            results = list(record.results)
+            results[index] = (command, 1)
             record = replace(
-                record,
-                summary=_bounded_runtime_summary(record.summary, line))
+                record, status="FAILED", exit_code=1, results=tuple(results),
+                summary=_bounded_runtime_summary(
+                    record.summary, f"Unable to start runtime command: {error}\n"))
             state = _with_runtime_test_record(state, record)
             write_runtime_test_workflow_state(owner_dir, state)
-        return_code = process.wait()
-    except KeyboardInterrupt:
-        _terminate_runtime_process(process)
+            break
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                record = replace(
+                    record,
+                    summary=_bounded_runtime_summary(record.summary, line))
+                state = _with_runtime_test_record(state, record)
+                write_runtime_test_workflow_state(owner_dir, state)
+            return_code = process.wait()
+        except KeyboardInterrupt:
+            _terminate_runtime_process(process)
+            record = replace(
+                record,
+                summary=_bounded_runtime_summary(
+                    record.summary, "Runtime command interrupted.\n"))
+            state = _with_runtime_test_record(state, record)
+            write_runtime_test_workflow_state(owner_dir, state)
+            raise
+        except BaseException:
+            _terminate_runtime_process(process)
+            raise
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+
+        results = list(record.results)
+        results[index] = (command, return_code)
+        failed = return_code != 0
         record = replace(
-            record,
+            record, status="FAILED" if failed else "STALE",
+            exit_code=return_code if failed else 0,
+            results=tuple(results),
             summary=_bounded_runtime_summary(
-                record.summary, "Runtime command interrupted.\n"))
+                record.summary,
+                ("Runtime command passed.\n" if not failed else
+                 f"Runtime command failed (exit code {return_code}).\n")))
         state = _with_runtime_test_record(state, record)
         write_runtime_test_workflow_state(owner_dir, state)
-        raise
-    except BaseException:
-        _terminate_runtime_process(process)
-        raise
-    finally:
-        if process.stdout is not None:
-            process.stdout.close()
+        if failed:
+            break
+    else:
+        record = replace(record, status="PASSED", exit_code=0)
 
-    record = replace(
-        record, status="PASSED" if return_code == 0 else "FAILED",
-        exit_code=return_code,
-        summary=_bounded_runtime_summary(
-            record.summary,
-            ("Runtime command passed.\n" if return_code == 0 else
-             f"Runtime command failed (exit code {return_code}).\n")))
     try:
-        unchanged = _runtime_test_identity(cfg, command) == identity
+        unchanged = (_runtime_test_identity(
+            cfg, commands, allow_dirty=allow_dirty) == identity)
     except AssentError:
         unchanged = False
     if not unchanged:
@@ -457,7 +526,7 @@ def _run_runtime_test_action(
             record, status="STALE",
             summary=_bounded_runtime_summary(
                 record.summary,
-                "Source or runtime command changed during runtime_test.\n"))
+                "Source or runtime command list changed during runtime_test.\n"))
     state = _with_runtime_test_record(state, record)
     write_runtime_test_workflow_state(owner_dir, state)
     print(f"  runtime_test evidence: {record.status} (exit {record.exit_code})")
@@ -468,11 +537,15 @@ def _runtime_test_prompt(state: WorkflowState) -> str:
     record = _runtime_test_record(state)
     if record is None:
         return ""
+    outcomes = "\n".join(
+        f"- {command}: "
+        + ("not run" if exit_code is None else f"exit {exit_code}")
+        for command, exit_code in record.results)
     return (
         "\nRUNTIME TEST EVIDENCE\n"
         f"Status: {record.status}\n"
-        f"Command: {record.command}\n"
         f"Exit code: {record.exit_code}\n"
+        f"Commands:\n{outcomes}\n"
         f"Bounded output:\n{record.summary}\n")
 
 
@@ -2052,7 +2125,7 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
                      sleep: Callable[[float], None] | None = None,
                      now: Callable[[], datetime] | None = None,
                      unresolved_exit_code: int = 1) -> int:
-    """Run one plan contract's runtime command and finite repair workflow."""
+    """Run one plan contract's runtime commands and finite repair workflow."""
     try:
         contracts.require_contracts()
         if not has_git_marker(cfg.root):
@@ -2062,7 +2135,7 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
         if contract.execution == "disabled":
             raise AssentError(
                 f"Runtime testing is disabled for plan {cfg.tasks_name}")
-        assert contract.command is not None
+        assert contract.commands is not None
         steps = _runtime_test_source_steps(cfg)
 
         adapter_names = list(cfg.adapter_names)
@@ -2091,7 +2164,7 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
             code = _process_source_workflow(
                 work_cfg, plan, None, steps, rotation, sleep, now,
                 _ActiveTask(), unit="runtime_test",
-                runtime_command=contract.command, state_owner=cfg.tasks_dir)
+                runtime_commands=contract.commands, state_owner=cfg.tasks_dir)
             if code != 0:
                 return code
             state = read_runtime_test_workflow_state(cfg.tasks_dir)
@@ -2112,54 +2185,17 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
         return 1
 
 
-def _main_runtime_candidate(cfg: Config, base: str) -> Config:
-    """Create or validate the one main runtime-test candidate identity."""
-    primary = gitops.main_worktree(cfg.root)
-    path = gitops.runtime_test_worktree_path(primary)
-    branch = gitops.RUNTIME_TEST_BRANCH_PREFIX + "main"
-    path_exists = os.path.lexists(path)
-    branch_exists = gitops.branch_exists(primary, branch)
-    if not path_exists and not branch_exists:
-        gitops.add_worktree_branch(primary, branch, path, base)
-    elif path_exists != branch_exists:
-        raise AssentError(
-            "main runtime-test candidate identity is incomplete; retained "
-            f"branch={branch} path={path}")
-    if not gitops.is_repo_worktree(primary, path):
-        raise AssentError(
-            f"main runtime-test path is not the managed repository worktree: {path}")
-    attached = gitops.current_branch(path)
-    if attached != branch:
-        raise AssentError(
-            f"main runtime-test worktree is on {attached or '(detached)'}, "
-            f"expected {branch}; retained {path}")
-    tip = gitops.commit_of(path, "HEAD")
-    if not gitops.is_ancestor(primary, base, tip):
-        raise AssentError(
-            f"main runtime-test candidate no longer contains exact base {base}; "
-            f"retained branch={branch} path={path}")
-    return cfg.for_worktree(path)
-
-
-def _print_main_runtime_candidate(cfg: Config, base: str, status: str) -> None:
-    primary = cfg.source_root or cfg.root
-    print(f"Main runtime test {status}.")
-    print(f"Exact base: {base}")
-    print(f"Candidate branch: {gitops.RUNTIME_TEST_BRANCH_PREFIX}main")
-    print(f"Candidate worktree: {gitops.runtime_test_worktree_path(primary)}")
-
-
 def run_main_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
                           sleep: Callable[[float], None] | None = None,
                           now: Callable[[], datetime] | None = None) -> int:
-    """Test main and preserve every non-redundant repair candidate for review."""
+    """Run and repair the project command in the primary working tree."""
     try:
         contracts.require_contracts()
         if cfg.source_of("runtime_test.command") != PROJECT_LAYER:
             raise AssentError(
                 "[runtime_test].command must be stated in the project config")
-        command = cfg.runtime_test_command
-        if command is None:
+        commands = cfg.runtime_test_commands
+        if commands is None:
             raise AssentError(
                 "Project config is missing [runtime_test].command")
         steps = _runtime_test_source_steps(cfg)
@@ -2187,91 +2223,52 @@ def run_main_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
         now = now or (lambda: datetime.now(timezone.utc))
         owner = cfg.assent_dir
         state_path = runtime_test_workflow_state_path(owner)
-        path = gitops.runtime_test_worktree_path(primary)
-        branch = gitops.RUNTIME_TEST_BRANCH_PREFIX + "main"
 
         with lockfile.hold_integration_lock(cfg.assent_dir):
+            gitops.require_current_branch(primary)
+            head = gitops.commit_of(primary, "HEAD")
             state = read_runtime_test_workflow_state(owner)
-            if (state is not None and not os.path.lexists(path)
-                    and not gitops.branch_exists(primary, branch)):
+            if (state is not None and state.base_ref == head
+                    and state.candidate_head
+                    and state.candidate_head != head):
+                raise AssentError(
+                    "runtime state names a separate source HEAD "
+                    f"{state.candidate_head}, but the current working tree is at "
+                    f"{head}; existing runtime work was preserved for explicit "
+                    "Git review")
+            if (state is not None
+                    and (state.base_ref != head or state.step_index >= len(steps))):
                 state_path.unlink(missing_ok=True)
                 state = None
             if state is None:
-                if os.path.lexists(path) or gitops.branch_exists(primary, branch):
-                    raise AssentError(
-                        "main runtime-test artifacts exist without their state; "
-                        f"retained branch={branch} path={path}")
-                gitops.ensure_clean(primary, cfg.git_excludes)
-                gitops.require_current_branch(primary)
-                base = gitops.commit_of(primary, "HEAD")
                 state = WorkflowState(
-                    "runtime_test", "", 0, False, base,
-                    action="runtime_test", candidate_head=base)
+                    "runtime_test", "", 0, False, head,
+                    action="runtime_test", candidate_head=head)
                 write_runtime_test_workflow_state(owner, state)
-            else:
-                base = state.base_ref
 
-            work_cfg = _main_runtime_candidate(cfg, base)
-            if not state.candidate_head:
-                raise AssentError(
-                    "main runtime-test state has no candidate HEAD identity; "
-                    f"retained branch={branch} path={path}")
-            candidate_head = gitops.commit_of(work_cfg.root, "HEAD")
-            if candidate_head != state.candidate_head:
-                raise AssentError(
-                    "main runtime-test candidate HEAD changed outside its "
-                    f"workflow ({state.candidate_head} -> {candidate_head}); "
-                    f"retained branch={branch} path={path}")
-            gitops.ensure_clean(primary, cfg.git_excludes)
-            _recover_or_ensure_clean(work_cfg, now)
-            recovered_head = gitops.commit_of(work_cfg.root, "HEAD")
-            if recovered_head != state.candidate_head:
-                state = replace(state, candidate_head=recovered_head)
-                write_runtime_test_workflow_state(owner, state)
+            code = _process_source_workflow(
+                cfg, Plan([], cfg.assent_dir), None, steps, rotation,
+                sleep, now, _ActiveTask(), unit="runtime_test",
+                runtime_commands=commands, state_owner=owner,
+                checkpoint_changes=False)
+            if code != 0:
+                return code
 
             state = read_runtime_test_workflow_state(owner)
             assert state is not None
-            if state.step_index >= len(steps) and state.action_status == "PASSED":
-                if gitops.commit_of(work_cfg.root, "HEAD") != base:
-                    _print_main_runtime_candidate(
-                        work_cfg, base,
-                        "has a repaired candidate pending human integration")
-                    return 1
-            else:
-                code = _process_source_workflow(
-                    work_cfg, Plan([], cfg.assent_dir), None, steps, rotation,
-                    sleep, now, _ActiveTask(), unit="runtime_test",
-                    runtime_command=command, state_owner=owner)
-                if code != 0:
-                    _print_main_runtime_candidate(work_cfg, base, "failed")
-                    return code
-
-            state = read_runtime_test_workflow_state(owner)
-            assert state is not None
-            head = gitops.commit_of(work_cfg.root, "HEAD")
             if state.action_status != "PASSED":
-                _print_main_runtime_candidate(work_cfg, base, "is unresolved")
                 return 1
-            if head != base:
-                _print_main_runtime_candidate(
-                    work_cfg, base,
-                    "passed with repairs pending human integration")
-                return 1
-            gitops.ensure_clean(work_cfg.root, work_cfg.git_excludes)
-            gitops.remove_worktree(primary, path)
-            gitops.delete_branch(primary, branch)
             state_path.unlink(missing_ok=True)
-            print(f"Main runtime test passed unchanged at exact base {base}; "
-                  "redundant candidate artifacts were removed.")
+            print(f"Main runtime test passed in current working tree {primary}.")
             return 0
     except lockfile.LockBusy as error:
         print(str(error))
         return 1
     except KeyboardInterrupt:
-        print("Interrupted; main runtime-test state and candidate were preserved.")
+        print("Interrupted; main runtime-test state and working-tree edits were preserved.")
         return 130
     except _BillingAbort as error:
-        print(f"Main runtime test stopped for billing: {error}; candidate preserved.")
+        print(f"Main runtime test stopped for billing: {error}; edits preserved.")
         return 1
     except (AssentError, OSError) as error:
         print(f"Main runtime test refused: {error}")
@@ -2622,15 +2619,15 @@ def _source_workflow_prompt(
     if main_runtime_test:
         contracts_text = (
             "Repair the project source so the configured main runtime-test "
-            "command passes. Preserve the primary worktree unchanged; all edits "
-            "belong in this candidate worktree.")
+            "command passes. Work directly in the current primary working tree; "
+            "leave every edit visible for the operator's ordinary Git review.")
     prior = "\n\n".join(state.evidence) or "(none)"
     action = (_runtime_test_prompt(state) if runtime_test else
               (_focused_test_prompt(state) if task is not None
                else _focused_sweep_prompt(state)))
     write_policy = (
         "You may edit any ordinary project source, test, configuration, or "
-        "documentation file in this candidate worktree that is needed to "
+        "documentation file in this working tree that is needed to "
         "satisfy the stated behavior."
         if step.writes else
         "This is a read-only review session. Do not create, edit, delete, "
@@ -2642,13 +2639,18 @@ def _source_workflow_prompt(
         "Review and repair the cumulative candidate as one plan result; do not "
         "assign findings or files to task owners.")
     runtime_policy = (
-        "\nThe runtime command is scheduler-owned. Do not run Git, Assent, or "
-        "the runtime command. AI text cannot declare the runtime test passed. "
+        "\nThe runtime commands are scheduler-owned. Do not run Git, Assent, or "
+        "any runtime command. AI text cannot declare the runtime test passed. "
         "A writable role may repair the root cause across ordinary source, "
         "tests, fixtures, project configuration, and documentation in this "
-        "candidate worktree.\n"
+        "working tree.\n"
         if runtime_test else "")
-    ignored_dir_clause = ignored_dirs.declaration_clause(_ignored_dir_decision(cfg))
+    ignored_dir_policy = ""
+    if not main_runtime_test:
+        ignored_dir_policy = (
+            "The exact ignored-dirs command injected below is the sole Assent "
+            "exception.\n"
+            + ignored_dirs.declaration_clause(_ignored_dir_decision(cfg)))
     return f"""You are one Assent role session.
 
 Read the project rules {_agents_md_path_for_prompt(cfg)} and the Assent session
@@ -2669,8 +2671,7 @@ Task contracts are read-only. Journals, scheduler state, Git state, receipts,
 and files below .git or .assent are also read-only. Do not run Git, Assent, a
 scheduler-owned focused action, or the full verifier. The scheduler owns every
 checkpoint, task status, journal entry, and action result.
-The exact ignored-dirs command injected below is the sole Assent exception.
-{ignored_dir_clause}
+{ignored_dir_policy}
 
 Authoritative task requirements:
 {contracts_text}
@@ -2703,9 +2704,14 @@ def _run_source_role(
         session_position: int, session_total: int,
         rotation: _AdapterRotation,
         sleep: Callable[[float], None], now: Callable[[], datetime],
-        active: _ActiveTask, *, state_owner: Path | None = None
+        active: _ActiveTask, *, state_owner: Path | None = None,
+        checkpoint_changes: bool = True
         ) -> tuple[int, WorkflowState]:
     """Run one role session; only adapter availability may repeat the step."""
+    def checkpoint(subject: str) -> None:
+        if checkpoint_changes:
+            gitops.commit_if_dirty(cfg.root, subject, cfg.git_excludes)
+
     step_rotation = rotation.subset(step.adapters)
     failed_adapters: set[str] = set()
     while True:
@@ -2713,10 +2719,8 @@ def _run_source_role(
             state = _resume_runtime_quota_waits(
                 cfg, state_owner or cfg.tasks_dir, state, step_rotation,
                 failed_adapters, sleep, now)
-        gitops.commit_if_dirty(
-            cfg.root,
-            f"wip({cfg.tasks_name}): before workflow step {state.step_index + 1}",
-            cfg.git_excludes)
+        checkpoint(
+            f"wip({cfg.tasks_name}): before workflow step {state.step_index + 1}")
         adapter = step_rotation.adapter
         adapter_name = step_rotation.name
         session = _role_session_identity(cfg, step, adapter_name)
@@ -2745,9 +2749,7 @@ def _run_source_role(
                 session.requested_effort, cfg.root, context_kind=state.unit,
                 context_id=f"workflow.{state.unit}[{state.step_index}]")
         except KeyboardInterrupt:
-            gitops.commit_if_dirty(
-                cfg.root, f"wip({cfg.tasks_name}): {step.role} interrupted",
-                cfg.git_excludes)
+            checkpoint(f"wip({cfg.tasks_name}): {step.role} interrupted")
             if state.candidate_head:
                 state = replace(
                     state, candidate_head=gitops.head_ref(cfg.root) or "")
@@ -2772,15 +2774,10 @@ def _run_source_role(
         active.session = None
 
         if result.checkpoint_resume and not result.quota_exhausted:
-            gitops.commit_if_dirty(
-                cfg.root,
-                f"wip({cfg.tasks_name}): {step.role} checkpoint resume",
-                cfg.git_excludes)
+            checkpoint(f"wip({cfg.tasks_name}): {step.role} checkpoint resume")
             continue
         if result.quota_exhausted:
-            gitops.commit_if_dirty(
-                cfg.root, f"wip({cfg.tasks_name}): {step.role} quota interrupt",
-                cfg.git_excludes)
+            checkpoint(f"wip({cfg.tasks_name}): {step.role} quota interrupt")
             if state.unit == "runtime_test":
                 reset_at = result.reset_at
                 if reset_at is not None:
@@ -2806,10 +2803,8 @@ def _run_source_role(
             result.exit_code, result.stalled, result.output,
             result.failure_kind)
         if result.failure_kind == "authentication":
-            gitops.commit_if_dirty(
-                cfg.root,
-                f"wip({cfg.tasks_name}): {step.role} authentication failover",
-                cfg.git_excludes)
+            checkpoint(
+                f"wip({cfg.tasks_name}): {step.role} authentication failover")
             action = _authentication_failover_action(
                 step_rotation, failed_adapters, reason)
             if action == "switch":
@@ -2819,9 +2814,7 @@ def _run_source_role(
                 _wait_for_rotation(cfg, sleep)
             continue
         if _adapter_availability_failed(result):
-            gitops.commit_if_dirty(
-                cfg.root, f"wip({cfg.tasks_name}): {step.role} adapter failover",
-                cfg.git_excludes)
+            checkpoint(f"wip({cfg.tasks_name}): {step.role} adapter failover")
             if step_rotation.advance_after_failure(failed_adapters):
                 print(f"Role adapter failure: {reason}; switching "
                       f"{adapter_name} -> {step_rotation.name}.")
@@ -2831,9 +2824,7 @@ def _run_source_role(
                 _wait_for_rotation(cfg, sleep)
             continue
         if result.exit_code != 0 or result.stalled:
-            gitops.commit_if_dirty(
-                cfg.root, f"wip({cfg.tasks_name}): {step.role} failed",
-                cfg.git_excludes)
+            checkpoint(f"wip({cfg.tasks_name}): {step.role} failed")
             if state.candidate_head:
                 state = replace(
                     state, candidate_head=gitops.head_ref(cfg.root) or "")
@@ -2861,11 +2852,9 @@ def _run_source_role(
                   + ", ".join(violations[:8]))
             return 1, state
 
-        gitops.commit_if_dirty(
-            cfg.root,
+        checkpoint(
             f"wip({cfg.tasks_name}): workflow step {state.step_index + 1} "
-            f"({step.role})",
-            cfg.git_excludes)
+            f"({step.role})")
         state = _with_session_evidence(state, step.role, result.output)
         state = replace(
             state, step_index=state.step_index + 1, started=False,
@@ -2950,8 +2939,10 @@ def _process_source_workflow(
         steps: tuple[_RoleStep | WorkflowActionStep, ...],
         rotation: _AdapterRotation, sleep: Callable[[float], None],
         now: Callable[[], datetime], active: _ActiveTask, *,
-        unit: str | None = None, runtime_command: str | None = None,
-        state_owner: Path | None = None) -> int:
+        unit: str | None = None,
+        runtime_commands: tuple[str, ...] | None = None,
+        state_owner: Path | None = None,
+        checkpoint_changes: bool = True) -> int:
     """Execute one source workflow as a finite linear step array."""
     if not steps:
         return 0
@@ -2978,35 +2969,58 @@ def _process_source_workflow(
 
     while state.step_index < len(steps):
         step = steps[state.step_index]
+        main_runtime_test = (
+            unit == "runtime_test" and cfg.tasks_dir == cfg.assent_dir)
         if isinstance(step, _RoleStep):
+            if (unit == "runtime_test"
+                    and not main_runtime_test
+                    and _runtime_test_record(state) is None
+                    and _ignored_dir_decision(cfg).settled):
+                # A prior action was refused before it started, and its only
+                # precondition is now settled. Resume at the next scheduler
+                # action without spending another repair session.
+                state = replace(
+                    state, step_index=state.step_index + 1, started=False)
+                _write_source_workflow_state(owner, state)
+                continue
             session_position, session_total = _session_progress(
                 steps, state.step_index)
             source_head = gitops.head_ref(cfg.root)
+            source_identity = (
+                None if checkpoint_changes else _runtime_worktree_identity(cfg))
             code, state = _run_source_role(
                 cfg, plan, task, step, state, len(steps),
                 session_position, session_total, rotation, sleep, now, active,
-                state_owner=owner)
+                state_owner=owner, checkpoint_changes=checkpoint_changes)
             if code != 0:
                 return code
-            if unit == "runtime_test" and gitops.head_ref(cfg.root) == source_head:
+            source_changed = (
+                gitops.head_ref(cfg.root) != source_head
+                if checkpoint_changes else
+                _runtime_worktree_identity(cfg) != source_identity)
+            if unit == "runtime_test" and not source_changed:
                 record = _runtime_test_record(state)
                 if record is None:
-                    raise AssentError(
-                        "Runtime repair role completed without failed action evidence")
+                    # The preceding action was refused before it started. The
+                    # role may have settled its injected ignored-directory
+                    # decision without changing tracked source; let the next
+                    # scheduler action evaluate that precondition again.
+                    continue
                 state = replace(state, step_index=len(steps), started=False)
                 return _source_workflow_unresolved(
                     cfg, task, state, record, now, state_owner=owner,
                     reason="the writable role made no source change")
             continue
 
-        gitops.commit_if_dirty(
-            cfg.root,
-            f"wip({cfg.tasks_name}): before {step.action}",
-            cfg.git_excludes)
+        if checkpoint_changes:
+            gitops.commit_if_dirty(
+                cfg.root,
+                f"wip({cfg.tasks_name}): before {step.action}",
+                cfg.git_excludes)
         print(f"\n{unit.title()} workflow step {state.step_index + 1}/"
               f"{len(steps)}: {step.action}")
-        decision = _ignored_dir_decision(cfg)
-        if not decision.settled:
+        decision = (None if main_runtime_test else _ignored_dir_decision(cfg))
+        if decision is not None and not decision.settled:
             summary = (ignored_dirs.closeout_refusal(decision)
                        or f"Run `{ignored_dirs.DECLARE_COMMAND}`")
             gate_evidence = f"{step.action} not started:\n{summary}"
@@ -3028,10 +3042,11 @@ def _process_source_workflow(
             _write_source_workflow_state(owner, state)
             continue
         elif unit == "runtime_test":
-            if runtime_command is None:
-                raise AssentError("Runtime workflow has no contract command")
+            if runtime_commands is None:
+                raise AssentError("Runtime workflow has no contract commands")
             state, record, _reused = _run_runtime_test_action(
-                cfg, owner, runtime_command, state)
+                cfg, owner, runtime_commands, state,
+                allow_dirty=not checkpoint_changes)
         elif task is not None:
             state, record, _reused = _run_focused_test_action(cfg, task, state)
         else:

@@ -202,6 +202,7 @@ class DocumentationTests(unittest.TestCase):
                 "assent test [PLAN]", "assent test <PLAN>",
                 "_runtime_test.toml", "[runtime_test].command",
                 "execution = \"after_plan\"", "runtime_repairer",
+                "ordered command array", "stops at its first failed command",
                 "full_verify", "source-bound", "REVIEW UNRESOLVED, HUMAN DECISION"):
             with self.subTest(language="English", phrase=phrase):
                 self.assertIn(" ".join(phrase.split()), english)
@@ -217,6 +218,7 @@ class DocumentationTests(unittest.TestCase):
                 "assent test [PLAN]", "assent test <PLAN>",
                 "_runtime_test.toml", "[runtime_test].command",
                 "execution = \"after_plan\"", "runtime_repairer",
+                "有序 command array", "第一個失敗 command 停止",
                 "full_verify", "source-bound", "REVIEW UNRESOLVED, HUMAN DECISION"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(" ".join(phrase.split()), chinese)

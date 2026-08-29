@@ -8,6 +8,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from assent.init import (
     _BRIDGE_BEGIN,
@@ -100,9 +101,33 @@ class TestInitContractRefresh(unittest.TestCase):
         config_text = config_path.read_text(encoding="utf-8")
         config = tomllib.loads(config_text)
         self.assertEqual(config["roles"]["runtime_repairer"]["model"], "core")
-        self.assertIn("runtime_test", config["workflow"])
+        self.assertNotIn("runtime_test", config["workflow"])
         self.assertNotIn("[runtime_test]", config_text)
         self.assertEqual(list(self.root.rglob("_runtime_test.toml")), [])
+
+    def test_init_creates_project_runtime_command_and_workflow_only(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(
+                self.root,
+                test="unittest",
+                runtime_command=("python probe_a.py", "python probe_b.py")), 0)
+
+        project_config = tomllib.loads(
+            (self.root / ".assent/assent.toml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            project_config["runtime_test"]["command"],
+            ["python probe_a.py", "python probe_b.py"])
+        self.assertIn("runtime_test", project_config["workflow"])
+        self.assertNotIn("abilities", project_config)
+        self.assertNotIn("roles", project_config)
+
+    def test_init_asks_before_creating_project_runtime_settings(self):
+        with patch("builtins.input", return_value="n"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(
+                self.root, test="unittest", runtime_command=None), 0)
+
+        self.assertFalse((self.root / ".assent/assent.toml").exists())
 
     def test_existing_global_bridge_is_stable_when_contract_wording_changes(self):
         agents = self.root / "AGENTS.md"

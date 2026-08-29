@@ -119,14 +119,14 @@ runtime_test = [{ action = "runtime_test" }]
     def test_runtime_test_workflow_omission_stays_unset(self):
         cfg = self.load('[workflow]\ntask = [{ action = "focused_test" }]')
         self.assertIsNone(cfg.workflow_runtime_test)
-        self.assertIsNone(cfg.runtime_test_command)
+        self.assertIsNone(cfg.runtime_test_commands)
         self.assertEqual(cfg.source_of("runtime_test.command"), BUILTIN_LAYER)
 
     def test_runtime_command_and_workflow_do_not_fallback_to_each_other(self):
         cfg = self.load(
             '[workflow]\ntask = [{ action = "focused_test" }]',
             runtime_test='[runtime_test]\ncommand = "run-project"')
-        self.assertEqual(cfg.runtime_test_command, "run-project")
+        self.assertEqual(cfg.runtime_test_commands, ("run-project",))
         self.assertIsNone(cfg.workflow_runtime_test)
 
         cfg = self.load(
@@ -135,19 +135,38 @@ runtime_test = [{ action = "runtime_test" }]
 task = [{ action = "focused_test" }]
 runtime_test = [{ action = "runtime_test" }]
 """)
-        self.assertIsNone(cfg.runtime_test_command)
+        self.assertIsNone(cfg.runtime_test_commands)
 
     def test_runtime_command_keeps_project_and_user_provenance(self):
         self.write_user('[runtime_test]\ncommand = "user-command"\n')
         cfg = self.load(
             '[workflow]\ntask = [{ action = "focused_test" }]',
             runtime_test='[runtime_test]\ncommand = "project-command"')
-        self.assertEqual(cfg.runtime_test_command, "project-command")
+        self.assertEqual(cfg.runtime_test_commands, ("project-command",))
         self.assertEqual(cfg.source_of("runtime_test.command"), PROJECT_LAYER)
 
         cfg = self.load('[workflow]\ntask = [{ action = "focused_test" }]')
-        self.assertEqual(cfg.runtime_test_command, "user-command")
+        self.assertEqual(cfg.runtime_test_commands, ("user-command",))
         self.assertEqual(cfg.source_of("runtime_test.command"), USER_LAYER)
+
+    def test_runtime_command_array_is_ordered_and_nonempty(self):
+        cfg = self.load(
+            '[workflow]\ntask = [{ action = "focused_test" }]',
+            runtime_test=(
+                '[runtime_test]\n'
+                'command = ["first", "second", "third"]'))
+        self.assertEqual(
+            cfg.runtime_test_commands, ("first", "second", "third"))
+
+        for value, message in (
+                ('[]', "must not be empty"),
+                ('["run", 1]', "array must contain only strings"),
+                ('["run", "  "]', "runtime_test.command.*blank")):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    AssentError, message):
+                self.load(
+                    '[workflow]\ntask = [{ action = "focused_test" }]',
+                    runtime_test=f'[runtime_test]\ncommand = {value}')
 
     def test_runtime_command_is_nonblank_and_runtime_section_is_closed(self):
         with self.assertRaisesRegex(AssentError, "runtime_test.command.*blank"):

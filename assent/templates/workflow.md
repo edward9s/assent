@@ -80,11 +80,10 @@ of task, plan, and integration workflows and never dispatches `full_verify`,
 writes a verification receipt, or accepts a plan.
 
 With `PLAN`, the command reads that live plan's `_runtime_test.toml` and runs
-its declared command in the plan candidate worktree. Without `PLAN`, it uses
-the project-layer `[runtime_test].command` from the project settings and a
-separate main repair candidate; the primary worktree remains unchanged. The
-main command is project-specific and is not supplied by the shared settings
-template.
+its declared command or ordered commands in the plan candidate worktree.
+Without `PLAN`, it uses the project-layer `[runtime_test].command` directly in
+the current primary working tree. The main command is project-specific and is
+not supplied by the shared settings template.
 
 The plan contract selects one exact `execution` mode. `disabled` has no runtime
 gate. `explicit` runs only when `assent test PLAN` is requested. `after_plan`
@@ -97,29 +96,35 @@ runtime evidence before publication.
 `[workflow].runtime_test` is a separate finite linear array. Its legal action is
 `{ action = "runtime_test" }`; every role between actions is writable and has
 an explicit model, and the array strictly alternates action and role starting
-and ending with an action. The shipped settings use `runtime_repairer` for the
-repair roles. The runtime action is authoritative: exit 0 records `PASSED`, a
-nonzero exit records `FAILED`, and source or command drift records `STALE`.
+and ending with an action. The project settings template uses
+`runtime_repairer` for the repair roles. The external `command` value is one string or a non-empty string
+array. The scheduler runs array entries in order and stops at the first nonzero
+exit or launch failure. Evidence identifies every completed command, the failed
+command, and later entries that did not run. A repair invalidates earlier
+successes, so the next action starts again at the first command. The runtime
+action is authoritative: completing every command with exit 0 records `PASSED`,
+a nonzero exit records `FAILED`, and source or command-list drift records `STALE`.
 Role output never declares a pass. A successful writable runtime role that
-makes no candidate source change ends the workflow unresolved; no extra action
-is invented.
+makes no working-tree source change ends the workflow unresolved; no extra action
+is invented. This source-change requirement applies only after a runtime
+command actually failed. A role that settles an injected ignored-directory
+precondition may advance without changing tracked source, and the next action
+then evaluates the command.
 
 A runtime repair role may edit ordinary project source, tests, fixtures, project
-configuration, and documentation in its candidate. It may not run commands or
+configuration, and documentation in its working tree. It may not run commands or
 modify task contracts, journals, scheduler state, receipts, Git state,
 acceptance state, or other control state, and it cannot declare the runtime test
 passed. The scheduler alone runs the runtime action, records evidence, changes
 state, and owns Git transitions.
 
 Plan runtime state is `.assent/<PLAN>/_runtime_test_workflow.toml` beside the
-plan contract, and its candidate is `<project>.worktrees/<PLAN>/`. Main runtime
-state is `.assent/_runtime_test_workflow.toml`, and its candidate is
-`<project>.runtime-test/main` based on the exact primary `HEAD`. These state and
-worktree identities are scheduler-owned. Quota waits, role progress, bounded
-evidence, and candidate identity are persisted; quota interruption checkpoints
-the candidate and, on restart, resumes the same workflow position. A candidate
-identity or source change outside the workflow is a refusal. Token-burned work
-is never reverted. A repaired main candidate remains pending human integration.
+plan, and its candidate is `<project>.worktrees/<PLAN>/`. Main runtime state is
+`.assent/_runtime_test_workflow.toml`; its commands and repairs operate directly
+in the primary working tree. Quota waits, role progress, bounded evidence, and
+source identity are persisted. A restart resumes the workflow position, while
+working-tree edits remain visible for ordinary Git review. Token-burned work is
+never reverted.
 
 If the finite runtime array ends without a passing action, the result is
 `REVIEW UNRESOLVED, HUMAN DECISION` with preserved evidence. A standalone
@@ -188,8 +193,10 @@ Task, plan, and runtime-test workflows use one finite linear interpreter:
 2. A passing action completes the layer immediately; later roles are skipped.
 3. A failing non-final action records its exact command/output and advances to
    the next configured step.
-4. An unsettled ignored-directory decision records that the action did not
-   start; it never becomes test failure evidence.
+4. In a worktree-backed source workflow, an unsettled ignored-directory
+   decision records that the action did not start; it never becomes test
+   failure evidence. Main runtime commands run in the primary working tree and
+   do not use this gate.
 5. If the array ends without a passing action, all edits and evidence remain and
    the outcome is `REVIEW UNRESOLVED, HUMAN DECISION`.
 

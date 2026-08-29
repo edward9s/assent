@@ -148,10 +148,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "With PLAN, execute that exact live plan's declared runtime command "
             "in its candidate worktree. Without PLAN, execute the project-layer "
-            "runtime command in the current main repair candidate. This command "
+            "runtime command in the current primary working tree. This command "
             "never dispatches task, plan, integration, full verification, or "
             "accept workflows. Startup output names the target, command source, "
-            "candidate worktree, and current workflow step."))
+            "working tree, and current workflow step."))
     test_p.add_argument(
         "plan_name", nargs="?", metavar="PLAN",
         help="Exact live plan for the plan runtime workflow; omit PLAN to test "
@@ -367,14 +367,14 @@ def _print_runtime_test_start(cfg, *, plan_name: str | None) -> None:
         target = "current main"
         command_source = ("project config [runtime_test].command ("
                           f"{cfg.assent_dir / 'assent.toml'})")
-        candidate = gitops.runtime_test_worktree_path(cfg.root)
+        candidate = cfg.root
     else:
         target = f"live plan {plan_name}"
         command_source = f"plan contract ({cfg.tasks_dir / '_runtime_test.toml'})"
         candidate = gitops.worktree_path(cfg.root, plan_name)
     print(f"Runtime test target: {target}")
     print(f"Runtime test command source: {command_source}")
-    print(f"Runtime test candidate worktree: {candidate}")
+    print(f"Runtime test working tree: {candidate}")
     print(f"Runtime test workflow step: {_runtime_workflow_step(cfg)}")
 
 
@@ -581,7 +581,7 @@ def _dispatch(argv: list[str]) -> int:
             parser.error("archive requires PLAN or --all")
 
     if args.command == "init":
-        return run_init(args.path, args.test)
+        return run_init(args.path, args.test, runtime_command=None)
 
     if args.command == "doctor":
         return run_doctor()

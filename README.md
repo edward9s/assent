@@ -71,7 +71,9 @@ assent archive --all
 
 `assent init` installs shared settings and three AI contracts under
 `~/.assent/`, creates the project skeleton, and asks which full verifier the
-project uses. Review `~/.assent/assent.toml`, `AGENTS.md`, and
+project uses. It also asks before creating `.assent/assent.toml`, then records
+the project's runtime command or ordered commands and runtime-test workflow.
+Review `~/.assent/assent.toml`, `.assent/assent.toml`, `AGENTS.md`, and
 `.assent/verify.py` before the first run.
 
 ## What happens during `run`
@@ -97,11 +99,12 @@ configured steps. Plan review has a different job: checking whether the
 cumulative implementation matches the agreed plan.
 
 `assent test [PLAN]` is an independent runtime-test workflow. With `PLAN`, it
-uses that live plan's `_runtime_test.toml` command in the plan candidate. Without
-`PLAN`, it uses the project-layer `[runtime_test].command` in the current main
-repair candidate. A plan using `execution = "after_plan"` runs this workflow
+uses that live plan's `_runtime_test.toml` command or ordered command array in the plan candidate. Without
+`PLAN`, it uses the project-layer `[runtime_test].command` directly in the
+current primary working tree. A plan using `execution = "after_plan"` runs this workflow
 after its plan layer and before integration `full_verify`; `accept` never runs
-runtime testing.
+runtime testing. An array stops at its first failed command; repair evidence
+names that command, and the next runtime action restarts the array from the beginning.
 
 Integration keeps the exact selected plans. Typed Git conflict evidence names
 the conflicting plan and paths, so a configured integration role may repair it

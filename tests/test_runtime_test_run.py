@@ -10,6 +10,7 @@ from assent import batch_accept, engine, gitops, runtime_test
 from assent.accept import accept_plan
 from assent.config import load_config
 from assent.plan import (WorkflowState, runtime_test_workflow_state_path,
+                         encode_runtime_action_results,
                          selection_workflow_state_path,
                          write_runtime_test_workflow_state)
 from assent.verification_common import FullVerifyEvidence
@@ -38,7 +39,7 @@ class RuntimeTestRunTests(EngineTestCase):
 
     def _record(self, cfg, status="PASSED", source_tip=None):
         contract = engine.parse_runtime_test_contract(cfg.tasks_dir)
-        assert contract.command is not None
+        assert contract.commands is not None
         if source_tip is None:
             _branch, source_tip, _worktree = engine.source_snapshot(
                 cfg, gitops.main_worktree(cfg.root))
@@ -46,9 +47,11 @@ class RuntimeTestRunTests(EngineTestCase):
             "runtime_test", "", 1, False, source_tip,
             action="runtime_test", action_status=status,
             action_source_tree=runtime_test.evidence_identity(
-                source_tip, contract.command),
+                source_tip, contract.commands),
             action_exit_code=0 if status == "PASSED" else 7,
-            action_evidence=(contract.command, status.lower()))
+            action_evidence=(encode_runtime_action_results(tuple(
+                (command, 0 if status == "PASSED" else 7)
+                for command in contract.commands)), status.lower()))
         write_runtime_test_workflow_state(cfg.tasks_dir, state)
 
     def _fake_runtime(self, cfg, **_kwargs):
@@ -160,7 +163,7 @@ class RuntimeTestRunTests(EngineTestCase):
 
         def run_one(cfg, **_kwargs):
             commands.append(engine.parse_runtime_test_contract(
-                cfg.tasks_dir).command)
+                cfg.tasks_dir).commands)
             self._record(cfg, source_tip=tips[cfg.tasks_name])
             return 0
 
@@ -172,7 +175,7 @@ class RuntimeTestRunTests(EngineTestCase):
                 (self.cfg, cfg2), sleep=lambda _seconds: None)
 
         self.assertEqual((code, problem), (0, None))
-        self.assertEqual(commands, [second_command])
+        self.assertEqual(commands, [(second_command,)])
 
     def test_accept_refuses_stale_runtime_evidence_before_receipt_reuse(self):
         self._contract("after_plan")

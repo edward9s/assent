@@ -29,7 +29,6 @@ from assent import AssentError, pathops
 # literal.
 INTEGRATION_BRANCH_PREFIX = "assent-integration/"
 RECONCILE_BRANCH_PREFIX = "assent-reconcile/"
-RUNTIME_TEST_BRANCH_PREFIX = "assent/runtime-test/"
 TEMPORARY_BRANCH_PREFIXES = (INTEGRATION_BRANCH_PREFIX, RECONCILE_BRANCH_PREFIX)
 
 
@@ -133,12 +132,6 @@ def ensure_branch(root: Path, prefix: str) -> str:
 def worktree_path(root: Path, plan_name: str) -> Path:
     """Return the fixed worktree path for the given plan."""
     return root.parent / f"{root.name}.worktrees" / plan_name
-
-
-def runtime_test_worktree_path(root: Path) -> Path:
-    """Return the fixed main runtime-test candidate path."""
-    root = Path(root).resolve()
-    return root.parent / f"{root.name}.runtime-test" / "main"
 
 
 def _resolved_git_path(root: Path, value: str) -> Path:

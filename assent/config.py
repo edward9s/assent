@@ -188,7 +188,7 @@ class Config:
     antigravity_print_timeout_minutes: int = _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES
     workflow_plan: tuple[WorkflowRoleStep | WorkflowActionStep, ...] = ()
     workflow_integration: tuple[WorkflowRoleStep | WorkflowActionStep, ...] = ()
-    runtime_test_command: str | None = None
+    runtime_test_commands: tuple[str, ...] | None = None
     workflow_runtime_test: tuple[
         WorkflowRoleStep | WorkflowActionStep, ...] | None = None
     abilities: dict[str, Ability] = field(default_factory=dict)
@@ -480,6 +480,29 @@ class _BlankGuard:
         for key, value in mapping.items():
             self.text(value, f"{prefix}.{key}")
         return mapping
+
+
+def _runtime_test_commands(
+        section: dict, guard: _BlankGuard) -> tuple[str, ...] | None:
+    """Normalize the external singular ``command`` key to ordered commands."""
+    if "command" not in section:
+        return None
+    raw = section["command"]
+    if isinstance(raw, str):
+        commands = (raw,)
+    elif isinstance(raw, list):
+        if not raw:
+            raise AssentError("Config runtime_test.command must not be empty")
+        if not all(isinstance(item, str) for item in raw):
+            raise AssentError(
+                "Config runtime_test.command array must contain only strings")
+        commands = tuple(raw)
+    else:
+        raise AssentError(
+            "Config [runtime_test] command must be a string or an array of strings")
+    for command in commands:
+        guard.text(command, "runtime_test.command")
+    return commands
 
 
 def _workflow_adapter_candidates(value: dict, owner: str, guard: "_BlankGuard"
@@ -984,9 +1007,7 @@ def load_config(path: str | Path, plan_name: str) -> Config:
         antigravity_print_timeout_minutes=_typed(
             antigravity, "[adapter.antigravity]", "print_timeout_minutes", int,
             _DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_MINUTES),
-        runtime_test_command=guard.text(
-            _typed(runtime_test, "[runtime_test]", "command", str, None),
-            "runtime_test.command"),
+        runtime_test_commands=_runtime_test_commands(runtime_test, guard),
         abilities=abilities,
         roles=roles,
         sources=sources,

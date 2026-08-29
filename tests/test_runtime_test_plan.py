@@ -4,9 +4,10 @@ import json
 from pathlib import Path
 from unittest import mock
 
-from assent import engine
+from assent import engine, ignored_dirs
 from assent.adapters import TaskResult
-from assent.plan import read_runtime_test_workflow_state
+from assent.plan import (parse_runtime_action_results,
+                         read_runtime_test_workflow_state)
 from tests.engine_support import EngineTestCase, ScriptedAdapter, ok_result
 
 
@@ -66,7 +67,9 @@ class RuntimeTestPlanTests(EngineTestCase):
         self.assertEqual(adapter.calls, [])
         state = read_runtime_test_workflow_state(self.plan_dir)
         self.assertEqual(state.action_status, "PASSED")
-        self.assertEqual(state.action_evidence[0], command)
+        self.assertEqual(
+            parse_runtime_action_results(state.action_evidence[0]),
+            ((command, 0),))
         self.assertTrue(self.execution_root().is_dir())
 
     def test_failed_command_is_repaired_then_rerun(self):
@@ -103,6 +106,59 @@ class RuntimeTestPlanTests(EngineTestCase):
         state = read_runtime_test_workflow_state(self.plan_dir)
         self.assertEqual(state.action_status, "FAILED")
         self.assertEqual(state.step_index, 3)
+
+    def test_role_may_settle_refused_precondition_without_source_change(self):
+        cfg = self.build_runtime('python -c "raise SystemExit(0)"')
+        stale = ignored_dirs.Decision(
+            ignored_dirs.STALE, evidence=(".gitignore changed",),
+            needs_review=True, inventory=("local-input",))
+        settled = ignored_dirs.Decision(
+            ignored_dirs.NO_IGNORED_DIRECTORY_CANDIDATE)
+        declared = False
+
+        def decision(_cfg):
+            return settled if declared else stale
+
+        def declare(prompt):
+            nonlocal declared
+            self.assertIn("IGNORED DIRECTORY DECISION (STALE)", prompt)
+            declared = True
+            return ok_result()
+
+        with mock.patch.object(
+                engine, "_ignored_dir_decision", side_effect=decision):
+            code, _output = self.run_runtime(
+                cfg, ScriptedAdapter([declare]))
+
+        self.assertEqual(code, 0)
+        state = read_runtime_test_workflow_state(self.plan_dir)
+        self.assertEqual(state.action_status, "PASSED")
+
+    def test_resume_skips_role_after_refused_precondition_is_settled(self):
+        cfg = self.build_runtime('python -c "raise SystemExit(0)"')
+        stale = ignored_dirs.Decision(
+            ignored_dirs.STALE, evidence=(".gitignore changed",),
+            needs_review=True, inventory=("local-input",))
+        settled = ignored_dirs.Decision(
+            ignored_dirs.NO_IGNORED_DIRECTORY_CANDIDATE)
+
+        with mock.patch.object(
+                engine, "_ignored_dir_decision", return_value=stale):
+            code, _output = self.run_runtime(
+                cfg, ScriptedAdapter([
+                    lambda _prompt: (_ for _ in ()).throw(
+                        KeyboardInterrupt())]))
+        self.assertEqual(code, 130)
+
+        adapter = ScriptedAdapter([])
+        with mock.patch.object(
+                engine, "_ignored_dir_decision", return_value=settled):
+            code, _output = self.run_runtime(cfg, adapter)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(adapter.calls, [])
+        state = read_runtime_test_workflow_state(self.plan_dir)
+        self.assertEqual(state.action_status, "PASSED")
 
     def test_exhausted_steps_preserve_failed_evidence_and_edits(self):
         cfg = self.build_runtime('python -c "raise SystemExit(5)"')

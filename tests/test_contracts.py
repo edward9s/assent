@@ -188,6 +188,8 @@ class TestContractContent(unittest.TestCase):
                 'execution = "disabled"',
                 'execution = "explicit"',
                 'execution = "after_plan"',
+                "one non-empty string or a non-empty array",
+                "Array order is execution order",
                 "Every live plan contains exactly one",
                 "There is no fallback, alias, migration",
                 "including when it selects `disabled`"):
@@ -209,7 +211,7 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(" ".join(phrase.split()), compact)
 
-    def test_runtime_repair_defaults_are_writable_and_strictly_alternating(self):
+    def test_runtime_repair_defaults_are_global_and_workflow_is_project_owned(self):
         config_text = (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
             encoding="utf-8")
         data = tomllib.loads(config_text)
@@ -226,7 +228,19 @@ class TestContractContent(unittest.TestCase):
         self.assertEqual(data["roles"]["runtime_repairer"]["ability"],
                          ["runtime_repair"])
         self.assertEqual(data["roles"]["runtime_repairer"]["model"], "core")
-        workflow = data["workflow"]["runtime_test"]
+        self.assertNotIn("runtime_test", data["workflow"])
+        self.assertNotIn("[runtime_test]", config_text)
+
+        project_text = (
+            _PROJECT_ROOT / "assent/templates/project-assent.toml").read_text(
+                encoding="utf-8").replace(
+                    "{{ runtime_test_command }}", '"python runtime.py"')
+        project = tomllib.loads(project_text)
+        self.assertNotIn("abilities", project)
+        self.assertNotIn("roles", project)
+        self.assertEqual(
+            project["runtime_test"]["command"], "python runtime.py")
+        workflow = project["workflow"]["runtime_test"]
         self.assertGreaterEqual(len(workflow), 3)
         self.assertEqual(workflow[0], {"action": "runtime_test"})
         self.assertEqual(workflow[-1], {"action": "runtime_test"})
@@ -236,7 +250,6 @@ class TestContractContent(unittest.TestCase):
                     self.assertEqual(entry["role"], "runtime_repairer")
                 else:
                     self.assertEqual(entry, {"action": "runtime_test"})
-        self.assertNotIn("[runtime_test]", config_text)
 
     def test_workflow_contract_states_the_three_governing_principles(self):
         text = (_PROJECT_ROOT / "assent/templates/workflow.md").read_text(
@@ -319,10 +332,10 @@ class TestContractContent(unittest.TestCase):
                 encoding="utf-8").split())
         for phrase in (
                 "`assent test [PLAN]`", "project-layer `[runtime_test].command`",
-                "plan candidate worktree", "separate main repair candidate",
+                "plan candidate worktree", "current primary working tree",
                 "after the plan workflow and before the selection's integration `full_verify`",
-                "exit 0 records `PASSED`", "source or command drift records `STALE`",
-                "makes no candidate source change", "quota waits", "on restart",
+                "exit 0 records `PASSED`", "source or command-list drift records `STALE`",
+                "makes no working-tree source change", "quota waits", "restart",
                 "REVIEW UNRESOLVED, HUMAN DECISION", "Runtime evidence is not a verification receipt",
                 "acceptance requires both fresh receipt evidence"):
             with self.subTest(phrase=phrase):

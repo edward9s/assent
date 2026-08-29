@@ -27,6 +27,7 @@ _GITIGNORE_LINES = [".assent/"]
 _DIRECT_API_DEFAULT = object()
 _PROJECT_TESTS_BEGIN = "# --- Project test commands begin (project-owned) ---"
 _PROJECT_TESTS_END = "# --- Project test commands end ---"
+_PROJECT_RUNTIME_COMMAND_MARKER = "{{ runtime_test_command }}"
 
 
 @dataclass(frozen=True)
@@ -305,8 +306,62 @@ def _backup_target(path: Path) -> Path:
     return path.with_name(f"{path.name}.bak")
 
 
+def _runtime_commands(
+        value: str | Sequence[str] | None) -> tuple[str, ...] | None:
+    """Resolve explicit commands or ask for one or more project commands."""
+    if value is None:
+        commands: list[str] = []
+        while True:
+            try:
+                command = input("Project runtime command: ")
+            except (EOFError, KeyboardInterrupt) as error:
+                raise AssentError(
+                    "runtime-test command choice cancelled or reached EOF") from error
+            if not command.strip():
+                raise AssentError("project runtime command must not be blank")
+            commands.append(command)
+            if not _confirm("Add another project runtime command?", default=False):
+                return tuple(commands)
+    raw = (value,) if isinstance(value, str) else tuple(value)
+    if not raw or not all(isinstance(command, str) and command.strip()
+                          for command in raw):
+        raise AssentError(
+            "project runtime command must be a non-empty string or sequence "
+            "of non-empty strings")
+    return raw
+
+
+def _render_project_config(template: str, commands: tuple[str, ...]) -> str:
+    """Render the one project-owned runtime settings template."""
+    if template.count(_PROJECT_RUNTIME_COMMAND_MARKER) != 1:
+        raise AssentError(
+            "built-in project settings template has an invalid runtime command marker")
+    value: str | list[str] = commands[0] if len(commands) == 1 else list(commands)
+    return template.replace(
+        _PROJECT_RUNTIME_COMMAND_MARKER,
+        json.dumps(value, ensure_ascii=False), 1)
+
+
+def _existing_runtime_commands(content: str) -> tuple[str, ...] | None:
+    """Read a usable command value from an existing project config."""
+    try:
+        data = tomllib.loads(content)
+    except tomllib.TOMLDecodeError:
+        return None
+    section = data.get("runtime_test")
+    if not isinstance(section, dict) or "command" not in section:
+        return None
+    command = section["command"]
+    raw = (command,) if isinstance(command, str) else (
+        tuple(command) if isinstance(command, list) else ())
+    if not raw or not all(isinstance(item, str) and item.strip() for item in raw):
+        return None
+    return raw
+
+
 def _validate_planned_config(root: Path, user_config_content: str,
                              user_adapter_content: str | None, *,
+                             project_config_content: str | None = None,
                              removed_project_overrides: frozenset[Path] = frozenset()
                              ) -> None:
     """Load the exact planned user settings plus preserved project overrides."""
@@ -326,10 +381,9 @@ def _validate_planned_config(root: Path, user_config_content: str,
         if user_adapter_content is not None:
             (temporary_user / "adapter.toml").write_text(
                 user_adapter_content, encoding="utf-8", newline="\n")
-        if (project_config.is_file()
-                and project_config not in removed_project_overrides):
+        if project_config_content is not None:
             (temporary_project / "assent.toml").write_text(
-                _read_file(project_config, "the project assent.toml"),
+                project_config_content,
                 encoding="utf-8", newline="\n")
         if (project_adapter.is_file()
                 and project_adapter not in removed_project_overrides):
@@ -455,7 +509,9 @@ def _apply(target: Path, content: str, plan: tuple[str, str]) -> None:
 
 
 def init(path: str | Path = ".",
-         test: str | Sequence[str] | None | object = _DIRECT_API_DEFAULT) -> int:
+         test: str | Sequence[str] | None | object = _DIRECT_API_DEFAULT,
+         runtime_command: str | Sequence[str] | None | object =
+         _DIRECT_API_DEFAULT) -> int:
     """Initialize the user home and a Git project.
 
     Returns a CLI-style exit code.  The shared settings and the two contracts
@@ -540,6 +596,7 @@ def init(path: str | Path = ".",
         user_config = user_config_path()
         config_template = _template("assent.toml")
         adapter_template = _template("adapter.toml")
+        project_config_template = _template("project-assent.toml")
         user_adapter = user_config.with_name("adapter.toml")
         user_adapter_content: str | None = None
         user_adapter_plan: tuple[str, str] | None = None
@@ -633,26 +690,92 @@ def init(path: str | Path = ".",
                     f"not removed; sessions read {global_path}, so delete the "
                     "local copy once you have moved anything you still want")
 
-        project_override_removals: list[Path] = []
         project_config = assent_dir / "assent.toml"
         project_adapter = assent_dir / "adapter.toml"
-        for project_override in (project_config, project_adapter):
-            if not project_override.exists():
-                continue
-            if not project_override.is_file():
+        project_config_content: str | None = None
+        project_config_plan: tuple[str, str] | None = None
+        if project_config.exists():
+            if not project_config.is_file():
                 raise AssentError(
-                    f"project settings override is not a file: {project_override}")
+                    f"project settings override is not a file: {project_config}")
+            existing_project_config = _read_file(
+                project_config, "the project assent.toml")
+            if runtime_command is _DIRECT_API_DEFAULT:
+                project_config_content = existing_project_config
+                project_config_plan = (
+                    "preserved", f"{project_config} (local override, unchanged)")
+            else:
+                replacement_approved = runtime_command is not None
+                commands = (_existing_runtime_commands(existing_project_config)
+                            if runtime_command is None else
+                            _runtime_commands(runtime_command))
+                if commands is None:
+                    if _confirm(
+                            f"{project_config} has no valid runtime-test command. "
+                            "Back it up and replace it with the project runtime "
+                            "settings template?", default=False):
+                        replacement_approved = True
+                        commands = _runtime_commands(None)
+                    else:
+                        project_config_content = existing_project_config
+                        project_config_plan = (
+                            "preserved", f"{project_config} (replacement declined)")
+                        warnings.append(
+                            f"{project_config} has no valid project runtime-test "
+                            "command and remains unchanged")
+                if commands is not None:
+                    rendered = _render_project_config(
+                        project_config_template, commands)
+                    if rendered == existing_project_config:
+                        project_config_content = existing_project_config
+                        project_config_plan = (
+                            "preserved", f"{project_config} (already current)")
+                    elif (replacement_approved
+                          or _confirm(
+                              f"{project_config} differs from the current project "
+                              "runtime settings template. Back it up and replace it?",
+                              default=False)):
+                        project_config_content = rendered
+                        backup = _backup_target(project_config)
+                        project_backups.append((
+                            project_config, project_config.read_bytes(), backup))
+                        project_config_plan = (
+                            "updated",
+                            f"{project_config} (replaced; prior file backed up)")
+                    else:
+                        project_config_content = existing_project_config
+                        project_config_plan = (
+                            "preserved", f"{project_config} (replacement declined)")
+                        warnings.append(
+                            f"{project_config} differs from the current project "
+                            "runtime settings template and remains unchanged")
+        elif runtime_command is not _DIRECT_API_DEFAULT:
+            create = (runtime_command is not None or _confirm(
+                f"Create project runtime-test settings at {project_config}?",
+                default=True))
+            if create:
+                commands = _runtime_commands(runtime_command)
+                assert commands is not None
+                project_config_content = _render_project_config(
+                    project_config_template, commands)
+                project_config_plan = ("created", str(project_config))
+
+        project_override_removals: list[Path] = []
+        if project_adapter.exists():
+            if not project_adapter.is_file():
+                raise AssentError(
+                    f"project settings override is not a file: {project_adapter}")
             if _confirm(
-                    f"{project_override} overrides the current shared settings. "
+                    f"{project_adapter} overrides the current shared settings. "
                     "Back it up and remove it so the shared template applies?",
                     default=False):
-                backup = _backup_target(project_override)
+                backup = _backup_target(project_adapter)
                 project_backups.append(
-                    (project_override, project_override.read_bytes(), backup))
-                project_override_removals.append(project_override)
+                    (project_adapter, project_adapter.read_bytes(), backup))
+                project_override_removals.append(project_adapter)
             else:
                 warnings.append(
-                    f"{project_override} remains a project override and can "
+                    f"{project_adapter} remains a project override and can "
                     "shadow the current shared settings")
 
         agents_content, agents_plan = _agents_plan(root)
@@ -660,6 +783,7 @@ def init(path: str | Path = ".",
 
         _validate_planned_config(
             root, user_config_content, user_adapter_content,
+            project_config_content=project_config_content,
             removed_project_overrides=frozenset(project_override_removals))
 
         # Every validation and read above happens before the first
@@ -690,6 +814,8 @@ def init(path: str | Path = ".",
         _apply(verifier, verifier_content, verifier_plan)
         _apply(root / "AGENTS.md", agents_content, agents_plan)
         _apply(root / ".gitignore", gitignore_content, gitignore_plan)
+        if project_config_plan is not None and project_config_content is not None:
+            _apply(project_config, project_config_content, project_config_plan)
         for project_override in project_override_removals:
             try:
                 project_override.unlink()
@@ -697,7 +823,7 @@ def init(path: str | Path = ".",
                 raise AssentError(
                     f"Cannot remove project override {project_override}: {e}") from e
             print(f"  Removed: {project_override} (backed up first)")
-        for project_override in (project_config, project_adapter):
+        for project_override in (project_adapter,):
             if (project_override.exists()
                     and project_override not in project_override_removals):
                 print(f"  Preserved: {project_override} (local override, unchanged)")

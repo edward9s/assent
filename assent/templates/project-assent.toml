@@ -1,0 +1,16 @@
+# Project-owned runtime-test settings. `assent init` renders the command value
+# from the operator's explicit choice; it never infers a runtime command.
+
+[runtime_test]
+command = {{ runtime_test_command }}
+
+[workflow]
+runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer", adapter = ["claude", "codex"] },
+  { action = "runtime_test" },
+  { role = "runtime_repairer", adapter = ["claude", "codex"] },
+  { action = "runtime_test" },
+  { role = "runtime_repairer", adapter = ["claude", "codex"] },
+  { action = "runtime_test" },
+]

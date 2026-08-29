@@ -31,15 +31,13 @@ external Git process.
 `assent test PLAN` uses the plan candidate at
 `<project>.worktrees/<PLAN>/` and stores its scheduler-owned cursor at
 `.assent/<PLAN>/_runtime_test_workflow.toml`. `assent test` without `PLAN` uses
-the separate main candidate at `<project>.runtime-test/main`, with its cursor at
-`.assent/_runtime_test_workflow.toml`; the primary worktree stays unchanged.
+the current primary working tree, with its cursor at
+`.assent/_runtime_test_workflow.toml`.
 
 Runtime quota waits, role progress, and source-bound action evidence remain in
-the cursor. A restart resumes the same candidate and workflow position after a
-WIP checkpoint; it does not discard edits or invent another repair round. A
-candidate identity or source change outside the workflow is a refusal. A
-repaired main candidate remains for human review rather than being published by
-`assent test`.
+the cursor. A plan restart resumes the same candidate after a WIP checkpoint.
+A main restart leaves ordinary working-tree edits in place and resumes the
+workflow position. Neither path discards edits or invents another repair round.
 
 ## Interruption and recovery
 
@@ -48,9 +46,9 @@ crash. Before a role or scheduler action starts, it checkpoints dirty candidate
 work. A later run gathers a dirty managed plan worktree into a `WIP` checkpoint
 and resumes the persisted workflow cursor without a recovery AI session.
 
-If an AI writes into the primary worktree, the before/after boundary check
-refuses the role. Assent preserves both trees for human recovery and never
-guesses how to transfer or discard those edits.
+If a plan role writes into the primary worktree, the before/after boundary check
+refuses the role. A main runtime role instead edits the primary working tree by
+contract, leaving every change visible for ordinary Git review.
 
 Journals retain structured events and bounded summaries, not the full raw
 adapter stream. The terminal log keeps rendered session output without adding a

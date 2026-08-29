@@ -15,9 +15,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from assent import AssentError
-from assent.engine import _run_runtime_test_action
+from assent.engine import _run_runtime_test_action, _runtime_test_prompt
 from assent.plan import (
-    RuntimeQuotaWait, WorkflowState, read_runtime_test_workflow_state,
+    RuntimeQuotaWait, WorkflowState, encode_runtime_action_results,
+    parse_runtime_action_results, read_runtime_test_workflow_state,
     runtime_test_workflow_state_path, selection_workflow_state_path,
     workflow_state_path,
     write_runtime_test_workflow_state, write_workflow_state,
@@ -61,9 +62,10 @@ class TestRuntimeTestAction(unittest.TestCase):
         values.update(changes)
         return WorkflowState(**values)
 
-    def run_action(self, command: str, state=None):
+    def run_action(self, command: str | tuple[str, ...], state=None):
+        commands = (command,) if isinstance(command, str) else command
         return _run_runtime_test_action(
-            self.cfg, self.owner, command, state or self.state())
+            self.cfg, self.owner, commands, state or self.state())
 
     def test_exit_results_output_and_passed_reuse_are_authoritative(self):
         passed_command = python_command("print('runtime-visible')")
@@ -93,6 +95,32 @@ class TestRuntimeTestAction(unittest.TestCase):
         self.assertLessEqual(len(failed.summary), 4096)
         self.assertEqual(
             read_runtime_test_workflow_state(self.owner), failed_state)
+
+    def test_commands_stop_at_first_failure_and_report_each_outcome(self):
+        marker = self.root / "must-not-run"
+        commands = (
+            python_command("print('first-passed')"),
+            python_command("import sys; print('second-failed'); sys.exit(7)"),
+            python_command(
+                f"from pathlib import Path; Path({str(marker)!r}).touch()"),
+        )
+
+        with redirect_stdout(io.StringIO()):
+            state, record, reused = self.run_action(commands)
+
+        self.assertFalse(reused)
+        self.assertEqual((record.status, record.exit_code), ("FAILED", 7))
+        self.assertEqual(
+            record.results,
+            ((commands[0], 0), (commands[1], 7), (commands[2], None)))
+        self.assertFalse(marker.exists())
+        self.assertIn("second-failed", record.summary)
+        self.assertEqual(
+            parse_runtime_action_results(state.action_evidence[0]),
+            record.results)
+        prompt = _runtime_test_prompt(state)
+        self.assertIn(f"- {commands[1]}: exit 7", prompt)
+        self.assertIn(f"- {commands[2]}: not run", prompt)
 
     def test_output_is_forwarded_before_process_exits(self):
         command = python_command(
@@ -220,15 +248,40 @@ class TestRuntimeTestAction(unittest.TestCase):
 
     def test_runtime_state_preserves_the_exact_command_while_bounding_output(self):
         command = "python -c " + "x" * 5000
+        encoded = encode_runtime_action_results(((command, 1),))
         state = self.state(
             action_status="FAILED", action_source_tree="source:command",
-            action_exit_code=1, action_evidence=(command, "failed"))
+            action_exit_code=1, action_evidence=(encoded, "failed"))
 
         write_runtime_test_workflow_state(self.owner, state)
 
         self.assertEqual(
             read_runtime_test_workflow_state(self.owner).action_evidence[0],
-            command)
+            encoded)
+
+    def test_runtime_state_rejects_passed_with_nonzero_exit(self):
+        state = self.state(
+            action_status="PASSED", action_source_tree="source:command",
+            action_exit_code=1,
+            action_evidence=(
+                encode_runtime_action_results((("command", 1),)), "failed"))
+
+        with self.assertRaisesRegex(AssentError, "invalid action evidence"):
+            write_runtime_test_workflow_state(self.owner, state)
+
+        valid = self.state(
+            action_status="PASSED", action_source_tree="source:command",
+            action_exit_code=0,
+            action_evidence=(
+                encode_runtime_action_results((("command", 0),)), "passed"))
+        write_runtime_test_workflow_state(self.owner, valid)
+        path = runtime_test_workflow_state_path(self.owner)
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "action_exit_code = 0", "action_exit_code = 1"),
+            encoding="utf-8")
+        with self.assertRaisesRegex(AssentError, "invalid values"):
+            read_runtime_test_workflow_state(self.owner)
 
 
 if __name__ == "__main__":

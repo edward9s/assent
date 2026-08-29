@@ -29,13 +29,13 @@ lock 只能序列化自己的發布動作，無法阻止外部 writer。
 
 `assent test PLAN` 使用 `<project>.worktrees/<PLAN>/` 的 plan candidate，並把
 scheduler 擁有的 cursor 存在 `.assent/<PLAN>/_runtime_test_workflow.toml`。
-省略 `PLAN` 的 `assent test` 使用獨立的 `<project>.runtime-test/main` main candidate，
-cursor 在 `.assent/_runtime_test_workflow.toml`；主要 worktree 保持不變。
+省略 `PLAN` 的 `assent test` 直接使用目前的 primary working tree，cursor 在
+`.assent/_runtime_test_workflow.toml`。
 
 Runtime quota wait、role progress 與 source-bound action evidence 都保留在 cursor。
-Restart 會在 WIP checkpoint 後，從同一個 candidate 與 workflow position 繼續；不會
-丟棄修改或自行新增 repair round。Candidate identity 或 workflow 外的 source 變更會
-被拒絕。修復過的 main candidate 留給人類檢查，不會由 `assent test` 發布。
+Plan restart 會在 WIP checkpoint 後從同一個 candidate 繼續。Main restart 保留一般
+working-tree edits，並從 workflow position 繼續。兩者都不會丟棄修改或自行新增
+repair round。
 
 ## 中斷與復原
 
@@ -44,8 +44,8 @@ scheduler action 開始前會 checkpoint dirty candidate work。下次 run 會�
 managed plan worktree 收進 `WIP` checkpoint，再從已保存的 workflow cursor 繼續，
 不另開復原 AI session。
 
-若 AI 誤寫主要 worktree，before/after boundary check 會拒絕該 role。Assent 保留
-兩邊現況交給人類處理，不猜測如何轉移或丟棄修改。
+Plan role 若誤寫主要 worktree，before/after boundary check 會拒絕該 role。Main
+runtime role 則依契約直接修改 primary working tree，所有 edits 留給一般 Git review。
 
 Journal 保存 structured event 與有界摘要，不保存完整 raw adapter stream。Terminal
 log 保存畫面上的 session output，也不會在每行再重複 scheduler prefix。

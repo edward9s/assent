@@ -53,10 +53,11 @@ guide summarizes how to use it.
 
 `assent test [PLAN]` is separate from the task, plan, and integration layers. A
 plan argument reads that live plan's `_runtime_test.toml` and runs its command
+or ordered command array
 in the plan candidate worktree. Without a plan argument, `assent test` uses the
-project-layer `[runtime_test].command` and a separate main repair candidate;
-the primary worktree is not edited. It does not dispatch `full_verify`, write a
-verification receipt, or accept anything.
+project-layer `[runtime_test].command` directly in the current primary working
+tree. It does not dispatch `full_verify`, write a verification receipt, or
+accept anything.
 
 The plan contract selects one exact `execution` mode: `disabled` has no runtime
 gate, `explicit` runs only when `assent test PLAN` is requested, and
@@ -67,15 +68,23 @@ rechecks the same source-bound runtime evidence; `accept` never runs runtime
 testing.
 
 `[workflow].runtime_test` is a finite linear array of
-`{ action = "runtime_test" }` steps and writable repair roles. The shipped
-configuration strictly alternates action, `runtime_repairer`, and action. The
-runtime action is the authority: exit 0 records `PASSED`, a nonzero exit records
-`FAILED`, and source or command drift records `STALE`. Role output cannot
-declare a pass. A successful repair role that makes no candidate source change
-ends the workflow unresolved; no extra action is invented.
+`{ action = "runtime_test" }` steps and writable repair roles. The project
+template strictly alternates action, `runtime_repairer`, and action. The
+For an array, the scheduler stops at the first nonzero exit or launch failure
+and records completed, failed, and not-run entries for the repair role. After a
+repair, the next action restarts at the first entry because the source changed.
+The runtime action is the authority: every entry exiting 0 records `PASSED`, a
+nonzero exit records `FAILED`, and source or command-list drift records `STALE`. Role output cannot
+declare a pass. A successful repair role that makes no working-tree source change
+ends the workflow unresolved; no extra action is invented. This source-change
+requirement applies only after a runtime command actually failed. A plan runtime
+role that settles an injected ignored-directory precondition may advance without
+changing tracked source, and the next action then evaluates the command. Main
+runtime commands run directly in the primary working tree and do not use this
+precondition.
 
 Runtime role sessions may edit ordinary source, tests, fixtures, project
-configuration, and documentation in the candidate. They do not run commands or
+configuration, and documentation in the current working tree. They do not run commands or
 change task contracts, journals, scheduler state, receipts, Git, or acceptance
 state. Runtime state records the workflow cursor, bounded evidence, candidate
 identity, and quota waits. Quota interruption checkpoints the candidate and
@@ -85,17 +94,16 @@ reports `REVIEW UNRESOLVED, HUMAN DECISION` with preserved evidence. A standalon
 decision outcome so unrelated queued plans continue.
 
 Plan runtime state is `.assent/<PLAN>/_runtime_test_workflow.toml` beside the
-plan contract. Main runtime state is `.assent/_runtime_test_workflow.toml` and
-its candidate is `<project>.runtime-test/main`, based on the exact primary
-`HEAD`. A repaired main candidate remains pending human integration. Runtime
-evidence is not a verification receipt: `full_verify` and its receipt remain
-separate evidence, and acceptance requires both fresh receipt evidence and any
-required current runtime gate.
+plan contract. Main runtime state is `.assent/_runtime_test_workflow.toml`; its
+commands and repairs operate directly in the primary working tree, where edits
+remain for ordinary Git review. Runtime evidence is not a verification receipt:
+`full_verify` and its receipt remain separate evidence, and acceptance requires
+both fresh receipt evidence and any required current runtime gate.
 
-An unsettled ignored-directory decision means the action did not start; Assent
-records that gate evidence separately from test results. A later configured
-action runs again after FAILED evidence. Only matching PASSED evidence is reused
-to finish interruption recovery.
+In a worktree-backed source workflow, an unsettled ignored-directory decision
+means the action did not start; Assent records that gate evidence separately
+from test results. A later configured action runs again after FAILED evidence.
+Only matching PASSED evidence is reused to finish interruption recovery.
 
 Role and ability names have no scheduler meaning. Abilities supply prompt text
 and write authority. A writable role may repair any ordinary candidate file

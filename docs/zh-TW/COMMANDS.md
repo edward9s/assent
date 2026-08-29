@@ -42,6 +42,14 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 | `ignored-dirs status` | 查看目前 worktree 的 ignored-directory 決定與鏈結，不做任何變更。 |
 | `ignored-dirs declare` | AI source role 記錄審查結果的 operation；只為必要目錄建立鏈結。 |
 
+## 初始化專案
+
+`assent init` 會先詢問是否在 `.assent/assent.toml` 建立專案自有的 runtime-test
+設定。同意後，它會詢問一或多個 commands，並從 packaged project template 產生
+command 值與 runtime-test workflow；不會從 verifier 或其他專案檔案推測 runtime
+command。既有專案設定與 template 不同時，必須先確認才會取代，原檔保存為
+`.assent/assent.toml.bak`。
+
 ## 常見用法
 
 排程所有找到的 plan：
@@ -73,9 +81,10 @@ assent test <PLAN>
 ```
 
 Plan 形式讀取 `.assent/<PLAN>/_runtime_test.toml`，在 plan candidate worktree
-執行其中宣告的 `command`。`execution = "disabled"` 時，這個 plan command
+執行其中宣告的 `command`；其值可以是單一 string 或有序 string array。Array 在
+第一個失敗 command 停止，後續項目記為 not run。`execution = "disabled"` 時，這個 plan command
 會被拒絕。省略 `PLAN` 時，則使用 `.assent/assent.toml` project layer 的
-`[runtime_test].command`，測試目前的 main repair candidate：
+`[runtime_test].command`，直接測試目前的 primary working tree：
 
 ```text
 assent test

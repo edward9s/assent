@@ -43,6 +43,16 @@ project-location rules.
 | `ignored-dirs status` | Inspect the current worktree's ignored-directory decision and links without changing them. |
 | `ignored-dirs declare` | AI source-role operation that records the reviewed decision and links only required directories. |
 
+## Initialize a project
+
+`assent init` asks before creating project-owned runtime-test settings at
+`.assent/assent.toml`. When approved, it asks for one or more commands and
+renders that command value plus the runtime-test workflow from the packaged
+project template. It never infers a runtime command from the verifier or other
+project files. If an existing project settings file differs from the template,
+replacement requires confirmation and preserves the prior file as
+`.assent/assent.toml.bak`.
+
 ## Common choices
 
 Schedule every discovered plan:
@@ -75,9 +85,12 @@ assent test <PLAN>
 ```
 
 The plan form reads `.assent/<PLAN>/_runtime_test.toml` and runs its declared
-`command` in the plan candidate worktree. `execution = "disabled"` refuses this
-plan command. The no-`PLAN` form tests the current main repair candidate with
-the project-layer `[runtime_test].command` from `.assent/assent.toml`:
+`command`, which may be one string or an ordered string array, in the plan
+candidate worktree. An array stops at its first failed command and records the
+remaining entries as not run. `execution = "disabled"` refuses this
+plan command. The no-`PLAN` form runs the project-layer
+`[runtime_test].command` from `.assent/assent.toml` directly in the current
+primary working tree:
 
 ```text
 assent test

@@ -38,7 +38,7 @@ class TestRuntimeTestContract(unittest.TestCase):
         contract = parse_runtime_test_contract(self.plan_dir)
 
         self.assertEqual(contract, RuntimeTestContract("disabled", None))
-        self.assertIsNone(contract.command)
+        self.assertIsNone(contract.commands)
 
     def test_explicit_preserves_command_value(self):
         command = "  python -m unittest tests.test_runtime_test_contract  "
@@ -48,7 +48,7 @@ class TestRuntimeTestContract(unittest.TestCase):
         contract = parse_runtime_test_contract(self.plan_dir)
 
         self.assertEqual(contract.execution, "explicit")
-        self.assertEqual(contract.command, command)
+        self.assertEqual(contract.commands, (command,))
 
     def test_after_plan_requires_and_returns_command(self):
         self.write_contract(
@@ -56,8 +56,17 @@ class TestRuntimeTestContract(unittest.TestCase):
 
         self.assertEqual(
             parse_runtime_test_contract(self.plan_dir),
-            RuntimeTestContract("after_plan", "python -m unittest"),
+            RuntimeTestContract("after_plan", ("python -m unittest",)),
         )
+
+    def test_command_array_preserves_order(self):
+        self.write_contract(
+            'execution = "explicit"\n'
+            'command = ["first", "second", "third"]\n')
+
+        self.assertEqual(
+            parse_runtime_test_contract(self.plan_dir).commands,
+            ("first", "second", "third"))
 
     def test_contract_is_immutable(self):
         self.write_contract('execution = "disabled"\n')
@@ -123,8 +132,19 @@ class TestRuntimeTestContract(unittest.TestCase):
     def test_command_type_is_rejected(self):
         self.assert_rejected(
             'execution = "explicit"\ncommand = 1\n',
-            "field command must be a string",
+            "field command must be a string or an array of strings",
         )
+
+    def test_command_array_rejects_empty_non_string_and_blank_entries(self):
+        self.assert_rejected(
+            'execution = "explicit"\ncommand = []\n',
+            "field command must not be empty")
+        self.assert_rejected(
+            'execution = "explicit"\ncommand = ["run", 1]\n',
+            "command array must contain only strings")
+        self.assert_rejected(
+            'execution = "explicit"\ncommand = ["run", "  "]\n',
+            "field command[1] must not be empty or whitespace")
 
     def test_blank_commands_are_rejected(self):
         for command in ("", "   ", "\t"):

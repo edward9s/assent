@@ -69,8 +69,10 @@ assent archive --all
 ```
 
 `assent init` 會把共用設定與三份 AI 契約安裝到 `~/.assent/`，建立專案骨架，
-並詢問專案的完整驗證方式。第一次執行前，請檢查
-`~/.assent/assent.toml`、`AGENTS.md` 與 `.assent/verify.py`。
+並詢問專案的完整驗證方式。它也會先詢問是否建立 `.assent/assent.toml`，再記錄
+專案的單一或多個有序 runtime commands 與 runtime-test workflow。第一次執行前，
+請檢查 `~/.assent/assent.toml`、`.assent/assent.toml`、`AGENTS.md` 與
+`.assent/verify.py`。
 
 ## `run` 會做什麼
 
@@ -90,10 +92,11 @@ Task action 失敗時仍留在 task 層，並依設定的有限 steps 前進。P
 不同：它負責確認累積實作是否符合整份計畫。
 
 `assent test [PLAN]` 是獨立的 runtime-test workflow。有 `PLAN` 時，使用該 live
-plan 的 `_runtime_test.toml` command，在 plan candidate 中執行；省略 `PLAN` 時，
-使用 project layer 的 `[runtime_test].command`，在目前 main repair candidate 中執行。
+plan 的 `_runtime_test.toml` 單一 command 或有序 command array，在 plan candidate 中執行；省略 `PLAN` 時，
+使用 project layer 的 `[runtime_test].command`，直接在目前 primary working tree 執行。
 `execution = "after_plan"` 的 plan 會在 plan layer 完成後、integration `full_verify`
-前執行這個 workflow；`accept` 絕不執行 runtime testing。
+前執行這個 workflow；`accept` 絕不執行 runtime testing。Array 會在第一個失敗
+command 停止；repair evidence 會指出該 command，下一個 runtime action 從頭重跑。
 
 Integration 會維持原本選取的完整計畫集合。Typed Git conflict evidence 會指出
 衝突的 plan 與 paths，因此已設定的 integration role 可以在 scheduler 提供的
