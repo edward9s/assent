@@ -78,9 +78,11 @@ Review `~/.assent/assent.toml`, `.assent/assent.toml`, `AGENTS.md`, and
 
 ## What happens during `run`
 
-The configured `[workflow]` has three core layers plus an independent runtime-
-test workflow:
+The configured `[workflow]` has a preflight repair layer, three core layers,
+and an independent runtime-test workflow:
 
+- `preflight` runs the complete read-only check and starts its AI repairer only
+  when that action fails;
 - `task` works on one task and uses `focused_test` as its mechanical gate;
 - `plan` runs a `focused_sweep` over the completed plan and reviews cumulative
   behavior only after all tasks are done or skipped; and
@@ -91,6 +93,8 @@ configured repair role, whose work is checked by the following action. The
 default repair roles combine review and repair in one session; custom workflows
 may keep those abilities in separate roles. The arrays are the complete repair
 budget: Assent never invents extra rounds.
+Explicit `assent check` remains read-only; only `assent run` enters the
+configured preflight repair workflow.
 If automation cannot decide safely, it preserves all work and reports `REVIEW
 UNRESOLVED, HUMAN DECISION` for the acceptance meeting.
 

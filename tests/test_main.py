@@ -245,25 +245,24 @@ class TestDispatch(MainTestCase):
         self.assertFalse((self.root / ".assent" / "MISSING02").exists())
         self.assertFalse((self.root / ".assent" / "MISSING03").exists())
 
-    def test_run_refuses_before_dispatch_when_a_global_contract_is_broken(self):
+    def test_run_dispatches_broken_global_contract_to_engine_preflight(self):
         config = self.write_config()
         self.write_task("plan01")
         cases = {"missing": lambda p: p.unlink(),
                  "stale": lambda p: p.write_text("older\n", encoding="utf-8")}
         for state, break_contract in cases.items():
-            for argv in (["run"], ["run", "plan01"]):
+            for argv, target in (
+                    (["run"], "assent.__main__.run_all"),
+                    (["run", "plan01"], "assent.__main__.engine.run")):
                 with self.subTest(state=state, argv=argv):
                     home = install_global_contracts(self)
                     break_contract(home / "instructions.md")
-                    with patch("assent.__main__.engine.run",
-                               side_effect=AssertionError("must not dispatch")), \
-                            patch("assent.__main__.run_all",
-                                  side_effect=AssertionError("must not dispatch")):
+                    with patch(target, return_value=1) as operation:
                         code, out = self.run_main(
                             [*argv, "--config", str(config)])
                     self.assertEqual(code, 1)
-                    self.assertIn("Global contracts: FAIL", out)
-                    self.assertIn("assent init", out)
+                    operation.assert_called_once()
+                    self.assertNotIn("Global contracts: FAIL", out)
 
     def test_an_absent_default_project_file_is_not_an_error(self):
         # Everything stated user-wide is a complete, ordinary setup.

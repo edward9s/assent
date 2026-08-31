@@ -89,6 +89,21 @@ plan = []
 integration = []
 """
 
+PREFLIGHT_WORKFLOW = """
+[abilities.preflight_repair]
+prompt = "Repair the failed declarative check without changing status."
+writes = true
+[roles.preflight_repairer]
+ability = ["preflight_repair"]
+model = "lite"
+[workflow]
+preflight = [{ action = "check" }, { role = "preflight_repairer" },
+             { action = "check" }]
+task = [{ action = "focused_test" }]
+plan = []
+integration = []
+"""
+
 
 class TestLinearEngine(EngineTestCase):
     def run_with_contracts(self, cfg, adapter, **kwargs):
@@ -110,6 +125,66 @@ class TestLinearEngine(EngineTestCase):
             cfg, ScriptedAdapter([implement])), 0)
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertTrue((self.execution_root() / "src" / "ok.txt").is_file())
+
+    def test_preflight_pass_skips_repair_ai(self):
+        self.write_task(1)
+        cfg = self.build(extra_config=PREFLIGHT_WORKFLOW)
+        self.commit_all()
+        adapter = ScriptedAdapter([])
+
+        with mock.patch.object(
+                engine, "_preflight_check_action",
+                return_value=(0, "Result: passed", cfg)) as check:
+            self.assertEqual(self.run_with_contracts(cfg, adapter), 0)
+
+        check.assert_called_once_with(cfg)
+        self.assertEqual(adapter.calls, [])
+
+    def test_failed_preflight_is_repaired_and_rechecked_before_task_run(self):
+        path = self.write_task(1, notes="old note")
+        cfg = self.build(extra_config=PREFLIGHT_WORKFLOW)
+        self.commit_all()
+
+        def repair(prompt):
+            self.assertIn("Task-file format: FAIL", prompt)
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "old note", "format repaired"),
+                encoding="utf-8")
+            return result("updated the declarative task format")
+
+        checks = [(1, "Task-file format: FAIL (old format)", cfg),
+                  (0, "Result: passed", cfg)]
+        with mock.patch.object(
+                engine, "_preflight_check_action", side_effect=checks):
+            self.assertEqual(self.run_with_contracts(
+                cfg, ScriptedAdapter([repair])), 0)
+
+        entries = read_entries(parse_task_file(path).journal_path)
+        repair_entries = [entry for entry in entries
+                          if entry.get("event") == "preflight_repair"]
+        self.assertEqual(len(repair_entries), 1)
+        self.assertIn(path.name, repair_entries[0]["detail"])
+
+    def test_preflight_repair_cannot_change_task_status(self):
+        path = self.write_task(1)
+        cfg = self.build(extra_config=PREFLIGHT_WORKFLOW)
+        self.commit_all()
+
+        def tamper(_prompt):
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    'status = "TODO"', 'status = "DONE"'),
+                encoding="utf-8")
+            return result("changed task status")
+
+        with mock.patch.object(
+                engine, "_preflight_check_action",
+                return_value=(1, "Task-file format: FAIL", cfg)) as check:
+            self.assertEqual(self.run_with_contracts(
+                cfg, ScriptedAdapter([tamper])), 1)
+
+        check.assert_called_once_with(cfg)
 
     def test_run_processes_every_task(self):
         first = self.write_task(1)

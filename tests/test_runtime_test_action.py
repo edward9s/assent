@@ -123,8 +123,12 @@ class TestRuntimeTestAction(unittest.TestCase):
         self.assertIn(f"- {commands[2]}: not run", prompt)
 
     def test_output_is_forwarded_before_process_exits(self):
+        release = self.root / "release-runtime"
         command = python_command(
-            "import time; print('early', flush=True); time.sleep(2)")
+            "import time; from pathlib import Path; "
+            "print('early', flush=True); "
+            f"release = Path({str(release)!r}); "
+            "\nwhile not release.exists(): time.sleep(.01)")
         seen = threading.Event()
         finished = threading.Event()
         errors = []
@@ -145,9 +149,12 @@ class TestRuntimeTestAction(unittest.TestCase):
 
         thread = threading.Thread(target=run)
         thread.start()
-        self.assertTrue(seen.wait(1.5))
-        self.assertFalse(finished.is_set())
-        thread.join(3)
+        try:
+            self.assertTrue(seen.wait(10))
+            self.assertFalse(finished.is_set())
+        finally:
+            release.touch()
+            thread.join(15)
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
 

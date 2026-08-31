@@ -76,8 +76,10 @@ assent archive --all
 
 ## `run` 會做什麼
 
-`[workflow]` 有三個核心 layer，另有獨立的 runtime-test workflow：
+`[workflow]` 有 preflight repair layer、三個核心 layer，另有獨立的
+runtime-test workflow：
 
+- `preflight` 會執行完整的唯讀 check，只有失敗時才啟動 AI repairer；
 - `task` 處理單一任務，並以 `focused_test` 作為機械檢查；
 - `plan` 等所有任務完成或略過後，以 `focused_sweep` 檢查整體成果；
 - `integration` 重建本次明確選取的結果，再執行 `full_verify`。
@@ -87,6 +89,8 @@ assent archive --all
 session 內合併審查與修復；自訂 workflow 仍可使用分離的 role。設定陣列就是全部
 修復次數；Assent 不會自行追加回合。若自動流程無法安全判斷，會保留所有成果，
 並回報 `REVIEW UNRESOLVED, HUMAN DECISION`，交給驗收會議決定。
+明確執行 `assent check` 仍為唯讀；只有 `assent run` 會進入已設定的 preflight
+repair workflow。
 
 Task action 失敗時仍留在 task 層，並依設定的有限 steps 前進。Plan role 的工作
 不同：它負責確認累積實作是否符合整份計畫。

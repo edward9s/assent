@@ -167,6 +167,8 @@ class Config:
     tasks_dir: Path                # Plan directory (.assent/<tasks>)
     tasks_name: str                # Plan name (= git branch prefix stem)
     workflow_task: tuple[WorkflowTaskStep | WorkflowActionStep, ...]
+    workflow_preflight: tuple[
+        WorkflowRoleStep | WorkflowActionStep, ...] = ()
     stall_minutes: int = 0         # 0 = watchdog disabled
     quota_poll_minutes: int = 30
     rotation_poll_minutes: int = 1
@@ -193,6 +195,7 @@ class Config:
         WorkflowRoleStep | WorkflowActionStep, ...] | None = None
     abilities: dict[str, Ability] = field(default_factory=dict)
     roles: dict[str, Role] = field(default_factory=dict)
+    config_path: Path | None = None
     source_root: Path | None = None  # Original main worktree when running isolated; not from the config file
     # Where the effective settings came from: the layers that were present, lowest priority
     # first, and each stated leaf setting's dotted key mapped to the layer that stated it.
@@ -567,12 +570,13 @@ def _parse_workflow_entries(section: dict, key: str, guard: "_BlankGuard",
             action = guard.text(
                 _typed(value, f"[{owner}]", "action", str, None),
                 f"workflow.{key}.{index}.action")
-            allowed_actions = {"task": {"focused_test"},
+            allowed_actions = {"preflight": {"check"},
+                               "task": {"focused_test"},
                                "plan": {"focused_sweep"},
                                "integration": {"full_verify"},
                                "runtime_test": {"runtime_test"}}[key]
             if action not in {"focused_test", "focused_sweep", "full_verify",
-                              "runtime_test"}:
+                              "runtime_test", "check"}:
                 raise AssentError(f"Config {owner} has unknown action {action!r}")
             if action not in allowed_actions:
                 valid = "/".join(sorted(allowed_actions))
@@ -632,6 +636,36 @@ def _validate_runtime_test_entries(entries) -> None:
         if not entry[2].writes:
             raise AssentError(
                 f"Config [workflow].runtime_test[{index}] role {entry[0]!r}"
+                " must be writable")
+
+
+def _validate_preflight_entries(entries) -> None:
+    """Require checks around every writable preflight repair role."""
+    if entries is None:
+        return
+    if not entries:
+        raise AssentError(
+            "Config [workflow].preflight must not be empty")
+    if not isinstance(entries[0], WorkflowActionStep):
+        raise AssentError(
+            "Config [workflow].preflight must start with an action")
+    if not isinstance(entries[-1], WorkflowActionStep):
+        raise AssentError(
+            "Config [workflow].preflight must end with an action")
+    for index, entry in enumerate(entries):
+        if index % 2 == 0:
+            if not isinstance(entry, WorkflowActionStep):
+                raise AssentError(
+                    "Config [workflow].preflight must strictly alternate"
+                    " check actions and writable roles")
+            continue
+        if isinstance(entry, WorkflowActionStep):
+            raise AssentError(
+                "Config [workflow].preflight must strictly alternate"
+                " check actions and writable roles")
+        if not entry[2].writes:
+            raise AssentError(
+                f"Config [workflow].preflight[{index}] role {entry[0]!r}"
                 " must be writable")
 
 
@@ -951,11 +985,13 @@ def load_config(path: str | Path, plan_name: str) -> Config:
     roles = _parse_roles(_section(data, "roles"), abilities)
     workflow = _section(data, "workflow")
     _known_keys(workflow, "workflow",
-                {"plan", "integration", "task", "runtime_test"})
+                {"preflight", "plan", "integration", "task", "runtime_test"})
     runtime_test = _section(data, "runtime_test")
     _known_keys(runtime_test, "runtime_test", {"command"})
     guard = _BlankGuard(provenance, sources)
     adapter_names = _parse_adapter_names(adapter, guard)
+    raw_workflow_preflight = _parse_workflow_entries(
+        workflow, "preflight", guard, roles, abilities)
     raw_workflow_plan = _parse_workflow_entries(
         workflow, "plan", guard, roles, abilities)
     raw_workflow_task = _parse_workflow_entries(
@@ -964,6 +1000,7 @@ def load_config(path: str | Path, plan_name: str) -> Config:
         workflow, "integration", guard, roles, abilities)
     raw_workflow_runtime_test = _parse_workflow_entries(
         workflow, "runtime_test", guard, roles, abilities)
+    _validate_preflight_entries(raw_workflow_preflight)
     _validate_runtime_test_entries(raw_workflow_runtime_test)
     if raw_workflow_task is None:
         raise AssentError(
@@ -1010,6 +1047,7 @@ def load_config(path: str | Path, plan_name: str) -> Config:
         runtime_test_commands=_runtime_test_commands(runtime_test, guard),
         abilities=abilities,
         roles=roles,
+        config_path=project_path,
         sources=sources,
         provenance=provenance,
     )
@@ -1024,8 +1062,11 @@ def load_config(path: str | Path, plan_name: str) -> Config:
         raise AssentError(
             "[adapter.antigravity] print_timeout_minutes must be at least 1")
     _require_complete_models(cfg, _workflow_bound_adapters(
-        raw_workflow_task, raw_workflow_plan, raw_workflow_integration,
+        raw_workflow_preflight, raw_workflow_task, raw_workflow_plan,
+        raw_workflow_integration,
         raw_workflow_runtime_test))
+    cfg.workflow_preflight = _resolve_plan_steps(
+        cfg, raw_workflow_preflight, "preflight")
     plan_steps = _resolve_plan_steps(cfg, raw_workflow_plan, "plan")
     integration_steps = _resolve_plan_steps(
         cfg, raw_workflow_integration, "integration")

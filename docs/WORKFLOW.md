@@ -32,9 +32,12 @@ The plan is runnable only after `assent check` passes.
 
 ## 2. Unattended execution
 
-`assent run` executes the task, plan, and integration arrays, with the
-independent runtime-test array inserted where a plan requires it:
+`assent run` first executes the plan's preflight array, then the task, plan, and
+integration arrays, with the independent runtime-test array inserted where a
+plan requires it:
 
+- `preflight` runs the complete read-only `check`; failure may enter a
+  declarative repair role and then recheck.
 - `task` works on one task; `focused_test` runs that task's command.
 - `plan` works on the cumulative candidate; `focused_sweep` runs the distinct
   task commands.
@@ -45,6 +48,19 @@ A role session that exits successfully advances one step. A passing action
 completes its layer and skips later roles. A failing action records evidence and
 advances. The configured arrays are the entire automation budget; Assent never
 invents another review or repair round.
+
+### Preflight repair workflow
+
+The installed `~/.assent/assent.toml` strictly alternates `check`,
+`preflight_repairer`, and `check`. A passing first action starts no AI. Failure
+supplies the complete diagnostic to the repairer, whose declarative edits are
+accepted only when the next read-only check passes. The repairer cannot change
+task status, workflow cursors, evidence, receipts, Git, candidate source, or
+acceptance. Successful repair evidence appears in the plan journal and report.
+
+Explicit `assent check` remains a read-only command and never enters the
+workflow. A configuration failure that prevents Assent from resolving the
+preflight role or any sendable adapter remains a manual bootstrap failure.
 
 ### Independent runtime-test workflow
 

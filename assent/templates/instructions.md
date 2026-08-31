@@ -51,6 +51,12 @@ tests or the implementation and corrects whichever is wrong. Preserve correct
 tests; never weaken, narrow, delete, rewrite, bypass, or mock them merely to make
 a check pass.
 
+A scheduler-started preflight repair session is the one declarative-control
+exception. It repairs only files named by failed `check` evidence, preserves
+task meaning and status, and never changes journals, workflow cursors, action
+evidence, receipts, Git state, candidate source, or acceptance state. The
+following scheduler-owned check action alone decides whether the repair passed.
+
 Git commit messages must contain no AI attribution or advertising text such as
 `Co-Authored-By` or `Generated with`.
 

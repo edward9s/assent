@@ -10,6 +10,9 @@ rotation_poll_minutes = 1         # polling interval after every adapter in the 
 
 # Abilities define session responsibility and write authority. Names have no
 # engine meaning.
+[abilities.preflight_repair]
+prompt = "Repair only the declarative Assent files named by the failed check. Preserve every task's meaning, dependency, verification command, and status. Do not edit candidate source, journals, workflow cursors, scheduler evidence, receipts, Git state, or acceptance state; do not run Git, Assent, tests, or verification. The scheduler reruns the complete read-only check and alone decides whether the repair passed."
+writes = true
 [abilities.write_tests]
 prompt = "Write or update the smallest decisive tests that prove the supplied behavioral requirements. Prefer observable semantics and invariants over the current representation: do not treat template example names, default values, serialization, ordering, or internal helpers as contracts unless a requirement explicitly makes them public. For configurable behavior, when applicable use an alternate valid combination, a semantics-preserving input transformation, or rejection of an invalid combination. Prove that behavior follows the declared semantics rather than a packaged example. Do not weaken existing tests or mock away the behavior being proved."
 writes = true
@@ -48,6 +51,9 @@ writes = true
 [roles.implementer]
 ability = ["write_tests", "implement_source"]
 #model = "lite"
+[roles.preflight_repairer]
+ability = ["preflight_repair"]
+model = "prime"
 [roles.runtime_repairer]
 ability = ["runtime_repair"]
 model = "core"
@@ -78,6 +84,11 @@ model = "prime"
 # A role is one session. Sessions run in array order and do not converse; the
 # preceding session output and action evidence are inputs to the next step.
 [workflow]
+preflight = [
+  { action = "check" },
+  { role = "preflight_repairer", adapter = ["claude", "codex"] },
+  { action = "check" },
+]
 task = [
   { role = "implementer" },
   { action = "focused_test" },

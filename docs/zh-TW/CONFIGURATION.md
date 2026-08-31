@@ -67,11 +67,16 @@ Workflow entry 指定可攜 tier 但省略 `adapter` 時，全域 rotation 中�
 
 ## Workflow
 
-`[workflow]` 包含三個核心、可任意排列且長度有限的 step array，另有獨立的
-runtime-test array：
+`[workflow]` 包含 preflight repair array、三個核心且長度有限的 step array，
+另有獨立的 runtime-test array：
 
 ```toml
 [workflow]
+preflight = [
+  { action = "check" },
+  { role = "preflight_repairer" },
+  { action = "check" },
+]
 task = [
   { role = "implementer" },
   { action = "focused_test" },
@@ -100,6 +105,7 @@ runtime_test = [
 
 | Array | Action | 意義 |
 | --- | --- | --- |
+| `preflight` | `check` | 執行完整的唯讀 plan 與環境檢查。 |
 | `task` | `focused_test` | 執行目前 task 的 `verify` command。 |
 | `plan` | `focused_sweep` | 在累積 candidate 上執行各個不重複的 task command。 |
 | `integration` | `full_verify` | 重建並驗證精確選集。 |
@@ -108,6 +114,13 @@ runtime_test = [
 Role session 成功就前進一格。Action 通過就完成該層並略過後續 step；action
 失敗則前進。走完仍未通過時，結果是 `REVIEW UNRESOLVED, HUMAN DECISION`，
 exit zero，並保留所有證據。
+
+`preflight` 嚴格交替 `check` action 與可寫 repair role，並以 action 開始和結束。
+`assent run` 會在 task 執行前進入此層；第一個 check 通過就略過所有 repair role。
+Repairer 只能修改 check evidence 指名的宣告式 Assent input，不得修改 status、
+workflow cursor、scheduler evidence、receipt、Git、candidate source 或 acceptance。
+最後仍失敗時，`run` 以 nonzero 停止。明確執行 `assent check` 仍為唯讀，而且
+不會進入這個 workflow。
 
 設定中沒有 structured verdict。Reviewer、fixer 或合併責任完全由 ability 決定。
 Sessions 依序執行且不互相對話；scheduler 把有限長度的輸出與 action evidence

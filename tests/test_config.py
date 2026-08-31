@@ -58,6 +58,7 @@ integration = [{ role = "reviewer" }, { action = "full_verify" },
 
     def test_actions_are_layer_specific(self):
         cases = (
+            ('preflight = [{ action = "focused_test" }]', "check"),
             ('task = [{ action = "full_verify" }]', "focused_test"),
             ('plan = [{ action = "focused_test" }]', "focused_sweep"),
             ('integration = [{ action = "focused_sweep" }]', "full_verify"),
@@ -66,6 +67,30 @@ integration = [{ role = "reviewer" }, { action = "full_verify" },
             with self.subTest(workflow=workflow), self.assertRaisesRegex(
                     AssentError, expected):
                 self.load(ROLES + "[workflow]\n" + workflow + "\n")
+
+    def test_preflight_strictly_alternates_checks_and_writable_roles(self):
+        valid = self.load(ROLES + """
+[workflow]
+preflight = [{ action = "check" }, { role = "repairer" },
+             { action = "check" }]
+task = [{ action = "focused_test" }]
+""")
+        self.assertEqual(
+            [step.action if isinstance(step, WorkflowActionStep) else step.role
+             for step in valid.workflow_preflight],
+            ["check", "repairer", "check"])
+
+        cases = (
+            'preflight = [{ role = "repairer" }, { action = "check" }]',
+            'preflight = [{ action = "check" }, { role = "repairer" }]',
+            'preflight = [{ action = "check" }, { role = "reviewer" }, '
+            '{ action = "check" }]',
+        )
+        for workflow in cases:
+            with self.subTest(workflow=workflow), self.assertRaisesRegex(
+                    AssentError, "preflight"):
+                self.load(ROLES + "[workflow]\n" + workflow
+                          + '\ntask = [{ action = "focused_test" }]\n')
 
     def test_task_array_is_required_and_nonempty(self):
         with self.assertRaisesRegex(AssentError, "must not be empty"):
@@ -117,6 +142,12 @@ plan = [{ role = "bare" }]
         template = (Path(__file__).resolve().parents[1]
                     / "assent" / "templates" / "assent.toml")
         cfg = self.load(template.read_text(encoding="utf-8"))
+        self.assertEqual(len(cfg.workflow_preflight), 3)
+        self.assertIsInstance(cfg.workflow_preflight[0], WorkflowActionStep)
+        self.assertEqual(cfg.workflow_preflight[0].action, "check")
+        self.assertEqual(cfg.workflow_preflight[1].role, "preflight_repairer")
+        self.assertIsInstance(cfg.workflow_preflight[2], WorkflowActionStep)
+        self.assertEqual(cfg.workflow_preflight[2].action, "check")
         task_roles = cfg.workflow_task[::2]
         task_actions = cfg.workflow_task[1::2]
         self.assertTrue(task_roles)

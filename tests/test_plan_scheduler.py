@@ -226,6 +226,28 @@ class TestRunAll(PlanSchedulerTestCase):
         self.assertLess(lines.index("[serial] 最後一列"),
                         lines.index("Plan complete: serial (exit code 0)"))
 
+    def test_preflight_runs_before_whole_project_plan_parsing(self):
+        task = self.make_plan("serial")
+        events = []
+
+        def preflight(_cfg):
+            events.append("preflight")
+            return 0
+
+        def parse(assent_dir):
+            events.append("parse")
+            return parse_plan_dependency_graph(assent_dir)
+
+        with patch("assent.engine.run_preflight", side_effect=preflight), patch(
+                "assent.plan_scheduler.parse_plan_dependency_graph",
+                side_effect=parse), patch(
+                "assent.plan_scheduler._start_plan",
+                return_value=FinishedProcess(task)):
+            code = run_all(str(self.config), self.assent_dir)
+
+        self.assertEqual(code, 0)
+        self.assertLess(events.index("preflight"), events.index("parse"))
+
     def test_jobs_two_serializes_lines_with_correct_source(self):
         tasks = {
             "alpha": self.make_plan("alpha"),

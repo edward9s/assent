@@ -123,8 +123,8 @@ class DocumentationTests(unittest.TestCase):
                 "Ability names have no engine meaning",
                 "A passing action completes the layer",
                 "There is no structured verdict setting",
-                "three core finite step arrays plus an independent runtime-test array",
-                "runtime_test",
+                "a preflight repair array, three core finite step arrays",
+                "preflight", "runtime_test",
                 "integration_repairer", "Task workflow overrides",
                 '{ role = "tests_writer" }',
                 '{ action = "focused_test" }'):
@@ -137,8 +137,8 @@ class DocumentationTests(unittest.TestCase):
                 "Ability 名稱\n對 engine 沒有特殊意義",
                 "Action 通過就完成該層",
                 "設定中沒有 structured verdict",
-                "三個核心、可任意排列且長度有限的 step array，另有獨立的 runtime-test array",
-                "runtime_test",
+                "preflight repair array、三個核心且長度有限的 step array",
+                "preflight", "runtime_test",
                 "integration_repairer", "Task workflow override",
                 '{ role = "tests_writer" }',
                 '{ action = "focused_test" }'):

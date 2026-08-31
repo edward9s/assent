@@ -36,6 +36,12 @@ key; scalars and arrays replace whole values. The effective `workflow.task`
 array is required and nonempty. Empty `plan` and `integration` arrays disable
 their optional role layers.
 
+The shared settings template defines a finite `[workflow].preflight` array.
+Omission disables automatic repair; an explicitly stated array is nonempty and
+strictly alternates `{ action = "check" }` with writable repair roles, starting
+and ending with the action. An explicit `assent check` always runs only the
+read-only action and never enters this workflow.
+
 Before an AI session, `instructions.md`, `format.md`, and `workflow.md` in the
 user home must match the installed version. Run `assent init` to refresh them.
 
@@ -50,7 +56,7 @@ and a `writes` flag; roles compose abilities and may choose a model. A workflow
 entry chooses its adapter candidates and its position determines task, plan,
 or integration context.
 
-A writable session may change any ordinary candidate file needed to satisfy
+A writable task, plan, integration, or runtime-test session may change any ordinary candidate file needed to satisfy
 the stated requirements. Predicted paths and task ownership are not write
 boundaries. A read-only session may change no project file. All sessions are
 forbidden from Git, Assent commands, scheduler-owned actions, task contracts,
@@ -58,6 +64,14 @@ journals, receipts, and `.git` or `.assent` state. For unknown or stale local
 input evidence, the bounded `assent ignored-dirs declare` operation is the only
 Assent-command exception. The session supplies the reviewed declaration;
 Assent validates, records, and applies it.
+
+A preflight repair session is the sole management-plane exception. It may
+repair declarative task, plan, runtime-test, or project configuration named by
+failed check evidence. It may not change task status, journals, workflow
+cursors, action evidence, receipts, Git state, candidate source, or acceptance
+state. The following read-only check action is authoritative; role output never
+declares the repair successful. Successful repair evidence is appended to the
+plan journal for the acceptance report.
 
 Every writable repair session treats the authoritative requirements as the
 source of truth, determines whether each defect is in the tests or the
@@ -72,6 +86,24 @@ execution only in trusted environments.
 
 One plan folder permits one live `run`, enforced by an OS lock. Different plans
 may run concurrently in dedicated `<project>.worktrees/<plan>/` worktrees.
+
+## Preflight workflow
+
+`assent run` executes the configured preflight workflow under the plan lock
+before a task or plan session starts. Its only action is the same complete,
+read-only check used by explicit `assent check`. A passing first action ends the
+layer without spending AI tokens. Failure supplies its exact diagnostics to the
+next repair role, and the next action checks the result from the beginning.
+
+The repair role uses ordinary adapter rotation, authentication handling, quota
+waiting, and immediate continuation. It never changes the existing task or plan
+workflow cursor. An interrupt preserves declarative edits; rerunning starts with
+the check action, which either accepts the completed repair or supplies current
+evidence for another configured repair session. If the finite preflight array
+ends without a pass, `run` exits nonzero before normal workflow execution.
+
+Configuration that cannot be parsed far enough to resolve the preflight role
+and at least one sendable adapter is outside this automatic repair boundary.
 
 ## Runtime-test workflow
 
@@ -137,10 +169,11 @@ runtime gate.
 
 ## Workflow configuration
 
-`[workflow]` has four ordered arrays:
+`[workflow]` has five ordered arrays:
 
 | Array | Role context | Legal scheduler action |
 | --- | --- | --- |
+| `preflight` | declarative Assent inputs named by check evidence | `check` |
 | `task` | one task | `focused_test` |
 | `plan` | the cumulative plan candidate | `focused_sweep` |
 | `integration` | the exact selection and scheduler-named repair workspace(s) | `full_verify` |
@@ -167,6 +200,10 @@ adapter.
 
 Actions accept no role, adapter, model, prompt, or arbitrary command. AI
 sessions never run them.
+
+The preflight and runtime-test arrays are stricter than the other layers: each
+starts and ends with its action and strictly alternates actions with writable
+roles. A passing action skips every later repair role.
 
 Task configuration is explicit:
 
@@ -231,8 +268,9 @@ order; `--jobs N` sets the concurrency cap. One or more named plans form an
 exact selection and run in the stated order. `--jobs` is valid only when no
 plan is named.
 
-`run` executes task and plan workflows, then the integration workflow for the
-same completed selection. No run accepts.
+`run` executes each plan's preflight workflow before its task and plan
+workflows, then the integration workflow for the same completed selection. No
+run accepts.
 
 `status`, `check`, and `report` are read-only. `check` validates configuration,
 task files, dependencies, adapters, Git layering, and global contracts.

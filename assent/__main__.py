@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from assent import AssentError, contracts, engine, gitops, inspection
+from assent import AssentError, engine, gitops, inspection
 from assent.accept import accept_plan
 from assent.adapters.process import wake_stop_waiters
 from assent.archive import (archive_all, archive_plan, archive_recovery_names,
@@ -625,14 +625,6 @@ def _dispatch(argv: list[str]) -> int:
         return 1
 
     if args.command == "run":
-        # The session gate for the global contracts: a run that would point the
-        # execution AI at a missing or out-of-date ~/.assent contract is refused
-        # here, before any plan is opened and before any adapter process exists.
-        try:
-            contracts.require_contracts()
-        except AssentError as e:
-            print(f"Global contracts: FAIL ({e})")
-            return 1
         selection: list[str] | None = None
         if args.plan_names:
             selection = _filter_accepted_run_plans(

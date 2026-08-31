@@ -31,9 +31,11 @@ verification command，不預測 write scope。
 
 ## 2. 自動執行
 
-`assent run` 執行 task、plan 與 integration array；若 plan 需要，會在指定位置
-插入獨立的 runtime-test array：
+`assent run` 先執行 plan 的 preflight array，再執行 task、plan 與 integration
+array；若 plan 需要，會在指定位置插入獨立的 runtime-test array：
 
+- `preflight` 執行完整的唯讀 `check`；失敗時可進入宣告式 repair role，再重新
+  check。
 - `task` 處理一個 task；`focused_test` 執行該 task 的 command。
 - `plan` 處理累積 candidate；`focused_sweep` 執行不重複的 task commands。
 - `integration` 重建精確選集；`full_verify` 在 AI session 外執行完整 verifier。
@@ -41,6 +43,19 @@ verification command，不預測 write scope。
 Role session 成功就前進一格。Action 通過就完成該層並略過後續 roles；失敗則
 記錄證據並前進。設定的 array 就是全部自動化預算，Assent 不會自行新增審查或
 修復回合。
+
+### Preflight repair workflow
+
+已安裝的 `~/.assent/assent.toml` 嚴格交替 `check`、
+`preflight_repairer` 與 `check`。第一個 action 通過時不會啟動 AI。失敗時，
+repairer 會收到完整診斷；只有下一個唯讀 check 通過，才接受其宣告式修改。
+Repairer 不得修改 task status、workflow cursor、evidence、receipt、Git、
+candidate source 或 acceptance。成功的 repair evidence 會寫入 plan journal 與
+report。
+
+明確執行 `assent check` 仍為唯讀，不會進入 workflow。若設定錯誤使 Assent
+無法解析 preflight role 或任何可傳送的 adapter，仍屬於需要人工處理的 bootstrap
+failure。
 
 ### 獨立的 runtime-test workflow
 

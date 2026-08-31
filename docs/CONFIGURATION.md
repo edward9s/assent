@@ -71,11 +71,16 @@ exactly one adapter; otherwise configuration loading refuses it as ambiguous.
 
 ## Workflows
 
-`[workflow]` contains three core finite step arrays plus an independent
-runtime-test array:
+`[workflow]` contains a preflight repair array, three core finite step arrays,
+and an independent runtime-test array:
 
 ```toml
 [workflow]
+preflight = [
+  { action = "check" },
+  { role = "preflight_repairer" },
+  { action = "check" },
+]
 task = [
   { role = "implementer" },
   { action = "focused_test" },
@@ -104,6 +109,7 @@ Each entry contains exactly one `role` or `action`. Legal actions are:
 
 | Array | Action | Meaning |
 | --- | --- | --- |
+| `preflight` | `check` | Run the complete read-only plan and environment check. |
 | `task` | `focused_test` | Run the current task's `verify` command. |
 | `plan` | `focused_sweep` | Run each distinct task command on the cumulative candidate. |
 | `integration` | `full_verify` | Reconstruct and verify the exact selection. |
@@ -112,6 +118,14 @@ Each entry contains exactly one `role` or `action`. Legal actions are:
 A role success advances one position. A passing action completes the layer and
 skips later positions. A failing action advances. Exhaustion without a pass is
 `REVIEW UNRESOLVED, HUMAN DECISION` with exit zero and preserved evidence.
+
+`preflight` strictly alternates `check` actions with writable repair roles and
+starts and ends with the action. `assent run` enters it before task execution;
+the first passing check skips all repair roles. The repairer may change only
+declarative Assent input named by check evidence and may not change status,
+workflow cursors, scheduler evidence, receipts, Git, candidate source, or
+acceptance. A final failure stops `run` nonzero. Explicit `assent check` remains
+read-only and never enters this workflow.
 
 There is no structured verdict setting. Reviewer, fixer, or combined behavior
 comes entirely from the configured abilities. Sessions are sequential and do

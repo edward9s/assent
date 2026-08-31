@@ -12,6 +12,8 @@ import contextlib
 
 import hashlib
 
+import io
+
 import json
 
 import os
@@ -60,7 +62,7 @@ from assent.plandeps import (find_unfinished_prerequisites,
 
 from assent.plan_verification_closeout import verify_plan_action
 
-from assent.inspection import try_write_report
+from assent.inspection import check as inspection_check, try_write_report
 
 from assent.modeling import effort_identity
 
@@ -2147,38 +2149,393 @@ def run_dynamic_selection_workflow(config_path: str, assent_dir) -> int:
         return 0
     return run_selection_workflow(config_path, assent_dir, plan_names)
 
+
+_TASK_STATUS_RE = re.compile(
+    r'(?m)^[ \t]*status[ \t]*=[ \t]*"([^"\r\n]+)"[ \t]*(?:#.*)?$')
+_TASK_PREFIX_RE = re.compile(r"^(t[0-9]{3})_.+\.toml$")
+
+
+def _preflight_steps(cfg: Config) -> tuple[_RoleStep | WorkflowActionStep, ...]:
+    """Resolve the optional preflight repair workflow."""
+    steps: list[_RoleStep | WorkflowActionStep] = []
+    for step in cfg.workflow_preflight:
+        if isinstance(step, WorkflowActionStep):
+            steps.append(step)
+            continue
+        assert step.model is not None
+        steps.append(_RoleStep(
+            step.role, step.adapters, step.model, step.writes,
+            _role_policy(step)))
+    return tuple(steps)
+
+
+def _preflight_task_statuses(tasks_dir: Path) -> dict[str, tuple[str, ...]]:
+    """Read task statuses without requiring the task document to parse."""
+    found: dict[str, list[str]] = {}
+    if not tasks_dir.is_dir():
+        return {}
+    for path in tasks_dir.iterdir():
+        match = _TASK_PREFIX_RE.match(path.name)
+        if (match is None or not path.is_file()
+                or path.name.endswith(".r.toml")):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        statuses = _TASK_STATUS_RE.findall(text)
+        if statuses:
+            found.setdefault(match.group(1), []).extend(statuses)
+    return {task_id: tuple(values) for task_id, values in found.items()}
+
+
+def _preflight_control_snapshot(cfg: Config) -> dict[Path, bytes | None]:
+    """Snapshot control evidence a preflight repair role may not change."""
+    paths = {
+        cfg.assent_dir / "_integration_workflow.toml",
+        cfg.assent_dir / "_batch_verification.toml",
+        cfg.assent_dir / "_ignored-dirs.toml",
+        cfg.assent_dir / "_archived.toml",
+        cfg.tasks_dir / "_workflow.toml",
+        cfg.tasks_dir / "_runtime_test_workflow.toml",
+        cfg.tasks_dir / "_verification.toml",
+    }
+    if cfg.tasks_dir.is_dir():
+        paths.update(path for path in cfg.tasks_dir.iterdir()
+                     if path.is_file() and path.name.endswith(".r.toml"))
+    snapshot: dict[Path, bytes | None] = {}
+    for path in paths:
+        try:
+            snapshot[path] = path.read_bytes() if path.is_file() else None
+        except OSError as error:
+            raise AssentError(
+                f"Unable to snapshot protected preflight file {path}: {error}") from error
+    return snapshot
+
+
+def _preflight_git_fingerprint(root: Path) -> bytes:
+    """Describe HEAD plus tracked and untracked source changes outside .assent."""
+    pieces: list[bytes] = []
+    for args in (("rev-parse", "HEAD"),
+                 ("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+                 ("diff", "--binary"),
+                 ("diff", "--cached", "--binary")):
+        result = subprocess.run(
+            ["git", *args], cwd=str(root), capture_output=True)
+        if result.returncode != 0:
+            raise AssentError(
+                "Unable to snapshot Git state before preflight repair")
+        pieces.append(result.stdout)
+    return b"\0".join(pieces)
+
+
+def _preflight_editable_snapshot(cfg: Config) -> dict[Path, bytes | None]:
+    """Read declarative files whose changes must be disclosed in the report."""
+    paths = {
+        contracts.contract_path(name) for name in contracts.CONTRACT_NAMES
+    }
+    paths.update(
+        source.path for source in cfg.sources if source.path is not None)
+    if cfg.config_path is not None:
+        paths.add(cfg.config_path)
+    if cfg.tasks_dir.is_dir():
+        for path in cfg.tasks_dir.iterdir():
+            if not path.is_file() or path.name.endswith(".r.toml"):
+                continue
+            if (_TASK_PREFIX_RE.match(path.name)
+                    or path.name in {"_plan_deps.toml", "_runtime_test.toml"}):
+                paths.add(path)
+    snapshot: dict[Path, bytes | None] = {}
+    for path in paths:
+        assert path is not None
+        try:
+            snapshot[path] = path.read_bytes() if path.is_file() else None
+        except OSError as error:
+            raise AssentError(
+                f"Unable to snapshot preflight repair input {path}: {error}") from error
+    return snapshot
+
+
+def _preflight_changed_files(
+        cfg: Config, before: dict[Path, bytes | None]) -> tuple[Path, ...]:
+    after = _preflight_editable_snapshot(cfg)
+    paths = set(before) | set(after)
+    return tuple(sorted(
+        (path for path in paths if before.get(path) != after.get(path)),
+        key=lambda path: str(path)))
+
+
+def _preflight_prompt(cfg: Config, step: _RoleStep, evidence: str) -> str:
+    """Build one management-plane repair prompt from authoritative contracts."""
+    instructions_text = contracts.installed_contract_text("instructions.md")
+    format_text = contracts.installed_contract_text("format.md")
+    workflow_text = contracts.installed_contract_text("workflow.md")
+    config_path = cfg.config_path or (cfg.assent_dir / "assent.toml")
+    return f"""You are the configured Assent preflight repair role.
+
+Working directory: {cfg.root}
+Selected plan directory: {cfg.tasks_dir}
+Project configuration: {config_path}
+
+{step.prompt}
+
+The failed read-only check follows:
+
+{evidence}
+
+Repair only declarative Assent input named by that evidence. Preserve every
+task's meaning, dependency, verification command, and status. Do not edit
+candidate source, journals, workflow cursors, scheduler evidence, receipts,
+Git state, or acceptance state. Do not run Git, Assent, tests, or verification.
+The scheduler reruns the complete check and alone decides whether this repair
+passed.
+
+Current canonical working instructions:
+
+{instructions_text}
+
+Current canonical plan-format contract:
+
+{format_text}
+
+Current canonical workflow contract:
+
+{workflow_text}
+
+Return only a concise account of the files changed and why.
+"""
+
+
+def _preflight_check_action(cfg: Config) -> tuple[int, str, Config]:
+    """Run the same read-only plan check used by explicit ``assent check``."""
+    output = io.StringIO()
+    checked = cfg
+    with contextlib.redirect_stdout(output):
+        if cfg.config_path is not None:
+            try:
+                checked = load_config(cfg.config_path, cfg.tasks_name)
+            except AssentError as error:
+                print(f"Config: FAIL ({error})")
+                print("Result: some items failed")
+                code = 1
+            else:
+                code = inspection_check(checked)
+        else:
+            code = inspection_check(checked)
+    evidence = output.getvalue().rstrip()
+    print(evidence)
+    return code, evidence, checked
+
+
+def _preflight_role_adapters(
+        cfg: Config, step: _RoleStep, injected: Adapter | None
+        ) -> _AdapterRotation:
+    """Resolve a sendable bootstrap rotation for one repair role."""
+    names: list[str] = []
+    adapters: list[Adapter] = []
+    failures: list[str] = []
+    for name in step.adapters:
+        try:
+            adapter = (injected if injected is not None
+                       and name == cfg.adapter_names[0]
+                       else get_adapter(name, cfg))
+            assert adapter is not None
+            requested_model, requested_effort = cfg.adapter_settings(name).resolve(
+                step.model)
+            errors = adapter.preflight((InvocationRequest(
+                task_id=f"preflight role {step.role}", model=step.model,
+                requested_model=requested_model,
+                requested_effort=requested_effort),))
+            if errors:
+                raise AssentError("; ".join(errors))
+            if adapter is not injected:
+                probe_ok, probe = adapter.probe_cli()
+                if not probe_ok:
+                    raise AssentError(probe)
+        except AssentError as error:
+            failures.append(f"{name}: {error}")
+            continue
+        names.append(name)
+        adapters.append(adapter)
+    if not adapters:
+        raise AssentError(
+            "Preflight repair has no sendable adapter candidate ("
+            + "; ".join(failures) + ")")
+    return _AdapterRotation(tuple(names), tuple(adapters))
+
+
+def _run_preflight_role(
+        cfg: Config, step: _RoleStep, evidence: str,
+        injected: Adapter | None, sleep: Callable[[float], None],
+        now: Callable[[], datetime]) -> tuple[int, SessionIdentity | None, str]:
+    """Run one repair role with ordinary quota and adapter failover behavior."""
+    rotation = _preflight_role_adapters(cfg, step, injected)
+    failed_adapters: set[str] = set()
+    while True:
+        adapter = rotation.adapter
+        adapter_name = rotation.name
+        session = _role_session_identity(cfg, step, adapter_name)
+        print(f"\nPreflight repair role: {step.role}")
+        print(_session_line(adapter_name, step.model, session))
+        result = _invoke_adapter(
+            cfg, adapter, adapter_name, _preflight_prompt(cfg, step, evidence),
+            session.requested_model, session.requested_effort, cfg.root,
+            context_kind="preflight", context_id=f"workflow.preflight.{step.role}")
+        if result.checkpoint_resume and not result.quota_exhausted:
+            continue
+        if result.quota_exhausted:
+            if len(rotation.names) == 1:
+                _wait_for_quota(cfg, result.reset_at, sleep, now)
+            elif rotation.advance_after_quota(failed_adapters):
+                _wait_for_rotation(cfg, sleep)
+            continue
+        reason = _adapter_failure_reason(
+            result.exit_code, result.stalled, result.output,
+            result.failure_kind)
+        if result.failure_kind == "authentication":
+            action = _authentication_failover_action(
+                rotation, failed_adapters, reason)
+            if action == "switch":
+                print(f"Preflight repair authentication failure: {reason}; "
+                      f"switching {adapter_name} -> {rotation.name}.")
+            else:
+                _wait_for_rotation(cfg, sleep)
+            continue
+        if result.failure_kind == "billing":
+            print(f"Preflight repair stopped for billing: {reason}")
+            return 1, session, result.output
+        if _adapter_availability_failed(result):
+            if rotation.advance_after_failure(failed_adapters):
+                print(f"Preflight repair adapter failure: {reason}; switching "
+                      f"{adapter_name} -> {rotation.name}.")
+            else:
+                print(f"Preflight repair adapters unavailable: {reason}; "
+                      f"waiting before restarting with {rotation.name}.")
+                _wait_for_rotation(cfg, sleep)
+            continue
+        if result.exit_code != 0 or result.stalled:
+            print(f"Preflight repair role failed: {reason}")
+            return result.exit_code or 1, session, result.output
+        return 0, session, result.output
+
+
+def _record_preflight_repairs(
+        cfg: Config,
+        repairs: list[tuple[SessionIdentity, str, tuple[Path, ...]]],
+        now: Callable[[], datetime]) -> None:
+    """Put successful automatic contract repairs in the acceptance journal."""
+    if not repairs:
+        return
+    plan = Plan.parse(cfg.tasks_dir)
+    journal = plan.tasks[0].journal_path
+    for session, output, changed in repairs:
+        names = [
+            str(path.relative_to(cfg.root)) if path.is_relative_to(cfg.root)
+            else str(path)
+            for path in changed]
+        detail = ("Changed declarative files:\n"
+                  + "\n".join(f"- {name}" for name in names)
+                  + "\n\nSession output:\n"
+                  + _bounded_session_evidence(output))
+        append_entry(
+            journal, by="scheduler", event="preflight_repair",
+            summary="Automatic preflight repair passed the complete check",
+            detail=detail, agent=session.agent,
+            requested_model=session.requested_model,
+            requested_effort=session.requested_effort,
+            time_str=now().isoformat(timespec="seconds"))
+
+
+def _run_preflight_workflow(
+        cfg: Config, *, adapter: Adapter | None,
+        sleep: Callable[[float], None], now: Callable[[], datetime]
+        ) -> tuple[int, Config]:
+    """Run configured check/repair/check steps without changing run cursors."""
+    steps = _preflight_steps(cfg)
+    if not steps:
+        return 0, cfg
+    evidence = ""
+    repairs: list[tuple[SessionIdentity, str, tuple[Path, ...]]] = []
+    for index, step in enumerate(steps):
+        if isinstance(step, WorkflowActionStep):
+            print(f"\nPreflight workflow step {index + 1}/{len(steps)}: check")
+            code, evidence, cfg = _preflight_check_action(cfg)
+            if code == 0:
+                _record_preflight_repairs(cfg, repairs, now)
+                print("Preflight workflow: PASS")
+                return 0, cfg
+            continue
+
+        statuses = _preflight_task_statuses(cfg.tasks_dir)
+        protected = _preflight_control_snapshot(cfg)
+        git_before = _preflight_git_fingerprint(cfg.root)
+        editable = _preflight_editable_snapshot(cfg)
+        code, session, output = _run_preflight_role(
+            cfg, step, evidence, adapter, sleep, now)
+        if code != 0 or session is None:
+            return code or 1, cfg
+        protected_after = _preflight_control_snapshot(cfg)
+        violations = [
+            str(path) for path in set(protected) | set(protected_after)
+            if protected.get(path) != protected_after.get(path)]
+        current_statuses = _preflight_task_statuses(cfg.tasks_dir)
+        for task_id, prior in statuses.items():
+            if current_statuses.get(task_id) != prior:
+                violations.append(f"{task_id} status")
+        if _preflight_git_fingerprint(cfg.root) != git_before:
+            violations.append("Git source or state")
+        if violations:
+            print("Preflight repair crossed its control boundary: "
+                  + ", ".join(violations[:8]))
+            return 1, cfg
+        changed = _preflight_changed_files(cfg, editable)
+        repairs.append((session, output, changed))
+        evidence = _bounded_session_evidence(output)
+    print("Preflight workflow: unresolved; the final check did not pass")
+    return 1, cfg
+
+
+def run_preflight(cfg: Config, *, adapter: Adapter | None = None,
+                  sleep: Callable[[float], None] | None = None,
+                  now: Callable[[], datetime] | None = None) -> int:
+    """Run only the configured preflight, before whole-project scheduling."""
+    if not cfg.workflow_preflight:
+        return 0
+    if not has_git_marker(cfg.root):
+        print(GIT_REQUIRED_MESSAGE)
+        return 1
+    sleep = sleep or interruptible_sleep
+    now = now or (lambda: datetime.now(timezone.utc))
+    try:
+        with lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name):
+            code, _checked = _run_preflight_workflow(
+                cfg, adapter=adapter, sleep=sleep, now=now)
+            return code
+    except KeyboardInterrupt:
+        print("Preflight interrupted; declarative repairs were preserved.")
+        return 130
+    except _AuthenticationRequired as error:
+        print(f"Preflight repair stopped: {error}")
+        return 1
+    except lockfile.LockBusy as error:
+        print(str(error))
+        return 1
+    except (AssentError, OSError) as error:
+        print(f"Preflight repair stopped: {error}")
+        return 1
+
+
 def run(cfg: Config, *, adapter: Adapter | None = None,
         sleep: Callable[[float], None] | None = None,
         now: Callable[[], datetime] | None = None) -> int:
     """Run tasks until all are DONE/BLOCKED/SKIP. Return the process exit code.
 
-    First check plan prerequisites, then take the plan's file lock; the lock covers
-    the whole run (including the long sleeps of quota waiting); if another run is already
+    The plan lock covers the preflight repair workflow and the whole source run,
+    including long quota waits; if another run is already
     running in the same plan, print a message and fail with exit code 1 without touching
     anything in the working tree. status / check / report are read-only, take no lock, and can
     be used while a run is in progress.
     """
-    # The final global-contracts gate.  The CLI refuses earlier with the same
-    # message, but a library caller reaches the adapters only through here, so
-    # this check -- not that one -- is what guarantees no session can start
-    # against a missing or out-of-date ~/.assent contract.
-    try:
-        contracts.require_contracts()
-    except AssentError as e:
-        print(f"Global contracts: FAIL ({e})")
-        return 1
-
-    try:
-        unfinished = find_unfinished_prerequisites(cfg.tasks_dir)
-    except AssentError as e:
-        print(f"Prerequisite plan gate: FAIL ({e})")
-        return 1
-    if unfinished:
-        print("Prerequisite plans not finished, refusing to run:")
-        for prerequisite in unfinished:
-            print(f"  - {prerequisite.message()}")
-        return 1
-
     if not has_git_marker(cfg.root):
         print(GIT_REQUIRED_MESSAGE)
         return 1
@@ -2193,9 +2550,40 @@ def run(cfg: Config, *, adapter: Adapter | None = None,
     result: int
     try:
         with lockfile.hold_lock(cfg.tasks_dir, cfg.tasks_name):
+            preflight_code, cfg = _run_preflight_workflow(
+                cfg, adapter=adapter, sleep=sleep, now=now)
+            if preflight_code != 0:
+                return preflight_code
+            # A config with no preflight layer retains the same authoritative
+            # contract gate; a configured check action has already proved it.
+            try:
+                contracts.require_contracts()
+            except AssentError as e:
+                print(f"Global contracts: FAIL ({e})")
+                return 1
+            try:
+                unfinished = find_unfinished_prerequisites(cfg.tasks_dir)
+            except AssentError as e:
+                print(f"Prerequisite plan gate: FAIL ({e})")
+                return 1
+            if unfinished:
+                print("Prerequisite plans not finished, refusing to run:")
+                for prerequisite in unfinished:
+                    print(f"  - {prerequisite.message()}")
+                return 1
             result = _run_locked(cfg, adapter, sleep, now)
+    except KeyboardInterrupt:
+        print("Preflight interrupted; declarative repairs and the original "
+              "workflow cursor were preserved.")
+        return 130
+    except _AuthenticationRequired as error:
+        print(f"Preflight repair stopped: {error}")
+        return 1
     except lockfile.LockBusy as e:
         print(str(e))
+        return 1
+    except (AssentError, OSError) as error:
+        print(f"Preflight repair stopped: {error}")
         return 1
     if result != 0:
         return result

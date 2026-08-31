@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TextIO
 
 from assent import AssentError, gitops
-from assent.config import load_config
+from assent.config import list_task_plans, load_config
 from assent.plandeps import (archived_plan_names, is_upstream_complete,
                                parse_plan_dependency_graph,
                                resolve_plan_base)
@@ -458,6 +458,19 @@ def run_all(config_path: str, assent_dir: str | Path, jobs: int = 1) -> int:
     if not (assent_dir.parent / ".git").exists():
         print(_GIT_REQUIRED_MESSAGE)
         return 1
+    # Repair declarative inputs before dependency or task parsing can reject an
+    # older plan.  This pass is sequential, so concurrent plan workers never
+    # race while repairing shared configuration or global contracts.
+    from assent import engine
+    for plan_name in list_task_plans(assent_dir):
+        try:
+            cfg = load_config(config_path, plan_name)
+        except AssentError as error:
+            print(f"Config error: {error}")
+            return 1
+        result = engine.run_preflight(cfg)
+        if result != 0:
+            return result
     active: dict[str, subprocess.Popen] = {}
     readers: dict[str, threading.Thread] = {}
     output: queue.Queue[tuple[str, str]] = queue.Queue()
