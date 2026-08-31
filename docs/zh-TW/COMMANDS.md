@@ -44,11 +44,11 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 
 ## 初始化專案
 
-`assent init` 會先詢問是否在 `.assent/assent.toml` 建立專案自有的 runtime-test
-設定。同意後，它會詢問一或多個 commands，並從 packaged project template 產生
-command 值與 runtime-test workflow；不會從 verifier 或其他專案檔案推測 runtime
-command。既有專案設定與 template 不同時，必須先確認才會取代，原檔保存為
-`.assent/assent.toml.bak`。
+`assent init` 會安裝共用契約與設定，並建立 fail-closed 的
+`.assent/verify.py` 骨架，不詢問 verification 或 runtime command。更新 framework
+時會保留既有 project-owned verifier command block，並原樣保留
+`.assent/assent.toml`。Planning meeting 必須在最後一次 `assent check` 前配置
+verifier 與 plan runtime decision。
 
 ## 常見用法
 

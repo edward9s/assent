@@ -45,13 +45,12 @@ project-location rules.
 
 ## Initialize a project
 
-`assent init` asks before creating project-owned runtime-test settings at
-`.assent/assent.toml`. When approved, it asks for one or more commands and
-renders that command value plus the runtime-test workflow from the packaged
-project template. It never infers a runtime command from the verifier or other
-project files. If an existing project settings file differs from the template,
-replacement requires confirmation and preserves the prior file as
-`.assent/assent.toml.bak`.
+`assent init` installs the shared contracts and settings and creates a
+fail-closed `.assent/verify.py` skeleton without asking for verification or
+runtime commands. It preserves an existing project-owned verifier command block
+when refreshing the framework and preserves `.assent/assent.toml` unchanged.
+The planning meeting configures the verifier and plan runtime decision before
+its final `assent check`.
 
 ## Common choices
 

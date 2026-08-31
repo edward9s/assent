@@ -167,9 +167,10 @@ use `workflow = [{ action = "focused_test" }]` when no AI session is wanted.
 
 Runtime testing has its own workflow layer and does not reuse task, plan, or
 integration actions. The shared settings define the writable
-`runtime_repairer` role. The project template defines a strict alternating
-`[workflow].runtime_test` array of `runtime_test` actions and that repair role.
-A custom runtime role must be writable and state a model; the array begins and
+`runtime_repairer` role. When a plan selects `explicit` or `after_plan`, the
+planning meeting defines a strict alternating `[workflow].runtime_test` array
+of `runtime_test` actions and that repair role in `.assent/assent.toml`. A
+custom runtime role must be writable and state a model; the array begins and
 ends with an action.
 
 The main-candidate command is project-specific and must be stated in the
@@ -187,10 +188,9 @@ For several ordered commands, keep the same singular key and use an array:
 command = ["python tools/probe_a.py", "python tools/probe_b.py"]
 ```
 
-`assent init` asks before creating this project file, then asks for the command
-entries and renders both the command value and runtime-test workflow from its
-packaged project template. The ability and role definitions remain inherited
-from `~/.assent/assent.toml`.
+`assent init` neither asks for nor creates this optional main-candidate command.
+Configure it explicitly only when `assent test` without `PLAN` is needed. The
+ability and role definitions remain inherited from `~/.assent/assent.toml`.
 
 This `[runtime_test].command` accepts one non-empty string or a non-empty array
 of non-empty strings and is used only by `assent test` without `PLAN`.

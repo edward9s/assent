@@ -34,6 +34,10 @@ from assent import AssentError, gitops, pathops
 from assent.config import Config
 
 VERIFY_COMMAND = "python .assent/verify.py"
+UNCONFIGURED_VERIFIER_LINES = (
+    b"# assent-project-verifier: unconfigured",
+    b'fail("project verification is not configured")',
+)
 RECEIPT_STATUSES = ("PASSED", "FAILED")
 OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -156,7 +160,16 @@ def verifier_digest(cfg: Config) -> str:
     script = (cfg.assent_dir / "verify.py").resolve()
     if not script.is_file():
         raise AssentError(f"Verification script not found: {script}")
-    return sha256_file(script)
+    try:
+        content = script.read_bytes()
+    except OSError as e:
+        raise AssentError(
+            f"Unable to read verification script {script}: {e}") from e
+    if any(line in content for line in UNCONFIGURED_VERIFIER_LINES):
+        raise AssentError(
+            f"Project verification is not configured in {script}; the planning "
+            "meeting must replace the fail-closed project-test block")
+    return hashlib.sha256(content).hexdigest()
 
 
 def summary(*parts: str, retain_start: bool = False) -> str:

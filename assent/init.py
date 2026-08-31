@@ -1,14 +1,10 @@
 """Initialize Assent user contracts and project support files safely."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-import json
 import os
 from pathlib import Path
-import shlex
 import tempfile
 import tomllib
-from collections.abc import Sequence
 
 from assent import AssentError, contracts
 from assent.user_home import user_assent_dir, user_config_path
@@ -24,82 +20,8 @@ _BRIDGE_LINE = (
 )
 _BRIDGE_BLOCK = "\n".join((_BRIDGE_BEGIN, _BRIDGE_LINE, _BRIDGE_END))
 _GITIGNORE_LINES = [".assent/"]
-_DIRECT_API_DEFAULT = object()
 _PROJECT_TESTS_BEGIN = "# --- Project test commands begin (project-owned) ---"
 _PROJECT_TESTS_END = "# --- Project test commands end ---"
-_PROJECT_RUNTIME_COMMAND_MARKER = "{{ runtime_test_command }}"
-
-
-@dataclass(frozen=True)
-class _TestSelection:
-    """The one project-test line activated in a generated verifier."""
-
-    label: str
-    verifier_line: str
-
-
-_BUILTIN_TESTS = {
-    "unittest": _TestSelection(
-        "parallel unittest", "run_unittest_parallel()"),
-    "pytest": _TestSelection("pytest", 'run("pytest")'),
-    "npm": _TestSelection("npm test", 'run("npm", "test")'),
-    "flutter": _TestSelection("Flutter test", 'run("flutter", "test")'),
-    "dotnet": _TestSelection("dotnet test", 'run("dotnet", "test")'),
-    "maven": _TestSelection("Maven test", 'run("mvn", "test")'),
-    "gradle": _TestSelection("Gradle test", 'run("gradle", "test")'),
-    "cmake-ctest": _TestSelection(
-        "CMake/CTest",
-        'run("ctest", "--test-dir", "build", "--output-on-failure")'),
-    "make": _TestSelection("Make test", 'run("make", "test")'),
-}
-_BUILTIN_ALIASES = {
-    "1": "unittest",
-    "parallel-unittest": "unittest",
-    "parallel unittest": "unittest",
-    "unittest-parallel": "unittest",
-    "parallel_unittest": "unittest",
-    "python-unittest": "unittest",
-    "python unittest": "unittest",
-    "2": "pytest",
-    "3": "npm",
-    "npm-test": "npm",
-    "npm test": "npm",
-    "4": "flutter",
-    "flutter-test": "flutter",
-    "flutter test": "flutter",
-    "5": "dotnet",
-    "dotnet-test": "dotnet",
-    "dotnet test": "dotnet",
-    "6": "maven",
-    "mvn": "maven",
-    "mvn-test": "maven",
-    "mvn test": "maven",
-    "7": "gradle",
-    "gradle-test": "gradle",
-    "gradle test": "gradle",
-    "8": "cmake-ctest",
-    "cmake": "cmake-ctest",
-    "ctest": "cmake-ctest",
-    "cmake-test": "cmake-ctest",
-    "cmake ctest": "cmake-ctest",
-    "9": "make",
-    "make-test": "make",
-    "make test": "make",
-}
-_CUSTOM_ALIASES = {"0", "custom", "custom-command", "custom command"}
-_MENU = (
-    ("0", "Custom command (argv passed to run(...))"),
-    ("1", "Parallel unittest (run_unittest_parallel())"),
-    ("2", "pytest (run(\"pytest\"))"),
-    ("3", "npm test (run(\"npm\", \"test\"))"),
-    ("4", "Flutter test (run(\"flutter\", \"test\"))"),
-    ("5", "dotnet test (run(\"dotnet\", \"test\"))"),
-    ("6", "Maven test (run(\"mvn\", \"test\"))"),
-    ("7", "Gradle test (run(\"gradle\", \"test\"))"),
-    ("8", "CMake/CTest (run(\"ctest\", \"--test-dir\", \"build\", "
-         "\"--output-on-failure\"))"),
-    ("9", "Make test (run(\"make\", \"test\"))"),
-)
 
 
 def _template(name: str) -> str:
@@ -120,151 +42,8 @@ def _read_file(path: Path, description: str) -> str:
         raise AssentError(f"Cannot read {description} {path}: {e}") from e
 
 
-def _normalise_choice(value: str) -> str:
-    return " ".join(value.strip().casefold().replace("_", "-").split())
-
-
-def _custom_selection(command: str | Sequence[str]) -> _TestSelection:
-    """Parse a command into argv and render it without shell execution."""
-    if isinstance(command, str):
-        if not command.strip():
-            raise AssentError("custom test command is empty")
-        try:
-            argv = shlex.split(command, posix=True)
-        except ValueError as e:
-            raise AssentError(
-                f"custom test command is malformed: {e}") from e
-    else:
-        argv = list(command)
-
-    if not argv or not isinstance(argv[0], str) or not argv[0].strip():
-        raise AssentError("custom test command is empty")
-    for argument in argv:
-        if not isinstance(argument, str) or any(
-                ord(char) < 0x20 or ord(char) == 0x7F
-                for char in argument):
-            raise AssentError(
-                "custom test command contains a control character")
-
-    rendered = ", ".join(json.dumps(argument, ensure_ascii=False)
-                          for argument in argv)
-    return _TestSelection("custom command", f"run({rendered})")
-
-
-def _selection_from_values(values: Sequence[str]) -> _TestSelection:
-    if not values:
-        raise AssentError(
-            "invalid test selection; choose 0-9, unittest, pytest, npm, "
-            "flutter, dotnet, maven, gradle, cmake-ctest, make, or "
-            "custom:<command>")
-    if not all(isinstance(value, str) for value in values):
-        raise AssentError("test selection values must be strings")
-
-    first = values[0]
-    normalised = _normalise_choice(first)
-    builtin = _BUILTIN_ALIASES.get(normalised, normalised)
-    if builtin in _BUILTIN_TESTS:
-        if len(values) != 1:
-            raise AssentError(
-                f"test selection {first!r} does not accept a command")
-        return _BUILTIN_TESTS[builtin]
-
-    if normalised in _CUSTOM_ALIASES:
-        if len(values) == 1:
-            raise AssentError(
-                "custom test selection requires a command; use "
-                "--test custom:<command>")
-        command_values = values[1:]
-        if len(command_values) == 1:
-            return _custom_selection(command_values[0])
-        return _custom_selection(command_values)
-
-    for prefix in ("custom:", "custom="):
-        if normalised.startswith(prefix):
-            command_text = first.strip()[len(prefix):]
-            if len(values) > 1:
-                command_text = " ".join((command_text, *values[1:]))
-            return _custom_selection(command_text)
-
-    # A multi-value form is a direct argv custom command.  A quoted command
-    # line is also accepted for convenience, but a lone unknown word is an
-    # invalid choice rather than silently becoming a custom test.
-    if len(values) > 1:
-        return _custom_selection(values)
-    if any(char.isspace() for char in first.strip()):
-        return _custom_selection(first)
-    raise AssentError(
-        f"invalid test selection {first!r}; choose 0-9, unittest, pytest, "
-        "npm, flutter, dotnet, maven, gradle, cmake-ctest, make, or "
-        "custom:<command>")
-
-
-def _interactive_selection() -> _TestSelection:
-    print("Choose the project's test command before assent writes its skeleton:")
-    for number, description in _MENU:
-        print(f"  {number}. {description}")
-    try:
-        choice = input("Test choice [0-9]: ").strip()
-    except (EOFError, KeyboardInterrupt) as e:
-        raise AssentError("test selection cancelled or reached EOF") from e
-
-    if _normalise_choice(choice) in _CUSTOM_ALIASES:
-        try:
-            command = input("Custom test command: ")
-        except (EOFError, KeyboardInterrupt) as e:
-            raise AssentError("custom test command cancelled or reached EOF") from e
-        return _custom_selection(command)
-    return _selection_from_values([choice])
-
-
-def _resolve_selection(test: str | Sequence[str] | None) -> _TestSelection:
-    if test is None:
-        return _interactive_selection()
-    if isinstance(test, str):
-        return _selection_from_values([test])
-    return _selection_from_values(test)
-
-
-def _render_verifier(template: str, selection: _TestSelection) -> str:
-    """Activate exactly one commented project-test example in the template."""
-    markers = (
-        "# run_unittest_parallel()",
-        '# run("pytest")',
-        '# run("npm", "test")',
-        '# run("flutter", "test")',
-        '# run("dotnet", "test")',
-        '# run("mvn", "test")',
-        '# run("gradle", "test")',
-        '# run("ctest", "--test-dir", "build", "--output-on-failure")',
-        '# run("make", "test")',
-    )
-    active_markers = [marker for marker in markers if marker in template]
-    if len(active_markers) != len(markers):
-        raise AssentError(
-            "built-in verifier template is missing a project-test example")
-    marker = {
-        "parallel unittest": "# run_unittest_parallel()",
-        "pytest": '# run("pytest")',
-        "npm test": '# run("npm", "test")',
-        "Flutter test": '# run("flutter", "test")',
-        "dotnet test": '# run("dotnet", "test")',
-        "Maven test": '# run("mvn", "test")',
-        "Gradle test": '# run("gradle", "test")',
-        "CMake/CTest": '# run("ctest", "--test-dir", "build", "--output-on-failure")',
-        "Make test": '# run("make", "test")',
-    }.get(selection.label)
-    if marker is None:
-        # A custom command has no fixed marker; it replaces the Python unittest
-        # example, leaving every other packaged example commented.
-        marker = "# run_unittest_parallel()"
-    if template.count(marker) != 1:
-        raise AssentError(
-            f"built-in verifier template has an ambiguous test example: {marker}")
-    return template.replace(marker, selection.verifier_line, 1)
-
-
-def _verifier_framework(content: str) -> str | None:
-    """Return verifier content outside its project-owned command block."""
+def _verifier_parts(content: str) -> tuple[str, str] | None:
+    """Return the framework and project-owned block of a valid verifier."""
     lines = content.splitlines(keepends=True)
     begins = [index for index, line in enumerate(lines)
               if line.rstrip("\r\n") == _PROJECT_TESTS_BEGIN]
@@ -272,7 +51,20 @@ def _verifier_framework(content: str) -> str | None:
             if line.rstrip("\r\n") == _PROJECT_TESTS_END]
     if len(begins) != 1 or len(ends) != 1 or begins[0] >= ends[0]:
         return None
-    return "".join(lines[:begins[0]] + lines[ends[0] + 1:])
+    return (
+        "".join(lines[:begins[0]] + lines[ends[0] + 1:]),
+        "".join(lines[begins[0] + 1:ends[0]]),
+    )
+
+
+def _with_project_tests(template: str, project_tests: str) -> str:
+    """Place an existing project-owned block in the current framework."""
+    lines = template.splitlines(keepends=True)
+    begin = next(index for index, line in enumerate(lines)
+                 if line.rstrip("\r\n") == _PROJECT_TESTS_BEGIN)
+    end = next(index for index, line in enumerate(lines)
+               if line.rstrip("\r\n") == _PROJECT_TESTS_END)
+    return "".join(lines[:begin + 1]) + project_tests + "".join(lines[end:])
 
 
 def _plan_file(path: Path, content: str, description: str
@@ -304,59 +96,6 @@ def _confirm(prompt: str, *, default: bool) -> bool:
 def _backup_target(path: Path) -> Path:
     """Return the single sibling backup replaced by each update."""
     return path.with_name(f"{path.name}.bak")
-
-
-def _runtime_commands(
-        value: str | Sequence[str] | None) -> tuple[str, ...] | None:
-    """Resolve explicit commands or ask for one or more project commands."""
-    if value is None:
-        commands: list[str] = []
-        while True:
-            try:
-                command = input("Project runtime command: ")
-            except (EOFError, KeyboardInterrupt) as error:
-                raise AssentError(
-                    "runtime-test command choice cancelled or reached EOF") from error
-            if not command.strip():
-                raise AssentError("project runtime command must not be blank")
-            commands.append(command)
-            if not _confirm("Add another project runtime command?", default=False):
-                return tuple(commands)
-    raw = (value,) if isinstance(value, str) else tuple(value)
-    if not raw or not all(isinstance(command, str) and command.strip()
-                          for command in raw):
-        raise AssentError(
-            "project runtime command must be a non-empty string or sequence "
-            "of non-empty strings")
-    return raw
-
-
-def _render_project_config(template: str, commands: tuple[str, ...]) -> str:
-    """Render the one project-owned runtime settings template."""
-    if template.count(_PROJECT_RUNTIME_COMMAND_MARKER) != 1:
-        raise AssentError(
-            "built-in project settings template has an invalid runtime command marker")
-    value: str | list[str] = commands[0] if len(commands) == 1 else list(commands)
-    return template.replace(
-        _PROJECT_RUNTIME_COMMAND_MARKER,
-        json.dumps(value, ensure_ascii=False), 1)
-
-
-def _existing_runtime_commands(content: str) -> tuple[str, ...] | None:
-    """Read a usable command value from an existing project config."""
-    try:
-        data = tomllib.loads(content)
-    except tomllib.TOMLDecodeError:
-        return None
-    section = data.get("runtime_test")
-    if not isinstance(section, dict) or "command" not in section:
-        return None
-    command = section["command"]
-    raw = (command,) if isinstance(command, str) else (
-        tuple(command) if isinstance(command, list) else ())
-    if not raw or not all(isinstance(item, str) and item.strip() for item in raw):
-        return None
-    return raw
 
 
 def _validate_planned_config(root: Path, user_config_content: str,
@@ -508,20 +247,12 @@ def _apply(target: Path, content: str, plan: tuple[str, str]) -> None:
     print(f"  {state.title()}: {description}")
 
 
-def init(path: str | Path = ".",
-         test: str | Sequence[str] | None | object = _DIRECT_API_DEFAULT,
-         runtime_command: str | Sequence[str] | None | object =
-         _DIRECT_API_DEFAULT) -> int:
+def init(path: str | Path = ".") -> int:
     """Initialize the user home and a Git project.
 
-    Returns a CLI-style exit code.  The shared settings and the two contracts
+    Returns a CLI-style exit code.  The shared settings and contracts
     live in ``~/.assent``; the project keeps only what is genuinely its own.
     """
-    # The command-line dispatcher passes ``None`` when --test is omitted and
-    # therefore gets the required interactive menu.  Keep direct library calls
-    # made by older integrations deterministic instead of unexpectedly reading
-    # their stdin; callers that want the menu can pass ``test=None`` explicitly.
-    direct_api_default = test is _DIRECT_API_DEFAULT
     root = Path(path).resolve()
     if not root.is_dir():
         print(f"Error: directory does not exist: {root}")
@@ -538,65 +269,55 @@ def init(path: str | Path = ".",
         project_backups: list[tuple[Path, bytes, Path]] = []
         verifier_exists = verifier.exists()
         verify_template = _template("verify.py")
-        verifier_framework = _verifier_framework(verify_template)
-        if verifier_framework is None:
+        verifier_parts = _verifier_parts(verify_template)
+        if verifier_parts is None:
             raise AssentError(
                 "built-in verifier template has invalid project-test markers")
+        verifier_framework, _template_project_tests = verifier_parts
         if verifier_exists:
             if not verifier.is_file():
                 raise AssentError(f".assent/verify.py is not a file: {verifier}")
             existing_verifier = _read_file(verifier, ".assent/verify.py")
-            explicit_selection = test is not None and not direct_api_default
-            if explicit_selection:
-                selection = _resolve_selection(test)
-                verifier_content = _render_verifier(verify_template, selection)
-                if verifier_content == existing_verifier:
-                    verifier_plan = (
-                        "preserved", f"{verifier} (already current)")
-                else:
-                    backup = _backup_target(verifier)
-                    project_backups.append(
-                        (verifier, verifier.read_bytes(), backup))
-                    verifier_plan = (
-                        "updated",
-                        f"{verifier} ({selection.label} selected; prior file backed up)")
+            existing_parts = _verifier_parts(existing_verifier)
+            if existing_parts is None:
+                raise AssentError(
+                    f"{verifier} has invalid or duplicate project-test markers; "
+                    "repair the project-owned verifier before rerunning init")
+            existing_framework, project_tests = existing_parts
+            if existing_framework == verifier_framework:
+                verifier_content = existing_verifier
+                verifier_plan = (
+                    "preserved", f"{verifier} (framework already current)")
+            elif _confirm(
+                    f"{verifier} has a different verifier framework. Back it up "
+                    "and update the framework while preserving its project-test "
+                    "commands?", default=False):
+                verifier_content = _with_project_tests(
+                    verify_template, project_tests)
+                backup = _backup_target(verifier)
+                project_backups.append(
+                    (verifier, verifier.read_bytes(), backup))
+                verifier_plan = (
+                    "updated",
+                    f"{verifier} (framework updated; project-test commands "
+                    "preserved; prior file backed up)")
             else:
-                existing_framework = _verifier_framework(existing_verifier)
-                if existing_framework == verifier_framework:
-                    verifier_content = existing_verifier
-                    verifier_plan = (
-                        "preserved", f"{verifier} (framework already current)")
-                elif _confirm(
-                        f"{verifier} has a different verifier framework. "
-                        "Back it up and replace it?", default=False):
-                    selection = _resolve_selection(None)
-                    verifier_content = _render_verifier(
-                        verify_template, selection)
-                    backup = _backup_target(verifier)
-                    project_backups.append(
-                        (verifier, verifier.read_bytes(), backup))
-                    verifier_plan = (
-                        "updated",
-                        f"{verifier} ({selection.label} selected; prior file backed up)")
-                else:
-                    verifier_content = existing_verifier
-                    verifier_plan = (
-                        "preserved", f"{verifier} (replacement declined)")
-                    warnings.append(
-                        f"{verifier} has a different verifier framework "
-                        "and remains unchanged")
+                verifier_content = existing_verifier
+                verifier_plan = (
+                    "preserved", f"{verifier} (framework update declined)")
+                warnings.append(
+                    f"{verifier} has a different verifier framework and remains "
+                    "unchanged")
         else:
-            selection = (_BUILTIN_TESTS["unittest"] if direct_api_default
-                         else _resolve_selection(test))
-            verifier_plan = ("created", f"{verifier} ({selection.label} selected)")
-            verifier_content = _render_verifier(verify_template, selection)
+            verifier_plan = (
+                "created", f"{verifier} (project verification unconfigured)")
+            verifier_content = verify_template
 
         # The user home: settings the operator owns, contracts assent owns.
         user_dir = user_assent_dir()
         user_config = user_config_path()
         config_template = _template("assent.toml")
         adapter_template = _template("adapter.toml")
-        project_config_template = _template("project-assent.toml")
         user_adapter = user_config.with_name("adapter.toml")
         user_adapter_content: str | None = None
         user_adapter_plan: tuple[str, str] | None = None
@@ -700,65 +421,9 @@ def init(path: str | Path = ".",
                     f"project settings override is not a file: {project_config}")
             existing_project_config = _read_file(
                 project_config, "the project assent.toml")
-            if runtime_command is _DIRECT_API_DEFAULT:
-                project_config_content = existing_project_config
-                project_config_plan = (
-                    "preserved", f"{project_config} (local override, unchanged)")
-            else:
-                replacement_approved = runtime_command is not None
-                commands = (_existing_runtime_commands(existing_project_config)
-                            if runtime_command is None else
-                            _runtime_commands(runtime_command))
-                if commands is None:
-                    if _confirm(
-                            f"{project_config} has no valid runtime-test command. "
-                            "Back it up and replace it with the project runtime "
-                            "settings template?", default=False):
-                        replacement_approved = True
-                        commands = _runtime_commands(None)
-                    else:
-                        project_config_content = existing_project_config
-                        project_config_plan = (
-                            "preserved", f"{project_config} (replacement declined)")
-                        warnings.append(
-                            f"{project_config} has no valid project runtime-test "
-                            "command and remains unchanged")
-                if commands is not None:
-                    rendered = _render_project_config(
-                        project_config_template, commands)
-                    if rendered == existing_project_config:
-                        project_config_content = existing_project_config
-                        project_config_plan = (
-                            "preserved", f"{project_config} (already current)")
-                    elif (replacement_approved
-                          or _confirm(
-                              f"{project_config} differs from the current project "
-                              "runtime settings template. Back it up and replace it?",
-                              default=False)):
-                        project_config_content = rendered
-                        backup = _backup_target(project_config)
-                        project_backups.append((
-                            project_config, project_config.read_bytes(), backup))
-                        project_config_plan = (
-                            "updated",
-                            f"{project_config} (replaced; prior file backed up)")
-                    else:
-                        project_config_content = existing_project_config
-                        project_config_plan = (
-                            "preserved", f"{project_config} (replacement declined)")
-                        warnings.append(
-                            f"{project_config} differs from the current project "
-                            "runtime settings template and remains unchanged")
-        elif runtime_command is not _DIRECT_API_DEFAULT:
-            create = (runtime_command is not None or _confirm(
-                f"Create project runtime-test settings at {project_config}?",
-                default=True))
-            if create:
-                commands = _runtime_commands(runtime_command)
-                assert commands is not None
-                project_config_content = _render_project_config(
-                    project_config_template, commands)
-                project_config_plan = ("created", str(project_config))
+            project_config_content = existing_project_config
+            project_config_plan = (
+                "preserved", f"{project_config} (local override, unchanged)")
 
         project_override_removals: list[Path] = []
         if project_adapter.exists():
@@ -787,7 +452,7 @@ def init(path: str | Path = ".",
             removed_project_overrides=frozenset(project_override_removals))
 
         # Every validation and read above happens before the first
-        # write, so a bad selection or an unparsable TOML file leaves neither
+        # write, so an unparsable settings file leaves neither
         # the user home nor the project partially initialized.
         try:
             user_dir.mkdir(parents=True, exist_ok=True)
@@ -846,10 +511,10 @@ def init(path: str | Path = ".",
     print("Next steps:")
     print(f"  1. Review the shared settings in {user_config}; every project on "
           "this machine reads them")
-    print("  2. Add the selected project's tests and keep the generated "
-          ".assent/verify.py check enabled")
-    print("  3. Fill in AGENTS.md's project description and hard constraints")
-    print(f"  4. Start an interactive planning session: read "
+    print("  2. Fill in AGENTS.md's project description and hard constraints")
+    print(f"  3. Start an interactive planning session: read "
           f"{contracts.instructions_path()}")
+    print("  4. Have the planning AI configure .assent/verify.py and each "
+          "plan's _runtime_test.toml")
     print("  5. Once assent check passes, run assent run")
     return 0

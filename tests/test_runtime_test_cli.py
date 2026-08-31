@@ -38,6 +38,8 @@ class RuntimeTestCliTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.assent_dir = self.root / ".assent"
         self.assent_dir.mkdir()
+        (self.assent_dir / "verify.py").write_text(
+            "# configured verifier fixture\n", encoding="utf-8")
         self.git_marker = self.root / ".git"
         self.git_marker.mkdir()
         self.user_home = self.root / "user-assent"

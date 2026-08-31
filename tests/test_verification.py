@@ -236,8 +236,11 @@ class TestPackagedVerifier(unittest.TestCase):
         self.script = self.root / ".assent" / "verify.py"
         self.script.parent.mkdir()
         template = Path(__file__).parents[1] / "assent/templates/verify.py"
-        self.script.write_text(template.read_text(encoding="utf-8"),
-                               encoding="utf-8")
+        configured = template.read_text(encoding="utf-8").replace(
+            "# assent-project-verifier: unconfigured\n"
+            'fail("project verification is not configured")\n',
+            "# No project command is needed for these framework-only tests.\n")
+        self.script.write_text(configured, encoding="utf-8")
 
     def _git_config(self) -> None:
         for key, value in (("user.name", "Verifier Test"),

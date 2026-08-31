@@ -58,6 +58,7 @@ from assent.preflight import (GIT_REQUIRED_MESSAGE, SessionIdentity,
                               runtime_test_adapter_names,
                               runtime_test_capability_errors,
                               worktree_configuration_errors)
+from assent.verification_common import verifier_digest
 
 def _git_read(root, *args: str) -> str | None:
     """Read-only git query; a missing git or a non-zero exit returns None (used by
@@ -282,6 +283,15 @@ def _contract_lines() -> tuple[bool, list[str]]:
                    f"  {contracts.CONTRACT_REMEDY}"]
 
 
+def _project_verifier_lines(cfg: Config) -> tuple[bool, list[str]]:
+    """Require the planning meeting to configure the complete verifier."""
+    try:
+        verifier_digest(cfg)
+    except AssentError as error:
+        return False, [f"Project verifier: FAIL ({error})"]
+    return True, [f"Project verifier: OK ({cfg.assent_dir / 'verify.py'})"]
+
+
 def _runtime_test_contract_lines(
         cfg: Config) -> tuple[bool, RuntimeTestContract | None]:
     """Parse the required plan runtime-test contract and report its mode."""
@@ -335,6 +345,11 @@ def check(cfg: Config) -> int:
     contract_ok, contract_lines = _contract_lines()
     ok = ok and contract_ok
     for line in contract_lines:
+        print(line)
+
+    verifier_ok, verifier_lines = _project_verifier_lines(cfg)
+    ok = ok and verifier_ok
+    for line in verifier_lines:
         print(line)
 
     runtime_ok, runtime_contract = _runtime_test_contract_lines(cfg)

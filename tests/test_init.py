@@ -8,8 +8,10 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from assent.inspection import _project_verifier_lines
 from assent.init import (
     _BRIDGE_BEGIN,
     _BRIDGE_BLOCK,
@@ -43,7 +45,7 @@ class TestInitContractRefresh(unittest.TestCase):
 
     def test_repeat_init_refreshes_the_packaged_format_through_normal_flow(self):
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(self.root, test="unittest"), 0)
+            self.assertEqual(run_init(self.root), 0)
 
         (self.user_home / "format.md").write_text(
             "an older unsafe cleanup contract\n", encoding="utf-8")
@@ -71,7 +73,7 @@ class TestInitContractRefresh(unittest.TestCase):
         (self.user_home / "instructions.md").write_text(
             "an older working instruction\n", encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(self.root, test="unittest"), 0)
+            self.assertEqual(run_init(self.root), 0)
 
         text = " ".join((self.user_home / "instructions.md").read_text(
             encoding="utf-8").split())
@@ -90,7 +92,7 @@ class TestInitContractRefresh(unittest.TestCase):
                                                 encoding="utf-8")
 
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(self.root, test="unittest"), 0)
+            self.assertEqual(run_init(self.root), 0)
 
         for name in ("instructions.md", "format.md", "workflow.md"):
             with self.subTest(contract=name):
@@ -105,29 +107,43 @@ class TestInitContractRefresh(unittest.TestCase):
         self.assertNotIn("[runtime_test]", config_text)
         self.assertEqual(list(self.root.rglob("_runtime_test.toml")), [])
 
-    def test_init_creates_project_runtime_command_and_workflow_only(self):
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(
-                self.root,
-                test="unittest",
-                runtime_command=("python probe_a.py", "python probe_b.py")), 0)
-
-        project_config = tomllib.loads(
-            (self.root / ".assent/assent.toml").read_text(encoding="utf-8"))
-        self.assertEqual(
-            project_config["runtime_test"]["command"],
-            ["python probe_a.py", "python probe_b.py"])
-        self.assertIn("runtime_test", project_config["workflow"])
-        self.assertNotIn("abilities", project_config)
-        self.assertNotIn("roles", project_config)
-
-    def test_init_asks_before_creating_project_runtime_settings(self):
-        with patch("builtins.input", return_value="n"), \
-                contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(
-                self.root, test="unittest", runtime_command=None), 0)
+    def test_init_leaves_project_runtime_settings_for_planning(self):
+        output = io.StringIO()
+        with patch("builtins.input",
+                   side_effect=AssertionError("unexpected command prompt")), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root), 0)
 
         self.assertFalse((self.root / ".assent/assent.toml").exists())
+        self.assertIn("planning AI", output.getvalue())
+
+    def test_check_rejects_verifier_until_planning_replaces_the_marker(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run_init(self.root), 0)
+        cfg = SimpleNamespace(assent_dir=self.root / ".assent")
+
+        ok, lines = _project_verifier_lines(cfg)
+        self.assertFalse(ok)
+        self.assertIn("planning meeting must replace", lines[0])
+
+        verifier = self.root / ".assent" / "verify.py"
+        unconfigured = verifier.read_text(encoding="utf-8")
+        verifier.write_text(
+            unconfigured.replace(
+                "# assent-project-verifier: unconfigured\n", ""),
+            encoding="utf-8")
+        ok, _lines = _project_verifier_lines(cfg)
+        self.assertFalse(ok)
+
+        configured = unconfigured.replace(
+            "# assent-project-verifier: unconfigured\n"
+            'fail("project verification is not configured")\n',
+            "run_unittest_parallel()\n")
+        verifier.write_text(configured, encoding="utf-8")
+
+        ok, lines = _project_verifier_lines(cfg)
+        self.assertTrue(ok)
+        self.assertIn("Project verifier: OK", lines[0])
 
     def test_existing_global_bridge_is_stable_when_contract_wording_changes(self):
         agents = self.root / "AGENTS.md"
@@ -135,7 +151,7 @@ class TestInitContractRefresh(unittest.TestCase):
         agents.write_text(original, encoding="utf-8")
 
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(self.root, test="unittest"), 0)
+            self.assertEqual(run_init(self.root), 0)
 
         self.assertEqual(agents.read_text(encoding="utf-8"), original)
 
@@ -145,7 +161,7 @@ class TestInitContractRefresh(unittest.TestCase):
         agents.write_text(original, encoding="utf-8")
 
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(self.root, test="unittest"), 0)
+            self.assertEqual(run_init(self.root), 0)
 
         updated = agents.read_text(encoding="utf-8")
         self.assertEqual(
@@ -165,7 +181,7 @@ class TestInitContractRefresh(unittest.TestCase):
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            self.assertEqual(run_init(self.root, test="unittest"), 1)
+            self.assertEqual(run_init(self.root), 1)
 
         self.assertEqual(agents.read_text(encoding="utf-8"), original)
         self.assertIn(
@@ -181,7 +197,7 @@ class TestInitContractRefresh(unittest.TestCase):
         agents.write_text(original, encoding="utf-8")
 
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(self.root, test="unittest"), 0)
+            self.assertEqual(run_init(self.root), 0)
 
         updated = agents.read_text(encoding="utf-8")
         self.assertIn("- Keep this project rule.\n", updated)
@@ -197,7 +213,7 @@ class TestInitContractRefresh(unittest.TestCase):
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            self.assertEqual(run_init(self.root, test="unittest"), 1)
+            self.assertEqual(run_init(self.root), 1)
 
         self.assertEqual(agents.read_text(encoding="utf-8"), original)
         self.assertIn(

@@ -46,7 +46,7 @@ worktree、archive 或 Git branch。清理資料必須由人明確執行。
 在既有 Git 專案根目錄執行：
 
 ```text
-assent init --test unittest
+assent init
 
 # 先與 AI 確認需求；取得共識後，再請 AI 將討論共識建立成
 # .assent/<PLAN>/ 下的 Assent 格式計畫。
@@ -68,11 +68,11 @@ assent clean <PLAN>
 assent archive --all
 ```
 
-`assent init` 會把共用設定與三份 AI 契約安裝到 `~/.assent/`，建立專案骨架，
-並詢問專案的完整驗證方式。它也會先詢問是否建立 `.assent/assent.toml`，再記錄
-專案的單一或多個有序 runtime commands 與 runtime-test workflow。第一次執行前，
-請檢查 `~/.assent/assent.toml`、`.assent/assent.toml`、`AGENTS.md` 與
-`.assent/verify.py`。
+`assent init` 會把共用設定與三份 AI 契約安裝到 `~/.assent/`，並在不詢問 command
+的情況下建立專案骨架；新建的 `.assent/verify.py` 預設 fail-closed。第一次 live
+plan 結束規劃前，planning AI 會配置完整的 project-test block、選擇該 plan 的
+`_runtime_test.toml`、按需要加入 project runtime-test workflow，並反覆執行
+`assent check` 直到通過。
 
 ## `run` 會做什麼
 

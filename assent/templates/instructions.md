@@ -16,15 +16,26 @@
 Other documents may reference an owned rule, but must not duplicate it as a
 competing normative contract.
 
-## Planning runtime decision
+## Planning verification decisions
 
-When a planning session creates a live plan, it chooses exactly one runtime
-execution mode and creates that plan's `_runtime_test.toml` immediately. Use
-`disabled` when runtime testing is unknown or not needed; omission never means
-disabled. Use `explicit` or `after_plan` only when the plan has its own command
-or ordered commands under the singular `command` key.
-The exact schema is in `format.md`. Keep the task file's ten-field schema:
-runtime execution and command never become task fields.
+Before a planning meeting finishes a live plan, it configures the project-owned
+command block in `.assent/verify.py` from the agreed stack and acceptance
+requirements. Remove the fail-closed unconfigured marker and use the greatest
+safe parallelism supported by the declared test runner. Standard-library
+unittest uses the verifier's `run_unittest_parallel()` helper. Keep dependent
+phases ordered, and never assume an optional parallel-runner dependency that the
+project does not declare. The meeting configures commands that must work when
+implementation is complete; their files need not exist during planning, and
+the meeting does not run them.
+
+The meeting also chooses exactly one runtime execution mode and creates the
+plan's `_runtime_test.toml`. Use `disabled` only when the agreed plan needs no
+runtime gate, never because the command is unknown. Use `explicit` or
+`after_plan` only when the plan states its command or ordered commands under the
+singular `command` key. If the consensus does not determine either verification
+decision, ask the human rather than guessing or ending the meeting. The exact
+runtime schema is in `format.md`. Keep the task file's ten-field schema: runtime
+execution and command never become task fields.
 
 Contract and reader documentation must be concise, present-tense, and
 reader-oriented. Keep only text needed to act or understand; do not add

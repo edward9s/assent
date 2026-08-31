@@ -47,7 +47,7 @@ branches. Cleanup remains an explicit choice.
 Run these commands from an existing Git project:
 
 ```text
-assent init --test unittest
+assent init
 
 # First confirm requirements with the AI. After agreement, ask it to turn the
 # consensus into an Assent-format plan under .assent/<PLAN>/.
@@ -70,11 +70,11 @@ assent archive --all
 ```
 
 `assent init` installs shared settings and three AI contracts under
-`~/.assent/`, creates the project skeleton, and asks which full verifier the
-project uses. It also asks before creating `.assent/assent.toml`, then records
-the project's runtime command or ordered commands and runtime-test workflow.
-Review `~/.assent/assent.toml`, `.assent/assent.toml`, `AGENTS.md`, and
-`.assent/verify.py` before the first run.
+`~/.assent/` and creates the project skeleton without asking for commands. Its
+`.assent/verify.py` starts fail-closed. Before finishing the first live plan,
+the planning AI configures its complete project-test block, chooses that plan's
+`_runtime_test.toml`, adds a project runtime-test workflow when needed, and runs
+`assent check` until it passes.
 
 ## What happens during `run`
 

@@ -309,15 +309,6 @@ def _build_parser() -> argparse.ArgumentParser:
                      ".assent skeleton")
     init_p.add_argument("--path", default=".", metavar="DIR",
                         help="Target project root directory (default: current directory)")
-    init_p.add_argument(
-        "--test", nargs="+", metavar="CHOICE",
-        help=("Select the project test non-interactively: 0/custom followed "
-              "by an argv command (custom:<command> also accepts one quoted "
-              "command), 1/unittest, 2/pytest, 3/npm, 4/flutter, 5/dotnet, "
-              "6/maven, 7/gradle, 8/cmake-ctest, or 9/make. Omit it for the "
-              "numbered menu when creating a verifier or after agreeing to "
-              "replace one; an explicit repeat choice backs up and replaces "
-              "a differing verifier"))
 
     # The only sanctioned writer of the local ignored-directory manifest.  It needs no
     # .assent project config: it acts on the Git worktree it is run in.
@@ -581,7 +572,7 @@ def _dispatch(argv: list[str]) -> int:
             parser.error("archive requires PLAN or --all")
 
     if args.command == "init":
-        return run_init(args.path, args.test, runtime_command=None)
+        return run_init(args.path)
 
     if args.command == "doctor":
         return run_doctor()

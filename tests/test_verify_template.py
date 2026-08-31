@@ -12,6 +12,10 @@ import unittest
 from pathlib import Path
 
 TEMPLATE = Path(__file__).parents[1] / "assent/templates/verify.py"
+_UNCONFIGURED_PROJECT_BLOCK = (
+    "# assent-project-verifier: unconfigured\n"
+    'fail("project verification is not configured")\n'
+)
 
 _PASS_MODULE = (
     "import unittest\n\n"
@@ -79,8 +83,9 @@ class VerifyTemplateFixture(unittest.TestCase):
 
         template_text = TEMPLATE.read_text(encoding="utf-8")
         self.assertIn("# run_unittest_parallel()", template_text)
+        self.assertEqual(template_text.count(_UNCONFIGURED_PROJECT_BLOCK), 1)
         script_text = template_text.replace(
-            "# run_unittest_parallel()", "run_unittest_parallel()")
+            _UNCONFIGURED_PROJECT_BLOCK, "run_unittest_parallel()\n")
         self.script = self.root / "run_verify.py"
         self.script.write_text(script_text, encoding="utf-8")
 
@@ -340,12 +345,13 @@ class ResolvedCommandCase(VerifyTemplateFixture):
     """run() resolves its program through PATH/PATHEXT before spawning it."""
 
     def _write_script_with_command(self, call: str) -> None:
-        """Rewrite the fixture script with one extra run() call before the OK line."""
+        """Rewrite the fixture script with one configured project command."""
         template_text = TEMPLATE.read_text(encoding="utf-8")
-        marker = 'print("verify: OK")'
-        self.assertIn(marker, template_text)
+        self.assertEqual(template_text.count(_UNCONFIGURED_PROJECT_BLOCK), 1)
         self.script.write_text(
-            template_text.replace(marker, f"{call}\n{marker}"), encoding="utf-8")
+            template_text.replace(
+                _UNCONFIGURED_PROJECT_BLOCK, f"{call}\n"),
+            encoding="utf-8")
 
     def test_missing_command_fails_closed_without_traceback(self) -> None:
         self._write_script_with_command(

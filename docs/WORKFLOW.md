@@ -14,7 +14,12 @@ scheduler behavior. Inspect relevant source and tests as needed.
 
 Confirm requirements before writing plan files. After explicit human agreement,
 create `.assent/<PLAN>/tNNN_name.e.toml` tasks. Each task states behavior and a
-focused verification command; it does not predict a write scope.
+focused verification command; it does not predict a write scope. Before the
+meeting ends, configure `.assent/verify.py` for the agreed completed project,
+using the test runner's greatest safe parallelism, and create the plan's
+`_runtime_test.toml`. The commands may name tests or probes that the plan will
+create; planning does not run them. Use `disabled` only when the plan needs no
+runtime gate, never because its command is unknown.
 
 Planning prompt:
 
@@ -25,7 +30,8 @@ not use subagents. Inspect relevant source and tests. Report source bugs, bad
 structure, and documentation/runtime mismatches. Do not overengineer. Confirm
 the requirements first; create no files before I explicitly agree. After I
 agree, turn the consensus above into an Assent-format plan under
-.assent/<PLAN>/ and run assent check.
+.assent/<PLAN>/, configure its complete verification and runtime decisions,
+and run assent check until it passes.
 ```
 
 The plan is runnable only after `assent check` passes.

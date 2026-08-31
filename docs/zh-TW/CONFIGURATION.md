@@ -157,7 +157,8 @@ workflow = [
 ## Runtime-test 設定
 
 Runtime testing 有自己的 workflow layer，不會重用 task、plan 或 integration
-action。共用設定提供可寫入的 `runtime_repairer` role；project template 提供由
+action。共用設定提供可寫入的 `runtime_repairer` role。Plan 選擇 `explicit` 或
+`after_plan` 時，planning meeting 會在 `.assent/assent.toml` 定義由
 `runtime_test` action 與該 repair role 嚴格交替組成的 `[workflow].runtime_test`
 array。自訂 runtime role 必須可寫入並明確指定 model；array 頭尾都是 action。
 
@@ -176,9 +177,9 @@ command = "python -m unittest tests.test_runtime"
 command = ["python tools/probe_a.py", "python tools/probe_b.py"]
 ```
 
-`assent init` 會先詢問是否建立這份 project file，再詢問各 command，並從 packaged
-project template 產生 command 值與 runtime-test workflow。Ability 與 role 定義
-仍繼承自 `~/.assent/assent.toml`。
+`assent init` 不會詢問或建立這個 optional main-candidate command。只有需要執行
+不帶 `PLAN` 的 `assent test` 時才明確配置；ability 與 role 定義仍繼承自
+`~/.assent/assent.toml`。
 
 這個 `[runtime_test].command` 接受一個非空 string，或由非空 string 組成的非空
 array；只由不帶 `PLAN` 的 `assent test` 使用。每個 plan

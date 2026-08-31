@@ -7,8 +7,8 @@ file's verify field must never name it -- a task's gate is
 the narrow command proving its own acceptance, and the plan parser refuses a task
 that points here.
 Commands between the project-test markers are project-owned. Assent init
-compares only the framework outside that block and leaves every example disabled
-until the operator selects one.
+compares only the framework outside that block. The planning meeting replaces
+the fail-closed placeholder with the project's complete verification commands.
 """
 
 import concurrent.futures
@@ -247,45 +247,45 @@ run("git", "-c", DIFF_CHECK_CONFIG, "diff", "--check")
 check_committed_delta()
 
 # --- Project test commands begin (project-owned) ---
-# Assent init activates exactly one line; the
-# numbering matches the assent init menu.
+# The planning meeting replaces both unconfigured lines below. It uses the
+# greatest safe parallelism supported by the project's declared test runner;
+# standard-library unittest uses run_unittest_parallel().
+# assent-project-verifier: unconfigured
+fail("project verification is not configured")
 
-# 0. Custom command (anything not covered below):
-#    assent init --test custom:"<your test command>"
-
-# 1. Python (unittest):
+# Python (unittest):
 # run_unittest_parallel()
 
-# 2. Python (pytest):
+# Python (pytest; use native parallelism only when its dependency is declared):
 # run("ruff", "check", ".")
 # run("ruff", "format", "--check", ".")
 # run("pytest")
 
-# 3. Node / TypeScript:
+# Node / TypeScript:
 # run("npx", "prettier", "--check", ".")
 # run("npx", "eslint", ".")
 # run("npm", "test")
 
-# 4. Flutter / Dart:
+# Flutter / Dart:
 # run("dart", "format", "--output=none", "--set-exit-if-changed", ".")
 # run("flutter", "analyze")
 # run("flutter", "test")
 
-# 5. C# / .NET:
+# C# / .NET:
 # run("dotnet", "test")
 
-# 6. Java (Maven):
+# Java (Maven):
 # run("mvn", "test")
 
-# 7. Java (Gradle):
+# Java (Gradle):
 # run("gradle", "test")
 
-# 8. C / C++ (CMake + CTest; "build" is only the common default -- point
+# C / C++ (CMake + CTest; "build" is only the common default -- point
 #    --test-dir at whatever binary directory your project actually
 #    configures, e.g. cmake-build-debug or out/build/<preset>):
 # run("ctest", "--test-dir", "build", "--output-on-failure")
 
-# 9. C / C++ (Make):
+# C / C++ (Make):
 # run("make", "test")
 
 # --- Project test commands end ---

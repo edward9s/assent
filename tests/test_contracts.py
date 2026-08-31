@@ -192,26 +192,31 @@ class TestContractContent(unittest.TestCase):
                 "Array order is execution order",
                 "Every live plan contains exactly one",
                 "There is no fallback, alias, migration",
-                "including when it selects `disabled`"):
+                "including when it selects `disabled`",
+                "Unknown never means `disabled`"):
             with self.subTest(phrase=phrase):
                 self.assertIn(" ".join(phrase.split()), compact)
         self.assertNotIn("[runtime_test].command", text)
         self.assertNotIn("project command", text)
 
-    def test_planning_instructions_choose_runtime_without_changing_task_schema(self):
+    def test_planning_instructions_configure_both_verification_gates(self):
         text = (_PROJECT_ROOT / "assent/templates/instructions.md").read_text(
             encoding="utf-8")
         compact = " ".join(text.split())
         for phrase in (
-                "When a planning session creates a live plan",
+                "Before a planning meeting finishes a live plan",
+                "configures the project-owned command block",
+                "greatest safe parallelism",
+                "run_unittest_parallel()",
                 "chooses exactly one runtime execution mode",
-                "omission never means disabled",
+                "never because the command is unknown",
+                "ask the human rather than guessing",
                 "Keep the task file's ten-field schema",
                 "never become task fields"):
             with self.subTest(phrase=phrase):
                 self.assertIn(" ".join(phrase.split()), compact)
 
-    def test_runtime_repair_defaults_are_global_and_workflow_is_project_owned(self):
+    def test_runtime_repair_defaults_are_global(self):
         config_text = (_PROJECT_ROOT / "assent/templates/assent.toml").read_text(
             encoding="utf-8")
         data = tomllib.loads(config_text)
@@ -230,26 +235,6 @@ class TestContractContent(unittest.TestCase):
         self.assertEqual(data["roles"]["runtime_repairer"]["model"], "core")
         self.assertNotIn("runtime_test", data["workflow"])
         self.assertNotIn("[runtime_test]", config_text)
-
-        project_text = (
-            _PROJECT_ROOT / "assent/templates/project-assent.toml").read_text(
-                encoding="utf-8").replace(
-                    "{{ runtime_test_command }}", '"python runtime.py"')
-        project = tomllib.loads(project_text)
-        self.assertNotIn("abilities", project)
-        self.assertNotIn("roles", project)
-        self.assertEqual(
-            project["runtime_test"]["command"], "python runtime.py")
-        workflow = project["workflow"]["runtime_test"]
-        self.assertGreaterEqual(len(workflow), 3)
-        self.assertEqual(workflow[0], {"action": "runtime_test"})
-        self.assertEqual(workflow[-1], {"action": "runtime_test"})
-        for index, entry in enumerate(workflow):
-            with self.subTest(index=index):
-                if index % 2:
-                    self.assertEqual(entry["role"], "runtime_repairer")
-                else:
-                    self.assertEqual(entry, {"action": "runtime_test"})
 
     def test_workflow_contract_states_the_three_governing_principles(self):
         text = (_PROJECT_ROOT / "assent/templates/workflow.md").read_text(

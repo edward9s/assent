@@ -104,9 +104,11 @@ command = [
 `after_plan`. `disabled` forbids `command`. `explicit` and `after_plan`
 require `command` as either one non-empty string or a non-empty array of
 non-empty strings. Array order is execution order. There is no fallback, alias,
-migration, or omitted-file meaning for any mode. A planning session creates this file
-from the start, including when it selects `disabled`. The runtime workflow and
-the timing of `after_plan` belong to `workflow.md`.
+migration, or omitted-file meaning for any mode. A planning meeting creates
+this file before it finishes the live plan, including when it selects
+`disabled`. Unknown never means `disabled`; unresolved meaning keeps the meeting
+open. The runtime workflow and the timing of `after_plan` belong to
+`workflow.md`.
 
 ## Task file: `tNNN_name.e.toml`
 

@@ -94,6 +94,9 @@ before a task or plan session starts. Its only action is the same complete,
 read-only check used by explicit `assent check`. A passing first action ends the
 layer without spending AI tokens. Failure supplies its exact diagnostics to the
 next repair role, and the next action checks the result from the beginning.
+The check requires the planning meeting to have replaced `.assent/verify.py`'s
+fail-closed unconfigured project-test block, but it never executes that verifier
+or any declared runtime command.
 
 The repair role uses ordinary adapter rotation, authentication handling, quota
 waiting, and immediate continuation. It never changes the existing task or plan
@@ -128,9 +131,9 @@ runtime evidence before publication.
 `[workflow].runtime_test` is a separate finite linear array. Its legal action is
 `{ action = "runtime_test" }`; every role between actions is writable and has
 an explicit model, and the array strictly alternates action and role starting
-and ending with an action. The project settings template uses
-`runtime_repairer` for the repair roles. The external `command` value is one string or a non-empty string
-array. The scheduler runs array entries in order and stops at the first nonzero
+and ending with an action. The planning meeting uses `runtime_repairer` for the
+default repair roles. The external `command` value is one string or a non-empty
+string array. The scheduler runs array entries in order and stops at the first nonzero
 exit or launch failure. Evidence identifies every completed command, the failed
 command, and later entries that did not run. A repair invalidates earlier
 successes, so the next action starts again at the first command. The runtime

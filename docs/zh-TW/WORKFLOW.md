@@ -15,7 +15,11 @@ Assent 有三個人類可見階段：談妥計畫、自動執行、驗收結果�
 
 先確認需求，再寫 plan file。取得人類明確同意後，建立
 `.assent/<PLAN>/tNNN_name.e.toml` tasks。每份 task 描述行為與 focused
-verification command，不預測 write scope。
+verification command，不預測 write scope。會議結束前，依完成後的專案共識配置
+`.assent/verify.py`，使用 test runner 支援的最大安全平行度，並建立 plan 的
+`_runtime_test.toml`。Commands 可以指向 plan 將建立的 test 或 probe；規劃階段
+不執行它們。只有 plan 不需要 runtime gate 時才使用 `disabled`，不能用它表示
+command 尚未確定。
 
 規劃 prompt：
 
@@ -24,7 +28,8 @@ verification command，不預測 write scope。
 ~/.assent/format.md。請簡潔回答，不要使用子代理。按需要檢查相關原始碼與
 測試；若發現原始碼錯誤、結構問題或文件與實作不符，請直接指出。不要過度
 設計。先和我確認需求；在我明確同意前不要建立檔案。我同意後，將上述討論的
-共識建立成 .assent/<PLAN>/ 下的 Assent 格式計畫，最後執行 assent check。
+共識建立成 .assent/<PLAN>/ 下的 Assent 格式計畫，配置完整 verification 與
+runtime decisions，最後反覆執行 assent check 直到通過。
 ```
 
 `assent check` 通過後，計畫才可以執行。

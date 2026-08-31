@@ -1253,16 +1253,21 @@ class TestInit(MainTestCase):
         subprocess.run(["git", "init"], cwd=self.root, check=True,
                        capture_output=True)
 
+    def test_help_has_no_test_command_option(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit):
+            main(["init", "--help"])
+        self.assertNotIn("--test", output.getvalue())
+
     def test_creates_skeleton(self):
-        with patch("builtins.input", side_effect=(
-                "y", "python project_runtime.py", "n")):
-            code, out = self.run_main(["init", "--test", "unittest"])
+        with patch("builtins.input",
+                   side_effect=AssertionError("unexpected command prompt")):
+            code, out = self.run_main(["init"])
         self.assertEqual(code, 0)
-        for rel in (".assent/verify.py", ".assent/assent.toml",
-                    "AGENTS.md", ".gitignore"):
+        for rel in (".assent/verify.py", "AGENTS.md", ".gitignore"):
             self.assertTrue((self.root / rel).is_file(), rel)
-        # Shared settings and contracts stay in the user home. The project owns
-        # only its runtime-test override.
+        self.assertFalse((self.root / ".assent/assent.toml").exists())
+        # Shared settings and contracts stay in the user home.
         for rel in (".assent/instructions.md", ".assent/format.md"):
             self.assertFalse((self.root / rel).exists(), rel)
         for name in ("assent.toml", "instructions.md", "format.md"):
@@ -1291,7 +1296,9 @@ class TestInit(MainTestCase):
         verifier = (self.root / ".assent" / "verify.py").read_text(
             encoding="utf-8")
         self.assertNotIn("assent-verifier-template", verifier)
-        self.assertIn("\nrun_unittest_parallel()\n", verifier)
+        self.assertIn("# assent-project-verifier: unconfigured", verifier)
+        self.assertIn('fail("project verification is not configured")', verifier)
+        self.assertIn("\n# run_unittest_parallel()\n", verifier)
         self.assertIn("\n# run(\"pytest\")\n", verifier)
         self.assertIn("\n# run(\"npm\", \"test\")\n", verifier)
         self.assertIn("\n# run(\"flutter\", \"test\")\n", verifier)
@@ -1304,76 +1311,17 @@ class TestInit(MainTestCase):
         self.assertIn("\n# run(\"make\", \"test\")\n", verifier)
         self.assertIn("Created:", out)
 
-    def test_builtin_test_choices_activate_only_the_selected_command(self):
-        choices = {
-            "unittest": "run_unittest_parallel()",
-            "pytest": 'run("pytest")',
-            "npm": 'run("npm", "test")',
-            "flutter": 'run("flutter", "test")',
-            "dotnet": 'run("dotnet", "test")',
-            "maven": 'run("mvn", "test")',
-            "gradle": 'run("gradle", "test")',
-            "cmake-ctest":
-                'run("ctest", "--test-dir", "build", "--output-on-failure")',
-            "make": 'run("make", "test")',
-        }
-        for choice, active in choices.items():
-            with self.subTest(choice=choice):
-                root = self.root / choice
-                root.mkdir()
-                subprocess.run(["git", "init"], cwd=root, check=True,
-                               capture_output=True)
-                self.assertEqual(run_init(root, test=choice), 0)
-                verifier = (root / ".assent" / "verify.py").read_text(
-                    encoding="utf-8")
-                self.assertIn(f"\n{active}\n", verifier)
-                for other in choices.values():
-                    if other != active:
-                        self.assertIn(f"\n# {other}\n", verifier)
-
-    def test_cli_without_test_shows_menu_and_uses_the_selected_choice(self):
-        with patch("builtins.input", side_effect=(
-                "2", "y", "python project_runtime.py", "n")):
-            code, output = self.run_main(["init"])
-        self.assertEqual(code, 0)
-        self.assertIn("0. Custom command", output)
-        self.assertIn("1. Parallel unittest", output)
-        verifier = (self.root / ".assent" / "verify.py").read_text(
-            encoding="utf-8")
-        self.assertIn('\nrun("pytest")\n', verifier)
-
-    def test_custom_test_choice_is_quoted_as_argv(self):
-        self.assertEqual(
-            run_init(self.root, test=["custom", "python", "-m", "unittest",
-                                      "tests/special case"]), 0)
-        verifier = (self.root / ".assent" / "verify.py").read_text(
-            encoding="utf-8")
-        self.assertIn(
-            'run("python", "-m", "unittest", "tests/special case")', verifier)
-        self.assertNotIn("os.system", verifier)
-
-    def test_invalid_selection_and_eof_leave_a_fresh_project_untouched(self):
-        invalid_out = io.StringIO()
-        with contextlib.redirect_stdout(invalid_out):
-            self.assertEqual(run_init(self.root, test="not-a-choice"), 1)
-        self.assertIn("Refused:", invalid_out.getvalue())
-        self.assertFalse((self.root / ".assent").exists())
-
-        with patch("builtins.input", side_effect=EOFError), contextlib.redirect_stdout(
-                io.StringIO()):
-            self.assertEqual(run_init(self.root, test=None), 1)
-        self.assertFalse((self.root / ".assent").exists())
-
-    def test_empty_git_project_verifier_fails_until_tests_exist(self):
-        self.assertEqual(run_init(self.root, test="unittest"), 0)
+    def test_empty_git_project_verifier_is_fail_closed(self):
+        self.assertEqual(run_init(self.root), 0)
         result = subprocess.run(
             [sys.executable, ".assent/verify.py"], cwd=self.root,
             capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 1)
+        self.assertIn("project verification is not configured", result.stdout)
         self.assertNotIn("verify: OK", result.stdout)
 
     def test_idempotent_no_overwrite_no_duplicates(self):
-        run_init(self.root, test="unittest")
+        run_init(self.root)
         user_config = self.user_home / "assent.toml"
         user_config.write_text(
             user_config.read_text(encoding="utf-8").replace(
@@ -1429,20 +1377,20 @@ class TestInit(MainTestCase):
         self.assertEqual(
             agents_md.count("<!-- assent-instructions end -->"), 1)
 
-    def test_init_does_not_overwrite_existing_verifier(self):
-        run_init(self.root, test="unittest")
+    def test_init_refuses_existing_verifier_without_project_markers(self):
+        run_init(self.root)
         verifier = self.root / ".assent" / "verify.py"
         custom = "# project-specific verifier\n"
         verifier.write_text(custom, encoding="utf-8")
         output = io.StringIO()
-        with patch("builtins.input", return_value="n"), \
-                contextlib.redirect_stdout(output):
-            self.assertEqual(run_init(self.root), 0)
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run_init(self.root), 1)
         self.assertEqual(verifier.read_text(encoding="utf-8"), custom)
-        self.assertIn("replacement declined", output.getvalue())
+        self.assertIn("invalid or duplicate project-test markers",
+                      output.getvalue())
 
     def test_init_ignores_project_owned_verifier_commands(self):
-        run_init(self.root, test="unittest")
+        run_init(self.root)
         verifier = self.root / ".assent" / "verify.py"
         content = verifier.read_text(encoding="utf-8")
         begin = "# --- Project test commands begin (project-owned) ---"
@@ -1464,7 +1412,7 @@ class TestInit(MainTestCase):
         self.assertIn("framework already current", output.getvalue())
 
     def test_init_prompts_when_verifier_framework_differs(self):
-        run_init(self.root, test="unittest")
+        run_init(self.root)
         verifier = self.root / ".assent" / "verify.py"
         customized = verifier.read_text(encoding="utf-8").replace(
             'print("verify: OK")', 'print("project verify: OK")')
@@ -1478,50 +1426,34 @@ class TestInit(MainTestCase):
         self.assertEqual(verifier.read_text(encoding="utf-8"), customized)
         self.assertIn("different verifier framework", output.getvalue())
 
-    def test_test_option_backs_up_and_replaces_existing_verifier(self):
-        run_init(self.root, test="unittest")
+    def test_framework_update_preserves_project_commands_and_backs_up(self):
+        run_init(self.root)
         verifier = self.root / ".assent" / "verify.py"
-        before = {path: path.read_bytes() for path in (
-            verifier, self.user_home / "format.md",
-            self.user_home / "instructions.md",
-            self.user_home / "assent.toml")}
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            self.assertEqual(run_init(self.root, test="pytest"), 0)
-        backup = verifier.with_name("verify.py.bak")
-        self.assertEqual(backup.read_bytes(), before[verifier])
-        self.assertIn('\nrun("pytest")\n', verifier.read_text(encoding="utf-8"))
-        self.assertIn("Backed up:", output.getvalue())
-        for path, content in before.items():
-            if path != verifier:
-                self.assertEqual(path.read_bytes(), content)
-
-        pytest_verifier = verifier.read_bytes()
-        numbered_backup = verifier.with_name("verify.py.bak.02")
-        numbered_backup.write_bytes(b"older numbered backup\n")
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(self.root, test="npm"), 0)
-        self.assertEqual(backup.read_bytes(), pytest_verifier)
-        self.assertEqual(numbered_backup.read_bytes(), b"older numbered backup\n")
-
-    def test_differing_verifier_can_be_backed_up_and_replaced_from_menu(self):
-        run_init(self.root, test="unittest")
-        verifier = self.root / ".assent" / "verify.py"
-        custom = b"# custom verifier\n"
-        verifier.write_bytes(custom)
+        content = verifier.read_text(encoding="utf-8")
+        content = content.replace(
+            "# assent-project-verifier: unconfigured\n"
+            'fail("project verification is not configured")\n',
+            "run_unittest_parallel()\n")
+        customized = content.replace(
+            'print("verify: OK")', 'print("project verify: OK")')
+        verifier.write_text(customized, encoding="utf-8")
+        before = verifier.read_bytes()
 
         output = io.StringIO()
-        with patch("builtins.input", side_effect=("y", "2")), \
+        with patch("builtins.input", return_value="y"), \
                 contextlib.redirect_stdout(output):
             self.assertEqual(run_init(self.root), 0)
 
         backup = verifier.with_name("verify.py.bak")
-        self.assertEqual(backup.read_bytes(), custom)
-        self.assertIn('\nrun("pytest")\n', verifier.read_text(encoding="utf-8"))
-        self.assertIn("Choose the project's test command", output.getvalue())
+        self.assertEqual(backup.read_bytes(), before)
+        updated = verifier.read_text(encoding="utf-8")
+        self.assertIn("\nrun_unittest_parallel()\n", updated)
+        self.assertIn('print("verify: OK")', updated)
+        self.assertNotIn("assent-project-verifier: unconfigured", updated)
+        self.assertIn("project-test commands preserved", output.getvalue())
 
     def test_invalid_existing_toml_prevents_partial_initialization(self):
-        run_init(self.root, test="unittest")
+        run_init(self.root)
         # A stale contract would be refreshed by a successful init; here the
         # unparsable user config must stop everything before the first write.
         (self.user_home / "format.md").write_text("old format\n", encoding="utf-8")
@@ -1542,7 +1474,7 @@ class TestInit(MainTestCase):
             self.assertEqual(path.read_bytes(), content)
 
     def test_differing_settings_are_prompted_and_replaced_independently(self):
-        run_init(self.root, test="unittest")
+        run_init(self.root)
         user_config = self.user_home / "assent.toml"
         user_adapter = self.user_home / "adapter.toml"
         user_config.write_text(
@@ -1583,7 +1515,7 @@ class TestInit(MainTestCase):
             'command = "codex"', user_adapter.read_text(encoding="utf-8"))
 
     def test_effective_config_is_validated_before_contracts_are_refreshed(self):
-        run_init(self.root, test="unittest")
+        run_init(self.root)
         stale_contract = self.user_home / "format.md"
         stale_contract.write_text("stale contract\n", encoding="utf-8")
         user_config = self.user_home / "assent.toml"
@@ -1608,7 +1540,7 @@ class TestInit(MainTestCase):
         subprocess.run(["git", "init"], cwd=second, check=True,
                        capture_output=True)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(self.root, test="unittest"), 0)
+            self.assertEqual(run_init(self.root), 0)
         user_config = self.user_home / "assent.toml"
         user_config.write_text(
             user_config.read_text(encoding="utf-8").replace(
@@ -1616,7 +1548,7 @@ class TestInit(MainTestCase):
             encoding="utf-8")
         with patch("builtins.input", return_value="n"), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run_init(second, test="unittest"), 0)
+            self.assertEqual(run_init(second), 0)
         self.assertEqual(
             tomllib.loads(user_config.read_text(encoding="utf-8"))
             ["run"]["quota_poll_minutes"], 5)
@@ -1628,7 +1560,7 @@ class TestInit(MainTestCase):
 
     def test_existing_project_config_is_preserved_byte_for_byte_by_direct_api(self):
         with contextlib.redirect_stdout(io.StringIO()):
-            run_init(self.root, test="unittest")
+            run_init(self.root)
         project_config = self.root / ".assent" / "assent.toml"
         project_config.write_text(
             "[run]\nquota_poll_minutes = 3   # local override\n", encoding="utf-8")
@@ -1639,31 +1571,9 @@ class TestInit(MainTestCase):
         self.assertEqual(project_config.read_bytes(), before)
         self.assertIn("local override, unchanged", output.getvalue())
 
-    def test_project_runtime_template_replacement_is_confirmed_and_backed_up(self):
-        with contextlib.redirect_stdout(io.StringIO()):
-            run_init(self.root, test="unittest")
-        project_config = self.root / ".assent" / "assent.toml"
-        content = b"[run]\nquota_poll_minutes = 3\n"
-        project_config.write_bytes(content)
-
-        with patch("builtins.input", side_effect=(
-                "y", "python project_runtime.py", "n")), \
-                contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(
-                run_init(self.root, runtime_command=None), 0)
-
-        parsed = tomllib.loads(project_config.read_text(encoding="utf-8"))
-        self.assertEqual(
-            parsed["runtime_test"]["command"], "python project_runtime.py")
-        self.assertIn("runtime_test", parsed["workflow"])
-        self.assertEqual(
-            project_config.with_name(
-                "assent.toml.bak").read_bytes(),
-            content)
-
     def test_matching_local_contract_is_removed_and_a_differing_one_is_kept(self):
         with contextlib.redirect_stdout(io.StringIO()):
-            run_init(self.root, test="unittest")
+            run_init(self.root)
         assent_dir = self.root / ".assent"
         (assent_dir / "instructions.md").write_text(
             (_PROJECT_ROOT / "assent/templates/instructions.md").read_text(
@@ -1701,7 +1611,7 @@ class TestInit(MainTestCase):
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            self.assertEqual(run_init(self.root, test="unittest"), 1)
+            self.assertEqual(run_init(self.root), 1)
 
         self.assertEqual(agents.read_text(encoding="utf-8"), original)
         self.assertIn(
@@ -1711,7 +1621,7 @@ class TestInit(MainTestCase):
     def test_adds_one_bridge_line_to_existing_agents_md(self):
         (self.root / "AGENTS.md").write_text(
             "# 我的專案\n\n既有規則。\n", encoding="utf-8")
-        run_init(self.root, test="unittest")
+        run_init(self.root)
         text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# 我的專案"))
         self.assertIn("既有規則。", text)
@@ -1719,7 +1629,7 @@ class TestInit(MainTestCase):
         self.assertEqual(text.count("<!-- assent-instructions end -->"), 1)
 
     def test_new_agents_md_combines_template_with_managed_bridge(self):
-        run_init(self.root, test="unittest")
+        run_init(self.root)
         text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
         template = (_PROJECT_ROOT / "assent/templates/AGENTS.md").read_text(
             encoding="utf-8")
@@ -1731,7 +1641,7 @@ class TestInit(MainTestCase):
     def test_preserves_existing_ignore_lines_and_agents_md_ignore_choice(self):
         (self.root / ".gitignore").write_text(
             "cache/\nAGENTS.md\n", encoding="utf-8")
-        run_init(self.root, test="unittest")
+        run_init(self.root)
         lines = (self.root / ".gitignore").read_text(
             encoding="utf-8").splitlines()
         self.assertIn("cache/", lines)
@@ -1748,7 +1658,7 @@ class TestInit(MainTestCase):
         target.mkdir()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(run_init(target, test="unittest"), 1)
+            self.assertEqual(run_init(target), 1)
         self.assertIn("This project has no git repository yet; run git init first",
                       out.getvalue())
         self.assertFalse((target / ".assent").exists())
