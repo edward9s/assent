@@ -12,9 +12,9 @@ Task file 只使用 `prime`、`core`、`lite` 三種可攜 tier。每個 adapter
 
 ```toml
 [adapter.codex.models]
-prime = "gpt-5.6-sol/high"
+prime = "gpt-5.6-sol/medium"
 core = "gpt-5.6-luna/max"
-lite = "gpt-5.6-luna/high"
+lite = "gpt-5.6-luna/xhigh"
 ```
 
 第一個 `/` 分隔 model 與 effort。未包含 `/` 時不傳 effort，沿用供應商 CLI

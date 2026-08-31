@@ -14,9 +14,9 @@ maps a tier to one complete `model/effort` selection:
 
 ```toml
 [adapter.codex.models]
-prime = "gpt-5.6-sol/high"
+prime = "gpt-5.6-sol/medium"
 core = "gpt-5.6-luna/max"
-lite = "gpt-5.6-luna/medium"
+lite = "gpt-5.6-luna/xhigh"
 ```
 
 The first `/` separates model and effort. A selection without `/` passes no
