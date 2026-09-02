@@ -5,8 +5,8 @@
 stall_minutes = 0                 # 0 disables the session-output watchdog
 
 [run]
-quota_poll_minutes = 30           # polling interval when the quota reset time cannot be parsed
-rotation_poll_minutes = 1         # polling interval after every adapter in the rotation is quota-exhausted
+quota_poll_minutes = 10           # polling interval when the quota reset time cannot be parsed
+rotation_poll_minutes = 10        # polling interval after every adapter in the rotation is quota-exhausted
 
 # Abilities define session responsibility and write authority. Names have no
 # engine meaning.
