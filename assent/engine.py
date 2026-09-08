@@ -44,6 +44,7 @@ from assent import (AssentError, contracts, gitops, lockfile, reconcile,
 from assent.adapters import Adapter, InvocationRequest, get_adapter
 
 from assent.adapters.process import (clear_stop_wake, interruptible_sleep,
+                                     iter_output_lines, terminate_process_tree,
                                      run_subprocess as _adapter_run_subprocess,
                                      stop_wake_requested)
 
@@ -484,31 +485,6 @@ def _bounded_runtime_summary(current: str, addition: str) -> str:
     return merged[:start] + marker + merged[-(remaining - start):]
 
 
-def _terminate_runtime_process(process: subprocess.Popen) -> None:
-    """Terminate and reap the runtime command's whole process group."""
-    if process.poll() is not None:
-        process.wait()
-        return
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, check=False)
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            process.kill()
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
-
-
 def _run_runtime_test_action(
         cfg: Config, owner_dir: Path, commands: tuple[str, ...],
         state: WorkflowState, *, allow_dirty: bool = False
@@ -562,7 +538,7 @@ def _run_runtime_test_action(
             break
         try:
             assert process.stdout is not None
-            for line in process.stdout:
+            for line in iter_output_lines(process.stdout):
                 print(line, end="", flush=True)
                 record = replace(
                     record,
@@ -571,7 +547,7 @@ def _run_runtime_test_action(
                 write_runtime_test_workflow_state(owner_dir, state)
             return_code = process.wait()
         except KeyboardInterrupt:
-            _terminate_runtime_process(process)
+            terminate_process_tree(process)
             record = replace(
                 record,
                 summary=_bounded_runtime_summary(
@@ -580,7 +556,7 @@ def _run_runtime_test_action(
             write_runtime_test_workflow_state(owner_dir, state)
             raise
         except BaseException:
-            _terminate_runtime_process(process)
+            terminate_process_tree(process)
             raise
         finally:
             if process.stdout is not None:

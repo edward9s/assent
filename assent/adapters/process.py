@@ -12,7 +12,9 @@ It also owns the stop-wake mechanism every scheduler-owned blocking wait shares
 """
 from __future__ import annotations
 
+import os
 import queue
+import signal
 import subprocess
 import threading
 import time
@@ -39,8 +41,8 @@ _WAKE = object()
 # The fix is one wake mechanism shared by every such wait: an Event the sleeps
 # wait on, plus a sentinel pushed into each registered output queue.  Waking is
 # all it does -- the pending KeyboardInterrupt is still what stops the run; this
-# only gives it a bytecode boundary to land on.  Nothing polls, so the watchdog's
-# elapsed-time semantics are untouched.
+# only gives it a bytecode boundary to land on. Queue waits also return to Python
+# periodically for direct console interrupts; the watchdog keeps its own deadline.
 #
 # It lives in this module because it is the one place ``assent.engine`` and every
 # vendor adapter already depend on, and nothing in ``assent`` imports back into
@@ -94,6 +96,65 @@ def _unregister_wake_queue(waiting: "queue.Queue") -> None:
             _wake_queues.remove(waiting)
 
 
+def _get_output(waiting: "queue.Queue", timeout: float | None = None):
+    """Reach Python regularly so Windows can deliver a pending Ctrl+C."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return waiting.get_nowait()
+        try:
+            return waiting.get(timeout=.1 if remaining is None else min(.1, remaining))
+        except queue.Empty:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise
+
+
+def iter_output_lines(stream):
+    """Stream child output without parking the main thread in a pipe read."""
+    waiting = queue.Queue()
+
+    def read():
+        try:
+            for line in stream:
+                waiting.put(line)
+        except Exception as error:
+            waiting.put(error)
+        finally:
+            waiting.put(_SENTINEL)
+
+    threading.Thread(target=read, name="assent-runtime-output", daemon=True).start()
+    while True:
+        item = _get_output(waiting)
+        if item is _SENTINEL:
+            return
+        if isinstance(item, Exception):
+            raise item
+        yield item
+
+
+def terminate_process_tree(process: subprocess.Popen) -> None:
+    """Stop an owned process group before closing pipes its descendants hold."""
+    if process.poll() is not None:
+        process.wait()
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, check=False)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
                    echo=None, heartbeat_path: Path | None = None,
                    input_text: str | None = None) -> tuple[int, str, bool]:
@@ -121,6 +182,10 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
         text=True, encoding="utf-8", errors="replace", bufsize=1)
     if input_text is not None:
         popen_options["stdin"] = subprocess.PIPE
+    if os.name == "nt":
+        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_options["start_new_session"] = True
     proc = subprocess.Popen(command, **popen_options)
 
     q: "queue.Queue" = queue.Queue()
@@ -189,9 +254,9 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
             while True:
                 try:
                     if stall_seconds and stall_seconds > 0:
-                        item = q.get(timeout=stall_seconds)
+                        item = _get_output(q, timeout=stall_seconds)
                     else:
-                        item = q.get()
+                        item = _get_output(q)
                 except queue.Empty:
                     if heartbeat_path is not None:
                         try:
@@ -202,10 +267,7 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
                             last_activity = mtime
                             continue    # the log file proves the process is still alive
                     stalled = True
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
+                    terminate_process_tree(proc)
                     _close_input()
                     break
                 if item is _WAKE:
@@ -237,10 +299,7 @@ def run_subprocess(command: list[str], cwd: Path, stall_seconds: float,
             # Never rely solely on the console's own signal propagation to the child: kill it
             # here too, so an interrupt always leaves no orphaned process behind, and reap it
             # so it is not left as a zombie once this function returns.
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            terminate_process_tree(proc)
             _close_input()
             proc.wait()
             raise

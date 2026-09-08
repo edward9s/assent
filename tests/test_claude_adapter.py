@@ -6,8 +6,10 @@ probed once to record a fixture; see stream_json_ok.txt.
 """
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -359,6 +361,51 @@ class TestRunSubprocessStopWake(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(stalled)
         self.assertIn("ok", out)
+
+    def test_keyboard_interrupt_stops_silent_process_and_its_descendant(self):
+        import _thread
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pid_file = root / "descendant.pid"
+            script = (
+                "import subprocess, sys, time; from pathlib import Path; "
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import time; time.sleep(4)']); "
+                f"Path({str(pid_file)!r}).write_text(str(child.pid), encoding='utf-8'); "
+                "time.sleep(4)")
+            for watchdog in (0, 300):
+                with self.subTest(watchdog=watchdog):
+                    if pid_file.exists():
+                        pid_file.unlink()
+
+                    def interrupt():
+                        deadline = time.monotonic() + 3
+                        while not pid_file.exists() and time.monotonic() < deadline:
+                            time.sleep(.01)
+                        time.sleep(.2)
+                        _thread.interrupt_main()
+
+                    timer = threading.Thread(target=interrupt, daemon=True)
+                    timer.start()
+                    started = time.monotonic()
+                    with self.assertRaises(KeyboardInterrupt):
+                        run_subprocess(_py(script), root, stall_seconds=watchdog)
+                    timer.join(1)
+                    self.assertLess(time.monotonic() - started, 3)
+                    pid = int(pid_file.read_text(encoding="utf-8"))
+                    if os.name == "nt":
+                        listing = subprocess.run(
+                            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", check=True).stdout
+                        self.assertNotIn(f'"{pid}"', listing)
+                    else:
+                        # A killed descendant can briefly remain a zombie until reaped.
+                        status = subprocess.run(
+                            ["ps", "-o", "stat=", "-p", str(pid)],
+                            capture_output=True, text=True, encoding="utf-8",
+                            check=False).stdout.strip()
+                        self.assertTrue(not status or status.startswith("Z"))
 
 
 class TestFormatStreamEvent(unittest.TestCase):

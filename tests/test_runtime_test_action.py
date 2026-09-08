@@ -193,19 +193,23 @@ class TestRuntimeTestAction(unittest.TestCase):
         command = python_command(
             "import os,time; from pathlib import Path; "
             "Path('runtime.pid').write_text(str(os.getpid())); "
-            "\nwhile True: print('tick', flush=True); time.sleep(.05)")
+            "print('ready', flush=True); time.sleep(4); print('late', flush=True)")
 
         def interrupt_when_started():
             deadline = time.monotonic() + 3
             while not pid_file.exists() and time.monotonic() < deadline:
                 time.sleep(.01)
+            time.sleep(.2)  # Let the parent consume "ready" and block on silence.
             _thread.interrupt_main()
 
         interrupter = threading.Thread(target=interrupt_when_started)
         interrupter.start()
+        started = time.monotonic()
         with self.assertRaises(KeyboardInterrupt), redirect_stdout(io.StringIO()):
             self.run_action(command)
         interrupter.join(1)
+        self.assertLess(time.monotonic() - started, 3,
+                        "interrupt must not wait for the next output line")
         state = read_runtime_test_workflow_state(self.owner)
         self.assertIsNotNone(state)
         self.assertEqual(state.action_status, "STALE")

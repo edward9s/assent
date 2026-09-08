@@ -1324,8 +1324,9 @@ class TestInit(MainTestCase):
         run_init(self.root)
         user_config = self.user_home / "assent.toml"
         user_config.write_text(
-            user_config.read_text(encoding="utf-8").replace(
-                "quota_poll_minutes = 30", "quota_poll_minutes = 7"),
+            re.sub(r"(?m)^quota_poll_minutes\s*=\s*\d+",
+                   "quota_poll_minutes = 7",
+                   user_config.read_text(encoding="utf-8"), count=1),
             encoding="utf-8")
         (self.user_home / "instructions.md").write_text(
             "an older assent's working instructions\n", encoding="utf-8")
@@ -1543,8 +1544,9 @@ class TestInit(MainTestCase):
             self.assertEqual(run_init(self.root), 0)
         user_config = self.user_home / "assent.toml"
         user_config.write_text(
-            user_config.read_text(encoding="utf-8").replace(
-                "quota_poll_minutes = 30", "quota_poll_minutes = 5"),
+            re.sub(r"(?m)^quota_poll_minutes\s*=\s*\d+",
+                   "quota_poll_minutes = 5",
+                   user_config.read_text(encoding="utf-8"), count=1),
             encoding="utf-8")
         with patch("builtins.input", return_value="n"), \
                 contextlib.redirect_stdout(io.StringIO()):
