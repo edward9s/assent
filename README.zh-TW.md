@@ -15,13 +15,13 @@ AI 確認需求，再請 AI 將討論共識建立成 Assent 格式計畫。接�
 
 | 階段 | 人類要做的事 | 主要指令 |
 | --- | --- | --- |
-| 規劃 | 與 AI 確認需求後，明確要求：「將上述討論的共識，建立成 `.assent/<PLAN>/` 下的 Assent 格式計畫。」 | `assent check` |
-| 執行 | 讓 task、plan、integration 三層流程在有限次數內實作、測試與修復。 | `assent run` |
-| Runtime test | 執行 plan 宣告的 runtime contract，或測試目前的 main candidate。 | `assent test [PLAN]` |
-| 驗收 | 閱讀報告與 diff，再接受、重做或駁回。 | `assent report`、`assent accept` |
+| 規劃 | 與 AI 確認需求後，要求它在 `.assent/<PLAN>/` 下建立 Assent 格式計畫。 | `assent check <PLAN>` |
+| 執行 | 讓 Assent 在有限流程內實作、測試與修復指定計畫。 | `assent run <PLAN>` |
+| 驗收 | 閱讀報告與 diff，再接受、重做或駁回。 | `assent report <PLAN>`、`assent accept <PLAN>` |
 
 `DONE` 只表示執行 AI 認為任務完成；通過的 receipt 只表示重建後的結果通過
-完整驗證。兩者都不是人類批准，只有 `assent accept` 會正式整合成果。
+完整驗證。兩者都不是人類批准。`assent accept` 會把人類批准的精確驗證結果
+發布到目前 target branch；它不會替你 push 到 GitHub。
 
 ## 安裝
 
@@ -43,28 +43,47 @@ worktree、archive 或 Git branch。清理資料必須由人明確執行。
 
 ## 快速開始
 
-在既有 Git 專案根目錄執行：
+先在既有 Git 專案根目錄執行一次：
 
 ```text
 assent init
+```
 
-# 先與 AI 確認需求；取得共識後，再請 AI 將討論共識建立成
-# .assent/<PLAN>/ 下的 Assent 格式計畫。
-assent check
+`assent init` 不會自行啟動 AI session。請在同一個 repository 中開啟已登入的
+Codex、Claude 等受支援 AI CLI，先和它談妥需求，再要求它建立 Assent plan。例如：
 
-# 自動執行所有找到的計畫。
-assent run
+```text
+請和我一起規劃這項變更。先讀 AGENTS.md、~/.assent/instructions.md 與
+~/.assent/format.md。在我明確同意前不要建立 plan file。我同意需求後，將我們的
+討論共識建立成 .assent/my-plan/ 下的 Assent 格式計畫，配置完整 verification 與
+runtime decisions，最後反覆執行 assent check my-plan 直到通過。
+```
 
-# 明確執行 plan runtime test，或測試目前的 main candidate。
-assent test <PLAN>
-assent test
+接著執行這個 plan：
 
-# 閱讀證據後，再由人決定是否接受。
-assent report <PLAN>
-assent accept <PLAN>
+```text
+assent check my-plan
+assent run my-plan
+assent report my-plan
+assent accept my-plan
+```
 
-# 需要時才清除多餘 worktree 或封存已完成計畫。
-assent clean <PLAN>
+把 `my-plan` 換成 `.assent/` 下實際建立的 plan 目錄名稱。
+`assent run my-plan` 會在已設定的有限 workflow 內，自動實作、測試與修復該 plan；
+`assent report my-plan` 產生驗收證據；`assent accept my-plan` 只在人類決定後，
+把精確驗證過的結果發布到目前 target branch，不會自動 push 到 remote。
+
+第一次走流程時不必特別執行 runtime test。Plan 可以將它設成 `disabled`、要求人
+明確執行 `assent test my-plan`，或使用 `execution = "after_plan"` 讓 `assent run`
+自動執行。省略 plan 的 `assent test` 則使用 project-level runtime command 測試
+目前的 main candidate。
+
+較大的專案可以省略 plan 名稱，使用 `assent run` 排程所有找到且已 ready 的 plan；
+`assent run --jobs 2` 可讓 whole-project 執行使用平行工作。清理與封存則是明確的
+維護操作：
+
+```text
+assent clean my-plan
 assent archive --all
 ```
 
@@ -75,6 +94,9 @@ plan 結束規劃前，planning AI 會配置完整的 project-test block、選�
 `assent check` 直到通過。
 
 ## `run` 會做什麼
+
+概念上，`assent run` 會讓已設定的 AI roles 處理指定 plan，在修復嘗試之間執行
+機械檢查，驗證重建後的結果，最後停下來交給人驗收，不會自行接受成果。
 
 `[workflow]` 有 preflight repair layer、三個核心 layer，另有獨立的
 runtime-test workflow：
