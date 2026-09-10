@@ -2,24 +2,28 @@
 
 *[README](../README.md) · [Traditional Chinese](zh-TW/WORKFLOW.md)*
 
-Assent has three human-facing stages: agree on a plan, run it unattended, and
-review the result. Each AI session reads only the material needed for its stage.
+The ordinary human path is: initialize once, hold a planning meeting with any AI
+you choose, run the resulting plan, run its explicit runtime test when required,
+accept it, then archive it. The planning AI owns the final `assent check`; the
+human does not normally run that validation step separately.
+
+Each execution AI session reads only the material needed for its stage.
 
 ## 1. Planning meeting
 
-Start in the primary worktree. Read `AGENTS.md`,
-`~/.assent/instructions.md`, and `~/.assent/format.md`. Read
+Start in the primary worktree. The planning AI reads `AGENTS.md`,
+`~/.assent/instructions.md`, and `~/.assent/format.md`. It reads
 `~/.assent/workflow.md` only when changing workflow settings or checking exact
-scheduler behavior. Inspect relevant source and tests as needed.
+scheduler behavior, and inspects relevant source and tests as needed.
 
 Confirm requirements before writing plan files. After explicit human agreement,
-create `.assent/<PLAN>/tNNN_name.e.toml` tasks. Each task states behavior and a
-focused verification command; it does not predict a write scope. Before the
-meeting ends, configure `.assent/verify.py` for the agreed completed project,
-using the test runner's greatest safe parallelism, and create the plan's
-`_runtime_test.toml`. The commands may name tests or probes that the plan will
-create; planning does not run them. Use `disabled` only when the plan needs no
-runtime gate, never because its command is unknown.
+the planning AI creates `.assent/<PLAN>/tNNN_name.e.toml` tasks. Each task states
+behavior and a focused verification command; it does not predict a write scope.
+Before the meeting ends, the AI configures `.assent/verify.py` for the agreed
+completed project, using the test runner's greatest safe parallelism, and creates
+the plan's `_runtime_test.toml`. The commands may name tests or probes that the
+plan will create; planning does not run them. Use `disabled` only when the plan
+needs no runtime gate, never because its command is unknown.
 
 Planning prompt:
 
@@ -31,12 +35,17 @@ structure, and documentation/runtime mismatches. Do not overengineer. Confirm
 the requirements first; create no files before I explicitly agree. After I
 agree, turn the consensus above into an Assent-format plan under
 .assent/<PLAN>/, configure its complete verification and runtime decisions,
-and run assent check until it passes.
+and run assent check until it passes before ending this meeting.
 ```
 
-The plan is runnable only after `assent check` passes.
+The plan is runnable only after `assent check` passes. In the normal workflow,
+this is the planning AI's final validation gate. The command remains available
+to humans for diagnostics, but it is not an extra human step after the meeting.
 
 ## 2. Unattended execution
+
+After planning, the human normally starts execution with `assent run` or an
+explicit `assent run <PLAN>` selection.
 
 `assent run` first executes the plan's preflight array, then the task, plan, and
 integration arrays, with the independent runtime-test array inserted where a
@@ -75,11 +84,10 @@ guide summarizes how to use it.
 
 `assent test [PLAN]` is separate from the task, plan, and integration layers. A
 plan argument reads that live plan's `_runtime_test.toml` and runs its command
-or ordered command array
-in the plan candidate worktree. Without a plan argument, `assent test` uses the
-project-layer `[runtime_test].command` directly in the current primary working
-tree. It does not dispatch `full_verify`, write a verification receipt, or
-accept anything.
+or ordered command array in the plan candidate worktree. Without a plan
+argument, `assent test` uses the project-layer `[runtime_test].command` directly
+in the current primary working tree. It does not dispatch `full_verify`, write a
+verification receipt, or accept anything.
 
 The plan contract selects one exact `execution` mode: `disabled` has no runtime
 gate, `explicit` runs only when `assent test PLAN` is requested, and
@@ -89,31 +97,36 @@ own current runtime gate before that full verification starts. Acceptance
 rechecks the same source-bound runtime evidence; `accept` never runs runtime
 testing.
 
+For an ordinary plan that uses `explicit`, the human-facing sequence after
+`run` is therefore `assent test <PLAN>` and then `assent accept <PLAN>`.
+`after_plan` needs no separate human test command, and `disabled` has no runtime
+gate.
+
 `[workflow].runtime_test` is a finite linear array of
 `{ action = "runtime_test" }` steps and writable repair roles. The project
-template strictly alternates action, `runtime_repairer`, and action. The
-For an array, the scheduler stops at the first nonzero exit or launch failure
-and records completed, failed, and not-run entries for the repair role. After a
+template strictly alternates action, `runtime_repairer`, and action. For an
+array, the scheduler stops at the first nonzero exit or launch failure and
+records completed, failed, and not-run entries for the repair role. After a
 repair, the next action restarts at the first entry because the source changed.
 The runtime action is the authority: every entry exiting 0 records `PASSED`, a
-nonzero exit records `FAILED`, and source or command-list drift records `STALE`. Role output cannot
-declare a pass. A successful repair role that makes no working-tree source change
-ends the workflow unresolved; no extra action is invented. This source-change
-requirement applies only after a runtime command actually failed. A plan runtime
-role that settles an injected ignored-directory precondition may advance without
-changing tracked source, and the next action then evaluates the command. Main
-runtime commands run directly in the primary working tree and do not use this
-precondition.
+nonzero exit records `FAILED`, and source or command-list drift records `STALE`.
+Role output cannot declare a pass. A successful repair role that makes no
+working-tree source change ends the workflow unresolved; no extra action is
+invented. This source-change requirement applies only after a runtime command
+actually failed. A plan runtime role that settles an injected ignored-directory
+precondition may advance without changing tracked source, and the next action
+then evaluates the command. Main runtime commands run directly in the primary
+working tree and do not use this precondition.
 
 Runtime role sessions may edit ordinary source, tests, fixtures, project
-configuration, and documentation in the current working tree. They do not run commands or
-change task contracts, journals, scheduler state, receipts, Git, or acceptance
-state. Runtime state records the workflow cursor, bounded evidence, candidate
-identity, and quota waits. Quota interruption checkpoints the candidate and
-resumes that state on restart; it never reverts token-burned work. Exhaustion
-reports `REVIEW UNRESOLVED, HUMAN DECISION` with preserved evidence. A standalone
-`assent test [PLAN]` returns 1; an unattended `run` returns 0 for this human-
-decision outcome so unrelated queued plans continue.
+configuration, and documentation in the current working tree. They do not run
+commands or change task contracts, journals, scheduler state, receipts, Git, or
+acceptance state. Runtime state records the workflow cursor, bounded evidence,
+candidate identity, and quota waits. Quota interruption checkpoints the
+candidate and resumes that state on restart; it never reverts token-burned work.
+Exhaustion reports `REVIEW UNRESOLVED, HUMAN DECISION` with preserved evidence.
+A standalone `assent test [PLAN]` returns 1; an unattended `run` returns 0 for
+this human-decision outcome so unrelated queued plans continue.
 
 Plan runtime state is `.assent/<PLAN>/_runtime_test_workflow.toml` beside the
 plan contract. Main runtime state is `.assent/_runtime_test_workflow.toml`; its
@@ -160,9 +173,14 @@ Interruptions and quota waits checkpoint dirty candidate work. A later run
 resumes the persisted cursor and worktree; it does not discard token-burned
 output.
 
-## 3. Acceptance review
+## 3. Human acceptance
 
-Start with:
+Review the implementation, diff, verification evidence, and any required
+runtime-test result. `assent report <PLAN>` is an optional helper that
+regenerates a structured review agenda; it is not a mandatory step before
+acceptance.
+
+When a structured review is useful:
 
 ```text
 assent report <PLAN>
@@ -184,16 +202,39 @@ human-driven: do not accept, rework, or edit anything. Wait for the human
 decision.
 ```
 
-The human then chooses one explicit action:
+The ordinary success path ends with:
 
-- `assent accept <PLAN>` publishes receipt-backed work.
+```text
+assent accept <PLAN>
+assent archive <PLAN>
+```
+
+`accept` publishes receipt-backed work into the current target branch and never
+runs verification or runtime testing itself. `archive` is the normal final
+maintenance action after accepted work is no longer needed as a live plan.
+
+When the result needs intervention instead, the human may choose:
+
 - `assent rework <PLAN> <TASK>` reopens an existing task while preserving code.
 - `assent reject <PLAN>` is a confirmed destructive reset: it checkpoints dirty
   edits, records branch tips, removes managed worktrees and same-prefix branches,
   then resets started tasks to `TODO`.
+- `assent reconcile <PLAN>` handles a Git conflict that requires human-edited
+  reconciliation.
 
 No workflow step accepts a plan. Verification supplies evidence; `accept` is
 the human publication decision.
+
+## 4. Archive finished work
+
+`assent archive <PLAN>` strictly contains the safe cleanup performed by
+`assent clean`: it first proves and removes any redundant managed source
+worktree/branch, then compresses `.assent/<PLAN>/`, records the archive, and
+retires the live plan directory.
+
+Therefore the ordinary workflow does not run `clean` before `archive`.
+Use `assent clean` separately only when you want to remove proven-redundant
+source worktrees/branches while deliberately keeping the live plan record.
 
 ## Dependencies and stacked work
 

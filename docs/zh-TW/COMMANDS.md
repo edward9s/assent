@@ -4,8 +4,29 @@
 
 > 本文是 [英文版](../COMMANDS.md) 的正體中文翻譯；若內容不同，以英文版為準。
 
-完整 option 請直接執行 `assent <command> --help`。本文只說明如何選指令，以及
-plan selection 的重要規則。
+完整 option 請直接執行 `assent <command> --help`。本文先把一般人類流程與
+planning AI、檢查、復原指令分開，再說明 plan selection。
+
+## 人類正常流程
+
+一般情況下，人類真正需要操作的是：
+
+```text
+assent init
+# 開規劃會議；planning AI 建立 plan，並在結束會議前反覆執行
+# assent check 直到通過。
+assent run <PLAN>
+assent test <PLAN>      # runtime execution 為 explicit 時
+assent accept <PLAN>
+assent archive <PLAN>
+```
+
+`assent check` 主要是 planning contract 的 validation gate。人類可以拿它診斷，
+但正常由 planning AI 負責。`assent report` 是可選的驗收輔助，不是必走步驟。
+`assent archive` 已經包含與 `clean` 相同的安全清理，所以完成 plan 時不需要先
+另外執行 `clean`。
+
+使用 whole-project scheduler 時，`assent run` 可以省略 plan 名稱。
 
 ## Plan selection
 
@@ -21,38 +42,38 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 設定並定位專案，不是 top-level global option。`init`、`doctor` 與 `ignored-dirs`
 各有自己的專案位置規則。
 
-## 指令用途
+## 指令角色
 
-| 指令 | 用途 |
+| 指令 | 角色 |
 | --- | --- |
-| `init` | 安裝共用契約與設定，建立專案骨架。 |
-| `check` | 不開 AI，檢查計畫、設定與相依關係。 |
-| `run` | 執行 task、plan 與 integration workflow。 |
-| `test` | 執行 plan 宣告的 runtime command，或在目前 main candidate 執行 project command。 |
-| `status` | 查看一個或全部計畫的簡要狀態。 |
-| `report` | 重新產生人類驗收用的報告。 |
-| `verify` | 執行指定的機械驗證，不啟動 AI review、repair 或 accept。 |
-| `accept` | 人類依相符證據發布成果。 |
-| `reconcile` | 準備並完成由人編輯的 Git 衝突修復。 |
-| `rework` | 保留程式碼，重新開啟既有 task。 |
-| `reject` | 記錄可復原的 Git 證據後，經人確認執行破壞性重設。 |
-| `clean` | 只移除已證明多餘的 worktree/branch。 |
-| `archive` | 安全清理後封存完成的管理紀錄。 |
-| `doctor` | 診斷安裝並復原孤兒暫存 branch。 |
-| `ignored-dirs status` | 查看目前 worktree 的 ignored-directory 決定與鏈結，不做任何變更。 |
-| `ignored-dirs declare` | AI source role 記錄審查結果的 operation；只為必要目錄建立鏈結。 |
+| `init` | **人類正常流程。** 安裝共用契約與設定，建立專案骨架。 |
+| `run` | **人類正常流程。** 執行 task、plan 與 integration workflow。 |
+| `test` | **需要時的人類正常流程。** 執行 plan 宣告的 runtime command，或在目前 main candidate 執行 project command。 |
+| `accept` | **人類正常流程。** 人類依相符證據發布成果。 |
+| `archive` | **人類正常流程。** 安全清理並封存完成的管理紀錄。 |
+| `check` | **Planning AI／診斷。** 不開 AI，檢查計畫、設定與相依關係。 |
+| `report` | **可選檢查。** 重新產生人類驗收用的報告。 |
+| `status` | **可選檢查。** 查看一個或全部計畫的簡要狀態。 |
+| `verify` | **手動驗證／復原。** 執行指定的機械驗證，不啟動 AI review、repair 或 accept。 |
+| `reconcile` | **復原。** 準備並完成由人編輯的 Git 衝突修復。 |
+| `rework` | **復原。** 保留程式碼，重新開啟既有 task。 |
+| `reject` | **復原。** 記錄可復原的 Git 證據後，經人確認執行破壞性重設。 |
+| `clean` | **可選維護。** 不封存 live plan，只移除已證明多餘的 worktree/branch。 |
+| `doctor` | **診斷。** 診斷安裝並復原孤兒暫存 branch。 |
+| `ignored-dirs status` | **診斷。** 查看目前 worktree 的 ignored-directory 決定與鏈結，不做任何變更。 |
+| `ignored-dirs declare` | **AI source-role operation。** 記錄審查結果，只為必要目錄建立鏈結。 |
 
 ## 初始化專案
 
 `assent init` 會安裝共用契約與設定，並建立 fail-closed 的
 `.assent/verify.py` 骨架，不詢問 verification 或 runtime command。更新 framework
 時會保留既有 project-owned verifier command block，並原樣保留
-`.assent/assent.toml`。Planning meeting 必須在最後一次 `assent check` 前配置
-verifier 與 plan runtime decision。
+`.assent/assent.toml`。Planning meeting 負責配置 verifier 與 plan runtime decision，
+planning AI 必須在結束會議前反覆執行最後的 `assent check` 直到通過。
 
-## 常見用法
+## 執行
 
-排程所有找到的 plan：
+排程所有找到且 ready 的 plan：
 
 ```text
 assent run
@@ -82,8 +103,12 @@ assent test <PLAN>
 
 Plan 形式讀取 `.assent/<PLAN>/_runtime_test.toml`，在 plan candidate worktree
 執行其中宣告的 `command`；其值可以是單一 string 或有序 string array。Array 在
-第一個失敗 command 停止，後續項目記為 not run。`execution = "disabled"` 時，這個 plan command
-會被拒絕。省略 `PLAN` 時，則使用 `.assent/assent.toml` project layer 的
+第一個失敗 command 停止，後續項目記為 not run。`execution = "disabled"` 時會拒絕
+這個 plan command。`execution = "after_plan"` 會在 `assent run` 中自動執行，因此
+不需要人類另外 test；`execution = "explicit"` 才是 `run` 後執行
+`assent test <PLAN>` 的一般理由。
+
+省略 `PLAN` 時，使用 `.assent/assent.toml` project layer 的
 `[runtime_test].command`，直接測試目前的 primary working tree：
 
 ```text
@@ -95,7 +120,15 @@ assent test
 evidence 規則見[工作流程](WORKFLOW.md)；main command 與 repair role 的設定見
 [設定](CONFIGURATION.md)。
 
-更新單一 receipt 或驗證明確選取：
+## 可選檢查與手動驗證
+
+需要結構化的人類驗收摘要時再執行：
+
+```text
+assent report <PLAN>
+```
+
+手動更新單一 receipt 或驗證明確選取：
 
 ```text
 assent verify <PLAN>
@@ -121,25 +154,33 @@ assent verify --batch
 明確選取必須整組成功，遇到衝突就拒絕。動態 batch 回報衝突後，可以詢問是否只
 驗證其餘互不衝突的計畫。
 
-驗收與後續決定：
+## 接受、復原與封存
+
+正常成功流程是：
 
 ```text
-assent report <PLAN>
 assent accept <PLAN>
-assent rework <PLAN> <TASK>
-assent reject <PLAN>
+assent archive <PLAN>
 ```
 
 直接或明確選取的 `accept` 不會執行驗證。`accept --all` 可以重播一份新鮮 batch
 receipt；若沒有可用 batch 證據，則逐一驗證並接受，遇到第一個失敗就停止。
 
-需要時才清理或封存：
+如果結果需要介入，再使用：
+
+```text
+assent rework <PLAN> <TASK>
+assent reject <PLAN>
+assent reconcile <PLAN>
+```
+
+`archive` 嚴格包含安全清理：如果 source branch/worktree 仍存在，它會重用 `clean`
+的證明與移除流程，再壓縮並封存 live plan。因此 archive 前不需要另跑 `clean`。
+只有想清理但不封存時才使用：
 
 ```text
 assent clean
 assent clean <PLAN>
-assent archive <PLAN>
-assent archive --all
 ```
 
 明確指定的 archive 若不符合條件會回報錯誤；`--all` 則略過不符合者。兩者都沒有

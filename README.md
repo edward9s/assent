@@ -2,21 +2,31 @@
 
 *[Traditional Chinese](README.zh-TW.md)*
 
-Assent turns an agreed AI plan into isolated, repeatable work. You first confirm
-requirements with an AI, then ask it to turn the agreed consensus into an
-Assent-format plan. Let `assent run` execute and verify the work, then review the
-evidence before explicitly accepting it.
+Assent turns an agreed AI plan into isolated, repeatable work. You can use any
+AI or other process for the planning conversation; Assent takes over once that
+conversation has produced an Assent-format plan. Let `assent run` execute and
+verify the work, run the declared runtime test when required, then make the
+human acceptance decision.
 
 The source remains ordinary Git. Assent keeps its plans and runtime evidence in
 the project's ignored `.assent/` directory.
 
-## The workflow
+## Human workflow
 
-| Stage | What you do | Main command |
+The ordinary human-facing path is deliberately small:
+
+| Stage | What happens | Main command |
 | --- | --- | --- |
-| Plan | Agree on requirements with an AI, then ask it to create an Assent-format plan under `.assent/<PLAN>/`. | `assent check <PLAN>` |
-| Run | Let Assent implement, test, and repair the selected plan within finite limits. | `assent run <PLAN>` |
-| Review | Read the report and diff, then accept, rework, or reject. | `assent report <PLAN>`, `assent accept <PLAN>` |
+| Initialize | Install Assent's shared contracts/settings and create the project skeleton. | `assent init` |
+| Plan | Discuss requirements with any AI you choose. The planning AI creates `.assent/<PLAN>/` and must run `assent check` until it passes before ending the meeting. | AI-owned `assent check` |
+| Run | Let Assent implement, test, repair, and verify the plan within finite limits. | `assent run` |
+| Runtime test | Run the plan's declared runtime workflow when it is `explicit`; `after_plan` runs automatically during `run`. | `assent test <PLAN>` |
+| Accept | Make the human publication decision using matching evidence. | `assent accept <PLAN>` |
+| Archive | Retire the finished plan. Archive performs the same safe cleanup as `clean` before compressing the plan record. | `assent archive <PLAN>` |
+
+You normally do **not** need to run `assent check` yourself; it is primarily the
+planning contract's validation gate. You also do not need a separate
+`assent clean` before `archive`.
 
 `DONE` means the execution AI believes a task is finished. A passing receipt
 means the reconstructed result passed complete verification. Neither is human
@@ -26,7 +36,9 @@ result into the current target branch; it does not push anything to GitHub.
 ## Install
 
 Assent requires Python 3.11+, Git, and an installed and authenticated supported
-AI CLI such as Claude or Codex. It uses only the Python standard library.
+AI CLI for unattended execution, such as Claude or Codex. Planning itself is
+not tied to that choice: use whichever AI or workflow you want to reach the
+requirements consensus. Assent uses only the Python standard library.
 
 ```text
 python -m pip install assent
@@ -50,47 +62,49 @@ Run `assent init` once from the root of an existing Git project:
 assent init
 ```
 
-`assent init` does not start an AI session. Open an authenticated supported AI
-CLI such as Codex or Claude in the same repository, discuss the change until you
-agree on the requirements, then ask it to create the plan. For example:
+Then hold the planning meeting with the AI of your choice. Assent does not
+start or choose that planning AI. After you explicitly agree on the
+requirements, the AI creates the Assent plan and validates it before ending the
+meeting. For example:
 
 ```text
 Help me plan this change. Read AGENTS.md, ~/.assent/instructions.md and
 ~/.assent/format.md. Do not create plan files until I explicitly agree. After I
 approve the requirements, turn our consensus into an Assent-format plan under
 .assent/my-plan/, configure its verification and runtime decisions, and run
-assent check my-plan until it passes.
+assent check my-plan until it passes before ending this meeting.
 ```
 
-Then run the plan:
+Once the meeting is finished, the normal human path is:
 
 ```text
-assent check my-plan
 assent run my-plan
-assent report my-plan
+assent test my-plan
 assent accept my-plan
+assent archive my-plan
 ```
 
 Replace `my-plan` with the plan directory name created under `.assent/`.
-`assent run my-plan` implements, tests, and repairs that plan unattended within
-the configured finite workflow. `assent report my-plan` prepares the evidence
-for review. `assent accept my-plan` publishes the exact verified result into the
-current target branch only after the human decision; it does not push the branch
-to a remote.
+`assent test my-plan` is needed when the plan declares `execution = "explicit"`.
+If it declares `after_plan`, runtime testing already runs inside `assent run`;
+if it declares `disabled`, there is no runtime gate.
 
-Runtime testing is optional in the first walkthrough. A plan may declare it as
-`disabled`, require an explicit `assent test my-plan`, or run it automatically
-with `execution = "after_plan"`. Running `assent test` without a plan tests the
-current main candidate using the project-level runtime command.
+`assent archive my-plan` first performs the same mechanical safe-cleanup proof
+and source worktree/branch removal as `assent clean`, then compresses and retires
+the live plan record. A separate `clean` is only useful when you want that
+cleanup without archiving the plan yet.
 
-For larger projects, `assent run` without a plan name schedules every discovered
-ready plan, and `assent run --jobs 2` allows whole-project parallel execution.
-Cleanup and archive are explicit maintenance operations:
+For whole-project scheduling, omit the plan names:
 
 ```text
-assent clean my-plan
-assent archive --all
+assent run
+assent run --jobs 2
 ```
+
+`assent report`, `status`, `verify`, `rework`, `reject`, `reconcile`, `clean`,
+and `ignored-dirs` remain available for inspection, manual verification,
+recovery, and advanced workflows. They are not extra steps in the ordinary
+happy path.
 
 `assent init` installs shared settings and three AI contracts under
 `~/.assent/` and creates the project skeleton without asking for commands. Its
@@ -101,8 +115,8 @@ the planning AI configures its complete project-test block, chooses that plan's
 
 ## What happens during `run`
 
-At a high level, `assent run` lets configured AI roles work on the selected plan,
-uses mechanical checks between repair attempts, verifies the reconstructed
+At a high level, `assent run` lets configured AI roles work on the selected
+plans, uses mechanical checks between repair attempts, verifies the reconstructed
 result, and stops for human review rather than accepting anything automatically.
 
 The configured `[workflow]` has a preflight repair layer, three core layers,
@@ -123,19 +137,20 @@ budget: Assent never invents extra rounds.
 Explicit `assent check` remains read-only; only `assent run` enters the
 configured preflight repair workflow.
 If automation cannot decide safely, it preserves all work and reports `REVIEW
-UNRESOLVED, HUMAN DECISION` for the acceptance meeting.
+UNRESOLVED, HUMAN DECISION` for human review.
 
 A failed task action stays in the task layer and advances through the remaining
 configured steps. Plan review has a different job: checking whether the
 cumulative implementation matches the agreed plan.
 
 `assent test [PLAN]` is an independent runtime-test workflow. With `PLAN`, it
-uses that live plan's `_runtime_test.toml` command or ordered command array in the plan candidate. Without
-`PLAN`, it uses the project-layer `[runtime_test].command` directly in the
-current primary working tree. A plan using `execution = "after_plan"` runs this workflow
-after its plan layer and before integration `full_verify`; `accept` never runs
-runtime testing. An array stops at its first failed command; repair evidence
-names that command, and the next runtime action restarts the array from the beginning.
+uses that live plan's `_runtime_test.toml` command or ordered command array in
+the plan candidate. Without `PLAN`, it uses the project-layer
+`[runtime_test].command` directly in the current primary working tree. A plan
+using `execution = "after_plan"` runs this workflow after its plan layer and
+before integration `full_verify`; `accept` never runs runtime testing. An array
+stops at its first failed command; repair evidence names that command, and the
+next runtime action restarts the array from the beginning.
 
 Integration keeps the exact selected plans. Typed Git conflict evidence names
 the conflicting plan and paths, so a configured integration role may repair it
@@ -146,20 +161,20 @@ passing prefix, or calls `accept`.
 
 ## Documentation
 
-- [Workflow](docs/WORKFLOW.md): planning, unattended execution, and acceptance
-  review.
-- [Commands](docs/COMMANDS.md): selection rules and command guide.
+- [Workflow](docs/WORKFLOW.md): planning, unattended execution, runtime testing,
+  acceptance, and archive.
+- [Commands](docs/COMMANDS.md): the normal human path, command roles, and
+  selection rules.
 - [Configuration](docs/CONFIGURATION.md): initialization, adapters, models, and
   workflow settings.
 - [Verification](docs/VERIFICATION.md): focused/full checks, receipts,
   conflicts, and ignored-directory inputs.
 - [Operations](docs/OPERATIONS.md): worktrees, recovery, cleanup, and archive.
 
-English documentation is canonical. Matching
-[Traditional Chinese guides](docs/zh-TW/WORKFLOW.md) are provided for readers.
-The installed AI contracts are deliberately separate from these human guides:
-`instructions.md` gives session rules, `format.md` defines plan files, and
-`workflow.md` defines scheduler and acceptance behavior.
+English documentation is canonical. Matching Traditional Chinese guides are
+provided for readers. The installed AI contracts are deliberately separate
+from these human guides: `instructions.md` gives session rules, `format.md`
+defines plan files, and `workflow.md` defines scheduler and acceptance behavior.
 
 ## Safety boundaries
 
