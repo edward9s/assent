@@ -71,7 +71,7 @@ meeting. For example:
 Help me plan this change. Read AGENTS.md, ~/.assent/instructions.md and
 ~/.assent/format.md. Do not create plan files until I explicitly agree. After I
 approve the requirements, turn our consensus into an Assent-format plan under
-.assent/my-plan/, configure its verification and runtime decisions, and run
+.assent/, configure its verification and runtime decisions, and run
 assent check my-plan until it passes before ending this meeting.
 ```
 
