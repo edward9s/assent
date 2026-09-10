@@ -72,7 +72,7 @@ Help me plan this change. Read AGENTS.md, ~/.assent/instructions.md and
 ~/.assent/format.md. Do not create plan files until I explicitly agree. After I
 approve the requirements, turn our consensus into an Assent-format plan under
 .assent/, configure its verification and runtime decisions, and run
-assent check my-plan until it passes before ending this meeting.
+assent check until it passes before ending this meeting.
 ```
 
 Once the meeting is finished, the normal human path is:
