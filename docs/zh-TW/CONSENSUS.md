@@ -28,9 +28,11 @@ construction 與完整驗證都由程式檢查。AI 只在有限 workflow 中已
 
 ## 保留成果，無法證明就停止
 
-Assent 在失敗或中斷後保留修改與證據。無法證明 control boundary、Git identity
-或安全 transition 時，會停止，不猜測，也不自動還原。真正需要人類判斷的問題
-會明確回報，而且不會取消其他無關的排隊工作。
+Assent 在失敗或中斷後保留 candidate 修改與證據。Role 未經授權改動
+已快照的 control file 時，Assent 會精確還原該修改，讓已設定的 workflow
+繼續。無法證明還原結果、control boundary、Git identity 或安全 transition
+時，會停止而不猜測。真正需要人類判斷的問題會明確回報，而且不會取消
+其他無關的排隊工作。
 
 ## 由人接受
 

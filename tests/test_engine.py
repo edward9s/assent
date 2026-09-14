@@ -452,18 +452,27 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "DONE")
         self.assertIsNone(read_workflow_state(cfg.tasks_dir))
 
-    def test_role_cannot_edit_task_contract(self):
+    def test_role_contract_edit_is_restored_and_workflow_continues(self):
         path = self.write_task(1)
+        dependencies = self.plan_dir / "_plan_deps.toml"
+        dependencies.write_text("after = []\n", encoding="utf-8")
         cfg = self.build(extra_config=WORKFLOW)
         self.commit_all()
 
         def tamper(_prompt):
             path.write_text(path.read_text(encoding="utf-8").replace(
                 "做一件事。", "Different requirement"), encoding="utf-8")
+            dependencies.write_text(
+                'after = ["missing"]\n', encoding="utf-8")
             return result("changed the contract")
 
         self.assertEqual(self.run_with_contracts(
-            cfg, ScriptedAdapter([tamper])), 1)
+            cfg, ScriptedAdapter([tamper])), 0)
+        task = parse_task_file(path)
+        self.assertEqual(task.goal.strip(), "做一件事。")
+        self.assertEqual(task.status, "DONE")
+        self.assertEqual(
+            dependencies.read_text(encoding="utf-8"), "after = []\n")
 
     def test_read_only_role_cannot_edit_candidate_source(self):
         path = self.write_task(1, verify=_NEEDS_OK_TXT)

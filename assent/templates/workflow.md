@@ -81,8 +81,11 @@ to make a check pass.
 
 The worktree is an isolation and recovery boundary, not a security sandbox.
 Prompt rules and before/after checks detect control-boundary violations; broad
-adapter permissions do not prevent access outside the project. Use unattended
-execution only in trusted environments.
+adapter permissions do not prevent access outside the project. Assent restores
+snapshotted scheduler-owned files exactly before applying the adapter result;
+successful restoration preserves candidate work and lets ordinary workflow
+handling continue. An unprovable restoration or another boundary violation
+stops the run. Use unattended execution only in trusted environments.
 
 One plan folder permits one live `run`, enforced by an OS lock. Different plans
 may run concurrently in dedicated `<project>.worktrees/<plan>/` worktrees.
@@ -375,7 +378,8 @@ not a hand-maintained current-plan pointer, determines recovery.
 The scheduler checkpoints dirty candidate work before quota waits, adapter
 rotation, immediate continuation, failure, and interruption. Startup gathers a
 dirty managed plan worktree into a WIP checkpoint without inferring task
-ownership.
+ownership. A role's changes to snapshotted scheduler-owned files are restored
+exactly without reverting candidate work.
 
 The provider-neutral immediate-continuation record is:
 
@@ -384,5 +388,6 @@ The provider-neutral immediate-continuation record is:
 ```
 
 When quota and this record both appear, quota handling wins. Ctrl+C exits 130
-after preserving current progress. A control-boundary violation or unprovable
-Git state is nonzero and leaves evidence intact for human recovery.
+after preserving current progress. An unprovable control-file restoration,
+another control-boundary violation, or unprovable Git state is nonzero and
+leaves evidence intact for human recovery.

@@ -38,6 +38,8 @@ from pathlib import Path
 
 from typing import Callable, TextIO
 
+from uuid import uuid4
+
 from assent import (AssentError, contracts, gitops, lockfile, reconcile,
                     ignored_dirs, runtime_test, usage, verification)
 
@@ -1461,12 +1463,15 @@ def _run_integration_conflict_role(
             tuple(source_configs.values()))
         print(_session_line(adapter_name, step.model, session))
         try:
-            result = _invoke_adapter(
-                configs[0], adapter, adapter_name, prompt,
-                session.requested_model, session.requested_effort, cwd,
-                context_kind="integration",
-                context_id=f"workflow.integration[{state.step_index}]",
-                plan_names=state.plan_names)
+            try:
+                result = _invoke_adapter(
+                    configs[0], adapter, adapter_name, prompt,
+                    session.requested_model, session.requested_effort, cwd,
+                    context_kind="integration",
+                    context_id=f"workflow.integration[{state.step_index}]",
+                    plan_names=state.plan_names)
+            finally:
+                _restore_management_changes(management)
         except KeyboardInterrupt:
             ignored_violations = _ignored_input_violations(
                 ignored_input_guards, tuple(source_configs.values()))
@@ -1573,14 +1578,17 @@ def _run_integration_role(
         primary_baseline = gitops.dirty_paths(cfg.root)
         ignored_input_guards = _ignored_input_guards((work_cfg,))
         print(_session_line(adapter_name, step.model, session))
-        result = _invoke_adapter(
-            cfg, adapter, adapter_name,
-            _integration_prompt(
-                work_cfg, plan, step, state, position, total),
-            session.requested_model, session.requested_effort,
-            work_cfg.root, context_kind="integration",
-            context_id=f"workflow.integration[{state.step_index}]",
-            plan_names=state.plan_names)
+        try:
+            result = _invoke_adapter(
+                cfg, adapter, adapter_name,
+                _integration_prompt(
+                    work_cfg, plan, step, state, position, total),
+                session.requested_model, session.requested_effort,
+                work_cfg.root, context_kind="integration",
+                context_id=f"workflow.integration[{state.step_index}]",
+                plan_names=state.plan_names)
+        finally:
+            _restore_management_changes(management)
         ignored_violations = _ignored_input_violations(
             ignored_input_guards, (work_cfg,))
         if ignored_violations:
@@ -3059,7 +3067,7 @@ def _management_snapshot(cfg: Config, plan: Plan) -> dict[Path, bytes | None]:
     paths = {
         *(task.path for task in plan.tasks),
         *(task.journal_path for task in plan.tasks),
-        cfg.assent_dir / "_plan_deps.toml",
+        cfg.tasks_dir / "_plan_deps.toml",
         cfg.assent_dir / "assent.toml",
         cfg.assent_dir / "verify.py",
         cfg.assent_dir / "_batch_verification.toml",
@@ -3089,6 +3097,37 @@ def _management_changes(before: dict[Path, bytes | None]) -> list[str]:
         if current != prior:
             changed.append(str(path))
     return changed
+
+def _restore_management_changes(before: dict[Path, bytes | None]) -> list[str]:
+    """Restore role changes to the snapshotted scheduler-owned files exactly."""
+    restored: list[str] = []
+    for path, prior in before.items():
+        try:
+            current = path.read_bytes() if path.is_file() else None
+            if current == prior:
+                continue
+            if prior is None:
+                path.unlink()
+            else:
+                temporary = path.with_name(
+                    f".{path.name}.assent-restore-{uuid4().hex}.tmp")
+                try:
+                    temporary.write_bytes(prior)
+                    os.replace(temporary, path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            current = path.read_bytes() if path.is_file() else None
+        except OSError as error:
+            raise AssentError(
+                f"Unable to restore protected control file {path}: {error}") from error
+        if current != prior:
+            raise AssentError(
+                f"Unable to verify restored protected control file {path}")
+        restored.append(str(path))
+    if restored:
+        print("Restored protected control files changed by the role session: "
+              + ", ".join(restored[:8]))
+    return restored
 
 def _source_workflow_prompt(
         cfg: Config, plan: Plan, task: Task | None, step: _RoleStep,
@@ -3232,10 +3271,13 @@ def _run_source_role(
         active.task = task
         active.session = session
         try:
-            result = _invoke_adapter(
-                cfg, adapter, adapter_name, prompt, session.requested_model,
-                session.requested_effort, cfg.root, context_kind=state.unit,
-                context_id=f"workflow.{state.unit}[{state.step_index}]")
+            try:
+                result = _invoke_adapter(
+                    cfg, adapter, adapter_name, prompt, session.requested_model,
+                    session.requested_effort, cfg.root, context_kind=state.unit,
+                    context_id=f"workflow.{state.unit}[{state.step_index}]")
+            finally:
+                _restore_management_changes(management)
         except KeyboardInterrupt:
             ignored_violations = _ignored_input_violations(
                 ignored_input_guards, (cfg,))

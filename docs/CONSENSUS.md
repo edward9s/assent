@@ -30,10 +30,12 @@ confirm the machine result.
 
 ## Preserve work, fail closed
 
-Assent keeps edits and evidence across failure and interruption. When it cannot
-prove a control boundary, Git identity, or safe state transition, it stops
-instead of guessing or reverting. Questions that genuinely require human
-judgment are reported as such and do not cancel unrelated queued work.
+Assent keeps candidate edits and evidence across failure and interruption. It
+restores a role's unauthorized changes to snapshotted control files exactly so
+the configured workflow can continue. When it cannot prove that restoration, a
+control boundary, Git identity, or safe state transition, it stops instead of
+guessing. Questions that genuinely require human judgment are reported as such
+and do not cancel unrelated queued work.
 
 ## Human acceptance
 
