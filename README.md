@@ -71,8 +71,8 @@ meeting. For example:
 Help me plan this change. Read AGENTS.md, ~/.assent/instructions.md and
 ~/.assent/format.md. Do not create plan files until I explicitly agree.
 Turn the consensus above into an Assent-format plan under `.assent/<PLAN>/`.
-Configure its verification and runtime decisions, and run assent check PLAN
-until it passes before ending this meeting.
+Configure its verification and runtime decisions, and run
+assent check until it passes before ending this meeting.
 ```
 
 Once the meeting is finished, the normal human path is:

@@ -66,7 +66,7 @@ assent init
 請和我一起規劃這項變更。先讀 AGENTS.md、~/.assent/instructions.md 與
 ~/.assent/format.md。在我明確同意前不要建立 plan file。
 將上述討論的共識，建立成 `.assent/<PLAN>/` 下的 Assent 格式計畫。
-配置完整 verification 與 runtime decisions，最後反覆執行 assent check PLAN
+配置完整 verification 與 runtime decisions，最後反覆執行 assent check
 直到通過後才能結束會議。
 ```
 
