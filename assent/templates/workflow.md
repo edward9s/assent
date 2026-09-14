@@ -361,6 +361,12 @@ branches. `archive` requires finished, accepted state and stores the plan under
 `rework` reopens existing tasks and preserves code unless the human explicitly
 chooses `--revert-code`.
 
+Before `reject` removes a managed worktree or same-prefix branch, it records the
+worktree HEAD and every branch tip in the plan-level `_reject.toml`. This
+append-only journal supports manual Git recovery only while those commit objects
+remain. It is not a workflow cursor: rerunning `reject` does not read it or
+reconstruct deleted branches.
+
 Never manually remove managed worktrees or temporary branches. Git evidence,
 not a hand-maintained current-plan pointer, determines recovery.
 

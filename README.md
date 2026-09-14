@@ -69,10 +69,10 @@ meeting. For example:
 
 ```text
 Help me plan this change. Read AGENTS.md, ~/.assent/instructions.md and
-~/.assent/format.md. Do not create plan files until I explicitly agree. After I
-approve the requirements, turn our consensus into an Assent-format plan under
-.assent/my-plan/, configure its verification and runtime decisions, and run
-assent check my-plan until it passes before ending this meeting.
+~/.assent/format.md. Do not create plan files until I explicitly agree.
+Turn the consensus above into an Assent-format plan under `.assent/<PLAN>/`.
+Configure its verification and runtime decisions, and run assent check PLAN
+until it passes before ending this meeting.
 ```
 
 Once the meeting is finished, the normal human path is:

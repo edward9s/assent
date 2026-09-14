@@ -13,6 +13,7 @@ from assent.lockfile import LockBusy, LockMissing, probe_lock
 from assent.plan import Plan, append_entry, set_status
 
 RESETTABLE_STATUSES = ("DONE", "WIP", "BLOCKED")
+REJECT_JOURNAL_NAME = "_reject.toml"
 
 
 def _remove_empty_container(path: Path) -> None:
@@ -51,7 +52,7 @@ def _confirm_destructive(name: str, path: Path, branches: list[str],
                          confirm: Callable[[str], str] | None) -> bool:
     """Print a preview of what reject is about to destroy and ask for interactive
     confirmation. Anything other than exactly "y"/"Y", including EOF, declines."""
-    print(f"{name}: about to reject (destructive, cannot be undone):")
+    print(f"{name}: about to reject (destructive, no automatic undo):")
     print(f"  worktree: {path}")
     if branches:
         print("  branches to delete:")
@@ -191,6 +192,8 @@ def _reject_locked(cfg: Config, path: Path, dependent_locks: ExitStack,
               "`assent verify --batch` again before the next batch release")
 
     evidence: list[str] = []
+    worktree_head: str | None = None
+    branch_tips: list[tuple[str, str]] = []
     try:
         if path.exists():
             if not gitops.is_repo_worktree(root, path):
@@ -204,36 +207,65 @@ def _reject_locked(cfg: Config, path: Path, dependent_locks: ExitStack,
                     path, f"wip({name}): reject archive, preserving uncommitted changes",
                     cfg.git_excludes):
                 print(f"{name}: uncommitted changes archived as a wip commit")
-            head = gitops.commit_of(path, "HEAD")
-            evidence.append(f"worktree HEAD {head}")
-            gitops.remove_worktree(root, path)
-            _remove_empty_container(path)
-            print(f"{name}: removed worktree {path} (HEAD {head})")
+            worktree_head = gitops.commit_of(path, "HEAD")
+            evidence.append(f"worktree HEAD {worktree_head}")
         else:
             print(f"{name}: worktree does not exist, continuing to reject branches")
 
-        # Branches without this prefix are never touched; the full tip hash is shown
-        # in the terminal and, after success, written into each reset task's rejected
-        # journal entry for later recovery.
+        # Capture every tip before the first destructive operation. One plan-level
+        # journal entry is the durable manual-recovery boundary; reject never reads
+        # it as workflow state or uses it to recreate a branch automatically.
         for branch in branches:
             tip = gitops.commit_of(root, branch)
-            gitops.delete_branch_force(root, branch)
+            branch_tips.append((branch, tip))
             evidence.append(f"branch {branch} tip {tip}")
+    except AssentError as e:
+        print(f"{name}: reject aborted (Git evidence gathering failed: {e}); "
+              "no worktree or branch was removed, task files not reset")
+        return 1
+
+    evidence_path: Path | None = None
+    if evidence:
+        evidence_path = cfg.tasks_dir / REJECT_JOURNAL_NAME
+        detail = "\n".join(evidence) + (
+            "\nCommit objects can be restored by hash only until Git prunes them.")
+        try:
+            append_entry(
+                evidence_path, by="scheduler", event="reject_evidence",
+                summary=f"Recovery evidence captured before destructive reject of {name}",
+                detail=detail)
+        except (AssentError, OSError) as e:
+            print(f"{name}: reject aborted (recovery evidence could not be written: "
+                  f"{e}); no worktree or branch was removed, task files not reset")
+            return 1
+        print(f"{name}: recovery evidence recorded in {evidence_path}")
+
+    try:
+        if worktree_head is not None:
+            gitops.remove_worktree(root, path)
+            _remove_empty_container(path)
+            print(f"{name}: removed worktree {path} (HEAD {worktree_head})")
+
+        # Branches without this prefix are never touched. Their pre-recorded full
+        # hashes remain available in _reject.toml for manual recovery.
+        for branch, tip in branch_tips:
+            gitops.delete_branch_force(root, branch)
             print(f"  branch {branch} (tip {tip}): deleted (recoverable by hash "
                   "only within the gc grace period)")
     except AssentError as e:
         print(f"{name}: reject aborted (Git step failed: {e}), task files not reset")
         return 1
-    return _reset_rejected_tasks(cfg, plan, evidence, stranded)
+    return _reset_rejected_tasks(cfg, plan, evidence_path, stranded)
 
 
-def _reset_rejected_tasks(cfg: Config, plan: Plan, evidence: list[str],
+def _reset_rejected_tasks(cfg: Config, plan: Plan, evidence_path: Path | None,
                           stranded: list[tuple[str, str]] = ()) -> int:
-    """Reset DONE/WIP/BLOCKED back to TODO, and preserve full Git evidence in the r file."""
+    """Reset DONE/WIP/BLOCKED to TODO and journal each task-local transition."""
     name = cfg.tasks_name
     reset = 0
-    detail = "Git evidence before deletion:\n" + (
-        "\n".join(evidence) if evidence else "no worktree or same-prefix branches")
+    detail = (f"Plan-level Git recovery evidence: {evidence_path.name}"
+              if evidence_path is not None
+              else "No worktree or same-prefix branches existed at rejection.")
     if stranded:
         detail += "\n\nConfirmed stranding unaccepted dependent plan(s):\n" + "\n".join(
             f"{dependent}: {reason}" for dependent, reason in stranded)
@@ -252,7 +284,10 @@ def _reset_rejected_tasks(cfg: Config, plan: Plan, evidence: list[str],
             print(f"  task {task.id}: {task.status} -> TODO")
             reset += 1
     except (AssentError, OSError) as e:
-        print(f"{name}: task-file reset interrupted ({e}), rerun assent reject {name}")
+        recovery = (f"; plan-level Git recovery evidence remains in "
+                    f"{evidence_path.name}" if evidence_path is not None else "")
+        print(f"{name}: task-file reset interrupted ({e}){recovery}; rerun "
+              f"assent reject {name} to reset any remaining tasks")
         return 1
     print(f"{name}: reject complete ({reset} task(s) reset to TODO). "
           "Revise task files as needed then rerun with assent run; assent report "

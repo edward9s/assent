@@ -189,8 +189,10 @@ runtime testing。接受完成而且不再需要 live plan 後，`archive` 是�
 
 - `assent rework <PLAN> <TASK>`：保留程式碼並重開既有 task。
 - `assent reject <PLAN>`：經確認的破壞性重設；先 checkpoint dirty edits、記錄
-  branch tips、移除受管理的 worktrees 與同前綴 branches，再把已開始的 task
-  重設為 `TODO`。
+  worktree HEAD 與所有 branch tip 到 plan-level `_reject.toml`、移除受管理的
+  worktrees 與同前綴 branches，再把已開始的 task 重設為 `TODO`。這些 hash 只在
+  Git 尚未清除 commit object 時支援人工復原；重新執行 `reject` 不會讀取這份
+  journal，也不會重建已刪除的 branch。
 - `assent reconcile <PLAN>`：處理需要人工編輯的 Git conflict。
 
 Workflow 不會自行接受 plan。Verification 提供證據；`accept` 才是人類發布決定。

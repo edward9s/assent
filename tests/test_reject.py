@@ -17,7 +17,7 @@ from assent import AssentError, gitops, pathops
 from assent.config import load_config
 from assent.lockfile import hold_lock
 from assent.plan import read_entries
-from assent.reject import reject_plan
+from assent.reject import REJECT_JOURNAL_NAME, reject_plan
 from tests.link_support import make_directory_link, safe_rmtree
 
 
@@ -182,15 +182,19 @@ class TestReject(unittest.TestCase):
         self.assertTrue(_git(self.root, "branch", "--show-current"))
         self.assertIn(tip, output)
         self.assertIn(f"branch {branch} (tip {tip}): deleted", output)
-        # DONE -> TODO leaves recoverable full Git evidence in the r file; SKIP/TODO
-        # are untouched.
+        # DONE -> TODO gets a task-local event; SKIP/TODO are untouched. Full Git
+        # recovery evidence is stored once at plan level before deletion.
         self.assertEqual(self._task_status(done), "TODO")
         self.assertEqual(self._task_status(skipped), "SKIP")
         self.assertEqual(self._task_status(todo), "TODO")
+        recovery = read_entries(self.tasks_dir / REJECT_JOURNAL_NAME)
+        self.assertEqual(recovery[-1]["event"], "reject_evidence")
+        self.assertIn(f"branch {branch} tip {tip}", recovery[-1]["detail"])
         entries = read_entries(self.tasks_dir / "t001_task.r.toml")
         self.assertEqual(entries[-1]["event"], "rejected")
         self.assertEqual(entries[-1]["by"], "scheduler")
-        self.assertIn(f"branch {branch} tip {tip}", entries[-1]["detail"])
+        self.assertIn(REJECT_JOURNAL_NAME, entries[-1]["detail"])
+        self.assertNotIn(tip, entries[-1]["detail"])
         self.assertFalse((self.tasks_dir / "t002_task.r.toml").exists())
         self.assertIn("reject complete (1 task(s) reset to TODO)", output)
 
@@ -295,9 +299,27 @@ class TestReject(unittest.TestCase):
         self.assertEqual(self._task_status(done), "DONE")
         self.assertIn("reject aborted", output)
 
-    def test_reject_git_failure_skips_task_reset(self) -> None:
+    def test_reject_evidence_write_failure_preserves_git_and_task_state(self) -> None:
         done = self._write_task(1, "DONE")
-        self._worktree_branch(commit=True)
+        worktree, branch = self._worktree_branch(commit=True)
+
+        with patch("assent.reject.append_entry",
+                   side_effect=OSError("simulated journal failure")):
+            code, output = self._run_reject()
+
+        self.assertEqual(code, 1)
+        self.assertTrue(worktree.exists())
+        self.assertIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.plan_name}/"))
+        self.assertEqual(self._task_status(done), "DONE")
+        self.assertFalse((self.tasks_dir / REJECT_JOURNAL_NAME).exists())
+        self.assertIn("recovery evidence could not be written", output)
+        self.assertIn("no worktree or branch was removed", output)
+
+    def test_reject_git_failure_preserves_evidence_and_skips_task_reset(self) -> None:
+        done = self._write_task(1, "DONE")
+        _worktree, branch = self._worktree_branch(commit=True)
+        tip = gitops.commit_of(self.root, branch)
 
         with patch("assent.reject.gitops.delete_branch_force",
                    side_effect=AssentError("simulated deletion failure")):
@@ -306,7 +328,53 @@ class TestReject(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(self._task_status(done), "DONE")
         self.assertFalse((self.tasks_dir / "t001_task.r.toml").exists())
+        recovery = read_entries(self.tasks_dir / REJECT_JOURNAL_NAME)
+        self.assertIn(f"branch {branch} tip {tip}", recovery[-1]["detail"])
         self.assertIn("task files not reset", output)
+
+    def test_reject_records_every_tip_before_a_partial_branch_deletion(self) -> None:
+        done = self._write_task(1, "DONE")
+        _worktree, branch = self._worktree_branch(commit=True)
+        tip = gitops.commit_of(self.root, branch)
+        later_branch = f"{self.plan_name}/zz-later"
+        _git(self.root, "branch", later_branch, tip)
+        original_delete = gitops.delete_branch_force
+
+        def delete_until_later(root: Path, candidate: str) -> None:
+            if candidate == later_branch:
+                raise AssentError("simulated later deletion failure")
+            original_delete(root, candidate)
+
+        with patch("assent.reject.gitops.delete_branch_force",
+                   side_effect=delete_until_later):
+            code, output = self._run_reject()
+
+        self.assertEqual(code, 1, output)
+        self.assertNotIn(branch, gitops.branches_with_prefix(
+            self.root, f"{self.plan_name}/"))
+        self.assertIn(later_branch, gitops.branches_with_prefix(
+            self.root, f"{self.plan_name}/"))
+        self.assertEqual(self._task_status(done), "DONE")
+        recovery = read_entries(self.tasks_dir / REJECT_JOURNAL_NAME)
+        detail = recovery[-1]["detail"]
+        self.assertIn(f"branch {branch} tip {tip}", detail)
+        self.assertIn(f"branch {later_branch} tip {tip}", detail)
+
+    def test_recorded_tip_can_recreate_a_deleted_branch_before_pruning(self) -> None:
+        self._write_task(1, "DONE")
+        _worktree, branch = self._worktree_branch(commit=True)
+
+        code, output = self._run_reject()
+
+        self.assertEqual(code, 0, output)
+        detail = read_entries(
+            self.tasks_dir / REJECT_JOURNAL_NAME)[-1]["detail"]
+        prefix = f"branch {branch} tip "
+        recorded_tip = next(
+            line.removeprefix(prefix) for line in detail.splitlines()
+            if line.startswith(prefix))
+        _git(self.root, "branch", branch, recorded_tip)
+        self.assertEqual(gitops.commit_of(self.root, branch), recorded_tip)
 
     def test_reject_is_idempotent_after_success(self) -> None:
         self._write_task(1, "DONE")

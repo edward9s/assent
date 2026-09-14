@@ -55,9 +55,9 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 | `report` | **可選檢查。** 重新產生人類驗收用的報告。 |
 | `status` | **可選檢查。** 查看一個或全部計畫的簡要狀態。 |
 | `verify` | **手動驗證／復原。** 執行指定的機械驗證，不啟動 AI review、repair 或 accept。 |
-| `reconcile` | **復原。** 準備並完成由人編輯的 Git 衝突修復。 |
-| `rework` | **復原。** 保留程式碼，重新開啟既有 task。 |
-| `reject` | **復原。** 記錄可復原的 Git 證據後，經人確認執行破壞性重設。 |
+| `reconcile` | **衝突解決。** 準備並完成由人編輯的 Git 衝突修復。 |
+| `rework` | **重新開啟 task。** 保留程式碼，重新開啟既有 task。 |
+| `reject` | **破壞性重設。** 將人工 Git 復原證據記錄到 `_reject.toml` 後，拋棄該 plan 的實作。 |
 | `clean` | **可選維護。** 不封存 live plan，只移除已證明多餘的 worktree/branch。 |
 | `doctor` | **診斷。** 診斷安裝並復原孤兒暫存 branch。 |
 | `ignored-dirs status` | **診斷。** 查看目前 worktree 的 ignored-directory 決定與鏈結，不做任何變更。 |
@@ -173,6 +173,11 @@ assent rework <PLAN> <TASK>
 assent reject <PLAN>
 assent reconcile <PLAN>
 ```
+
+要保留並修改實作時使用 `rework`。`reject` 先把 worktree HEAD 與 branch tips 記錄
+到 `_reject.toml`，再拋棄該 plan 的實作。這份 journal 只在 commit objects 尚存時
+支援人工、best-effort 的 Git 復原；重新執行 `reject` 只處理當下仍存在的狀態，
+不會重建已刪除的 branch。
 
 `archive` 嚴格包含安全清理：如果 source branch/worktree 仍存在，它會重用 `clean`
 的證明與移除流程，再壓縮並封存 live plan。因此 archive 前不需要另跑 `clean`。

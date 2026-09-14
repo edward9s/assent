@@ -190,7 +190,7 @@ Inspect `_report.md`, task requirements, relevant journals, the source diff,
 and verification evidence. Use an independent AI when a second opinion helps,
 but keep the decision human-owned.
 
-Acceptance-review prompt:
+Acceptance review prompt:
 
 ```text
 Act as an independent acceptance reviewer. Answer concisely and do not use
@@ -217,8 +217,11 @@ When the result needs intervention instead, the human may choose:
 
 - `assent rework <PLAN> <TASK>` reopens an existing task while preserving code.
 - `assent reject <PLAN>` is a confirmed destructive reset: it checkpoints dirty
-  edits, records branch tips, removes managed worktrees and same-prefix branches,
-  then resets started tasks to `TODO`.
+  edits, records the worktree HEAD and every branch tip in the plan-level
+  `_reject.toml`, removes managed worktrees and same-prefix branches, then resets
+  started tasks to `TODO`. The hashes support manual recovery only while Git
+  retains the commit objects; rerunning `reject` neither reads this journal nor
+  reconstructs deleted branches.
 - `assent reconcile <PLAN>` handles a Git conflict that requires human-edited
   reconciliation.
 

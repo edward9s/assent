@@ -228,10 +228,12 @@ class DocumentationTests(unittest.TestCase):
         english = _flat(_read(Path("docs/WORKFLOW.md")))
         chinese = _flat(_read(Path("docs/zh-TW/WORKFLOW.md")))
         for phrase in ("reopens an existing task while preserving code",
-                       "confirmed destructive reset", "resets started tasks to `TODO`"):
+                       "confirmed destructive reset", "resets started tasks to `TODO`",
+                       "plan-level `_reject.toml`", "rerunning `reject` neither reads"):
             self.assertIn(_flat(phrase), english)
         for phrase in ("保留程式碼並重開既有 task", "破壞性重設",
-                       "已開始的 task 重設為 `TODO`"):
+                       "已開始的 task 重設為 `TODO`", "plan-level `_reject.toml`",
+                       "重新執行 `reject` 不會讀取"):
             self.assertIn(_flat(phrase), chinese)
 
     def test_translation_guide_does_not_require_manual_version_bookkeeping(self):

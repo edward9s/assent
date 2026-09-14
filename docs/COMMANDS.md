@@ -58,9 +58,9 @@ project-location rules.
 | `report` | **Optional inspection.** Regenerate the human review agenda. |
 | `status` | **Optional inspection.** Show concise state for one or all plans. |
 | `verify` | **Manual verification / recovery.** Run requested mechanical verification without AI review, repair, or acceptance. |
-| `reconcile` | **Recovery.** Prepare and finish a human-edited Git conflict resolution. |
-| `rework` | **Recovery.** Reopen existing tasks, preserving code by default. |
-| `reject` | **Recovery.** Confirm a destructive reset after recording recoverable Git evidence. |
+| `reconcile` | **Conflict resolution.** Prepare and finish a human-edited Git conflict resolution. |
+| `rework` | **Task reopening.** Reopen existing tasks, preserving code by default. |
+| `reject` | **Destructive reset.** Discard a plan's implementation after recording manual Git recovery evidence in `_reject.toml`. |
 | `clean` | **Optional maintenance.** Remove proven-redundant worktrees/branches without archiving the live plan. |
 | `doctor` | **Diagnostics.** Diagnose installation and recover orphaned temporary branches. |
 | `ignored-dirs status` | **Diagnostics.** Inspect the current worktree's ignored-directory decision and links without changing them. |
@@ -182,6 +182,12 @@ assent rework <PLAN> <TASK>
 assent reject <PLAN>
 assent reconcile <PLAN>
 ```
+
+Use `rework` to keep and revise an implementation. `reject` discards the plan's
+implementation after recording its worktree HEAD and branch tips in
+`_reject.toml`. That journal supports only manual, best-effort Git recovery while
+the commit objects remain; rerunning `reject` applies the command to the state
+that remains and does not reconstruct deleted branches.
 
 `archive` strictly contains safe cleanup: it reuses `clean`'s proof and removal
 for any still-present source branch/worktree before compressing and retiring the
