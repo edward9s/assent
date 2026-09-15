@@ -97,9 +97,19 @@ preflight = [
   { action = "check" },
   { role = "preflight_repairer" },
   { action = "check" },
+  { role = "preflight_repairer" },
+  { action = "check" },
+  { role = "preflight_repairer" },
+  { action = "check" },
 ]
 task = [
   { role = "implementer" },
+  { action = "focused_test" },
+  { role = "task_repairer" },
+  { action = "focused_test" },
+  { role = "task_repairer" },
+  { action = "focused_test" },
+  { role = "task_repairer" },
   { action = "focused_test" },
   { role = "task_repairer" },
   { action = "focused_test" },
@@ -117,6 +127,12 @@ plan = [
   { action = "focused_sweep" },
   { role = "plan_repairer" },
   { action = "focused_sweep" },
+  { role = "plan_repairer" },
+  { action = "focused_sweep" },
+  { role = "plan_repairer" },
+  { action = "focused_sweep" },
+  { role = "plan_repairer" },
+  { action = "focused_sweep" },
 ]
 integration = [
   { action = "full_verify" },
@@ -126,8 +142,20 @@ integration = [
   { action = "full_verify" },
   { role = "integration_repairer" },
   { action = "full_verify" },
+  { role = "integration_repairer" },
+  { action = "full_verify" },
+  { role = "integration_repairer" },
+  { action = "full_verify" },
+  { role = "integration_repairer" },
+  { action = "full_verify" },
 ]
 runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
   { action = "runtime_test" },
   { role = "runtime_repairer" },
   { action = "runtime_test" },
@@ -203,7 +231,7 @@ use `workflow = [{ action = "focused_test" }]` when no AI session is wanted.
 
 Runtime testing has its own workflow layer and does not reuse task, plan, or
 integration actions. The shared `~/.assent/assent.toml` defines the writable
-`runtime_repairer` role and a default workflow with three repair attempts. A
+`runtime_repairer` role and a finite default workflow. A
 project may replace `[workflow].runtime_test`; its array must strictly
 alternate actions and writable roles, begin and end with an action, and give
 each custom role a model. Each role entry may independently select its adapter
@@ -218,24 +246,36 @@ execution = "pending"
 
 On the first no-argument `assent test`, a pending action records that it did not
 start. The next configured writable role inspects the implemented project and
-proposes the exact transition to `explicit` with one command:
+proposes the exact transition to `explicit` with the unambiguous, documented,
+finite production operation:
 
 ```toml
 execution = "explicit"
-command = "python -m unittest tests.test_runtime"
+command = "python run.py sync"
 ```
 
 or an ordered command array:
 
 ```toml
 execution = "explicit"
-command = ["python tools/probe_a.py", "python tools/probe_b.py"]
+command = ["python run.py migrate", "python run.py sync"]
 ```
 
-The role cannot select `disabled`. Assent first restores its direct edit to the
-control file, then validates the proposal and installs it as scheduler-owned
-state. The following action runs the command from the beginning. `assent check`
-remains read-only and never invokes this discovery workflow.
+One shell command is one complete string containing its executable and every
+argument. The array above means two sequential shell commands; it is not an argv
+array. Do not write `command = ["python", "run.py", "sync"]` for one command.
+
+The operation uses normal persistent production configuration and data. A unit
+test, test runner, mock, fixture, dedicated probe, temporary or in-memory
+resource, sample invocation, or artificially bounded invocation is not a
+production operation. Discovery changes no ordinary project file and leaves the
+contract pending if the operation is missing or ambiguous. The role cannot
+select `disabled`. Assent first restores its direct edit to the control file,
+validates the proposal, displays the exact command, and asks once `[y/N]`.
+Only `y` or `yes` installs it as scheduler-owned state; refusal or stdin EOF
+runs nothing and retains `pending`. The following action runs the command from
+the beginning. Once explicit, later `assent test` runs without asking again.
+`assent check` remains read-only and never invokes this discovery workflow.
 
 Each plan instead has its own `_runtime_test.toml` contract with `disabled`,
 `explicit`, or `after_plan`; its exact rules are in `format.md`. A plan command

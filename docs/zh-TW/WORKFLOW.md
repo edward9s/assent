@@ -89,8 +89,8 @@ execution = "pending"
 | Step | 可觀察結果 |
 | --- | --- |
 | `runtime_test` action | 不啟動，也不記成 `FAILED`。 |
-| 可寫 runtime role | 檢查已完成的 primary tree，必要時建立小型 probe；只能提出 `explicit` 與 command。 |
-| scheduler | 還原 role 直接修改的 control file，驗證後再寫入提案。 |
+| 可寫 runtime role | 檢查操作文件與 production entrypoint，不修改一般 project file；只有能唯一判定時，才提出精確、有限的 production operation，否則維持 `pending`。 |
+| scheduler | 還原 role 直接修改的 control file、驗證並顯示每一條完整 command，只在一次 `[y/N]` 確認後寫入。 |
 | 下一個 `runtime_test` action | 從頭執行已寫入的 command。 |
 
 有效提案如下：
@@ -98,9 +98,14 @@ execution = "pending"
 ```toml
 # .assent/_runtime_test.toml
 execution = "explicit"
-command = "python tools/runtime_probe.py"
+command = "python run.py sync"
 ```
 
+Command 必須使用正常持久化 production 設定與資料；test、probe、暫存 resource、
+sample 或刻意限縮範圍的替代指令都不符合。一條 shell command 是包含 executable
+與所有參數的完整字串；array 表示多條依序執行的完整 command line，不是 argv
+token array。只有 `y` 或 `yes` 會寫入並執行；拒絕
+或 stdin EOF 會維持 `pending` 且不執行。寫入後，之後的 `assent test` 不再詢問。
 無效提案直接拒絕；所有 role 都未提出時，有限 workflow 以 unresolved 結束。
 `assent check` 維持唯讀，不會啟動 discovery。
 
@@ -127,6 +132,12 @@ assent accept demo
 
 ```toml
 runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
   { action = "runtime_test" },
   { role = "runtime_repairer" },
   { action = "runtime_test" },

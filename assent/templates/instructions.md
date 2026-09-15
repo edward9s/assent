@@ -32,10 +32,16 @@ The meeting also chooses exactly one runtime execution mode and creates the
 plan's `_runtime_test.toml`. Use `disabled` only when the agreed plan needs no
 runtime gate, never because the command is unknown. Use `explicit` or
 `after_plan` only when the plan states its command or ordered commands under the
-singular `command` key. If the consensus does not determine either verification
-decision, ask the human rather than guessing or ending the meeting. The exact
-runtime schema is in `format.md`. Keep the task file's ten-field schema: runtime
-execution and command never become task fields.
+singular `command` key. The command is the exact finite production operation
+documented for operators and uses normal persistent production configuration
+and data. Never substitute a unit test, test runner, mock, fixture, dedicated
+probe, temporary or in-memory resource, sample invocation, or artificially
+bounded invocation. Encode one shell command as one complete string containing
+the executable and every argument. An array means multiple sequential complete
+command lines, never argv tokens. If the consensus does not determine either
+verification decision, ask the human rather than guessing or ending the
+meeting. The exact runtime schema is in `format.md`. Keep the task file's
+ten-field schema: runtime execution and command never become task fields.
 
 Contract and reader documentation must be concise, present-tense, and
 reader-oriented. Keep only text needed to act or understand; do not add
@@ -114,10 +120,17 @@ full verification for the human.
   prompt explicitly makes that primary working tree the writable session cwd.
   When that prompt states that the root `.assent/_runtime_test.toml` is pending,
   the session may propose only `execution = "explicit"` with a non-empty
-  command. The scheduler restores the direct edit, validates the proposal, and
-  installs it. The exception does not include plan runtime-test contracts,
-  task contracts, journals, scheduler state, or `~/.assent`; the scheduler owns
-  their transitions.
+  command naming the exact, documented, finite production operation. Discovery
+  is inspection-only and leaves the contract pending when that operation is
+  missing or ambiguous. One shell command is one complete string containing the
+  executable and every argument. An array means multiple sequential complete
+  command lines, never argv tokens. The scheduler restores the direct edit,
+  validates the proposal, shows the complete command, and installs it only after
+  one `[y/N]` confirmation. An already explicit contract runs without another
+  question.
+  The exception does not include plan runtime-test contracts,
+  task contracts, journals, scheduler state, or `~/.assent`; the scheduler
+  owns their transitions.
 - Command side effects count as writes. A check, compiler, importer, formatter,
   generator, or test must leave no non-ignored generated artifact in the
   project worktree; use a non-writing check or project-approved temporary output

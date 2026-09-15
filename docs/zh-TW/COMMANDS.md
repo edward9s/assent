@@ -117,10 +117,17 @@ assent test
 
 `assent init` 會把這份 contract 建立為 `execution = "pending"`。第一次執行
 `assent test` 時不會猜測或執行 command；下一個已設定的可寫 runtime role 會檢查
-完成後的專案，提出 `explicit` 與非空 command。Assent 先還原 role 對 control file
-的直接修改，再驗證提案並由 scheduler 寫入，下一個 runtime action 才執行它。
-提案無效時會直接拒絕；提案缺漏時有限 workflow 會以 unresolved 結束。兩者都回傳
-非 0。
+提供給操作人員的文件與已實作的 production entrypoint。只有能唯一判定時，才提出
+`explicit` 與使用正常持久化 production 設定及資料的精確、有限 production
+operation。Unit test、test runner、mock、fixture、專用 probe、暫存或 in-memory
+resource、sample invocation、刻意限縮範圍的 invocation 都不符合。Assent 先還原
+role 對 control file 的直接修改、驗證提案、顯示每一條完整 command，再詢問一次
+是否寫入並執行。只有 `y` 或 `yes` 會寫入；拒絕或 stdin EOF 會維持 `pending`，也
+不執行任何 command。一條 shell command 必須是一個包含 executable 與所有參數的
+完整字串；array 表示多條依序執行的完整 command line，不是 argv token array。
+寫入後，之後的 `assent test` 直接執行已保存的 command，
+不再詢問。提案無效時直接拒絕；缺少或無法唯一判定 operation 時，有限 workflow
+以 unresolved 結束。這些結果都回傳非 0。
 
 `test` 只啟動獨立的 `runtime_test` workflow，不會執行 task、plan、integration、
 `full_verify` 或 `accept`。完整的 mode、state、repair、quota 與 source-bound

@@ -123,11 +123,20 @@ assent test
 
 `assent init` creates that contract as `execution = "pending"`. The first
 `assent test` does not guess or run a command: its next configured writable
-runtime role inspects the implemented project and proposes `explicit` with a
-non-empty command. Assent restores the role's direct control-file edit,
-validates the proposal, installs it as scheduler-owned state, and the next
-runtime action executes it. An invalid proposal is refused; a missing proposal
-leaves the finite workflow unresolved. Both return nonzero.
+runtime role inspects the operator-facing documentation and implemented
+production entrypoint. It proposes `explicit` only with the exact unambiguous,
+finite production operation using normal persistent production configuration
+and data; tests, probes, temporary or in-memory resources, samples, and
+artificially bounded substitutes do not qualify. Assent restores the role's
+direct control-file edit, validates the proposal, displays every exact command,
+and asks once whether to install and run it. Only `y` or `yes` installs it as
+scheduler-owned state; refusal or stdin EOF retains `pending` and runs nothing.
+One shell command is one complete string containing its executable and
+arguments. An array means multiple sequential complete command lines, never
+argv tokens.
+After installation, later `assent test` runs the stored command without asking
+again. An invalid proposal is refused; a missing or ambiguous operation leaves
+the finite workflow unresolved. These outcomes return nonzero.
 
 `test` starts only the independent `runtime_test` workflow. It does not run
 task, plan, integration, `full_verify`, or `accept`. The complete mode, state,

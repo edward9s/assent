@@ -127,13 +127,20 @@ works directly in the current primary working tree.
 `assent init` creates the root contract with `execution = "pending"`; it cannot
 know either the command or its execution mechanism before implementation. A
 pending action records that it did not start and advances to the next configured
-writable role. That role inspects the implemented project, may create the
-smallest useful runtime probe, and proposes only `execution = "explicit"` with
-a non-empty command or command array. The scheduler captures the proposal,
-restores the role's direct control-file edit, validates the exact transition,
-and installs it. The following action runs the command. A missing proposal
-exhausts the finite workflow; an invalid proposal is refused. `assent check`
-remains read-only and never starts this discovery.
+writable role. That role inspects the operator-facing documentation and
+implemented production entrypoint without changing ordinary project files. It
+proposes only `execution = "explicit"` with the exact unambiguous, finite
+production operation, using normal persistent production configuration and
+data. One shell command is one complete string containing its executable and
+arguments. An array means multiple sequential complete command lines, never
+argv tokens. Tests, probes, temporary resources, samples, and artificially
+bounded substitutes are not production operations. A missing or ambiguous operation
+leaves the contract pending. The scheduler captures the proposal, restores the
+role's direct control-file edit, validates the exact transition, displays every
+command, and installs it only after one `[y/N]` confirmation. The following
+action runs the command. An already explicit contract runs without another
+question. A missing proposal exhausts the finite workflow; an invalid proposal
+is refused. `assent check` remains read-only and never starts this discovery.
 
 The plan contract selects one exact `execution` mode. `disabled` has no runtime
 gate. `explicit` runs only when `assent test PLAN` is requested. `after_plan`
@@ -146,11 +153,11 @@ runtime evidence before publication.
 `[workflow].runtime_test` is a separate finite linear array. Its legal action is
 `{ action = "runtime_test" }`; every role between actions is writable and has
 an explicit model, and the array strictly alternates action and role starting
-and ending with an action. The shared settings use three `runtime_repairer`
-attempts. A project may replace the array; each role entry may select one adapter
-or an ordered adapter list. The `command` value is one string or a non-empty
-string array. The scheduler runs array entries in order and stops at the first
-nonzero exit or launch failure. Evidence identifies every completed command,
+and ending with an action. The shared settings define the finite repair
+sequence. A project may replace the array; each role entry may select one
+adapter or an ordered adapter list. The `command` value is one string or a
+non-empty string array. The scheduler runs array entries in order and stops at
+the first nonzero exit or launch failure. Evidence identifies every completed command,
 the failed command, and later entries that did not run. A repair invalidates
 earlier successes, so the next action starts again at the first command. The
 runtime action is authoritative: completing every command with exit 0 records

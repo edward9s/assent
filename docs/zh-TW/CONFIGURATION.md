@@ -93,9 +93,19 @@ preflight = [
   { action = "check" },
   { role = "preflight_repairer" },
   { action = "check" },
+  { role = "preflight_repairer" },
+  { action = "check" },
+  { role = "preflight_repairer" },
+  { action = "check" },
 ]
 task = [
   { role = "implementer" },
+  { action = "focused_test" },
+  { role = "task_repairer" },
+  { action = "focused_test" },
+  { role = "task_repairer" },
+  { action = "focused_test" },
+  { role = "task_repairer" },
   { action = "focused_test" },
   { role = "task_repairer" },
   { action = "focused_test" },
@@ -113,6 +123,12 @@ plan = [
   { action = "focused_sweep" },
   { role = "plan_repairer" },
   { action = "focused_sweep" },
+  { role = "plan_repairer" },
+  { action = "focused_sweep" },
+  { role = "plan_repairer" },
+  { action = "focused_sweep" },
+  { role = "plan_repairer" },
+  { action = "focused_sweep" },
 ]
 integration = [
   { action = "full_verify" },
@@ -122,8 +138,20 @@ integration = [
   { action = "full_verify" },
   { role = "integration_repairer" },
   { action = "full_verify" },
+  { role = "integration_repairer" },
+  { action = "full_verify" },
+  { role = "integration_repairer" },
+  { action = "full_verify" },
+  { role = "integration_repairer" },
+  { action = "full_verify" },
 ]
 runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
   { action = "runtime_test" },
   { role = "runtime_repairer" },
   { action = "runtime_test" },
@@ -193,7 +221,7 @@ workflow = [
 
 Runtime testing 有自己的 workflow layer，不會重用 task、plan 或 integration
 action。共用的 `~/.assent/assent.toml` 提供可寫入的 `runtime_repairer` role，以及
-包含三次修復機會的預設 workflow。Project 可以整體取代
+長度有限的預設 workflow。Project 可以整體取代
 `[workflow].runtime_test`；array 必須嚴格交替 action 與可寫 role、頭尾都是
 action，而且自訂 role 必須指定 model。每個 role entry 可依上例分別選 adapter。
 
@@ -205,23 +233,34 @@ execution = "pending"
 ```
 
 第一次執行無參數的 `assent test` 時，pending action 會記錄自己尚未啟動。下一個
-已設定的可寫 role 會檢查完成後的專案，提出精確轉換為 `explicit` 與一個 command：
+已設定的可寫 role 會檢查完成後的專案，只有能唯一判定時，才提出精確轉換為
+`explicit` 與文件記載的有限 production operation：
 
 ```toml
 execution = "explicit"
-command = "python -m unittest tests.test_runtime"
+command = "python run.py sync"
 ```
 
 也可以提出有序 command array：
 
 ```toml
 execution = "explicit"
-command = ["python tools/probe_a.py", "python tools/probe_b.py"]
+command = ["python run.py migrate", "python run.py sync"]
 ```
 
-Role 不能選擇 `disabled`。Assent 會先還原它對 control file 的直接修改，再驗證提案，
-並以 scheduler-owned state 寫入；下一個 action 從第一個 command 開始執行。
-`assent check` 維持唯讀，不會啟動這段探索流程。
+一條 shell command 必須是一個包含 executable 與所有參數的完整字串。上面的 array
+表示兩條依序執行的 shell command，不是 argv array。單一命令不得寫成
+`command = ["python", "run.py", "sync"]`。
+
+Operation 必須使用正常持久化 production 設定與資料。Unit test、test runner、
+mock、fixture、專用 probe、暫存或 in-memory resource、sample invocation、刻意
+限縮範圍的 invocation 都不是 production operation。Discovery 不修改一般 project
+file；operation 缺少或無法唯一判定時維持 `pending`。Role 不能選擇 `disabled`。
+Assent 會先還原它對 control file 的直接修改、驗證提案、顯示精確 command，再詢問
+一次 `[y/N]`。只有 `y` 或 `yes` 會寫入 scheduler-owned state；拒絕或 stdin EOF
+不執行任何 command 並維持 `pending`。下一個 action 從第一個 command 開始執行。
+Contract 成為 explicit 後，之後的 `assent test` 不再詢問。`assent check` 維持
+唯讀，不會啟動這段探索流程。
 
 每個 plan 則有自己的 `_runtime_test.toml` contract，可用 `disabled`、`explicit` 或
 `after_plan`；精確規則見 `format.md`。Plan command 不會 fallback 到 main contract

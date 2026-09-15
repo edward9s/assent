@@ -104,10 +104,12 @@ class TestInitContractRefresh(unittest.TestCase):
         config = tomllib.loads(config_text)
         self.assertEqual(config["roles"]["runtime_repairer"]["model"], "core")
         runtime_workflow = config["workflow"]["runtime_test"]
-        self.assertEqual(len(runtime_workflow), 7)
-        self.assertEqual(
-            [entry.get("role") for entry in runtime_workflow if "role" in entry],
-            ["runtime_repairer"] * 3)
+        actions = [entry.get("action") for entry in runtime_workflow[::2]]
+        roles = [entry.get("role") for entry in runtime_workflow[1::2]]
+        self.assertTrue(roles)
+        self.assertEqual(len(actions), len(roles) + 1)
+        self.assertTrue(all(action == "runtime_test" for action in actions))
+        self.assertTrue(all(role == "runtime_repairer" for role in roles))
         self.assertNotIn("[runtime_test]", config_text)
         self.assertEqual(
             (self.root / ".assent/_runtime_test.toml").read_text(

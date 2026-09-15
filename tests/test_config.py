@@ -142,12 +142,15 @@ plan = [{ role = "bare" }]
         template = (Path(__file__).resolve().parents[1]
                     / "assent" / "templates" / "assent.toml")
         cfg = self.load(template.read_text(encoding="utf-8"))
-        self.assertEqual(len(cfg.workflow_preflight), 3)
-        self.assertIsInstance(cfg.workflow_preflight[0], WorkflowActionStep)
-        self.assertEqual(cfg.workflow_preflight[0].action, "check")
-        self.assertEqual(cfg.workflow_preflight[1].role, "preflight_repairer")
-        self.assertIsInstance(cfg.workflow_preflight[2], WorkflowActionStep)
-        self.assertEqual(cfg.workflow_preflight[2].action, "check")
+        preflight_actions = cfg.workflow_preflight[::2]
+        preflight_roles = cfg.workflow_preflight[1::2]
+        self.assertTrue(preflight_roles)
+        self.assertEqual(len(preflight_actions), len(preflight_roles) + 1)
+        self.assertTrue(all(isinstance(step, WorkflowActionStep)
+                            and step.action == "check"
+                            for step in preflight_actions))
+        self.assertTrue(all(step.role == "preflight_repairer"
+                            for step in preflight_roles))
         task_roles = cfg.workflow_task[::2]
         task_actions = cfg.workflow_task[1::2]
         self.assertTrue(task_roles)

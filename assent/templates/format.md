@@ -92,16 +92,24 @@ The no-argument `assent test` workflow resolves it to:
 
 ```toml
 execution = "explicit"
-command = "python -m unittest tests.test_runtime"
+command = "python run.py sync"
 ```
 
-or to an ordered non-empty command array. `execution` is exactly `pending` or
-`explicit`. `pending` forbids `command`; `explicit` requires one non-empty
-string or a non-empty array of non-empty strings. A writable main runtime role
-may propose only that exact transition. The scheduler restores the direct edit,
-validates it, and installs it before a later action runs the command. There is
-no `disabled` or `after_plan` main mode, compatibility reader, or fallback to a
-task command.
+or to an ordered non-empty command array. One shell command is one string that
+contains its executable and every argument. An array represents multiple
+sequential shell commands, with one complete command line per element; it is
+never an argv array. `execution` is exactly `pending` or `explicit`. `pending`
+forbids `command`; `explicit` requires one non-empty string or a non-empty array
+of non-empty strings. Each command is an exact,
+documented, finite production operation using normal persistent production
+configuration and data, not a test, probe, temporary resource, sample, or
+artificially bounded substitute. A writable main runtime role may propose only
+that exact transition and leaves `pending` unchanged when the operation is
+missing or ambiguous. The scheduler restores the direct edit, validates it,
+shows every command, and installs it after one `[y/N]` confirmation before a
+later action runs it. An already explicit contract runs without another
+question. There is no `disabled` or `after_plan` main mode, compatibility
+reader, or fallback to a task command.
 
 ### Plan runtime-test contract: `<plan>/_runtime_test.toml`
 
@@ -115,25 +123,28 @@ execution = "disabled"
 
 ```toml
 execution = "explicit"
-command = "python -m unittest tests.test_runtime"
+command = "python run.py sync"
 ```
 
 ```toml
 execution = "after_plan"
 command = [
-  "python -m unittest tests.test_runtime",
-  "python tools/runtime_probe.py",
+  "python run.py migrate",
+  "python run.py sync",
 ]
 ```
 
 `execution` is required and is exactly one of `disabled`, `explicit`, or
 `after_plan`. `disabled` forbids `command`. `explicit` and `after_plan`
 require `command` as either one non-empty string or a non-empty array of
-non-empty strings. Array order is execution order. There is no fallback, alias,
-migration, or omitted-file meaning for any mode. A planning meeting creates
+non-empty strings. A string is one complete command line, including executable
+and arguments; an array is multiple sequential complete command lines, not one
+command split into argv tokens. Array order is execution order. There is no
+fallback, alias, migration, or omitted-file meaning for any mode. A planning meeting creates
 this file before it finishes the live plan, including when it selects
-`disabled`. Unknown never means `disabled`; unresolved meaning keeps the meeting
-open. The runtime workflow and the timing of `after_plan` belong to
+`disabled`. Every declared command has the same production-operation semantics
+as the main contract. Unknown never means `disabled`; unresolved meaning keeps
+the meeting open. The runtime workflow and the timing of `after_plan` belong to
 `workflow.md`.
 
 ## Task file: `tNNN_name.e.toml`

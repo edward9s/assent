@@ -248,13 +248,12 @@ class TestContractContent(unittest.TestCase):
                          ["runtime_repair"])
         self.assertEqual(data["roles"]["runtime_repairer"]["model"], "core")
         workflow = data["workflow"]["runtime_test"]
-        self.assertEqual(len(workflow), 7)
-        self.assertEqual(
-            [entry.get("action") for entry in workflow[::2]],
-            ["runtime_test"] * 4)
-        self.assertEqual(
-            [entry.get("role") for entry in workflow[1::2]],
-            ["runtime_repairer"] * 3)
+        actions = [entry.get("action") for entry in workflow[::2]]
+        roles = [entry.get("role") for entry in workflow[1::2]]
+        self.assertTrue(roles)
+        self.assertEqual(len(actions), len(roles) + 1)
+        self.assertTrue(all(action == "runtime_test" for action in actions))
+        self.assertTrue(all(role == "runtime_repairer" for role in roles))
         self.assertTrue(all("adapter" not in entry for entry in workflow))
         self.assertNotIn('adapter = ["claude", "codex"]', config_text)
         self.assertNotIn("[runtime_test]", config_text)

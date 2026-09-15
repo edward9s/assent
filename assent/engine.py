@@ -2690,7 +2690,8 @@ def run_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
 
 def run_main_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
                           sleep: Callable[[float], None] | None = None,
-                          now: Callable[[], datetime] | None = None) -> int:
+                          now: Callable[[], datetime] | None = None,
+                          confirm: Callable[[str], str] | None = None) -> int:
     """Resolve or run the main runtime contract in the primary working tree."""
     try:
         contracts.require_contracts()
@@ -2747,7 +2748,8 @@ def run_main_runtime_test(cfg: Config, *, adapter: Adapter | None = None,
                 cfg, Plan([], cfg.assent_dir), None, steps, rotation,
                 sleep, now, _ActiveTask(), unit="runtime_test",
                 runtime_commands=commands, state_owner=owner,
-                checkpoint_changes=False)
+                checkpoint_changes=False,
+                runtime_contract_confirm=confirm)
             if code != 0:
                 return code
 
@@ -3156,11 +3158,25 @@ def _source_workflow_prompt(
         if main_runtime_pending:
             contract_path = cfg.assent_dir / "_runtime_test.toml"
             contracts_text = (
-                "The main runtime-test decision is pending. Inspect the implemented "
-                "project, create the smallest useful runtime probe if needed, and "
+                "The main runtime-test decision is pending. Inspect the operator-"
+                "facing documentation and the implemented production entrypoint. "
+                "If they identify one unambiguous, finite production operation, "
                 f"replace {contract_path} with exactly execution = \"explicit\" and "
-                "one command or ordered command array. Do not select disabled. The "
-                "scheduler validates and runs the command after this session.")
+                "its exact command. One shell command is one TOML string, including "
+                "the executable and every argument: for example, command = "
+                "\"python run.py sync\". Never split one command into argv-like "
+                "array elements such as [\"python\", \"run.py\", \"sync\"]. Use "
+                "an array only for multiple sequential shell commands; every array "
+                "element must itself be one complete command line. Use the normal "
+                "persistent production configuration and data. A unit test, test "
+                "runner, mock, fixture, dedicated probe, temporary or in-memory "
+                "resource, sample invocation, or artificially bounded invocation "
+                "is not a production operation. Do not create a command or project "
+                "file to make discovery succeed. If the production operation is "
+                "missing or ambiguous, leave the contract pending. Do not select "
+                "disabled. The scheduler validates an explicit proposal, shows "
+                "the exact command to the operator, and runs it only after "
+                "explicit confirmation.")
         else:
             contracts_text = (
                 "Repair the project source so the configured main runtime-test "
@@ -3171,12 +3187,15 @@ def _source_workflow_prompt(
               (_focused_test_prompt(state) if task is not None
                else _focused_sweep_prompt(state)))
     write_policy = (
-        "You may edit any ordinary project source, test, configuration, or "
-        "documentation file in this working tree that is needed to "
-        "satisfy the stated behavior."
-        if step.writes else
-        "This is a read-only review session. Do not create, edit, delete, "
-        "rename, format, or generate any project file.")
+        "Discovery is inspection-only. Do not create, edit, delete, rename, "
+        "format, or generate any ordinary project file."
+        if main_runtime_pending else
+        ("You may edit any ordinary project source, test, configuration, or "
+         "documentation file in this working tree that is needed to "
+         "satisfy the stated behavior."
+         if step.writes else
+         "This is a read-only review session. Do not create, edit, delete, "
+         "rename, format, or generate any project file."))
     task_focus = (
         "Focus on this task's behavior, but do not treat predicted file paths "
         "or task ownership as a write boundary."
@@ -3259,7 +3278,8 @@ def _run_source_role(
         rotation: _AdapterRotation,
         sleep: Callable[[float], None], now: Callable[[], datetime],
         active: _ActiveTask, *, state_owner: Path | None = None,
-        checkpoint_changes: bool = True
+        checkpoint_changes: bool = True,
+        runtime_contract_confirm: Callable[[str], str] | None = None,
         ) -> tuple[int, WorkflowState]:
     """Run one role session; only adapter availability may repeat the step."""
     def checkpoint(subject: str) -> None:
@@ -3291,6 +3311,9 @@ def _run_source_role(
                 cfg.assent_dir).execution == "pending")
         contract_before = (
             management[main_runtime_contract]
+            if discovering_main_runtime else None)
+        discovery_source_identity = (
+            _runtime_worktree_identity(cfg)
             if discovering_main_runtime else None)
         contract_proposal: bytes | None | object = _NO_CONTRACT_PROPOSAL
         source_head = gitops.head_ref(cfg.root)
@@ -3428,6 +3451,12 @@ def _run_source_role(
             print(f"Role session failed: {reason}")
             return result.exit_code or 1, state
 
+        if (discovering_main_runtime
+                and _runtime_worktree_identity(cfg) != discovery_source_identity):
+            print("Role session crossed its control boundary: main runtime "
+                  "discovery changed an ordinary project file")
+            return 1, state
+
         if contract_proposal is not _NO_CONTRACT_PROPOSAL:
             if contract_proposal is None:
                 print("Role session crossed its control boundary: the main "
@@ -3443,6 +3472,18 @@ def _run_source_role(
             if proposal.execution != "explicit" or proposal.commands is None:
                 print("Role session crossed its control boundary: main runtime "
                       "discovery must replace pending with explicit plus command")
+                return 1, state
+            print("Proposed main production runtime command(s):")
+            for index, command in enumerate(proposal.commands, start=1):
+                print(f"Command {index}/{len(proposal.commands)}: {command}")
+            ask = runtime_contract_confirm or input
+            try:
+                answer = ask("Install and run this production operation? [y/N]: ")
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() not in {"y", "yes"}:
+                print("Main runtime-test proposal declined; contract remains "
+                      "pending and the command was not run.")
                 return 1, state
             atomic_write_text(main_runtime_contract, proposal_text)
             management[main_runtime_contract] = main_runtime_contract.read_bytes()
@@ -3557,7 +3598,8 @@ def _process_source_workflow(
         unit: str | None = None,
         runtime_commands: tuple[str, ...] | None = None,
         state_owner: Path | None = None,
-        checkpoint_changes: bool = True) -> int:
+        checkpoint_changes: bool = True,
+        runtime_contract_confirm: Callable[[str], str] | None = None) -> int:
     """Execute one source workflow as a finite linear step array."""
     if not steps:
         return 0
@@ -3609,7 +3651,8 @@ def _process_source_workflow(
             code, state = _run_source_role(
                 cfg, plan, task, step, state, len(steps),
                 session_position, session_total, rotation, sleep, now, active,
-                state_owner=owner, checkpoint_changes=checkpoint_changes)
+                state_owner=owner, checkpoint_changes=checkpoint_changes,
+                runtime_contract_confirm=runtime_contract_confirm)
             if code != 0:
                 return code
             source_changed = (

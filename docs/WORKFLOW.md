@@ -97,8 +97,8 @@ Running `assent test` then follows this finite sequence:
 | Step | Observable result |
 | --- | --- |
 | `runtime_test` action | Does not start and is not recorded as `FAILED`. |
-| writable runtime role | Inspects the implemented primary tree and may create a small probe. It proposes only `explicit` plus a command. |
-| scheduler | Restores the role's direct control-file edit, validates it, then installs the proposal. |
+| writable runtime role | Inspects operator-facing documentation and the production entrypoint without changing ordinary project files. It proposes only the exact unambiguous, finite production operation; a missing or ambiguous operation stays `pending`. |
+| scheduler | Restores the role's direct control-file edit, validates it, displays every exact command, and installs it only after one `[y/N]` confirmation. |
 | next `runtime_test` action | Runs the installed command from the beginning. |
 
 A successful proposal looks like:
@@ -106,11 +106,18 @@ A successful proposal looks like:
 ```toml
 # .assent/_runtime_test.toml
 execution = "explicit"
-command = "python tools/runtime_probe.py"
+command = "python run.py sync"
 ```
 
-An invalid proposal is refused. If no role supplies one, the finite workflow
-ends unresolved. `assent check` remains read-only and never starts discovery.
+The command uses normal persistent production configuration and data. Tests,
+probes, temporary resources, samples, and artificially bounded substitutes do
+not qualify. One shell command is one complete string containing its executable
+and arguments; an array means multiple sequential complete command lines, never
+argv tokens. Only `y` or `yes` installs and runs the proposal; refusal or stdin
+EOF retains `pending` and runs nothing. Once installed, later `assent test` runs
+the stored command without asking again. An invalid proposal is refused. If no
+role supplies one, the finite workflow ends unresolved. `assent check` remains
+read-only and never starts discovery.
 
 Plan contracts use the same filename inside the plan directory but have three
 different modes:
@@ -136,6 +143,12 @@ The default repair loop is visible directly in the shared configuration:
 
 ```toml
 runtime_test = [
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
+  { action = "runtime_test" },
+  { role = "runtime_repairer" },
   { action = "runtime_test" },
   { role = "runtime_repairer" },
   { action = "runtime_test" },

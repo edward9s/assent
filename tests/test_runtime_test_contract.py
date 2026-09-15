@@ -81,11 +81,11 @@ class TestRuntimeTestContract(unittest.TestCase):
     def test_command_array_preserves_order(self):
         self.write_contract(
             'execution = "explicit"\n'
-            'command = ["first", "second", "third"]\n')
+            'command = ["python run.py migrate", "python run.py sync"]\n')
 
         self.assertEqual(
             parse_runtime_test_contract(self.plan_dir).commands,
-            ("first", "second", "third"))
+            ("python run.py migrate", "python run.py sync"))
 
     def test_contract_is_immutable(self):
         self.write_contract('execution = "disabled"\n')
