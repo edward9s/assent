@@ -18,7 +18,7 @@ from assent.batch_receipt import (BATCH_RECEIPT_NAME, BATCH_RECEIPT_VERSION,
                                   BatchSource, BatchVerificationReceipt,
                                   batch_receipt_is_current, batch_receipt_path,
                                   batch_receipt_staleness,
-                                  current_batch_ignored_directory_inputs,
+                                  current_batch_ignored_inputs,
                                   read_batch_receipt, write_batch_receipt)
 from assent.plan_verification import RECEIPT_NAME, read_receipt
 from assent.gitops import commit_of, tree_of
@@ -66,18 +66,18 @@ class BatchReceiptCase(VerificationRepositoryCase):
             target_tip=self.target_tip,
             sources=sources, final_tree=candidate.step_trees[-1],
             verify_script_sha256=verifier_digest(self.cfg),
-            ignored_directory_inputs_sha256="0" * 64,
+            ignored_inputs_sha256="0" * 64,
             verify_command="python .assent/verify.py", exit_code=0,
             completed_at="2026-07-24T00:00:00+00:00", failure_summary="")
         fields.update(overrides)
         receipt = BatchVerificationReceipt(**fields)
-        if "ignored_directory_inputs_sha256" not in overrides:
+        if "ignored_inputs_sha256" not in overrides:
             # The reviewed ignored-directory inputs are part of the evidence now, so the
             # fixture records what the repository currently is rather than a
             # placeholder that would read as drift.
             receipt = dataclasses.replace(
                 receipt,
-                ignored_directory_inputs_sha256=current_batch_ignored_directory_inputs(
+                ignored_inputs_sha256=current_batch_ignored_inputs(
                     self.root, receipt))
         return receipt
 
@@ -202,7 +202,7 @@ class TestBatchReceiptStaleness(BatchReceiptCase):
         reasons = batch_receipt_staleness(self.cfg, receipt)
 
         self.assertEqual(len(reasons), 1, reasons)
-        self.assertIn("reviewed ignored-directory inputs cannot be reproduced", reasons[0])
+        self.assertIn("ignored inputs cannot be reproduced", reasons[0])
         self.assertIn("outside its active REVIEWED-NONE", reasons[0])
         self.assertEqual(
             (external / "marker.txt").read_text(encoding="utf-8"),

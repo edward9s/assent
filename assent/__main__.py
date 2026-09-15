@@ -28,9 +28,9 @@ from assent.plandeps import infer_plan_completion, parse_plan_dependency_graph
 from assent.plan_source import resolve_source_snapshot
 from assent.plan_scheduler import run_all
 from assent.init import init as run_init
-from assent.ignored_dirs_cli import (add_ignored_dirs_command,
-                                     ignored_dirs_declare,
-                                     ignored_dirs_status)
+from assent.ignored_inputs_cli import (add_ignored_inputs_command,
+                                     ignored_inputs_declare,
+                                     ignored_inputs_status)
 from assent.plan import (plan_workflow_requires_human,
                          read_runtime_test_workflow_state)
 from assent.reconcile import (reconcile_abort, reconcile_continue,
@@ -130,7 +130,7 @@ def _build_parser() -> argparse.ArgumentParser:
         parser_class=functools.partial(argparse.ArgumentParser,
                                        formatter_class=_HelpFormatter),
         metavar=("{run,test,status,check,report,verify,clean,accept,reconcile,reject,"
-                 "rework,archive,init,doctor,ignored-dirs}"))
+                 "rework,archive,init,doctor,ignored-inputs}"))
 
     run_p = sub.add_parser(
         "run", help="Run every discovered plan, or the exact named plans, "
@@ -310,9 +310,9 @@ def _build_parser() -> argparse.ArgumentParser:
     init_p.add_argument("--path", default=".", metavar="DIR",
                         help="Target project root directory (default: current directory)")
 
-    # The only sanctioned writer of the local ignored-directory manifest.  It needs no
+    # The only sanctioned writer of the local ignored-input manifest. It needs no
     # .assent project config: it acts on the Git worktree it is run in.
-    add_ignored_dirs_command(sub)
+    add_ignored_inputs_command(sub)
 
     sub.add_parser(
         "doctor", help="Diagnose the machine environment (Python, git, "
@@ -577,18 +577,18 @@ def _dispatch(argv: list[str]) -> int:
     if args.command == "doctor":
         return run_doctor()
 
-    # `ignored-dirs` acts on the Git worktree it runs in and writes only the
+    # `ignored-inputs` acts on the Git worktree it runs in and writes only the
     # primary worktree's local manifest, so it deliberately skips the .assent
     # project config gate below: a source worktree carries no .assent at all.
-    if args.command == "ignored-dirs":
+    if args.command == "ignored-inputs":
         try:
             if args.operation == "status":
-                return ignored_dirs_status()
-            return ignored_dirs_declare(
+                return ignored_inputs_status()
+            return ignored_inputs_declare(
                 args.required, args.watch, args.none_required,
                 args.not_required)
         except AssentError as e:
-            print(f"ignored-dirs {args.operation}: failed ({e})")
+            print(f"ignored-inputs {args.operation}: failed ({e})")
             return 1
 
     try:

@@ -96,7 +96,7 @@ assent run --jobs 2
 ```
 
 `assent report`、`status`、`verify`、`rework`、`reject`、`reconcile`、`clean` 與
-`ignored-dirs` 仍提供檢查、手動驗證、復原與進階流程使用；它們不是正常 happy
+`ignored-inputs` 仍提供檢查、手動驗證、復原與進階流程使用；它們不是正常 happy
 path 額外必走的步驟。
 
 `assent init` 會把共用設定與三份 AI 契約安裝到 `~/.assent/`，並在不詢問 command

@@ -113,7 +113,7 @@ nonzero exit records `FAILED`, and source or command-list drift records `STALE`.
 Role output cannot declare a pass. A successful repair role that makes no
 working-tree source change ends the workflow unresolved; no extra action is
 invented. This source-change requirement applies only after a runtime command
-actually failed. A plan runtime role that settles an injected ignored-directory
+actually failed. A plan runtime role that settles an injected ignored-input
 precondition may advance without changing tracked source, and the next action
 then evaluates the command. Main runtime commands run directly in the primary
 working tree and do not use this precondition.
@@ -135,7 +135,7 @@ remain for ordinary Git review. Runtime evidence is not a verification receipt:
 `full_verify` and its receipt remain separate evidence, and acceptance requires
 both fresh receipt evidence and any required current runtime gate.
 
-In a worktree-backed source workflow, an unsettled ignored-directory decision
+In a worktree-backed source workflow, an unsettled ignored-input decision
 means the action did not start; Assent records that gate evidence separately
 from test results. A later configured action runs again after FAILED evidence.
 Only matching PASSED evidence is reused to finish interruption recovery.
@@ -150,9 +150,9 @@ bounded output from earlier roles and exact mechanical action evidence. There
 is no structured verdict, finding ledger, owner routing, path-scope amendment,
 or second repair engine.
 
-Unknown or stale ignored-directory evidence adds one bounded declaration
+Unknown or stale ignored-input evidence adds one bounded declaration
 instruction to a source role. The session reviews the complete inventory and
-submits its decision through `assent ignored-dirs declare`; Assent validates,
+submits its decision through `assent ignored-inputs declare`; Assent validates,
 records, and applies it. This operation is the only writer of the local manifest.
 The following action does not start until the decision is settled; no directory
 is copied or linked by hand.

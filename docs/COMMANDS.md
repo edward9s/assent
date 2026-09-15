@@ -42,7 +42,7 @@ verification.
 `run`, `status`, `check`, `report`, `verify`, `clean`, `archive`, `accept`,
 `reconcile`, `reject`, and `rework` accept `--config PATH` as an option on that
 subcommand. It selects the project override and locates the project; it is not a
-top-level global option. `init`, `doctor`, and `ignored-dirs` have their own
+top-level global option. `init`, `doctor`, and `ignored-inputs` have their own
 project-location rules.
 
 ## Command guide
@@ -63,8 +63,8 @@ project-location rules.
 | `reject` | **Destructive reset.** Discard a plan's implementation after recording manual Git recovery evidence in `_reject.toml`. |
 | `clean` | **Optional maintenance.** Remove proven-redundant worktrees/branches without archiving the live plan. |
 | `doctor` | **Diagnostics.** Diagnose installation and recover orphaned temporary branches. |
-| `ignored-dirs status` | **Diagnostics.** Inspect the current worktree's ignored-directory decision and links without changing them. |
-| `ignored-dirs declare` | **AI source-role operation.** Record the reviewed decision and link only required directories. |
+| `ignored-inputs status` | **Diagnostics.** Inspect the current worktree's ignored-input decision and links without changing them. |
+| `ignored-inputs declare` | **AI source-role operation.** Record the reviewed decision and link only required files or directories. |
 
 ## Initialize a project
 

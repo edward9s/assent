@@ -140,20 +140,20 @@ watchdog stall is an adapter failure: Assent preserves work and applies its
 retry policy. A successful role session advances to the next configured step;
 only a scheduler action changes task completion state.
 
-## Ignored directories
+## Ignored inputs
 
 If an injected clause says `UNKNOWN` or `STALE`, inspect the complete listed
-inventory and submit the decision with `assent ignored-dirs declare` from the
+inventory and submit the decision with `assent ignored-inputs declare` from the
 source worktree before closeout. Assent validates, records, and applies the
-declaration. Mark every listed ordinary ignored directory exactly once with
+declaration. Mark every listed ordinary ignored file or directory exactly once with
 `--required` or `--not-required`; use `--none-required` when none is an input.
 Watch only tracked dependency or build files that invalidate the decision.
 
-Require only a directory that the task demonstrably needs and whose
-same-relative primary target is an ordinary Git-ignored directory. Assent then
-creates the worktree link. Never copy an ignored tree. Never
-hand-create a source-worktree link, provision unrelated caches or credentials,
-or modify a linked target. Assent snapshots the relevant targets around every
+Require only an input that the task demonstrably needs and whose same-relative
+primary target is an ordinary Git-ignored file or directory. Assent then
+creates the worktree link. Never copy an ignored input or hand-create a
+source-worktree link. Do not share writable build output or unrelated caches,
+and do not modify a linked target. Assent snapshots the relevant targets around every
 AI role; changing one and then redeclaring it is a control-boundary failure, not
 a way to turn task output into an ignored input.
 

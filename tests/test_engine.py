@@ -6,7 +6,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from assent import engine, gitops, ignored_dirs
+from assent import engine, gitops, ignored_inputs
 from assent.adapters import TaskResult
 from assent.plan import (parse_task_file, read_entries,
                          plan_workflow_requires_human,
@@ -498,14 +498,14 @@ class TestLinearEngine(EngineTestCase):
         local_input.mkdir()
         marker = local_input / "research.py"
         marker.write_text("original\n", encoding="utf-8")
-        ignored_dirs.declare(
+        ignored_inputs.declare(
             self.root, self.root, required=("local-input",),
             watch=(".gitignore",), not_required=())
 
         def tamper_and_redeclare(_prompt):
             linked_marker = self.execution_root() / "local-input" / "research.py"
             linked_marker.write_text("changed by role\n", encoding="utf-8")
-            ignored_dirs.declare(
+            ignored_inputs.declare(
                 self.root, self.execution_root(), required=("local-input",),
                 watch=(".gitignore",), not_required=())
             return result("changed and redeclared the ignored input")
@@ -535,7 +535,7 @@ class TestLinearEngine(EngineTestCase):
         local_input = self.root / "local-input"
         local_input.mkdir()
         (local_input / "fixture.txt").write_text("input\n", encoding="utf-8")
-        ignored_dirs.declare(
+        ignored_inputs.declare(
             self.root, self.root, required=("local-input",),
             watch=(".gitignore",), not_required=())
 
@@ -553,15 +553,16 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(
             (local_input / "fixture.txt").read_text(encoding="utf-8"), "input\n")
 
-    def test_unsettled_ignored_dirs_advance_without_running_focused_test(self):
+    def test_unsettled_ignored_inputs_advance_without_running_focused_test(self):
         path = self.write_task(1)
         cfg = self.build(extra_config=WORKFLOW)
         self.commit_all()
         adapter = ScriptedAdapter([result(), result()])
-        unknown = ignored_dirs.Decision(
-            ignored_dirs.UNKNOWN, needs_review=True, inventory=("assets",))
+        unknown = ignored_inputs.Decision(
+            ignored_inputs.UNKNOWN, needs_review=True, inventory=("assets",),
+            kinds={"assets": ignored_inputs.DIRECTORY_INPUT})
 
-        with mock.patch("assent.engine._ignored_dir_decision",
+        with mock.patch("assent.engine._ignored_input_decision",
                         return_value=unknown), \
                 mock.patch("assent.engine._verify_subprocess") as verify:
             code = self.run_with_contracts(cfg, adapter)
@@ -570,7 +571,7 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(parse_task_file(path).status, "BLOCKED")
         verify.assert_not_called()
         self.assertEqual(len(adapter.calls), 2)
-        self.assertTrue(all("assent ignored-dirs declare" in call[0]
+        self.assertTrue(all("assent ignored-inputs declare" in call[0]
                             for call in adapter.calls))
         state = read_workflow_state(cfg.tasks_dir)
         self.assertIsNotNone(state)
@@ -578,18 +579,19 @@ class TestLinearEngine(EngineTestCase):
         self.assertEqual(state.action_status, "")
         self.assertIn("focused_test not started", state.evidence[-1])
 
-    def test_settled_ignored_dirs_allow_the_next_focused_test_to_run(self):
+    def test_settled_ignored_inputs_allow_the_next_focused_test_to_run(self):
         path = self.write_task(1)
         cfg = self.build(extra_config=WORKFLOW)
         self.commit_all()
         adapter = ScriptedAdapter([result(), result()])
-        reviewed = ignored_dirs.Decision(ignored_dirs.REVIEWED_NONE)
-        unknown = ignored_dirs.Decision(
-            ignored_dirs.UNKNOWN, needs_review=True, inventory=("assets",))
+        reviewed = ignored_inputs.Decision(ignored_inputs.REVIEWED_NONE)
+        unknown = ignored_inputs.Decision(
+            ignored_inputs.UNKNOWN, needs_review=True, inventory=("assets",),
+            kinds={"assets": ignored_inputs.DIRECTORY_INPUT})
         decisions = [reviewed, reviewed, unknown, unknown, reviewed]
         passed = subprocess.CompletedProcess("verify", 0, "", "")
 
-        with mock.patch("assent.engine._ignored_dir_decision",
+        with mock.patch("assent.engine._ignored_input_decision",
                         side_effect=decisions), \
                 mock.patch("assent.engine._verify_subprocess",
                            return_value=passed) as verify:
@@ -606,9 +608,9 @@ class TestLinearEngine(EngineTestCase):
         failed = subprocess.CompletedProcess("verify", 1, "failed", "")
         passed = subprocess.CompletedProcess("verify", 0, "", "")
 
-        with mock.patch("assent.engine._ignored_dir_decision",
-                        return_value=ignored_dirs.Decision(
-                            ignored_dirs.REVIEWED_NONE)), \
+        with mock.patch("assent.engine._ignored_input_decision",
+                        return_value=ignored_inputs.Decision(
+                            ignored_inputs.REVIEWED_NONE)), \
                 mock.patch("assent.engine._verify_subprocess",
                            side_effect=[failed, passed]) as verify:
             code = self.run_with_contracts(

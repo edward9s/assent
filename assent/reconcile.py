@@ -31,7 +31,7 @@ import io
 from dataclasses import dataclass
 from pathlib import Path
 
-from assent import AssentError, gitops, ignored_dirs, verification
+from assent import AssentError, gitops, ignored_inputs, verification
 from assent.config import Config
 from assent.plan_source import COMPLETE_STATUSES, resolve_source_snapshot
 from assent.lockfile import LockBusy, hold_integration_lock, hold_lock
@@ -112,10 +112,10 @@ def _require_source(cfg: Config, main: Path) -> tuple[str, str, Path]:
     return branch, tip, worktree
 
 
-def _ignored_dir_decision(managed: _Managed, worktree: Path,
+def _ignored_input_decision(managed: _Managed, worktree: Path,
                           label: str, *,
-                          manifest: ignored_dirs.Manifest | None = None
-                          ) -> ignored_dirs.Decision | None:
+                          manifest: ignored_inputs.Manifest | None = None
+                          ) -> ignored_inputs.Decision | None:
     """Classify the finished source snapshot, or refuse before any managed resource.
 
     The reconciliation worktree is another consumer of the reviewed manifest, so
@@ -126,26 +126,26 @@ def _ignored_dir_decision(managed: _Managed, worktree: Path,
     own.
     """
     try:
-        decision = ignored_dirs.classify(
+        decision = ignored_inputs.classify(
             managed.main, worktree, manifest=manifest)
         if decision.settled:
-            ignored_dirs.require_directory_link_agreement(
+            ignored_inputs.require_input_link_agreement(
                 managed.main, worktree, decision, plan_name=managed.plan)
     except AssentError as e:
         print(f"{label}: refused, {e}. Nothing was created.")
         return None
     if not decision.settled:
-        print(f"{label}: refused, {ignored_dirs.closeout_refusal(decision)}. "
+        print(f"{label}: refused, {ignored_inputs.closeout_refusal(decision)}. "
               "Nothing was created.")
         return None
     return decision
 
 
-def _release_ignored_dirs(managed: _Managed) -> None:
+def _release_ignored_inputs(managed: _Managed) -> None:
     """Detach the reconciliation worktree's assent-created links and forget them."""
-    detached = ignored_dirs.release(managed.main, managed.path)
+    detached = ignored_inputs.release(managed.main, managed.path)
     for relative in detached:
-        print(f"  ignored-directory link detached: {relative}")
+        print(f"  ignored-input link detached: {relative}")
 
 
 def _remove_managed(managed: _Managed, expected_head: str) -> None:
@@ -178,8 +178,8 @@ def _remove_managed(managed: _Managed, expected_head: str) -> None:
                 "changes")
         # Ownership is proven above; only now are the link objects assent itself
         # recorded detached, because Git must never be handed a tree that still
-        # contains a directory link.
-        _release_ignored_dirs(managed)
+        # contains a provisioned link.
+        _release_ignored_inputs(managed)
         gitops.remove_worktree(managed.main, managed.path)
         _remove_empty_container(managed.path)
         print(f"  reconciliation worktree removed: {managed.path}")
@@ -199,7 +199,7 @@ def _remove_managed(managed: _Managed, expected_head: str) -> None:
     if not managed.path.exists():
         # A worktree that is gone cannot hold a link, so discarding its stale
         # application record costs one existence check and no traversal.
-        _release_ignored_dirs(managed)
+        _release_ignored_inputs(managed)
 
 
 def _stage_resolution(worktree: Path) -> str | None:
@@ -416,10 +416,10 @@ def _automatic_reconcile_context(
             or gitops.current_branch(managed.path) != managed.branch):
         raise AssentError(
             "automatic reconcile worktree ownership cannot be proven")
-    problem = ignored_dirs.application_problem(managed.main, managed.path)
+    problem = ignored_inputs.application_problem(managed.main, managed.path)
     if problem:
         raise AssentError(
-            f"automatic reconcile ignored-directory evidence is invalid: {problem}")
+            f"automatic reconcile ignored-input evidence is invalid: {problem}")
     head = gitops.commit_of(managed.path, "HEAD")
     pending = gitops.merge_head(managed.path)
     if pending is None:
@@ -564,26 +564,26 @@ def _start(cfg: Config) -> int:
     # worktree has been provisioned; it can never replace the profile between
     # the refusal gate and link creation.
     try:
-        with ignored_dirs.hold_manifest_lock(managed.main):
-            manifest = ignored_dirs.read_manifest(managed.main)
-            decision = _ignored_dir_decision(
+        with ignored_inputs.hold_manifest_lock(managed.main):
+            manifest = ignored_inputs.read_manifest(managed.main)
+            decision = _ignored_input_decision(
                 managed, worktree, label, manifest=manifest)
             if decision is None:
                 return 1
             gitops.add_worktree_branch(
                 managed.main, managed.branch, managed.path, source_tip)
-            # The declared ignored-directory inputs exist before the merge does: a
+            # The declared ignored inputs exist before the merge does: a
             # resolution is edited and later verified in this worktree, so it
             # must look like a real source worktree. REVIEWED-NONE creates
             # nothing at all.
-            created, _detached = ignored_dirs.reconcile(
+            created, _detached = ignored_inputs.reconcile(
                 managed.main, managed.path, decision, manifest=manifest)
     except AssentError as e:
         raise AssentError(
             f"{e}. The reconciliation worktree {managed.path} was kept; run "
             f"`assent reconcile --abort {plan_name}` to discard it") from e
     for relative in created:
-        print(f"  ignored-directory link provisioned: {relative}")
+        print(f"  ignored-input link provisioned: {relative}")
     try:
         outcome = gitops.merge_no_commit(managed.path, target_tip)
     except AssentError as e:
@@ -675,16 +675,16 @@ def _continue(cfg: Config) -> int:
         return 1
 
     try:
-        decision = ignored_dirs.classify(managed.main, source_worktree)
+        decision = ignored_inputs.classify(managed.main, source_worktree)
         if decision.settled:
-            ignored_dirs.require_directory_link_agreement(
+            ignored_inputs.require_input_link_agreement(
                 managed.main, source_worktree, decision, plan_name=plan_name)
     except AssentError as e:
         print(f"{label}: refused, {e}. The reconciliation worktree "
               f"{managed.path} and every edit were preserved.")
         return 1
     if not decision.settled:
-        print(f"{label}: refused, {ignored_dirs.closeout_refusal(decision)}. "
+        print(f"{label}: refused, {ignored_inputs.closeout_refusal(decision)}. "
               f"The reconciliation worktree {managed.path} and every edit "
               "were preserved.")
         return 1
@@ -707,11 +707,11 @@ def _continue(cfg: Config) -> int:
     # profile it was provisioned from must still exist and every recorded link
     # must still point at the primary worktree's same relative directory.  A
     # mismatch refuses with the conflict and every human edit preserved.
-    problem = ignored_dirs.application_problem(managed.main, managed.path)
+    problem = ignored_inputs.application_problem(managed.main, managed.path)
     if problem:
         print(f"{label}: refused, {problem}. The reconciliation worktree "
               f"{managed.path} and every edit were preserved; assent does not "
-              "repair an ignored-directory link behind your back.")
+              "repair an ignored-input link behind your back.")
         return 1
 
     pending = gitops.merge_head(managed.path)
@@ -803,7 +803,7 @@ def _abort(cfg: Config) -> int:
                   "rather than force-removed.")
             return 1
         head = gitops.commit_of(managed.path, "HEAD")
-        _release_ignored_dirs(managed)
+        _release_ignored_inputs(managed)
         gitops.remove_worktree(managed.main, managed.path)
         _remove_empty_container(managed.path)
         print(f"{label}: reconciliation worktree removed: {managed.path} "
@@ -818,7 +818,7 @@ def _abort(cfg: Config) -> int:
         print(f"{label}: temporary branch removed: {managed.branch} "
               f"(was {tip}; recoverable by that hash)")
 
-    _release_ignored_dirs(managed)
+    _release_ignored_inputs(managed)
     print(f"{label}: done. The source and the integration target were not "
           "changed.")
     return 0

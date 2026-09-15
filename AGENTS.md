@@ -5,7 +5,7 @@
 assent — an AI plan format plus an automatic scheduler. Pure Python 3.11+
 (standard library only, tomllib), Windows-first and cross-platform. CLI
 subcommands: run / status / check / report / verify / clean / accept /
-reconcile / reject / rework / archive / init / doctor / ignored-dirs.
+reconcile / reject / rework / archive / init / doctor / ignored-inputs.
 Source lives in `assent/`, tests in `tests/` (unittest, not pytest).
 
 This file governs development of the assent project itself. Rules followed
@@ -194,20 +194,21 @@ These principles jointly govern every design and implementation decision:
 - A verification receipt is a deletable derived artifact, never an independent
   source of truth: source commits, the reconstructed integration tree, and the
   verification-script digest must reproduce it before it can authorize accept.
+  Before receipt-producing verification, the scheduler invalidates a parsed
+  older positive-integer receipt version and regenerates it; malformed or future
+  versions refuse, acceptance never upgrades one, and AI roles never edit one.
 - Complete verification mirrors exactly two kinds of artifact from the source
   worktrees that enter the candidate, never arbitrary ignored content:
-  reviewed-profile ignored directory links provisioned by Assent -- Windows junctions and
-  directory symlinks, POSIX directory symlinks -- and ordinary ignored leaf
-  files that sit inside an otherwise tracked directory, such as a generated
-  `*.g.dart` beside its tracked source. Both may be at the root or nested below
-  tracked parents. Discovery uses Git's own ignore walk with whole ignored
-  trees collapsed, so ignored directory trees, build output, caches, editor
-  state, `.git`, `.assent`, and everything inside a discovered link's target
-  are pruned rather than enumerated, as is any file whose parent chain is not
-  part of the candidate's tracked tree. A directory is mirrored as a link to
-  the same resolved target and a file as a candidate-side link to the source
-  file (same-volume hard link on Windows, file symlink on POSIX); nothing is
-  copied and no hardlink twin is prepared by hand. Each destination must be
+  reviewed-profile ignored input links provisioned by Assent, and ordinary
+  ignored leaf files generated in a source worktree beside tracked content.
+  Both may be at the root or nested below tracked parents. Discovery uses Git's
+  own ignore walk with whole ignored trees collapsed, so ignored directory
+  trees, build output, caches, editor state, `.git`, `.assent`, and everything
+  inside a discovered directory link's target are pruned rather than
+  enumerated, as is any file whose parent chain is not part of the candidate's
+  tracked tree. A directory uses a Windows junction or POSIX directory symlink;
+  a file uses a same-volume Windows hard link or POSIX file symlink. Nothing is
+  copied and no hard-link twin is prepared by hand. Each destination must be
   absent from the candidate and Git-ignored there; a provisioned artifact never
   replaces or shadows tracked content. Several sources contribute their union:
   one path resolving to one directory target, or to a file with one content
@@ -220,13 +221,15 @@ These principles jointly govern every design and implementation decision:
   provisioning created, so neither creating nor cleaning a candidate ever
   traverses, modifies, or deletes a linked target, and the source worktree's own
   links, files, and targets survive success, failure, and interruption alike.
-  Do not add `--force`, a project `local_inputs` setting, a blanket `.gitignore`
-  overlay, or copies of ignored directory contents into Git.
+  The receipt's `ignored_inputs_sha256` binds reviewed targets and the content
+  of automatic ignored leaf files. Do not add `--force`, a project
+  `local_inputs` setting, a blanket `.gitignore` overlay, or copies of ignored
+  content into Git.
 - The ignored-input handoff is documented where each reader actually looks: the
   packaged scheduled-task instructions tell an executing session to record a
-  required ignored directory through `assent ignored-dirs declare`, which
-  provisions the same-relative junction or directory symlink, and never to copy
-  the tree or hand-create a source link; a full verifier that fails on a
+  required ignored file or directory through `assent ignored-inputs declare`,
+  which provisions the same-relative link, and never to copy the input or
+  hand-create a source link; a full verifier that fails on a
   path inside a physically ignored source directory gets one appended
   `Ignored input diagnosis:` note naming that directory and the directory-link
   remedy. The note preserves the verifier output and exit code, is stored in
@@ -234,56 +237,57 @@ These principles jointly govern every design and implementation decision:
   exact selected, dynamic batch, and localization-prefix verification alike,
   normalizes separators, and reports only a directory the verifier output
   itself names; it never enumerates or traverses an ignored tree.
-- Which ignored directories a source requires is a reviewed decision cached in
+- Which ignored inputs a source requires is a reviewed decision cached in
   the primary worktree's untracked, never-committed
-  `.assent/_ignored-dirs.toml`;
+  `.assent/_ignored-inputs.toml`;
   it is Assent-owned local execution memory, not project source, and its only
-  writer is the validated `assent ignored-dirs declare` operation. Under
-  `[ignored_dirs]` it has one exact schema with no version field, migration,
+  writer is the validated `assent ignored-inputs declare` operation. Under
+  `[ignored_inputs]` it has one exact schema with no version field, migration,
   or legacy reader. It retains whole profiles by fingerprint -- normalized
-  project-relative `required` directories, a complete collapsed ordinary
-  ignored-directory inventory, explicit `not_required` entries with reasons,
-  exact tracked `watch` files,
+  project-relative `required` paths, a complete collapsed ordinary ignored-input
+  inventory with exact file/directory kinds, explicit `not_required` entries
+  with reasons, exact tracked `watch` files,
   and a digest of those files plus the tracked Git-ignore rules -- so parallel
-  branches never make the cache oscillate and an omitted directory cannot
+  branches never make the cache oscillate and an omitted input cannot
   be accepted. A source snapshot is UNKNOWN, REVIEWED-NONE (a matching
   `required = []` profile is an answer and must never trigger another review),
-  REVIEWED-REQUIRED (Assent provisions the exact Windows junction or POSIX
-  directory symlink to the primary worktree's same relative path itself), or
+  REVIEWED-REQUIRED (Assent provisions the primary worktree's same-relative
+  input: a Windows junction or POSIX symlink for a directory, and a Windows
+  hard link or POSIX symlink for a file), or
   STALE; conflicting matching profiles fail closed. One further state,
-  NO-IGNORED-DIRECTORY-CANDIDATE, is the deterministic zero-token fast path:
+  NO-IGNORED-INPUT-CANDIDATE, is the deterministic zero-token fast path:
   a successful primary-worktree query found no existing ordinary ignored
-  directory. It is distinct from REVIEWED-NONE and never claims that an
-  ignored-directory input is semantically unnecessary. Discovery failure
-  refuses; a new directory makes the next classification UNKNOWN.
+  input. It is distinct from REVIEWED-NONE and never claims that an ignored
+  input is semantically unnecessary. Discovery failure refuses; a new input or
+  a file/directory kind change makes the next classification UNKNOWN or STALE.
   Complete-verifier `required_evidence`
-  requires a provisionable primary directory or refuses with the exact target
-  problem. UNKNOWN and STALE add one bounded `assent ignored-dirs declare`
+  requires a provisionable primary input or refuses with the exact target
+  problem. UNKNOWN and STALE add one bounded `assent ignored-inputs declare`
   clause to a source role; the following scheduler action refuses to run until
   the validated operation settles the decision. Inventory comes from the
-  primary worktree; ignored leaf files remain on their separate automatic
-  verifier path.
+  primary worktree. Source-generated ignored leaf files remain on their
+  separate automatic verifier path.
   Every verification entry point and `assent reconcile` classify and reconcile
   before any candidate, verifier, or managed worktree exists, and plan and
-  batch receipts bind one `ignored_directory_inputs_sha256` -- snapshotted
+  batch receipts bind one `ignored_inputs_sha256` -- snapshotted
   immediately before and after the full verifier -- that acceptance rechecks before
   publishing a ref without ever repairing a link or invoking AI. Do not add a
   copy fallback, glob, all-ignored mode, force flag, Git staging of the
   manifest, or any claim that semantic necessity can be inferred from
   `.gitignore` alone.
-  Every contributing source's ignored directory links must equal its active
+  Every contributing source's reviewed ignored-input links must equal its active
   profile and resolve to those exact primary targets. An undeclared manual link
   is unreviewed evidence under every state and refuses verification,
   reconciliation, receipt freshness, reporting, and acceptance; ordinary
   ignored leaf files keep their separate automatic candidate-link behavior.
-  Required ignored directories are immutable inputs to every AI role. The
+  Required ignored inputs are immutable inputs to every AI role. The
   scheduler snapshots their contents before and after each role; while a
   decision is UNKNOWN or STALE it snapshots the complete review inventory so a
-  role cannot modify a directory and then legitimize that output by declaring
+  role cannot modify an input and then legitimize that output by declaring
   it required. Any change is a control-boundary failure, is never checkpointed
   as candidate source, and remains a blocking workflow-state fact across
   restart until source rework changes the candidate identity. Reports name
-  every required ignored directory as a local input that Git does not deliver.
+  every required ignored input as local content that Git does not deliver.
 - Cross-plan speculative execution stacks only on an explicitly declared
   `base`, so at most one not-yet-accepted upstream tip is ever in a stack. A
   plan that declares no `base` is cut from the integration target; the
@@ -346,7 +350,7 @@ Git-based workflow: `gitops.py`, `accept.py`, `archive.py`, `reconcile.py`,
 `reject.py`, `rework.py`, `clean.py`, `init.py`, `plan.py`, `batch_accept.py`,
 `batch_receipt.py`, `plan_verification.py`,
 `plan_verification_closeout.py`, `batch_verification.py`, `verification.py`,
-`verification_common.py`, `ignored_dirs.py`.
+`verification_common.py`, `ignored_inputs.py`.
 
 Unattended workflow: `plan_scheduler.py` and the linear task, plan, and
 integration interpreter in `engine.py`, including adapter rotation and

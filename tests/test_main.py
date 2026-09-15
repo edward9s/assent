@@ -29,7 +29,7 @@ from assent.config import load_config
 from assent.init import init as run_init
 from assent.plan import Plan, WorkflowState, write_workflow_state
 from tests.test_contracts import install_global_contracts
-from tests.test_ignored_dirs import settle_ignored_dirs
+from tests.test_ignored_inputs import settle_ignored_inputs
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _HAN_CHAR_RE = re.compile(r"[一-鿿]")
@@ -136,7 +136,7 @@ class TestDispatch(MainTestCase):
                 self.assertEqual(result.returncode, 0)
                 self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
-    def test_ignored_dirs_operations_are_reachable_through_the_real_cli(self):
+    def test_ignored_inputs_operations_are_reachable_through_the_real_cli(self):
         """Both inspection and the only manifest writer are real subcommands.
 
         It also has to reach dispatch without a project `.assent`: it acts on
@@ -145,36 +145,36 @@ class TestDispatch(MainTestCase):
         env = dict(os.environ)
         env["PYTHONPATH"] = str(_PROJECT_ROOT)
         result = subprocess.run(
-            [sys.executable, "-m", "assent", "ignored-dirs", "declare", "--help"],
+            [sys.executable, "-m", "assent", "ignored-inputs", "declare", "--help"],
             cwd=self.root, capture_output=True, text=True,
             encoding="utf-8", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--not-required DIR REASON", result.stdout)
-        self.assertIn("Every inventory directory must be covered exactly once",
+        self.assertIn("--not-required PATH REASON", result.stdout)
+        self.assertIn("Every inventory input must be covered exactly once",
                       result.stdout)
         self.assertIn("--none-required", result.stdout)
         self.assertIn("--watch is a repeatable", result.stdout)
         self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
         retired = subprocess.run(
-            [sys.executable, "-m", "assent", "ignored-dirs", "review", "--help"],
+            [sys.executable, "-m", "assent", "ignored-inputs", "review", "--help"],
             cwd=self.root, capture_output=True, text=True,
             encoding="utf-8", env=env)
         self.assertNotEqual(retired.returncode, 0)
         self.assertIn("invalid choice", retired.stderr)
 
         result = subprocess.run(
-            [sys.executable, "-m", "assent", "ignored-dirs", "status", "--help"],
+            [sys.executable, "-m", "assent", "ignored-inputs", "status", "--help"],
             cwd=self.root, capture_output=True, text=True,
             encoding="utf-8", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("without changing it", result.stdout)
         self.assertNotRegex(result.stdout, _HAN_CHAR_RE)
 
-        with patch("assent.__main__.ignored_dirs_declare",
+        with patch("assent.__main__.ignored_inputs_declare",
                    return_value=0) as declare:
             code, _out = self.run_main(
-                ["ignored-dirs", "declare", "--required", "pkg",
+                ["ignored-inputs", "declare", "--required", "pkg",
                  "--not-required", "build", "build output",
                  "--watch", "pubspec.yaml"])
         self.assertEqual(code, 0)
@@ -182,9 +182,9 @@ class TestDispatch(MainTestCase):
             ["pkg"], ["pubspec.yaml"], False,
             [["build", "build output"]])
 
-        with patch("assent.__main__.ignored_dirs_status",
+        with patch("assent.__main__.ignored_inputs_status",
                    return_value=0) as status:
-            code, _out = self.run_main(["ignored-dirs", "status"])
+            code, _out = self.run_main(["ignored-inputs", "status"])
         self.assertEqual(code, 0)
         status.assert_called_once_with()
         self.assertFalse((self.root / ".assent").exists())

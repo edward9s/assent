@@ -211,13 +211,13 @@ def _accept_locked(cfg: Config) -> int:
     # longer describes what would be tested.  Accept never repairs a link or
     # invokes AI to make this pass; it refuses and asks for a fresh verify.
     try:
-        current_ignored_dirs = verification.current_ignored_directory_inputs(cfg)
+        current_ignored_inputs = verification.current_ignored_inputs(cfg)
     except AssentError as e:
         print(_refresh_message(plan_name, str(e)))
         return 1
-    if receipt.ignored_directory_inputs_sha256 != current_ignored_dirs:
+    if receipt.ignored_inputs_sha256 != current_ignored_inputs:
         print(_refresh_message(
-            plan_name, "the reviewed ignored-directory inputs changed since verification"))
+            plan_name, "the ignored inputs changed since verification"))
         return 1
 
     message = accept_merge_message(
@@ -300,14 +300,14 @@ def _accept_locked(cfg: Config) -> int:
                                 "the verification script changed during acceptance")
                         if gate_problem is None:
                             try:
-                                final_ignored_dirs = (
-                                    verification.current_ignored_directory_inputs(cfg))
+                                final_ignored_inputs = (
+                                    verification.current_ignored_inputs(cfg))
                             except AssentError as e:
                                 gate_problem = str(e)
                             else:
-                                if final_ignored_dirs != current_ignored_dirs:
+                                if final_ignored_inputs != current_ignored_inputs:
                                     gate_problem = (
-                                        "the reviewed ignored-directory inputs changed during "
+                                        "the ignored inputs changed during "
                                         "acceptance")
                         if gate_problem is None:
                             gitops.fast_forward(main, integration_commit)

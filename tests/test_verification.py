@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
-from assent import AssentError, pathops, ignored_dirs
+from assent import AssentError, pathops, ignored_inputs
 from assent.config import load_config
 from assent.plan_verification import (RECEIPT_NAME, RECEIPT_VERSION,
                                         VerificationReceipt, read_receipt,
@@ -28,7 +28,7 @@ from assent.gitops import (branch_tip, commit_of, plan_branches, tree_of,
 from assent.verification_common import (ProvisionedLink, _require_no_overlap,
                                         provisioned_candidate_links, summary,
                                         union_worktree_links)
-from tests.test_ignored_dirs import excluded_inventory, settle_ignored_dirs
+from tests.test_ignored_inputs import excluded_input_inventory, settle_ignored_inputs
 
 
 def _git(root: Path, *args: str) -> str:
@@ -115,7 +115,7 @@ class VerificationRepositoryCase(unittest.TestCase):
         # These fixtures hand-provision whatever links they need, so the honest
         # reviewed answer here is the empty one; recording it once gets every
         # case past the ignored-directory gate without pretending a path is declared.
-        settle_ignored_dirs(self.root, self.source_worktree)
+        settle_ignored_inputs(self.root, self.source_worktree)
         self.addCleanup(self._cleanup)
 
     def _link_target(self, name: str) -> Path:
@@ -141,9 +141,9 @@ class VerificationRepositoryCase(unittest.TestCase):
         declared = set(getattr(self, "declared", ()))
         declared.add(name)
         self.declared = tuple(sorted(declared))
-        ignored_dirs.declare(
+        ignored_inputs.declare(
             self.root, worktree, required=self.declared, watch=("README.md",),
-            not_required=excluded_inventory(self.root, self.declared))
+            not_required=excluded_input_inventory(self.root, self.declared))
         return target
 
     def _write_verifier(self, exit_code: int, output_size: int = 0,
@@ -366,7 +366,7 @@ class TestVerificationRun(VerificationRepositoryCase):
             version=RECEIPT_VERSION, status="FAILED", source_tip=self.source_tip,
             target_tip=self.target_tip,
             integration_tree=tree_of(self.root, self.source_tip),
-            verify_script_sha256="a" * 64, ignored_directory_inputs_sha256="b" * 64,
+            verify_script_sha256="a" * 64, ignored_inputs_sha256="b" * 64,
             verify_command="python .assent/verify.py", exit_code=1,
             completed_at="2026-01-01T00:00:00+00:00",
             failure_summary=normalized)
@@ -572,6 +572,21 @@ class TestReceiptMatching(VerificationRepositoryCase):
 
 
 class TestReceiptParsing(VerificationRepositoryCase):
+    def test_obsolete_receipt_is_invalidated_and_regenerated_without_ai(self):
+        self.assertEqual(verify_plan(self.cfg), 0)
+        path = receipt_path(self.cfg)
+        obsolete = path.read_text(encoding="utf-8").replace(
+            f"version = {RECEIPT_VERSION}\n", "version = 2\n", 1).replace(
+                "ignored_inputs_sha256", "ignored_directory_inputs_sha256", 1)
+        path.write_text(obsolete, encoding="utf-8")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(verify_plan(self.cfg), 0)
+
+        self.assertIn("obsolete receipt invalidated", output.getvalue())
+        self.assertEqual(read_receipt(path, self.root).version, RECEIPT_VERSION)
+
     def test_round_trip_and_unknown_partial_or_wrong_object_fail_closed(self):
         self.assertEqual(verify_plan(self.cfg), 0)
         path = self.tasks_dir / RECEIPT_NAME
@@ -603,7 +618,7 @@ class TestReceiptParsing(VerificationRepositoryCase):
             version=True, status="PASSED", source_tip=self.source_tip,
             target_tip=self.target_tip, integration_tree=tree_of(
                 self.root, self.source_tip), verify_script_sha256="a" * 64,
-            ignored_directory_inputs_sha256="b" * 64,
+            ignored_inputs_sha256="b" * 64,
             verify_command="python .assent/verify.py", exit_code=0,
             completed_at="2026-01-01T00:00:00+00:00", failure_summary="")
         with self.assertRaises(AssentError):
@@ -763,7 +778,7 @@ class TestProvisionedCandidateLinks(VerificationRepositoryCase):
                       receipt.failure_summary)
         for phrase in ("Ignored input diagnosis: pkg/",
                        "intentionally omitted from the integration candidate",
-                       "AI source role records it with `assent ignored-dirs declare`",
+                       "AI source role records it with `assent ignored-inputs declare`",
                        "Do not copy the tree or hand-create"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, receipt.failure_summary)
@@ -824,10 +839,10 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
         target.mkdir(parents=True)
         (target / "app_localizations.dart").write_text(
             "// generated localizations\n", encoding="utf-8")
-        ignored_dirs.declare(
+        ignored_inputs.declare(
             self.root, self.source_worktree, required=("lib/l10n/arb",),
             watch=("README.md",),
-            not_required=excluded_inventory(self.root, ("lib/l10n/arb",)))
+            not_required=excluded_input_inventory(self.root, ("lib/l10n/arb",)))
         return target
 
     def _provision_generated_part(self) -> Path:
@@ -853,6 +868,17 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
         branches, paths = self._temporary_resources()
         self.assertEqual((branches, paths), ([], []))
 
+    def test_a_directory_link_is_one_boundary_not_recursive_links(self):
+        self._provision_nested()
+
+        links = union_worktree_links([self.source_worktree])
+
+        self.assertEqual(
+            [(link.path, link.kind) for link in links],
+            [("lib/l10n/arb", "directory")])
+        self.assertNotIn("lib/l10n/arb/app_localizations.dart",
+                         [link.path for link in links])
+
     def test_an_ignored_generated_part_is_linked_without_preparation(self):
         part = self._provision_generated_part()
         self._commit_target_verifier(
@@ -866,6 +892,19 @@ class TestNestedAndFileProvisionedLinks(VerificationRepositoryCase):
         self.assertEqual(
             read_receipt(receipt_path(self.cfg), self.root).status, "PASSED")
         self.assertEqual(part.read_text(encoding="utf-8"), "// generated part\n")
+
+    def test_an_ignored_generated_part_is_bound_into_receipt_freshness(self):
+        part = self._provision_generated_part()
+        self._commit_target_verifier(
+            exit_code=0, read=("lib/models/task.g.dart",))
+        self.assertEqual(verify_plan(self.cfg), 0)
+        self.assertTrue(receipt_matches_current_candidate(self.cfg))
+
+        part.write_text("// regenerated differently\n", encoding="utf-8")
+
+        self.assertFalse(receipt_matches_current_candidate(self.cfg))
+        self.assertIn("stale: ignored inputs changed",
+                      receipt_report_lines(self.cfg)[0])
 
     def test_ignored_trees_and_link_descendants_stay_out_of_the_candidate(self):
         self._provision_nested()
@@ -963,7 +1002,7 @@ class TestIgnoredDirGate(VerificationRepositoryCase):
 
     def setUp(self) -> None:
         super().setUp()
-        ignored_dirs.manifest_path(self.root).unlink()
+        ignored_inputs.manifest_path(self.root).unlink()
         for relative in ("pkg", "assets"):
             (self.root / relative).mkdir(parents=True, exist_ok=True)
             (self.root / relative / "marker.txt").write_text(
@@ -975,15 +1014,15 @@ class TestIgnoredDirGate(VerificationRepositoryCase):
         with contextlib.redirect_stdout(output):
             self.assertEqual(verify_plan(self.cfg), 1)
         self.assertIn("UNKNOWN", output.getvalue())
-        self.assertIn("assent ignored-dirs declare", output.getvalue())
+        self.assertIn("assent ignored-inputs declare", output.getvalue())
         # No verifier ran and no receipt was written.
         self.assertFalse(self.counter.exists())
         self.assertFalse(receipt_path(self.cfg).exists())
 
     def test_a_reviewed_profile_provisions_the_source_and_binds_the_digest(self):
-        ignored_dirs.declare(self.root, self.source_worktree,
+        ignored_inputs.declare(self.root, self.source_worktree,
                             required=("pkg",), watch=("README.md",),
-                            not_required=excluded_inventory(
+                            not_required=excluded_input_inventory(
                                 self.root, ("pkg",)))
         self._commit_target_verifier(exit_code=0, probe=("pkg",))
 
@@ -991,7 +1030,7 @@ class TestIgnoredDirGate(VerificationRepositoryCase):
 
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "PASSED")
-        self.assertRegex(receipt.ignored_directory_inputs_sha256, r"^[0-9a-f]{64}$")
+        self.assertRegex(receipt.ignored_inputs_sha256, r"^[0-9a-f]{64}$")
         self.assertTrue(receipt_matches_current_candidate(self.cfg))
 
         # Changing the declared target's content makes that receipt stale.
@@ -999,13 +1038,13 @@ class TestIgnoredDirGate(VerificationRepositoryCase):
             "changed marker\n", encoding="utf-8")
         self.assertFalse(receipt_matches_current_candidate(self.cfg))
         self.assertIn(
-            "stale: ignored-directory inputs changed",
+            "stale: ignored inputs changed",
             receipt_report_lines(self.cfg)[0])
 
     def test_reviewed_none_refuses_an_external_ignored_directory_link(self):
-        ignored_dirs.declare(self.root, self.source_worktree,
+        ignored_inputs.declare(self.root, self.source_worktree,
                             none_required=True, watch=("README.md",),
-                            not_required=excluded_inventory(self.root))
+                            not_required=excluded_input_inventory(self.root))
         external = self.parent / "external pkg"
         external.mkdir()
         marker = external / "marker.txt"
@@ -1020,15 +1059,15 @@ class TestIgnoredDirGate(VerificationRepositoryCase):
         diagnostic = output.getvalue()
         self.assertIn("outside its active REVIEWED-NONE profile", diagnostic)
         self.assertIn("Remove the link if it is irrelevant", diagnostic)
-        self.assertIn("assent ignored-dirs declare", diagnostic)
+        self.assertIn("assent ignored-inputs declare", diagnostic)
         self.assertFalse(self.counter.exists())
         self.assertFalse(receipt_path(self.cfg).exists())
         self.assertEqual(marker.read_text(encoding="utf-8"), "external\n")
 
     def test_a_missing_link_is_recreated_rather_than_depended_on(self):
-        ignored_dirs.declare(self.root, self.source_worktree,
+        ignored_inputs.declare(self.root, self.source_worktree,
                             required=("pkg",), watch=("README.md",),
-                            not_required=excluded_inventory(
+                            not_required=excluded_input_inventory(
                                 self.root, ("pkg",)))
         pathops.detach_directory_link(self.source_worktree / "pkg")
         self._commit_target_verifier(exit_code=0, probe=("pkg",))
@@ -1037,9 +1076,9 @@ class TestIgnoredDirGate(VerificationRepositoryCase):
         self.assertTrue(pathops.is_link(self.source_worktree / "pkg"))
 
     def test_a_target_changing_during_the_verifier_cannot_pass(self):
-        ignored_dirs.declare(self.root, self.source_worktree,
+        ignored_inputs.declare(self.root, self.source_worktree,
                             required=("pkg",), watch=("README.md",),
-                            not_required=excluded_inventory(
+                            not_required=excluded_input_inventory(
                                 self.root, ("pkg",)))
         # The stand-in verifier rewrites the declared target's content while it
         # is running, which is exactly the race the second snapshot exists for.
@@ -1057,4 +1096,4 @@ class TestIgnoredDirGate(VerificationRepositoryCase):
         self.assertEqual(verify_plan(self.cfg), 1)
         receipt = read_receipt(receipt_path(self.cfg), self.root)
         self.assertEqual(receipt.status, "FAILED")
-        self.assertIn("ignored-directory input changed", receipt.failure_summary)
+        self.assertIn("ignored input changed", receipt.failure_summary)

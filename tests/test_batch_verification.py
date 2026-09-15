@@ -19,7 +19,7 @@ from tests.engine_support import ScriptedAdapter, models_block
 from pathlib import Path
 from unittest import mock
 
-from assent import engine, gitops, ignored_dirs
+from assent import engine, gitops, ignored_inputs
 from assent.adapters import TaskResult
 from assent.__main__ import _dispatch
 from assent.batch_accept import accept_all
@@ -33,7 +33,7 @@ from assent.config import load_config
 from assent.plan_verification import receipt_path
 from assent.lockfile import hold_integration_lock, hold_lock
 from assent.verification_common import build_batch_candidate
-from tests.test_ignored_dirs import excluded_inventory
+from tests.test_ignored_inputs import excluded_input_inventory
 from tests.test_verification import make_directory_link
 
 _VERIFY_OK = "raise SystemExit(0)\n"
@@ -1056,9 +1056,9 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         declared = set(getattr(self, "declared", ()))
         declared.add(name)
         self.declared = tuple(sorted(declared))
-        ignored_dirs.declare(
+        ignored_inputs.declare(
             self.root, worktree, required=self.declared, watch=("README.md",),
-            not_required=excluded_inventory(self.root, self.declared))
+            not_required=excluded_input_inventory(self.root, self.declared))
         return target
 
     def write_probe_verify(self, *probe: str, absent: tuple[str, ...] = (),
@@ -1104,10 +1104,10 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         arb = self.root / "lib/l10n/arb"
         arb.mkdir(parents=True)
         (arb / "app_localizations.dart").write_text("// l10n\n", encoding="utf-8")
-        ignored_dirs.declare(
+        ignored_inputs.declare(
             self.root, gitops.worktree_path(self.root, "aa"),
             required=("lib/l10n/arb",), watch=("README.md",),
-            not_required=excluded_inventory(self.root, ("lib/l10n/arb",)))
+            not_required=excluded_input_inventory(self.root, ("lib/l10n/arb",)))
         part = gitops.worktree_path(self.root, "bb") / "lib/models/task.g.dart"
         part.write_text("// generated part\n", encoding="utf-8")
         cache = gitops.worktree_path(self.root, "bb") / "ignored"
@@ -1243,16 +1243,16 @@ class TestBatchProvisionedLinks(BatchVerifyRepositoryCase):
         code, output = self.run_batch()
 
         self.assertEqual(code, 1, output)
-        self.assertIn("not a directory link to the reviewed primary target", output)
+        self.assertIn("not a link to the reviewed primary target", output)
         self.assertIn("pkg", output)
         self.assertFalse(self.receipt_path().exists())
 
     def test_reviewed_none_refuses_an_external_link_before_batch_verify(self) -> None:
         self.make_source("aa")
         worktree = gitops.worktree_path(self.root, "aa")
-        ignored_dirs.declare(
+        ignored_inputs.declare(
             self.root, worktree, none_required=True, watch=("README.md",),
-            not_required=excluded_inventory(self.root))
+            not_required=excluded_input_inventory(self.root))
         target = self.link_target("pkg")
         make_directory_link(worktree / "pkg", target)
 

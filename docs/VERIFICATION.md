@@ -53,8 +53,13 @@ remainder. Any resulting receipt names only what was actually verified.
 
 A receipt is deletable evidence, not source truth. It records enough identity
 to reproduce the result: selected source commits, reconstructed trees, verifier
-digest, and reviewed ignored-directory input digest. Any relevant source, candidate,
-verifier, or ignored-directory input change makes it stale.
+digest, and ignored-input digest. Any relevant source, candidate, verifier, or
+ignored-input change makes it stale.
+
+Before writing new evidence, verification invalidates a parsed receipt whose
+positive integer version is older than the current schema and reruns the full
+verifier. This is scheduler-owned regeneration, not an AI migration. A malformed
+receipt or unknown future version still refuses; acceptance never upgrades one.
 
 Complete plan verification refreshes `_report.md` once after the receipt
 operation and all verification locks settle. The refresh is best-effort and
@@ -113,21 +118,23 @@ A manual single-plan reconcile handles conflict with the current target. The
 integration workflow can also repair peer-only conflicts without accepting a
 prefix or changing the exact selection.
 
-## Ignored-directory inputs
+## Ignored inputs
 
-A fresh Git worktree has no ignored directories, but a project may need a large
-local directory such as `assets/` or `pkg/` to compile or test. `ignored-dirs`
-records which ignored directories are required source inputs. Assent links only
-those required directories instead of copying every ignored tree. Ordinary
-ignored leaf files beside tracked source are handled automatically.
+A fresh Git worktree has no ignored content, but a project may need local files
+such as `.env` or a credential, or a large directory such as `assets/` or
+`pkg/`, to compile or test. `ignored-inputs` records which ignored files and
+directories are required source inputs. Assent links only those required inputs
+instead of copying them. Ignored leaf files generated only in a source worktree
+beside tracked source are handled automatically.
 
 The locations have separate responsibilities:
 
-- The primary worktree contains the real directories and the untracked
-  `.assent/_ignored-dirs.toml` decision cache.
-- A managed source worktree receives same-relative Windows junctions or POSIX
-  directory symlinks to those primary targets.
-- The AI-only `ignored-dirs declare` operation uses its managed source worktree
+- The primary worktree contains the real inputs and the untracked
+  `.assent/_ignored-inputs.toml` decision cache.
+- A managed source worktree receives a same-relative Windows junction or POSIX
+  symlink for each required directory, and a Windows hard link or POSIX symlink
+  for each required file.
+- The AI-only `ignored-inputs declare` operation uses its managed source worktree
   as both the declared snapshot and the destination whose links are reconciled.
 
 Normally this is automatic. If a matching reviewed profile exists, `run`
@@ -144,12 +151,12 @@ they never depend on a link left behind by an earlier `run`.
 Inspect either worktree without changing it:
 
 ```text
-assent ignored-dirs status
+assent ignored-inputs status
 ```
 
 The output identifies both worktrees, the manifest, state, matching profile,
-required directories, watch files, and link agreement. In the primary worktree, links are
-reported as not applicable because its ordinary directories are the targets.
+required inputs, watch files, and link agreement. In the primary worktree, links are
+reported as not applicable because its ordinary inputs are the targets.
 It never repairs anything; an unreadable contract or a broken settled link
 returns a nonzero status.
 
@@ -158,44 +165,45 @@ declaration from its managed worktree and names the tracked dependency or build
 files whose changes should invalidate the decision:
 
 ```text
-assent ignored-dirs declare --required assets --required pkg --not-required build "generated output" --watch package.lock
+assent ignored-inputs declare --required assets --required pkg --not-required build "generated output" --watch package.lock
 ```
 
-Every listed ordinary ignored directory must be covered once by `--required`
-or `--not-required DIR REASON`; either may cover a subtree. Use
-`--none-required` when none is a source input. Only `--required` directories
-receive worktree links. Ignored leaf files remain automatic verifier inputs and
-do not require classification. This command is not a general junction manager
-and never copies a directory. It is not a human recovery command: use
+Every listed ordinary ignored file or directory must be covered once by
+`--required` or `--not-required PATH REASON`; either may cover a subtree. Use
+`--none-required` when none is a source input. A required directory receives a
+Windows junction or POSIX directory symlink; a required file receives a Windows
+hard link or POSIX file symlink. Source-generated ignored leaf files remain
+automatic verifier inputs. This command is not a general link manager and never
+copies an input. It is not a human recovery command: use
 `assent rework` and let the next `run` return the decision to the AI workflow.
 
 The decision is cached in the primary worktree's untracked
-`.assent/_ignored-dirs.toml`. A changed watch file, directory inventory, or target
-makes it stale. A successful query that finds no ordinary ignored directory is
-reported as `NO-IGNORED-DIRECTORY-CANDIDATE`; that describes current filesystem
-evidence, not a semantic promise that the project will never need ignored-directory input.
+`.assent/_ignored-inputs.toml`. A changed watch file, input inventory, input
+kind, or target makes it stale. A successful query that finds no ordinary ignored input is
+reported as `NO-IGNORED-INPUT-CANDIDATE`; that describes current filesystem
+evidence, not a semantic promise that the project will never need an ignored input.
 The leading underscore marks this as Assent-owned local state; edit it only
-through `ignored-dirs declare`.
+through `ignored-inputs declare`.
 
-A required directory is immutable during every AI role. Assent snapshots its
+A required input is immutable during every AI role. Assent snapshots its
 contents before and after the role; while the decision is unknown or stale it
 snapshots the complete review inventory. Modifying a linked target, or changing
 it and then declaring the new contents required, is a control-boundary failure
 and cannot become a candidate checkpoint. The failure blocks restart until
 source rework changes the candidate identity. The plan report lists every
-required local directory explicitly as content Git does not deliver.
+required local input explicitly as content Git does not deliver.
 
 Assent cannot safely link everything ignored by Git: ignore rules also cover
 writable build output, caches, virtual environments, editor state, and
-credentials. Linking them all would share mutable state, expose unrelated local
-data, and make verification depend on stale artifacts. Never create a
-source-worktree link by hand or copy an ignored directory into it. An undeclared
+credentials unrelated to a task. Linking them all would share mutable state,
+expose unrelated local data, and make verification depend on stale artifacts.
+Never create a source-worktree link by hand or copy an ignored input into it. An undeclared
 link invalidates verification, reporting, reconcile, and acceptance. Cleanup
 detaches each provisioned link object without traversing or deleting its target.
 
 If verifier output names a missing path inside an existing ignored directory,
 Assent appends an `Ignored input diagnosis:` note pointing to the
-`ignored-dirs declare` remedy without changing the original exit code.
+`ignored-inputs declare` remedy without changing the original exit code.
 
 See [Commands](COMMANDS.md) for selection syntax and
 [Operations](OPERATIONS.md) for recovery safety.

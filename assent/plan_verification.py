@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from assent import AssentError, gitops, ignored_dirs
+from assent import AssentError, gitops, ignored_inputs
 from assent.config import Config
 from assent.plandeps import (infer_plan_completion, live_upstreams,
                                parse_plan_dependencies)
@@ -28,7 +28,9 @@ from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
                                         SUMMARY_LIMIT, VERIFY_COMMAND,
                                         CandidateConflict, FullVerifyEvidence,
                                         atomic_write_text, candidate_tree,
+                                        candidate_ignored_inputs_digest,
                                         ignored_input_diagnosis,
+                                        invalidate_obsolete_receipt,
                                         invalidate_receipt,
                                         provisioned_candidate_links,
                                         require_oid, run_full_verifier,
@@ -36,20 +38,20 @@ from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
                                         toml_string, union_worktree_links)
 
 RECEIPT_NAME = "_verification.toml"
-RECEIPT_VERSION = 2
+RECEIPT_VERSION = 3
 _COMPLETE_STATUSES = ("DONE", "SKIP")
 # The receipt records a source/target conflict with this prefix, which is also
 # what tells a failed `verify PLAN` to point at `assent reconcile`.
 _CONFLICT_SUMMARY_PREFIX = "Integration conflict: "
 _RECEIPT_KEYS = {
     "version", "status", "source_tip", "target_tip", "integration_tree",
-    "verify_script_sha256", "ignored_directory_inputs_sha256", "verify_command",
+    "verify_script_sha256", "ignored_inputs_sha256", "verify_command",
     "exit_code", "completed_at", "failure_summary",
 }
-# The evidence an ignored-directory input digest changing produces, phrased so a human sees
+# The evidence an ignored-input digest changing produces, phrased so a human sees
 # the remedy without opening the receipt.
-_IGNORED_DIRECTORY_INPUT_DRIFT = (
-    "a required ignored-directory input changed while the full verifier was running, so "
+_IGNORED_INPUT_DRIFT = (
+    "an ignored input changed while the full verifier was running, so "
     "the run certifies nothing")
 
 
@@ -65,13 +67,13 @@ class VerificationReceipt:
     exit_code: int
     completed_at: str
     failure_summary: str
-    #: Digest of every required ignored-directory input this verification used --
-    #: the selected profiles and the exact content of their declared targets.
+    #: Digest of every ignored input this verification used: reviewed profiles,
+    #: declared target content, and source-generated ignored leaf files.
     #: The empty default is what a receipt written before this schema carried,
     #: and it is never a usable value: validation refuses it on the way in and
     #: on the way out, so an absent digest is stale evidence, not an assumed
     #: empty one.
-    ignored_directory_inputs_sha256: str = ""
+    ignored_inputs_sha256: str = ""
 
 
 def receipt_path(cfg: Config) -> Path:
@@ -100,7 +102,7 @@ def _receipt_text(receipt: VerificationReceipt) -> str:
         f"target_tip = {toml_string(receipt.target_tip)}\n"
         f"integration_tree = {toml_string(receipt.integration_tree)}\n"
         f"verify_script_sha256 = {toml_string(receipt.verify_script_sha256)}\n"
-        f"ignored_directory_inputs_sha256 = {toml_string(receipt.ignored_directory_inputs_sha256)}\n"
+        f"ignored_inputs_sha256 = {toml_string(receipt.ignored_inputs_sha256)}\n"
         f"verify_command = {toml_string(receipt.verify_command)}\n"
         f"exit_code = {receipt.exit_code}\n"
         f"completed_at = {toml_string(receipt.completed_at)}\n"
@@ -121,10 +123,10 @@ def _validate_receipt(receipt: VerificationReceipt, repository: Path) -> None:
         raise AssentError(
             "Verification receipt verify_script_sha256 must be a 64-character "
             "lowercase hexadecimal digest")
-    if not isinstance(receipt.ignored_directory_inputs_sha256, str) or not DIGEST_RE.fullmatch(
-            receipt.ignored_directory_inputs_sha256):
+    if not isinstance(receipt.ignored_inputs_sha256, str) or not DIGEST_RE.fullmatch(
+            receipt.ignored_inputs_sha256):
         raise AssentError(
-            "Verification receipt ignored_directory_inputs_sha256 must be a "
+            "Verification receipt ignored_inputs_sha256 must be a "
             "64-character "
             "lowercase hexadecimal digest")
     if receipt.verify_command != VERIFY_COMMAND:
@@ -241,7 +243,7 @@ def _stack_sources(cfg: Config, target_tip: str,
 
 
 def _new_receipt(*, status: str, source_tip: str, target_tip: str,
-                 integration_tree: str, digest: str, ignored_directory_inputs: str,
+                 integration_tree: str, digest: str, ignored_input_digest: str,
                  exit_code: int,
                  failure_summary: str = "") -> VerificationReceipt:
     return VerificationReceipt(
@@ -251,7 +253,7 @@ def _new_receipt(*, status: str, source_tip: str, target_tip: str,
         target_tip=target_tip,
         integration_tree=integration_tree,
         verify_script_sha256=digest,
-        ignored_directory_inputs_sha256=ignored_directory_inputs,
+        ignored_inputs_sha256=ignored_input_digest,
         verify_command=VERIFY_COMMAND,
         exit_code=exit_code,
         completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -266,6 +268,9 @@ def _verify_locked(cfg: Config, *,
     # A malformed cache is evidence of an unsafe state, not permission to
     # erase it.  Stack preflight below also happens before invalidation so an
     # upstream drift keeps the old receipt available for audit.
+    if invalidate_obsolete_receipt(path, RECEIPT_VERSION):
+        print(f"verify {cfg.tasks_name}: obsolete receipt invalidated; "
+              "full verification required")
     if path.exists():
         read_receipt(path, main)
 
@@ -299,10 +304,10 @@ def _verify_locked(cfg: Config, *,
     decision_sources = [(cfg.tasks_name, source_worktree),
                         *((source.plan, source.worktree)
                           for source in upstream_sources)]
-    decisions = ignored_dirs.prepare_sources(main, decision_sources)
-    ignored_directory_inputs = ignored_dirs.ignored_directory_inputs_digest(
-        main, decisions)
+    decisions = ignored_inputs.prepare_sources(main, decision_sources)
     links = union_worktree_links(worktrees)
+    ignored_input_digest = candidate_ignored_inputs_digest(
+        ignored_inputs.ignored_inputs_digest(main, decisions), links)
     invalidate_receipt(path)
 
     integration_tree = gitops.tree_of(main, target_tip)
@@ -316,7 +321,7 @@ def _verify_locked(cfg: Config, *,
             if not record_conflict_receipt:
                 raise CandidateConflict(FullVerifyEvidence(
                     "TARGET_CONFLICT", (cfg.tasks_name,), target_tip,
-                    (source_tip,), integration_tree, digest, ignored_directory_inputs,
+                    (source_tip,), integration_tree, digest, ignored_input_digest,
                     outcome.exit_code or 1,
                     (f"{_CONFLICT_SUMMARY_PREFIX}{conflicts}",
                      *(f"{cfg.tasks_name}:{path}"
@@ -324,7 +329,7 @@ def _verify_locked(cfg: Config, *,
             receipt = _new_receipt(
                 status="FAILED", source_tip=source_tip, target_tip=target_tip,
                 integration_tree=integration_tree, digest=digest,
-                ignored_directory_inputs=ignored_directory_inputs,
+                ignored_input_digest=ignored_input_digest,
                 exit_code=outcome.exit_code or 1,
                 failure_summary=f"{_CONFLICT_SUMMARY_PREFIX}{conflicts}")
         else:
@@ -335,7 +340,7 @@ def _verify_locked(cfg: Config, *,
                     "candidate")
             integration_tree = gitops.tree_of(candidate, "HEAD")
             # Every source worktree whose commits are in this candidate may
-            # hold ignored directory links and generated leaf files; the
+            # hold ignored input links and generated leaf files; the
             # verifier needs the same ones, and an unmirrorable artifact
             # refuses here rather than producing evidence for a candidate
             # nobody provisioned.
@@ -347,7 +352,7 @@ def _verify_locked(cfg: Config, *,
                         status="FAILED", source_tip=source_tip,
                         target_tip=target_tip,
                         integration_tree=integration_tree,
-                        digest=digest, ignored_directory_inputs=ignored_directory_inputs,
+                        digest=digest, ignored_input_digest=ignored_input_digest,
                         exit_code=1,
                         failure_summary=f"Unable to start verification: {e}")
                 else:
@@ -355,7 +360,7 @@ def _verify_locked(cfg: Config, *,
                         status="PASSED" if result.returncode == 0 else "FAILED",
                         source_tip=source_tip, target_tip=target_tip,
                         integration_tree=integration_tree, digest=digest,
-                        ignored_directory_inputs=ignored_directory_inputs,
+                        ignored_input_digest=ignored_input_digest,
                         exit_code=result.returncode,
                         failure_summary=("" if result.returncode == 0 else summary(
                             result.stdout, result.stderr,
@@ -398,15 +403,15 @@ def _verify_locked(cfg: Config, *,
     # replaces a profile with a different identity must invalidate the run even
     # when its path list and target bytes happen to be unchanged.
     try:
-        if current_ignored_directory_inputs(cfg) != ignored_directory_inputs:
-            changed.append(_IGNORED_DIRECTORY_INPUT_DRIFT)
+        if current_ignored_inputs(cfg) != ignored_input_digest:
+            changed.append(_IGNORED_INPUT_DRIFT)
     except AssentError as e:
-        changed.append(f"ignored-directory inputs became unreadable: {e}")
+        changed.append(f"ignored inputs became unreadable: {e}")
     if changed:
         receipt = _new_receipt(
             status="FAILED", source_tip=source_tip, target_tip=target_tip,
             integration_tree=integration_tree, digest=digest,
-            ignored_directory_inputs=ignored_directory_inputs, exit_code=1,
+            ignored_input_digest=ignored_input_digest, exit_code=1,
             failure_summary="; ".join(changed))
 
     write_receipt(path, receipt, main)
@@ -444,11 +449,11 @@ def _receipt_matches_current_candidate_locked(cfg: Config) -> bool:
         return False
     upstream_sources = _stack_sources(cfg, target_tip, source_tip)
     try:
-        current_ignored_dirs = _current_ignored_directory_inputs(
+        current_ignored_inputs = _current_ignored_inputs(
             cfg, main, worktree, upstream_sources)
     except AssentError:
         return False
-    if current_ignored_dirs != receipt.ignored_directory_inputs_sha256:
+    if current_ignored_inputs != receipt.ignored_inputs_sha256:
         return False
     tree, outcome = candidate_tree(
         main, cfg.tasks_name, target_tip, source_tip)
@@ -472,15 +477,15 @@ def _evidence_from_receipt(cfg: Config, receipt: VerificationReceipt, *,
             "target branch changed", "target tip changed",
             "target worktree became dirty", "source tip changed",
             "source worktree became dirty", "upstream stack changed",
-            "verification script changed", "ignored-directory inputs became unreadable",
-            _IGNORED_DIRECTORY_INPUT_DRIFT)):
+            "verification script changed", "ignored inputs became unreadable",
+            _IGNORED_INPUT_DRIFT)):
         outcome = "INFRASTRUCTURE_FAILED"
     else:
         outcome = "VERIFIER_FAILED"
     return FullVerifyEvidence(
         outcome, (cfg.tasks_name,), receipt.target_tip,
         (receipt.source_tip,), receipt.integration_tree,
-        receipt.verify_script_sha256, receipt.ignored_directory_inputs_sha256,
+        receipt.verify_script_sha256, receipt.ignored_inputs_sha256,
         receipt.exit_code,
         tuple(item for item in (receipt.failure_summary,) if item), reused)
 
@@ -494,6 +499,9 @@ def verify_plan_action(cfg: Config, *, recheck: bool = False,
         with hold_integration_lock(cfg.assent_dir):
             with hold_lock(cfg.tasks_dir, plan_name):
                 path = receipt_path(cfg)
+                if invalidate_obsolete_receipt(path, RECEIPT_VERSION):
+                    print(f"verify {plan_name}: obsolete receipt invalidated; "
+                          "full verification required")
                 if path.exists():
                     receipt = read_receipt(path, gitops.main_worktree(cfg.root))
                     if (_receipt_matches_current_candidate_locked(cfg)
@@ -513,10 +521,10 @@ def verify_plan_action(cfg: Config, *, recheck: bool = False,
             (str(error),))
 
 
-def _current_ignored_directory_inputs(
+def _current_ignored_inputs(
         cfg: Config, main: Path, worktree: Path | None,
         upstream_sources: tuple[gitops.PlanSourceSnapshot, ...]) -> str:
-    """Recompute this plan's ignored-directory input digest without repairing anything.
+    """Recompute this plan's ignored-input digest without repairing anything.
 
     Freshness is a question, not a repair: a profile that changed identity, a
     declared target that moved, or content that differs recomputes to another
@@ -526,25 +534,27 @@ def _current_ignored_directory_inputs(
     """
     sources = [(cfg.tasks_name, worktree),
                *((source.plan, source.worktree) for source in upstream_sources)]
-    decisions: list[tuple[str, ignored_dirs.Decision]] = []
-    manifest = ignored_dirs.read_manifest(main)
+    decisions: list[tuple[str, ignored_inputs.Decision]] = []
+    manifest = ignored_inputs.read_manifest(main)
     for plan_name, tree in sources:
         # A vanished source worktree falls back to the primary worktree, exactly
         # as ``prepare_sources`` did when the receipt was written.
-        decision = ignored_dirs.classify(main, tree or main, manifest)
+        decision = ignored_inputs.classify(main, tree or main, manifest)
         if not decision.settled:
             raise AssentError(
-                f"the ignored-directory decision for {plan_name} is "
+                f"the ignored-input decision for {plan_name} is "
                 f"{decision.state}; "
-                "the receipt's ignored-directory input evidence can no longer be reproduced")
-        ignored_dirs.require_directory_link_agreement(
+                "the receipt's ignored-input evidence can no longer be reproduced")
+        ignored_inputs.require_input_link_agreement(
             main, tree or main, decision, plan_name=plan_name)
         decisions.append((plan_name, decision))
-    return ignored_dirs.ignored_directory_inputs_digest(main, decisions)
+    links = union_worktree_links(tree for _plan_name, tree in sources)
+    return candidate_ignored_inputs_digest(
+        ignored_inputs.ignored_inputs_digest(main, decisions), links)
 
 
-def current_ignored_directory_inputs(cfg: Config) -> str:
-    """This plan's ignored-directory input digest as it stands right now.
+def current_ignored_inputs(cfg: Config) -> str:
+    """This plan's ignored-input digest as it stands right now.
 
     ``accept`` uses it for the same pre-publication recheck it already performs
     on the source, target, and verifier: the evidence a receipt was written
@@ -554,7 +564,7 @@ def current_ignored_directory_inputs(cfg: Config) -> str:
     main = gitops.main_worktree(cfg.root)
     target_tip = gitops.commit_of(main, gitops.require_current_branch(main))
     _branch, source_tip, worktree = source_snapshot(cfg, main)
-    return _current_ignored_directory_inputs(
+    return _current_ignored_inputs(
         cfg, main, worktree, _stack_sources(cfg, target_tip, source_tip))
 
 
@@ -586,6 +596,9 @@ def verify_plan_receipt_if_needed(cfg: Config) -> int:
                 if any(task.status not in _COMPLETE_STATUSES for task in plan.tasks):
                     return 0
                 path = receipt_path(cfg)
+                if invalidate_obsolete_receipt(path, RECEIPT_VERSION):
+                    print(f"verify {plan_name}: obsolete receipt invalidated; "
+                          "refreshing")
                 if path.exists():
                     try:
                         fresh = _receipt_matches_current_candidate_locked(cfg)
@@ -617,7 +630,7 @@ def receipt_report_lines(cfg: Config) -> list[str]:
     """Return read-only plan-verification facts for the human report.
 
     Freshness here is intentionally conservative and side-effect free: exact
-    source, target, verifier, and ignored-directory input identities are fresh. Acceptance
+    source, target, verifier, and ignored-input identities are fresh. Acceptance
     remains responsible for rebuilding and comparing the candidate tree.
     """
     path = receipt_path(cfg)
@@ -638,10 +651,10 @@ def receipt_report_lines(cfg: Config) -> list[str]:
             reasons.append("source tip changed")
         upstream_sources = _stack_sources(
             cfg, gitops.commit_of(main, target_branch), source_tip)
-        if _current_ignored_directory_inputs(
+        if _current_ignored_inputs(
                 cfg, main, worktree,
-                upstream_sources) != receipt.ignored_directory_inputs_sha256:
-            reasons.append("ignored-directory inputs changed")
+                upstream_sources) != receipt.ignored_inputs_sha256:
+            reasons.append("ignored inputs changed")
         if receipt.status != "PASSED":
             reasons.append(f"exit code {receipt.exit_code}")
     except AssentError as e:

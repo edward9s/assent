@@ -1,7 +1,7 @@
 """Reports present mechanical workflow evidence without an auto-fix ledger."""
 import unittest
 
-from assent import ignored_dirs
+from assent import ignored_inputs
 from assent.inspection import render_report
 from assent.plan import (Plan, WorkflowState, append_entry, set_status,
                          write_workflow_state)
@@ -47,14 +47,14 @@ class TestInspection(EngineTestCase):
         local_input = self.root / "local-input"
         local_input.mkdir()
         (local_input / "fixture.txt").write_text("input\n", encoding="utf-8")
-        ignored_dirs.declare(
+        ignored_inputs.declare(
             self.root, self.root, required=("local-input",),
             watch=(".gitignore",), not_required=())
 
         text = render_report(cfg, Plan.parse(cfg.tasks_dir))
 
         self.assertIn(
-            "Local ignored-directory inputs (not delivered by Git): local-input",
+            "Local ignored inputs (not delivered by Git): local-input",
             text)
 
 

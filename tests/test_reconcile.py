@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from assent import AssentError, engine, gitops, pathops, ignored_dirs, verification
+from assent import AssentError, engine, gitops, pathops, ignored_inputs, verification
 from assent import accept as accept_mod
 from assent import batch_accept as batch_accept_mod
 from assent import plan as plan_mod
@@ -26,7 +26,7 @@ from assent.reconcile import (automatic_reconcile_continue_locked,
                               reconcile_continue, reconcile_start)
 from tests.link_support import (cleanup_worktree, make_directory_link,
                                 safe_rmtree)
-from tests.test_ignored_dirs import excluded_inventory, settle_ignored_dirs
+from tests.test_ignored_inputs import excluded_input_inventory, settle_ignored_inputs
 
 
 def _git(root: Path, *args: str) -> str:
@@ -139,7 +139,7 @@ class ReconcileRepositoryCase(unittest.TestCase):
         # Real ignored directories now exist in the primary worktree, so the
         # ignored-directory decision has something to answer. These cases provision
         # their links by hand, so the honest reviewed answer is the empty one.
-        settle_ignored_dirs(self.root, self.root)
+        settle_ignored_inputs(self.root, self.root)
         return self._target_inventory(targets)
 
     def _target_inventory(self, targets: dict[str, dict[str, str]]) -> list[tuple[str, str]]:
@@ -342,7 +342,7 @@ class IgnoredDirDecisionTest(ReconcileRepositoryCase):
 
         self.assertEqual(code, 1)
         self.assertIn("UNKNOWN", output)
-        self.assertIn("assent ignored-dirs declare", output)
+        self.assertIn("assent ignored-inputs declare", output)
         self.assertFalse(self._managed_path().exists())
         self.assertFalse(
             gitops.branch_exists(self.root, self._managed_branch()))
@@ -353,10 +353,10 @@ class IgnoredDirDecisionTest(ReconcileRepositoryCase):
             self) -> None:
         self._ignored_targets()
         self._conflicting_repository()
-        ignored_dirs.declare(
+        ignored_inputs.declare(
             self.root, self.source_worktree,
             required=("pkg", "lib/l10n/arb"), watch=(".gitignore",),
-            not_required=excluded_inventory(
+            not_required=excluded_input_inventory(
                 self.root, ("pkg", "lib/l10n/arb")))
 
         code, output = self._run(reconcile_start)
@@ -380,9 +380,9 @@ class IgnoredDirDecisionTest(ReconcileRepositoryCase):
     def test_resume_revalidates_rather_than_repairing_an_altered_link(self) -> None:
         self._ignored_targets()
         self._conflicting_repository()
-        ignored_dirs.declare(self.root, self.source_worktree,
+        ignored_inputs.declare(self.root, self.source_worktree,
                             required=("pkg",), watch=(".gitignore",),
-                            not_required=excluded_inventory(
+                            not_required=excluded_input_inventory(
                                 self.root, ("pkg",)))
         self.assertEqual(self._run(reconcile_start)[0], 0)
         self._resolve()
@@ -403,9 +403,9 @@ class IgnoredDirDecisionTest(ReconcileRepositoryCase):
     def test_a_reviewed_empty_answer_creates_no_links_at_all(self) -> None:
         self._ignored_targets()
         self._conflicting_repository()
-        ignored_dirs.declare(self.root, self.source_worktree, none_required=True,
+        ignored_inputs.declare(self.root, self.source_worktree, none_required=True,
                             watch=(".gitignore",),
-                            not_required=excluded_inventory(self.root))
+                            not_required=excluded_input_inventory(self.root))
 
         self.assertEqual(self._run(reconcile_start)[0], 0)
         for relative in ("pkg", "assets", "lib/l10n/arb"):
@@ -422,7 +422,7 @@ class StartTest(ReconcileRepositoryCase):
         (self.root / "pkg").mkdir()
         (self.root / "pkg" / "primary.txt").write_text(
             "primary\n", encoding="utf-8")
-        settle_ignored_dirs(self.root, self.source_worktree)
+        settle_ignored_inputs(self.root, self.source_worktree)
         external = self.parent / "external source package"
         external.mkdir()
         (external / "sentinel.txt").write_text("keep\n", encoding="utf-8")
@@ -577,7 +577,7 @@ class ContinueTest(ReconcileRepositoryCase):
 
         self.assertEqual(code, 1)
         self.assertIn(
-            "outside its active NO-IGNORED-DIRECTORY-CANDIDATE", output)
+            "outside its active NO-IGNORED-INPUT-CANDIDATE", output)
         self.assertIn("every edit were preserved", output)
         self.assertTrue(self._managed_path().exists())
         self.assertTrue(gitops.branch_exists(self.root, self._managed_branch()))
@@ -594,9 +594,9 @@ class ContinueTest(ReconcileRepositoryCase):
             (self.root / directory / "sentinel.txt").write_text(
                 f"{directory} sentinel\n", encoding="utf-8")
         self._conflicting_repository()
-        ignored_dirs.declare(self.root, self.source_worktree,
+        ignored_inputs.declare(self.root, self.source_worktree,
                             required=("pkg",), watch=(".gitignore",),
-                            not_required=excluded_inventory(
+                            not_required=excluded_input_inventory(
                                 self.root, ("pkg",)))
         self.assertEqual(self._run(reconcile_start)[0], 0)
         self._resolve("keep this human resolution\n")
@@ -607,9 +607,9 @@ class ContinueTest(ReconcileRepositoryCase):
         # The watch and ignore rules are unchanged, so this declaration
         # deliberately reuses the same fingerprint while replacing the reviewed
         # answer.
-        ignored_dirs.declare(self.root, self.source_worktree,
+        ignored_inputs.declare(self.root, self.source_worktree,
                             required=("assets",), watch=(".gitignore",),
-                            not_required=excluded_inventory(
+                            not_required=excluded_input_inventory(
                                 self.root, ("assets",)))
 
         code, output = self._run(reconcile_continue)
@@ -987,7 +987,7 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
             source_tip=self.source_tip, target_tip=self.target_tip,
             integration_tree=self._tree(),
             verify_script_sha256=verification.verifier_digest(cfg),
-            ignored_directory_inputs_sha256=verification.current_ignored_directory_inputs(cfg),
+            ignored_inputs_sha256=verification.current_ignored_inputs(cfg),
             verify_command=verification.VERIFY_COMMAND, exit_code=0,
             completed_at=self._now(), failure_summary=""), self.root)
         return path
@@ -1002,7 +1002,7 @@ class ReceiptInvalidationTest(ReconcileRepositoryCase):
                           for plan_name, tip in plan_names),
             final_tree=tree,
             verify_script_sha256=verification.verifier_digest(self._config()),
-            ignored_directory_inputs_sha256="0" * 64,
+            ignored_inputs_sha256="0" * 64,
             verify_command=verification.VERIFY_COMMAND, exit_code=0,
             completed_at=self._now(), failure_summary=""), self.root)
         return path

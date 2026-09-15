@@ -101,6 +101,24 @@ def create_directory_link(destination: Path, target: Path) -> None:
         os.symlink(target, destination, target_is_directory=True)
 
 
+def create_file_link(destination: Path, target: Path) -> None:
+    """Create one file link without copying the target's contents.
+
+    Windows uses a hard link because it needs no symlink privilege; POSIX uses
+    a file symlink.  Removing either destination name leaves the primary target
+    name intact.  ``OSError`` is left unwrapped for the caller to diagnose.
+    """
+    if os.name == "nt":
+        os.link(target, destination)
+    else:
+        os.symlink(target, destination)
+
+
+def detach_file_link(path: Path) -> None:
+    """Remove one file-link name without touching its target name."""
+    os.unlink(path)
+
+
 def _require_inside(root: Path, path: Path) -> Path:
     """Refuse a path that is not lexically beneath the exact worktree root."""
     try:

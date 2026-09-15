@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 import uuid
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -58,7 +59,7 @@ class FullVerifyEvidence:
     source_commits: tuple[str, ...]
     candidate_tree: str
     verification_script_sha256: str
-    ignored_directory_inputs_sha256: str
+    ignored_inputs_sha256: str
     exit_code: int
     evidence: tuple[str, ...] = ()
     reused: bool = False
@@ -142,6 +143,29 @@ def invalidate_receipt(path: Path) -> None:
     except OSError as e:
         raise AssentError(
             f"Unable to invalidate old verification receipt {path}: {e}") from e
+
+
+def invalidate_obsolete_receipt(
+        path: Path, current_version: int) -> bool:
+    """Delete parsed derived evidence whose version predates this release.
+
+    Verification can regenerate a receipt, so an older positive integer version
+    is stale rather than repair work for an AI. Malformed receipts and unknown
+    future versions are left in place for the normal fail-closed reader.
+    """
+    path = Path(path)
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except FileNotFoundError:
+        return False
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    version = data.get("version") if isinstance(data, dict) else None
+    if type(version) is not int or not 0 < version < current_version:
+        return False
+    invalidate_receipt(path)
+    return True
 
 
 def sha256_file(path: Path, label: str = "verification script") -> str:
@@ -418,7 +442,7 @@ def discover_worktree_links(worktree: Path) -> tuple[ProvisionedLink, ...]:
 IGNORED_INPUT_PREFIX = "Ignored input diagnosis: "
 
 
-def ordinary_ignored_dirs(worktree: Path) -> tuple[str, ...]:
+def ordinary_ignored_inputs(worktree: Path) -> tuple[str, ...]:
     """List the physical ignored directory trees a source worktree holds.
 
     These are exactly the trees ``discover_worktree_links`` deliberately does
@@ -454,7 +478,7 @@ def _mentions_path_below(text: str, relative: str) -> bool:
     return re.search(pattern, text) is not None
 
 
-def mentioned_ordinary_ignored_dirs(
+def mentioned_ordinary_ignored_inputs(
         output: str, worktrees: Iterable[Path | None]) -> tuple[str, ...]:
     """Ignored directories whose descendant path the output actually names."""
     text = output.replace("\\", "/")
@@ -462,7 +486,7 @@ def mentioned_ordinary_ignored_dirs(
     for worktree in worktrees:
         if worktree is None:
             continue
-        for relative in ordinary_ignored_dirs(worktree):
+        for relative in ordinary_ignored_inputs(worktree):
             if _mentions_path_below(text, relative):
                 named.add(relative)
     return tuple(sorted(named))
@@ -483,7 +507,7 @@ def ignored_input_diagnosis(output: str,
     trees are neither listed nor traversed.  An empty string means the failure
     says nothing about an ignored input.
     """
-    named = mentioned_ordinary_ignored_dirs(output, worktrees)
+    named = mentioned_ordinary_ignored_inputs(output, worktrees)
     if not named:
         return ""
     listed = ", ".join(f"{relative}/" for relative in sorted(named))
@@ -497,14 +521,14 @@ def ignored_input_diagnosis(output: str,
         "For a required input, place its ordinary Git-ignored target at the "
         "same relative path in the primary worktree, then rework the affected "
         "task. On the next run its AI source role records it with `assent "
-        "ignored-dirs declare`, naming the dependency or build file that made "
+        "ignored-inputs declare`, naming the dependency or build file that made "
         "it necessary as a `--watch` value. Assent provisions the "
         "exact junction or directory symlink for later sessions. Do not copy "
         "the tree or hand-create a source-worktree link; neither is reviewed "
         "candidate evidence.")
 
 
-def diagnosed_ignored_dirs(failure_summary: str) -> tuple[str, ...]:
+def diagnosed_ignored_inputs(failure_summary: str) -> tuple[str, ...]:
     """The directories a stored ``Ignored input diagnosis:`` names, if any.
 
     This reads back exactly what ``ignored_input_diagnosis`` wrote, so a full
@@ -588,6 +612,31 @@ def union_worktree_links(
     return ordered
 
 
+def candidate_ignored_inputs_digest(
+        reviewed_digest: str,
+        links: Sequence[ProvisionedLink]) -> str:
+    """Bind reviewed inputs and source-generated ignored files together.
+
+    Reviewed inputs already include required primary-target content. Ignored
+    leaf files generated only in a source worktree have no reviewed profile,
+    so their path, kind, and content digest are added here. Directory content
+    is deliberately not traversed; reviewed directory targets are covered by
+    ``reviewed_digest``.
+    """
+    digest = hashlib.sha256()
+    digest.update(b"assent-candidate-ignored-inputs\n")
+    digest.update(reviewed_digest.encode("ascii"))
+    digest.update(b"\n")
+    for link in links:
+        if link.kind != FILE_LINK:
+            continue
+        digest.update(link.path.encode("utf-8"))
+        digest.update(b"\0file\0")
+        digest.update(link.digest.encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def _create_file_link(destination: Path, target: Path) -> None:
     """Link one source file into the candidate without copying its content.
 
@@ -596,10 +645,7 @@ def _create_file_link(destination: Path, target: Path) -> None:
     the link raises ``OSError`` and the caller fails closed, because a copy
     would silently detach the candidate from the file the source is using.
     """
-    if os.name == "nt":
-        os.link(target, destination)
-    else:
-        os.symlink(target, destination)
+    pathops.create_file_link(destination, target)
 
 
 def _remove_link(destination: Path, kind: str) -> None:
@@ -612,7 +658,7 @@ def _remove_link(destination: Path, kind: str) -> None:
     if kind == DIRECTORY_LINK:
         pathops.detach_directory_link(destination)
     else:
-        os.unlink(destination)
+        pathops.detach_file_link(destination)
 
 
 def _create_parents(candidate: Path, relative: str) -> list[Path]:

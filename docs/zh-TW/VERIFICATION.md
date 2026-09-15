@@ -50,8 +50,12 @@ assent verify --batch    # 動態發現的 batch
 ## Receipt
 
 Receipt 是可刪除的證據，不是 source of truth。它記錄重現結果所需的身分：選取的
-source commit、重建過程的 tree、verifier digest 與 reviewed ignored-directory input digest。
-任何相關 source、candidate、verifier 或 ignored-directory input 改變，都會讓 receipt 過期。
+source commit、重建過程的 tree、verifier digest 與 ignored-input digest。
+任何相關 source、candidate、verifier 或 ignored input 改變，都會讓 receipt 過期。
+
+寫入新證據前，verification 會使正整數版本低於目前 schema 的可解析 receipt 失效，
+並重新執行完整 verifier。這是 scheduler-owned regeneration，不是 AI migration。
+格式損壞或未知未來版本仍會拒絕；acceptance 不會升級 receipt。
 
 完整 plan verification 會在 receipt operation 與所有 verification lock 結束後，
 恰好刷新一次該 plan 的 `_report.md`。這是 best-effort 動作，不會改變驗證結果。
@@ -100,20 +104,21 @@ marker、whitespace error 或無關修改。它只推進 source，不改 target�
 手動的單一 plan reconcile 處理 source 與目前 target 的衝突。Integration workflow
 也能修復 peer-only conflict，不會接受 prefix 或改變 exact selection。
 
-## Ignored-directory input
+## Ignored input
 
-新的 Git worktree 不會有 ignored directory，但專案可能需要大型本機目錄（例如
-`assets/` 或 `pkg/`）才能編譯或測試。`ignored-dirs` 記錄哪些 ignored directory
-是 source 必要輸入；Assent 只連結這些目錄，不會複製所有 ignored tree。Tracked
-source 旁的一般 ignored leaf file 則會自動處理。
+新的 Git worktree 不會有 ignored content，但專案可能需要 `.env`、credential 等
+本機檔案，或 `assets/`、`pkg/` 等大型本機目錄才能編譯或測試。
+`ignored-inputs` 記錄哪些 ignored file 或 directory 是 source 必要輸入；Assent
+只連結這些必要輸入，不會複製。只存在 source worktree、且位於 tracked source
+旁的一般 generated ignored leaf file 仍會自動處理。
 
 各位置的責任不同：
 
-- 主要 worktree 保存真實目錄，以及未納入 Git 的審查快取
-  `.assent/_ignored-dirs.toml`。
-- 受管理的 source worktree 在相同相對路徑建立 Windows junction 或 POSIX
-  directory symlink，指向主要 worktree 的真實目錄。
-- AI 專用的 `ignored-dirs declare` operation 把自己的受管理 source worktree 當成
+- 主要 worktree 保存真實輸入，以及未納入 Git 的審查快取
+  `.assent/_ignored-inputs.toml`。
+- 受管理的 source worktree 在相同相對路徑為目錄建立 Windows junction 或 POSIX
+  symlink，為檔案建立 Windows hard link 或 POSIX symlink。
+- AI 專用的 `ignored-inputs declare` operation 把自己的受管理 source worktree 當成
   宣告所描述的 snapshot，也只同步該 worktree 的鏈結。
 
 一般流程不需要人介入。`run` 找到匹配的審查結果時，會在 AI session 開始前自動
@@ -128,49 +133,49 @@ worktree，不會依賴先前 `run` 遺留下來的鏈結。
 可在任一 worktree 查看狀態，不做任何變更：
 
 ```text
-assent ignored-dirs status
+assent ignored-inputs status
 ```
 
-輸出會列出目前與主要 worktree、manifest、狀態、匹配的 profile、必要目錄、watch
+輸出會列出目前與主要 worktree、manifest、狀態、匹配的 profile、必要輸入、watch
 files，以及鏈結是否一致。在主要 worktree 中，鏈結會顯示為不適用，因為其中的一般
-目錄就是 target。這個指令不會修復任何東西；無法讀取契約或已確定 profile 的鏈結
+輸入就是 target。這個指令不會修復任何東西；無法讀取契約或已確定 profile 的鏈結
 損壞時，會回傳非零狀態。
 
 審查列出的 inventory 後，active source role 會在自己的受管理 worktree 提交宣告，
 並指定哪些 tracked dependency 或 build file 改變後，原決定應該失效：
 
 ```text
-assent ignored-dirs declare --required assets --required pkg --not-required build "generated output" --watch package.lock
+assent ignored-inputs declare --required assets --required pkg --not-required build "generated output" --watch package.lock
 ```
 
-宣告指示列出的每個 ordinary ignored directory，都必須由 `--required` 或
-`--not-required DIR REASON` 覆蓋一次；兩者都可以涵蓋 subtree。沒有目錄是 source
-必要輸入時使用 `--none-required`。只有 `--required` 目錄會在 worktree 建立鏈結。
-Ignored leaf file 仍由 verifier 自動處理，不需要分類。這不是一般 junction 管理
-指令，也不會複製目錄。它不是人類復原指令；人類使用 `assent rework`，讓下一次
+宣告指示列出的每個 ordinary ignored file 或 directory，都必須由 `--required` 或
+`--not-required PATH REASON` 覆蓋一次；兩者都可以涵蓋 subtree。沒有輸入是 source
+必要輸入時使用 `--none-required`。只存在 source worktree 的 generated ignored leaf
+file 仍由 verifier 自動處理。這不是一般 link 管理指令，也不會複製輸入。它不是
+人類復原指令；人類使用 `assent rework`，讓下一次
 `run` 把決定重新交給 AI workflow。
 
-決定會快取在主要 worktree 未追蹤的 `.assent/_ignored-dirs.toml`。Watch file、directory
-inventory 或 target 改變後會過期。若成功查詢沒有發現 ordinary ignored directory，
-狀態是 `NO-IGNORED-DIRECTORY-CANDIDATE`；它只描述目前檔案系統，不是「專案永遠
-不需要 ignored-directory input」的語意保證。
-前導底線表示這是 Assent-owned 本機狀態；只能透過 `ignored-dirs declare` 修改。
+決定會快取在主要 worktree 未追蹤的 `.assent/_ignored-inputs.toml`。Watch file、input
+inventory、file/directory 類型或 target 改變後會過期。若成功查詢沒有發現 ordinary ignored input，
+狀態是 `NO-IGNORED-INPUT-CANDIDATE`；它只描述目前檔案系統，不是「專案永遠
+不需要 ignored input」的語意保證。
+前導底線表示這是 Assent-owned 本機狀態；只能透過 `ignored-inputs declare` 修改。
 
-Required directory 在每個 AI role 期間都是不可變的輸入。Assent 會在 role 前後比對
+Required input 在每個 AI role 期間都是不可變的輸入。Assent 會在 role 前後比對
 內容；決定仍是 UNKNOWN 或 STALE 時，則比對完整 review inventory。修改 linked target，
 或先修改再把新內容重新宣告為 required，都屬於 control-boundary failure，不能成為
 candidate checkpoint。這項失敗會跨 restart 保留，直到 source rework 改變 candidate
-identity。Plan report 會明確列出每個 Git 不會交付的 required 本機目錄。
+identity。Plan report 會明確列出每個 Git 不會交付的 required 本機輸入。
 
-不能把所有 ignored directory 都建立成鏈結。Ignore rule 還可能包含可寫入的 build
-output、cache、virtual environment、editor state 與 credential；全部連結會共用
-可變狀態、暴露無關的本機資料，也會讓驗證依賴過期產物。不要手動建立 source-
-worktree link，也不要把 ignored directory 複製進去。未宣告的 link 會讓
+不能把所有 ignored input 都建立成鏈結。Ignore rule 還可能包含可寫入的 build
+output、cache、virtual environment、editor state 與 task 無關的 credential；全部
+連結會共用可變狀態、暴露無關的本機資料，也會讓驗證依賴過期產物。不要手動建立
+source-worktree link，也不要把 ignored input 複製進去。未宣告的 link 會讓
 verification、report、reconcile 與 acceptance 失效。清理時 Assent 只會移除鏈結
 本身，不會進入或刪除 target。
 
 若 verifier output 指向既有 ignored directory 內的遺漏路徑，Assent 會附加
-`Ignored input diagnosis:`，指出 `ignored-dirs declare` 的處理方式，但保留原始 exit
+`Ignored input diagnosis:`，指出 `ignored-inputs declare` 的處理方式，但保留原始 exit
 code。
 
 選取方式請看[指令](COMMANDS.md)，復原安全請看[作業](OPERATIONS.md)。

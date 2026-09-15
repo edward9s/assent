@@ -41,7 +41,7 @@ from typing import Callable, TextIO
 from uuid import uuid4
 
 from assent import (AssentError, contracts, gitops, lockfile, reconcile,
-                    ignored_dirs, runtime_test, usage, verification)
+                    ignored_inputs, runtime_test, usage, verification)
 
 from assent.adapters import Adapter, InvocationRequest, get_adapter
 
@@ -299,18 +299,18 @@ def _diagnosed_ignored_directory_inputs(cfg: Config) -> tuple[str, ...]:
             verification.receipt_path(cfg), gitops.main_worktree(cfg.root))
     except AssentError:
         return ()
-    return verification.diagnosed_ignored_dirs(receipt.failure_summary)
+    return verification.diagnosed_ignored_inputs(receipt.failure_summary)
 
-def _ignored_dir_decision(cfg: Config) -> ignored_dirs.Decision:
-    """Classify and provision required ignored directories for this source."""
-    return ignored_dirs.prepare_worktree(
+def _ignored_input_decision(cfg: Config) -> ignored_inputs.Decision:
+    """Classify and provision required ignored inputs for this source."""
+    return ignored_inputs.prepare_worktree(
         gitops.main_worktree(cfg.root), cfg.root,
         required_evidence=_diagnosed_ignored_directory_inputs(cfg))
 
 
 @dataclass(frozen=True)
 class _IgnoredInputGuard:
-    """Exact ignored-directory contents visible to one AI role."""
+    """Exact ignored-input contents visible to one AI role."""
 
     main: Path
     paths: tuple[str, ...]
@@ -327,11 +327,11 @@ def _ignored_input_guards(configs: tuple[Config, ...]) -> tuple[_IgnoredInputGua
     paths_by_main: dict[Path, set[str]] = {}
     for cfg in configs:
         if cfg.source_root is None and cfg.tasks_dir == cfg.assent_dir:
-            # Main runtime repair has no ignored-directory profile or links.
+            # Main runtime repair has no ignored-input profile or links.
             continue
         main = gitops.main_worktree(cfg.root)
-        decision = ignored_dirs.classify(
-            main, cfg.root, ignored_dirs.read_manifest(main),
+        decision = ignored_inputs.classify(
+            main, cfg.root, ignored_inputs.read_manifest(main),
             required_evidence=_diagnosed_ignored_directory_inputs(cfg))
         paths = decision.required if decision.settled else decision.inventory
         paths_by_main.setdefault(main.resolve(), set()).update(paths)
@@ -340,7 +340,7 @@ def _ignored_input_guards(configs: tuple[Config, ...]) -> tuple[_IgnoredInputGua
         ordered = tuple(sorted(paths))
         guards.append(_IgnoredInputGuard(
             main, ordered,
-            tuple((path, ignored_dirs.snapshot_target(main, path))
+            tuple((path, ignored_inputs.snapshot_target(main, path))
                   for path in ordered)))
     return tuple(guards)
 
@@ -354,7 +354,7 @@ def _ignored_input_violations(
     for guard in guards:
         for relative, before in guard.snapshots:
             try:
-                after = ignored_dirs.snapshot_target(guard.main, relative)
+                after = ignored_inputs.snapshot_target(guard.main, relative)
             except AssentError as error:
                 violations.append(f"ignored input {relative}: {error}")
                 continue
@@ -365,8 +365,8 @@ def _ignored_input_violations(
             continue
         main = gitops.main_worktree(cfg.root).resolve()
         try:
-            decision = ignored_dirs.classify(
-                main, cfg.root, ignored_dirs.read_manifest(main),
+            decision = ignored_inputs.classify(
+                main, cfg.root, ignored_inputs.read_manifest(main),
                 required_evidence=_diagnosed_ignored_directory_inputs(cfg))
         except AssentError as error:
             violations.append(f"ignored input decision: {error}")
@@ -956,8 +956,8 @@ def _prepare_worktree(cfg: Config) -> Config:
                 f"validation ({detail})")
         _require_stack_ancestry(cfg, state_after, downstream_tip)
 
-        decision = _ignored_dir_decision(worktree_cfg)
-        print(ignored_dirs.describe(decision))
+        decision = _ignored_input_decision(worktree_cfg)
+        print(ignored_inputs.describe(decision))
         print(f"Isolated worktree: {root}")
         print(f"Target snapshot: {state_after.base.target_snapshot}")
         stacked = state_before.base.speculative_upstream
@@ -1094,7 +1094,8 @@ def _integration_prompt(
         if step.writes else
         "This is read-only. Do not create, edit, delete, rename, format, or "
         "generate project files.")
-    ignored_dir_clause = ignored_dirs.declaration_clause(_ignored_dir_decision(cfg))
+    ignored_input_clause = ignored_inputs.declaration_clause(
+        _ignored_input_decision(cfg))
     return f"""You are one Assent integration role session.
 
 Read the project rules {_agents_md_path_for_prompt(cfg)} and the Assent session
@@ -1109,9 +1110,9 @@ Role responsibility:
 Treat the plan candidate as one result. Do not assign findings or files to task
 owners. Task contracts, journals, scheduler state, Git state, receipts, and
 files below .git or .assent are read-only. Do not run Git, Assent, or the full
-verifier; the scheduler owns them. The exact ignored-dirs command injected
+verifier; the scheduler owns them. The exact ignored-inputs command injected
 below is the sole exception.
-{ignored_dir_clause}
+{ignored_input_clause}
 
 Authoritative task requirements:
 {contracts_text}
@@ -1896,7 +1897,7 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
                     action_status="", action_candidate_tree="",
                     action_exit_code=0, action_evidence=(),
                     verification_script_sha256="",
-                    ignored_directory_inputs_sha256="")
+                    ignored_inputs_sha256="")
                 write_selection_workflow_state(
                     configs[0].assent_dir, prior_state)
         target_ref, target_commit, source_commits = _selection_snapshot(configs)
@@ -2009,7 +2010,7 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
                         action_status="", action_candidate_tree="",
                         action_exit_code=0, action_evidence=(),
                         verification_script_sha256="",
-                        ignored_directory_inputs_sha256="")
+                        ignored_inputs_sha256="")
                     write_selection_workflow_state(
                         configs[0].assent_dir, state)
                 for cfg, source_tip in zip(configs, current[2]):
@@ -2049,7 +2050,7 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
         if (not result.target_commit or not result.source_commits
                 or not result.candidate_tree
                 or not result.verification_script_sha256
-                or not result.ignored_directory_inputs_sha256):
+                or not result.ignored_inputs_sha256):
             print("Selection full_verify returned incomplete evidence")
             return 1
         if len(configs) == 1 and result.outcome == "TARGET_CONFLICT":
@@ -2091,7 +2092,7 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
                     action_evidence=(result.outcome,) + result.evidence,
                     verification_script_sha256=(
                         result.verification_script_sha256),
-                    ignored_directory_inputs_sha256=result.ignored_directory_inputs_sha256)
+                    ignored_inputs_sha256=result.ignored_inputs_sha256)
                 write_selection_workflow_state(
                     configs[0].assent_dir, state)
         except (AssentError, lockfile.LockBusy) as error:
@@ -2178,7 +2179,7 @@ def _preflight_control_snapshot(cfg: Config) -> dict[Path, bytes | None]:
     paths = {
         cfg.assent_dir / "_integration_workflow.toml",
         cfg.assent_dir / "_batch_verification.toml",
-        cfg.assent_dir / "_ignored-dirs.toml",
+        cfg.assent_dir / "_ignored-inputs.toml",
         cfg.assent_dir / "_archived.toml",
         cfg.tasks_dir / "_workflow.toml",
         cfg.tasks_dir / "_runtime_test_workflow.toml",
@@ -3171,12 +3172,12 @@ def _source_workflow_prompt(
         "tests, fixtures, project configuration, and documentation in this "
         "working tree.\n"
         if runtime_test else "")
-    ignored_dir_policy = ""
+    ignored_input_policy = ""
     if not main_runtime_test:
-        ignored_dir_policy = (
-            "The exact ignored-dirs command injected below is the sole Assent "
+        ignored_input_policy = (
+            "The exact ignored-inputs command injected below is the sole Assent "
             "exception.\n"
-            + ignored_dirs.declaration_clause(_ignored_dir_decision(cfg)))
+            + ignored_inputs.declaration_clause(_ignored_input_decision(cfg)))
     return f"""You are one Assent role session.
 
 Read the project rules {_agents_md_path_for_prompt(cfg)} and the Assent session
@@ -3197,7 +3198,7 @@ Task contracts are read-only. Journals, scheduler state, Git state, receipts,
 and files below .git or .assent are also read-only. Do not run Git, Assent, a
 scheduler-owned focused action, or the full verifier. The scheduler owns every
 checkpoint, task status, journal entry, and action result.
-{ignored_dir_policy}
+{ignored_input_policy}
 
 Authoritative task requirements:
 {contracts_text}
@@ -3475,7 +3476,7 @@ def _source_workflow_gate_unresolved(
         set_status(task.path, "BLOCKED")
         append_entry(
             task.journal_path, by="scheduler", event="blocked",
-            summary=("Task workflow exhausted while the ignored-directory "
+            summary=("Task workflow exhausted while the ignored-input "
                      "decision remained unsettled"),
             detail=f"Action not started: {action}\nReason:\n{summary}",
             time_str=now().isoformat(timespec="seconds"))
@@ -3529,7 +3530,7 @@ def _process_source_workflow(
             if (unit == "runtime_test"
                     and not main_runtime_test
                     and _runtime_test_record(state) is None
-                    and _ignored_dir_decision(cfg).settled):
+                    and _ignored_input_decision(cfg).settled):
                 # A prior action was refused before it started, and its only
                 # precondition is now settled. Resume at the next scheduler
                 # action without spending another repair session.
@@ -3556,7 +3557,7 @@ def _process_source_workflow(
                 record = _runtime_test_record(state)
                 if record is None:
                     # The preceding action was refused before it started. The
-                    # role may have settled its injected ignored-directory
+                    # role may have settled its injected ignored-input
                     # decision without changing tracked source; let the next
                     # scheduler action evaluate that precondition again.
                     continue
@@ -3573,10 +3574,10 @@ def _process_source_workflow(
                 cfg.git_excludes)
         print(f"\n{unit.title()} workflow step {state.step_index + 1}/"
               f"{len(steps)}: {step.action}")
-        decision = (None if main_runtime_test else _ignored_dir_decision(cfg))
+        decision = (None if main_runtime_test else _ignored_input_decision(cfg))
         if decision is not None and not decision.settled:
-            summary = (ignored_dirs.closeout_refusal(decision)
-                       or f"Run `{ignored_dirs.DECLARE_COMMAND}`")
+            summary = (ignored_inputs.closeout_refusal(decision)
+                       or f"Run `{ignored_inputs.DECLARE_COMMAND}`")
             gate_evidence = f"{step.action} not started:\n{summary}"
             state = replace(
                 state, evidence=state.evidence + (gate_evidence,),
@@ -3739,7 +3740,7 @@ def _verify_focused_locked(
 
     # --focus provisions the persistent source worktree like every other verify
     # entry point, and writes no receipt of any kind.
-    ignored_dirs.prepare_sources(main, [(plan_name, source.worktree)])
+    ignored_inputs.prepare_sources(main, [(plan_name, source.worktree)])
     print(f"{label}: source worktree {source.worktree}")
     print(f"{label}: {kind} cannot authorize `accept`; "
           "complete integration verification has not run")

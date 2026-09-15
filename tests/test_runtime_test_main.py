@@ -79,12 +79,12 @@ class MainRuntimeTestTests(EngineTestCase):
         cfg = self.build_main(command, repair=True)
 
         def repair(prompt):
-            self.assertNotIn("ignored-dirs", prompt)
+            self.assertNotIn("ignored-inputs", prompt)
             (self.root / "value.txt").write_text("good\n", encoding="utf-8")
             return ok_result()
 
         with mock.patch.object(
-                engine, "_ignored_dir_decision",
+                engine, "_ignored_input_decision",
                 side_effect=AssertionError(
                     "main runtime must not classify ignored directories")):
             code, output = self.run_main(cfg, ScriptedAdapter([repair]))

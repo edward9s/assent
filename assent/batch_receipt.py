@@ -20,20 +20,22 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from assent import AssentError, gitops, ignored_dirs
+from assent import AssentError, gitops, ignored_inputs
 from assent.config import Config, validate_tasks_name
 from assent.verification_common import (DIGEST_RE, RECEIPT_STATUSES,
                                         SUMMARY_LIMIT, VERIFY_COMMAND,
                                         atomic_write_text,
                                         build_batch_candidate,
+                                        candidate_ignored_inputs_digest,
                                         invalidate_receipt, require_oid,
-                                        toml_string, verifier_digest)
+                                        toml_string, union_worktree_links,
+                                        verifier_digest)
 
 BATCH_RECEIPT_NAME = "_batch_verification.toml"
-BATCH_RECEIPT_VERSION = 2
+BATCH_RECEIPT_VERSION = 3
 _BATCH_RECEIPT_KEYS = {
     "version", "status", "target_tip", "sources", "final_tree",
-    "verify_script_sha256", "ignored_directory_inputs_sha256", "verify_command",
+    "verify_script_sha256", "ignored_inputs_sha256", "verify_command",
     "exit_code", "completed_at", "failure_summary",
 }
 _BATCH_SOURCE_KEYS = {"plan", "source_tip", "step_tree"}
@@ -63,9 +65,9 @@ class BatchVerificationReceipt:
     sources: tuple[BatchSource, ...]
     final_tree: str
     verify_script_sha256: str
-    #: Digest of every required ignored-directory input this batch verification
-    #: used -- the selected profiles and exact target content.
-    ignored_directory_inputs_sha256: str
+    #: Digest of every ignored input this batch verification used: reviewed
+    #: targets and source-generated ignored leaf files.
+    ignored_inputs_sha256: str
     verify_command: str
     exit_code: int
     completed_at: str
@@ -116,7 +118,7 @@ def _batch_receipt_text(receipt: BatchVerificationReceipt) -> str:
         f"target_tip = {toml_string(receipt.target_tip)}\n"
         f"final_tree = {toml_string(receipt.final_tree)}\n"
         f"verify_script_sha256 = {toml_string(receipt.verify_script_sha256)}\n"
-        f"ignored_directory_inputs_sha256 = {toml_string(receipt.ignored_directory_inputs_sha256)}\n"
+        f"ignored_inputs_sha256 = {toml_string(receipt.ignored_inputs_sha256)}\n"
         f"verify_command = {toml_string(receipt.verify_command)}\n"
         f"exit_code = {receipt.exit_code}\n"
         f"completed_at = {toml_string(receipt.completed_at)}\n"
@@ -174,10 +176,10 @@ def _validate_batch_receipt(receipt: BatchVerificationReceipt,
         raise AssentError(
             "Batch verification receipt verify_script_sha256 must be a "
             "64-character lowercase hexadecimal digest")
-    if not isinstance(receipt.ignored_directory_inputs_sha256, str) or not DIGEST_RE.fullmatch(
-            receipt.ignored_directory_inputs_sha256):
+    if not isinstance(receipt.ignored_inputs_sha256, str) or not DIGEST_RE.fullmatch(
+            receipt.ignored_inputs_sha256):
         raise AssentError(
-            "Batch verification receipt ignored_directory_inputs_sha256 must be a "
+            "Batch verification receipt ignored_inputs_sha256 must be a "
             "64-character lowercase hexadecimal digest")
     if receipt.verify_command != VERIFY_COMMAND:
         raise AssentError(
@@ -283,9 +285,9 @@ def read_batch_receipt(path: Path,
     return receipt
 
 
-def current_batch_ignored_directory_inputs(main: Path,
+def current_batch_ignored_inputs(main: Path,
                                 receipt: BatchVerificationReceipt) -> str:
-    """Recompute the batch's ignored-directory input digest without repairing anything.
+    """Recompute the batch's ignored-input digest without repairing anything.
 
     Freshness is a question, not a repair: a profile that changed identity, a
     declared target that moved, or target content that differs recomputes to
@@ -293,20 +295,24 @@ def current_batch_ignored_directory_inputs(main: Path,
     at all.  Both outcomes leave the receipt stale, which is what acceptance
     needs -- it may never provision a link as a side effect of publishing.
     """
-    manifest = ignored_dirs.read_manifest(main)
-    decisions: list[tuple[str, ignored_dirs.Decision]] = []
+    manifest = ignored_inputs.read_manifest(main)
+    decisions: list[tuple[str, ignored_inputs.Decision]] = []
+    worktrees: list[Path | None] = []
     for source in receipt.sources:
         worktree = gitops.plan_worktree(main, source.plan)
-        decision = ignored_dirs.classify(main, worktree or main, manifest)
+        worktrees.append(worktree)
+        decision = ignored_inputs.classify(main, worktree or main, manifest)
         if not decision.settled:
             raise AssentError(
-                f"the ignored-directory decision for {source.plan} is "
-                f"{decision.state}; the batch receipt's ignored-directory input evidence "
+                f"the ignored-input decision for {source.plan} is "
+                f"{decision.state}; the batch receipt's ignored-input evidence "
                 "can no longer be reproduced")
-        ignored_dirs.require_directory_link_agreement(
+        ignored_inputs.require_input_link_agreement(
             main, worktree or main, decision, plan_name=source.plan)
         decisions.append((source.plan, decision))
-    return ignored_dirs.ignored_directory_inputs_digest(main, decisions)
+    return candidate_ignored_inputs_digest(
+        ignored_inputs.ignored_inputs_digest(main, decisions),
+        union_worktree_links(worktrees))
 
 
 def batch_receipt_staleness(cfg: Config,
@@ -352,14 +358,14 @@ def batch_receipt_staleness(cfg: Config,
         return tuple(reasons)
 
     # Only once every recorded source identity is still current does asking
-    # about the ignored-directory inputs mean anything: a vanished source is already
+    # about the ignored inputs mean anything: a vanished source is already
     # reported above and would otherwise be reported twice.
     try:
-        if current_batch_ignored_directory_inputs(
-                main, receipt) != receipt.ignored_directory_inputs_sha256:
-            return ("the reviewed ignored-directory inputs changed since verification",)
+        if current_batch_ignored_inputs(
+                main, receipt) != receipt.ignored_inputs_sha256:
+            return ("the ignored inputs changed since verification",)
     except AssentError as e:
-        return (f"the reviewed ignored-directory inputs cannot be reproduced: {e}",)
+        return (f"the ignored inputs cannot be reproduced: {e}",)
 
     candidate = build_batch_candidate(
         main, target_tip,

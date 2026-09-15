@@ -153,7 +153,7 @@ class AcceptAllRepositoryCase(unittest.TestCase):
             target_tip=target_tip,
             integration_tree=tree,
             verify_script_sha256=digest,
-            ignored_directory_inputs_sha256=verification.current_ignored_directory_inputs(cfg),
+            ignored_inputs_sha256=verification.current_ignored_inputs(cfg),
             verify_command=verification.VERIFY_COMMAND,
             exit_code=0 if status == "PASSED" else 7,
             completed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),

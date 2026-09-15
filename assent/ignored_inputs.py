@@ -1,30 +1,28 @@
-"""Reviewed ignored directories: local execution evidence, not project source.
+"""Reviewed ignored inputs: local execution evidence, not project source.
 
-Some projects genuinely need an ignored directory to exist inside a working
-tree before their own tests can run -- a vendored package tree, a generated
-asset directory, a localization ``arb`` folder.  Git cannot carry it and no
-filesystem rule can prove which ignored directory is semantically required, so
-the answer has to be reviewed once by a human or an AI session and then reused.
+Some projects need Git-ignored files or directories inside a working tree
+before their own tests can run -- credentials, local configuration, vendored
+packages, or generated assets. Git cannot carry them and no filesystem rule can
+prove which inputs are semantically required, so the answer is reviewed once
+by a human or AI session and then reused.
 
 This module owns that answer and everything around it:
 
-* ``.assent/_ignored-dirs.toml`` in the primary worktree -- one untracked,
+* ``.assent/_ignored-inputs.toml`` in the primary worktree -- one untracked,
   Assent-owned file of local execution memory.  It is not project source, not
   candidate content, and it is never committed; the selected profile and
   target snapshot are bound separately into verification evidence.
-  The file has one exact ``[ignored_dirs]`` schema and no version machinery.
+  The file has one exact ``[ignored_inputs]`` schema and no version machinery.
 * Reviewed *profiles*, retained by fingerprint rather than overwritten, so two
   branches with different dependency structure each keep their own prior answer
   instead of making the cache oscillate.
 * The three-state decision a scheduled session starts under -- UNKNOWN,
   REVIEWED-NONE, REVIEWED-REQUIRED -- plus STALE, which is a matched answer that
-  concrete evidence has invalidated, and NO-IGNORED-DIRECTORY-CANDIDATE, the
+  concrete evidence has invalidated, and NO-IGNORED-INPUT-CANDIDATE, the
   deterministic fast path for a primary worktree a successful Git query proves
-  holds no ordinary ignored directory to declare at all.
-* The controlled declaration operation, the only writer of the manifest, and the
-  provisioning that turns a reviewed profile into real directory links using
-  ``pathops.create_directory_link`` -- the same primitive candidate mirroring
-  uses.
+  holds no ordinary ignored input to declare at all.
+* The controlled declaration operation, the only writer of the manifest, and
+  provisioning that turns a reviewed profile into same-relative links.
 
 Nothing here ever traverses, copies, modifies or deletes a link target.  A link
 this module created is detached as a link object; anything else found in a
@@ -46,41 +44,44 @@ from pathlib import Path
 
 from assent import AssentError, gitops, pathops
 
-MANIFEST_NAME = "_ignored-dirs.toml"
-MANIFEST_LOCK_NAME = "_ignored-dirs.lock"
-SECTION = "ignored_dirs"
+MANIFEST_NAME = "_ignored-inputs.toml"
+MANIFEST_LOCK_NAME = "_ignored-inputs.lock"
+SECTION = "ignored_inputs"
 
 UNKNOWN = "UNKNOWN"
 REVIEWED_NONE = "REVIEWED-NONE"
 REVIEWED_REQUIRED = "REVIEWED-REQUIRED"
 STALE = "STALE"
 # A successful Git ignored-entry query of the primary worktree that found no
-# existing ordinary ignored directory outside `.git/` and `.assent/`.  It is a
+# existing ordinary ignored input outside `.git/` and `.assent/`. It is a
 # statement about that query alone and never a claim that the project needs no
-# ignored-directory input semantically: nothing exists there to declare, so
+# ignored input semantically: nothing exists there to declare, so
 # it neither charges a session for a review nor refuses a verification. It
 # still has its own input-digest identity, distinct from the reviewed
 # empty answer REVIEWED-NONE.  A failed query is not this state -- it is a
-# refusal -- and the moment a candidate directory appears, classification
+# refusal -- and the moment a candidate input appears, classification
 # becomes UNKNOWN.
-NO_IGNORED_DIRECTORY_CANDIDATE = "NO-IGNORED-DIRECTORY-CANDIDATE"
+NO_IGNORED_INPUT_CANDIDATE = "NO-IGNORED-INPUT-CANDIDATE"
 
 ABSENT = "absent"                       # a watched path that is not there at all
 _UNTRACKED = "untracked"                # internal snapshot-only watch state
 _EXCLUDED_ROOTS = (".git", ".assent")
 _IGNORE_RULE_PATHSPEC = "*.gitignore"
-DECLARE_COMMAND = "assent ignored-dirs declare"
+DECLARE_COMMAND = "assent ignored-inputs declare"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_GIT_EXCLUDE_BEGIN = "# --- Assent directory links begin ---"
-_GIT_EXCLUDE_END = "# --- Assent directory links end ---"
+_GIT_EXCLUDE_BEGIN = "# --- Assent ignored-input links begin ---"
+_GIT_EXCLUDE_END = "# --- Assent ignored-input links end ---"
+DIRECTORY_INPUT = "directory"
+FILE_INPUT = "file"
+_INPUT_KINDS = (DIRECTORY_INPUT, FILE_INPUT)
 
 
 # --------------------------------------------------------------------------- #
 # Manifest model
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
-class NonRequiredDirectory:
-    """Why one inventory directory is not a required source input."""
+class NonRequiredInput:
+    """Why one inventory path is not a required source input."""
 
     path: str
     reason: str
@@ -93,21 +94,23 @@ class ValidatedDeclaration:
     required: tuple[str, ...]
     watch: tuple[str, ...]
     inventory: tuple[str, ...]
-    not_required: tuple[NonRequiredDirectory, ...]
+    not_required: tuple[NonRequiredInput, ...]
+    kinds: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class Profile:
     """One reviewed answer, keyed by the source snapshot it was reviewed for.
 
-    ``required`` holds normalized project-relative directories (empty means the
+    ``required`` holds normalized project-relative inputs (empty means the
     reviewed answer "none are required"), ``watch`` the exact tracked
     dependency/build files that justify reconsidering it, and ``digests`` the
     per-file evidence -- each watch file plus every tracked Git-ignore rule file
     -- from which ``fingerprint`` is derived.  Keeping the digests, not only
     their hash, is what lets a stale profile report *which* file changed instead
     of merely that something did. ``inventory`` and ``not_required`` prove that
-    every ignored directory was explicitly accounted for.
+    every ignored input was explicitly accounted for. ``kinds`` records whether
+    each inventory path was a file or directory.
     """
 
     fingerprint: str
@@ -115,7 +118,8 @@ class Profile:
     watch: tuple[str, ...] = ()
     digests: dict[str, str] = field(default_factory=dict)
     inventory: tuple[str, ...] = ()
-    not_required: tuple[NonRequiredDirectory, ...] = ()
+    not_required: tuple[NonRequiredInput, ...] = ()
+    kinds: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_none(self) -> bool:
@@ -133,7 +137,7 @@ class Application:
 
 @dataclass
 class Manifest:
-    """The parsed local ignored-directory manifest."""
+    """The parsed local ignored-input manifest."""
 
     profiles: tuple[Profile, ...] = ()
     applications: tuple[Application, ...] = ()
@@ -147,14 +151,14 @@ class Manifest:
 
 @dataclass(frozen=True)
 class Decision:
-    """The ignored-directory state one source worktree starts a task session under.
+    """The ignored-input state one source worktree starts a task session under.
 
     ``needs_review`` separates "no answer and something to decide" from "no
     answer and nothing to decide": a primary worktree that a successful Git
-    query proves holds no ordinary ignored directory has nothing anyone could
+    query proves holds no ordinary ignored input has nothing anyone could
     declare, so no session is charged for discovering that. ``inventory`` is the
-    complete collapsed set of ordinary ignored directories physically present
-    in the primary worktree. Presence is never proof that a directory is
+    complete collapsed set of ordinary ignored inputs physically present in the
+    primary worktree. Presence is never proof that an input is
     required; complete required/not-required coverage makes omission explicit.
     """
 
@@ -165,6 +169,7 @@ class Decision:
     evidence: tuple[str, ...] = ()
     needs_review: bool = False
     inventory: tuple[str, ...] = ()
+    kinds: dict[str, str] = field(default_factory=dict)
 
     @property
     def required(self) -> tuple[str, ...]:
@@ -174,7 +179,7 @@ class Decision:
     def settled(self) -> bool:
         """True when nothing is left to decide before real work may start."""
         return self.state in (REVIEWED_NONE, REVIEWED_REQUIRED,
-                              NO_IGNORED_DIRECTORY_CANDIDATE)
+                              NO_IGNORED_INPUT_CANDIDATE)
 
 
 # --------------------------------------------------------------------------- #
@@ -237,14 +242,14 @@ def hold_manifest_lock(main: Path) -> Iterator[None]:
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise AssentError(
-            f"Unable to prepare the ignored-directory manifest directory "
+            f"Unable to prepare the ignored-input manifest directory "
             f"{path.parent}: {e}") from e
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
     handle = os.fdopen(os.open(str(path), flags, 0o644), "r+b")
     try:
         if not _try_lock(handle):
             raise AssentError(
-                "Another ignored-directory declaration is already updating "
+                "Another ignored-input declaration is already updating "
                 f"{manifest_path(main)}; only one may write at a time")
         try:
             handle.seek(0)
@@ -270,7 +275,7 @@ def _atomic_write(path: Path, text: str) -> None:
         os.replace(temporary, path)
     except OSError as e:
         raise AssentError(
-            f"Unable to atomically write the ignored-directory manifest {path}: {e}") from e
+            f"Unable to atomically write the ignored-input manifest {path}: {e}") from e
     finally:
         with contextlib.suppress(OSError):
             temporary.unlink(missing_ok=True)
@@ -394,11 +399,37 @@ def _inventory_from(value: object, path: Path) -> tuple[str, ...]:
         for value in raw_inventory), "profile inventory", path)
 
 
-def _not_required_from(value: object, path: Path) -> tuple[NonRequiredDirectory, ...]:
+def _kinds_from(value: object, inventory: tuple[str, ...],
+                path: Path) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise AssentError(f"{path}: profile kinds must be a table of strings")
+    kinds: dict[str, str] = {}
+    for raw_relative, kind in value.items():
+        relative = _stored_relative(raw_relative, "profile kind keys", path)
+        if kind not in _INPUT_KINDS:
+            raise AssentError(
+                f"{path}: profile kind for {relative} must be "
+                f"{DIRECTORY_INPUT!r} or {FILE_INPUT!r}")
+        kinds[relative] = kind
+    if set(kinds) != set(inventory):
+        missing = sorted(set(inventory) - set(kinds))
+        extra = sorted(set(kinds) - set(inventory))
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if extra:
+            details.append("not in inventory: " + ", ".join(extra))
+        raise AssentError(
+            f"{path}: profile kinds must describe the complete inventory ("
+            + "; ".join(details) + ")")
+    return dict(sorted(kinds.items()))
+
+
+def _not_required_from(value: object, path: Path) -> tuple[NonRequiredInput, ...]:
     if not isinstance(value, list):
         raise AssentError(
             f"{path}: profile not_required must be an array of tables")
-    not_required: list[NonRequiredDirectory] = []
+    not_required: list[NonRequiredInput] = []
     for index, raw in enumerate(value):
         fields = set(raw) if isinstance(raw, dict) else set()
         if (not isinstance(raw, dict)
@@ -412,7 +443,7 @@ def _not_required_from(value: object, path: Path) -> tuple[NonRequiredDirectory,
         if not isinstance(reason, str) or not reason.strip():
             raise AssentError(
                 f"{path}: profile not_required[{index}].reason must be non-empty")
-        not_required.append(NonRequiredDirectory(relative, reason.strip()))
+        not_required.append(NonRequiredInput(relative, reason.strip()))
     if len({item.path for item in not_required}) != len(not_required):
         raise AssentError(f"{path}: profile not_required contain duplicate paths")
     for item in not_required:
@@ -427,7 +458,7 @@ def _not_required_from(value: object, path: Path) -> tuple[NonRequiredDirectory,
 
 
 def _validate_profile_coverage(profile: Profile, path: Path) -> None:
-    """Require a profile to account for every ignored directory."""
+    """Require a profile to account for every ignored input."""
     inventory = set(profile.inventory)
     required = set(profile.required)
     non_required_roots = {item.path for item in profile.not_required}
@@ -445,7 +476,7 @@ def _validate_profile_coverage(profile: Profile, path: Path) -> None:
                    for relative in inventory))
     if empty_required:
         raise AssentError(
-            f"{path}: required directories cover no profile inventory entry: "
+            f"{path}: required inputs cover no profile inventory entry: "
             + ", ".join(empty_required))
     empty_not_required = sorted(
         root for root in non_required_roots
@@ -454,7 +485,7 @@ def _validate_profile_coverage(profile: Profile, path: Path) -> None:
     overlap = sorted(covered_required & covered_not_required)
     if overlap:
         raise AssentError(
-            f"{path}: inventory directories are both required and not required: "
+            f"{path}: inventory inputs are both required and not required: "
             + ", ".join(overlap))
     missing = sorted(inventory - covered_required - covered_not_required)
     if missing or empty_not_required:
@@ -462,10 +493,10 @@ def _validate_profile_coverage(profile: Profile, path: Path) -> None:
         if missing:
             details.append("unclassified: " + ", ".join(missing))
         if empty_not_required:
-            details.append("not-required entry covers no inventory directory: "
+            details.append("not-required entry covers no inventory input: "
                            + ", ".join(empty_not_required))
         raise AssentError(
-            f"{path}: profile does not exactly cover ignored-directory inventory ("
+            f"{path}: profile does not exactly cover ignored-input inventory ("
             + "; ".join(details) + ")")
 
 
@@ -474,7 +505,7 @@ def _profile_from(data: object, path: Path) -> Profile:
         raise AssentError(f"{path}: each [{SECTION}] profile must be a table")
     expected = {
         "fingerprint", "required", "watch", "digests", "inventory",
-        "not_required",
+        "not_required", "kinds",
     }
     if set(data) != expected:
         raise AssentError(
@@ -483,13 +514,13 @@ def _profile_from(data: object, path: Path) -> Profile:
     fingerprint = data.get("fingerprint")
     if not isinstance(fingerprint, str) or not _SHA256_RE.fullmatch(fingerprint):
         raise AssentError(
-            f"{path}: an ignored-directory profile fingerprint must be a 64-character "
+            f"{path}: an ignored-input profile fingerprint must be a 64-character "
             "lowercase SHA-256 digest")
     raw_required = _string_list(data["required"], f"{path}: profile required")
     raw_watch = _string_list(data["watch"], f"{path}: profile watch")
     if not raw_watch:
         raise AssentError(
-            f"{path}: an ignored-directory profile needs at least one watch file")
+            f"{path}: an ignored-input profile needs at least one watch file")
     required = _canonical_list(tuple(
         _stored_relative(value, "profile required", path)
         for value in raw_required), "profile required", path)
@@ -518,10 +549,11 @@ def _profile_from(data: object, path: Path) -> Profile:
         raise AssentError(
             f"{path}: profile fingerprint does not match its digest evidence")
     inventory = _inventory_from(data["inventory"], path)
+    kinds = _kinds_from(data["kinds"], inventory, path)
     not_required = _not_required_from(data["not_required"], path)
     profile = Profile(
         fingerprint, required, watch, normalized_digests, inventory,
-        not_required)
+        not_required, kinds)
     _validate_profile_coverage(profile, path)
     return profile
 
@@ -564,12 +596,12 @@ def read_manifest(main: Path) -> Manifest:
         return Manifest()
     except OSError as e:
         raise AssentError(
-            f"Unable to read the ignored-directory manifest {path}: {e}") from e
+            f"Unable to read the ignored-input manifest {path}: {e}") from e
     try:
         data = tomllib.loads(raw.decode("utf-8"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
         raise AssentError(
-            f"The ignored-directory manifest {path} is not valid TOML: {e}") from e
+            f"The ignored-input manifest {path} is not valid TOML: {e}") from e
 
     if set(data) != {SECTION}:
         raise AssentError(f"{path}: the only top-level table must be [{SECTION}]")
@@ -602,7 +634,7 @@ def _toml_value(value: object) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
     raise AssentError(
-        f"the ignored-directory manifest cannot represent {type(value).__name__} values")
+        f"the ignored-input manifest cannot represent {type(value).__name__} values")
 
 
 def _render_table(path: tuple[str, ...], table: dict,
@@ -629,9 +661,9 @@ def _toml_key(key: str) -> str:
 
 
 def render_manifest(manifest: Manifest) -> str:
-    """Serialize the one exact ignored-directory manifest shape."""
+    """Serialize the one exact ignored-input manifest shape."""
     lines = [
-        "# assent local ignored-directory manifest -- Assent-owned execution memory.",
+        "# assent local ignored-input manifest -- Assent-owned execution memory.",
         "# Untracked and never committed: it records reviewed decisions for this",
         "# machine, not project source, receipt evidence or acceptance input.",
         "",
@@ -643,6 +675,7 @@ def render_manifest(manifest: Manifest) -> str:
             "watch": list(profile.watch),
             "digests": dict(sorted(profile.digests.items())),
             "inventory": list(profile.inventory),
+            "kinds": dict(sorted(profile.kinds.items())),
             "not_required": [
                 {"path": item.path, "reason": item.reason}
                 for item in profile.not_required],
@@ -672,6 +705,7 @@ def write_manifest(main: Path, manifest: Manifest) -> None:
             "watch": list(profile.watch),
             "digests": dict(profile.digests),
             "inventory": list(profile.inventory),
+            "kinds": dict(profile.kinds),
             "not_required": [
                 {"path": item.path, "reason": item.reason}
                 for item in profile.not_required],
@@ -687,7 +721,7 @@ def write_manifest(main: Path, manifest: Manifest) -> None:
         tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:  # pragma: no cover - defensive
         raise AssentError(
-            f"refusing to write an unparseable ignored-directory manifest: {e}") from e
+            f"refusing to write an unparseable ignored-input manifest: {e}") from e
     _sync_managed_git_excludes(Path(main), manifest)
     _atomic_write(manifest_path(main), text)
 
@@ -750,7 +784,7 @@ def snapshot_digests(worktree: Path,
 
     Two kinds of file decide whether a reviewed answer still holds: the exact
     dependency/build files the review declared, and the repository's own tracked
-    Git-ignore rules, since those decide which directories are ignored at all.
+    Git-ignore rules, since those decide which paths are ignored at all.
     A file that is not there is recorded as ``absent`` rather than omitted, so a
     watched file disappearing is as visible as one changing.
     """
@@ -766,7 +800,7 @@ def snapshot_digests(worktree: Path,
 def fingerprint_of(digests: dict[str, str]) -> str:
     """Hash one evidence snapshot into the profile key used for lookup."""
     digest = hashlib.sha256()
-    digest.update(b"assent-ignored-dirs\n")
+    digest.update(b"assent-ignored-inputs\n")
     for relative in sorted(digests):
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
@@ -787,15 +821,18 @@ def _evidence_matches(profile: Profile, current: dict[str, str]) -> bool:
 
 def _matches(
         profile: Profile, current: dict[str, str], *,
-        inventory: tuple[str, ...] | None = None) -> bool:
+        inventory: tuple[str, ...] | None = None,
+        kinds: dict[str, str] | None = None) -> bool:
     """True when file evidence and inventory still match.
 
     The comparison is over the profile's own recorded keys, so two profiles with
     different watch sets are each answered against their own evidence.
     """
     inventory = profile.inventory if inventory is None else inventory
+    kinds = profile.kinds if kinds is None else kinds
     return (_evidence_matches(profile, current)
-            and profile.inventory == inventory)
+            and profile.inventory == inventory
+            and profile.kinds == kinds)
 
 
 def _profile_snapshots(manifest: Manifest, worktree: Path
@@ -862,6 +899,21 @@ def _is_ordinary_directory(path: Path) -> bool:
     return stat.S_ISDIR(info.st_mode)
 
 
+def _ordinary_input_kind(path: Path) -> str:
+    """Return an ordinary file/directory kind, or an empty string."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return ""
+    if pathops.is_link_stat(info) or pathops.is_reparse_point(info):
+        return ""
+    if stat.S_ISDIR(info.st_mode):
+        return DIRECTORY_INPUT
+    if stat.S_ISREG(info.st_mode):
+        return FILE_INPUT
+    return ""
+
+
 def _parent_problem(root: Path, relative: str) -> str:
     """Return a reason a relative path has an unsafe existing parent."""
     current = Path(root)
@@ -894,13 +946,17 @@ def _is_ignored_directory(root: Path, relative: str) -> bool:
     return expected in gitops.ignored_entries(root)
 
 
+def _is_ignored_input(root: Path, relative: str, kind: str) -> bool:
+    if kind == DIRECTORY_INPUT:
+        return _is_ignored_directory(root, relative)
+    return gitops.is_path_ignored(root, relative)
+
+
 def target_problem(main: Path, relative: str) -> str:
     """Why the primary worktree cannot serve ``relative`` as an input target.
 
-    An empty string means it can: the path is an ordinary directory there (not a
-    link, not a file, not a reparse point assent cannot classify) and Git ignores
-    it, so linking to it neither shadows tracked content nor exports anything
-    Git is supposed to carry itself.
+    An empty string means it can: the path is an ordinary directory or regular
+    file there, not a link or reparse point, and Git ignores it.
     """
     main = Path(main)
     path = main / relative
@@ -909,11 +965,12 @@ def target_problem(main: Path, relative: str) -> str:
         return f"{relative} has an unsafe parent in the primary worktree: {parent_problem}"
     if not os.path.lexists(path):
         return f"{relative} does not exist in the primary worktree {main}"
-    if not _is_ordinary_directory(path):
-        return (f"{relative} is not an ordinary directory in the primary "
-                f"worktree {main}")
+    kind = _ordinary_input_kind(path)
+    if not kind:
+        return (f"{relative} is neither an ordinary directory nor an ordinary "
+                f"file in the primary worktree {main}")
     try:
-        if not _is_ignored_directory(main, relative):
+        if not _is_ignored_input(main, relative, kind):
             return (f"{relative} is no longer Git-ignored in the primary "
                     f"worktree {main}")
     except AssentError as e:
@@ -922,14 +979,14 @@ def target_problem(main: Path, relative: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Ignored-directory input evidence bound into a receipt
+# Ignored-input evidence bound into a receipt
 # --------------------------------------------------------------------------- #
 def _entry_kind(path: Path, info: os.stat_result) -> str:
     if pathops.is_link_stat(info):
         return "link"
     if pathops.is_reparse_point(info):
         raise AssentError(
-            f"refusing to snapshot ignored-directory input at {path}: it is a "
+            f"refusing to snapshot ignored input at {path}: it is a "
             "reparse point assent cannot classify, so it is left unread rather "
             "than walked into")
     if stat.S_ISDIR(info.st_mode):
@@ -937,7 +994,7 @@ def _entry_kind(path: Path, info: os.stat_result) -> str:
     if stat.S_ISREG(info.st_mode):
         return "file"
     raise AssentError(
-        f"refusing to snapshot ignored-directory input at {path}: it is "
+        f"refusing to snapshot ignored input at {path}: it is "
         "neither an ordinary file, an ordinary directory, nor a representable "
         f"link (mode {stat.S_IFMT(info.st_mode):#o})")
 
@@ -953,13 +1010,13 @@ def _link_identity(path: Path) -> str:
         return os.readlink(path).replace("\\", "/")
     except OSError as e:
         raise AssentError(
-            f"refusing to snapshot ignored-directory input at {path}: its "
+            f"refusing to snapshot ignored input at {path}: its "
             f"link target cannot be represented without following it ({e})"
         ) from e
 
 
 def snapshot_target(main: Path, relative: str) -> str:
-    """Digest one required ignored directory through a bounded safe traversal.
+    """Digest one required ignored input through a bounded safe traversal.
 
     Ordinary directories are descended, ordinary files are hashed by content,
     and a link is recorded by its own target text without ever being followed --
@@ -969,14 +1026,24 @@ def snapshot_target(main: Path, relative: str) -> str:
     unreadable link, a device or socket -- refuses rather than being skipped.
     """
     root = Path(main) / relative
-    if not _is_ordinary_directory(root):
+    root_kind = _ordinary_input_kind(root)
+    if not root_kind:
         raise AssentError(
-            f"refusing to snapshot ignored-directory input {root}: it is no longer an "
-            "ordinary primary-worktree directory")
+            f"refusing to snapshot ignored input {root}: it is no longer an "
+            "ordinary primary-worktree file or directory")
     digest = hashlib.sha256()
-    digest.update(b"assent-ignored-dir-input\n")
+    digest.update(b"assent-ignored-input\n")
     digest.update(relative.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(root_kind.encode("utf-8"))
     digest.update(b"\n")
+    if root_kind == FILE_INPUT:
+        content = _digest_of(root)
+        if content == ABSENT:
+            raise AssentError(f"Unable to read ignored input {root}")
+        digest.update(content.encode("utf-8"))
+        digest.update(b"\n")
+        return digest.hexdigest()
     pending = [("", root)]
     while pending:
         prefix, current = pending.pop()
@@ -984,30 +1051,30 @@ def snapshot_target(main: Path, relative: str) -> str:
             info = os.lstat(current)
         except OSError as e:
             raise AssentError(
-                f"Unable to inspect ignored-directory input {current}: {e}") from e
+                f"Unable to inspect ignored input {current}: {e}") from e
         if (pathops.is_link_stat(info) or pathops.is_reparse_point(info)
                 or not stat.S_ISDIR(info.st_mode)):
             raise AssentError(
-                f"refusing to snapshot ignored-directory input {current}: "
+                f"refusing to snapshot ignored input {current}: "
                 "it changed to a link, reparse point, or non-directory")
         try:
             with os.scandir(current) as entries:
                 names = sorted(entry.name for entry in entries)
         except OSError as e:
             raise AssentError(
-                f"Unable to read ignored-directory input {current}: {e}") from e
+                f"Unable to read ignored input {current}: {e}") from e
         for name in names:
             path = current / name
             key = f"{prefix}{name}"
             if "/" in name or name in ("", ".", ".."):  # pragma: no cover
                 raise AssentError(
-                    f"refusing to snapshot ignored-directory input at {path}: "
+                    f"refusing to snapshot ignored input at {path}: "
                     f"{name!r} is not a representable entry name")
             try:
                 info = os.lstat(path)
             except OSError as e:
                 raise AssentError(
-                    f"Unable to inspect {path} while snapshotting ignored-directory "
+                    f"Unable to inspect {path} while snapshotting ignored "
                     f"input {relative}: {e}") from e
             kind = _entry_kind(path, info)
             digest.update(key.encode("utf-8"))
@@ -1021,7 +1088,7 @@ def snapshot_target(main: Path, relative: str) -> str:
                 if content == ABSENT:       # pragma: no cover - raced removal
                     raise AssentError(
                         f"Unable to read {path} while snapshotting "
-                        f"ignored-directory input {relative}")
+                        f"ignored input {relative}")
                 digest.update(content.encode("utf-8"))
             else:
                 pending.append((f"{key}/", path))
@@ -1029,25 +1096,25 @@ def snapshot_target(main: Path, relative: str) -> str:
     return digest.hexdigest()
 
 
-def ignored_directory_inputs_digest(main: Path,
+def ignored_inputs_digest(main: Path,
                          decisions: Sequence[tuple[str, Decision]]) -> str:
-    """Digest required ignored-directory inputs and their reviewed profiles.
+    """Digest required ignored inputs and their reviewed profiles.
 
     It covers, in the caller's own contributing order, each source's plan name
-    and selected profile fingerprint, that profile's required directories,
+    and selected profile fingerprint, that profile's required input paths,
     the exact resolved primary-worktree target of each one, and a content
     snapshot of that target.  REVIEWED-NONE contributes an explicit empty-profile
     line, so "reviewed to need nothing" is evidence and is never confused with
     UNKNOWN, which has no digest at all because it may not reach a receipt.
     """
     digest = hashlib.sha256()
-    digest.update(b"assent-ignored-dir-inputs\n")
+    digest.update(b"assent-ignored-inputs\n")
     snapshots: dict[str, str] = {}
     for plan_name, decision in decisions:
         if not decision.settled:
             raise AssentError(
-                f"refusing to record ignored-directory input evidence for {plan_name}: its "
-                f"ignored-directory decision is {decision.state}, not a reviewed answer")
+                f"refusing to record ignored-input evidence for {plan_name}: its "
+                f"ignored-input decision is {decision.state}, not a reviewed answer")
         fingerprint = decision.profile.fingerprint if decision.profile else ""
         digest.update(f"{plan_name}\0{decision.state}\0{fingerprint}\n"
                       .encode("utf-8"))
@@ -1055,7 +1122,7 @@ def ignored_directory_inputs_digest(main: Path,
             problem = target_problem(main, relative)
             if problem:
                 raise AssentError(
-                    f"refusing to record ignored-directory input evidence for {plan_name}: "
+                    f"refusing to record ignored-input evidence for {plan_name}: "
                     f"{problem}")
             if relative not in snapshots:
                 snapshots[relative] = snapshot_target(main, relative)
@@ -1068,13 +1135,13 @@ def ignored_directory_inputs_digest(main: Path,
 # --------------------------------------------------------------------------- #
 # Classification
 # --------------------------------------------------------------------------- #
-def ignored_inventory(worktree: Path) -> tuple[str, ...]:
-    """List collapsed ordinary ignored directories without walking them."""
+def _ignored_inventory_snapshot(
+        worktree: Path) -> tuple[tuple[str, ...], dict[str, str]]:
+    """List collapsed ordinary ignored files and directories without walking."""
     root = Path(worktree)
     found: list[str] = []
+    kinds: dict[str, str] = {}
     for raw in gitops.ignored_entries(root):
-        if not raw.endswith("/"):
-            continue
         candidate = raw.replace("\\", "/").rstrip("/")
         if candidate.split("/")[0] in _EXCLUDED_ROOTS:
             continue
@@ -1085,34 +1152,60 @@ def ignored_inventory(worktree: Path) -> tuple[str, ...]:
         except OSError as e:
             raise AssentError(
                 f"Unable to inspect ignored inventory entry {path}: {e}") from e
-        if (not pathops.is_link_stat(info)
-                and not pathops.is_reparse_point(info)
-                and stat.S_ISDIR(info.st_mode)):
-            found.append(relative)
-    return tuple(sorted(set(found)))
+        if pathops.is_link_stat(info) or pathops.is_reparse_point(info):
+            continue
+        kind = (DIRECTORY_INPUT if stat.S_ISDIR(info.st_mode)
+                else FILE_INPUT if stat.S_ISREG(info.st_mode) else "")
+        if not kind:
+            raise AssentError(
+                f"ignored inventory entry {path} is neither an ordinary file "
+                "nor an ordinary directory")
+        if (raw.endswith("/")) != (kind == DIRECTORY_INPUT):
+            raise AssentError(
+                f"ignored inventory entry {path} changed kind during discovery")
+        found.append(relative)
+        kinds[relative] = kind
+    inventory = tuple(sorted(set(found)))
+    return inventory, {relative: kinds[relative] for relative in inventory}
 
 
-def ignored_directory_candidates(worktree: Path) -> tuple[str, ...]:
-    """Return the ordinary ignored directories eligible for review."""
+def ignored_inventory(worktree: Path) -> tuple[str, ...]:
+    """List collapsed ordinary ignored input paths without walking directories."""
+    return _ignored_inventory_snapshot(worktree)[0]
+
+
+def ignored_input_kinds(worktree: Path) -> dict[str, str]:
+    """Map each current ignored input candidate to its filesystem kind."""
+    return _ignored_inventory_snapshot(worktree)[1]
+
+
+def ignored_input_candidates(worktree: Path) -> tuple[str, ...]:
+    """Return the ordinary ignored input paths eligible for review."""
     return ignored_inventory(worktree)
 
 
-def has_ignored_directory_candidate(worktree: Path) -> bool:
-    """True when the worktree really holds an ordinary ignored directory."""
-    return bool(ignored_directory_candidates(worktree))
+def has_ignored_input_candidate(worktree: Path) -> bool:
+    """True when the worktree holds an ordinary ignored file or directory."""
+    return bool(ignored_input_candidates(worktree))
 
 
 def changed_inventory_evidence(
-        profile: Profile, current: tuple[str, ...]) -> tuple[str, ...]:
-    """Describe ignored-directory inventory membership changes."""
+        profile: Profile, current: tuple[str, ...],
+        current_kinds: dict[str, str] | None = None) -> tuple[str, ...]:
+    """Describe ignored-input inventory membership and kind changes."""
     recorded = set(profile.inventory)
     now = set(current)
     changes: list[str] = []
     for relative in sorted(recorded | now):
         if relative not in recorded:
-            changes.append(f"ignored directory added: {relative}")
+            changes.append(f"ignored input added: {relative}")
         elif relative not in now:
-            changes.append(f"ignored directory removed: {relative}")
+            changes.append(f"ignored input removed: {relative}")
+        elif current_kinds is not None and (
+                profile.kinds.get(relative) != current_kinds.get(relative)):
+            changes.append(
+                f"ignored input changed kind: {relative} "
+                f"({profile.kinds.get(relative)} -> {current_kinds.get(relative)})")
     return tuple(changes)
 
 
@@ -1123,11 +1216,11 @@ def _evidence_note(relative: str) -> str:
 
 def _required_evidence_paths(main: Path,
                              required_evidence: Iterable[str]) -> tuple[str, ...]:
-    """Normalize verifier-required directories, refusing unusable ones.
+    """Normalize verifier-required inputs, refusing unusable ones.
 
-    A complete verifier that names a required ignored directory has produced a
+    A complete verifier that names a required ignored input has produced a
     subject for review -- but only the primary worktree can serve one, so a
-    named directory that is missing there, is not an ordinary directory, or is
+    named input that is missing there, is not an ordinary file or directory, or is
     no longer ignored cannot be reviewed into existence.  That is reported as
     the exact target problem rather than as a review clause the session could
     never satisfy, and never as "nothing needs sharing".
@@ -1144,9 +1237,9 @@ def _required_evidence_paths(main: Path,
         normalized.append(relative)
     if problems:
         raise AssentError(
-            "complete-verifier evidence requires the ignored directory "
+            "complete-verifier evidence requires the ignored input "
             f"that cannot be provisioned: {'; '.join(problems)}. Create the "
-            f"directory in the primary worktree and keep it Git-ignored, then "
+            f"input in the primary worktree and keep it Git-ignored, then "
             f"run `{DECLARE_COMMAND}`")
     return tuple(sorted(normalized))
 
@@ -1154,7 +1247,7 @@ def _required_evidence_paths(main: Path,
 def classify(main: Path, worktree: Path,
              manifest: Manifest | None = None,
              required_evidence: Iterable[str] = ()) -> Decision:
-    """Decide the ignored-directory state one source worktree starts under.
+    """Decide the ignored-input state one source worktree starts under.
 
     UNKNOWN means no stored profile answers this snapshot at all; REVIEWED-NONE
     and REVIEWED-REQUIRED are a matching profile's answer, the empty one included --
@@ -1162,24 +1255,24 @@ def classify(main: Path, worktree: Path,
     merely for being empty.  STALE is a previously reviewed project whose answer
     no longer holds: the watched evidence moved, a declared target changed, or
     ``required_evidence`` (a complete verifier naming a required ignored
-    directory) contradicts the active profile.  Two matching profiles that
+    input) contradicts the active profile. Two matching profiles that
     disagree have no correct answer and fail closed.
 
-    NO-IGNORED-DIRECTORY-CANDIDATE is reached only when nothing was ever
+    NO-IGNORED-INPUT-CANDIDATE is reached only when nothing was ever
     reviewed, no verifier evidence demands anything, and a *successful* Git
-    query proves the primary worktree holds no ordinary ignored directory.  A
-    failed query and a required directory that the primary worktree cannot
+    query proves the primary worktree holds no ordinary ignored input. A
+    failed query and a required input that the primary worktree cannot
     serve are both refusals, never that fast path.
 
     Classification is state-only. Every consumer must separately require that
-    the source's directory links agree with a settled answer; provisioning
+    the source's input links agree with a settled answer; provisioning
     callers may allow missing declared links only for the duration of their
     locked reconcile step.
     """
     main = Path(main)
     worktree = Path(worktree)
     manifest = read_manifest(main) if manifest is None else manifest
-    inventory = ignored_inventory(main)
+    inventory, kinds = _ignored_inventory_snapshot(main)
 
     # One tracked-ignore query serves every retained profile.  Each profile is
     # then compared with its own watch set plus this exact current ignore-rule
@@ -1188,14 +1281,14 @@ def classify(main: Path, worktree: Path,
     digests, profile_digests = _profile_snapshots(manifest, worktree)
     matches = tuple(
         profile for profile, current in zip(manifest.profiles, profile_digests)
-        if _matches(profile, current, inventory=inventory))
+        if _matches(profile, current, inventory=inventory, kinds=kinds))
 
     if len({profile.required for profile in matches}) > 1:
         listed = "; ".join(
             f"{profile.fingerprint[:12]} -> {list(profile.required)}"
             for profile in matches)
         raise AssentError(
-            f"the ignored-directory manifest {manifest_path(main)} holds conflicting "
+            f"the ignored-input manifest {manifest_path(main)} holds conflicting "
             f"matching profiles ({listed}); resolve them with "
             f"`{DECLARE_COMMAND}` before any session runs")
 
@@ -1220,15 +1313,15 @@ def classify(main: Path, worktree: Path,
                 return Decision(
                     STALE, active_profile, active_digests,
                     active_profile.required, problems, needs_review=True,
-                    inventory=inventory)
+                    inventory=inventory, kinds=kinds)
         prior = manifest.profiles[-1].required if manifest.profiles else ()
         evidence = tuple(
             change for profile, current in zip(
                 manifest.profiles, profile_digests)
             for change in (
                 changed_watch_evidence(profile, current)
-                + changed_inventory_evidence(profile, inventory)))
-        # Verifier evidence naming a required ignored directory is a real
+                + changed_inventory_evidence(profile, inventory, kinds)))
+        # Verifier evidence naming a required ignored input is a real
         # subject on its own: it must never settle as "there is nothing to
         # declare", and a directory the primary worktree cannot serve is
         # refused with that exact problem instead of being queued for a review
@@ -1239,11 +1332,12 @@ def classify(main: Path, worktree: Path,
         elif required or inventory:
             state = UNKNOWN
         else:
-            state = NO_IGNORED_DIRECTORY_CANDIDATE
+            state = NO_IGNORED_INPUT_CANDIDATE
         evidence += tuple(_evidence_note(relative) for relative in required)
         return Decision(
             state, None, digests, prior, tuple(dict.fromkeys(evidence)),
-            needs_review=state in (STALE, UNKNOWN), inventory=inventory)
+            needs_review=state in (STALE, UNKNOWN), inventory=inventory,
+            kinds=kinds)
 
     profile = matches[0]
     profile_index = manifest.profiles.index(profile)
@@ -1259,10 +1353,10 @@ def classify(main: Path, worktree: Path,
                                     for relative in missing)
         return Decision(STALE, profile, digests, profile.required, evidence,
                         needs_review=True,
-                        inventory=inventory)
+                        inventory=inventory, kinds=kinds)
     return Decision(
         REVIEWED_NONE if profile.is_none else REVIEWED_REQUIRED,
-        profile, digests, profile.required, inventory=inventory)
+        profile, digests, profile.required, inventory=inventory, kinds=kinds)
 
 
 # --------------------------------------------------------------------------- #
@@ -1273,22 +1367,27 @@ def _link_target(main: Path, relative: str) -> Path:
 
 
 def _resolves_to(path: Path, target: Path) -> bool:
-    """True when ``path`` is a link resolving exactly to ``target``.
+    """True when ``path`` is the exact link/hard-link view of ``target``.
 
     Only the link itself is examined and only its target's identity is asked
     for; nothing inside either one is enumerated.
     """
-    if not pathops.is_link(path):
+    if not os.path.lexists(path) or not os.path.lexists(target):
         return False
     try:
-        return Path(os.path.realpath(path, strict=True)) == target
+        return os.path.samefile(path, target)
     except OSError:
         return False
 
 
-def ignored_directory_links(worktree: Path) -> tuple[str, ...]:
-    """List untracked directory-link objects without entering their targets."""
+def ignored_input_links(main: Path, worktree: Path | None = None) -> tuple[str, ...]:
+    """List same-primary ignored input links without walking directory targets."""
+    if worktree is None:
+        worktree = main
+        main = gitops.main_worktree(worktree)
     root = Path(worktree)
+    if root.resolve() == Path(main).resolve():
+        return ()
     found: list[str] = []
     entries = set(gitops.ignored_entries(root))
     entries.update(gitops.working_tree_status(root).untracked)
@@ -1298,7 +1397,10 @@ def ignored_directory_links(worktree: Path) -> tuple[str, ...]:
             continue
         require_safe_relative(relative, root)
         path = root / relative
-        if pathops.is_link(path) and path.is_dir():
+        target = Path(main) / relative
+        if pathops.is_link(path) or (
+                _ordinary_input_kind(target) == FILE_INPUT
+                and _resolves_to(path, target)):
             found.append(relative)
     return tuple(sorted(found))
 
@@ -1317,7 +1419,7 @@ def review_decision_with_source_links(
     main = Path(main)
     worktree = Path(worktree)
     unexpected = sorted(
-        set(ignored_directory_links(worktree)) - set(decision.required))
+        set(ignored_input_links(main, worktree)) - set(decision.required))
     reviewable = tuple(
         relative for relative in unexpected
         if not target_problem(main, relative)
@@ -1325,21 +1427,21 @@ def review_decision_with_source_links(
     if not reviewable:
         return decision
     evidence = decision.evidence + tuple(
-        f"source worktree has an unreviewed same-primary directory link: {relative}"
+        f"source worktree has an unreviewed same-primary input link: {relative}"
         for relative in reviewable
         if not any(relative in item for item in decision.evidence))
     if decision.settled:
         return Decision(
             STALE, decision.profile, decision.digests, decision.required,
             evidence, needs_review=True,
-            inventory=ignored_inventory(main))
+            inventory=ignored_inventory(main), kinds=ignored_input_kinds(main))
     return replace(decision, evidence=evidence)
 
 
-def require_directory_link_agreement(
+def require_input_link_agreement(
         main: Path, worktree: Path, decision: Decision, *,
         plan_name: str | None = None, allow_missing: bool = False) -> None:
-    """Require source directory links to reproduce exactly one reviewed answer.
+    """Require source input links to reproduce exactly one reviewed answer.
 
     Git supplies a collapsed ignored-entry inventory and each link object is
     inspected only at its own path. Unexpected links are never resolved: an
@@ -1348,13 +1450,13 @@ def require_directory_link_agreement(
     root = Path(worktree)
     plan_name = plan_name or root.name
     declared = set(decision.required)
-    actual = set(ignored_directory_links(root))
+    actual = set(ignored_input_links(main, root))
     unexpected = sorted(actual - declared)
     if unexpected:
         relative = unexpected[0]
         raise AssentError(
-            f"refusing to use ignored-directory inputs for {plan_name}: source worktree "
-            f"{root} contains the ignored directory link {relative}, which is "
+            f"refusing to use ignored inputs for {plan_name}: source worktree "
+                f"{root} contains the ignored input link {relative}, which is "
             f"outside its active {decision.state} profile. Remove the link if "
             "it is irrelevant. If it is required, place its ordinary "
             f"Git-ignored target at {Path(main) / relative} and record "
@@ -1362,7 +1464,7 @@ def require_directory_link_agreement(
             "link is not reviewed evidence")
     if Path(main).resolve() == root.resolve():
         # A vanished source falls back to the primary snapshot. Its declared
-        # targets are the ordinary directories themselves, never links to self.
+        # targets are the ordinary inputs themselves, never links to self.
         return
     for relative in decision.required:
         destination = root / relative
@@ -1370,16 +1472,16 @@ def require_directory_link_agreement(
             if allow_missing:
                 continue
             raise AssentError(
-                f"refusing to use ignored-directory inputs for {plan_name}: the active "
+                f"refusing to use ignored inputs for {plan_name}: the active "
                 f"profile declares {relative}, but {destination} is missing. "
                 "Reconcile the source so Assent can provision the exact "
                 "same-relative primary-worktree link")
         target = _link_target(main, relative)
         if relative not in actual or not _resolves_to(destination, target):
             raise AssentError(
-                f"refusing to use ignored-directory inputs for {plan_name}: the active "
+                f"refusing to use ignored inputs for {plan_name}: the active "
                 f"profile declares {relative}, but {destination} is not a "
-                f"directory link to the reviewed primary target {target}. "
+                f"link to the reviewed primary target {target}. "
                 "Remove an irrelevant link; otherwise place the required "
                 "ordinary Git-ignored target at that primary path and record "
                 f"it with `{DECLARE_COMMAND}`")
@@ -1391,27 +1493,28 @@ def _validate_destination(main: Path, worktree: Path,
     problem = target_problem(main, relative)
     if problem:
         raise AssentError(
-            f"refusing to provision ignored-directory input for {worktree}: {problem}")
+            f"refusing to provision ignored input for {worktree}: {problem}")
     parent_problem = _parent_problem(worktree, relative)
     if parent_problem:
         raise AssentError(
-            f"refusing to provision required directory {relative} into {worktree}: "
+            f"refusing to provision required input {relative} into {worktree}: "
             f"{parent_problem}")
     destination = Path(worktree) / relative
     target = _link_target(main, relative)
     if os.path.lexists(destination):
         if not _resolves_to(destination, target):
             raise AssentError(
-                f"refusing to provision required directory {relative} into {worktree}: "
+                f"refusing to provision required input {relative} into {worktree}: "
                 f"{destination} already exists and is not a link to {target}")
-        if not _is_ignored_directory(Path(worktree), relative):
+        kind = _ordinary_input_kind(Path(main) / relative)
+        if not _is_ignored_input(Path(worktree), relative, kind):
             raise AssentError(
-                f"refusing to provision required directory {relative} into {worktree}: "
-                "Git does not ignore the existing directory link there")
+                f"refusing to provision required input {relative} into {worktree}: "
+                "Git does not ignore the existing link there")
     if gitops.tracked_paths(Path(worktree), relative):
         raise AssentError(
-            f"refusing to provision required directory {relative} into {worktree}: "
-            "tracked content lives there and a directory link must never shadow it")
+            f"refusing to provision required input {relative} into {worktree}: "
+            "tracked content lives there and an input link must never shadow it")
     return target
 
 
@@ -1428,25 +1531,32 @@ def _provision_one(main: Path, worktree: Path, relative: str) -> bool:
         except OSError as e:
             raise AssentError(
                 f"Unable to create the parent directory {parent} for required "
-                f"directory {relative}: {e}") from e
+                f"input {relative}: {e}") from e
     try:
-        pathops.create_directory_link(destination, target)
+        kind = _ordinary_input_kind(Path(main) / relative)
+        if kind == DIRECTORY_INPUT:
+            pathops.create_directory_link(destination, target)
+        else:
+            pathops.create_file_link(destination, target)
     except OSError as e:
         raise AssentError(
-            f"Unable to link required directory {relative} in {worktree} to "
+            f"Unable to link required input {relative} in {worktree} to "
             f"{target}: {e}") from e
     try:
-        if not _is_ignored_directory(Path(worktree), relative):
+        if not _is_ignored_input(Path(worktree), relative, kind):
             raise AssentError(
-                f"refusing to provision required directory {relative} into {worktree}: "
-                "Git does not ignore the linked directory there, so the link "
+                f"refusing to provision required input {relative} into {worktree}: "
+                "Git does not ignore the linked input there, so the link "
                 "would change what the worktree tracks")
     except BaseException as primary_error:
         try:
-            pathops.detach_directory_link(destination)
+            if kind == DIRECTORY_INPUT:
+                pathops.detach_directory_link(destination)
+            else:
+                pathops.detach_file_link(destination)
         except OSError as cleanup_error:
             primary_error.add_note(
-                f"Unable to detach the rejected ignored-directory link {destination}: "
+                f"Unable to detach the rejected ignored-input link {destination}: "
                 f"{cleanup_error}")
         raise
     return True
@@ -1456,8 +1566,8 @@ def _detach_one(main: Path, worktree: Path, relative: str) -> bool:
     """Detach one link assent created; anything else is left exactly as found.
 
     The proof required is deliberately narrow: the place must still hold a link
-    object that resolves to the primary worktree's same relative directory.  An
-    ordinary directory, a foreign link and a missing path are all no-ops, and
+    object that resolves to the primary worktree's same relative input.  An
+    ordinary path, a foreign link and a missing path are all no-ops, and
     the target itself is never walked, modified or removed.
     """
     destination = Path(worktree) / relative
@@ -1466,28 +1576,31 @@ def _detach_one(main: Path, worktree: Path, relative: str) -> bool:
     parent_problem = _parent_problem(worktree, relative)
     if parent_problem:
         raise AssentError(
-            f"Unable to prove ownership of the ignored-directory link {destination}: "
+            f"Unable to prove ownership of the ignored-input link {destination}: "
             f"{parent_problem}")
     target_root = Path(main)
     primary_parent_problem = _parent_problem(target_root, relative)
     if primary_parent_problem:
         raise AssentError(
-            f"Unable to prove ownership of the ignored-directory link {destination}: "
+            f"Unable to prove ownership of the ignored-input link {destination}: "
             f"the primary target has an unsafe parent ({primary_parent_problem})")
     primary_target = target_root / relative
-    if not os.path.lexists(primary_target) or not _is_ordinary_directory(
-            primary_target):
+    kind = _ordinary_input_kind(primary_target)
+    if not kind:
         raise AssentError(
-            f"Unable to prove ownership of the ignored-directory link {destination}: "
+            f"Unable to prove ownership of the ignored-input link {destination}: "
             f"the primary target {primary_target} is no longer an ordinary "
-            "directory")
+            "file or directory")
     if not _resolves_to(destination, _link_target(main, relative)):
         return False
     try:
-        pathops.detach_directory_link(destination)
+        if kind == DIRECTORY_INPUT:
+            pathops.detach_directory_link(destination)
+        else:
+            pathops.detach_file_link(destination)
     except OSError as e:
         raise AssentError(
-            f"Unable to detach the ignored-directory link {destination}: {e}") from e
+            f"Unable to detach the ignored-input link {destination}: {e}") from e
     return True
 
 
@@ -1518,7 +1631,7 @@ def _worktree_key(worktree: Path) -> str:
     return Path(worktree).resolve().as_posix()
 
 
-def applied_required_directories(manifest: Manifest, worktree: Path) -> tuple[str, ...]:
+def applied_required_inputs(manifest: Manifest, worktree: Path) -> tuple[str, ...]:
     key = _worktree_key(worktree)
     for application in manifest.applications:
         if application.worktree == key:
@@ -1535,7 +1648,7 @@ def reconcile(main: Path, worktree: Path, decision: Decision, *,
     Returns ``(created, detached)``.  Additions create only genuinely missing
     exact links; a path a newer profile no longer declares is detached only when
     the recorded application says assent created it and the place still proves to
-    be a link to the primary worktree's same relative directory.  Running inside
+    be a link to the primary worktree's same relative input. Running inside
     the primary worktree itself provisions nothing -- a path cannot be a link to
     itself -- but the caller's profile caching still happens.
     """
@@ -1543,7 +1656,7 @@ def reconcile(main: Path, worktree: Path, decision: Decision, *,
     worktree = Path(worktree)
     if not decision.settled:
         raise AssentError(
-            f"refusing to provision ignored-directory inputs for {worktree}: "
+            f"refusing to provision ignored inputs for {worktree}: "
             f"the decision is {decision.state}, not a reviewed answer")
     manifest = read_manifest(main) if manifest is None else manifest
     if _worktree_key(worktree) == _worktree_key(main):
@@ -1552,7 +1665,7 @@ def reconcile(main: Path, worktree: Path, decision: Decision, *,
         return (), ()
 
     wanted = decision.required
-    previous = applied_required_directories(manifest, worktree)
+    previous = applied_required_inputs(manifest, worktree)
 
     # Existing application records are the authority for the exact companion
     # excludes.  Sync them before inspecting a link created by an earlier run.
@@ -1607,14 +1720,14 @@ def reconcile(main: Path, worktree: Path, decision: Decision, *,
                     _provision_one(main, worktree, relative)
                 elif not _resolves_to(destination, _link_target(main, relative)):
                     rollback_problems.append(
-                        f"unable to restore the prior ignored-directory link {destination}: "
+                        f"unable to restore the prior ignored-input link {destination}: "
                         "the destination changed while rolling back")
             except (AssentError, OSError) as e:
                 rollback_problems.append(
-                    f"unable to restore the prior ignored-directory link {destination}: {e}")
+                    f"unable to restore the prior ignored-input link {destination}: {e}")
         if rollback_problems:
             primary_error.add_note(
-                "Ignored-directory link rollback was incomplete: "
+                "Ignored-input link rollback was incomplete: "
                 + "; ".join(rollback_problems))
         raise
     return tuple(created), tuple(detached)
@@ -1627,7 +1740,7 @@ def application_problem(main: Path, worktree: Path, *,
     A resumed managed worktree -- a reconciliation being continued, above all --
     is revalidated rather than silently repaired: the profile it was provisioned
     from must still be in the manifest and every recorded path must still be a
-    link to the primary worktree's same relative directory.  A worktree assent
+    link to the primary worktree's same relative input. A worktree assent
     never provisioned has no record and so no problem.
     """
     manifest = read_manifest(main) if manifest is None else manifest
@@ -1640,18 +1753,18 @@ def application_problem(main: Path, worktree: Path, *,
         profile for profile in manifest.profiles
         if profile.fingerprint == record.fingerprint)
     if not same_fingerprint:
-        return (f"the ignored-directory profile {record.fingerprint[:12]} recorded for "
+        return (f"the ignored-input profile {record.fingerprint[:12]} recorded for "
                 f"{worktree} is no longer in {manifest_path(main)}")
     if not any(profile.required == record.required for profile in same_fingerprint):
         current = "; ".join(
             f"{list(profile.required)}" for profile in same_fingerprint)
-        return (f"the ignored-directory application for {worktree} recorded required "
+        return (f"the ignored-input application for {worktree} recorded required "
                 f"{list(record.required)} under profile {record.fingerprint[:12]}, "
                 f"but the current profile declares {current}")
     for relative in record.required:
         target = _link_target(main, relative)
         if not _resolves_to(Path(worktree) / relative, target):
-            return (f"required directory {relative} in {worktree} is no longer a "
+            return (f"required input {relative} in {worktree} is no longer a "
                     f"link to {target}")
     return ""
 
@@ -1661,8 +1774,8 @@ def release(main: Path, worktree: Path) -> tuple[str, ...]:
 
     This is what a managed worktree's disposal calls before Git or any recursive
     remover is allowed near it.  Only a link object proven to point at the
-    primary worktree's same relative directory is detached; an ordinary
-    directory, a foreign link and an already-removed path are left exactly as
+    primary worktree's same relative input is detached; an ordinary path, a
+    foreign link and an already-removed path are left exactly as
     found, and no target is ever traversed.
     """
     main = Path(main)
@@ -1697,7 +1810,7 @@ def prepare_sources(main: Path,
     exists, and the refusal names the zero-AI remedy.
 
     The returned decisions, in the caller's order, are what
-    ``ignored_directory_inputs_digest`` binds into the receipt.
+    ``ignored_inputs_digest`` binds into the receipt.
     """
     main = Path(main)
     prepared: list[tuple[str, Decision]] = []
@@ -1711,14 +1824,14 @@ def prepare_sources(main: Path,
             decision = classify(main, worktree or main, manifest)
             if not decision.settled:
                 raise AssentError(
-                    f"refusing to verify: the ignored-directory decision for "
+                    f"refusing to verify: the ignored-input decision for "
                     f"{plan_name} ({worktree}) is {decision.state}. "
                     f"{closeout_refusal(decision) or 'Run `' + DECLARE_COMMAND + '`'}")
-            require_directory_link_agreement(
+            require_input_link_agreement(
                 main, worktree or main, decision, plan_name=plan_name,
                 allow_missing=True)
             reconcile(main, worktree or main, decision, manifest=manifest)
-            require_directory_link_agreement(
+            require_input_link_agreement(
                 main, worktree or main, decision, plan_name=plan_name)
             prepared.append((plan_name, decision))
     return tuple(prepared)
@@ -1746,10 +1859,10 @@ def prepare_worktree(main: Path, worktree: Path, *,
         decision = review_decision_with_source_links(
             main, worktree, decision)
         if decision.settled:
-            require_directory_link_agreement(
+            require_input_link_agreement(
                 main, worktree, decision, allow_missing=True)
             reconcile(main, worktree, decision, manifest=manifest)
-            require_directory_link_agreement(main, worktree, decision)
+            require_input_link_agreement(main, worktree, decision)
     return decision
 
 
@@ -1759,20 +1872,20 @@ def prepare_worktree(main: Path, worktree: Path, *,
 def _validate_required(main: Path, required: Sequence[str]) -> tuple[str, ...]:
     normalized: list[str] = []
     for raw in required:
-        relative = require_safe_relative(raw, "required directory")
+        relative = require_safe_relative(raw, "required input")
         if Path(raw.replace("\\", "/")).is_absolute():
             raise AssentError(
-                f"required directory {raw!r} must be project-relative, not absolute")
+                f"required input {raw!r} must be project-relative, not absolute")
         problem = target_problem(main, relative)
         if problem:
-            raise AssentError(f"refusing to record a required directory: {problem}")
+            raise AssentError(f"refusing to record a required input: {problem}")
         if relative not in normalized:
             normalized.append(relative)
     for relative in normalized:
         for other in normalized:
             if other != relative and relative.startswith(f"{other}/"):
                 raise AssentError(
-                    f"refusing to record overlapping required directories: {relative} "
+                    f"refusing to record overlapping required inputs: {relative} "
                     f"lies inside {other}")
     return tuple(sorted(normalized))
 
@@ -1780,7 +1893,7 @@ def _validate_required(main: Path, required: Sequence[str]) -> tuple[str, ...]:
 def _validate_watch(worktree: Path, watch: Sequence[str]) -> tuple[str, ...]:
     if not watch:
         raise AssentError(
-            "an ignored-directory declaration must state at least one --watch file: without "
+            "an ignored-input declaration must state at least one --watch file: without "
             "it nothing could ever make the decision worth reconsidering")
     normalized: list[str] = []
     for raw in watch:
@@ -1800,36 +1913,36 @@ def _validate_watch(worktree: Path, watch: Sequence[str]) -> tuple[str, ...]:
 
 
 def _validate_not_required(
-        not_required: Sequence[NonRequiredDirectory]) -> tuple[NonRequiredDirectory, ...]:
-    normalized: list[NonRequiredDirectory] = []
+        not_required: Sequence[NonRequiredInput]) -> tuple[NonRequiredInput, ...]:
+    normalized: list[NonRequiredInput] = []
     for index, item in enumerate(not_required):
-        if not isinstance(item, NonRequiredDirectory):
+        if not isinstance(item, NonRequiredInput):
             raise AssentError(
-                f"not-required entry {index} must contain directory and reason")
-        relative = require_safe_relative(item.path, "not-required directory")
+                f"not-required entry {index} must contain path and reason")
+        relative = require_safe_relative(item.path, "not-required input")
         reason = item.reason.strip() if isinstance(item.reason, str) else ""
         if not reason:
             raise AssentError(f"not-required reason for {relative} must not be empty")
-        normalized.append(NonRequiredDirectory(relative, reason))
+        normalized.append(NonRequiredInput(relative, reason))
     if len({item.path for item in normalized}) != len(normalized):
-        raise AssentError("not-required entries contain a duplicate directory")
+        raise AssentError("not-required entries contain a duplicate input")
     for item in normalized:
         if any(other.path != item.path
                and item.path.startswith(f"{other.path}/")
                for other in normalized):
             raise AssentError(
-                "not-required entries contain overlapping directories")
+                "not-required entries contain overlapping inputs")
     return tuple(sorted(normalized, key=lambda item: item.path))
 
 
 def validate_declaration(
         main: Path, worktree: Path, required: Sequence[str],
         watch: Sequence[str],
-        not_required: Sequence[NonRequiredDirectory] = ()) -> ValidatedDeclaration:
+        not_required: Sequence[NonRequiredInput] = ()) -> ValidatedDeclaration:
     """Validate one caller-supplied declaration without mutating anything."""
     declared = _validate_required(Path(main), required) if required else ()
     watched = _validate_watch(Path(worktree), watch)
-    inventory = ignored_inventory(Path(main))
+    inventory, kinds = _ignored_inventory_snapshot(Path(main))
     excluded = _validate_not_required(not_required)
     inventory_paths = set(inventory)
     required_set = set(declared)
@@ -1856,22 +1969,22 @@ def validate_declaration(
     if empty_required or empty_not_required or overlap or missing:
         details: list[str] = []
         if empty_required:
-            details.append("required but covers no inventory directory: "
+            details.append("required but covers no inventory input: "
                            + ", ".join(empty_required))
         if overlap:
             details.append("both required and not required: " + ", ".join(overlap))
         if missing:
             details.append("unclassified: " + ", ".join(missing))
         if empty_not_required:
-            details.append("not-required entry covers no inventory directory: "
+            details.append("not-required entry covers no inventory input: "
                            + ", ".join(empty_not_required))
         raise AssentError(
-            "ignored-directory declaration must cover the complete primary ignored-directory "
+            "ignored-input declaration must cover the complete primary ignored-input "
             "inventory (" + "; ".join(details) + ")")
     unexpected = sorted(
-        set(ignored_directory_links(Path(worktree))) - set(declared))
+        set(ignored_input_links(Path(worktree))) - set(declared))
     manifest = read_manifest(Path(main))
-    recorded = set(applied_required_directories(manifest, Path(worktree)))
+    recorded = set(applied_required_inputs(manifest, Path(worktree)))
     foreign = [
         relative for relative in unexpected
         if relative not in recorded
@@ -1879,7 +1992,7 @@ def validate_declaration(
             Path(worktree) / relative, _link_target(Path(main), relative))]
     if foreign:
         raise AssentError(
-            "the declaration omitted existing ignored directory link(s): "
+            "the declaration omitted existing ignored-input link(s): "
             + ", ".join(foreign)
             + ". Rerun the validated command with --required for each required "
               "same-primary link; a foreign link requires human decision. "
@@ -1887,17 +2000,17 @@ def validate_declaration(
     if Path(main).resolve() != Path(worktree).resolve():
         for relative in declared:
             _validate_destination(Path(main), Path(worktree), relative)
-    return ValidatedDeclaration(declared, watched, inventory, excluded)
+    return ValidatedDeclaration(declared, watched, inventory, excluded, kinds)
 
 
 def declare(main: Path, worktree: Path, *,
             required: Sequence[str] = (), watch: Sequence[str] = (),
             none_required: bool = False,
-            not_required: Sequence[NonRequiredDirectory] = ()) -> Decision:
-    """Validate and apply one ignored-directory declaration.
+            not_required: Sequence[NonRequiredInput] = ()) -> Decision:
+    """Validate and apply one ignored-input declaration.
 
     Every value is validated before anything is mutated: a path must be an
-    existing ordinary Git-ignored directory at the same relative place in the
+    existing ordinary Git-ignored file or directory at the same relative place in the
     primary worktree, and a watch must be a readable tracked file in the source
     snapshot.  The whole update happens under one project-local lock and lands
     through one atomic replacement, so a concurrent attempt is refused rather
@@ -1911,11 +2024,11 @@ def declare(main: Path, worktree: Path, *,
     worktree = Path(worktree)
     if none_required and required:
         raise AssentError(
-            "an ignored-directory declaration states either --required values "
+            "an ignored-input declaration states either --required values "
             "or --none-required, not both")
     if not none_required and not required:
         raise AssentError(
-            "an ignored-directory declaration must state at least one --required, "
+            "an ignored-input declaration must state at least one --required, "
             "or --none-required")
 
     with hold_manifest_lock(main):
@@ -1928,14 +2041,14 @@ def declare(main: Path, worktree: Path, *,
         digests = snapshot_digests(worktree, watched)
         profile = Profile(
             fingerprint_of(digests), declared, watched, digests,
-            decision.inventory, decision.not_required)
+            decision.inventory, decision.not_required, decision.kinds)
         manifest.profiles = tuple(
             existing for existing, snapshot in zip(manifest.profiles, current)
             if not _matches(existing, snapshot)
             and existing.fingerprint != profile.fingerprint) + (profile,)
         decision = Decision(REVIEWED_NONE if profile.is_none else REVIEWED_REQUIRED,
                             profile, digests, profile.required,
-                            inventory=decision.inventory)
+                            inventory=decision.inventory, kinds=decision.kinds)
         # The prospective profile is held only in memory until every declared
         # destination has passed preflight and every required link has been
         # reconciled.  ``force_write`` also covers REVIEWED-NONE and the primary
@@ -1947,29 +2060,30 @@ def declare(main: Path, worktree: Path, *,
 
 
 def _candidate_inventory(decision: Decision) -> str:
-    heading = "Complete primary ignored-directory inventory:"
+    heading = "Complete primary ignored-input inventory:"
     if not decision.inventory:
         return heading + "\n  (none)"
     return heading + "\n" + "\n".join(
-        f"  - {relative}" for relative in decision.inventory)
+        f"  - {relative} ({decision.kinds[relative]})"
+        for relative in decision.inventory)
 
 
 def declaration_clause(decision: Decision) -> str:
     """Return one bounded declaration instruction for an unsettled session."""
     if decision.settled or not decision.needs_review:
         return ""
-    prior = ("\nPreviously required directories: "
+    prior = ("\nPreviously required inputs: "
              + ", ".join(decision.prior_required)
              if decision.prior_required else "")
     evidence = ("\nWhat changed: " + "; ".join(decision.evidence)
                 if decision.evidence else "")
     return (
-        f"\nIGNORED DIRECTORY DECISION ({decision.state})\n"
+        f"\nIGNORED INPUT DECISION ({decision.state})\n"
         "Before this role ends, run the validated command in this worktree:\n"
-        f"  {DECLARE_COMMAND} --required DIR --not-required DIR REASON --watch FILE\n"
+        f"  {DECLARE_COMMAND} --required PATH --not-required PATH REASON --watch FILE\n"
         "or use --none-required instead of --required. Repeat options as needed. "
-        "Cover every listed directory exactly once as required or not required, and watch "
-        "only tracked dependency or build files. Do not copy a directory, create "
+        "Cover every listed input exactly once as required or not required, and watch "
+        "only tracked dependency or build files. Do not copy an input, create "
         "a link by hand, or edit the manifest directly."
         f"{prior}{evidence}\n{_candidate_inventory(decision)}\n")
 
@@ -1979,7 +2093,7 @@ def closeout_refusal(decision: Decision) -> str:
     if decision.settled or not decision.needs_review:
         return ""
     evidence = f" ({'; '.join(decision.evidence)})" if decision.evidence else ""
-    return (f"the ignored-directory decision for this source is still "
+    return (f"the ignored-input decision for this source is still "
             f"{decision.state}{evidence}; run `{DECLARE_COMMAND}` with the "
             "declared --required/--none-required, --not-required, and --watch "
             "values before "
@@ -1989,12 +2103,12 @@ def closeout_refusal(decision: Decision) -> str:
 def describe(decision: Decision) -> str:
     """One operator-facing line stating the decision a session starts under."""
     if decision.state == REVIEWED_REQUIRED:
-        return ("Ignored directories: REVIEWED-REQUIRED "
+        return ("Ignored inputs: REVIEWED-REQUIRED "
                 f"({', '.join(decision.required)})")
     if decision.state == REVIEWED_NONE:
-        return "Ignored directories: REVIEWED-NONE (none required)"
-    if decision.state == NO_IGNORED_DIRECTORY_CANDIDATE:
-        return (f"Ignored directories: {NO_IGNORED_DIRECTORY_CANDIDATE} "
-                "(the primary worktree holds no ordinary ignored directory)")
-    return (f"Ignored directories: {decision.state}; one declaration is "
+        return "Ignored inputs: REVIEWED-NONE (none required)"
+    if decision.state == NO_IGNORED_INPUT_CANDIDATE:
+        return (f"Ignored inputs: {NO_IGNORED_INPUT_CANDIDATE} "
+                "(the primary worktree holds no ordinary ignored input)")
+    return (f"Ignored inputs: {decision.state}; one declaration is "
             "required")

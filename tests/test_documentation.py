@@ -173,7 +173,7 @@ class DocumentationTests(unittest.TestCase):
                 "assent run --jobs 2",
                 "One selected plan", "one exact batch",
                 "assent verify <PLAN> --focus", "Direct and selected acceptance",
-                "assent ignored-dirs status",
+                "assent ignored-inputs status",
                 "Running `declare` in the primary worktree",
                 "cannot safely link everything ignored by Git"):
             with self.subTest(language="English", phrase=phrase):
@@ -184,9 +184,9 @@ class DocumentationTests(unittest.TestCase):
         for phrase in (
                 "assent run --jobs 2", "一個 plan",
                 "精確 batch", "assent verify <PLAN> --focus",
-                "assent ignored-dirs status",
+                "assent ignored-inputs status",
                 "在主要 worktree 執行 `declare`",
-                "不能把所有 ignored directory 都建立成鏈結"):
+                "不能把所有 ignored input 都建立成鏈結"):
             with self.subTest(language="Traditional Chinese", phrase=phrase):
                 self.assertIn(_flat(phrase), chinese)
 

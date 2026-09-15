@@ -100,7 +100,7 @@ action 才是裁決者：每一項 exit 0 才記為 `PASSED`，非 0 記為 `FAI
 command-list 漂移則記為 `STALE`。Role output 不能宣告 pass。可寫 role 若成功
 結束但沒有修改 working-tree source，workflow 會成為 unresolved，不會自行增加
 action。這項 source-change 要求只適用於 runtime command 確實失敗之後。Plan
-runtime role 若只是完成 injected ignored-directory precondition，可以不修改 tracked
+runtime role 若只是完成 injected ignored-input precondition，可以不修改 tracked
 source；下一個 action 接著評估 command。Main runtime command 直接在 primary
 working tree 執行，不使用這項 precondition。
 
@@ -119,7 +119,7 @@ Main runtime state 是 `.assent/_runtime_test_workflow.toml`；command 與 repai
 verification receipt：`full_verify` 與 receipt 仍是獨立證據，acceptance 需要新鮮的
 receipt 與任何必需的 current runtime gate。
 
-在以 worktree 為基礎的 source workflow 中，ignored-directory 決定未完成時，
+在以 worktree 為基礎的 source workflow 中，ignored-input 決定未完成時，
 action 並未啟動；Assent 會把這項 gate 證據與測試結果分開。FAILED 之後的下一個
 已設定 action 會重新執行；只有匹配的 PASSED 證據可在中斷復原時重用。
 
@@ -132,7 +132,7 @@ Sessions 依序執行，不互相對話。Scheduler 只把先前 role 的有限�
 ledger、owner routing、path-scope amendment 或第二套修復引擎。
 
 Ignored-directory 證據為 unknown 或 stale 時，source role 會收到一項有限的宣告
-指示。Session 審查完整 inventory，再透過 `assent ignored-dirs declare` 提交決定；
+指示。Session 審查完整 inventory，再透過 `assent ignored-inputs declare` 提交決定；
 Assent 負責驗證、記錄並套用。只有這個 operation 能寫入本機 manifest；決定完成
 前，下一個 action 不會開始。AI 不會複製目錄或手動建立 link。
 

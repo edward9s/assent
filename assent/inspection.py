@@ -34,7 +34,7 @@ from pathlib import Path
 
 from typing import Callable
 
-from assent import AssentError, contracts, gitops, ignored_dirs, usage
+from assent import AssentError, contracts, gitops, ignored_inputs, usage
 
 from assent.adapters import Adapter, get_adapter
 
@@ -100,20 +100,20 @@ def _stack_report_lines(cfg: Config, plan: Plan) -> list[str]:
 
 
 def _ignored_input_report_lines(cfg: Config) -> list[str]:
-    """Expose local directories used by verification but absent from Git."""
+    """Expose local inputs used by verification but absent from Git."""
     try:
         worktree = _query_git_root(cfg)
         main = gitops.main_worktree(worktree)
-        decision = ignored_dirs.classify(
-            main, worktree, ignored_dirs.read_manifest(main))
+        decision = ignored_inputs.classify(
+            main, worktree, ignored_inputs.read_manifest(main))
     except AssentError as error:
-        return [f"Local ignored-directory inputs: unavailable ({error})"]
+        return [f"Local ignored inputs: unavailable ({error})"]
     if decision.required:
-        return ["Local ignored-directory inputs (not delivered by Git): "
+        return ["Local ignored inputs (not delivered by Git): "
                 + ", ".join(decision.required)]
     if not decision.settled:
-        return [f"Local ignored-directory inputs: {decision.state} (unresolved)"]
-    return ["Local ignored-directory inputs: none"]
+        return [f"Local ignored inputs: {decision.state} (unresolved)"]
+    return ["Local ignored inputs: none"]
 
 def render_report(cfg: Config, plan: Plan,
                   now: Callable[[], datetime] | None = None) -> str:

@@ -102,7 +102,7 @@ assent run --jobs 2
 ```
 
 `assent report`, `status`, `verify`, `rework`, `reject`, `reconcile`, `clean`,
-and `ignored-dirs` remain available for inspection, manual verification,
+and `ignored-inputs` remain available for inspection, manual verification,
 recovery, and advanced workflows. They are not extra steps in the ordinary
 happy path.
 
@@ -168,7 +168,7 @@ passing prefix, or calls `accept`.
 - [Configuration](docs/CONFIGURATION.md): initialization, adapters, models, and
   workflow settings.
 - [Verification](docs/VERIFICATION.md): focused/full checks, receipts,
-  conflicts, and ignored-directory inputs.
+  conflicts, and ignored inputs.
 - [Operations](docs/OPERATIONS.md): worktrees, recovery, cleanup, and archive.
 
 English documentation is canonical. Matching Traditional Chinese guides are

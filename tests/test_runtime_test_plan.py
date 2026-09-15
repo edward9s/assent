@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from unittest import mock
 
-from assent import engine, ignored_dirs
+from assent import engine, ignored_inputs
 from assent.adapters import TaskResult
 from assent.plan import (parse_runtime_action_results,
                          read_runtime_test_workflow_state)
@@ -109,11 +109,12 @@ class RuntimeTestPlanTests(EngineTestCase):
 
     def test_role_may_settle_refused_precondition_without_source_change(self):
         cfg = self.build_runtime('python -c "raise SystemExit(0)"')
-        stale = ignored_dirs.Decision(
-            ignored_dirs.STALE, evidence=(".gitignore changed",),
-            needs_review=True, inventory=("local-input",))
-        settled = ignored_dirs.Decision(
-            ignored_dirs.NO_IGNORED_DIRECTORY_CANDIDATE)
+        stale = ignored_inputs.Decision(
+            ignored_inputs.STALE, evidence=(".gitignore changed",),
+            needs_review=True, inventory=("local-input",),
+            kinds={"local-input": ignored_inputs.DIRECTORY_INPUT})
+        settled = ignored_inputs.Decision(
+            ignored_inputs.NO_IGNORED_INPUT_CANDIDATE)
         declared = False
 
         def decision(_cfg):
@@ -121,12 +122,12 @@ class RuntimeTestPlanTests(EngineTestCase):
 
         def declare(prompt):
             nonlocal declared
-            self.assertIn("IGNORED DIRECTORY DECISION (STALE)", prompt)
+            self.assertIn("IGNORED INPUT DECISION (STALE)", prompt)
             declared = True
             return ok_result()
 
         with mock.patch.object(
-                engine, "_ignored_dir_decision", side_effect=decision):
+                engine, "_ignored_input_decision", side_effect=decision):
             code, _output = self.run_runtime(
                 cfg, ScriptedAdapter([declare]))
 
@@ -136,14 +137,15 @@ class RuntimeTestPlanTests(EngineTestCase):
 
     def test_resume_skips_role_after_refused_precondition_is_settled(self):
         cfg = self.build_runtime('python -c "raise SystemExit(0)"')
-        stale = ignored_dirs.Decision(
-            ignored_dirs.STALE, evidence=(".gitignore changed",),
-            needs_review=True, inventory=("local-input",))
-        settled = ignored_dirs.Decision(
-            ignored_dirs.NO_IGNORED_DIRECTORY_CANDIDATE)
+        stale = ignored_inputs.Decision(
+            ignored_inputs.STALE, evidence=(".gitignore changed",),
+            needs_review=True, inventory=("local-input",),
+            kinds={"local-input": ignored_inputs.DIRECTORY_INPUT})
+        settled = ignored_inputs.Decision(
+            ignored_inputs.NO_IGNORED_INPUT_CANDIDATE)
 
         with mock.patch.object(
-                engine, "_ignored_dir_decision", return_value=stale):
+                engine, "_ignored_input_decision", return_value=stale):
             code, _output = self.run_runtime(
                 cfg, ScriptedAdapter([
                     lambda _prompt: (_ for _ in ()).throw(
@@ -152,7 +154,7 @@ class RuntimeTestPlanTests(EngineTestCase):
 
         adapter = ScriptedAdapter([])
         with mock.patch.object(
-                engine, "_ignored_dir_decision", return_value=settled):
+                engine, "_ignored_input_decision", return_value=settled):
             code, _output = self.run_runtime(cfg, adapter)
 
         self.assertEqual(code, 0)

@@ -69,7 +69,7 @@ class TestInitContractRefresh(unittest.TestCase):
         self.assertIn("Updated:", output.getvalue())
 
     def test_init_installs_the_ignored_input_provisioning_instruction(self):
-        """What a scheduled session reads must forbid copying an ignored tree."""
+        """Scheduled sessions must use reviewed links instead of copies."""
         (self.user_home / "instructions.md").write_text(
             "an older working instruction\n", encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
@@ -77,13 +77,13 @@ class TestInitContractRefresh(unittest.TestCase):
 
         text = " ".join((self.user_home / "instructions.md").read_text(
             encoding="utf-8").split())
-        self.assertIn("Never copy an ignored tree", text)
+        self.assertIn("Never copy an ignored input", text)
         self.assertIn(
-            "submit the decision with `assent ignored-dirs declare`",
+            "submit the decision with `assent ignored-inputs declare`",
             text)
-        self.assertIn("Mark every listed ordinary ignored directory exactly once",
+        self.assertIn("Mark every listed ordinary ignored file or directory exactly once",
                       text)
-        self.assertIn("Never hand-create a source-worktree link", text)
+        self.assertIn("hand-create a source-worktree link", text)
         self.assertFalse((self.root / ".assent/instructions.md").exists())
 
     def test_init_installs_runtime_defaults_without_a_plan_contract_or_command(self):

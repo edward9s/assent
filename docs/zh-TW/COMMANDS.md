@@ -39,7 +39,7 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 
 `run`、`status`、`check`、`report`、`verify`、`clean`、`archive`、`accept`、
 `reconcile`、`reject`、`rework` 支援各自的 `--config PATH` option。它會選擇專案
-設定並定位專案，不是 top-level global option。`init`、`doctor` 與 `ignored-dirs`
+設定並定位專案，不是 top-level global option。`init`、`doctor` 與 `ignored-inputs`
 各有自己的專案位置規則。
 
 ## 指令角色
@@ -60,8 +60,8 @@ accept 仍需要與整組完全相符的證據，而且不會啟動驗證。
 | `reject` | **破壞性重設。** 將人工 Git 復原證據記錄到 `_reject.toml` 後，拋棄該 plan 的實作。 |
 | `clean` | **可選維護。** 不封存 live plan，只移除已證明多餘的 worktree/branch。 |
 | `doctor` | **診斷。** 診斷安裝並復原孤兒暫存 branch。 |
-| `ignored-dirs status` | **診斷。** 查看目前 worktree 的 ignored-directory 決定與鏈結，不做任何變更。 |
-| `ignored-dirs declare` | **AI source-role operation。** 記錄審查結果，只為必要目錄建立鏈結。 |
+| `ignored-inputs status` | **診斷。** 查看目前 worktree 的 ignored-input 決定與鏈結，不做任何變更。 |
+| `ignored-inputs declare` | **AI source-role operation。** 記錄審查結果，只為必要檔案或目錄建立鏈結。 |
 
 ## 初始化專案
 
