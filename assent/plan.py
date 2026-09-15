@@ -42,6 +42,7 @@ _STATUS_LINE_RE = re.compile(
 _FULL_VERIFIER_RE = re.compile(r'\.assent[\\/]verify\.py\b')
 WORKFLOW_STATE_NAME = "_workflow.toml"
 INTEGRATION_WORKFLOW_STATE_NAME = "_integration_workflow.toml"
+INTEGRATION_WORKFLOW_STATE_VERSION = 1
 RUNTIME_TEST_WORKFLOW_STATE_NAME = "_runtime_test_workflow.toml"
 _WORKFLOW_ACTIONS = {"focused_test"}
 _ACTION_STATUS_VALUES = {"PASSED", "FAILED", "STALE"}
@@ -144,6 +145,30 @@ def workflow_state_path(tasks_dir: Path) -> Path:
 
 def selection_workflow_state_path(assent_dir: Path) -> Path:
     return assent_dir / INTEGRATION_WORKFLOW_STATE_NAME
+
+
+def invalidate_obsolete_selection_workflow_state(assent_dir: Path) -> bool:
+    """Discard an older, reproducible integration workflow cursor."""
+    path = selection_workflow_state_path(assent_dir)
+    try:
+        with open(path, "rb") as source:
+            data = tomllib.load(source)
+    except FileNotFoundError:
+        return False
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    version = data.get("version") if isinstance(data, dict) else None
+    if (version is not None
+            and (type(version) is not int
+                 or not 0 < version < INTEGRATION_WORKFLOW_STATE_VERSION)):
+        return False
+    try:
+        path.unlink()
+    except OSError as error:
+        raise AssentError(
+            f"Unable to invalidate obsolete integration workflow state "
+            f"{path}: {error}") from error
+    return True
 
 
 def runtime_test_workflow_state_path(owner_dir: Path) -> Path:
@@ -462,13 +487,20 @@ def read_selection_workflow_state(assent_dir: Path) -> SelectionWorkflowState | 
     except (OSError, tomllib.TOMLDecodeError) as error:
         raise AssentError(f"Integration workflow state {path.name} is unreadable: {error}") from error
     expected = {
-        "plans", "target_ref", "target_commit", "source_commits", "step_index",
+        "version", "plans", "target_ref", "target_commit", "source_commits",
+        "step_index",
         "evidence", "action", "action_status", "action_candidate_tree",
         "action_exit_code", "action_evidence", "verification_script_sha256",
         "ignored_inputs_sha256",
     }
     if set(data) != expected:
         raise AssentError(f"Integration workflow state {path.name} has an invalid schema")
+    version = data.get("version")
+    if (type(version) is not int
+            or version != INTEGRATION_WORKFLOW_STATE_VERSION):
+        raise AssentError(
+            f"Integration workflow state {path.name} version must be "
+            f"{INTEGRATION_WORKFLOW_STATE_VERSION}")
     plan_names = data.get("plans")
     target_ref = data.get("target_ref")
     target_commit = data.get("target_commit")
@@ -513,6 +545,7 @@ def write_selection_workflow_state(
         assent_dir: Path, state: SelectionWorkflowState) -> None:
     """Atomically persist one exact selection and its recovery boundary."""
     text = "\n".join((
+        f"version = {INTEGRATION_WORKFLOW_STATE_VERSION}",
         "plans = [" + ", ".join(json.dumps(item) for item in state.plan_names) + "]",
         f"target_ref = {json.dumps(state.target_ref)}",
         f"target_commit = {json.dumps(state.target_commit)}",

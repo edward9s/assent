@@ -77,6 +77,7 @@ from assent.plan import (Plan, RuntimeQuotaWait,
                          parse_runtime_action_results,
                          parse_runtime_test_contract, parse_task_file,
                          plan_workflow_requires_human,
+                         invalidate_obsolete_selection_workflow_state,
                          read_runtime_test_workflow_state,
                          read_selection_workflow_state,
                          read_workflow_state,
@@ -1879,6 +1880,10 @@ def run_selection_workflow(config_path: str, assent_dir, plan_names,
             return code
         with _selection_locks(configs):
             locked_snapshot = _selection_snapshot(configs)
+            if invalidate_obsolete_selection_workflow_state(
+                    configs[0].assent_dir):
+                print("Obsolete integration workflow state discarded; "
+                      "restarting integration workflow.")
             prior_state = read_selection_workflow_state(
                 configs[0].assent_dir)
             if (prior_state is not None

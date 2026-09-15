@@ -8,6 +8,7 @@ from pathlib import Path
 from assent import AssentError
 from assent.plan import (
     Plan, SelectionWorkflowState, WorkflowState, parse_task_file,
+    invalidate_obsolete_selection_workflow_state,
     plan_workflow_needs_resume, plan_workflow_requires_human,
     read_selection_workflow_state, read_workflow_state,
     set_status, write_selection_workflow_state, write_workflow_state,
@@ -117,10 +118,28 @@ class TestPlan(unittest.TestCase):
             ("repair evidence",), "full_verify", "FAILED", "candidate", 1,
             ("VERIFIER_FAILED",), "verify-digest", "shared-digest")
         write_selection_workflow_state(self.directory, state)
-        self.assertNotIn(
-            "version =", (self.directory / "_integration_workflow.toml").read_text(
+        self.assertIn(
+            "version = 1",
+            (self.directory / "_integration_workflow.toml").read_text(
                 encoding="utf-8"))
         self.assertEqual(read_selection_workflow_state(self.directory), state)
+
+    def test_unversioned_selection_state_is_discarded(self):
+        path = self.directory / "_integration_workflow.toml"
+        path.write_text('plans = ["old"]\n', encoding="utf-8")
+
+        self.assertTrue(
+            invalidate_obsolete_selection_workflow_state(self.directory))
+        self.assertFalse(path.exists())
+
+    def test_current_malformed_selection_state_is_not_discarded(self):
+        path = self.directory / "_integration_workflow.toml"
+        path.write_text('version = 1\nplans = ["broken"]\n', encoding="utf-8")
+
+        self.assertFalse(
+            invalidate_obsolete_selection_workflow_state(self.directory))
+        with self.assertRaisesRegex(AssentError, "invalid schema"):
+            read_selection_workflow_state(self.directory)
 
 
 if __name__ == "__main__":

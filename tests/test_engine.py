@@ -630,10 +630,14 @@ class TestLinearEngine(EngineTestCase):
         evidence = FullVerifyEvidence(
             "PASSED", ("plan01",), target, sources, "candidate",
             "v" * 64, "s" * 64, 0)
+        (cfg.assent_dir / "_integration_workflow.toml").write_text(
+            'plans = ["old"]\n', encoding="utf-8")
 
+        output = io.StringIO()
         with mock.patch("assent.engine.verify_plan_action",
                         return_value=evidence) as verify, \
-                mock.patch("assent.engine.get_adapter") as get_adapter:
+                mock.patch("assent.engine.get_adapter") as get_adapter, \
+                contextlib.redirect_stdout(output):
             first_code = engine.run_selection_workflow(
                 str(cfg.assent_dir / "assent.toml"), cfg.assent_dir,
                 ["plan01"])
@@ -646,6 +650,8 @@ class TestLinearEngine(EngineTestCase):
             [call.kwargs["recheck"] for call in verify.call_args_list],
             [False, False])
         get_adapter.assert_not_called()
+        self.assertIn(
+            "Obsolete integration workflow state discarded", output.getvalue())
         state = read_selection_workflow_state(cfg.assent_dir)
         self.assertEqual(state.action_status, "PASSED")
         self.assertEqual(state.evidence, ())
